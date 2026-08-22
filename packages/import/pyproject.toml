@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "onboard-personal-import"
+version = "5.0.0a2"
+description = "Unpublished copy-only legacy importer for On Board Personal"
+readme = "PERSONAL-IMPORT.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+dependencies = []
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+]
+
+[project.scripts]
+onboard-personal-import = "onboard_personal_import.personal_import:main"

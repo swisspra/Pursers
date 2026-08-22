@@ -1,0 +1,6 @@
+[
+  {"id":"M-decision","agent_name":"legacy-main","memory_type":"decision","title":"Synthetic decision","content":"Use the central service.","pinned":true},
+  {"id":"M-working","agent_name":"legacy-main","memory_type":"progress","title":"Synthetic private working note","content":"Unpublished implementation detail.","pinned":false},
+  {"id":"M-handoff","agent_name":"legacy-peer","memory_type":"handoff","title":"Synthetic handoff","content":"Continue ticket review.","pinned":true},
+  {"id":"M-secret","agent_name":"legacy-main","memory_type":"progress","title":"Synthetic quarantined note","content":"synthetic credential AKIAABCDEFGHIJKLMNOP must never import","pinned":false}
+]

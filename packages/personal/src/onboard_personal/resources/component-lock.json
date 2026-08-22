@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "product_version": "5.0.0a1",
+  "components": {
+    "onboard-central": {
+      "version": "0.1.0a9",
+      "wheel_sha256": "8cf9036fbac4841938f86be9e0477c03d35f59ed5ce91365b5ce38feba272948",
+      "members": {
+        "onboard_central/__init__.py": "5a383eb8bb37e6f3a14557297c56c692965d0e874623bdcbbd257ceb21a8f612",
+        "onboard_central/central.py": "14a547344f1957446b4bef6b65cec91c5ed937fb6a4b1c2427d5172c33ed8f7b",
+        "onboard_central/cursor.py": "5f57c3d58bdb88ca9f01497e518de96c9651063047b0928689a0fda58cceeb2b",
+        "onboard_central/journal.py": "8f376689649abf5d0c197c30bec37eb22a426db714f558edfd832bfa18716152",
+        "onboard_central/jwt_verifier.py": "e4ad036ae4db25da6f85a82268b827686259507f266e3d53c6a3c50a3964ca25",
+        "onboard_central/locked_store.py": "d5575f8b0c3e9a6587fb51969ba08f05ff3dda4d19036ae6af60d85200331869",
+        "onboard_central/onboard_central_runtime.py": "f32f95652747a8b2d61f4b7db3489ccc50da3d3b0598c0dbd1f1c554887dbc45",
+        "onboard_central/scrub.py": "03d4435da77b75b31dd3b0c2ad137b74f9d719adab84a9d9a6bdb42b11deb705",
+        "onboard_central/sqlite_store.py": "6fe55c1445d2d70f6163d017ec011c860ed9df32d1dfdeea4b94b4249b10042b",
+        "onboard_central/transactional_sqlite.py": "a329341eb7eed3c006f17e5cb58d60634a5db23c75ccc9c7dbc335cfed6698f4",
+        "onboard_central-0.1.0a9.dist-info/licenses/LICENSE": "c48efd75374a365d9d9f3e24c5b4148d53ce8621dd55bf470c9b4c513d03d84d",
+        "onboard_central-0.1.0a9.dist-info/METADATA": "e3f15ae6bf82dfd9149df220ee7d14e9b78d0a61d60bf86cc129ab6e8fdf4bbd",
+        "onboard_central-0.1.0a9.dist-info/WHEEL": "61532836a2b3111b7ec23519c09df7c41180c27165fb872a6d8913b566b88ad1",
+        "onboard_central-0.1.0a9.dist-info/top_level.txt": "96a0ce9a561bccb5c9b8ceab2d71924b6911d8a225152db6d280fc1c35a440d4"
+      }
+    },
+    "onboard-client": {
+      "version": "0.1.0a10",
+      "wheel_sha256": "82dbaed79efbbe227419c8aab5cdb5b76ba71c121f70fdc91dfd735a0d954612",
+      "members": {
+        "onboard_client/__init__.py": "1ee773eb9253f30d13fc18f61743f057e59571c24c6f6893c6afdaf9f3f994f8",
+        "onboard_client/client.py": "1b254d08b2c27f22d4e3d2b8317faa054aa4993be8804ac2b15ca4f9fbdcef37",
+        "onboard_client/personal_profile.py": "d95e898b32fe10ccd5cfc09c2d06fede63634e045222216392407df3610949fe",
+        "onboard_client-0.1.0a10.dist-info/licenses/LICENSE": "c48efd75374a365d9d9f3e24c5b4148d53ce8621dd55bf470c9b4c513d03d84d",
+        "onboard_client-0.1.0a10.dist-info/METADATA": "bff68e777b76d06c25abdbc764b10f5012dfbf82ec21090c0ac6b58c47931d11",
+        "onboard_client-0.1.0a10.dist-info/WHEEL": "61532836a2b3111b7ec23519c09df7c41180c27165fb872a6d8913b566b88ad1",
+        "onboard_client-0.1.0a10.dist-info/top_level.txt": "6204afe2dd06337e67d83ce5605e2317086ef90724d9adc0d2f4776a24ca5571"
+      }
+    }
+  },
+  "view": {
+    "resource": "onboard_personal/resources/dashboard.html",
+    "size_bytes": 387090,
+    "sha256": "50ad322e4100dbccdbbb65e5fb18b1e244e6ed2e7d2410d862ae83ae09cff722"
+  }
+}

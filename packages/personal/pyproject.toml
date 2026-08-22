@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "onboard-personal"
+version = "5.0.0a1"
+description = "On Board Personal Preview: one owner, multiple local agents, and an MCP Apps dashboard"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md", "licenses/*"]
+dependencies = [
+  "onboard-central==0.1.0a9",
+  "onboard-client==0.1.0a10",
+  "mcp[cli]==2.0.0",
+  "PyJWT[crypto]>=2.10,<3",
+  "cryptography>=44,<51",
+]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Operating System :: MacOS",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+]
+
+[project.scripts]
+onboard-personal = "onboard_personal.cli:main"
+
+[project.optional-dependencies]
+test = ["pytest>=8", "build>=1.2"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["onboard_personal*"]
+
+[tool.setuptools.package-data]
+onboard_personal = ["resources/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
