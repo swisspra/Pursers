@@ -131,6 +131,11 @@ GENERATION_REJOIN_ERROR = (
     "stale or missing board generation; rejoin with board_join or board_onboard "
     "before retrying"
 )
+DEFAULT_SNAPSHOT_LIMIT = 100
+MAX_SNAPSHOT_LIMIT = 1_000
+DEFAULT_SNAPSHOT_MAX_BYTES = 300_000
+MIN_SNAPSHOT_MAX_BYTES = 4_096
+MAX_SNAPSHOT_MAX_BYTES = 750_000
 
 
 @dataclass(frozen=True)
@@ -1813,6 +1818,93 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             "state": copy.deepcopy(document.get("state", {})),
         }
 
+    def bounded_snapshot_payload(
+        document: dict[str, Any],
+        *,
+        limit: int,
+        max_bytes: int,
+        watermark: int,
+        snapshot_at: str,
+    ) -> dict[str, Any]:
+        """Build a deterministic snapshot with explicit collection and byte bounds."""
+        snapshot = snapshot_payload(document)
+        scrub_items = sorted(snapshot["board"]["scrub_allow_counts"].items())
+        collections: dict[str, Any] = {
+            "agents": snapshot["agents"][:limit],
+            "tickets": snapshot["tickets"][:limit],
+            "state": dict(sorted(snapshot["state"].items())[:limit]),
+            "scrub_allow_counts": dict(scrub_items[:limit]),
+        }
+        totals = {
+            "agents": len(snapshot["agents"]),
+            "tickets": len(snapshot["tickets"]),
+            "state": len(snapshot["state"]),
+            "scrub_allow_counts": len(scrub_items),
+        }
+        board = copy.deepcopy(snapshot["board"])
+        board["scrub_allow_counts"] = collections["scrub_allow_counts"]
+        result = {
+            "ok": True,
+            "board": board,
+            "agents": collections["agents"],
+            "tickets": collections["tickets"],
+            "state": collections["state"],
+            "latest_seq": watermark,
+            "snapshot_at": snapshot_at,
+            "memories_included": False,
+            "bounds": {"limit_per_collection": limit, "max_bytes": max_bytes},
+            "total_counts": totals,
+            "returned_counts": {},
+            "omitted_counts": {},
+            "truncated": False,
+        }
+
+        def refresh_counts() -> None:
+            returned = {
+                "agents": len(result["agents"]),
+                "tickets": len(result["tickets"]),
+                "state": len(result["state"]),
+                "scrub_allow_counts": len(result["board"]["scrub_allow_counts"]),
+            }
+            omitted = {key: totals[key] - returned[key] for key in totals}
+            result["returned_counts"] = returned
+            result["omitted_counts"] = omitted
+            result["truncated"] = any(omitted.values())
+
+        def serialized_size(value: Any) -> int:
+            return len(
+                json.dumps(value, ensure_ascii=False, sort_keys=True).encode("utf-8")
+            )
+
+        refresh_counts()
+        while serialized_size(result) > max_bytes:
+            candidates: list[tuple[int, str, Any]] = []
+            for name in ("agents", "tickets"):
+                for index, item in enumerate(result[name]):
+                    candidates.append((serialized_size(item), name, index))
+            for name, values in (
+                ("state", result["state"]),
+                ("scrub_allow_counts", result["board"]["scrub_allow_counts"]),
+            ):
+                for key, value in values.items():
+                    candidates.append(
+                        (serialized_size({key: value}), name, key)
+                    )
+            if not candidates:
+                raise ValueError("max_bytes is too small for snapshot metadata")
+            _, name, locator = max(
+                candidates,
+                key=lambda item: (item[0], item[1], str(item[2])),
+            )
+            if name in {"agents", "tickets"}:
+                result[name].pop(locator)
+            elif name == "state":
+                result["state"].pop(locator)
+            else:
+                result["board"]["scrub_allow_counts"].pop(locator)
+            refresh_counts()
+        return result
+
     def briefing_payload(
         document: dict[str, Any], principal: Principal, token_budget: int,
         *, ticket_id: str | None = None,
@@ -2116,22 +2208,44 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         }
 
     @mcp.tool()
-    async def board_snapshot(board_id: str) -> dict[str, Any]:
-        """Return an authorized cold projection and exact journal splice watermark."""
+    async def board_snapshot(
+        board_id: str,
+        limit: int = DEFAULT_SNAPSHOT_LIMIT,
+        max_bytes: int = DEFAULT_SNAPSHOT_MAX_BYTES,
+    ) -> dict[str, Any]:
+        """Return a bounded cold projection and exact journal splice watermark.
+
+        ``limit`` caps each projected collection. ``max_bytes`` caps the UTF-8
+        JSON payload; explicit counts report every omitted entry.
+        """
         board_id = require_id("board_id", board_id)
+        if (
+            not isinstance(limit, int)
+            or isinstance(limit, bool)
+            or not 0 <= limit <= MAX_SNAPSHOT_LIMIT
+        ):
+            raise ValueError(f"limit must be between 0 and {MAX_SNAPSHOT_LIMIT}")
+        if (
+            not isinstance(max_bytes, int)
+            or isinstance(max_bytes, bool)
+            or not MIN_SNAPSHOT_MAX_BYTES <= max_bytes <= MAX_SNAPSHOT_MAX_BYTES
+        ):
+            raise ValueError(
+                f"max_bytes must be between {MIN_SNAPSHOT_MAX_BYTES} "
+                f"and {MAX_SNAPSHOT_MAX_BYTES}"
+            )
         principal = current_principal()
         require_scope(principal, "board:read")
         document = service.load(board_id)
         service.principal_members(document, principal.principal_id)
-        snapshot = snapshot_payload(document)
         watermark = latest_seq(board_id)
-        return {
-            "ok": True,
-            **snapshot,
-            "latest_seq": watermark,
-            "snapshot_at": datetime.now(timezone.utc).isoformat(),
-            "memories_included": False,
-        }
+        return bounded_snapshot_payload(
+            document,
+            limit=limit,
+            max_bytes=max_bytes,
+            watermark=watermark,
+            snapshot_at=datetime.now(timezone.utc).isoformat(),
+        )
 
     @mcp.tool()
     async def board_list() -> dict[str, Any]:
