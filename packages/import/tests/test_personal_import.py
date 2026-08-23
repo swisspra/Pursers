@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import json
 import os
 import shutil
@@ -17,6 +18,7 @@ import personal_import as personal_import_module
 from native_import import board_path, canonical_db_hash
 from personal_import import (
     _destination_lock_path,
+    generate_policy_decisions,
     review_import,
     retry_import,
     rollback_import,
@@ -27,6 +29,7 @@ from personal_import import (
 )
 from prepare_apply_rehearsal import _tree_state as snapshot_tree_state
 from prepare_apply_rehearsal import prepare as prepare_frozen_copy
+from reconcile import _decision_map
 from safe_tree import MAX_FILE_BYTES
 from transactional_sqlite import TransactionalSQLiteStore
 
@@ -180,6 +183,67 @@ def make_review_files(run: Path) -> tuple[Path | None, Path | None]:
     return bindings_path, decisions_path
 
 
+def start_policy_run(tmp_path: Path) -> tuple[Path, dict]:
+    source = make_source(tmp_path)
+    memories_path = source / "memories.json"
+    memories = json.loads(memories_path.read_text(encoding="utf-8"))
+    memories.append(
+        {
+            "id": "M-mixed-policy",
+            "agent_name": "legacy-main",
+            "memory_type": "context",
+            "title": "Path /Users/synthetic-user/private",
+            "content": "Bearer ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+            "pinned": False,
+        }
+    )
+    memories_path.write_text(json.dumps(memories), encoding="utf-8")
+    run = tmp_path / "import-run"
+    state = start_import(
+        source,
+        tmp_path / "central",
+        run,
+        board_id=BOARD_ID,
+        owner_principal_id=OWNER_PRINCIPAL,
+        owner_agent_name=OWNER_AGENT,
+        stable_install_root=make_stable_install(tmp_path),
+        confirm_central_stopped=True,
+    )
+    assert state["phase"] == "review_required"
+    return run, state
+
+
+def write_policy(
+    tmp_path: Path,
+    run: Path,
+    *,
+    overrides: dict[str, str] | None = None,
+    worksheet_sha256: str | None = None,
+) -> tuple[Path, dict]:
+    worksheet = json.loads(
+        (run / "evidence" / "quarantine-worksheet.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    actions = {
+        rule: "drop"
+        for entry in worksheet["entries"]
+        for rule in entry["rules"]
+    }
+    actions.update(overrides or {})
+    policy = {
+        "schema_version": 1,
+        "status": "POLICY-SIGNED-READY",
+        "board_id": BOARD_ID,
+        "worksheet_sha256": worksheet_sha256 or worksheet["worksheet_sha256"],
+        "rules": actions,
+    }
+    path = tmp_path / "POLICY-signed.json"
+    path.write_text(json.dumps(policy, sort_keys=True), encoding="utf-8")
+    os.chmod(path, 0o600)
+    return path, worksheet
+
+
 def complete_review(run: Path, checkpoint=None) -> dict:
     bindings, decisions = make_review_files(run)
     return review_import(
@@ -189,6 +253,76 @@ def complete_review(run: Path, checkpoint=None) -> dict:
         confirm_central_stopped=True,
         checkpoint=checkpoint,
     )
+
+
+def test_decide_cli_escalates_mixed_record_and_emits_valid_decisions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    run, _state = start_policy_run(tmp_path)
+    policy_path, worksheet = write_policy(
+        tmp_path,
+        run,
+        overrides={"posix_home": "accept-as-is", "bearer_token": "redact-span"},
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "personal_import.py",
+            "decide",
+            str(run),
+            "--policy",
+            str(policy_path),
+        ],
+    )
+
+    personal_import_module.main()
+
+    summary = json.loads(capsys.readouterr().out)
+    decisions_path = run / "evidence" / summary["output_name"]
+    decisions = json.loads(decisions_path.read_text(encoding="utf-8"))
+    decision_map, decisions_format = _decision_map(
+        decisions, worksheet, BOARD_ID
+    )
+    mixed_keys = [
+        entry["record_key"]
+        for entry in worksheet["entries"]
+        if entry["record_id"] == "M-mixed-policy"
+    ]
+    assert len(mixed_keys) >= 2
+    assert {decision_map[key] for key in mixed_keys} == {"redact-span"}
+    assert decisions_format == "policy-auto-decisions-v1"
+    assert decisions["status"] == "POLICY-AUTO-DECIDED"
+    assert decisions["policy_sha256"] == hashlib.sha256(
+        policy_path.read_bytes()
+    ).hexdigest()
+    assert stat.S_IMODE(decisions_path.stat().st_mode) == 0o600
+
+
+def test_policy_worksheet_sha_mismatch_is_rejected(tmp_path: Path) -> None:
+    run, _state = start_policy_run(tmp_path)
+    policy_path, _worksheet = write_policy(
+        tmp_path,
+        run,
+        worksheet_sha256="0" * 64,
+    )
+
+    with pytest.raises(ValueError, match="does not match worksheet_sha256"):
+        generate_policy_decisions(run, policy_path=policy_path)
+
+
+def test_policy_cannot_auto_accept_secret_class_rule(tmp_path: Path) -> None:
+    run, _state = start_policy_run(tmp_path)
+    policy_path, _worksheet = write_policy(
+        tmp_path,
+        run,
+        overrides={"aws_access_key_id": "accept-as-is"},
+    )
+
+    with pytest.raises(ValueError, match="secret-class"):
+        generate_policy_decisions(run, policy_path=policy_path)
 
 
 def write_worker_config(

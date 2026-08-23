@@ -66,6 +66,9 @@ onboard-personal-import retry /path/to/private-import-run \
 onboard-personal-import status /path/to/private-import-run \
   --confirm-central-stopped
 
+onboard-personal-import decide /path/to/private-import-run \
+  --policy /path/to/POLICY-signed.json
+
 onboard-personal-import review /path/to/private-import-run \
   --decisions /path/to/private-decisions.json \
   --bindings /path/to/private-bindings.json \
@@ -78,6 +81,15 @@ onboard-personal-import rollback /path/to/private-import-run \
 When import reports `review_required`, use the private files under the owned
 run directory:
 
+- `decide` accepts an owned `0600` policy JSON document with
+  `schema_version: 1`, `status: "POLICY-SIGNED-READY"`, the matching
+  `board_id` and `worksheet_sha256`, and a `rules` object mapping every rule
+  present in the worksheet to `accept-as-is`, `redact-span`, or `drop`.
+  It writes `evidence/policy-decisions-<policy-hash>.json` as an owned `0600`
+  complete decisions file. Use `--output` to select another file in an owned
+  `0700` directory. Mixed rules on one record escalate the entire record to
+  the most restrictive action (`drop`, then `redact-span`, then
+  `accept-as-is`). Secret-class rules cannot be auto-accepted.
 - `evidence/quarantine-worksheet.json` lists masked quarantine rows. Create an
   owned `0600` decisions file with the same `board_id`, `worksheet_sha256`, and
   one entry per worksheet row. Set `status` to `REVIEWED-SIGNED-READY`, include

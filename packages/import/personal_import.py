@@ -23,18 +23,30 @@ if __package__:
     from .native_import import CENTRAL_ID, board_path, canonical_db_hash, load_json, promote
     from .prepare_apply_rehearsal import _tree_state as _snapshot_tree_state
     from .prepare_apply_rehearsal import prepare
-    from .reconcile import _decision_map, apply_decisions, generate_worksheet
+    from .reconcile import (
+        ACTIONS,
+        POLICY_DECISIONS_STATUS,
+        _decision_map,
+        apply_decisions,
+        generate_worksheet,
+    )
     from .safe_tree import open_directory_nofollow, require_path_matches_descriptor, walk_tree_fd
-    from .scrub import Policy, scrub
+    from .scrub import DEFAULT_RULES, Policy, scrub
     from .transactional_sqlite import TransactionalSQLiteStore
 else:  # source-checkout execution
     from bind_identities import bind_identities, generate_identity_material
     from native_import import CENTRAL_ID, board_path, canonical_db_hash, load_json, promote
     from prepare_apply_rehearsal import _tree_state as _snapshot_tree_state
     from prepare_apply_rehearsal import prepare
-    from reconcile import _decision_map, apply_decisions, generate_worksheet
+    from reconcile import (
+        ACTIONS,
+        POLICY_DECISIONS_STATUS,
+        _decision_map,
+        apply_decisions,
+        generate_worksheet,
+    )
     from safe_tree import open_directory_nofollow, require_path_matches_descriptor, walk_tree_fd
-    from scrub import Policy, scrub
+    from scrub import DEFAULT_RULES, Policy, scrub
     from transactional_sqlite import TransactionalSQLiteStore
 
 
@@ -46,6 +58,23 @@ ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,80}$")
 SUPPORTED_STABLE_VERSION = "4.0.4"
 Checkpoint = Callable[[str], None]
 CLI_REASON_MAX_CHARS = 500
+POLICY_SIGNED_STATUS = "POLICY-SIGNED-READY"
+ACTION_RESTRICTIVENESS = {"accept-as-is": 0, "redact-span": 1, "drop": 2}
+SECRET_CLASS_RULES = frozenset(
+    {
+        "pem_private_key",
+        "aws_access_key_id",
+        "aws_secret_access_key",
+        "gcp_api_key",
+        "gcp_oauth_token",
+        "azure_storage_key",
+        "azure_client_secret",
+        "azure_sas_signature",
+        "bearer_token",
+        "jwt",
+        "url_password",
+    }
+)
 _POSIX_ABSOLUTE_PATH_RE = re.compile(r"(?<![A-Za-z0-9._-])/(?:[^\r\n)]*)")
 _WINDOWS_ABSOLUTE_PATH_RE = re.compile(
     r"(?i)(?<![A-Za-z0-9._-])[A-Z]:\\(?:[^\r\n)]*)"
@@ -1186,6 +1215,116 @@ def _copy_review_input(source: Path, directory: Path, label: str) -> dict[str, s
     }
 
 
+def _policy_rule_actions(
+    policy: dict[str, Any], worksheet: dict[str, Any], board_id: str
+) -> dict[str, str]:
+    if (
+        policy.get("schema_version") != 1
+        or policy.get("status") != POLICY_SIGNED_STATUS
+    ):
+        raise ValueError("policy must be a POLICY-SIGNED-READY schema v1 document")
+    if policy.get("board_id") != board_id:
+        raise ValueError("policy board_id does not match the import run")
+    if policy.get("worksheet_sha256") != worksheet.get("worksheet_sha256"):
+        raise ValueError("policy does not match worksheet_sha256")
+    actions = policy.get("rules")
+    if not isinstance(actions, dict) or not all(
+        isinstance(rule, str)
+        and isinstance(action, str)
+        and action in ACTIONS
+        for rule, action in actions.items()
+    ):
+        raise ValueError("policy rules must map rule names to supported actions")
+    known_rules = {rule.name for rule in DEFAULT_RULES}
+    unknown = set(actions) - known_rules
+    if unknown:
+        raise ValueError("policy contains an unsupported rule")
+    encountered = {
+        rule
+        for entry in worksheet.get("entries", [])
+        for rule in entry.get("rules", [])
+        if isinstance(rule, str)
+    }
+    if encountered - set(actions):
+        raise ValueError("policy must decide every worksheet rule")
+    if any(
+        actions.get(rule) == "accept-as-is"
+        for rule in SECRET_CLASS_RULES
+    ):
+        raise ValueError("secret-class policy rules cannot use accept-as-is")
+    return dict(actions)
+
+
+def generate_policy_decisions(
+    run_root: Path,
+    *,
+    policy_path: Path,
+    output_path: Path | None = None,
+) -> dict[str, Any]:
+    """Generate complete record-consistent decisions from a sealed policy."""
+    with _locked_run(run_root, create_locks=False) as (state, paths):
+        if state.get("phase") != "review_required":
+            raise ValueError("decide requires a review_required import run")
+        _verify_invariants(state, frozen=True)
+        worksheet = _load_private_json(paths["worksheet"])
+        policy_dir = _ensure_private_child(
+            paths["worksheet"].parent, "policies", "policy directory"
+        )
+        copied = _copy_review_input(policy_path, policy_dir, "policy")
+        sealed_policy_path = Path(state["run_root"]) / copied["relative"]
+        policy = _load_private_json(sealed_policy_path)
+        actions = _policy_rule_actions(policy, worksheet, state["board_id"])
+
+        record_actions: dict[tuple[str, str], str] = {}
+        for entry in worksheet.get("entries", []):
+            rules = entry.get("rules")
+            if not isinstance(rules, list) or not rules:
+                raise ValueError("worksheet entry must contain at least one rule")
+            row_action = max(
+                (actions[rule] for rule in rules),
+                key=ACTION_RESTRICTIVENESS.__getitem__,
+            )
+            record = (entry["record_type"], entry["record_id"])
+            previous = record_actions.get(record, "accept-as-is")
+            record_actions[record] = max(
+                (previous, row_action),
+                key=ACTION_RESTRICTIVENESS.__getitem__,
+            )
+
+        decisions = {
+            "schema_version": 1,
+            "board_id": state["board_id"],
+            "worksheet_sha256": worksheet["worksheet_sha256"],
+            "entry_count": len(worksheet.get("entries", [])),
+            "status": POLICY_DECISIONS_STATUS,
+            "policy_sha256": copied["sha256"],
+            "entries": [
+                {
+                    **entry,
+                    "decision": record_actions[
+                        (entry["record_type"], entry["record_id"])
+                    ],
+                }
+                for entry in worksheet.get("entries", [])
+            ],
+        }
+        _decision_map(decisions, worksheet, state["board_id"])
+        target = output_path or (
+            paths["worksheet"].parent
+            / f"policy-decisions-{copied['sha256'][:16]}.json"
+        )
+        payload = _canonical_bytes(decisions)
+        _write_private_bytes(target, payload)
+        return {
+            "status": "complete",
+            "entry_count": decisions["entry_count"],
+            "worksheet_sha256": decisions["worksheet_sha256"],
+            "policy_sha256": decisions["policy_sha256"],
+            "decisions_sha256": hashlib.sha256(payload).hexdigest(),
+            "output_name": Path(target).name,
+        }
+
+
 def _review_input_path(state: dict[str, Any], label: str) -> Path | None:
     value = state["review_inputs"].get(label)
     if value is None:
@@ -2307,6 +2446,10 @@ def _parser() -> argparse.ArgumentParser:
     review.add_argument("--bindings", type=Path)
     review.add_argument("--decisions", type=Path)
     review.add_argument("--confirm-central-stopped", action="store_true")
+    decide = subparsers.add_parser("decide")
+    decide.add_argument("run_dir", type=Path)
+    decide.add_argument("--policy", required=True, type=Path)
+    decide.add_argument("--output", type=Path)
     status = subparsers.add_parser("status")
     status.add_argument("run_dir", type=Path)
     status.add_argument("--confirm-central-stopped", action="store_true")
@@ -2344,6 +2487,14 @@ def main() -> None:
                 decisions_path=args.decisions,
                 confirm_central_stopped=args.confirm_central_stopped,
             )
+        elif args.command == "decide":
+            result = generate_policy_decisions(
+                args.run_dir,
+                policy_path=args.policy,
+                output_path=args.output,
+            )
+            print(json.dumps(result, sort_keys=True))
+            return
         else:
             state = status_import(
                 args.run_dir,
