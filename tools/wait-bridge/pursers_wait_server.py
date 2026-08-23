@@ -17,8 +17,9 @@ TRANSPORT
 
 THE TOOL
     a2a_wait(since_seq=0, timeout_s=180, only_mine=True)
-      1. CHECK BEFORE BLOCKING: fully drain board_catchup from since_seq. If
-         any relevant event already accrued, return immediately (no wait).
+      1. CHECK BEFORE BLOCKING: fully drain board_catchup from since_seq and
+         scan current open tickets older than the cursor. If relevant work is
+         found on either path, return immediately (no wait).
       2. Otherwise poll board_catchup every ~2s until a relevant event shows
          up or timeout_s elapses. Fire a lease_renew heartbeat for any ticket
          this agent currently holds every ~20s, so a peer's reaper does not
@@ -51,6 +52,7 @@ from typing import Any, AsyncIterator
 from onboard_client import BoardClient, BoardClientError
 from mcp.server.mcpserver import Context, MCPServer
 from agent_naming import resolve_agent_name
+from backlog import backlog_events, ticket_is_relevant
 
 # --- config from env -------------------------------------------------------
 
@@ -73,12 +75,9 @@ DESKTOP_SAFE_MAX_S = 200        # stay clear of Claude Desktop's ~240s hard canc
 DEFAULT_POLL_INTERVAL_S = 2.0
 HEARTBEAT_INTERVAL_S = 20.0
 CATCHUP_PAGE_LIMIT = 100
+BACKLOG_SCAN_LIMIT = 100
 RELEVANT_KINDS = frozenset({"ticket_created", "ticket_status_changed"})
 CLAIMED_STATES = frozenset({"claimed", "in_progress", "creating_report"})
-# Only a genuinely open ticket is claimable. Waking a worker for a ticket that
-# is already claimed by someone else, submitted, or closed just races into a
-# failed claim and a busy re-arm, so those are excluded from open-queue wakeups.
-CLAIMABLE_STATES = frozenset({"open"})
 
 
 def clamp_timeout(timeout_s: Any) -> int:
@@ -153,22 +152,6 @@ async def _catchup_all(client: BoardClient, cursor: int) -> tuple[list[dict], in
     return events, cursor, resynced
 
 
-def _ticket_project(ticket: dict) -> str | None:
-    """Project slug of a ticket = the first path segment of its target_url.
-
-    Convention (see the worker directive): a work-item ticket sets
-    target_url = "<project-slug>/<path...>", so one shared Pursers board can
-    carry many projects and a worker can wait on only its own. Returns a
-    lowercased slug, or None when target_url is empty/untagged (an untagged
-    ticket never matches a project filter, so it stays visible only to an
-    unfiltered listener / the cross-project orchestrator)."""
-    target = (ticket.get("target_url") or "").strip()
-    if not target:
-        return None
-    first = target.replace(":", "/").split("/", 1)[0].strip().lower()
-    return first or None
-
-
 async def _is_relevant(
     client: BoardClient,
     event: dict,
@@ -189,27 +172,7 @@ async def _is_relevant(
         except BoardClientError:
             return False
         ticket = result.get("ticket", {})
-        if project is not None and _ticket_project(ticket) != project:
-            return False
-        if not only_mine:
-            return True
-        status = ticket.get("status")
-        claimed_by = ticket.get("claimed_by_agent_id")
-        assigned = ticket.get("assigned_to_agent_id")
-        # Work I should resume: I created it, hold its claim, or it's assigned to me.
-        mine = (
-            ticket.get("created_by_agent_id") == my_agent_id
-            or claimed_by == my_agent_id
-            or assigned == my_agent_id
-        )
-        # Claimable open work: genuinely open, unclaimed, and unassigned -- so a
-        # wakeup will not race into a failed claim on a ticket already taken.
-        claimable = (
-            status in CLAIMABLE_STATES
-            and claimed_by in (None, my_agent_id)
-            and assigned in (None, my_agent_id)
-        )
-        return mine or claimable
+        return ticket_is_relevant(ticket, my_agent_id, only_mine, project)
     # No project filter and not only_mine: every relevant-kind event counts.
     return True
 
@@ -223,6 +186,23 @@ async def _filter_relevant(
         if await _is_relevant(client, ev, my_agent_id, only_mine, project):
             out.append(ev)
     return out
+
+
+async def _scan_open_backlog(
+    client: BoardClient, only_mine: bool, project: str | None
+) -> list[dict]:
+    """Best-effort scan for open work older than the caller's journal cursor."""
+    try:
+        listed = await client.ticket_list(
+            status="open", include_closed=False, limit=BACKLOG_SCAN_LIMIT
+        )
+    except Exception as exc:
+        _log(f"backlog scan: ticket_list failed: {exc}")
+        return []
+    my_agent_id = client.identity.agent_id if client.identity else None
+    return backlog_events(
+        listed.get("tickets", []), my_agent_id, only_mine, project
+    )
 
 
 async def _heartbeat(client: BoardClient) -> None:
@@ -264,8 +244,10 @@ async def a2a_wait(
 ) -> dict[str, Any]:
     """Block until pursers board work arrives, or until timeout_s elapses.
 
-    CHECK-BEFORE-BLOCKING: any backlog accrued since since_seq is drained and
-    returned without waiting, so a re-arm after a long gap costs one call.
+    CHECK-BEFORE-BLOCKING: journal backlog accrued since since_seq is drained,
+    then current open tickets are scanned for work older than the cursor.
+    Relevant work is returned without waiting, so a re-arm after a long gap
+    costs one call.
     Otherwise polls every ~2s, firing a lease_renew heartbeat roughly every
     20s for any ticket this agent holds, until a relevant event appears or
     timeout_s (clamped to a desktop-safe ceiling) elapses.
@@ -302,8 +284,17 @@ async def a2a_wait(
             resynced = True
         return await _filter_relevant(client, events, only_mine, proj)
 
-    # 1. CHECK BEFORE BLOCKING.
+    # 1. CHECK BEFORE BLOCKING. Journal events advance the cursor; synthetic
+    # backlog cues never carry or fabricate a sequence number.
     relevant = await poll_once()
+    backlog = await _scan_open_backlog(client, only_mine, proj)
+    journal_ticket_ids = {
+        event.get("ticket_id") for event in relevant if event.get("ticket_id")
+    }
+    relevant.extend(
+        event for event in backlog
+        if event.get("ticket_id") not in journal_ticket_ids
+    )
     if relevant:
         return {
             "new_seq": cursor,

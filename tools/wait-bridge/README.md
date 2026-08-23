@@ -81,12 +81,16 @@ file that contains a token.
 
 ## Worker loop
 
-Call `a2a_wait` with the last returned `new_seq`. On `timed_out=true`, re-arm
-immediately. An event is a cue to refetch and claim current board state. The
-bridge renews held leases only while `a2a_wait` is blocking; long-running work
-must call Central's `lease_renew` directly.
+Call `a2a_wait` with the last returned `new_seq`. On entry, it drains new
+journal events and scans the first 100 currently open tickets, so work older
+than the cursor still wakes the worker. Backlog cues use
+`source="backlog_scan"`, carry no fabricated journal sequence, and leave
+`new_seq` governed only by the real journal. On `timed_out=true`, re-arm
+immediately. Every event is a cue to refetch and claim current board state.
+The bridge renews held leases only while `a2a_wait` is blocking; long-running
+work must call Central's `lease_renew` directly.
 
-Run the naming tests with:
+Run the bridge tests with:
 
 ```sh
 python -m unittest discover -s tools/wait-bridge/tests -v
