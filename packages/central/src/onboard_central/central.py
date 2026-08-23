@@ -2946,6 +2946,103 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         }
 
     @mcp.tool()
+    async def ticket_unclaim(
+        board_id: str,
+        agent_name: str,
+        ticket_id: str,
+        ctx: Context,
+        expected_generation: str | None = None,
+    ) -> dict[str, Any]:
+        """Release a held pre-submission ticket back to the open queue."""
+        board_id = require_id("board_id", board_id)
+        ticket_id = require_id("ticket_id", ticket_id)
+        principal = current_principal()
+        require_scope(principal, "board:write")
+        now = time.time()
+
+        def unclaim(document: dict[str, Any]) -> dict[str, Any]:
+            actor, released, renewed = prepare_board_call(
+                document, principal, agent_name, now
+            )
+            ticket = document["tickets"].get(ticket_id)
+            if ticket is None:
+                raise ValueError("ticket not found")
+            if ticket.get("status") not in PRE_SUBMISSION_STATES:
+                raise ValueError(f"ticket is {ticket['status']}")
+            membership = service.resolve_board_context(
+                document, principal.principal_id
+            )
+            is_claimer = ticket.get("claimed_by_agent_id") == actor["agent_id"]
+            is_admin = membership.get("role") == "admin"
+            if not is_claimer and not is_admin:
+                raise PermissionError(
+                    "unclaim denied: requires current claiming agent or board admin"
+                )
+            old_status = str(ticket["status"])
+            permission = "current claiming agent" if is_claimer else "board admin"
+            ticket["last_claimed_by_agent_id"] = ticket.get("claimed_by_agent_id")
+            ticket["last_claimed_by_principal_id"] = ticket.get(
+                "claimed_by_principal_id"
+            )
+            ticket["last_claimed_by"] = ticket.get("claimed_by")
+            ticket["last_claimed_at"] = ticket.get("claimed_at")
+            ticket["last_unclaimed_by_agent_id"] = actor["agent_id"]
+            ticket["last_unclaimed_by_principal_id"] = principal.principal_id
+            ticket["last_unclaimed_at"] = iso_at(now)
+            ticket["last_release_reason"] = "explicit unclaim"
+            ticket["status"] = "open"
+            ticket["updated_at"] = iso_at(now)
+            for key in (
+                "claimed_by_agent_id",
+                "claimed_by_principal_id",
+                "claimed_by",
+                "claimed_at",
+                "lease_expires_at_epoch",
+                "lease_expires_at",
+                "lease_renewed_at",
+                "ttl_s",
+            ):
+                ticket.pop(key, None)
+            return {
+                "actor": actor,
+                "ticket": copy.deepcopy(ticket),
+                "recipients": ticket_recipients(document, actor),
+                "old_status": old_status,
+                "released": released,
+                "renewed": [
+                    renewed_ticket_id
+                    for renewed_ticket_id in renewed
+                    if renewed_ticket_id != ticket_id
+                ],
+                "permission": permission,
+            }
+
+        changed = service.mutate(board_id, unclaim)
+        release_events = await publish_releases(
+            board_id, changed["released"], principal, ctx
+        )
+        uri = resource_uri(board_id, "ticket", ticket_id)
+        event = await append_and_publish(
+            board_id,
+            changed["actor"],
+            "ticket_status_changed",
+            uri,
+            changed["recipients"],
+            ctx,
+            ticket_id=ticket_id,
+            status_from=changed["old_status"],
+            status_to="open",
+        )
+        return {
+            "ok": True,
+            "ticket": changed["ticket"],
+            "permission": changed["permission"],
+            "event": event,
+            "release_events": release_events,
+            "implicitly_renewed": changed["renewed"],
+        }
+
+    @mcp.tool()
     async def lease_renew(
         board_id: str,
         ticket_id: str,
