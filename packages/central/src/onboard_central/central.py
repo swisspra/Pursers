@@ -4518,11 +4518,25 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         document = service.load(board_id)
         actor = service.member(document, principal, agent_name)
         page = service.journal.read_after(board_id, start, limit)
+
+        def is_currently_open_ticket_event(event: dict[str, Any]) -> bool:
+            ticket_id = event.get("ticket_id")
+            if (
+                not isinstance(ticket_id, str)
+                or event.get("status_to") != "open"
+            ):
+                return False
+            ticket = document["tickets"].get(ticket_id)
+            return ticket is not None and ticket.get("status") == "open"
+
         visible = [
             event
             for event in page["events"]
-            if actor["agent_id"] in event.get("recipient_identities", [])
-            and event.get("actor") != actor["agent_id"]
+            if event.get("actor") != actor["agent_id"]
+            and (
+                actor["agent_id"] in event.get("recipient_identities", [])
+                or is_currently_open_ticket_event(event)
+            )
         ]
         acknowledged = start
         if ack and not page["resync_required"]:
