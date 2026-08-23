@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+import personal_import as personal_import_module
 from native_import import board_path, canonical_db_hash
 from personal_import import (
     _destination_lock_path,
@@ -1639,6 +1640,105 @@ def test_cli_success_and_errors_never_emit_paths_or_input_secrets(
     assert "private-account" not in corrupted.stderr
     assert "Traceback" not in corrupted.stderr
     assert json.loads(corrupted.stderr)["error_code"] == "IMPORT_FAILED"
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "decisions must be an owned 0600 bounded regular file",
+        "binding decisions do not match the identity worksheet",
+    ],
+)
+def test_cli_surfaces_known_value_error_reason(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    message: str,
+) -> None:
+    def fail(*_args, **_kwargs):
+        raise ValueError(message)
+
+    monkeypatch.setattr(personal_import_module, "status_import", fail)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "personal_import.py",
+            "status",
+            "import-run",
+            "--confirm-central-stopped",
+        ],
+    )
+
+    with pytest.raises(SystemExit) as stopped:
+        personal_import_module.main()
+
+    captured = capsys.readouterr()
+    assert stopped.value.code == 2
+    assert captured.out == ""
+    payload = json.loads(captured.err)
+    assert payload["error_code"] == "IMPORT_FAILED"
+    assert payload["reason"] == message
+
+
+def test_cli_sanitizes_value_error_reason(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def fail(*_args, **_kwargs):
+        raise ValueError(
+            "invalid input at /Users/private-account/secret-run; "
+            "Bearer ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        )
+
+    monkeypatch.setattr(personal_import_module, "status_import", fail)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "personal_import.py",
+            "status",
+            "import-run",
+            "--confirm-central-stopped",
+        ],
+    )
+
+    with pytest.raises(SystemExit):
+        personal_import_module.main()
+
+    payload = json.loads(capsys.readouterr().err)
+    rendered = json.dumps(payload)
+    assert payload["reason"].startswith("invalid input at [REDACTED:PATH]")
+    assert "private-account" not in rendered
+    assert "secret-run" not in rendered
+    assert "ABCDEFGHIJKLMNOPQRSTUVWXYZ" not in rendered
+
+
+def test_cli_unexpected_exception_stays_generic(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def fail(*_args, **_kwargs):
+        raise RuntimeError("unexpected /Users/private-account/secret-run")
+
+    monkeypatch.setattr(personal_import_module, "status_import", fail)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "personal_import.py",
+            "status",
+            "import-run",
+            "--confirm-central-stopped",
+        ],
+    )
+
+    with pytest.raises(SystemExit):
+        personal_import_module.main()
+
+    payload = json.loads(capsys.readouterr().err)
+    assert payload["error_code"] == "IMPORT_FAILED"
+    assert "reason" not in payload
+    assert "private-account" not in json.dumps(payload)
 
 
 @pytest.mark.parametrize("lock_kind", ["run", "destination"])

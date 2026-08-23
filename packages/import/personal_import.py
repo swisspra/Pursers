@@ -25,6 +25,7 @@ if __package__:
     from .prepare_apply_rehearsal import prepare
     from .reconcile import _decision_map, apply_decisions, generate_worksheet
     from .safe_tree import open_directory_nofollow, require_path_matches_descriptor, walk_tree_fd
+    from .scrub import Policy, scrub
     from .transactional_sqlite import TransactionalSQLiteStore
 else:  # source-checkout execution
     from bind_identities import bind_identities, generate_identity_material
@@ -33,6 +34,7 @@ else:  # source-checkout execution
     from prepare_apply_rehearsal import prepare
     from reconcile import _decision_map, apply_decisions, generate_worksheet
     from safe_tree import open_directory_nofollow, require_path_matches_descriptor, walk_tree_fd
+    from scrub import Policy, scrub
     from transactional_sqlite import TransactionalSQLiteStore
 
 
@@ -43,6 +45,11 @@ CENTRAL_URL = "https://personal-preview.invalid/mcp"
 ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,80}$")
 SUPPORTED_STABLE_VERSION = "4.0.4"
 Checkpoint = Callable[[str], None]
+CLI_REASON_MAX_CHARS = 500
+_POSIX_ABSOLUTE_PATH_RE = re.compile(r"(?<![A-Za-z0-9._-])/(?:[^\r\n)]*)")
+_WINDOWS_ABSOLUTE_PATH_RE = re.compile(
+    r"(?i)(?<![A-Za-z0-9._-])[A-Z]:\\(?:[^\r\n)]*)"
+)
 
 
 def _canonical_bytes(value: Any) -> bytes:
@@ -2264,6 +2271,19 @@ class _SafeArgumentParser(argparse.ArgumentParser):
         raise SystemExit(2)
 
 
+def _sanitized_validation_reason(error: ValueError) -> str:
+    """Return a bounded operator-facing reason without paths or secrets."""
+    try:
+        reason = " ".join(str(error).split())
+        reason, _ = scrub(reason, Policy(mode="redact"))
+        reason = _WINDOWS_ABSOLUTE_PATH_RE.sub("[REDACTED:PATH]", reason)
+        reason = _POSIX_ABSOLUTE_PATH_RE.sub("[REDACTED:PATH]", reason)
+        reason = reason[:CLI_REASON_MAX_CHARS].strip()
+    except Exception:
+        reason = ""
+    return reason or "Input validation failed."
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = _SafeArgumentParser(
         description="Import a stable local board copy into an offline Personal Central root."
@@ -2330,6 +2350,18 @@ def main() -> None:
                 confirm_central_stopped=args.confirm_central_stopped,
             )
         print(json.dumps(public_summary(state), sort_keys=True))
+    except ValueError as error:
+        payload = {
+            "status": "error",
+            "error_code": "IMPORT_FAILED",
+            "message": (
+                "Import could not be completed safely. Inspect the private run "
+                "state, correct the input, and retry."
+            ),
+            "reason": _sanitized_validation_reason(error),
+        }
+        print(json.dumps(payload, sort_keys=True), file=sys.stderr)
+        raise SystemExit(2) from None
     except Exception:
         payload = {
             "status": "error",
