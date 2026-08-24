@@ -14,7 +14,7 @@ sys.path.insert(0, str(CLIENT_SRC))
 sys.path.insert(0, str(ROOT))
 os.environ.setdefault("ONBOARD_CENTRAL_TOKEN", "TOKEN_PLACEHOLDER")
 
-from onboard_client import BoardClientError, JoinedIdentity  # noqa: E402
+from pursers_client import BoardClientError, JoinedIdentity  # noqa: E402
 import pursers_wait_server as wait_server  # noqa: E402
 
 

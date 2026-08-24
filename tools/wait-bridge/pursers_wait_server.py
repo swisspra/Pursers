@@ -52,7 +52,7 @@ from contextlib import asynccontextmanager
 from functools import lru_cache
 from typing import Any, AsyncIterator
 
-from onboard_client import BoardClient, BoardClientError
+from pursers_client import BoardClient, BoardClientError
 from mcp.server.mcpserver import Context, MCPServer
 from agent_naming import resolve_agent_name
 from backlog import backlog_events, ticket_is_relevant
