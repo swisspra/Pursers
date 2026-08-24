@@ -20,6 +20,7 @@ type Agent = {
   idle_minutes: number;
   last_activity_at: string | null;
   lease_expires_at: string | null;
+  stale: boolean;
   project?: string | null;
   duplicate?: boolean;
   suggested_name?: string | null;
@@ -80,6 +81,7 @@ type Snapshot = {
   ticket_total: number;
   ticket_truncated: boolean;
   agent_total: number;
+  agents_live: number;
   agent_truncated: boolean;
   event_cursor: number | null;
   dropped_events: number;
@@ -100,8 +102,8 @@ const fallback: Snapshot = {
   fixture_provenance: "synthetic, authored for standalone embedded fallback",
   board: { id: "board-synthetic", name: "Personal Preview Demo" },
   agents: [
-    { id: "AI-DEMO-1", name: "agent-alpha", status: "working", role: "builder", focus: "Personal UI shell", platform: "synthetic", idle_minutes: 1, last_activity_at: "2099-01-01T00:00:00Z", lease_expires_at: null },
-    { id: "AI-DEMO-2", name: "reviewer-β", status: "idle", role: "reviewer", focus: "Accessibility & special characters", platform: "synthetic", idle_minutes: 18, last_activity_at: "2099-01-01T00:00:00Z", lease_expires_at: null },
+    { id: "AI-DEMO-1", name: "agent-alpha", status: "working", role: "builder", focus: "Personal UI shell", platform: "synthetic", idle_minutes: 1, last_activity_at: "2099-01-01T00:00:00Z", lease_expires_at: null, stale: false },
+    { id: "AI-DEMO-2", name: "reviewer-β", status: "idle", role: "reviewer", focus: "Accessibility & special characters", platform: "synthetic", idle_minutes: 18, last_activity_at: "2099-01-01T00:00:00Z", lease_expires_at: null, stale: false },
   ],
   tickets: [
     { id: "TK-DEMO-1", title: "Shape the Personal Preview dashboard", description: "Synthetic example — no project data is loaded.", status: "claimed", priority: "high", assigned_to: "agent-alpha", assigned_agent_id: "AI-DEMO-1", claimed_agent_id: "AI-DEMO-1", lease_expires_at: null, rejected: false, abandoned_count: 0, rejection_count: 0 },
@@ -119,6 +121,7 @@ const fallback: Snapshot = {
   ticket_total: 2,
   ticket_truncated: false,
   agent_total: 2,
+  agents_live: 2,
   agent_truncated: false,
   event_cursor: 2,
   dropped_events: 0,
@@ -175,6 +178,7 @@ function decodeAgent(value: unknown): Agent | null {
     idle_minutes: nonNegative(value.idle_minutes),
     last_activity_at: optionalText(value.last_activity_at),
     lease_expires_at: optionalText(value.lease_expires_at),
+    stale: boolean(value.stale),
     project: optionalText(value.project),
     duplicate: value.duplicate === true,
     suggested_name: optionalText(value.suggested_name),
@@ -269,6 +273,12 @@ function decodeSnapshot(value: unknown): Snapshot | null {
   const tickets = value.tickets.slice(0, MAX_TICKETS).map(decodeTicket).filter((item): item is Ticket => item !== null);
   const events = value.events.slice(0, MAX_EVENTS).map(decodeEvent).filter((item): item is BoardEvent => item !== null);
   const agentTotal = Math.max(agents.length, value.agents.length, nonNegative(raw.agent_total));
+  const agentsLive = Math.min(
+    agentTotal,
+    typeof raw.agents_live === "number"
+      ? nonNegative(raw.agents_live)
+      : agents.filter((agent) => !agent.stale).length,
+  );
   const ticketTotal = Math.max(tickets.length, value.tickets.length, nonNegative(raw.ticket_total));
   return {
     contract_version: 2,
@@ -289,6 +299,7 @@ function decodeSnapshot(value: unknown): Snapshot | null {
     ticket_total: ticketTotal,
     ticket_truncated: boolean(raw.ticket_truncated) || value.tickets.length > tickets.length || ticketTotal > tickets.length,
     agent_total: agentTotal,
+    agents_live: agentsLive,
     agent_truncated: boolean(raw.agent_truncated) || value.agents.length > agents.length || agentTotal > agents.length,
     event_cursor: typeof raw.event_cursor === "number" && Number.isFinite(raw.event_cursor) ? raw.event_cursor : null,
     dropped_events: nonNegative(raw.dropped_events) + Math.max(0, value.events.length - events.length),
@@ -505,14 +516,13 @@ function renderToday(data: Snapshot): void {
   byId("metric-open").textContent = String(counts.open);
   byId("metric-working").textContent = String(counts.working);
   byId("metric-submitted").textContent = String(counts.submitted);
-  const activeAgents = data.agents.filter((agent) => ["active", "working"].includes(agent.status)).length;
-  byId("metric-agents").textContent = data.agent_truncated ? `≥${activeAgents}` : String(activeAgents);
+  byId("metric-agents").textContent = String(data.agents_live);
   renderHealth(data);
 
   const work = data.tickets.filter((ticket) => !["closed", "canceled", "terminated"].includes(ticket.status)).slice(0, 4);
   byId("today-work").replaceChildren(...(work.length ? work.map(ticketRow) : [emptyState("No current work", "Open or claimed tickets will appear here.")]));
 
-  const agents = data.agents.slice(0, 4).map((agent) => {
+  const agents = data.agents.filter((agent) => !agent.stale).slice(0, 4).map((agent) => {
     const row = element("div", "list-row");
     const copy = element("div");
     copy.append(element("h3", undefined, agent.name), element("p", "muted", agent.focus ?? `${Math.round(agent.idle_minutes)}m idle`));
@@ -597,9 +607,7 @@ function renderWork(data: Snapshot): void {
 }
 
 function renderAgents(data: Snapshot): void {
-  byId("agents-total").textContent = data.agent_truncated
-    ? `${data.agents.length} shown of ${data.agent_total}`
-    : `${data.agent_total} total`;
+  byId("agents-total").textContent = `${data.agents_live} live / ${data.agent_total} total`;
   const notice = byId("agents-notice");
   notice.replaceChildren();
   if (data.agent_truncated) {
@@ -608,12 +616,17 @@ function renderAgents(data: Snapshot): void {
     item.append(element("p", undefined, `This View is capped at ${data.agents.length} loaded agents; ${data.agent_total} are visible to the adapter.`));
     notice.append(item);
   }
-  const cards = data.agents.map((agent) => {
+  const orderedAgents = [...data.agents].sort((left, right) => Number(left.stale) - Number(right.stale));
+  const cards = orderedAgents.map((agent) => {
     const card = element("article", "agent-card");
+    card.dataset.stale = String(agent.stale);
     const heading = element("div", "agent-heading");
     const identity = element("div", "agent-heading");
     identity.append(element("span", "agent-avatar", agent.name.slice(0, 2).toUpperCase()), element("h3", undefined, agent.name));
-    heading.append(identity, pill(agent.status, toneForStatus(agent.status)));
+    const states = element("div", "agent-state-badges");
+    states.append(pill(agent.status, toneForStatus(agent.status)));
+    if (agent.stale) states.append(pill("stale"));
+    heading.append(identity, states);
     card.append(heading);
     if (agent.focus) card.append(element("p", "muted", agent.focus));
     const meta = element("div", "meta-row");

@@ -360,7 +360,14 @@ main[aria-busy="true"] { opacity: 0.72; }
 
 .agents-grid { grid-template-columns: repeat(auto-fit, minmax(min(100%, 230px), 1fr)); }
 .agent-card { min-height: 150px; }
+.agent-card[data-stale="true"] {
+  border-color: var(--border);
+  background: color-mix(in srgb, var(--inset-background) 65%, var(--surface-soft));
+  filter: grayscale(0.65);
+  opacity: 0.62;
+}
 .agent-heading { display: flex; min-width: 0; align-items: flex-start; justify-content: space-between; gap: 8px; }
+.agent-state-badges { display: flex; flex: 0 0 auto; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
 .agent-avatar { display: grid; width: 38px; height: 38px; place-items: center; border-radius: 12px; background: var(--accent-soft); color: var(--accent); font-weight: 800; }
 
 .timeline { position: relative; }

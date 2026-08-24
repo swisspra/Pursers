@@ -30,6 +30,7 @@ PINNED_CLIENT_VERSION = "0.1.0a10"
 PRODUCT_VERSION = "5.0.0a1"
 MAX_EVENTS = 200
 MAX_TICKETS = 500
+AGENT_STALE_AFTER_MINUTES = 60
 UI_URI = "ui://pursers/dashboard"
 MODEL_AND_APP = ["model", "app"]
 MODEL_ONLY = ["model"]
@@ -137,6 +138,7 @@ FALLBACK_AGENTS = [
         "platform": "synthetic",
         "last_activity_at": "2099-01-01T00:00:00Z",
         "lease_expires_at": None,
+        "stale": False,
     },
     {
         "id": "AI-DEMO-2",
@@ -149,6 +151,7 @@ FALLBACK_AGENTS = [
         "platform": "synthetic",
         "last_activity_at": "2099-01-01T00:00:00Z",
         "lease_expires_at": None,
+        "stale": False,
     },
 ]
 FALLBACK_EVENTS = [
@@ -698,6 +701,7 @@ class LiveDashboard:
             held = agent_projects.get(str(agent.get("id") or ""))
             agent["project"] = held[1] if held is not None else None
         self._flag_duplicate_agent_names(agent_views)
+        agents_live = sum(not bool(agent["stale"]) for agent in agent_views)
         projection = {
             "contract_version": 2,
             "data_mode": "live",
@@ -730,6 +734,7 @@ class LiveDashboard:
             "ticket_truncated": int(listed.get("total_matching", len(tickets)))
             > len(tickets),
             "agent_total": len(agents),
+            "agents_live": agents_live,
             "agent_truncated": False,
             "latest_seq": max(
                 int(cold.get("latest_seq", 0)),
@@ -781,17 +786,24 @@ class LiveDashboard:
         return await result
 
     @staticmethod
-    def _idle_minutes(value: Any) -> int:
+    def _agent_activity_age(value: Any) -> tuple[int, bool]:
         if not isinstance(value, str) or not value:
-            return 0
+            return 0, False
         try:
             parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
             if parsed.tzinfo is None:
                 parsed = parsed.replace(tzinfo=timezone.utc)
             elapsed = (datetime.now(timezone.utc) - parsed).total_seconds()
         except (TypeError, ValueError, OverflowError):
-            return 0
-        return min(525_600, max(0, int(elapsed // 60)))
+            return 0, False
+        elapsed = max(0.0, elapsed)
+        idle_minutes = min(525_600, int(elapsed // 60))
+        stale = elapsed > AGENT_STALE_AFTER_MINUTES * 60
+        return idle_minutes, stale
+
+    @classmethod
+    def _idle_minutes(cls, value: Any) -> int:
+        return cls._agent_activity_age(value)[0]
 
     @staticmethod
     def _ticket_claimed_sort_key(ticket: dict[str, Any]) -> tuple[str, ...]:
@@ -808,6 +820,7 @@ class LiveDashboard:
         agent: dict[str, Any],
         current_ticket: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        idle_minutes, stale = cls._agent_activity_age(agent.get("last_activity_at"))
         return {
             "id": agent.get("agent_id"),
             "name": agent.get("agent_name", "unknown-agent"),
@@ -815,9 +828,10 @@ class LiveDashboard:
             "role": agent.get("role"),
             "focus": agent.get("task_focus"),
             "platform": agent.get("agent_platform"),
-            "idle_minutes": cls._idle_minutes(agent.get("last_activity_at")),
+            "idle_minutes": idle_minutes,
             "last_activity_at": agent.get("last_activity_at"),
             "lease_expires_at": agent.get("lease_expires_at"),
+            "stale": stale,
             "duplicate": False,
             "suggested_name": None,
             "current_ticket": (
@@ -831,7 +845,7 @@ class LiveDashboard:
     def _flag_duplicate_agent_names(agents: list[dict[str, Any]]) -> None:
         active_by_name: dict[str, list[dict[str, Any]]] = {}
         for agent in agents:
-            if str(agent.get("status", "")).lower() != "active":
+            if agent.get("stale") or str(agent.get("status", "")).lower() != "active":
                 continue
             name = str(agent.get("name", "unknown-agent"))
             active_by_name.setdefault(name, []).append(agent)
@@ -987,6 +1001,7 @@ class LiveDashboard:
             "ticket_total": len(FALLBACK_TICKETS),
             "ticket_truncated": False,
             "agent_total": len(FALLBACK_AGENTS),
+            "agents_live": len(FALLBACK_AGENTS),
             "agent_truncated": False,
             "events": copy.deepcopy(FALLBACK_EVENTS),
             "event_cursor": FALLBACK_EVENTS[-1]["seq"],

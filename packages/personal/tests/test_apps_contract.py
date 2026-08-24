@@ -12,6 +12,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any
@@ -68,8 +69,8 @@ def test_exact_view_lock_and_embedded_external_attestation_boundary() -> None:
     lock_path = root / "src/pursers_personal/resources/component-lock.json"
     payload = view_path.read_bytes()
     lock = json.loads(lock_path.read_text(encoding="utf-8"))
-    expected = "17a1f561d4fe3f92ff5a484584316a0dfdd0534be3f955f9ce1cc73c464b1599"
-    assert len(payload) == 387_626
+    expected = "2c6cced4f310c1e66528d1966816ddc0c53389fe41ca54f82c458ed20d6d3815"
+    assert len(payload) == 388_099
     assert hashlib.sha256(payload).hexdigest() == expected
     assert lock["product_version"] == PRODUCT_VERSION == "5.0.0a1"
     assert lock["view"] == {
@@ -462,21 +463,31 @@ async def test_projection_flags_only_duplicate_active_agent_names() -> None:
                         "agent_id": "AI-active-1",
                         "agent_name": "worker",
                         "status": "active",
+                        "last_activity_at": "2099-01-01T00:00:00Z",
                     },
                     {
                         "agent_id": "AI-active-2",
                         "agent_name": "worker",
                         "status": "ACTIVE",
+                        "last_activity_at": "2099-01-01T00:00:00Z",
                     },
                     {
                         "agent_id": "AI-idle",
                         "agent_name": "worker",
                         "status": "idle",
+                        "last_activity_at": "2099-01-01T00:00:00Z",
                     },
                     {
                         "agent_id": "AI-solo",
                         "agent_name": "solo",
                         "status": "active",
+                        "last_activity_at": "2099-01-01T00:00:00Z",
+                    },
+                    {
+                        "agent_id": "AI-stale",
+                        "agent_name": "worker",
+                        "status": "active",
+                        "last_activity_at": "2000-01-01T00:00:00Z",
                     },
                 ],
                 "latest_seq": 4,
@@ -503,6 +514,8 @@ async def test_projection_flags_only_duplicate_active_agent_names() -> None:
     )
 
     assert state._projection is not None
+    assert state._projection["agent_total"] == 5
+    assert state._projection["agents_live"] == 4
     projected = {agent["id"]: agent for agent in state._projection["agents"]}
     first = projected["AI-active-1"]
     second = projected["AI-active-2"]
@@ -519,6 +532,19 @@ async def test_projection_flags_only_duplicate_active_agent_names() -> None:
     assert projected["AI-idle"]["suggested_name"] is None
     assert projected["AI-solo"]["duplicate"] is False
     assert projected["AI-solo"]["suggested_name"] is None
+    assert projected["AI-stale"]["stale"] is True
+    assert projected["AI-stale"]["duplicate"] is False
+    assert projected["AI-stale"]["suggested_name"] is None
+
+
+def test_agent_stale_threshold_is_sixty_minutes() -> None:
+    now = datetime.now(timezone.utc)
+    fresh = (now - timedelta(minutes=59)).isoformat()
+    old = (now - timedelta(minutes=61)).isoformat()
+
+    assert apps_server.AGENT_STALE_AFTER_MINUTES == 60
+    assert LiveDashboard._agent_activity_age(fresh)[1] is False
+    assert LiveDashboard._agent_activity_age(old)[1] is True
 
 
 @pytest.mark.anyio
@@ -1055,7 +1081,7 @@ async def test_projection_joins_agents_to_their_current_ticket() -> None:
     projected_agents = {item["id"]: item for item in state._projection["agents"]}
     assert set(projected_agents["AI-WORKING"]) == {
         "id", "name", "status", "role", "focus", "platform", "idle_minutes",
-        "last_activity_at", "lease_expires_at", "duplicate", "suggested_name",
+        "last_activity_at", "lease_expires_at", "stale", "duplicate", "suggested_name",
         "current_ticket", "project",
     }
     assert projected_agents["AI-WORKING"]["current_ticket"] == state._ticket_view(tickets[1])
