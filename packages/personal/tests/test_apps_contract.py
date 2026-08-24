@@ -453,6 +453,75 @@ async def test_app_reads_use_only_the_non_joining_pure_reader() -> None:
 
 
 @pytest.mark.anyio
+async def test_projection_flags_only_duplicate_active_agent_names() -> None:
+    class ProjectionReader:
+        async def board_status(self) -> dict[str, Any]:
+            return {
+                "agents": [
+                    {
+                        "agent_id": "AI-active-1",
+                        "agent_name": "worker",
+                        "status": "active",
+                    },
+                    {
+                        "agent_id": "AI-active-2",
+                        "agent_name": "worker",
+                        "status": "ACTIVE",
+                    },
+                    {
+                        "agent_id": "AI-idle",
+                        "agent_name": "worker",
+                        "status": "idle",
+                    },
+                    {
+                        "agent_id": "AI-solo",
+                        "agent_name": "solo",
+                        "status": "active",
+                    },
+                ],
+                "latest_seq": 4,
+            }
+
+        async def ticket_list(self, **_kwargs: Any) -> dict[str, Any]:
+            return {"tickets": [], "total_matching": 0, "latest_seq": 4}
+
+        async def board_get_briefing(self, **_kwargs: Any) -> dict[str, Any]:
+            return {"pinned_digest": [], "latest_handoff": None}
+
+    state = LiveDashboard(
+        fake_config(),
+        client_class=FakeClient,
+        client_error_class=FakeClientError,
+    )
+    await state._load_projection(
+        ProjectionReader(),
+        snapshot={
+            "board": {"board_id": "board-personal-test"},
+            "agents": [],
+            "latest_seq": 4,
+        },
+    )
+
+    assert state._projection is not None
+    projected = {agent["id"]: agent for agent in state._projection["agents"]}
+    first = projected["AI-active-1"]
+    second = projected["AI-active-2"]
+    assert first["duplicate"] is True
+    assert second["duplicate"] is True
+    assert first["suggested_name"] == (
+        "worker-" + hashlib.sha256(b"AI-active-1").hexdigest()[:6]
+    )
+    assert second["suggested_name"] == (
+        "worker-" + hashlib.sha256(b"AI-active-2").hexdigest()[:6]
+    )
+    assert first["suggested_name"] != second["suggested_name"]
+    assert projected["AI-idle"]["duplicate"] is False
+    assert projected["AI-idle"]["suggested_name"] is None
+    assert projected["AI-solo"]["duplicate"] is False
+    assert projected["AI-solo"]["suggested_name"] is None
+
+
+@pytest.mark.anyio
 async def test_raw_reader_rejects_non_pure_tools_before_transport() -> None:
     transport_calls: list[tuple[str, dict[str, Any]]] = []
 

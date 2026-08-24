@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import hashlib
 import importlib
 import importlib.resources
 import ipaddress
@@ -637,6 +638,8 @@ class LiveDashboard:
             ),
             reverse=True,
         )
+        agent_views = [self._agent_view(item) for item in agents]
+        self._flag_duplicate_agent_names(agent_views)
         projection = {
             "contract_version": 2,
             "data_mode": "live",
@@ -645,7 +648,7 @@ class LiveDashboard:
                 "MCP read session"
             ),
             "board": {"id": board_id, "name": board_id},
-            "agents": [self._agent_view(item) for item in agents],
+            "agents": agent_views,
             "tickets": [self._ticket_view(item) for item in tickets],
             "highlights": {
                 "latest_handoff": self._memory_highlight(
@@ -744,7 +747,27 @@ class LiveDashboard:
             "idle_minutes": cls._idle_minutes(agent.get("last_activity_at")),
             "last_activity_at": agent.get("last_activity_at"),
             "lease_expires_at": agent.get("lease_expires_at"),
+            "duplicate": False,
+            "suggested_name": None,
         }
+
+    @staticmethod
+    def _flag_duplicate_agent_names(agents: list[dict[str, Any]]) -> None:
+        active_by_name: dict[str, list[dict[str, Any]]] = {}
+        for agent in agents:
+            if str(agent.get("status", "")).lower() != "active":
+                continue
+            name = str(agent.get("name", "unknown-agent"))
+            active_by_name.setdefault(name, []).append(agent)
+
+        for name, matches in active_by_name.items():
+            if len(matches) < 2:
+                continue
+            for agent in matches:
+                agent_id = str(agent.get("id", ""))
+                suffix = hashlib.sha256(agent_id.encode("utf-8")).hexdigest()[:6]
+                agent["duplicate"] = True
+                agent["suggested_name"] = f"{name}-{suffix}"
 
     @staticmethod
     def _ticket_view(ticket: dict[str, Any]) -> dict[str, Any]:
