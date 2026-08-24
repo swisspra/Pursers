@@ -625,6 +625,23 @@ class LiveDashboard:
                 )
             ]
         tickets = listed.get("tickets", [])
+        current_tickets_by_agent_id: dict[str, dict[str, Any]] = {}
+        for ticket in tickets:
+            if not isinstance(ticket, dict):
+                continue
+            if ticket.get("status") in {"closed", "canceled", "terminated"}:
+                continue
+            holder_ids = {
+                ticket.get("claimed_by_agent_id"),
+                ticket.get("assigned_to_agent_id"),
+            }
+            for agent_id in holder_ids - {None, ""}:
+                key = str(agent_id)
+                current = current_tickets_by_agent_id.get(key)
+                if current is None or self._ticket_claimed_sort_key(
+                    ticket
+                ) > self._ticket_claimed_sort_key(current):
+                    current_tickets_by_agent_id[key] = ticket
         pinned = briefing.get("pinned_digest", [])
         if not isinstance(pinned, list):
             pinned = []
@@ -670,7 +687,13 @@ class LiveDashboard:
             if previous is None or recency >= previous[0]:
                 agent_projects[holder] = (recency, project)
 
-        agent_views = [self._agent_view(item) for item in agents]
+        agent_views = [
+            self._agent_view(
+                item,
+                current_tickets_by_agent_id.get(str(item.get("agent_id", ""))),
+            )
+            for item in agents
+        ]
         for agent in agent_views:
             held = agent_projects.get(str(agent.get("id") or ""))
             agent["project"] = held[1] if held is not None else None
@@ -770,8 +793,21 @@ class LiveDashboard:
             return 0
         return min(525_600, max(0, int(elapsed // 60)))
 
+    @staticmethod
+    def _ticket_claimed_sort_key(ticket: dict[str, Any]) -> tuple[str, ...]:
+        return (
+            str(ticket.get("claimed_at") or ""),
+            str(ticket.get("updated_at") or ""),
+            str(ticket.get("created_at") or ""),
+            str(ticket.get("ticket_id") or ""),
+        )
+
     @classmethod
-    def _agent_view(cls, agent: dict[str, Any]) -> dict[str, Any]:
+    def _agent_view(
+        cls,
+        agent: dict[str, Any],
+        current_ticket: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         return {
             "id": agent.get("agent_id"),
             "name": agent.get("agent_name", "unknown-agent"),
@@ -784,6 +820,11 @@ class LiveDashboard:
             "lease_expires_at": agent.get("lease_expires_at"),
             "duplicate": False,
             "suggested_name": None,
+            "current_ticket": (
+                cls._ticket_view(current_ticket)
+                if current_ticket is not None
+                else None
+            ),
         }
 
     @staticmethod

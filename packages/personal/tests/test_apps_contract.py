@@ -1007,3 +1007,57 @@ def test_source_has_no_legacy_connection_defaults_or_import_time_server() -> Non
     assert ".board_catchup(" not in source
     assert source.count("await self.start()") == 1
     assert "version=PRODUCT_VERSION" in source
+
+
+@pytest.mark.anyio
+async def test_projection_joins_agents_to_their_current_ticket() -> None:
+    agents = [
+        {"agent_id": "AI-WORKING", "agent_name": "working-agent", "status": "active"},
+        {"agent_id": "AI-ASSIGNED", "agent_name": "assigned-agent", "status": "active"},
+        {"agent_id": "AI-IDLE", "agent_name": "idle-agent", "status": "active"},
+    ]
+    tickets = [
+        {"ticket_id": "TK-OLDER", "title": "Older claim", "status": "claimed",
+         "claimed_by_agent_id": "AI-WORKING", "claimed_at": "2026-08-24T01:00:00+00:00"},
+        {"ticket_id": "TK-NEWER", "title": "Newer claim", "status": "submitted",
+         "claimed_by_agent_id": "AI-WORKING", "claimed_at": "2026-08-24T02:00:00+00:00"},
+        {"ticket_id": "TK-CLOSED", "title": "Closed newer claim", "status": "closed",
+         "claimed_by_agent_id": "AI-WORKING", "claimed_at": "2026-08-24T03:00:00+00:00"},
+        {"ticket_id": "TK-ASSIGNED", "title": "Assigned work", "status": "open",
+         "assigned_to_agent_id": "AI-ASSIGNED", "updated_at": "2026-08-24T04:00:00+00:00"},
+    ]
+
+    class ProjectionReader:
+        async def board_status(self) -> dict[str, Any]:
+            return {"agents": agents, "latest_seq": 4}
+
+        async def ticket_list(self, **_kwargs: Any) -> dict[str, Any]:
+            return {"tickets": tickets, "total_matching": len(tickets), "latest_seq": 4}
+
+        async def board_get_briefing(self, **_kwargs: Any) -> dict[str, Any]:
+            return {"pinned_digest": [], "latest_handoff": None}
+
+    state = LiveDashboard(
+        fake_config(),
+        client_class=FakeClient,
+        client_error_class=FakeClientError,
+    )
+    await state._load_projection(
+        ProjectionReader(),
+        snapshot={
+            "board": {"board_id": "board-personal-test"},
+            "latest_seq": 4,
+            "snapshot_at": "2026-08-24T04:00:00+00:00",
+        },
+    )
+
+    assert state._projection is not None
+    projected_agents = {item["id"]: item for item in state._projection["agents"]}
+    assert set(projected_agents["AI-WORKING"]) == {
+        "id", "name", "status", "role", "focus", "platform", "idle_minutes",
+        "last_activity_at", "lease_expires_at", "duplicate", "suggested_name",
+        "current_ticket", "project",
+    }
+    assert projected_agents["AI-WORKING"]["current_ticket"] == state._ticket_view(tickets[1])
+    assert projected_agents["AI-ASSIGNED"]["current_ticket"] == state._ticket_view(tickets[3])
+    assert projected_agents["AI-IDLE"]["current_ticket"] is None
