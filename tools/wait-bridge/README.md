@@ -34,6 +34,30 @@ after restarts. The explicit value is the stability anchor; the bridge does
 not guess window identity or create lock files that can swap identities when
 processes restart in a different order.
 
+## Per-call identities
+
+`a2a_wait` also accepts an optional `agent_name`. Omitting it uses the
+process-level identity above with the original behavior. Supplying it lets one
+bridge process and one Central connection serve multiple session identities:
+
+```text
+a2a_wait(since_seq=0, project="PROJECT_PLACEHOLDER", agent_name="session-a")
+```
+
+An explicit identity is joined when its call starts. Joins are stateless and
+idempotent; the bridge deliberately keeps no mutable join cache and does not
+rate-limit them. It never changes the shared client's process-level
+`agent_name` or joined identity. Catchup, relevance filtering, backlog scans,
+and heartbeat selection instead receive the call-local name and deterministic
+agent ID explicitly. If Central reports that an explicit identity was handed
+off, the bridge rejoins it once and retries catchup once.
+
+Central's `board_join` may reap expired leases across the board, even though an
+existing active identity does not produce another join journal event. A newly
+used name also was not a recipient of old journal entries. It can recover
+currently `open` work through the bridge's backlog scan, but it cannot discover
+old non-open history through `a2a_wait`.
+
 ## Connector examples
 
 Use placeholder paths and secrets as shown, then substitute values locally.
@@ -89,6 +113,13 @@ than the cursor still wakes the worker. Backlog cues use
 immediately. Every event is a cue to refetch and claim current board state.
 The bridge renews held leases only while `a2a_wait` is blocking; long-running
 work must call Central's `lease_renew` directly.
+
+For a per-call identity, heartbeat lookup first uses the name and then
+exact-filters `claimed_by_agent_id`. This prevents substring matches such as
+`session-a` and `session-a-2` from crossing over. Central authorizes
+`lease_renew` at principal scope, not per agent identity, so this exact ticket
+selection prevents accidental renewals by the bridge but is not a server-side
+identity-isolation guarantee.
 
 Run the bridge tests with:
 

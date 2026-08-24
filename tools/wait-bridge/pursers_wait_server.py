@@ -43,10 +43,13 @@ RELEVANCE
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import os
 import sys
 import time
 from contextlib import asynccontextmanager
+from functools import lru_cache
 from typing import Any, AsyncIterator
 
 from onboard_client import BoardClient, BoardClientError
@@ -78,6 +81,7 @@ CATCHUP_PAGE_LIMIT = 100
 BACKLOG_SCAN_LIMIT = 100
 RELEVANT_KINDS = frozenset({"ticket_created", "ticket_status_changed"})
 CLAIMED_STATES = frozenset({"claimed", "in_progress", "creating_report"})
+HANDOFF_REJOIN_MESSAGE = "call board_onboard or board_join before more work"
 
 
 def clamp_timeout(timeout_s: Any) -> int:
@@ -91,6 +95,23 @@ def clamp_timeout(timeout_s: Any) -> int:
 def _log(msg: str) -> None:
     # stderr only -- stdout is the stdio JSON-RPC channel.
     print(f"[a2a_wait] {msg}", file=sys.stderr, flush=True)
+
+
+@lru_cache(maxsize=1_024)
+def _derived_agent_id(principal_id: str, agent_name: str) -> str:
+    """Pure Central-compatible identity derivation; safe to memoize."""
+    logical = json.dumps(
+        [BOARD_ID, principal_id, agent_name], separators=(",", ":")
+    )
+    return "AI-" + hashlib.sha256(logical.encode("utf-8")).hexdigest()
+
+
+async def _join_for_call(
+    client: BoardClient, agent_name: str, explicit_name: bool
+) -> dict[str, Any]:
+    if explicit_name:
+        return await client.board_join(agent_name=agent_name)
+    return await client.board_join()
 
 
 @asynccontextmanager
@@ -124,7 +145,12 @@ async def _lifespan(server: MCPServer) -> AsyncIterator[dict[str, Any]]:
 mcp = MCPServer("Pursers Wait Bridge", version="0.1.0", lifespan=_lifespan)
 
 
-async def _catchup_all(client: BoardClient, cursor: int) -> tuple[list[dict], int, bool]:
+async def _catchup_all(
+    client: BoardClient,
+    cursor: int,
+    agent_name: str,
+    explicit_name: bool,
+) -> tuple[list[dict], int, bool]:
     """Fully drain board_catchup pages from cursor. ack=False: this tool owns
     since_seq/new_seq itself via the caller's explicit round trip rather than
     the server's per-(principal,agent) cursor, so it never perturbs cursor
@@ -139,7 +165,21 @@ async def _catchup_all(client: BoardClient, cursor: int) -> tuple[list[dict], in
     events: list[dict] = []
     resynced = False
     while True:
-        page = await client.board_catchup(cursor=cursor, limit=CATCHUP_PAGE_LIMIT, ack=False)
+        catchup_args: dict[str, Any] = {
+            "cursor": cursor,
+            "limit": CATCHUP_PAGE_LIMIT,
+            "ack": False,
+        }
+        if explicit_name:
+            catchup_args["agent_name"] = agent_name
+        try:
+            page = await client.board_catchup(**catchup_args)
+        except BoardClientError as exc:
+            if not explicit_name or HANDOFF_REJOIN_MESSAGE not in str(exc):
+                raise
+            _log(f"agent={agent_name!r}: handed off; rejoining once")
+            await _join_for_call(client, agent_name, explicit_name)
+            page = await client.board_catchup(**catchup_args)
         if page.get("resync_required"):
             resynced = True
             cursor = int(page["reset_cursor"])
@@ -178,9 +218,12 @@ async def _is_relevant(
 
 
 async def _filter_relevant(
-    client: BoardClient, events: list[dict], only_mine: bool, project: str | None
+    client: BoardClient,
+    events: list[dict],
+    my_agent_id: str,
+    only_mine: bool,
+    project: str | None,
 ) -> list[dict]:
-    my_agent_id = client.identity.agent_id if client.identity else None
     out = []
     for ev in events:
         if await _is_relevant(client, ev, my_agent_id, only_mine, project):
@@ -189,7 +232,10 @@ async def _filter_relevant(
 
 
 async def _scan_open_backlog(
-    client: BoardClient, only_mine: bool, project: str | None
+    client: BoardClient,
+    my_agent_id: str,
+    only_mine: bool,
+    project: str | None,
 ) -> list[dict]:
     """Best-effort scan for open work older than the caller's journal cursor."""
     try:
@@ -199,13 +245,14 @@ async def _scan_open_backlog(
     except Exception as exc:
         _log(f"backlog scan: ticket_list failed: {exc}")
         return []
-    my_agent_id = client.identity.agent_id if client.identity else None
     return backlog_events(
         listed.get("tickets", []), my_agent_id, only_mine, project
     )
 
 
-async def _heartbeat(client: BoardClient) -> None:
+async def _heartbeat(
+    client: BoardClient, agent_name: str, my_agent_id: str
+) -> None:
     """Best-effort lease_renew for any ticket this agent currently holds.
 
     Never raises -- a heartbeat failure must not abort the wait. If this
@@ -213,11 +260,12 @@ async def _heartbeat(client: BoardClient) -> None:
     common case for an idle listener; that is logged, not treated as error.
     """
     try:
-        listed = await client.ticket_list(assigned_to=AGENT_NAME, include_closed=False, limit=50)
+        listed = await client.ticket_list(
+            assigned_to=agent_name, include_closed=False, limit=50
+        )
     except Exception as exc:
         _log(f"heartbeat: ticket_list failed: {exc}")
         return
-    my_agent_id = client.identity.agent_id if client.identity else None
     held = [
         t for t in listed.get("tickets", [])
         if t.get("status") in CLAIMED_STATES and t.get("claimed_by_agent_id") == my_agent_id
@@ -229,7 +277,10 @@ async def _heartbeat(client: BoardClient) -> None:
         ticket_id = ticket["ticket_id"]
         try:
             renewed = await client.lease_renew(ticket_id)
-            _log(f"heartbeat: lease_renew {ticket_id} -> expires {renewed.get('lease_expires_at')}")
+            _log(
+                f"heartbeat: agent={agent_name!r} lease_renew {ticket_id} "
+                f"-> expires {renewed.get('lease_expires_at')}"
+            )
         except Exception as exc:
             _log(f"heartbeat: lease_renew {ticket_id} failed: {exc}")
 
@@ -241,6 +292,7 @@ async def a2a_wait(
     timeout_s: int = 180,
     only_mine: bool = True,
     project: str | None = None,
+    agent_name: str | None = None,
 ) -> dict[str, Any]:
     """Block until pursers board work arrives, or until timeout_s elapses.
 
@@ -257,6 +309,10 @@ async def a2a_wait(
     several projects without a worker seeing another project's queue. Leave it
     unset to see every project (the cross-project orchestrator view).
 
+    agent_name: optional per-call board identity. Omit it to preserve the
+    process-level ONBOARD_AGENT_NAME/INSTANCE identity exactly. An explicit
+    name is joined statelessly for this call on the existing connection.
+
     Returns {new_seq, events, waited_s, timed_out, resynced}. timed_out=True
     means "no work" -- call again with since_seq=new_seq to re-arm. resynced=True
     means the journal was compacted past our cursor and events were lost:
@@ -267,6 +323,27 @@ async def a2a_wait(
     a2a_wait calls -- during long work you must renew your own claim (lease_renew)
     or the reaper can reclaim it. See WORKER-DIRECTIVE.md step DO.
     """
+    client: BoardClient = ctx.request_context.lifespan_context["client"]
+    return await _wait_for_work(
+        client,
+        since_seq=since_seq,
+        timeout_s=timeout_s,
+        only_mine=only_mine,
+        project=project,
+        agent_name=agent_name,
+    )
+
+
+async def _wait_for_work(
+    client: BoardClient,
+    *,
+    since_seq: int = 0,
+    timeout_s: int = 180,
+    only_mine: bool = True,
+    project: str | None = None,
+    agent_name: str | None = None,
+) -> dict[str, Any]:
+    """Testable wait implementation with identity kept entirely call-local."""
     budget = clamp_timeout(timeout_s)
     started = time.monotonic()
     deadline = started + budget
@@ -274,20 +351,37 @@ async def a2a_wait(
     last_heartbeat = started
     resynced = False
     proj = project.strip().lower() if isinstance(project, str) and project.strip() else None
-
-    client: BoardClient = ctx.request_context.lifespan_context["client"]
+    explicit_name = agent_name is not None
+    call_agent_name = AGENT_NAME if agent_name is None else agent_name
+    if not isinstance(call_agent_name, str) or not call_agent_name:
+        raise ValueError("agent_name must be a non-empty string")
+    if client.identity is None:
+        raise RuntimeError("BoardClient has no default joined identity")
+    my_agent_id = _derived_agent_id(
+        client.identity.principal_id, call_agent_name
+    )
+    if explicit_name:
+        joined = await _join_for_call(client, call_agent_name, True)
+        if joined.get("agent_id") != my_agent_id:
+            raise BoardClientError("server returned an unexpected per-call agent_id")
 
     async def poll_once() -> list[dict]:
         nonlocal cursor, resynced
-        events, cursor, did_resync = await _catchup_all(client, cursor)
+        events, cursor, did_resync = await _catchup_all(
+            client, cursor, call_agent_name, explicit_name
+        )
         if did_resync:
             resynced = True
-        return await _filter_relevant(client, events, only_mine, proj)
+        return await _filter_relevant(
+            client, events, my_agent_id, only_mine, proj
+        )
 
     # 1. CHECK BEFORE BLOCKING. Journal events advance the cursor; synthetic
     # backlog cues never carry or fabricate a sequence number.
     relevant = await poll_once()
-    backlog = await _scan_open_backlog(client, only_mine, proj)
+    backlog = await _scan_open_backlog(
+        client, my_agent_id, only_mine, proj
+    )
     journal_ticket_ids = {
         event.get("ticket_id") for event in relevant if event.get("ticket_id")
     }
@@ -313,7 +407,7 @@ async def a2a_wait(
 
         now = time.monotonic()
         if now - last_heartbeat >= HEARTBEAT_INTERVAL_S:
-            await _heartbeat(client)
+            await _heartbeat(client, call_agent_name, my_agent_id)
             last_heartbeat = now
 
         relevant = await poll_once()
