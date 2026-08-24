@@ -5,11 +5,11 @@ from __future__ import annotations
 from .artifacts import import_verified_component
 
 _profile = import_verified_component(
-    "onboard-client",
-    "onboard_client",
-    "onboard_client.personal_profile",
-    package_member="onboard_client/__init__.py",
-    module_member="onboard_client/personal_profile.py",
+    "pursers-client",
+    "pursers_client",
+    "pursers_client.personal_profile",
+    package_member="pursers_client/__init__.py",
+    module_member="pursers_client/personal_profile.py",
 )
 
 DEFAULT_PORT = _profile.DEFAULT_PORT

@@ -99,7 +99,7 @@ class BoardClient:
         token: str,
         board_id: str,
         *,
-        agent_name: str = "onboard-client",
+        agent_name: str = "pursers-client",
         reconnect_delay_s: float = 0.05,
         claim_ttl_s: int | None = None,
     ):

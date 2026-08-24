@@ -25,7 +25,7 @@ _IMPORT_LOCK = threading.RLock()
 
 
 def _lock_document() -> dict[str, Any]:
-    resource = importlib.resources.files("onboard_personal").joinpath(
+    resource = importlib.resources.files("pursers_personal").joinpath(
         "resources/component-lock.json"
     )
     try:
@@ -125,7 +125,7 @@ def verify_component_artifacts(
 
     view = document.get("view")
     if names is None and isinstance(view, dict):
-        resource = importlib.resources.files("onboard_personal").joinpath(
+        resource = importlib.resources.files("pursers_personal").joinpath(
             "resources/dashboard.html"
         )
         try:
@@ -168,9 +168,9 @@ def import_verified_component(
             if (
                 existing_package is None
                 or existing_module is None
-                or getattr(existing_package, "__onboard_verified_source__", None)
+                or getattr(existing_package, "__pursers_verified_source__", None)
                 is not _VERIFIED_SOURCE_SENTINEL
-                or getattr(existing_module, "__onboard_verified_source__", None)
+                or getattr(existing_module, "__pursers_verified_source__", None)
                 is not _VERIFIED_SOURCE_SENTINEL
                 or Path(str(existing_package.__file__)).resolve() != approved_package
                 or Path(str(existing_module.__file__)).resolve() != approved_module
@@ -196,7 +196,7 @@ def import_verified_component(
             # A private empty prefix makes CPython compile the verified .py bytes
             # instead of accepting an adjacent timestamp-valid __pycache__ file.
             with tempfile.TemporaryDirectory(
-                prefix="onboard-verified-pycache-"
+                prefix="pursers-verified-pycache-"
             ) as cache_root:
                 sys.pycache_prefix = cache_root
                 importlib.invalidate_caches()
@@ -235,7 +235,7 @@ def import_verified_component(
         for loaded in loaded_components:
             setattr(
                 loaded,
-                "__onboard_verified_source__",
+                "__pursers_verified_source__",
                 _VERIFIED_SOURCE_SENTINEL,
             )
         return module

@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(PACKAGE_ROOT / "src" / "onboard_central"))
+sys.path.insert(0, str(PACKAGE_ROOT / "src" / "pursers_central"))
 
 import central  # noqa: E402
 

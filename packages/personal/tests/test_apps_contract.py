@@ -21,8 +21,8 @@ from mcp import Client
 from mcp.client import advertise
 from mcp.server.apps import APP_MIME_TYPE, EXTENSION_ID
 
-from onboard_personal import apps_server
-from onboard_personal.apps_server import (
+from pursers_personal import apps_server
+from pursers_personal.apps_server import (
     APP_ONLY,
     CHAT_TOOL_NAMES,
     MODEL_AND_APP,
@@ -64,8 +64,8 @@ def fake_config(token: str = "secret-not-for-the-view") -> DashboardConfig:
 
 def test_exact_view_lock_and_embedded_external_attestation_boundary() -> None:
     root = Path(__file__).resolve().parents[1]
-    view_path = root / "src/onboard_personal/resources/dashboard.html"
-    lock_path = root / "src/onboard_personal/resources/component-lock.json"
+    view_path = root / "src/pursers_personal/resources/dashboard.html"
+    lock_path = root / "src/pursers_personal/resources/component-lock.json"
     payload = view_path.read_bytes()
     lock = json.loads(lock_path.read_text(encoding="utf-8"))
     expected = "17a1f561d4fe3f92ff5a484584316a0dfdd0534be3f955f9ce1cc73c464b1599"
@@ -73,7 +73,7 @@ def test_exact_view_lock_and_embedded_external_attestation_boundary() -> None:
     assert hashlib.sha256(payload).hexdigest() == expected
     assert lock["product_version"] == PRODUCT_VERSION == "5.0.0a1"
     assert lock["view"] == {
-        "resource": "onboard_personal/resources/dashboard.html",
+        "resource": "pursers_personal/resources/dashboard.html",
         "size_bytes": len(payload),
         "sha256": expected,
     }
@@ -225,9 +225,9 @@ def test_client_is_verified_before_import_and_origin_checked(
 
     def verify(names: set[str]) -> dict[str, dict[str, Any]]:
         events.append("verify")
-        assert names == {"onboard-client"}
+        assert names == {"pursers-client"}
         return {
-            "onboard-client": {
+            "pursers-client": {
                 "version": PINNED_CLIENT_VERSION,
                 "members": {},
             }
@@ -252,10 +252,10 @@ def test_client_is_verified_before_import_and_origin_checked(
     assert events == [
         "verify",
         (
-            ("onboard-client", "onboard_client", "onboard_client.client"),
+            ("pursers-client", "pursers_client", "pursers_client.client"),
             {
-                "package_member": "onboard_client/__init__.py",
-                "module_member": "onboard_client/client.py",
+                "package_member": "pursers_client/__init__.py",
+                "module_member": "pursers_client/client.py",
             },
         ),
     ]
@@ -284,7 +284,7 @@ def test_personal_factory_uses_explicit_profile_host_and_session(
         board_id="board-explicit",
         agent_name="host-session-derived",
     )
-    profile_module = ModuleType("onboard_personal.profile")
+    profile_module = ModuleType("pursers_personal.profile")
 
     def load_personal_profile(value: Path) -> object:
         calls["profile_path"] = value
@@ -305,7 +305,7 @@ def test_personal_factory_uses_explicit_profile_host_and_session(
     profile_module.bootstrap_personal_review_policy = (  # type: ignore[attr-defined]
         bootstrap_personal_review_policy
     )
-    monkeypatch.setitem(sys.modules, "onboard_personal.profile", profile_module)
+    monkeypatch.setitem(sys.modules, "pursers_personal.profile", profile_module)
     monkeypatch.setattr(
         apps_server, "_load_board_client", lambda: (FakeClient, FakeClientError)
     )
@@ -889,7 +889,7 @@ async def test_hung_model_client_exit_does_not_block_dashboard_stop() -> None:
 async def test_app_reads_leave_sqlite_domain_journal_and_cursor_unchanged(
     tmp_path: Path,
 ) -> None:
-    required = {"onboard-central": "0.1.0a9", "onboard-client": "0.1.0a10"}
+    required = {"pursers-central": "0.1.0a9", "pursers-client": "0.1.0a10"}
     for distribution, version in required.items():
         try:
             installed = importlib.metadata.version(distribution)
@@ -899,7 +899,7 @@ async def test_app_reads_leave_sqlite_domain_journal_and_cursor_unchanged(
             pytest.skip(f"requires {distribution}=={version}, found {installed}")
 
     client_class, client_error_class = apps_server._load_board_client()
-    package = sys.modules["onboard_client"]
+    package = sys.modules["pursers_client"]
     ensure_personal_profile = package.ensure_personal_profile
     resolve_personal_context = package.resolve_personal_context
     central_environment = package.central_environment
@@ -921,7 +921,7 @@ async def test_app_reads_leave_sqlite_domain_journal_and_cursor_unchanged(
         [
             sys.executable,
             "-c",
-            "from onboard_central.onboard_central_runtime import main; main()",
+            "from pursers_central.pursers_central_runtime import main; main()",
         ],
         env=environment,
         stdin=subprocess.DEVNULL,

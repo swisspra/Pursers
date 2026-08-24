@@ -4,7 +4,7 @@ include LICENSE
 include PERSONAL-IMPORT.md
 include pyproject.toml
 include setup.py
-include src/onboard_personal_import/__init__.py
+include src/pursers_personal_import/__init__.py
 include bind_identities.py
 include journal.py
 include locked_store.py

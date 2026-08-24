@@ -9,8 +9,8 @@ from typing import Any
 
 import pytest
 
-from onboard_client import DEFAULT_EVENT_KINDS, GENERATION_META_KEY, BoardClient
-from onboard_client import client as client_module
+from pursers_client import DEFAULT_EVENT_KINDS, GENERATION_META_KEY, BoardClient
+from pursers_client import client as client_module
 
 
 def test_generation_constants_remain_public() -> None:

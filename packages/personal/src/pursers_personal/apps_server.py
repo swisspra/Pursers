@@ -30,7 +30,7 @@ PINNED_CLIENT_VERSION = "0.1.0a10"
 PRODUCT_VERSION = "5.0.0a1"
 MAX_EVENTS = 200
 MAX_TICKETS = 500
-UI_URI = "ui://onboard/dashboard"
+UI_URI = "ui://pursers/dashboard"
 MODEL_AND_APP = ["model", "app"]
 MODEL_ONLY = ["model"]
 APP_ONLY = ["app"]
@@ -65,15 +65,15 @@ CHAT_TOOL_NAMES = frozenset(
 
 def _load_board_client() -> tuple[type[Any], type[BaseException]]:
     """Verify the installed a10 package and import it through the safe loader."""
-    verified = verify_component_artifacts({"onboard-client"})["onboard-client"]
+    verified = verify_component_artifacts({"pursers-client"})["pursers-client"]
     if verified["version"] != PINNED_CLIENT_VERSION:
-        raise RuntimeError("unsupported onboard-client version")
+        raise RuntimeError("unsupported pursers-client version")
     client_module = import_verified_component(
-        "onboard-client",
-        "onboard_client",
-        "onboard_client.client",
-        package_member="onboard_client/__init__.py",
-        module_member="onboard_client/client.py",
+        "pursers-client",
+        "pursers_client",
+        "pursers_client.client",
+        package_member="pursers_client/__init__.py",
+        module_member="pursers_client/client.py",
     )
     return client_module.BoardClient, client_module.BoardClientError
 
@@ -82,7 +82,7 @@ def load_dashboard_html() -> str:
     """Verify the complete component lock, then load the packaged View."""
     verify_component_artifacts()
     return (
-        importlib.resources.files("onboard_personal")
+        importlib.resources.files("pursers_personal")
         .joinpath("resources", "dashboard.html")
         .read_text(encoding="utf-8")
     )
@@ -253,7 +253,7 @@ def config_from_personal_context(context: PersonalAppsContext) -> DashboardConfi
 class RawBoardReader:
     """Non-joining MCP session restricted to Central's pure read tools.
 
-    The transport and decoder come from the already verified onboard-client
+    The transport and decoder come from the already verified pursers-client
     module, but its ``BoardClient.__aenter__`` is deliberately never invoked.
     In particular, this reader does not expose ``board_catchup``: Central a9's
     compatibility heartbeat mutates a board for write-scoped principals even
@@ -267,14 +267,14 @@ class RawBoardReader:
     ) -> None:
         client_module = sys.modules.get(board_client_class.__module__)
         if client_module is None:
-            raise RuntimeError("verified onboard-client module is unavailable")
+            raise RuntimeError("verified pursers-client module is unavailable")
         try:
             self._httpx2 = client_module.httpx2
             self._mcp_client_class = client_module.Client
             self._streamable_http_client = client_module.streamable_http_client
             self._decode = board_client_class._decode
         except AttributeError as exc:
-            raise RuntimeError("verified onboard-client read primitives are unavailable") from exc
+            raise RuntimeError("verified pursers-client read primitives are unavailable") from exc
         self.config = config
         self.agent_name = config.agent_name
         self._stack: AsyncExitStack | None = None

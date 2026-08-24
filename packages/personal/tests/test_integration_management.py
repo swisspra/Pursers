@@ -11,8 +11,8 @@ from pathlib import Path
 
 import pytest
 
-import onboard_personal.integration as integration_module
-from onboard_personal.integration import (
+import pursers_personal.integration as integration_module
+from pursers_personal.integration import (
     ENTRY_NAME,
     IntegrationError,
     apply_integration,
@@ -69,7 +69,7 @@ def fixture_targets(tmp_path: Path) -> tuple[Path, Path]:
 
 
 def fixture_console(tmp_path: Path) -> Path:
-    binary = private_dir(tmp_path / "bin") / "onboard-personal"
+    binary = private_dir(tmp_path / "bin") / "pursers-personal"
     binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     binary.chmod(0o700)
     return binary

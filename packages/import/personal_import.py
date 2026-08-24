@@ -52,7 +52,7 @@ else:  # source-checkout execution
 
 __version__ = "5.0.0a2"
 RUN_SCHEMA_VERSION = 1
-RUN_KIND = "onboard-personal-copy-import"
+RUN_KIND = "pursers-personal-copy-import"
 CENTRAL_URL = "https://personal-preview.invalid/mcp"
 ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,80}$")
 SUPPORTED_STABLE_VERSION = "4.0.4"
@@ -289,7 +289,7 @@ def _ensure_private_child(parent: Path, name: str, label: str) -> Path:
 
 def _destination_lock_path(destination: Path) -> Path:
     token = hashlib.sha256(str(destination).encode("utf-8")).hexdigest()[:20]
-    return destination.parent / f".onboard-personal-import-{token}.lock"
+    return destination.parent / f".pursers-personal-import-{token}.lock"
 
 
 def _overlaps(first: Path, second: Path) -> bool:

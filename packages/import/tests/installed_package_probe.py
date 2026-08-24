@@ -11,8 +11,8 @@ import sys
 import tempfile
 from pathlib import Path
 
-import onboard_personal_import
-from onboard_personal_import.personal_import import (
+import pursers_personal_import
+from pursers_personal_import.personal_import import (
     review_import,
     retry_import,
     rollback_import,
@@ -33,7 +33,7 @@ def main() -> None:
     external_stable = (
         Path(sys.argv[2]).resolve(strict=True) if len(sys.argv) > 2 else None
     )
-    imported = Path(onboard_personal_import.__file__).resolve(strict=True)
+    imported = Path(pursers_personal_import.__file__).resolve(strict=True)
     if "site-packages" not in imported.parts:
         raise AssertionError("probe did not import the installed wheel")
     for generic in (
@@ -161,7 +161,7 @@ def main() -> None:
         json.dumps(
             {
                 "status": "PASS",
-                "version": onboard_personal_import.__version__,
+                "version": pursers_personal_import.__version__,
                 "installed_import": True,
                 "generic_top_level_modules": 0,
                 "mandatory_review": True,

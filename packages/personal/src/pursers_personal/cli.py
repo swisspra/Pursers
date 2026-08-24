@@ -66,19 +66,19 @@ def _default_claude_config() -> Path:
 
 
 def _console_path(value: Path | None) -> Path:
-    expected = Path(sys.executable).absolute().parent / "onboard-personal"
+    expected = Path(sys.executable).absolute().parent / "pursers-personal"
     candidate = value.expanduser().absolute() if value is not None else expected
     if candidate != expected:
         raise IntegrationError(
-            "--console must name the onboard-personal entry point beside this Python runtime"
+            "--console must name the pursers-personal entry point beside this Python runtime"
         )
     result = candidate
     if not result.is_file() or result.is_symlink():
-        raise IntegrationError("onboard-personal console is unavailable or unsafe")
+        raise IntegrationError("pursers-personal console is unavailable or unsafe")
     mode = result.stat().st_mode
     if not mode & 0o100 or mode & 0o022:
         raise IntegrationError(
-            "onboard-personal console must be owner-executable and not group/world writable"
+            "pursers-personal console must be owner-executable and not group/world writable"
         )
     return result
 
@@ -151,11 +151,11 @@ def _authenticated_status(profile: Any, *, host_id: str, session: str) -> dict[s
     api = _profile_api()
     context = api.resolve_personal_context(profile, host=host_id, session=session)
     client_module = import_verified_component(
-        "onboard-client",
-        "onboard_client",
-        "onboard_client.client",
-        package_member="onboard_client/__init__.py",
-        module_member="onboard_client/client.py",
+        "pursers-client",
+        "pursers_client",
+        "pursers_client.client",
+        package_member="pursers_client/__init__.py",
+        module_member="pursers_client/client.py",
     )
 
     async def probe() -> dict[str, Any]:
@@ -237,11 +237,11 @@ def _initialize_personal_board(
         session=session,
     )
     client_module = import_verified_component(
-        "onboard-client",
-        "onboard_client",
-        "onboard_client.client",
-        package_member="onboard_client/__init__.py",
-        module_member="onboard_client/client.py",
+        "pursers-client",
+        "pursers_client",
+        "pursers_client.client",
+        package_member="pursers_client/__init__.py",
+        module_member="pursers_client/client.py",
     )
 
     async def initialize() -> dict[str, Any]:
@@ -588,11 +588,11 @@ def command_central(args: argparse.Namespace) -> None:
     os.environ["CENTRAL_JWKS_PATH"] = str(profile.jwks_path)
     os.environ["CENTRAL_JWT_CLOCK_SKEW"] = "30"
     central = import_verified_component(
-        "onboard-central",
-        "onboard_central",
-        "onboard_central.central",
-        package_member="onboard_central/__init__.py",
-        module_member="onboard_central/central.py",
+        "pursers-central",
+        "pursers_central",
+        "pursers_central.central",
+        package_member="pursers_central/__init__.py",
+        module_member="pursers_central/central.py",
     )
 
     mcp, _service = central.build_server(
@@ -831,9 +831,9 @@ def main(argv: Sequence[str] | None = None) -> None:
             _emit(command_remove(args, uninstall=True), as_json=args.json)
     except RotationActivationError as exc:
         _emit(exc.result, as_json=args.json)
-        parser.exit(2, f"onboard-personal: {exc}\n")
+        parser.exit(2, f"pursers-personal: {exc}\n")
     except (ArtifactVerificationError, IntegrationError, OSError, ValueError) as exc:
-        parser.exit(2, f"onboard-personal: {exc}\n")
+        parser.exit(2, f"pursers-personal: {exc}\n")
 
 
 if __name__ == "__main__":

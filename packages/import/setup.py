@@ -7,7 +7,7 @@ from setuptools.command.build_py import build_py
 from setuptools.command.sdist import sdist
 
 
-PACKAGE = "onboard_personal_import"
+PACKAGE = "pursers_personal_import"
 RUNTIME_MODULES = {
     "__init__",
     "bind_identities",
@@ -30,7 +30,7 @@ SDIST_FILES = sorted(
         "pyproject.toml",
         "setup.py",
         *(
-            "src/onboard_personal_import/__init__.py"
+            "src/pursers_personal_import/__init__.py"
             if name == "__init__"
             else f"{name}.py"
             for name in RUNTIME_MODULES
@@ -46,7 +46,7 @@ class StrictBuildPy(build_py):
         selected = []
         for module in sorted(RUNTIME_MODULES):
             filename = (
-                Path("src/onboard_personal_import/__init__.py")
+                Path("src/pursers_personal_import/__init__.py")
                 if module == "__init__"
                 else Path(f"{module}.py")
             )
@@ -68,7 +68,7 @@ class StrictSdist(sdist):
 
 setup(
     packages=[PACKAGE],
-    package_dir={PACKAGE: "src/onboard_personal_import"},
+    package_dir={PACKAGE: "src/pursers_personal_import"},
     include_package_data=False,
     cmdclass={"build_py": StrictBuildPy, "sdist": StrictSdist},
 )

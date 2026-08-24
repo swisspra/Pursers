@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from onboard_client import BoardClient, JoinedIdentity
+from pursers_client import BoardClient, JoinedIdentity
 
 
 def joined(name: str) -> dict[str, Any]:

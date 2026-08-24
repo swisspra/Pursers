@@ -8,9 +8,9 @@ from types import SimpleNamespace
 
 import pytest
 
-import onboard_personal.cli as cli
-from onboard_personal.artifacts import ArtifactVerificationError
-from onboard_personal.integration import IntegrationError
+import pursers_personal.cli as cli
+from pursers_personal.artifacts import ArtifactVerificationError
+from pursers_personal.integration import IntegrationError
 
 
 def test_console_is_bound_to_current_python_entrypoint(
@@ -20,7 +20,7 @@ def test_console_is_bound_to_current_python_entrypoint(
     runtime.mkdir()
     python = runtime / "python"
     python.write_text("runtime\n", encoding="utf-8")
-    console = runtime / "onboard-personal"
+    console = runtime / "pursers-personal"
     console.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     console.chmod(0o700)
     shadow = tmp_path / "shadow"

@@ -597,7 +597,7 @@ def _profile_document(project_root: Path, port: int) -> tuple[dict[str, Any], rs
     central_url = f"http://127.0.0.1:{port}/mcp"
     issuer = f"http://127.0.0.1:{port}/personal-issuer/{profile_id}"
     subject = f"owner-{secrets.token_urlsafe(24)}"
-    client_id = "onboard-personal"
+    client_id = "pursers-personal"
     kid = f"personal-{secrets.token_hex(16)}"
     credential_generation = 1
     private_key = rsa.generate_private_key(public_exponent=65_537, key_size=2_048)

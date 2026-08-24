@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 
-ENTRY_NAME = "onboard-personal"
+ENTRY_NAME = "pursers-personal"
 LAUNCHCTL_PATH = "/bin/launchctl"
 RECEIPT_NAME = "integration-receipt.json"
 LOCK_NAME = "integration.lock"
@@ -170,10 +170,10 @@ def _console_snapshot(path: Path) -> dict[str, Any]:
     value = _snapshot(path)
     mode = value.get("mode")
     if not value["exists"] or not isinstance(mode, int):
-        raise IntegrationError("installed onboard-personal console is unavailable")
+        raise IntegrationError("installed pursers-personal console is unavailable")
     if not mode & stat.S_IXUSR or mode & 0o022:
         raise IntegrationError(
-            "installed onboard-personal console must be owner-executable and not group/world writable"
+            "installed pursers-personal console must be owner-executable and not group/world writable"
         )
     return value
 
@@ -477,7 +477,7 @@ def _host_payload(
     if not isinstance(servers, dict):
         raise IntegrationError("Claude Desktop mcpServers must be an object")
     if ENTRY_NAME in servers:
-        raise IntegrationError("unowned onboard-personal host entry already exists")
+        raise IntegrationError("unowned pursers-personal host entry already exists")
     servers[ENTRY_NAME] = {
         "command": str(console),
         "args": [
@@ -507,7 +507,7 @@ def prepare_integration(
     console = console_path.expanduser().absolute()
     profile_path = Path(profile.profile_path).expanduser().absolute()
     if not console.is_file() or console.is_symlink():
-        raise IntegrationError("installed onboard-personal console is unavailable or unsafe")
+        raise IntegrationError("installed pursers-personal console is unavailable or unsafe")
     if not profile_path.is_file() or profile_path.is_symlink():
         raise IntegrationError("selected profile is unavailable or unsafe")
     host_value = _safe_identity(host_id, "host_id")
@@ -694,7 +694,7 @@ def _verify_applied(receipt: Mapping[str, Any]) -> None:
         console["sha256"] != receipt.get("console_sha256")
         or console["mode"] != receipt.get("console_mode")
     ):
-        raise IntegrationError("managed onboard-personal console drifted")
+        raise IntegrationError("managed pursers-personal console drifted")
     targets = receipt.get("targets")
     if not isinstance(targets, list) or len(targets) != 2:
         raise IntegrationError("integration receipt targets are invalid")

@@ -673,7 +673,7 @@ class CentralBoard:
                         self._path(board_id), lambda: self._default(board_id)
                     )
                 ),
-                "fixture_provenance": "onboard-personal-runtime",
+                "fixture_provenance": "pursers-personal-runtime",
                 "admission_action": "bootstrap_admin_promoted",
                 "target_principal_id": migration["target_principal_id"],
                 "membership_role": "admin",
@@ -1078,7 +1078,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                     "actor": actor["agent_id"],
                     "payload_ref": payload_ref,
                     "recipient_identities": recipients,
-                    "fixture_provenance": "onboard-personal-runtime",
+                    "fixture_provenance": "pursers-personal-runtime",
                     **fields,
                 },
             )
@@ -1587,7 +1587,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         return entry
 
     def invite_digest(board_id: str, token: str) -> str:
-        material = f"onboard-central-invite-v1\x00{board_id}\x00{token}"
+        material = f"pursers-central-invite-v1\x00{board_id}\x00{token}"
         return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
     def generic_invite_denial() -> PermissionError:

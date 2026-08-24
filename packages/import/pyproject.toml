@@ -3,7 +3,7 @@ requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "onboard-personal-import"
+name = "pursers-personal-import"
 version = "5.0.0a2"
 description = "Unpublished copy-only legacy importer for On Board Personal"
 readme = "PERSONAL-IMPORT.md"
@@ -18,4 +18,4 @@ classifiers = [
 ]
 
 [project.scripts]
-onboard-personal-import = "onboard_personal_import.personal_import:main"
+pursers-personal-import = "pursers_personal_import.personal_import:main"

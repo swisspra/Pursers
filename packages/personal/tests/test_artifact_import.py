@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
-import onboard_personal.artifacts as artifacts
+import pursers_personal.artifacts as artifacts
 
 
 def test_hashless_local_wheel_receipt_uses_exact_member_inventory(

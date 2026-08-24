@@ -11,8 +11,8 @@ from pathlib import Path
 
 import pytest
 
-import onboard_client.personal_profile as profile_module
-from onboard_client import (
+import pursers_client.personal_profile as profile_module
+from pursers_client import (
     ProfileSecurityError,
     ensure_personal_profile,
     load_personal_profile,
