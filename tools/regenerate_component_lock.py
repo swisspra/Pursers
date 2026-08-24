@@ -10,6 +10,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import zipfile
 from pathlib import Path
 
@@ -27,6 +28,13 @@ PROJECTS = (
     ("personal", "pursers-personal", PRODUCT_VERSION),
 )
 LOCKED_COMPONENTS = ("pursers-central", "pursers-client")
+BUILD_TOOLCHAIN = (
+    ("build", "1.3.0"),
+    ("setuptools", "80.9.0"),
+    ("wheel", "0.45.1"),
+    ("packaging", "25.0"),
+    ("pyproject-hooks", "1.2.0"),
+)
 
 
 def _sha256(payload: bytes) -> str:
@@ -45,7 +53,53 @@ def _clean_build_state(project_dir: Path) -> None:
                 shutil.rmtree(path)
 
 
+def _create_build_environment(root: Path) -> Path:
+    """Create and verify the private, fully pinned wheel-build environment."""
+    venv_dir = root / "venv"
+    subprocess.run(
+        [sys.executable, "-m", "venv", str(venv_dir)],
+        check=True,
+    )
+    python = venv_dir / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    requirements = [f"{name}=={version}" for name, version in BUILD_TOOLCHAIN]
+    subprocess.run(
+        [
+            str(python),
+            "-m",
+            "pip",
+            "install",
+            "--disable-pip-version-check",
+            "--no-input",
+            *requirements,
+        ],
+        check=True,
+    )
+    verification = subprocess.run(
+        [
+            str(python),
+            "-c",
+            (
+                "import importlib.metadata as m, json; "
+                f"names={json.dumps([name for name, _ in BUILD_TOOLCHAIN])}; "
+                "print(json.dumps({name: m.version(name) for name in names}, "
+                "sort_keys=True))"
+            ),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    installed = json.loads(verification.stdout)
+    expected = {name: version for name, version in BUILD_TOOLCHAIN}
+    if installed != expected:
+        raise RuntimeError(
+            f"build toolchain verification failed: {installed!r} != {expected!r}"
+        )
+    return python
+
+
 def _build_wheel(
+    build_python: Path,
     repository: Path,
     wheel_dir: Path,
     project: str,
@@ -64,7 +118,7 @@ def _build_wheel(
     try:
         subprocess.run(
             [
-                sys.executable,
+                str(build_python),
                 "-m",
                 "build",
                 "--wheel",
@@ -125,6 +179,9 @@ def _write_lock(repository: Path, wheels: dict[str, Path]) -> Path:
     document = {
         "schema_version": 1,
         "product_version": PRODUCT_VERSION,
+        "build_toolchain": {
+            name: version for name, version in BUILD_TOOLCHAIN
+        },
         "components": components,
         "view": {
             "resource": "pursers_personal/resources/dashboard.html",
@@ -161,18 +218,35 @@ def main() -> int:
         parser.error(f"wheel directory must be empty: {wheel_dir}")
 
     wheels: dict[str, Path] = {}
-    for project, distribution, version in PROJECTS[:2]:
-        wheels[distribution] = _build_wheel(
-            repository, wheel_dir, project, distribution, version
-        )
-    lock_path = _write_lock(repository, wheels)
-    for project, distribution, version in PROJECTS[2:]:
-        wheels[distribution] = _build_wheel(
-            repository, wheel_dir, project, distribution, version
-        )
+    with tempfile.TemporaryDirectory(
+        prefix="pursers-build-toolchain-", dir=wheel_dir.parent
+    ) as toolchain_root:
+        build_python = _create_build_environment(Path(toolchain_root))
+        for project, distribution, version in PROJECTS[:2]:
+            wheels[distribution] = _build_wheel(
+                build_python,
+                repository,
+                wheel_dir,
+                project,
+                distribution,
+                version,
+            )
+        lock_path = _write_lock(repository, wheels)
+        for project, distribution, version in PROJECTS[2:]:
+            wheels[distribution] = _build_wheel(
+                build_python,
+                repository,
+                wheel_dir,
+                project,
+                distribution,
+                version,
+            )
 
     summary = {
         "lock": str(lock_path.relative_to(repository)),
+        "build_toolchain": {
+            name: version for name, version in BUILD_TOOLCHAIN
+        },
         "wheels": {
             distribution: {
                 "file": wheel.name,
