@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 
 import personal_import as personal_import_module
-from native_import import board_path, canonical_db_hash
+from native_import import archive_record_key, board_path, canonical_db_hash
 from personal_import import (
     _destination_lock_path,
     archive_backfill,
@@ -275,6 +275,73 @@ def test_archive_backfill_rejects_secrets_under_every_profile(
         )
 
 
+def test_archive_backfill_explicit_secret_redaction_is_provenanced_and_idempotent(
+    tmp_path: Path,
+) -> None:
+    source, _stable, destination, _run, state = start(tmp_path)
+    assert state["phase"] == "installed"
+    raw = {
+        "id": "redacted-secret",
+        "content": (
+            "workspace=/Users/private-account/project; "
+            "authorization: Bearer ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        ),
+    }
+    record_key = archive_record_key(raw)
+    archive_file = source / "archive.json"
+    archive_file.write_text(json.dumps([raw]), encoding="utf-8")
+
+    first = archive_backfill(
+        archive_file,
+        destination,
+        board_id=BOARD_ID,
+        confirm_central_stopped=True,
+        scrub_profile="internal",
+        redact_secrets_records=[record_key],
+    )
+    second = archive_backfill(
+        archive_file,
+        destination,
+        board_id=BOARD_ID,
+        confirm_central_stopped=True,
+        scrub_profile="internal",
+        redact_secrets_records=[record_key],
+    )
+    store = TransactionalSQLiteStore(destination)
+    board = store.load(board_path(store, BOARD_ID), dict)
+    inserted = next(
+        item for item in board["memories"] if item["memory_id"] == record_key
+    )
+
+    assert inserted["content"] == (
+        "workspace=/Users/private-account/project; "
+        "authorization: Bearer [REDACTED:BEARER_TOKEN]"
+    )
+    assert inserted["redacted_rules"] == ["bearer_token"]
+    assert first["posix_home_allowed_count"] == 1
+    assert first["redacted_records"] == [record_key]
+    assert second["status"] == "noop"
+    assert second["already_present"] == 1
+    assert second["redacted_records"] == [record_key]
+
+
+def test_archive_backfill_rejects_listed_clean_record(tmp_path: Path) -> None:
+    source, _stable, destination, _run, state = start(tmp_path)
+    assert state["phase"] == "installed"
+    raw = {"id": "clean-record", "content": "clean archive content"}
+    archive_file = source / "archive.json"
+    archive_file.write_text(json.dumps([raw]), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="has no secret violations"):
+        archive_backfill(
+            archive_file,
+            destination,
+            board_id=BOARD_ID,
+            confirm_central_stopped=True,
+            redact_secrets_records=[archive_record_key(raw)],
+        )
+
+
 def test_archive_backfill_cli_threads_scrub_profile(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -300,6 +367,10 @@ def test_archive_backfill_cli_threads_scrub_profile(
             BOARD_ID,
             "--scrub-profile",
             "internal",
+            "--redact-secrets-record",
+            "ARCHIVE-first",
+            "--redact-secrets-record",
+            "ARCHIVE-second",
             "--confirm-central-stopped",
         ],
     )
@@ -310,6 +381,7 @@ def test_archive_backfill_cli_threads_scrub_profile(
         "board_id": BOARD_ID,
         "confirm_central_stopped": True,
         "scrub_profile": "internal",
+        "redact_secrets_records": ["ARCHIVE-first", "ARCHIVE-second"],
     }
     assert json.loads(capsys.readouterr().out) == {"status": "noop"}
 

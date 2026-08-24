@@ -70,6 +70,7 @@ pursers-personal-import archive-backfill /path/to/project/.agent-mem/archive.jso
   /path/to/existing-central-data \
   --board-id personal-board \
   --scrub-profile internal \
+  --redact-secrets-record ARCHIVE-record-key \
   --confirm-central-stopped
 
 onboard-personal-import decide /path/to/private-import-run \
@@ -90,6 +91,9 @@ rerunning it does not duplicate rows and it never rewrites existing memories.
 The default `strict` scrub profile rejects every detected violation. Use
 `--scrub-profile internal` only when home paths must be retained byte-exact;
 all non-`posix_home` violations remain fail-closed.
+Repeat `--redact-secrets-record` only for explicitly approved archive record
+keys. Secret spans in those records are replaced with scrub markers and the
+rules are recorded as provenance; a missing or clean listed key is an error.
 
 When import reports `review_required`, use the private files under the owned
 run directory:

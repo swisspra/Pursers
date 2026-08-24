@@ -429,6 +429,7 @@ def safe_record(
     field: str = "",
     scrub_profile: str = "strict",
     allow_counts: dict[str, int] | None = None,
+    redacted_rules: set[str] | None = None,
 ) -> Any:
     if scrub_profile not in {"strict", "internal"}:
         raise ValueError("scrub_profile must be 'strict' or 'internal'")
@@ -464,44 +465,64 @@ def safe_record(
         identity: tuple[tuple[str, str], ...],
     ) -> Any:
         if isinstance(current, str):
-            try:
-                return scrub(current, Policy(mode="reject"))[0]
-            except ScrubRejected as exc:
-                rejected = list(exc.violations)
-                if scrub_profile == "internal":
-                    rejected = [
-                        item for item in exc.violations if item.rule != "posix_home"
-                    ]
-                    allowed = len(exc.violations) - len(rejected)
-                    if allowed and allow_counts is not None:
-                        allow_counts["posix_home"] = (
-                            int(allow_counts.get("posix_home", 0)) + allowed
-                        )
-                    if not rejected:
-                        return current
-                identity_payload = json.dumps(
-                    identity,
-                    ensure_ascii=True,
-                    sort_keys=False,
-                    separators=(",", ":"),
-                ).encode("utf-8")
-                quarantine.append(
-                    {
-                        "record_type": record_type,
-                        "record_id": safe_report_id(record_id),
-                        "field": display_path(segments) if segments else "$",
-                        "field_identity": "sha256-"
-                        + hashlib.sha256(identity_payload).hexdigest(),
-                        "rules": sorted({item.rule for item in rejected}),
-                        "violation_count": len(rejected),
-                        "spans": [
-                            {"rule": item.rule, "start": item.start, "end": item.end}
-                            for item in rejected
-                        ],
-                    }
-                )
-                all_violations.extend(rejected)
+            _, violations = scrub(current, Policy(mode="redact"))
+            if not violations:
                 return current
+            home_violations = [
+                item for item in violations if item.rule == "posix_home"
+            ]
+            secret_violations = [
+                item for item in violations if item.rule != "posix_home"
+            ]
+            if scrub_profile == "internal" and home_violations:
+                if allow_counts is not None:
+                    allow_counts["posix_home"] = (
+                        int(allow_counts.get("posix_home", 0))
+                        + len(home_violations)
+                    )
+            if redacted_rules is None:
+                rejected = (
+                    list(violations)
+                    if scrub_profile == "strict"
+                    else secret_violations
+                )
+            else:
+                redacted_rules.update(item.rule for item in secret_violations)
+                rejected = home_violations if scrub_profile == "strict" else []
+                if not rejected:
+                    pieces: list[str] = []
+                    cursor = 0
+                    for item in secret_violations:
+                        pieces.append(current[cursor : item.start])
+                        pieces.append(item.replacement)
+                        cursor = item.end
+                    pieces.append(current[cursor:])
+                    return "".join(pieces)
+            if not rejected:
+                return current
+            identity_payload = json.dumps(
+                identity,
+                ensure_ascii=True,
+                sort_keys=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            quarantine.append(
+                {
+                    "record_type": record_type,
+                    "record_id": safe_report_id(record_id),
+                    "field": display_path(segments) if segments else "$",
+                    "field_identity": "sha256-"
+                    + hashlib.sha256(identity_payload).hexdigest(),
+                    "rules": sorted({item.rule for item in rejected}),
+                    "violation_count": len(rejected),
+                    "spans": [
+                        {"rule": item.rule, "start": item.start, "end": item.end}
+                        for item in rejected
+                    ],
+                }
+            )
+            all_violations.extend(rejected)
+            return current
         if isinstance(current, list):
             return [
                 visit(
@@ -1144,12 +1165,16 @@ def backfill_archive(
     board_id: str,
     *,
     scrub_profile: str = "strict",
+    redact_secrets_records: list[str] | None = None,
 ) -> dict[str, Any]:
     """Append missing v4 archive rows to one completed import without rewriting rows."""
     if not BOARD_ID.fullmatch(board_id):
         raise ValueError("board_id must match [A-Za-z0-9._-]+")
     if scrub_profile not in {"strict", "internal"}:
         raise ValueError("scrub_profile must be 'strict' or 'internal'")
+    requested_redactions = set(redact_secrets_records or [])
+    if any(not isinstance(item, str) or not item for item in requested_redactions):
+        raise ValueError("redact_secrets_records must contain non-empty record keys")
     archive_file = Path(os.path.abspath(os.fspath(archive_file)))
     _require_regular(archive_file, "archive source")
     if archive_file.name != "archive.json":
@@ -1175,12 +1200,16 @@ def backfill_archive(
         appended: list[dict[str, Any]] = []
         duplicate_rows = 0
         allow_counts: dict[str, int] = {}
+        redacted_records: list[str] = []
         input_keys: set[str] = set()
         for raw in rows:
             rid = archive_record_key(raw)
             if rid in input_keys:
                 raise ValueError("duplicate archive identifiers are ambiguous")
             input_keys.add(rid)
+            record_redacted_rules: set[str] | None = (
+                set() if rid in requested_redactions else None
+            )
             cleaned = safe_record(
                 raw,
                 record_type="archive",
@@ -1188,11 +1217,25 @@ def backfill_archive(
                 quarantine=[],
                 scrub_profile=scrub_profile,
                 allow_counts=allow_counts,
+                redacted_rules=record_redacted_rules,
             )
+            if record_redacted_rules is not None and not record_redacted_rules:
+                raise ValueError(
+                    f"redact-secrets record {rid} has no secret violations"
+                )
             mapped = map_archive_memory(cleaned)
+            if mapped["memory_id"] != rid:
+                raise ValueError("redaction must not change the archive record key")
+            if record_redacted_rules is not None:
+                mapped["redacted_rules"] = sorted(record_redacted_rules)
+                redacted_records.append(rid)
             if rid in existing:
                 current = existing[rid]
-                if not current.get("archived") or current.get("legacy_record") != cleaned:
+                if (
+                    not current.get("archived")
+                    or current.get("legacy_record") != cleaned
+                    or current.get("redacted_rules") != mapped.get("redacted_rules")
+                ):
                     raise ValueError(
                         "archive record key conflicts with an existing memory"
                     )
@@ -1201,6 +1244,12 @@ def backfill_archive(
             board.setdefault("memories", []).append(mapped)
             appended.append(mapped)
             existing[rid] = mapped
+        missing_redactions = requested_redactions - input_keys
+        if missing_redactions:
+            raise ValueError(
+                "redact-secrets record keys not found: "
+                + ", ".join(sorted(missing_redactions))
+            )
         board["next_memory_seq"] = max(
             int(board.get("next_memory_seq", 1)), len(board["memories"]) + 1
         )
@@ -1212,6 +1261,7 @@ def backfill_archive(
         "inserted": len(appended),
         "already_present": duplicate_rows,
         "posix_home_allowed_count": int(allow_counts.get("posix_home", 0)),
+        "redacted_records": redacted_records,
         "record_keys": [item["memory_id"] for item in appended],
     }
 

@@ -1695,6 +1695,7 @@ def archive_backfill(
     board_id: str,
     confirm_central_stopped: bool,
     scrub_profile: str = "strict",
+    redact_secrets_records: list[str] | None = None,
 ) -> dict[str, Any]:
     """Backfill v4 archive.json rows into a completed Personal import."""
     if not confirm_central_stopped:
@@ -1721,6 +1722,7 @@ def archive_backfill(
             destination,
             board_id,
             scrub_profile=scrub_profile,
+            redact_secrets_records=redact_secrets_records,
         )
 
 
@@ -2510,6 +2512,9 @@ def _parser() -> argparse.ArgumentParser:
     backfill.add_argument(
         "--scrub-profile", choices=("strict", "internal"), default="strict"
     )
+    backfill.add_argument(
+        "--redact-secrets-record", action="append", default=[]
+    )
     backfill.add_argument("--confirm-central-stopped", action="store_true")
     return parser
 
@@ -2535,6 +2540,7 @@ def main() -> None:
                 board_id=args.board_id,
                 confirm_central_stopped=args.confirm_central_stopped,
                 scrub_profile=args.scrub_profile,
+                redact_secrets_records=args.redact_secrets_record,
             )
             print(json.dumps(result, sort_keys=True))
             return
