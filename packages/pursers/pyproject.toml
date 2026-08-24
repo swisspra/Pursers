@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pursers"
+version = "5.0.0a1"
+description = "Dependency-only installer for the Pursers local agent work board"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+dependencies = [
+  "pursers-central==0.1.0a9",
+  "pursers-client==0.1.0a10",
+  "pursers-personal==5.0.0a1",
+  "pursers-personal-import==5.0.0a2",
+]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+]
+
+[tool.setuptools]
+packages = []
