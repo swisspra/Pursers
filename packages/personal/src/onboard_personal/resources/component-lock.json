@@ -38,7 +38,7 @@
   },
   "view": {
     "resource": "onboard_personal/resources/dashboard.html",
-    "size_bytes": 387090,
-    "sha256": "50ad322e4100dbccdbbb65e5fb18b1e244e6ed2e7d2410d862ae83ae09cff722"
+    "size_bytes": 387626,
+    "sha256": "17a1f561d4fe3f92ff5a484584316a0dfdd0534be3f955f9ce1cc73c464b1599"
   }
 }
