@@ -209,6 +209,15 @@ class BoardClient:
         self._refresh_generation(result)
         return result
 
+    async def _call_refresh_uncached(
+        self, name: str, arguments: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Call a refresh tool without changing shared generation state."""
+        if self._client is None:
+            raise RuntimeError("BoardClient is not entered")
+        payload = {"board_id": self.board_id, **arguments}
+        return self._decode(await self._client.call_tool(name, payload))
+
     async def _call_unscoped(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         if self._client is None:
             raise RuntimeError("BoardClient is not entered")
@@ -241,22 +250,32 @@ class BoardClient:
         *,
         agent_platform: str | None = None,
         task_focus: str | None = None,
+        agent_name: str | None = None,
     ) -> dict[str, Any]:
-        arguments: dict[str, Any] = {"agent_name": self.agent_name}
+        selected_name = self.agent_name if agent_name is None else agent_name
+        arguments: dict[str, Any] = {"agent_name": selected_name}
         if claim_ttl_s is not None:
             arguments["claim_ttl_s"] = claim_ttl_s
         if agent_platform is not None:
             arguments["agent_platform"] = agent_platform
         if task_focus is not None:
             arguments["task_focus"] = task_focus
-        joined = await self._call_refresh("board_join", arguments)
-        self.identity = JoinedIdentity(
+        joined = await (
+            self._call_refresh("board_join", arguments)
+            if agent_name is None
+            else self._call_refresh_uncached("board_join", arguments)
+        )
+        identity = JoinedIdentity(
             joined["board_id"],
             joined["agent_id"],
             joined["principal_id"],
             joined["agent_name"],
             joined["role"],
         )
+        if agent_name is None:
+            self.identity = identity
+        else:
+            joined = {**joined, "identity": identity}
         return joined
 
     async def board_onboard(
@@ -624,11 +643,12 @@ class BoardClient:
         cursor: int | None = None,
         limit: int = 100,
         ack: bool = True,
+        agent_name: str | None = None,
     ) -> dict[str, Any]:
         result = await self._call(
             "board_catchup",
             {
-                "agent_name": self.agent_name,
+                "agent_name": self.agent_name if agent_name is None else agent_name,
                 "cursor": cursor,
                 "limit": limit,
                 "ack": ack,
