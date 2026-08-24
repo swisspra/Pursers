@@ -11,6 +11,7 @@ from locked_store import LockedJsonStore
 
 
 KINDS = frozenset({"ticket_status_changed", "ticket_created", "memory_written"})
+MIN_COMPACTION_RETAIN_LAST = 500
 SEMANTIC_FIELDS = frozenset(
     {
         "ticket_id",
@@ -143,8 +144,14 @@ class Journal:
 
     def compact(self, board_id: str, retain_last: int) -> dict[str, int]:
         board_id = _require_text("board_id", board_id)
-        if not isinstance(retain_last, int) or retain_last < 0:
-            raise ValueError("retain_last must be a non-negative integer")
+        if (
+            type(retain_last) is not int
+            or retain_last < MIN_COMPACTION_RETAIN_LAST
+        ):
+            raise ValueError(
+                f"retain_last must be an integer of at least "
+                f"{MIN_COMPACTION_RETAIN_LAST}"
+            )
         result: dict[str, int] = {}
 
         def mutate(document: dict[str, Any]) -> None:

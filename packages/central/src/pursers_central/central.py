@@ -34,6 +34,7 @@ from pydantic import AnyHttpUrl
 from cursor import CursorStore
 from journal import (
     KINDS as CORE_JOURNAL_KINDS,
+    MIN_COMPACTION_RETAIN_LAST,
     SEMANTIC_FIELDS as CORE_JOURNAL_FIELDS,
     Journal,
     _board_token,
@@ -4624,6 +4625,34 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             "scope": "project",
             "key": key,
             "state": copy.deepcopy(state[key] if key is not None else state),
+        }
+
+    @mcp.tool()
+    async def journal_compact(
+        board_id: str,
+        retain_last: int,
+    ) -> dict[str, Any]:
+        """Manually compact only derivable journal telemetry. Durable tickets,
+        memories, agents, and consumer cursors are never deleted or modified.
+        """
+        board_id = require_id("board_id", board_id)
+        if type(retain_last) is not int or retain_last < MIN_COMPACTION_RETAIN_LAST:
+            raise ValueError(
+                f"retain_last must be an integer of at least "
+                f"{MIN_COMPACTION_RETAIN_LAST}"
+            )
+        principal = current_principal()
+        require_scope(principal, "board:write")
+        document = service.load(board_id)
+        service.resolve_board_context(
+            document, principal.principal_id, {"admin"}
+        )
+        compacted = service.journal.compact(board_id, retain_last)
+        return {
+            "ok": True,
+            "board_id": board_id,
+            **compacted,
+            "durable_records_untouched": True,
         }
 
     @mcp.tool()
