@@ -19,12 +19,14 @@ if __package__:
         board_path,
         file_hash,
         load_json,
+        map_archive_memory,
         map_memory,
         map_state,
         map_ticket,
         memory_id,
         redact_record,
         safe_report_id,
+        source_archive,
         source_memories,
         source_tickets,
     )
@@ -36,12 +38,14 @@ else:  # source-checkout execution
         board_path,
         file_hash,
         load_json,
+        map_archive_memory,
         map_memory,
         map_state,
         map_ticket,
         memory_id,
         redact_record,
         safe_report_id,
+        source_archive,
         source_memories,
         source_tickets,
     )
@@ -219,6 +223,11 @@ def _raw_record(source: Path, record_type: str, record_id: str) -> Any:
         candidates = [
             (str(item.get("id")), item) for item in source_memories(source)
         ]
+    elif record_type == "archive":
+        candidates = [
+            (map_archive_memory(item)["memory_id"], item)
+            for item in source_archive(source)
+        ]
     elif record_type == "agent":
         candidates = list(load_json(source / "agents.json", {}).items())
     elif record_type == "ticket":
@@ -270,6 +279,20 @@ def _apply_record(
             mapped = map_memory(normalized)
             mapped["quarantine_record_keys"] = list(record_keys)
             mapped["tags"] = list(dict.fromkeys([*mapped.get("tags", []), *record_keys]))
+            board["memories"].append(mapped)
+        return
+    if record_type == "archive":
+        board["memories"] = [
+            item
+            for item in board.get("memories", [])
+            if item.get("memory_id") != record_id
+        ]
+        if action != "drop":
+            mapped = map_archive_memory(value)
+            mapped["quarantine_record_keys"] = list(record_keys)
+            mapped["tags"] = list(
+                dict.fromkeys([*mapped.get("tags", []), *record_keys])
+            )
             board["memories"].append(mapped)
         return
     if record_type == "agent":

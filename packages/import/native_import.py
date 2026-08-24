@@ -553,6 +553,21 @@ def source_memories(source: Path) -> list[dict[str, Any]]:
     return _unwrap(load_json(source / "memories.json", []), "entries")
 
 
+def source_archive(source: Path) -> list[dict[str, Any]]:
+    value = load_json(source / "archive.json", [])
+    if isinstance(value, dict):
+        for key in ("entries", "memories", "archived_memories", "archive"):
+            if key in value:
+                value = value[key]
+                break
+    if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
+        raise ValueError(
+            "archive.json must contain a list or an object with an entries, "
+            "memories, archived_memories, or archive list"
+        )
+    return value
+
+
 def source_tickets(source: Path) -> list[dict[str, Any]]:
     return _unwrap(load_json(source / "tickets" / "_index.json", []), "tickets")
 
@@ -752,6 +767,14 @@ def _validate_source_shape(source: Path) -> None:
             raise ValueError("duplicate legacy memory identifiers are ambiguous")
         memory_ids.add(identifier)
 
+    archive_ids: set[str] = set()
+    for raw in source_archive(source):
+        map_archive_memory(raw)
+        identifier = archive_record_key(raw)
+        if identifier in archive_ids:
+            raise ValueError("duplicate archive identifiers are ambiguous")
+        archive_ids.add(identifier)
+
     ticket_ids: set[str] = set()
     for raw in source_tickets(source):
         _validate_ticket_shape(raw)
@@ -776,6 +799,89 @@ def _validate_source_shape(source: Path) -> None:
 
 def memory_id(legacy_id: str) -> str:
     return "LEGACY-" + hashlib.sha256(legacy_id.encode()).hexdigest()[:16]
+
+
+def archive_record_key(raw: dict[str, Any]) -> str:
+    source_id = raw.get("id", raw.get("memory_id", raw.get("source_id")))
+    identity: Any = (
+        {"source_id": str(source_id)}
+        if source_id is not None
+        else {"entry": raw}
+    )
+    canonical = json.dumps(
+        identity, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return "ARCHIVE-" + hashlib.sha256(canonical).hexdigest()[:20]
+
+
+def map_archive_memory(raw: dict[str, Any]) -> dict[str, Any]:
+    record_key = archive_record_key(raw)
+    source_id = raw.get("id", raw.get("memory_id", raw.get("source_id")))
+    if source_id is not None and (
+        isinstance(source_id, bool)
+        or not isinstance(source_id, (str, int, float))
+        or not str(source_id)
+    ):
+        raise ValueError("archive source id must be a string or number")
+    source_id = str(source_id) if source_id is not None else record_key
+    archived_at = raw.get("archived_at")
+    if archived_at is not None and (
+        isinstance(archived_at, bool)
+        or not isinstance(archived_at, (str, int, float))
+    ):
+        raise ValueError("archive archived_at must be a string, number, or null")
+    content = raw.get("content")
+    if content is None:
+        content = json.dumps(raw, ensure_ascii=False, sort_keys=True)
+    if not isinstance(content, str):
+        content = json.dumps(content, ensure_ascii=False, sort_keys=True)
+    title = raw.get("title")
+    if not isinstance(title, str) or not title.strip():
+        title = f"Archived v4 memory {source_id}"
+    memory_type = raw.get("memory_type") or "context"
+    if memory_type not in {
+        "decision", "progress", "blocker", "context", "handoff", "todo",
+        "file_change", "discovery", "warning", "checkpoint",
+    }:
+        memory_type = "context"
+    raw_tags = raw.get("tags", [])
+    if not isinstance(raw_tags, list) or not all(
+        isinstance(item, str) for item in raw_tags
+    ):
+        raise ValueError("archive tags must be a list of strings")
+    for field in ("related_files", "related_tickets"):
+        values = raw.get(field, [])
+        if not isinstance(values, list) or not all(
+            isinstance(item, str) for item in values
+        ):
+            raise ValueError(f"archive {field} must be a list of strings")
+    for field in ("agent_name", "author"):
+        value = raw.get(field)
+        if value is not None and not isinstance(value, str):
+            raise ValueError(f"archive {field} must be a string or null")
+    tags = list(dict.fromkeys([*raw_tags, "archived"]))
+    return {
+        "schema_version": 2,
+        "memory_id": record_key,
+        "title": title,
+        "content": content,
+        "scope": "project",
+        "author_principal_id": "legacy_unbound",
+        "author_agent_id": None,
+        "author_agent_name": raw.get("agent_name") or raw.get("author"),
+        "legacy_agent_name": raw.get("agent_name") or raw.get("author"),
+        "memory_type": memory_type,
+        "tags": tags,
+        "related_files": list(raw.get("related_files") or []),
+        "related_tickets": list(raw.get("related_tickets") or []),
+        "priority": 0,
+        "pinned": False,
+        "archived": True,
+        "archive_source_id": source_id,
+        "archived_at": archived_at,
+        "migration_provenance": "v4-archive-import",
+        "legacy_record": copy.deepcopy(raw),
+    }
 
 
 def map_memory(raw: dict[str, Any]) -> dict[str, Any]:
@@ -993,8 +1099,97 @@ def _phase_memories(source: Path, board: dict[str, Any], quarantine: list[dict[s
             )
         except ScrubRejected:
             continue
+    archive_seen: set[str] = set()
+    for raw in source_archive(source):
+        rid = archive_record_key(raw)
+        if rid in archive_seen:
+            raise ValueError("duplicate archive identifiers are ambiguous")
+        archive_seen.add(rid)
+        try:
+            imported.append(
+                map_archive_memory(
+                    safe_record(
+                        raw,
+                        record_type="archive",
+                        record_id=rid,
+                        quarantine=quarantine,
+                    )
+                )
+            )
+        except ScrubRejected:
+            continue
     board["memories"] = imported
     board["next_memory_seq"] = len(imported) + 1
+
+
+def backfill_archive(
+    archive_file: Path,
+    central_root: Path,
+    board_id: str,
+) -> dict[str, Any]:
+    """Append missing v4 archive rows to one completed import without rewriting rows."""
+    if not BOARD_ID.fullmatch(board_id):
+        raise ValueError("board_id must match [A-Za-z0-9._-]+")
+    archive_file = Path(os.path.abspath(os.fspath(archive_file)))
+    _require_regular(archive_file, "archive source")
+    if archive_file.name != "archive.json":
+        raise ValueError("archive source must be a regular archive.json file")
+    archive_file = archive_file.resolve(strict=True)
+    source = archive_file.parent
+    rows = source_archive(source)
+    store = TransactionalSQLiteStore(central_root.resolve(strict=True))
+    target = board_path(store, board_id)
+    with store.transaction():
+        manifest = store.load(manifest_path(store, board_id), dict)
+        if manifest.get("status") != "complete":
+            raise ValueError("archive backfill requires a completed import manifest")
+        board = store.load(target, dict)
+        if not board:
+            raise ValueError("board not found")
+        existing: dict[str, dict[str, Any]] = {}
+        for item in board.get("memories", []):
+            identifier = str(item.get("memory_id"))
+            if identifier in existing:
+                raise ValueError("target board contains duplicate memory identifiers")
+            existing[identifier] = item
+        appended: list[dict[str, Any]] = []
+        duplicate_rows = 0
+        input_keys: set[str] = set()
+        for raw in rows:
+            rid = archive_record_key(raw)
+            if rid in input_keys:
+                raise ValueError("duplicate archive identifiers are ambiguous")
+            input_keys.add(rid)
+            cleaned = safe_record(
+                raw,
+                record_type="archive",
+                record_id=rid,
+                quarantine=[],
+            )
+            mapped = map_archive_memory(cleaned)
+            if rid in existing:
+                current = existing[rid]
+                if not current.get("archived") or current.get("legacy_record") != cleaned:
+                    raise ValueError(
+                        "archive record key conflicts with an existing memory"
+                    )
+                duplicate_rows += 1
+                continue
+            board.setdefault("memories", []).append(mapped)
+            appended.append(mapped)
+            existing[rid] = mapped
+        board["next_memory_seq"] = max(
+            int(board.get("next_memory_seq", 1)), len(board["memories"]) + 1
+        )
+        if appended:
+            _replace(store, target, board)
+    return {
+        "status": "complete" if appended else "noop",
+        "board_id": board_id,
+        "inserted": len(appended),
+        "already_present": duplicate_rows,
+        "record_keys": [item["memory_id"] for item in appended],
+    }
 
 
 def _phase_agents(source: Path, board: dict[str, Any], quarantine: list[dict[str, Any]]) -> None:

@@ -18,6 +18,7 @@ import personal_import as personal_import_module
 from native_import import board_path, canonical_db_hash
 from personal_import import (
     _destination_lock_path,
+    archive_backfill,
     generate_policy_decisions,
     review_import,
     retry_import,
@@ -87,8 +88,13 @@ def start(
     *,
     empty_destination: bool = False,
     checkpoint=None,
+    archive_entries: list[dict] | None = None,
 ) -> tuple[Path, Path, Path, Path, dict]:
     source = make_source(tmp_path)
+    if archive_entries is not None:
+        (source / "archive.json").write_text(
+            json.dumps({"entries": archive_entries}), encoding="utf-8"
+        )
     (source / "tickets" / "existing-empty-directory").mkdir(mode=0o700)
     stable = make_stable_install(tmp_path)
     destination = tmp_path / "central"
@@ -116,6 +122,77 @@ def start(
             checkpoint=checkpoint,
         )
     return source, stable, destination, run, state
+
+
+def test_v4_archive_is_imported_with_provenance(tmp_path: Path) -> None:
+    archived = {
+        "id": "old-memory-7",
+        "agent_name": "legacy-main",
+        "title": "Archived launch context",
+        "content": "\n" + "z" * 12_000 + "searchable archive phrase\n",
+        "archived_at": "2025-01-02T03:04:05+00:00",
+        "tags": ["launch"],
+    }
+
+    _source, _stable, destination, _run, state = start(
+        tmp_path, archive_entries=[archived]
+    )
+
+    assert state["phase"] == "installed"
+    store = TransactionalSQLiteStore(destination)
+    board = store.load(board_path(store, BOARD_ID), dict)
+    matches = [item for item in board["memories"] if item.get("archived")]
+    assert len(matches) == 1
+    assert matches[0]["content"] == archived["content"]
+    assert matches[0]["archive_source_id"] == archived["id"]
+    assert matches[0]["archived_at"] == archived["archived_at"]
+    assert matches[0]["migration_provenance"] == "v4-archive-import"
+    assert "archived" in matches[0]["tags"]
+
+
+def test_archive_backfill_twice_is_idempotent_and_keeps_existing_rows(
+    tmp_path: Path,
+) -> None:
+    source, _stable, destination, _run, state = start(tmp_path)
+    assert state["phase"] == "installed"
+    archive_file = source / "archive.json"
+    archive_file.write_text(
+        json.dumps(
+            [
+                {
+                    "id": "backfill-1",
+                    "title": "Backfilled archive",
+                    "content": "backfill searchable phrase",
+                    "archived_at": "2024-06-01T00:00:00Z",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    store = TransactionalSQLiteStore(destination)
+    before = store.load(board_path(store, BOARD_ID), dict)["memories"]
+
+    first = archive_backfill(
+        archive_file,
+        destination,
+        board_id=BOARD_ID,
+        confirm_central_stopped=True,
+    )
+    after_first = store.load(board_path(store, BOARD_ID), dict)["memories"]
+    second = archive_backfill(
+        archive_file,
+        destination,
+        board_id=BOARD_ID,
+        confirm_central_stopped=True,
+    )
+    after_second = store.load(board_path(store, BOARD_ID), dict)["memories"]
+
+    assert first["inserted"] == 1
+    assert second["status"] == "noop"
+    assert second["inserted"] == 0
+    assert after_first == after_second
+    assert after_first[: len(before)] == before
+    assert len(after_first) == len(before) + 1
 
 
 def make_review_files(run: Path) -> tuple[Path | None, Path | None]:

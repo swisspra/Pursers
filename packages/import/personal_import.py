@@ -20,7 +20,14 @@ from typing import Any, Callable
 
 if __package__:
     from .bind_identities import bind_identities, generate_identity_material
-    from .native_import import CENTRAL_ID, board_path, canonical_db_hash, load_json, promote
+    from .native_import import (
+        CENTRAL_ID,
+        backfill_archive as native_backfill_archive,
+        board_path,
+        canonical_db_hash,
+        load_json,
+        promote,
+    )
     from .prepare_apply_rehearsal import _tree_state as _snapshot_tree_state
     from .prepare_apply_rehearsal import prepare
     from .reconcile import (
@@ -35,7 +42,14 @@ if __package__:
     from .transactional_sqlite import TransactionalSQLiteStore
 else:  # source-checkout execution
     from bind_identities import bind_identities, generate_identity_material
-    from native_import import CENTRAL_ID, board_path, canonical_db_hash, load_json, promote
+    from native_import import (
+        CENTRAL_ID,
+        backfill_archive as native_backfill_archive,
+        board_path,
+        canonical_db_hash,
+        load_json,
+        promote,
+    )
     from prepare_apply_rehearsal import _tree_state as _snapshot_tree_state
     from prepare_apply_rehearsal import prepare
     from reconcile import (
@@ -1674,6 +1688,36 @@ def review_import(
         return _resume_review(state, paths, checkpoint)
 
 
+def archive_backfill(
+    archive_file: Path,
+    central_data_root: Path,
+    *,
+    board_id: str,
+    confirm_central_stopped: bool,
+) -> dict[str, Any]:
+    """Backfill v4 archive.json rows into a completed Personal import."""
+    if not confirm_central_stopped:
+        raise ValueError("--confirm-central-stopped is required")
+    if not ID_RE.fullmatch(board_id):
+        raise ValueError("board_id must match [A-Za-z0-9._-]{1,80}")
+    archive_file = _absolute(archive_file)
+    try:
+        archive_info = archive_file.lstat()
+    except FileNotFoundError as exc:
+        raise ValueError("archive source is missing") from exc
+    if (
+        stat.S_ISLNK(archive_info.st_mode)
+        or not stat.S_ISREG(archive_info.st_mode)
+        or archive_info.st_nlink != 1
+    ):
+        raise ValueError("archive source must be a regular archive.json file")
+    destination = _require_directory(
+        central_data_root, "Central data root", private=True
+    )
+    with _exclusive_lock(_destination_lock_path(destination), "Central import"):
+        return native_backfill_archive(archive_file, destination, board_id)
+
+
 def _start_install(
     state: dict[str, Any], paths: dict[str, Path], callback: Checkpoint | None
 ) -> dict[str, Any]:
@@ -2453,6 +2497,11 @@ def _parser() -> argparse.ArgumentParser:
     status = subparsers.add_parser("status")
     status.add_argument("run_dir", type=Path)
     status.add_argument("--confirm-central-stopped", action="store_true")
+    backfill = subparsers.add_parser("archive-backfill")
+    backfill.add_argument("archive_file", type=Path)
+    backfill.add_argument("central_data_root", type=Path)
+    backfill.add_argument("--board-id", required=True)
+    backfill.add_argument("--confirm-central-stopped", action="store_true")
     return parser
 
 
@@ -2470,6 +2519,15 @@ def main() -> None:
                 stable_install_root=args.stable_install_root,
                 confirm_central_stopped=args.confirm_central_stopped,
             )
+        elif args.command == "archive-backfill":
+            result = archive_backfill(
+                args.archive_file,
+                args.central_data_root,
+                board_id=args.board_id,
+                confirm_central_stopped=args.confirm_central_stopped,
+            )
+            print(json.dumps(result, sort_keys=True))
+            return
         elif args.command == "retry":
             state = retry_import(
                 args.run_dir,

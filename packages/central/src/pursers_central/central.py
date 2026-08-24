@@ -3783,9 +3783,12 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         retracts: str | None = None,
         related_files: list[str] | None = None,
         related_tickets: list[str] | None = None,
+        archived: bool = False,
+        archive_source_id: str | None = None,
+        archived_at: str | None = None,
         expected_generation: str | None = None,
     ) -> dict[str, Any]:
-        """Write one private/project memory after a fail-closed scrub pass."""
+        """Write one private/project memory; archived=true preserves oversize content."""
         board_id = require_id("board_id", board_id)
         agent_name = require_id("agent_name", agent_name)
         principal = current_principal()
@@ -3797,6 +3800,10 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             raise ValueError("unsupported memory_type")
         if not 0 <= priority <= 3:
             raise ValueError("priority must be between 0 and 3")
+        if type(archived) is not bool:
+            raise ValueError("archived must be a boolean")
+        if not archived and (archive_source_id is not None or archived_at is not None):
+            raise ValueError("archive provenance requires archived=true")
 
         def write(document: dict[str, Any]) -> dict[str, Any]:
             profile = board_scrub_profile(document)
@@ -3804,11 +3811,20 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             violations: dict[str, list[str]] = {}
             scalar_inputs = {
                 "title": (title, True, 200),
-                "content": (content, True, 10_000),
+                "content": (
+                    content,
+                    True,
+                    max(10_000, len(content)) if archived and isinstance(content, str)
+                    else 10_000,
+                ),
                 "pinned_summary": (
                     pinned_summary, pinned_summary is not None, 500
                 ),
                 "retracts": (retracts, retracts is not None, 100),
+                "archive_source_id": (
+                    archive_source_id, archive_source_id is not None, 512
+                ),
+                "archived_at": (archived_at, archived_at is not None, 100),
             }
             cleaned_scalars: dict[str, str | None] = {}
             for field, (value, required, max_length) in scalar_inputs.items():
@@ -3849,11 +3865,16 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                     }
                 }
             safe_title = cleaned_scalars["title"]
-            safe_content = cleaned_scalars["content"]
-            assert safe_title is not None and safe_content is not None
+            cleaned_content = cleaned_scalars["content"]
+            assert safe_title is not None and cleaned_content is not None
+            safe_content = content if archived else cleaned_content
             safe_summary = cleaned_scalars["pinned_summary"]
             safe_retracts = cleaned_scalars["retracts"]
+            safe_archive_source_id = cleaned_scalars["archive_source_id"]
+            safe_archived_at = cleaned_scalars["archived_at"]
             safe_tags = cleaned_lists.get("tags", [])
+            if archived and "archived" not in safe_tags:
+                safe_tags.append("archived")
             safe_files = cleaned_lists.get("related_files", [])
             safe_tickets = cleaned_lists.get("related_tickets", [])
             actor, released, renewed = prepare_board_call(document, principal, agent_name, now)
@@ -3876,6 +3897,14 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 "created_at": iso_at(now),
                 "created_at_epoch": now,
             }
+            if archived:
+                entry.update(
+                    {
+                        "archived": True,
+                        "archive_source_id": safe_archive_source_id,
+                        "archived_at": safe_archived_at or iso_at(now),
+                    }
+                )
             retracted = None
             if safe_retracts:
                 target = memory_target(document, principal, safe_retracts)
@@ -3945,10 +3974,11 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         since: str | None = None,
         since_minutes: int | None = None,
         pinned_only: bool = False,
+        include_archived: bool = False,
         limit: int = 50,
         expected_generation: str | None = None,
     ) -> dict[str, Any]:
-        """Return project memories plus caller-owned private memories only."""
+        """Return visible live memories, plus archives when explicitly requested."""
         board_id = require_id("board_id", board_id)
         agent_name = require_id("agent_name", agent_name)
         if memory_type is not None and memory_type not in MEMORY_TYPES:
@@ -3986,6 +4016,8 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         document = service.load(board_id)
         service.member(document, principal, agent_name)
         visible = [project_memory(entry) for entry in visible_memories(document, principal)]
+        if not include_archived:
+            visible = [item for item in visible if not item.get("archived")]
         if memory_type is not None:
             visible = [item for item in visible if item["memory_type"] == memory_type]
         if tag is not None:
@@ -4092,9 +4124,10 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         query: str,
         tag: str | None = None,
         author: str | None = None,
+        include_archived: bool = False,
         limit: int = 20,
     ) -> dict[str, Any]:
-        """Case-insensitive substring search over pre-authorized memories only."""
+        """Search visible live memories, plus archives when explicitly requested."""
         board_id = require_id("board_id", board_id)
         if not 1 <= limit <= 100:
             raise ValueError("limit must be between 1 and 100")
@@ -4108,6 +4141,8 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         ranked: list[tuple[int, float, str, dict[str, Any]]] = []
         for raw in visible_memories(document, principal):
             item = project_memory(raw)
+            if item.get("archived") and not include_archived:
+                continue
             if tag is not None and tag not in item.get("tags", []):
                 continue
             if author is not None and author not in {
@@ -4141,6 +4176,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             "results": results,
             "count": len(results),
             "total_matching": len(ranked),
+            "include_archived": include_archived,
         }
 
     @mcp.tool()

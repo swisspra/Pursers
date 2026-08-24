@@ -1,6 +1,7 @@
 """Safe, copy-only migration into an On Board Personal data root."""
 
 from .personal_import import (
+    archive_backfill,
     generate_policy_decisions,
     public_summary,
     review_import,
@@ -15,6 +16,7 @@ __version__ = "5.0.0a2"
 
 __all__ = [
     "__version__",
+    "archive_backfill",
     "generate_policy_decisions",
     "public_summary",
     "review_import",

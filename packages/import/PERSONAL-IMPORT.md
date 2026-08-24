@@ -11,9 +11,9 @@ unbound for later review.
 
 ## Safety boundary
 
-- Stop Personal Central before every `import`, `retry`, `rollback`, and
-  `status` operation. `--confirm-central-stopped` is an operator attestation;
-  the tool does not detect or stop a running Central process.
+- Stop Personal Central before every `import`, `archive-backfill`, `retry`,
+  `rollback`, and `status` operation. `--confirm-central-stopped` is an operator
+  attestation; the tool does not detect or stop a running Central process.
 - The source is read under its `.board.lock`. The tool verifies the live tree
   before and after the lock-bounded copy and performs all conversion from the
   sealed private copy.
@@ -66,6 +66,11 @@ onboard-personal-import retry /path/to/private-import-run \
 onboard-personal-import status /path/to/private-import-run \
   --confirm-central-stopped
 
+pursers-personal-import archive-backfill /path/to/project/.agent-mem/archive.json \
+  /path/to/existing-central-data \
+  --board-id personal-board \
+  --confirm-central-stopped
+
 onboard-personal-import decide /path/to/private-import-run \
   --policy /path/to/POLICY-signed.json
 
@@ -77,6 +82,10 @@ onboard-personal-import review /path/to/private-import-run \
 onboard-personal-import rollback /path/to/private-import-run \
   --confirm-central-stopped
 ```
+
+`archive-backfill` is for boards imported before `archive.json` became part of
+the import domain. It appends deterministic archived-memory records only;
+rerunning it does not duplicate rows and it never rewrites existing memories.
 
 When import reports `review_required`, use the private files under the owned
 run directory:

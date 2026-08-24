@@ -32,6 +32,7 @@ else:
 IMPORT_DOMAIN_ROOTS = {
     ".board.lock",
     "agents.json",
+    "archive.json",
     "memories.json",
     "project.json",
     "state.json",
