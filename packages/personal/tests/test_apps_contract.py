@@ -522,6 +522,89 @@ async def test_projection_flags_only_duplicate_active_agent_names() -> None:
 
 
 @pytest.mark.anyio
+async def test_projection_adds_projects_without_extra_central_reads() -> None:
+    calls: list[str] = []
+
+    class ProjectionReader:
+        async def board_status(self) -> dict[str, Any]:
+            calls.append("board_status")
+            return {
+                "agents": [
+                    {"agent_id": "AI-held", "agent_name": "held"},
+                    {"agent_id": "AI-assigned", "agent_name": "assigned"},
+                    {"agent_id": "AI-idle", "agent_name": "idle"},
+                ],
+                "latest_seq": 8,
+            }
+
+        async def ticket_list(self, **_kwargs: Any) -> dict[str, Any]:
+            calls.append("ticket_list")
+            tickets = [
+                {
+                    "ticket_id": "TK-held",
+                    "status": "claimed",
+                    "claimed_by_agent_id": "AI-held",
+                    "claimed_at": "2026-08-24T10:00:00Z",
+                    "target_url": "Pursers/packages/personal",
+                },
+                {
+                    "ticket_id": "TK-assigned",
+                    "status": "open",
+                    "assigned_to_agent_id": "AI-assigned",
+                    "updated_at": "2026-08-24T10:01:00Z",
+                    "target_url": "Other-Project/docs",
+                },
+                {
+                    "ticket_id": "TK-closed",
+                    "status": "closed",
+                    "claimed_by_agent_id": "AI-held",
+                    "claimed_at": "2026-08-24T10:02:00Z",
+                    "target_url": "stale/history",
+                },
+                {
+                    "ticket_id": "TK-no-target",
+                    "status": "open",
+                    "target_url": None,
+                },
+            ]
+            return {"tickets": tickets, "total_matching": 4, "latest_seq": 8}
+
+        async def board_get_briefing(self, **_kwargs: Any) -> dict[str, Any]:
+            calls.append("board_get_briefing")
+            return {"pinned_digest": [], "latest_handoff": None}
+
+    state = LiveDashboard(
+        fake_config(),
+        client_class=FakeClient,
+        client_error_class=FakeClientError,
+    )
+    await state._load_projection(
+        ProjectionReader(),
+        snapshot={
+            "board": {"board_id": "board-personal-test"},
+            "agents": [],
+            "latest_seq": 8,
+        },
+    )
+
+    assert calls == ["board_status", "ticket_list", "board_get_briefing"]
+    assert state._projection is not None
+    tickets = {ticket["id"]: ticket for ticket in state._projection["tickets"]}
+    assert tickets["TK-held"]["project"] == "pursers"
+    assert tickets["TK-assigned"]["project"] == "other-project"
+    assert tickets["TK-closed"]["project"] == "stale"
+    assert tickets["TK-no-target"]["project"] is None
+
+    agents = {agent["id"]: agent for agent in state._projection["agents"]}
+    assert agents["AI-held"]["project"] == "pursers"
+    assert agents["AI-assigned"]["project"] == "other-project"
+    assert agents["AI-idle"]["project"] is None
+    fallback = state._fallback_snapshot()
+    assert all("project" in ticket for ticket in fallback["tickets"])
+    assert all("project" in agent for agent in fallback["agents"])
+
+
+@pytest.mark.anyio
 async def test_raw_reader_rejects_non_pure_tools_before_transport() -> None:
     transport_calls: list[tuple[str, dict[str, Any]]] = []
 

@@ -102,6 +102,7 @@ PostJoinHook = Callable[[Any], Awaitable[Any]]
 FALLBACK_TICKETS = [
     {
         "id": "TK-DEMO-1",
+        "project": None,
         "title": "Shape the Personal Preview dashboard",
         "description": "Synthetic example — no project data is loaded.",
         "status": "claimed",
@@ -113,6 +114,7 @@ FALLBACK_TICKETS = [
     },
     {
         "id": "TK-DEMO-2",
+        "project": None,
         "title": "Review special characters: <safe> & readable",
         "description": "Synthetic content stays inert in the View.",
         "status": "submitted",
@@ -126,6 +128,7 @@ FALLBACK_TICKETS = [
 FALLBACK_AGENTS = [
     {
         "id": "AI-DEMO-1",
+        "project": None,
         "name": "agent-alpha",
         "status": "working",
         "role": "builder",
@@ -137,6 +140,7 @@ FALLBACK_AGENTS = [
     },
     {
         "id": "AI-DEMO-2",
+        "project": None,
         "name": "reviewer-beta",
         "status": "idle",
         "role": "reviewer",
@@ -638,7 +642,38 @@ class LiveDashboard:
             ),
             reverse=True,
         )
+        agent_projects: dict[str, tuple[str, str]] = {}
+        for ticket in tickets:
+            if ticket.get("status") not in {
+                "open",
+                "claimed",
+                "in_progress",
+                "creating_report",
+                "rejected",
+            }:
+                continue
+            project = self._project_from_target(ticket.get("target_url"))
+            if project is None:
+                continue
+            holder = ticket.get("claimed_by_agent_id") or ticket.get(
+                "assigned_to_agent_id"
+            )
+            if not isinstance(holder, str) or not holder:
+                continue
+            recency = str(
+                ticket.get("claimed_at")
+                or ticket.get("updated_at")
+                or ticket.get("created_at")
+                or ""
+            )
+            previous = agent_projects.get(holder)
+            if previous is None or recency >= previous[0]:
+                agent_projects[holder] = (recency, project)
+
         agent_views = [self._agent_view(item) for item in agents]
+        for agent in agent_views:
+            held = agent_projects.get(str(agent.get("id") or ""))
+            agent["project"] = held[1] if held is not None else None
         self._flag_duplicate_agent_names(agent_views)
         projection = {
             "contract_version": 2,
@@ -770,9 +805,17 @@ class LiveDashboard:
                 agent["suggested_name"] = f"{name}-{suffix}"
 
     @staticmethod
-    def _ticket_view(ticket: dict[str, Any]) -> dict[str, Any]:
+    def _project_from_target(target_url: Any) -> str | None:
+        if not isinstance(target_url, str):
+            return None
+        project = target_url.strip().partition("/")[0].strip().lower()
+        return project or None
+
+    @classmethod
+    def _ticket_view(cls, ticket: dict[str, Any]) -> dict[str, Any]:
         return {
             "id": ticket["ticket_id"],
+            "project": cls._project_from_target(ticket.get("target_url")),
             "title": ticket.get("title", "(untitled)"),
             "description": ticket.get("description", ""),
             "status": ticket.get("status", "unknown"),
