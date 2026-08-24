@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>On Board Personal Preview</title>
+  </head>
+  <body data-scenario="demo" data-render-state="loading">
+    <a class="skip-link" href="#main-content">Skip to dashboard</a>
+
+    <div class="app-shell">
+      <header class="app-header" aria-labelledby="name">
+        <div class="brand-block">
+          <div class="brand-line">
+            <span class="product-mark" aria-hidden="true">OB</span>
+            <p class="eyebrow">On Board Personal</p>
+            <span class="label label-accent">Personal Preview</span>
+            <span class="label">Local</span>
+            <span class="label">Read-only</span>
+          </div>
+          <h1 id="name">Personal Preview Demo</h1>
+          <p id="board-id" class="board-id">Local board</p>
+        </div>
+        <div class="header-actions">
+          <p id="source" class="source" aria-live="polite">Preparing local preview</p>
+          <button id="refresh" class="refresh-button" type="button">
+            <span aria-hidden="true">↻</span>
+            <span>Refresh</span>
+          </button>
+        </div>
+      </header>
+
+      <section id="connection-banner" class="connection-banner" role="status" aria-live="polite">
+        <span class="status-dot" aria-hidden="true"></span>
+        <div>
+          <strong id="connection-title">Loading board</strong>
+          <p id="connection-detail">Connecting through the local MCP Apps bridge.</p>
+        </div>
+      </section>
+
+      <section class="command-bar" aria-label="Dashboard search">
+        <label for="global-search" class="search-label">
+          <span aria-hidden="true">⌕</span>
+          <span class="sr-only">Search this dashboard</span>
+        </label>
+        <input id="global-search" type="search" autocomplete="off" placeholder="Search tickets, agents, activity" aria-describedby="search-help search-count" />
+        <kbd aria-hidden="true">/</kbd>
+        <span id="search-help" class="sr-only">Searches only the authorized data loaded in this dashboard. Press Escape to clear.</span>
+        <span id="search-count" class="search-count" aria-live="polite"></span>
+      </section>
+
+      <nav class="view-tabs" aria-label="Dashboard views" role="tablist">
+        <button id="tab-today" role="tab" aria-selected="true" aria-controls="view-today" tabindex="0" data-view="today" type="button">Today</button>
+        <button id="tab-work" role="tab" aria-selected="false" aria-controls="view-work" tabindex="-1" data-view="work" type="button">Work</button>
+        <button id="tab-agents" role="tab" aria-selected="false" aria-controls="view-agents" tabindex="-1" data-view="agents" type="button">Agents</button>
+        <button id="tab-activity" role="tab" aria-selected="false" aria-controls="view-activity" tabindex="-1" data-view="activity" type="button">Activity</button>
+      </nav>
+
+      <main id="main-content" tabindex="-1" aria-busy="true">
+        <section id="search-results" class="search-panel" aria-labelledby="search-title" hidden>
+          <div class="section-heading"><div><p class="section-kicker">Loaded data only</p><h2 id="search-title">Search results</h2></div></div>
+          <div id="search-results-list" class="search-results-list"></div>
+        </section>
+
+        <section id="view-today" class="view-panel" role="tabpanel" aria-labelledby="tab-today" data-panel="today">
+          <div class="hero-grid">
+            <article class="health-card card">
+              <p class="section-kicker">Project health</p>
+              <div class="health-row"><span id="health-icon" class="health-icon" aria-hidden="true">●</span><div><h2 id="health-title">Preparing board</h2><p id="health-detail" class="muted">Waiting for an authorized snapshot.</p></div></div>
+            </article>
+            <dl class="metrics-grid" aria-label="Today at a glance">
+              <div class="metric card"><dt>Open</dt><dd id="metric-open">—</dd></div>
+              <div class="metric card"><dt>Working</dt><dd id="metric-working">—</dd></div>
+              <div class="metric card"><dt>Submitted</dt><dd id="metric-submitted">—</dd></div>
+              <div class="metric card"><dt>Agents active</dt><dd id="metric-agents">—</dd></div>
+            </dl>
+          </div>
+
+          <div class="today-grid">
+            <section class="card span-two" aria-labelledby="today-work-title">
+              <div class="section-heading"><div><p class="section-kicker">What needs attention</p><h2 id="today-work-title">Current work</h2></div><button class="text-button" type="button" data-go-view="work">View all work</button></div>
+              <div id="today-work" class="stack-list"></div>
+            </section>
+            <section class="card" aria-labelledby="today-agents-title">
+              <div class="section-heading"><div><p class="section-kicker">Who is here</p><h2 id="today-agents-title">Agents</h2></div><button class="text-button" type="button" data-go-view="agents">View agents</button></div>
+              <div id="today-agents" class="stack-list compact"></div>
+            </section>
+            <section class="card" aria-labelledby="handoff-title"><p class="section-kicker">Continuity</p><h2 id="handoff-title">Latest handoff</h2><div id="latest-handoff"></div></section>
+            <section class="card" aria-labelledby="important-title"><p class="section-kicker">Decision or warning</p><h2 id="important-title">Important pinned note</h2><div id="important-pinned"></div></section>
+            <section class="card" aria-labelledby="recent-title">
+              <div class="section-heading"><div><p id="recent-activity-scope" class="section-kicker">Synthetic preview activity</p><h2 id="recent-title">Recent activity</h2></div><button class="text-button" type="button" data-go-view="activity">View activity</button></div>
+              <div id="recent-activity" class="timeline compact"></div>
+            </section>
+          </div>
+        </section>
+
+        <section id="view-work" class="view-panel" role="tabpanel" aria-labelledby="tab-work" data-panel="work" hidden>
+          <div class="page-heading"><div><p class="section-kicker">Read-only board</p><h2>Work</h2><p class="muted">See status, ownership, and review readiness. Actions stay in agent chat for this preview.</p></div><p id="work-total" class="count-badge"></p></div>
+          <div id="work-notice"></div><div id="work-groups" class="work-groups"></div>
+        </section>
+
+        <section id="view-agents" class="view-panel" role="tabpanel" aria-labelledby="tab-agents" data-panel="agents" hidden>
+          <div class="page-heading"><div><p class="section-kicker">Local agent roster</p><h2>Agents</h2><p class="muted">Status reflects the current authorized board projection.</p></div><p id="agents-total" class="count-badge"></p></div>
+          <div id="agents-notice"></div><div id="agents-grid" class="agents-grid"></div>
+        </section>
+
+        <section id="view-activity" class="view-panel" role="tabpanel" aria-labelledby="tab-activity" data-panel="activity" hidden>
+          <div class="page-heading"><div><p class="section-kicker">Bounded feed</p><h2>Activity</h2><p id="activity-scope-copy" class="muted">Synthetic preview events are authored fixtures; they do not represent local MCP-process activity or a complete audit log.</p></div><p id="activity-total" class="count-badge"></p></div>
+          <div id="activity-notice"></div><div id="activity-list" class="timeline"></div>
+        </section>
+      </main>
+
+      <footer class="app-footer"><span>On Board Personal Preview</span><span>Local · Read-only · Actions stay in agent chat</span></footer>
+    </div>
+    <script type="module" src="/src/dashboard.ts"></script>
+  </body>
+</html>
