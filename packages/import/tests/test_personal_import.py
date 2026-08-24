@@ -195,6 +195,125 @@ def test_archive_backfill_twice_is_idempotent_and_keeps_existing_rows(
     assert len(after_first) == len(before) + 1
 
 
+def test_archive_backfill_internal_allows_home_paths_byte_exact_and_is_idempotent(
+    tmp_path: Path,
+) -> None:
+    source, _stable, destination, _run, state = start(tmp_path)
+    assert state["phase"] == "installed"
+    content = "workspace=/Users/private-account/project\n"
+    archive_file = source / "archive.json"
+    archive_file.write_text(
+        json.dumps([{"id": "home-path", "content": content}]), encoding="utf-8"
+    )
+
+    with pytest.raises(ValueError, match="posix_home"):
+        archive_backfill(
+            archive_file,
+            destination,
+            board_id=BOARD_ID,
+            confirm_central_stopped=True,
+        )
+
+    first = archive_backfill(
+        archive_file,
+        destination,
+        board_id=BOARD_ID,
+        confirm_central_stopped=True,
+        scrub_profile="internal",
+    )
+    second = archive_backfill(
+        archive_file,
+        destination,
+        board_id=BOARD_ID,
+        confirm_central_stopped=True,
+        scrub_profile="internal",
+    )
+    store = TransactionalSQLiteStore(destination)
+    board = store.load(board_path(store, BOARD_ID), dict)
+    inserted = next(
+        item
+        for item in board["memories"]
+        if item.get("archive_source_id") == "home-path"
+    )
+
+    assert first["inserted"] == 1
+    assert first["posix_home_allowed_count"] == 1
+    assert inserted["content"] == content
+    assert inserted["legacy_record"]["content"] == content
+    assert second["status"] == "noop"
+    assert second["already_present"] == 1
+    assert second["posix_home_allowed_count"] == 1
+
+
+@pytest.mark.parametrize("scrub_profile", ["strict", "internal"])
+def test_archive_backfill_rejects_secrets_under_every_profile(
+    tmp_path: Path,
+    scrub_profile: str,
+) -> None:
+    source, _stable, destination, _run, state = start(tmp_path)
+    assert state["phase"] == "installed"
+    archive_file = source / "archive.json"
+    archive_file.write_text(
+        json.dumps(
+            [
+                {
+                    "id": "secret",
+                    "content": "Bearer ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="bearer_token"):
+        archive_backfill(
+            archive_file,
+            destination,
+            board_id=BOARD_ID,
+            confirm_central_stopped=True,
+            scrub_profile=scrub_profile,
+        )
+
+
+def test_archive_backfill_cli_threads_scrub_profile(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_backfill(*args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return {"status": "noop"}
+
+    monkeypatch.setattr(personal_import_module, "archive_backfill", fake_backfill)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "personal_import.py",
+            "archive-backfill",
+            str(tmp_path / "archive.json"),
+            str(tmp_path / "central"),
+            "--board-id",
+            BOARD_ID,
+            "--scrub-profile",
+            "internal",
+            "--confirm-central-stopped",
+        ],
+    )
+
+    personal_import_module.main()
+
+    assert captured["kwargs"] == {
+        "board_id": BOARD_ID,
+        "confirm_central_stopped": True,
+        "scrub_profile": "internal",
+    }
+    assert json.loads(capsys.readouterr().out) == {"status": "noop"}
+
+
 def make_review_files(run: Path) -> tuple[Path | None, Path | None]:
     state = json.loads((run / "state.json").read_text(encoding="utf-8"))
     evidence = run / "evidence"

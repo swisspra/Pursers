@@ -427,7 +427,11 @@ def safe_record(
     record_id: str,
     quarantine: list[dict[str, Any]],
     field: str = "",
+    scrub_profile: str = "strict",
+    allow_counts: dict[str, int] | None = None,
 ) -> Any:
+    if scrub_profile not in {"strict", "internal"}:
+        raise ValueError("scrub_profile must be 'strict' or 'internal'")
     all_violations: list[Any] = []
 
     def display_path(segments: tuple[tuple[str, str], ...]) -> str:
@@ -463,6 +467,18 @@ def safe_record(
             try:
                 return scrub(current, Policy(mode="reject"))[0]
             except ScrubRejected as exc:
+                rejected = list(exc.violations)
+                if scrub_profile == "internal":
+                    rejected = [
+                        item for item in exc.violations if item.rule != "posix_home"
+                    ]
+                    allowed = len(exc.violations) - len(rejected)
+                    if allowed and allow_counts is not None:
+                        allow_counts["posix_home"] = (
+                            int(allow_counts.get("posix_home", 0)) + allowed
+                        )
+                    if not rejected:
+                        return current
                 identity_payload = json.dumps(
                     identity,
                     ensure_ascii=True,
@@ -476,15 +492,15 @@ def safe_record(
                         "field": display_path(segments) if segments else "$",
                         "field_identity": "sha256-"
                         + hashlib.sha256(identity_payload).hexdigest(),
-                        "rules": sorted({item.rule for item in exc.violations}),
-                        "violation_count": len(exc.violations),
+                        "rules": sorted({item.rule for item in rejected}),
+                        "violation_count": len(rejected),
                         "spans": [
                             {"rule": item.rule, "start": item.start, "end": item.end}
-                            for item in exc.violations
+                            for item in rejected
                         ],
                     }
                 )
-                all_violations.extend(exc.violations)
+                all_violations.extend(rejected)
                 return current
         if isinstance(current, list):
             return [
@@ -1126,10 +1142,14 @@ def backfill_archive(
     archive_file: Path,
     central_root: Path,
     board_id: str,
+    *,
+    scrub_profile: str = "strict",
 ) -> dict[str, Any]:
     """Append missing v4 archive rows to one completed import without rewriting rows."""
     if not BOARD_ID.fullmatch(board_id):
         raise ValueError("board_id must match [A-Za-z0-9._-]+")
+    if scrub_profile not in {"strict", "internal"}:
+        raise ValueError("scrub_profile must be 'strict' or 'internal'")
     archive_file = Path(os.path.abspath(os.fspath(archive_file)))
     _require_regular(archive_file, "archive source")
     if archive_file.name != "archive.json":
@@ -1154,6 +1174,7 @@ def backfill_archive(
             existing[identifier] = item
         appended: list[dict[str, Any]] = []
         duplicate_rows = 0
+        allow_counts: dict[str, int] = {}
         input_keys: set[str] = set()
         for raw in rows:
             rid = archive_record_key(raw)
@@ -1165,6 +1186,8 @@ def backfill_archive(
                 record_type="archive",
                 record_id=rid,
                 quarantine=[],
+                scrub_profile=scrub_profile,
+                allow_counts=allow_counts,
             )
             mapped = map_archive_memory(cleaned)
             if rid in existing:
@@ -1188,6 +1211,7 @@ def backfill_archive(
         "board_id": board_id,
         "inserted": len(appended),
         "already_present": duplicate_rows,
+        "posix_home_allowed_count": int(allow_counts.get("posix_home", 0)),
         "record_keys": [item["memory_id"] for item in appended],
     }
 

@@ -69,6 +69,7 @@ onboard-personal-import status /path/to/private-import-run \
 pursers-personal-import archive-backfill /path/to/project/.agent-mem/archive.json \
   /path/to/existing-central-data \
   --board-id personal-board \
+  --scrub-profile internal \
   --confirm-central-stopped
 
 onboard-personal-import decide /path/to/private-import-run \
@@ -86,6 +87,9 @@ onboard-personal-import rollback /path/to/private-import-run \
 `archive-backfill` is for boards imported before `archive.json` became part of
 the import domain. It appends deterministic archived-memory records only;
 rerunning it does not duplicate rows and it never rewrites existing memories.
+The default `strict` scrub profile rejects every detected violation. Use
+`--scrub-profile internal` only when home paths must be retained byte-exact;
+all non-`posix_home` violations remain fail-closed.
 
 When import reports `review_required`, use the private files under the owned
 run directory:

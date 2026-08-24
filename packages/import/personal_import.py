@@ -1694,6 +1694,7 @@ def archive_backfill(
     *,
     board_id: str,
     confirm_central_stopped: bool,
+    scrub_profile: str = "strict",
 ) -> dict[str, Any]:
     """Backfill v4 archive.json rows into a completed Personal import."""
     if not confirm_central_stopped:
@@ -1715,7 +1716,12 @@ def archive_backfill(
         central_data_root, "Central data root", private=True
     )
     with _exclusive_lock(_destination_lock_path(destination), "Central import"):
-        return native_backfill_archive(archive_file, destination, board_id)
+        return native_backfill_archive(
+            archive_file,
+            destination,
+            board_id,
+            scrub_profile=scrub_profile,
+        )
 
 
 def _start_install(
@@ -2501,6 +2507,9 @@ def _parser() -> argparse.ArgumentParser:
     backfill.add_argument("archive_file", type=Path)
     backfill.add_argument("central_data_root", type=Path)
     backfill.add_argument("--board-id", required=True)
+    backfill.add_argument(
+        "--scrub-profile", choices=("strict", "internal"), default="strict"
+    )
     backfill.add_argument("--confirm-central-stopped", action="store_true")
     return parser
 
@@ -2525,6 +2534,7 @@ def main() -> None:
                 args.central_data_root,
                 board_id=args.board_id,
                 confirm_central_stopped=args.confirm_central_stopped,
+                scrub_profile=args.scrub_profile,
             )
             print(json.dumps(result, sort_keys=True))
             return
