@@ -130,6 +130,8 @@ FALLBACK_AGENTS = [
     {
         "id": "AI-DEMO-1",
         "project": None,
+        "current_ticket_id": None,
+        "duplicate_name": False,
         "name": "agent-alpha",
         "status": "working",
         "role": "builder",
@@ -143,6 +145,8 @@ FALLBACK_AGENTS = [
     {
         "id": "AI-DEMO-2",
         "project": None,
+        "current_ticket_id": None,
+        "duplicate_name": False,
         "name": "reviewer-beta",
         "status": "idle",
         "role": "reviewer",
@@ -629,10 +633,9 @@ class LiveDashboard:
             ]
         tickets = listed.get("tickets", [])
         current_tickets_by_agent_id: dict[str, dict[str, Any]] = {}
+        recent_tickets_by_agent_id: dict[str, dict[str, Any]] = {}
         for ticket in tickets:
             if not isinstance(ticket, dict):
-                continue
-            if ticket.get("status") in {"closed", "canceled", "terminated"}:
                 continue
             holder_ids = {
                 ticket.get("claimed_by_agent_id"),
@@ -640,11 +643,32 @@ class LiveDashboard:
             }
             for agent_id in holder_ids - {None, ""}:
                 key = str(agent_id)
-                current = current_tickets_by_agent_id.get(key)
-                if current is None or self._ticket_claimed_sort_key(
-                    ticket
-                ) > self._ticket_claimed_sort_key(current):
-                    current_tickets_by_agent_id[key] = ticket
+                if ticket.get("status") not in {
+                    "closed",
+                    "rejected",
+                    "canceled",
+                    "terminated",
+                }:
+                    current = current_tickets_by_agent_id.get(key)
+                    if current is None or self._ticket_claimed_sort_key(
+                        ticket
+                    ) > self._ticket_claimed_sort_key(current):
+                        current_tickets_by_agent_id[key] = ticket
+
+            touched_ids = holder_ids | {
+                ticket.get("last_claimed_by_agent_id"),
+                ticket.get("submitted_by_agent_id"),
+                ticket.get("reviewed_by_agent_id"),
+                ticket.get("created_by_agent_id"),
+            }
+            recency = self._ticket_touched_sort_key(ticket)
+            for agent_id in touched_ids - {None, ""}:
+                key = str(agent_id)
+                previous = recent_tickets_by_agent_id.get(key)
+                if previous is None or recency > self._ticket_touched_sort_key(
+                    previous
+                ):
+                    recent_tickets_by_agent_id[key] = ticket
         pinned = briefing.get("pinned_digest", [])
         if not isinstance(pinned, list):
             pinned = []
@@ -662,34 +686,6 @@ class LiveDashboard:
             ),
             reverse=True,
         )
-        agent_projects: dict[str, tuple[str, str]] = {}
-        for ticket in tickets:
-            if ticket.get("status") not in {
-                "open",
-                "claimed",
-                "in_progress",
-                "creating_report",
-                "rejected",
-            }:
-                continue
-            project = self._project_from_target(ticket.get("target_url"))
-            if project is None:
-                continue
-            holder = ticket.get("claimed_by_agent_id") or ticket.get(
-                "assigned_to_agent_id"
-            )
-            if not isinstance(holder, str) or not holder:
-                continue
-            recency = str(
-                ticket.get("claimed_at")
-                or ticket.get("updated_at")
-                or ticket.get("created_at")
-                or ""
-            )
-            previous = agent_projects.get(holder)
-            if previous is None or recency >= previous[0]:
-                agent_projects[holder] = (recency, project)
-
         agent_views = [
             self._agent_view(
                 item,
@@ -698,8 +694,18 @@ class LiveDashboard:
             for item in agents
         ]
         for agent in agent_views:
-            held = agent_projects.get(str(agent.get("id") or ""))
-            agent["project"] = held[1] if held is not None else None
+            agent_id = str(agent.get("id") or "")
+            current = current_tickets_by_agent_id.get(agent_id)
+            project_ticket = (
+                current
+                if current is not None
+                else recent_tickets_by_agent_id.get(agent_id)
+            )
+            agent["project"] = self._project_from_target(
+                project_ticket.get("target_url")
+                if project_ticket is not None
+                else None
+            )
         self._flag_duplicate_agent_names(agent_views)
         agents_live = sum(not bool(agent["stale"]) for agent in agent_views)
         projection = {
@@ -814,6 +820,20 @@ class LiveDashboard:
             str(ticket.get("ticket_id") or ""),
         )
 
+    @staticmethod
+    def _ticket_touched_sort_key(ticket: dict[str, Any]) -> tuple[str, ...]:
+        timestamps = [
+            str(ticket.get(field) or "")
+            for field in (
+                "updated_at",
+                "closed_at",
+                "submitted_at",
+                "claimed_at",
+                "created_at",
+            )
+        ]
+        return (max(timestamps), str(ticket.get("ticket_id") or ""))
+
     @classmethod
     def _agent_view(
         cls,
@@ -833,7 +853,13 @@ class LiveDashboard:
             "lease_expires_at": agent.get("lease_expires_at"),
             "stale": stale,
             "duplicate": False,
+            "duplicate_name": False,
             "suggested_name": None,
+            "current_ticket_id": (
+                str(current_ticket["ticket_id"])
+                if current_ticket is not None and current_ticket.get("ticket_id")
+                else None
+            ),
             "current_ticket": (
                 cls._ticket_view(current_ticket)
                 if current_ticket is not None
@@ -843,6 +869,21 @@ class LiveDashboard:
 
     @staticmethod
     def _flag_duplicate_agent_names(agents: list[dict[str, Any]]) -> None:
+        ids_by_name: dict[str, set[str]] = {}
+        for agent in agents:
+            agent_id = agent.get("id")
+            if agent_id in {None, ""}:
+                continue
+            name = str(agent.get("name", "unknown-agent"))
+            ids_by_name.setdefault(name, set()).add(str(agent_id))
+
+        for agent in agents:
+            agent_id = agent.get("id")
+            name = str(agent.get("name", "unknown-agent"))
+            agent["duplicate_name"] = (
+                agent_id not in {None, ""} and len(ids_by_name.get(name, set())) >= 2
+            )
+
         active_by_name: dict[str, list[dict[str, Any]]] = {}
         for agent in agents:
             if agent.get("stale") or str(agent.get("status", "")).lower() != "active":

@@ -521,6 +521,8 @@ async def test_projection_flags_only_duplicate_active_agent_names() -> None:
     second = projected["AI-active-2"]
     assert first["duplicate"] is True
     assert second["duplicate"] is True
+    assert first["duplicate_name"] is True
+    assert second["duplicate_name"] is True
     assert first["suggested_name"] == (
         "worker-" + hashlib.sha256(b"AI-active-1").hexdigest()[:6]
     )
@@ -529,12 +531,26 @@ async def test_projection_flags_only_duplicate_active_agent_names() -> None:
     )
     assert first["suggested_name"] != second["suggested_name"]
     assert projected["AI-idle"]["duplicate"] is False
+    assert projected["AI-idle"]["duplicate_name"] is True
     assert projected["AI-idle"]["suggested_name"] is None
     assert projected["AI-solo"]["duplicate"] is False
+    assert projected["AI-solo"]["duplicate_name"] is False
     assert projected["AI-solo"]["suggested_name"] is None
     assert projected["AI-stale"]["stale"] is True
     assert projected["AI-stale"]["duplicate"] is False
+    assert projected["AI-stale"]["duplicate_name"] is True
     assert projected["AI-stale"]["suggested_name"] is None
+
+
+def test_duplicate_name_requires_distinct_agent_ids() -> None:
+    agents = [
+        {"id": "AI-same", "name": "reused", "status": "idle", "stale": False},
+        {"id": "AI-same", "name": "reused", "status": "idle", "stale": False},
+    ]
+
+    LiveDashboard._flag_duplicate_agent_names(agents)
+
+    assert all(agent["duplicate_name"] is False for agent in agents)
 
 
 def test_agent_stale_threshold_is_sixty_minutes() -> None:
@@ -558,6 +574,8 @@ async def test_projection_adds_projects_without_extra_central_reads() -> None:
                 "agents": [
                     {"agent_id": "AI-held", "agent_name": "held"},
                     {"agent_id": "AI-assigned", "agent_name": "assigned"},
+                    {"agent_id": "AI-fallback", "agent_name": "fallback"},
+                    {"agent_id": "AI-missing", "agent_name": "missing"},
                     {"agent_id": "AI-idle", "agent_name": "idle"},
                 ],
                 "latest_seq": 8,
@@ -589,11 +607,19 @@ async def test_projection_adds_projects_without_extra_central_reads() -> None:
                 },
                 {
                     "ticket_id": "TK-no-target",
-                    "status": "open",
+                    "status": "claimed",
+                    "claimed_by_agent_id": "AI-missing",
                     "target_url": None,
                 },
+                {
+                    "ticket_id": "TK-fallback-history",
+                    "status": "closed",
+                    "claimed_by_agent_id": "AI-fallback",
+                    "closed_at": "2026-08-24T10:02:00Z",
+                    "target_url": "Historical/docs",
+                },
             ]
-            return {"tickets": tickets, "total_matching": 4, "latest_seq": 8}
+            return {"tickets": tickets, "total_matching": 5, "latest_seq": 8}
 
         async def board_get_briefing(self, **_kwargs: Any) -> dict[str, Any]:
             calls.append("board_get_briefing")
@@ -624,10 +650,17 @@ async def test_projection_adds_projects_without_extra_central_reads() -> None:
     agents = {agent["id"]: agent for agent in state._projection["agents"]}
     assert agents["AI-held"]["project"] == "pursers"
     assert agents["AI-assigned"]["project"] == "other-project"
+    assert agents["AI-fallback"]["project"] == "historical"
+    assert agents["AI-fallback"]["current_ticket_id"] is None
+    assert agents["AI-missing"]["project"] is None
+    assert agents["AI-missing"]["current_ticket_id"] == "TK-no-target"
     assert agents["AI-idle"]["project"] is None
+    assert agents["AI-idle"]["current_ticket_id"] is None
     fallback = state._fallback_snapshot()
     assert all("project" in ticket for ticket in fallback["tickets"])
     assert all("project" in agent for agent in fallback["agents"])
+    assert all("current_ticket_id" in agent for agent in fallback["agents"])
+    assert all("duplicate_name" in agent for agent in fallback["agents"])
 
 
 @pytest.mark.anyio
@@ -1082,8 +1115,11 @@ async def test_projection_joins_agents_to_their_current_ticket() -> None:
     assert set(projected_agents["AI-WORKING"]) == {
         "id", "name", "status", "role", "focus", "platform", "idle_minutes",
         "last_activity_at", "lease_expires_at", "stale", "duplicate", "suggested_name",
-        "current_ticket", "project",
+        "duplicate_name", "current_ticket_id", "current_ticket", "project",
     }
+    assert projected_agents["AI-WORKING"]["current_ticket_id"] == "TK-NEWER"
     assert projected_agents["AI-WORKING"]["current_ticket"] == state._ticket_view(tickets[1])
+    assert projected_agents["AI-ASSIGNED"]["current_ticket_id"] == "TK-ASSIGNED"
     assert projected_agents["AI-ASSIGNED"]["current_ticket"] == state._ticket_view(tickets[3])
+    assert projected_agents["AI-IDLE"]["current_ticket_id"] is None
     assert projected_agents["AI-IDLE"]["current_ticket"] is None
