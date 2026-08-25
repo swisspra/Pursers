@@ -8,7 +8,7 @@ import time
 import unittest
 from contextlib import AbstractAsyncContextManager
 from pathlib import Path
-from types import TracebackType
+from types import SimpleNamespace, TracebackType
 from typing import Any
 from unittest.mock import patch
 
@@ -150,6 +150,101 @@ class ForbiddenListenClient:
     def listen(self, **_arguments: Any) -> AbstractAsyncContextManager[Any]:
         self.listen_calls += 1
         raise AssertionError("poll mode must not call listen")
+
+
+class StubSubscription:
+    """Offline subscription stream whose values are wake cues, not events."""
+
+    def __init__(self, cues: list[object], honored_uri: str) -> None:
+        self._cues = iter(cues)
+        self.yielded = 0
+        self.honored = SimpleNamespace(resource_subscriptions=[honored_uri])
+
+    def __aiter__(self) -> StubSubscription:
+        return self
+
+    async def __anext__(self) -> object:
+        try:
+            cue = next(self._cues)
+        except StopIteration:
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+        self.yielded += 1
+        return cue
+
+
+class StubListenContext(AbstractAsyncContextManager[StubSubscription]):
+    def __init__(self, subscription: StubSubscription) -> None:
+        self.subscription = subscription
+
+    async def __aenter__(self) -> StubSubscription:
+        return self.subscription
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        return None
+
+
+class StubListenClient:
+    def __init__(self, subscription: StubSubscription) -> None:
+        self.subscription = subscription
+        self.calls: list[dict[str, object]] = []
+
+    def listen(self, **arguments: object) -> StubListenContext:
+        self.calls.append(arguments)
+        return StubListenContext(self.subscription)
+
+
+class ScriptedBoardClient:
+    """Small BoardClient stub for deterministic wait-path assertions."""
+
+    def __init__(
+        self,
+        catchups: list[tuple[list[dict[str, object]], int]],
+        *,
+        tickets: list[dict[str, object]] | None = None,
+        transport: object | None = None,
+    ) -> None:
+        self.identity = SimpleNamespace(principal_id="PR-scripted")
+        self._catchups = list(catchups)
+        self._last_cursor = 0
+        self._tickets = list(tickets or [])
+        self._client = transport
+        self.catchup_calls = 0
+        self.ticket_list_calls = 0
+
+    async def board_catchup(self, **arguments: object) -> dict[str, object]:
+        self.catchup_calls += 1
+        if self._catchups:
+            events, self._last_cursor = self._catchups.pop(0)
+        else:
+            events = []
+            self._last_cursor = int(arguments.get("cursor", self._last_cursor))
+        return {
+            "events": events,
+            "next_cursor": self._last_cursor,
+            "has_more": False,
+            "resync_required": False,
+        }
+
+    async def ticket_list(self, **_arguments: object) -> dict[str, object]:
+        self.ticket_list_calls += 1
+        return {"tickets": self._tickets}
+
+
+class ManualClock:
+    def __init__(self) -> None:
+        self.now = 100.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+    async def sleep(self, delay: float) -> None:
+        self.now += delay
 
 
 class PushWaitTests(unittest.IsolatedAsyncioTestCase):
@@ -324,6 +419,133 @@ class PushWaitTests(unittest.IsolatedAsyncioTestCase):
                     for event in result["events"]
                 )
             )
+
+    async def test_push_subscribes_only_to_stable_board_journal_uri(self) -> None:
+        journal_uri = f"board://{wait_server.BOARD_ID}/journal"
+        subscription = StubSubscription(
+            [
+                {"uri": "board://pursers/ticket/TK-cue-only"},
+                {"uri": "board://pursers/ticket/TK-cue-only"},
+                {"uri": "board://pursers/ticket/TK-cue-only"},
+            ],
+            journal_uri,
+        )
+        transport = StubListenClient(subscription)
+        authoritative = [
+            {"seq": 51, "kind": "ticket_created", "ticket_id": "TK-one"},
+            {"seq": 52, "kind": "ticket_created", "ticket_id": "TK-two"},
+        ]
+        client = ScriptedBoardClient(
+            [([], 50), (authoritative, 52)], transport=transport
+        )
+
+        with patch.object(wait_server, "WAIT_MODE", "push"):
+            result = await wait_server._wait_for_work(
+                client,
+                since_seq=50,
+                timeout_s=2,
+                only_mine=False,
+                project=None,
+            )
+
+        self.assertEqual(
+            transport.calls,
+            [{"resource_subscriptions": [journal_uri]}],
+        )
+        self.assertNotIn("board://pursers/ticket/TK-cue-only", str(transport.calls))
+        self.assertEqual(result["events"], authoritative)
+        self.assertEqual(result["new_seq"], 52)
+        self.assertEqual(
+            [event["ticket_id"] for event in result["events"]],
+            ["TK-one", "TK-two"],
+        )
+        self.assertEqual(subscription.yielded, 1)
+        self.assertEqual(client.catchup_calls, 2)
+
+    async def test_push_backlog_scan_precedes_subscription(self) -> None:
+        ticket = {
+            "ticket_id": "TK-before-cursor",
+            "status": "open",
+            "target_url": "pursers/tools/wait-bridge",
+            "created_by_agent_id": "AI-other",
+            "claimed_by_agent_id": None,
+            "assigned_to_agent_id": None,
+        }
+        forbidden = ForbiddenListenClient()
+        client = ScriptedBoardClient(
+            [([], 80)], tickets=[ticket], transport=forbidden
+        )
+
+        with patch.object(wait_server, "WAIT_MODE", "push"):
+            result = await wait_server._wait_for_work(
+                client,
+                since_seq=80,
+                timeout_s=2,
+                only_mine=True,
+                project="pursers",
+            )
+
+        self.assertEqual(client.ticket_list_calls, 1)
+        self.assertEqual(forbidden.listen_calls, 0)
+        self.assertEqual(
+            result["events"],
+            [
+                {
+                    "kind": "ticket_backlog",
+                    "source": "backlog_scan",
+                    "ticket_id": "TK-before-cursor",
+                    "status": "open",
+                }
+            ],
+        )
+        self.assertEqual(result["new_seq"], 80)
+        self.assertFalse(result["timed_out"])
+
+    async def test_subscription_failure_is_byte_identical_to_poll_mode(self) -> None:
+        event = {"seq": 91, "kind": "ticket_created", "ticket_id": "TK-fallback"}
+
+        async def run(mode: str) -> tuple[dict[str, object], int]:
+            clock = ManualClock()
+            attempted = asyncio.Event()
+            transport: object
+            if mode == "push":
+                transport = UnavailableListenClient(attempted)
+            else:
+                transport = ForbiddenListenClient()
+            client = ScriptedBoardClient(
+                [([], 90), ([event], 91)], transport=transport
+            )
+            with (
+                patch.object(wait_server, "WAIT_MODE", mode),
+                patch.object(wait_server, "DEFAULT_POLL_INTERVAL_S", 0.25),
+                patch.object(wait_server.time, "monotonic", clock.monotonic),
+                patch.object(wait_server.asyncio, "sleep", clock.sleep),
+            ):
+                result = await wait_server._wait_for_work(
+                    client,
+                    since_seq=90,
+                    timeout_s=2,
+                    only_mine=False,
+                    project=None,
+                )
+            return result, getattr(transport, "listen_calls")
+
+        push_result, push_listens = await run("push")
+        poll_result, poll_listens = await run("poll")
+
+        self.assertEqual(push_result, poll_result)
+        self.assertEqual(
+            push_result,
+            {
+                "new_seq": 91,
+                "events": [event],
+                "waited_s": 0.25,
+                "timed_out": False,
+                "resynced": False,
+            },
+        )
+        self.assertEqual(push_listens, 1)
+        self.assertEqual(poll_listens, 0)
 
 
 if __name__ == "__main__":
