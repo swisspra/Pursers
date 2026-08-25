@@ -1,12 +1,16 @@
 name: publish-pypi
 
-# Publishes the two remaining Pursers distributions to PyPI via Trusted
-# Publishing (OIDC, no API token). Trigger manually from the Actions tab.
+# Publishes all Pursers distributions to PyPI via Trusted Publishing
+# (OIDC, no API token). Trigger manually from the Actions tab.
 #
-# PyPI allows one pending publisher per (repo, workflow, environment) tuple,
-# so each project name gets its own job + environment:
-#   pursers-personal-import -> environment: pypi
-#   pursers-wait-bridge     -> environment: pypi-bridge
+# Environment mapping (per-project trusted publishers on PyPI):
+#   pypi        -> pursers, pursers-central, pursers-client,
+#                  pursers-personal, pursers-personal-import
+#   pypi-bridge -> pursers-wait-bridge
+# (pending publishers required distinct environments per project; regular
+#  per-project publishers share the `pypi` environment.)
+# skip-existing: already-published versions are skipped, so a run only
+# uploads distributions whose version was bumped.
 
 on:
   workflow_dispatch:
@@ -15,7 +19,7 @@ permissions:
   contents: read
 
 jobs:
-  publish-import:
+  publish-main:
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
@@ -27,9 +31,13 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Build pursers-personal-import wheel
+      - name: Build the five main-environment wheels
         run: |
           python -m pip install --upgrade pip build
+          python -m build --wheel --outdir dist packages/pursers
+          python -m build --wheel --outdir dist packages/central
+          python -m build --wheel --outdir dist packages/client
+          python -m build --wheel --outdir dist packages/personal
           python -m build --wheel --outdir dist packages/import
           ls -l dist
 
