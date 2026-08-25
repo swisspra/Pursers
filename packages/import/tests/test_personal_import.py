@@ -195,16 +195,23 @@ def test_archive_backfill_twice_is_idempotent_and_keeps_existing_rows(
     assert len(after_first) == len(before) + 1
 
 
-def test_archive_backfill_internal_allows_home_paths_byte_exact_and_is_idempotent(
+def test_archive_backfill_internal_counts_home_paths_per_record_byte_exact(
     tmp_path: Path,
 ) -> None:
     source, _stable, destination, _run, state = start(tmp_path)
     assert state["phase"] == "installed"
-    content = "workspace=/Users/private-account/project\n"
+    records = [
+        {
+            "id": "home-path-a",
+            "content": "workspace=/Users/synthetic-a/project\n",
+        },
+        {
+            "id": "home-path-b",
+            "content": "workspace=/Users/synthetic-b/project\n",
+        },
+    ]
     archive_file = source / "archive.json"
-    archive_file.write_text(
-        json.dumps([{"id": "home-path", "content": content}]), encoding="utf-8"
-    )
+    archive_file.write_text(json.dumps(records), encoding="utf-8")
 
     with pytest.raises(ValueError, match="posix_home"):
         archive_backfill(
@@ -230,19 +237,21 @@ def test_archive_backfill_internal_allows_home_paths_byte_exact_and_is_idempoten
     )
     store = TransactionalSQLiteStore(destination)
     board = store.load(board_path(store, BOARD_ID), dict)
-    inserted = next(
-        item
+    inserted = {
+        item["archive_source_id"]: item
         for item in board["memories"]
-        if item.get("archive_source_id") == "home-path"
-    )
+        if item.get("archive_source_id") in {"home-path-a", "home-path-b"}
+    }
 
-    assert first["inserted"] == 1
-    assert first["posix_home_allowed_count"] == 1
-    assert inserted["content"] == content
-    assert inserted["legacy_record"]["content"] == content
+    assert first["inserted"] == 2
+    assert first["posix_home_allowed_count"] == 2
+    assert set(inserted) == {"home-path-a", "home-path-b"}
+    for raw in records:
+        assert inserted[raw["id"]]["content"] == raw["content"]
+        assert inserted[raw["id"]]["legacy_record"]["content"] == raw["content"]
     assert second["status"] == "noop"
-    assert second["already_present"] == 1
-    assert second["posix_home_allowed_count"] == 1
+    assert second["already_present"] == 2
+    assert second["posix_home_allowed_count"] == 2
 
 
 @pytest.mark.parametrize("scrub_profile", ["strict", "internal"])
@@ -258,12 +267,14 @@ def test_archive_backfill_rejects_secrets_under_every_profile(
             [
                 {
                     "id": "secret",
-                    "content": "Bearer ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+                    "content": "Bearer TESTTOKEN_123456",
                 }
             ]
         ),
         encoding="utf-8",
     )
+    store = TransactionalSQLiteStore(destination)
+    before = store.load(board_path(store, BOARD_ID), dict)
 
     with pytest.raises(ValueError, match="bearer_token"):
         archive_backfill(
@@ -273,6 +284,7 @@ def test_archive_backfill_rejects_secrets_under_every_profile(
             confirm_central_stopped=True,
             scrub_profile=scrub_profile,
         )
+    assert store.load(board_path(store, BOARD_ID), dict) == before
 
 
 def test_archive_backfill_explicit_secret_redaction_is_provenanced_and_idempotent(
@@ -283,13 +295,18 @@ def test_archive_backfill_explicit_secret_redaction_is_provenanced_and_idempoten
     raw = {
         "id": "redacted-secret",
         "content": (
-            "workspace=/Users/private-account/project; "
-            "authorization: Bearer ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+            "workspace=/Users/synthetic-account/project; "
+            "authorization: Bearer TESTTOKEN_123456"
         ),
     }
+    clean_raw = {
+        "id": "neighboring-clean-record",
+        "content": "This synthetic record has no secret material.",
+    }
     record_key = archive_record_key(raw)
+    clean_record_key = archive_record_key(clean_raw)
     archive_file = source / "archive.json"
-    archive_file.write_text(json.dumps([raw]), encoding="utf-8")
+    archive_file.write_text(json.dumps([raw, clean_raw]), encoding="utf-8")
 
     first = archive_backfill(
         archive_file,
@@ -299,6 +316,8 @@ def test_archive_backfill_explicit_secret_redaction_is_provenanced_and_idempoten
         scrub_profile="internal",
         redact_secrets_records=[record_key],
     )
+    store = TransactionalSQLiteStore(destination)
+    board_after_first = store.load(board_path(store, BOARD_ID), dict)
     second = archive_backfill(
         archive_file,
         destination,
@@ -307,22 +326,34 @@ def test_archive_backfill_explicit_secret_redaction_is_provenanced_and_idempoten
         scrub_profile="internal",
         redact_secrets_records=[record_key],
     )
-    store = TransactionalSQLiteStore(destination)
-    board = store.load(board_path(store, BOARD_ID), dict)
+    board_after_second = store.load(board_path(store, BOARD_ID), dict)
     inserted = next(
-        item for item in board["memories"] if item["memory_id"] == record_key
+        item
+        for item in board_after_second["memories"]
+        if item["memory_id"] == record_key
+    )
+    clean_inserted = next(
+        item
+        for item in board_after_second["memories"]
+        if item["memory_id"] == clean_record_key
     )
 
     assert inserted["content"] == (
-        "workspace=/Users/private-account/project; "
+        "workspace=/Users/synthetic-account/project; "
         "authorization: Bearer [REDACTED:BEARER_TOKEN]"
     )
+    assert inserted["content"].count("[REDACTED:BEARER_TOKEN]") == 1
     assert inserted["redacted_rules"] == ["bearer_token"]
+    assert clean_inserted["content"] == clean_raw["content"]
+    assert "redacted_rules" not in clean_inserted
+    assert first["inserted"] == 2
     assert first["posix_home_allowed_count"] == 1
     assert first["redacted_records"] == [record_key]
     assert second["status"] == "noop"
-    assert second["already_present"] == 1
+    assert second["inserted"] == 0
+    assert second["already_present"] == 2
     assert second["redacted_records"] == [record_key]
+    assert board_after_second == board_after_first
 
 
 def test_archive_backfill_rejects_listed_clean_record(tmp_path: Path) -> None:
@@ -331,6 +362,8 @@ def test_archive_backfill_rejects_listed_clean_record(tmp_path: Path) -> None:
     raw = {"id": "clean-record", "content": "clean archive content"}
     archive_file = source / "archive.json"
     archive_file.write_text(json.dumps([raw]), encoding="utf-8")
+    store = TransactionalSQLiteStore(destination)
+    before = store.load(board_path(store, BOARD_ID), dict)
 
     with pytest.raises(ValueError, match="has no secret violations"):
         archive_backfill(
@@ -340,6 +373,32 @@ def test_archive_backfill_rejects_listed_clean_record(tmp_path: Path) -> None:
             confirm_central_stopped=True,
             redact_secrets_records=[archive_record_key(raw)],
         )
+    assert store.load(board_path(store, BOARD_ID), dict) == before
+
+
+def test_archive_backfill_rejects_unknown_redaction_record_key(
+    tmp_path: Path,
+) -> None:
+    source, _stable, destination, _run, state = start(tmp_path)
+    assert state["phase"] == "installed"
+    raw = {"id": "known-clean-record", "content": "clean archive content"}
+    archive_file = source / "archive.json"
+    archive_file.write_text(json.dumps([raw]), encoding="utf-8")
+    store = TransactionalSQLiteStore(destination)
+    before = store.load(board_path(store, BOARD_ID), dict)
+
+    with pytest.raises(
+        ValueError,
+        match="redact-secrets record keys not found: ARCHIVE-typo",
+    ):
+        archive_backfill(
+            archive_file,
+            destination,
+            board_id=BOARD_ID,
+            confirm_central_stopped=True,
+            redact_secrets_records=["ARCHIVE-typo"],
+        )
+    assert store.load(board_path(store, BOARD_ID), dict) == before
 
 
 def test_archive_backfill_cli_threads_scrub_profile(
