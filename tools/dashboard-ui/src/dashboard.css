@@ -342,6 +342,7 @@ main[aria-busy="true"] { opacity: 0.72; }
 .pill[data-tone="live"] { color: var(--pill-submitted); }
 .pill[data-tone="attention"] { color: var(--pill-attention); }
 .pill[data-tone="warning"] { color: var(--pill-warning); }
+.pill[data-empty="true"] { color: var(--text-soft); }
 .lease-countdown { color: var(--warning); }
 .bad { color: var(--danger); font-weight: 700; }
 

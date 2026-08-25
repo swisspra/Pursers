@@ -23,8 +23,10 @@ type Agent = {
   stale: boolean;
   project?: string | null;
   duplicate?: boolean;
+  duplicate_name?: boolean;
   suggested_name?: string | null;
   current_ticket?: Ticket | null;
+  current_ticket_id?: string | null;
 };
 type Ticket = {
   id: string;
@@ -181,8 +183,10 @@ function decodeAgent(value: unknown): Agent | null {
     stale: boolean(value.stale),
     project: optionalText(value.project),
     duplicate: value.duplicate === true,
+    duplicate_name: value.duplicate_name === true,
     suggested_name: optionalText(value.suggested_name),
     current_ticket: record(value.current_ticket) ? decodeTicket(value.current_ticket) : null,
+    current_ticket_id: optionalText(value.current_ticket_id),
   };
 }
 
@@ -353,6 +357,20 @@ function emptyState(title: string, detail: string): HTMLElement {
 function pill(label: string, tone?: string): HTMLElement {
   const item = element("span", "pill", label);
   if (tone) item.dataset.tone = tone;
+  return item;
+}
+
+function shortTicketId(value: string | null): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  const body = trimmed.startsWith("TK-") ? trimmed.slice(3) : trimmed;
+  return `TK-${body.slice(0, 8)}`;
+}
+
+function agentField(label: string, value: string | null): HTMLElement {
+  const item = pill(`${label} ${value ?? "\u2014"}`);
+  if (value === null) item.dataset.empty = "true";
   return item;
 }
 
@@ -626,13 +644,19 @@ function renderAgents(data: Snapshot): void {
     const states = element("div", "agent-state-badges");
     states.append(pill(agent.status, toneForStatus(agent.status)));
     if (agent.stale) states.append(pill("stale"));
+    if (agent.duplicate_name === true) {
+      const marker = pill("duplicate name", "warning");
+      marker.title = "duplicate display name";
+      states.append(marker);
+    }
     heading.append(identity, states);
     card.append(heading);
     if (agent.focus) card.append(element("p", "muted", agent.focus));
     const meta = element("div", "meta-row");
     if (agent.role) meta.append(pill(agent.role));
     if (agent.platform) meta.append(pill(agent.platform));
-    if (agent.project) meta.append(pill(agent.project));
+    meta.append(agentField("project", agent.project ?? null));
+    meta.append(agentField("ticket", shortTicketId(agent.current_ticket_id ?? agent.current_ticket?.id ?? null)));
     meta.append(pill(`${Math.round(agent.idle_minutes)}m idle`));
     card.append(meta);
     if (agent.duplicate) {
