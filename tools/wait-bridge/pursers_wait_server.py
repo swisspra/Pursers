@@ -55,6 +55,8 @@ from mcp.server.mcpserver import Context, MCPServer
 from agent_naming import resolve_agent_name
 from backlog import backlog_events, ticket_is_relevant
 
+VERSION = "0.1.0a1"
+
 # --- config from env -------------------------------------------------------
 
 CENTRAL_URL = os.environ.get("ONBOARD_CENTRAL_URL", "https://127.0.0.1:8766/mcp")
@@ -66,10 +68,6 @@ AGENT_NAME = resolve_agent_name(
 )
 _RAW_WAIT_MODE = os.environ.get("PURSERS_WAIT_MODE", "poll").strip().lower()
 WAIT_MODE = _RAW_WAIT_MODE if _RAW_WAIT_MODE in {"poll", "push"} else "poll"
-
-if not CENTRAL_TOKEN:
-    print("FATAL: ONBOARD_CENTRAL_TOKEN is not set", file=sys.stderr)
-    raise SystemExit(1)
 
 # --- wait policy (v4-parity constants; see a2a_wait.py) --------------------
 
@@ -509,5 +507,15 @@ async def _wait_for_work(
     }
 
 
-if __name__ == "__main__":
+def main() -> None:
+    if "--version" in sys.argv[1:]:
+        print(VERSION)
+        return
+    if not CENTRAL_TOKEN:
+        print("FATAL: ONBOARD_CENTRAL_TOKEN is not set", file=sys.stderr)
+        raise SystemExit(1)
     mcp.run(transport="stdio")
+
+
+if __name__ == "__main__":
+    main()
