@@ -17,7 +17,7 @@ pip install pursers
 pursers-personal --version
 ```
 
-Connect your first MCP host with the [English](docs-local/manual-en.html) or [Thai](docs-local/manual-th.html) getting-started manual; each covers profile creation, host configuration, stable agent identity, and the initial connection check without putting credentials in shared configuration.
+Getting-started manuals (English and Thai) cover profile creation, host configuration, stable agent identity, and the initial connection check without putting credentials in shared configuration.
 
 ## What it does
 
