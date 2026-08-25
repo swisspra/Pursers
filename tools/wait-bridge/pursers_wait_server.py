@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
-"""Poll-based "wait for work" MCP bridge for the Pursers / On Board v5 central.
+"""Wait-for-work MCP bridge for the Pursers / On Board v5 central.
 
 WHY THIS EXISTS
-    The live central (0.1.0a6, dev-auth) does not implement MCP v2
-    subscriptions ("subscriptions/listen"), so a listener cannot get pushed a
-    wakeup when a peer creates or reassigns a ticket. This bridge replicates
-    v4's blocking a2a_wait primitive (see On_Board-local/a2a_wait.py) purely
-    with short polling HTTP calls to the central: `board_catchup` for events
-    and `lease_renew` as a liveness heartbeat.
+    This bridge replicates v4's blocking a2a_wait primitive. Polling remains
+    the default and compatibility fallback. A dark-launch push mode can use
+    MCP v2 subscriptions/listen only as a wake signal, then refetch the same
+    journal/backlog state as polling so notifications never become data.
 
 TRANSPORT
     This server MUST run over stdio (the host spawns it as a subprocess).
@@ -66,6 +64,8 @@ BASE_AGENT_NAME = os.environ.get("ONBOARD_AGENT_NAME", "pursers-wait-bridge")
 AGENT_NAME = resolve_agent_name(
     BASE_AGENT_NAME, os.environ.get("ONBOARD_AGENT_INSTANCE")
 )
+_RAW_WAIT_MODE = os.environ.get("PURSERS_WAIT_MODE", "poll").strip().lower()
+WAIT_MODE = _RAW_WAIT_MODE if _RAW_WAIT_MODE in {"poll", "push"} else "poll"
 
 if not CENTRAL_TOKEN:
     print("FATAL: ONBOARD_CENTRAL_TOKEN is not set", file=sys.stderr)
@@ -95,6 +95,10 @@ def clamp_timeout(timeout_s: Any) -> int:
 def _log(msg: str) -> None:
     # stderr only -- stdout is the stdio JSON-RPC channel.
     print(f"[a2a_wait] {msg}", file=sys.stderr, flush=True)
+
+
+if _RAW_WAIT_MODE not in {"poll", "push"}:
+    _log(f"invalid PURSERS_WAIT_MODE={_RAW_WAIT_MODE!r}; using poll")
 
 
 @lru_cache(maxsize=1_024)
@@ -398,7 +402,82 @@ async def _wait_for_work(
             "resynced": resynced,
         }
 
-    # 2. Poll until relevant work appears or the budget runs out.
+    # 2. In dark-launch push mode, listen only for a wake cue. Every cue is
+    # followed by the exact same journal refetch/filter path as polling. The
+    # stable journal URI is published alongside every specific payload update,
+    # including tickets which did not exist when this call began.
+    if WAIT_MODE == "push":
+        try:
+            mcp_client = getattr(client, "_client", None)
+            listen = getattr(mcp_client, "listen", None)
+            if not callable(listen):
+                raise RuntimeError("BoardClient transport does not expose listen()")
+            journal_uri = f"board://{BOARD_ID}/journal"
+            async with listen(resource_subscriptions=[journal_uri]) as subscription:
+                honored = {
+                    str(uri)
+                    for uri in (
+                        subscription.honored.resource_subscriptions or ()
+                    )
+                }
+                if journal_uri not in honored:
+                    raise RuntimeError(
+                        "server did not honor journal subscription: "
+                        f"{journal_uri}"
+                    )
+                while True:
+                    now = time.monotonic()
+                    remaining = deadline - now
+                    if remaining <= 0:
+                        break
+                    heartbeat_due_in = max(
+                        0.0, HEARTBEAT_INTERVAL_S - (now - last_heartbeat)
+                    )
+                    wait_slice = min(remaining, heartbeat_due_in)
+                    if wait_slice > 0:
+                        try:
+                            async with asyncio.timeout(wait_slice):
+                                await anext(subscription)
+                        except TimeoutError:
+                            pass
+                        else:
+                            relevant = await poll_once()
+                            if relevant:
+                                return {
+                                    "new_seq": cursor,
+                                    "events": relevant,
+                                    "waited_s": round(
+                                        time.monotonic() - started, 2
+                                    ),
+                                    "timed_out": False,
+                                    "resynced": resynced,
+                                }
+
+                    now = time.monotonic()
+                    if now - last_heartbeat >= HEARTBEAT_INTERVAL_S:
+                        await _heartbeat(client, call_agent_name, my_agent_id)
+                        last_heartbeat = now
+
+                # Match poll mode's final boundary refetch: a mutation racing
+                # the timeout is still found even if its notification has not
+                # reached this process yet.
+                relevant = await poll_once()
+                if relevant:
+                    return {
+                        "new_seq": cursor,
+                        "events": relevant,
+                        "waited_s": round(time.monotonic() - started, 2),
+                        "timed_out": False,
+                        "resynced": resynced,
+                    }
+        except Exception as exc:
+            # Push is an optimization only. Unsupported protocol versions,
+            # rejected filters, stream loss, and transport errors all retain
+            # the proven poll path for the rest of this call.
+            _log(f"push unavailable; falling back to poll for this call: {exc}")
+
+    # 3. Poll until relevant work appears or the budget runs out. This is the
+    # default path and the whole-call fallback after any push failure.
     while True:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -420,7 +499,7 @@ async def _wait_for_work(
                 "resynced": resynced,
             }
 
-    # 3. Timed out -- the re-arm cue.
+    # 4. Timed out -- the re-arm cue.
     return {
         "new_seq": cursor,
         "events": [],

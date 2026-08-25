@@ -1,9 +1,11 @@
 # Pursers wait bridge
 
 `pursers_wait_server.py` is a stdio MCP server that exposes blocking
-`a2a_wait`. It polls an On Board Central connector, filters journal events,
-and renews leases while the tool call is blocked. Keep it on stdio; wrapping
-it in an HTTP transport adds request timeouts that defeat the wait behavior.
+`a2a_wait`. Polling is the default. An opt-in MCP v2 push mode uses
+`subscriptions/listen` on the stable `board://<board>/journal` cue only to wake
+the bridge, then refetches and filters the same journal events as polling.
+Keep it on stdio; wrapping it in an HTTP transport adds request timeouts that
+defeat the wait behavior.
 
 ## Requirements
 
@@ -25,6 +27,7 @@ SHA-256 `1a0981ec6cc47aed8eeb5e8f488bef260ab6b5fd5c7c88e2cd99604654103e1a`.
 | `ONBOARD_BOARD_ID` | no | Board ID; defaults to `pursers`. |
 | `ONBOARD_AGENT_NAME` | no | Base board identity; defaults to `pursers-wait-bridge`. |
 | `ONBOARD_AGENT_INSTANCE` | no | Stable per-instance suffix, such as `window-a`. |
+| `PURSERS_WAIT_MODE` | no | `poll` (default) or dark-launch `push`; push falls back to polling for the current call on any subscription error. |
 
 With no `ONBOARD_AGENT_INSTANCE`, the effective name is exactly
 `ONBOARD_AGENT_NAME`, preserving the single-instance behavior. When the value

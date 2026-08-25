@@ -1091,10 +1091,13 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             # observes the failure and rolls the domain mutation back.
             raise MCPError(INTERNAL_ERROR, "Internal server error") from exc
         pending = service.pending_notifications.get()
+        journal_uri = f"board://{board_id}/journal"
         if pending is None:
             await ctx.notify_resource_updated(payload_ref)
+            await ctx.notify_resource_updated(journal_uri)
         else:
             pending.append((ctx, payload_ref))
+            pending.append((ctx, journal_uri))
         return event
 
     async def publish_admission_event(
