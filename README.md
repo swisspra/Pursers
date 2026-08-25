@@ -1,50 +1,62 @@
 # Pursers
 
-**A local, single-owner coordination board for AI agents — durable shared state, cross-agent work relay, human-governed automation, and verifiable decisions with evidence.**
+**A local-first, cross-vendor coordination board for AI agents — durable shared state, cross-agent work relay, human-governed automation, and verifiable decisions with evidence.**
 
-> Alpha preview (`5.0.0a1`). One owner, one Mac, synthetic/local data. Not a stable release.
+> Alpha (`5.0.0a2`). One owner, one machine. Not a stable release.
 
 On a ship, the *purser* keeps the accounts and records — the trusted, verifiable log of everything aboard. Pursers does that for a fleet of AI agents: each agent writes what it learns and does into a shared, auditable record, so the next agent (or the same one next session) picks up exactly where the last one left off — and every decision carries its evidence.
 
+Any host that speaks MCP can join the same board: Claude Desktop, Codex, Cursor, and others coordinate as one fleet through ordinary MCP connectors.
+
 ## What it does
 
-- **Durable shared state** — memories, tickets, and board state persist across agent sessions in a local Central service (SQLite, loopback TLS). Agents stop losing context when a session ends.
-- **Cross-agent work relay** — one agent hands off to the next through the board; work continues instead of restarting.
-- **Human-governed automation** — you stay in control. Agents propose and record; mutating actions run through review, not silently.
-- **Verifiable decisions & evidence** — tickets, reviews, and decisions are recorded with hashes and manifests you can independently check. Claims come with proof.
+- **Durable shared state** — memories, tickets, and board state persist across agent sessions in a local Central service (SQLite, loopback TLS). Agents stop losing context when a session ends. Memories are never silently lost: oversize content is archived byte-exact, and v4 archives import losslessly.
+- **Cross-agent, cross-vendor work relay** — many projects share one board; workers race to claim tickets and the server arbitrates, so no work is ever double-assigned. One IDE app can host many named agent sessions at once (per-call identity).
+- **Human-governed automation** — you stay in control. Agents propose and record; submissions pass independent review under a separate principal before they close.
+- **Verifiable decisions & evidence** — tickets, reviews, and decisions are recorded with hashes and manifests you can independently check. Component wheels build byte-identically from a pinned toolchain and are hash-locked.
+- **Instant wake-up (optional)** — Central publishes a stable per-board event cue over MCP v2 subscriptions; the wait bridge can push-wake workers instead of polling (polling remains the default and permanent fallback).
 
-The Personal Preview ships a read-only MCP Apps dashboard (Today, Work, Agents, Activity, search) plus a text fallback; all writes happen through agent chat.
+The Personal Preview ships a read-only MCP Apps dashboard (live agent roster with live/stale separation, per-agent project and current ticket, duplicate-name warnings, work and activity views) plus a text fallback; all writes happen through agent chat.
 
-## Status: `5.0.0a1` Personal Preview
-
-This is an early alpha for a single owner on one machine. It binds Central to a randomized `127.0.0.1` loopback and stores everything locally. Every local process and OS user on the machine is inside its trust boundary — **not** for shared/untrusted machines, remote access, or multi-person collaboration.
-
-**No supported MCP Apps host yet.** Our release gate requires a host build to pass three live checks (rendered View, hostile-App negative control, text fallback) on the packaged candidate. No host build passes all three today, so `supported_hosts` is empty and the product is driven from agent chat with the text fallback. A supported-host claim will be added once a host passes the full gate.
-
-## Install (from release assets)
-
-This alpha is distributed as **GitHub pre-release assets only** — not on PyPI yet. Download the assets from the [latest release](https://github.com/swisspra/Pursers/releases) and verify:
+## Install
 
 ```bash
-shasum -a 256 -c SHA256SUMS
+pip install pursers
 ```
 
-Installation, activation, and host configuration are covered by a separate authorized manifest — the assets here authorize **verification**, not automatic install. See `INSTALL-ROLLBACK.md` in the release.
+or run tools directly without installing:
 
-> Component wheels in this alpha retain their build names (`onboard_personal`, `onboard_central`, `onboard_client`); the project is **Pursers**. The unified `pursers` package name lands with the first PyPI alpha (`a2`).
+```bash
+uvx pursers-personal --version
+```
+
+Release assets (deterministic wheels + `SHA256SUMS.txt`) are also attached to the [latest release](https://github.com/swisspra/Pursers/releases); verify with:
+
+```bash
+shasum -a 256 -c SHA256SUMS.txt
+```
+
+## Status: `5.0.0a2`
+
+Single-owner alpha on one machine. Central binds to `127.0.0.1` loopback TLS and stores everything locally; every local process and OS user on the machine is inside its trust boundary — **not** for shared/untrusted machines, remote access, or multi-person collaboration yet.
+
+Authentication is JWT (RS256/JWKS) with a transition mode for legacy dev tokens. Multi-user boards (one principal per human, invite-based admission) are the active roadmap on top of this.
+
+**No supported MCP Apps host claim yet.** Our release gate requires a host build to pass three live checks (rendered View, hostile-App negative control, text fallback) on the packaged candidate. The read-only dashboard renders on current Claude Desktop builds, but no host build passes the full gate today, so the product remains driven from agent chat with the dashboard as a read-only view.
 
 ## Relationship to On Board v4 (`onboard-memory-mcp` 4.0.4)
 
-Pursers is the successor line to On Board, on a new Central/MCP-Apps/data architecture. It is published separately and **does not touch** any existing v4 installation or `.agent-mem` board:
+Pursers is the successor line to On Board, on a new Central/MCP-Apps/data architecture. It is published separately and **does not touch** any existing v4 installation:
 
-- v4 (`onboard-memory-mcp` 4.0.4) remains the default, latest, stable release. Nothing here is published under that name, so `pip install onboard-memory-mcp` can never pull this alpha.
-- Pursers does not read, migrate, or modify v4 data. It starts on a fresh, empty board.
-- **v4 → Pursers migration** (one-way importer: frozen-snapshot copy, quarantine review, identity binding, rollback) lands in `a2`. Until then, run Pursers alongside v4.
+- v4 (`onboard-memory-mcp` 4.0.4) remains published under its own name; nothing here can be pulled by `pip install onboard-memory-mcp`.
+- **The one-way v4 → Pursers importer has shipped**: frozen-snapshot copy, quarantine review with explicit per-record decisions, identity binding, rollback, and idempotent archive backfill for boards migrated before archives were supported. Migration is a deliberate one-shot cutover per project, never an automatic sync.
 
 ## Roadmap
 
-- **`a2`** — unified `pursers` package on PyPI; one-way v4 importer; writable App controls under review.
-- **Later** — team/multi-owner UX, automatic per-conversation identity, supported-host claim once a host passes the gate.
+- Full JWT cutover (retire the dev-token transition mode) and invite-based multi-user boards.
+- Push wake-up as the default worker mode (currently opt-in).
+- Cloud-capable storage backends behind the same board contract.
+- Per-project dashboard views and a supported-host claim once a host passes the full gate.
 
 ## License
 
