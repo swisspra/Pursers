@@ -1,0 +1,41 @@
+name: publish-pypi
+
+# Publishes the two remaining Pursers distributions to PyPI via Trusted
+# Publishing (OIDC, no API token). Trigger manually from the Actions tab.
+# Register a PENDING trusted publisher on PyPI for EACH project name below,
+# all pointing at this workflow file (publish-pypi.yml), owner swisspra,
+# repo Pursers, environment pypi.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write   # required for Trusted Publishing (OIDC)
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build the two remaining wheels
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build --wheel --outdir dist packages/import
+          python -m build --wheel --outdir dist tools/wait-bridge
+          ls -l dist
+
+      - name: Publish to PyPI (Trusted Publishing)
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
+          # only these two are new; the other four already exist, so skip
+          # anything already present rather than failing the run
+          skip-existing: true
