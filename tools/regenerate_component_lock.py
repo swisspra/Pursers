@@ -22,7 +22,7 @@ EXPECTED_VIEW_SHA256 = (
 )
 EXPECTED_VIEW_SIZE = 388632
 PROJECTS = (
-    ("central", "pursers-central", "0.1.0a9"),
+    ("central", "pursers-central", "0.1.0a10"),
     ("client", "pursers-client", "0.1.0a10"),
     ("import", "pursers-personal-import", "5.0.0a2"),
     ("personal", "pursers-personal", PRODUCT_VERSION),
