@@ -23,20 +23,6 @@ This fleet-era release includes `pursers-personal==5.0.0a4`,
   registry boards and a read-only Fleet dashboard tab for project ticket totals,
   pooled agent seats, current work, and unavailable-board warnings
   (`3a32643`, `160efb3`).
-- Added push-mode invariant coverage proving stable journal-only subscriptions,
-  backlog-before-subscribe ordering, authoritative refetch after a cue, and
-  byte-identical polling fallback when subscriptions fail (`cf71cfe`).
-
-### Changed
-
-- Expanded the agent roster projection and UI columns with project, current
-  ticket, and duplicate-name state, including recent-ticket project fallback
-  for agents that are no longer holding work (`f3d7760`, `7d0f14d`).
-- Completed the JWT-only cutover: Central rejects every non-`jwt` authentication
-  mode and Personal derives connection credentials from its verified profile
-  rather than legacy `ONBOARD_*` connection defaults (`83ad38c`).
-- Moved all six distributions to PyPI Trusted Publishing with GitHub OIDC and no
-  API tokens, using the `pypi` and `pypi-bridge` environments (`67848a1`).
 
 ### Fixed
 
@@ -68,6 +54,9 @@ This fleet-era release includes `pursers-personal==5.0.0a4`,
 - Added MCP v2 journal-cue wakeups through `subscriptions/listen`, with refetching
   of authoritative events and automatic polling fallback when push is unavailable
   (`5b3c30d`).
+- Added push/poll invariant coverage proving stable journal-only subscriptions,
+  backlog-before-subscribe ordering, authoritative refetch after a cue, and
+  byte-identical polling fallback when subscriptions fail (`cf71cfe`).
 - Added `ticket_unclaim` so an authorized holder can return pre-submission work to
   the open queue with an auditable journal transition (`ea45542`).
 - Added bounded board snapshots with explicit truncation counts and a journal
@@ -91,15 +80,17 @@ This fleet-era release includes `pursers-personal==5.0.0a4`,
   from `onboard_*` / `onboard-` to `pursers_*` / `pursers-`, including the wait
   bridge client import (`19a44f8`, `22aa1a0`).
 - Transitioned Central authentication to signed JWT capabilities only, with
-  fail-closed RS256/JWKS verification plus issuer and audience checks; the a2
-  README's legacy-token transition language did not match the shipped code
-  (`83ad38c`, `f0f02da`).
+  fail-closed RS256/JWKS verification plus issuer and audience checks; no
+  legacy-token mode was ever shipped (`83ad38c`, `f0f02da`).
+- Moved all six distributions to PyPI Trusted Publishing with GitHub OIDC and no
+  API tokens, using the `pypi` and `pypi-bridge` environments (`67848a1`).
 - Made wheel and dashboard artifacts reproducible with a pinned build toolchain,
   deterministic build epoch, byte-level hashes, and a generated component lock
   (`19a44f8`, `00dc188`, `05aec22`).
 - Expanded the dashboard roster with project, current-ticket, and duplicate-name
   context, then separated live agents from stale agents using a 60-minute activity
-  threshold (`978348d`, `ccbc7d0`, `8776344`, `b7be2c7`, `4031367`).
+  threshold (`978348d`, `ccbc7d0`, `8776344`, `b7be2c7`, `4031367`, `f3d7760`,
+  `7d0f14d`).
 - Made v4 import decisions policy-driven and surfaced validation failures without
   leaking unsafe source details (`b42e437`, `d64d533`).
 
