@@ -27,7 +27,7 @@ SHA-256 `1a0981ec6cc47aed8eeb5e8f488bef260ab6b5fd5c7c88e2cd99604654103e1a`.
 | `ONBOARD_BOARD_ID` | no | Board ID; defaults to `pursers`. |
 | `ONBOARD_AGENT_NAME` | no | Base board identity; defaults to `pursers-wait-bridge`. |
 | `ONBOARD_AGENT_INSTANCE` | no | Stable per-instance suffix, such as `window-a`. |
-| `PURSERS_WAIT_MODE` | no | `poll` (default) or dark-launch `push`; push falls back to polling for the current call on any subscription error. |
+| `PURSERS_WAIT_MODE` | no | `poll` (default) or dark-launch `push`; in multi-board calls, a subscription error falls back to polling only for that board. |
 
 With no `ONBOARD_AGENT_INSTANCE`, the effective name is exactly
 `ONBOARD_AGENT_NAME`, preserving the single-instance behavior. When the value
@@ -60,6 +60,46 @@ existing active identity does not produce another join journal event. A newly
 used name also was not a recipient of old journal entries. It can recover
 currently `open` work through the bridge's backlog scan, but it cannot discover
 old non-open history through `a2a_wait`.
+
+## Multi-board response
+
+Pass `boards` to operate one worker identity across several boards without
+opening another transport:
+
+```text
+a2a_wait(
+  boards=["project-a", "project-b", "invite-only-board"],
+  since_seq={"project-a": 12, "project-b": 34, "invite-only-board": 0},
+  agent_name="pool-worker"
+)
+```
+
+Omitting `boards` permanently selects the original single-board path: its
+`new_seq` remains an integer, `resynced` remains a boolean, events are not
+tagged, and `skipped_boards` is absent. With `boards` present, the response is:
+
+```json
+{
+  "new_seq": {"project-a": 13, "project-b": 34, "invite-only-board": 0},
+  "events": [
+    {"board_id": "project-a", "kind": "ticket_created", "ticket_id": "TK-PLACEHOLDER"}
+  ],
+  "waited_s": 0.0,
+  "timed_out": false,
+  "resynced": {"project-a": false, "project-b": false, "invite-only-board": false},
+  "skipped_boards": {"invite-only-board": "access denied reason"}
+}
+```
+
+`new_seq` includes every requested board and must be passed back unchanged on
+re-arm. Each board keeps its own cursor, generation token, deterministic agent
+ID, filtering, and entry backlog scan. Events always carry `board_id`.
+Invite-required boards that the bearer cannot access are skipped. In push
+mode, each accessible board subscribes independently to
+`board://<board_id>/journal`; a cue refetches only its board, while a failed
+subscription degrades only that board to polling. Heartbeats scan each board
+but renew a lease only on the board where the exact derived agent ID holds the
+claim.
 
 ## Connector examples
 
