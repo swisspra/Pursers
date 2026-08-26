@@ -19,3 +19,5 @@ evidence/
 com.onboard.*.plist
 DECISIONS-signed.json
 POLICY-signed.json
+docs-local/
+.codex/
