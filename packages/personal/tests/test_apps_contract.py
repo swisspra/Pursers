@@ -136,6 +136,7 @@ async def test_discovery_envelope_partitions_app_and_model_surfaces(
                 return tools[name].meta["ui"]["visibility"]
 
             assert visibility("board_snapshot") == MODEL_AND_APP
+            assert visibility("fleet_snapshot") == MODEL_AND_APP
             assert visibility("board_event_feed") == APP_ONLY
             assert all(visibility(name) == MODEL_ONLY for name in CHAT_TOOL_NAMES)
             catchup_description = tools["board_catchup"].description or ""
@@ -454,6 +455,251 @@ async def test_app_reads_use_only_the_non_joining_pure_reader() -> None:
 
 
 @pytest.mark.anyio
+async def test_fleet_snapshot_groups_cross_board_seats_and_classifies_pool() -> None:
+    registry = json.dumps(
+        {
+            "schema_version": 1,
+            "projects": {
+                "alpha": {
+                    "board_id": "board-alpha",
+                    "work_dir": "/tmp/alpha",
+                    "status": "active",
+                },
+                "beta": {
+                    "board_id": "board-beta",
+                    "work_dir": "/tmp/beta",
+                    "status": "active",
+                },
+                "paused": {
+                    "board_id": "board-paused",
+                    "work_dir": "/tmp/paused",
+                    "status": "paused",
+                },
+            },
+        }
+    )
+    snapshots = {
+        "board-alpha": {
+            "agents": [
+                {
+                    "agent_id": "AI-alpha-shared",
+                    "principal_id": "PR-shared",
+                    "agent_name": "shared-worker",
+                    "last_activity_at": "2099-01-01T00:00:00Z",
+                    "lifecycle_status": "active",
+                },
+                {
+                    "agent_id": "AI-alpha-stale",
+                    "principal_id": "PR-stale",
+                    "agent_name": "stale-worker",
+                    "last_activity_at": "2000-01-01T00:00:00Z",
+                    "lifecycle_status": "active",
+                },
+            ],
+            "tickets": [
+                {
+                    "ticket_id": "TK-alpha-claimed",
+                    "status": "claimed",
+                    "claimed_by_agent_id": "AI-alpha-shared",
+                }
+            ],
+            "omitted_counts": {"agents": 0, "tickets": 0},
+            "truncated": False,
+        },
+        "board-beta": {
+            "agents": [
+                {
+                    "agent_id": "AI-beta-shared",
+                    "principal_id": "PR-shared",
+                    "agent_name": "shared-worker",
+                    "last_activity_at": "2099-01-01T00:00:00Z",
+                    "lifecycle_status": "active",
+                },
+                {
+                    "agent_id": "AI-beta-available",
+                    "principal_id": "PR-available",
+                    "agent_name": "available-worker",
+                    "last_activity_at": "2099-01-01T00:00:00Z",
+                    "lifecycle_status": "active",
+                },
+            ],
+            "tickets": [],
+            "omitted_counts": {"agents": 0, "tickets": 0},
+            "truncated": False,
+        },
+    }
+    status_counts = {
+        "board-alpha": {"open": 2, "claimed": 1, "submitted": 3},
+        "board-beta": {"open": 4, "in_progress": 2, "submitted": 1},
+    }
+    calls: list[tuple[str, str, dict[str, Any]]] = []
+
+    class FleetReader:
+        def __init__(self, config: DashboardConfig):
+            self.board_id = config.board_id
+
+        async def __aenter__(self) -> "FleetReader":
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+        async def board_state_get(self, **kwargs: Any) -> dict[str, Any]:
+            calls.append((self.board_id, "board_state_get", kwargs))
+            return {"state": {"value": registry}}
+
+        async def board_status(self) -> dict[str, Any]:
+            calls.append((self.board_id, "board_status", {}))
+            return {"ticket_status_counts": status_counts[self.board_id]}
+
+        async def board_snapshot(self, **kwargs: Any) -> dict[str, Any]:
+            calls.append((self.board_id, "board_snapshot", kwargs))
+            return snapshots[self.board_id]
+
+    state = LiveDashboard(
+        fake_config(),
+        client_class=FakeClient,
+        client_error_class=FakeClientError,
+        read_client_factory=FleetReader,
+    )
+
+    async def healthy_probe() -> None:
+        return None
+
+    state._probe_central = healthy_probe  # type: ignore[method-assign]
+    payload = await state.fleet()
+
+    assert payload["schema_version"] == 1
+    assert payload["registry_warning"] is None
+    assert payload["projects"] == [
+        {
+            "name": "alpha",
+            "board_id": "board-alpha",
+            "status": "active",
+            "tickets_open": 2,
+            "tickets_claimed": 1,
+            "tickets_submitted": 3,
+        },
+        {
+            "name": "beta",
+            "board_id": "board-beta",
+            "status": "active",
+            "tickets_open": 4,
+            "tickets_claimed": 2,
+            "tickets_submitted": 1,
+        },
+    ]
+    pool = {item["agent_name"]: item for item in payload["pool"]}
+    assert pool["shared-worker"]["principal_id"] == "PR-shared"
+    assert pool["shared-worker"]["pool_status"] == "busy"
+    assert pool["shared-worker"]["seats"] == [
+        {
+            "board_id": "board-alpha",
+            "project": "alpha",
+            "live": True,
+            "current_ticket_id": "TK-alpha-claimed",
+        },
+        {
+            "board_id": "board-beta",
+            "project": "beta",
+            "live": True,
+            "current_ticket_id": None,
+        },
+    ]
+    assert pool["available-worker"]["pool_status"] == "available"
+    assert pool["stale-worker"]["pool_status"] == "stale"
+    assert payload["totals"] == {
+        "agents": 3,
+        "busy": 1,
+        "available": 1,
+        "stale": 1,
+    }
+    assert payload["truncation_counts"] == {
+        "projects": 0,
+        "boards": 0,
+        "agents": 0,
+        "tickets": 0,
+        "pool": 0,
+    }
+    assert all(board != "board-paused" for board, _method, _args in calls)
+    assert (
+        "board-personal-test",
+        "board_state_get",
+        {"key": "project_registry"},
+    ) in calls
+    assert all(
+        kwargs == {"limit": 500, "max_bytes": 250_000}
+        for _board, method, kwargs in calls
+        if method == "board_snapshot"
+    )
+
+
+@pytest.mark.anyio
+async def test_fleet_snapshot_malformed_registry_degrades_to_profile_board() -> None:
+    opened_boards: list[str] = []
+
+    class FleetReader:
+        def __init__(self, config: DashboardConfig):
+            self.board_id = config.board_id
+
+        async def __aenter__(self) -> "FleetReader":
+            opened_boards.append(self.board_id)
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+        async def board_state_get(self, **_kwargs: Any) -> dict[str, Any]:
+            return {"state": {"value": "{"}}
+
+        async def board_status(self) -> dict[str, Any]:
+            return {"ticket_status_counts": {"open": 1}}
+
+        async def board_snapshot(self, **_kwargs: Any) -> dict[str, Any]:
+            return {
+                "agents": [],
+                "tickets": [],
+                "omitted_counts": {"agents": 0, "tickets": 0},
+                "truncated": False,
+            }
+
+    state = LiveDashboard(
+        fake_config(),
+        client_class=FakeClient,
+        client_error_class=FakeClientError,
+        read_client_factory=FleetReader,
+    )
+
+    async def healthy_probe() -> None:
+        return None
+
+    state._probe_central = healthy_probe  # type: ignore[method-assign]
+    payload = await state.fleet()
+
+    assert payload["registry_warning"] == (
+        "project_registry unavailable or malformed; using the profile board only"
+    )
+    assert payload["projects"] == [
+        {
+            "name": "board-personal-test",
+            "board_id": "board-personal-test",
+            "status": "active",
+            "tickets_open": 1,
+            "tickets_claimed": 0,
+            "tickets_submitted": 0,
+        }
+    ]
+    assert payload["pool"] == []
+    assert payload["totals"] == {
+        "agents": 0,
+        "busy": 0,
+        "available": 0,
+        "stale": 0,
+    }
+    assert opened_boards == ["board-personal-test", "board-personal-test"]
+
+
+@pytest.mark.anyio
 async def test_projection_flags_only_duplicate_active_agent_names() -> None:
     class ProjectionReader:
         async def board_status(self) -> dict[str, Any]:
@@ -677,6 +923,18 @@ async def test_raw_reader_rejects_non_pure_tools_before_transport() -> None:
     reader.config = fake_config()
     reader._decode = lambda result: result
 
+    allowed = await reader._call("board_state_get", {"key": "project_registry"})
+    assert allowed is not None
+    assert transport_calls == [
+        (
+            "board_state_get",
+            {
+                "board_id": "board-personal-test",
+                "key": "project_registry",
+            },
+        )
+    ]
+    transport_calls.clear()
     with pytest.raises(RuntimeError, match="rejected a non-pure tool"):
         await reader._call("board_catchup", {"ack": False})
     assert transport_calls == []

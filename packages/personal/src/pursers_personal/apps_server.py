@@ -13,9 +13,10 @@ import hashlib
 import importlib
 import importlib.resources
 import ipaddress
+import json
 import sys
 from contextlib import AsyncExitStack, asynccontextmanager, suppress
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Protocol
@@ -31,11 +32,19 @@ PRODUCT_VERSION = "5.0.0a2"
 MAX_EVENTS = 200
 MAX_TICKETS = 500
 AGENT_STALE_AFTER_MINUTES = 60
+FLEET_SCHEMA_VERSION = 1
+FLEET_MAX_PROJECTS = 25
+FLEET_SNAPSHOT_LIMIT = 500
+FLEET_SNAPSHOT_MAX_BYTES = 250_000
+FLEET_RESPONSE_MAX_BYTES = 250_000
+FLEET_CLAIM_STATES = frozenset({"claimed", "in_progress", "creating_report"})
 UI_URI = "ui://pursers/dashboard"
 MODEL_AND_APP = ["model", "app"]
 MODEL_ONLY = ["model"]
 APP_ONLY = ["app"]
-PRIMARY_UI_TOOL_NAMES = frozenset({"board_snapshot", "board_event_feed"})
+PRIMARY_UI_TOOL_NAMES = frozenset(
+    {"board_snapshot", "board_event_feed", "fleet_snapshot"}
+)
 CHAT_TOOL_NAMES = frozenset(
     {
         "board_onboard",
@@ -333,6 +342,7 @@ class RawBoardReader:
             "board_status",
             "ticket_list",
             "board_get_briefing",
+            "board_state_get",
         }:
             raise RuntimeError("raw board reader rejected a non-pure tool")
         result = await self._client.call_tool(
@@ -340,8 +350,18 @@ class RawBoardReader:
         )
         return self._decode(result)
 
-    async def board_snapshot(self) -> dict[str, Any]:
-        return await self._call("board_snapshot", {})
+    async def board_snapshot(
+        self,
+        *,
+        limit: int | None = None,
+        max_bytes: int | None = None,
+    ) -> dict[str, Any]:
+        arguments: dict[str, Any] = {}
+        if limit is not None:
+            arguments["limit"] = limit
+        if max_bytes is not None:
+            arguments["max_bytes"] = max_bytes
+        return await self._call("board_snapshot", arguments)
 
     async def board_status(self) -> dict[str, Any]:
         return await self._call("board_status", {})
@@ -371,6 +391,12 @@ class RawBoardReader:
         if ticket_id is not None:
             arguments["ticket_id"] = ticket_id
         return await self._call("board_get_briefing", arguments)
+
+    async def board_state_get(self, *, key: str | None = None) -> dict[str, Any]:
+        arguments: dict[str, Any] = {}
+        if key is not None:
+            arguments["key"] = key
+        return await self._call("board_state_get", arguments)
 
 
 ReadClientFactory = Callable[[DashboardConfig], Any]
@@ -471,6 +497,299 @@ class LiveDashboard:
     @staticmethod
     def _safe_connection_error(exc: BaseException) -> str:
         return f"Central unavailable ({type(exc).__name__})"
+
+    @staticmethod
+    def _fleet_registry_projects(
+        result: dict[str, Any],
+    ) -> tuple[list[dict[str, str]], int]:
+        state = result.get("state")
+        if not isinstance(state, dict):
+            raise ValueError("project_registry state is missing")
+        raw_value = state.get("value")
+        if not isinstance(raw_value, str):
+            raise ValueError("project_registry value is missing")
+        try:
+            registry = json.loads(raw_value)
+        except json.JSONDecodeError as exc:
+            raise ValueError("project_registry is malformed") from exc
+        if not isinstance(registry, dict) or registry.get("schema_version") != 1:
+            raise ValueError("project_registry schema is unsupported")
+        raw_projects = registry.get("projects")
+        if not isinstance(raw_projects, dict):
+            raise ValueError("project_registry projects are missing")
+
+        projects: list[dict[str, str]] = []
+        board_ids: set[str] = set()
+        for name, raw_project in raw_projects.items():
+            if not isinstance(name, str) or not name or name != name.strip():
+                raise ValueError("project_registry project name is invalid")
+            if not isinstance(raw_project, dict):
+                raise ValueError("project_registry project is invalid")
+            board_id = raw_project.get("board_id")
+            work_dir = raw_project.get("work_dir")
+            status = raw_project.get("status")
+            if (
+                not isinstance(board_id, str)
+                or not board_id
+                or board_id != board_id.strip()
+                or not isinstance(work_dir, str)
+                or not Path(work_dir).is_absolute()
+                or status not in {"active", "paused"}
+            ):
+                raise ValueError("project_registry project fields are invalid")
+            if status != "active":
+                continue
+            if board_id in board_ids:
+                raise ValueError("project_registry has duplicate active boards")
+            board_ids.add(board_id)
+            projects.append(
+                {"name": name, "board_id": board_id, "status": "active"}
+            )
+        projects.sort(key=lambda item: (item["name"], item["board_id"]))
+        omitted = max(0, len(projects) - FLEET_MAX_PROJECTS)
+        return projects[:FLEET_MAX_PROJECTS], omitted
+
+    @staticmethod
+    def _fleet_status_count(counts: Any, *statuses: str) -> int:
+        if not isinstance(counts, dict):
+            return 0
+        total = 0
+        for status in statuses:
+            value = counts.get(status, 0)
+            if isinstance(value, int) and not isinstance(value, bool):
+                total += max(0, value)
+        return total
+
+    async def _fleet_board_read(
+        self, project: dict[str, str]
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        board_config = replace(self.config, board_id=project["board_id"])
+        connection = self._read_client_factory(board_config)
+        async with AsyncExitStack() as connection_stack:
+            reader = await connection_stack.enter_async_context(connection)
+            status = await reader.board_status()
+            snapshot = await reader.board_snapshot(
+                limit=FLEET_SNAPSHOT_LIMIT,
+                max_bytes=FLEET_SNAPSHOT_MAX_BYTES,
+            )
+        return status, snapshot
+
+    async def fleet(self) -> dict[str, Any]:
+        """Return a bounded, non-joining pool view across active registry boards."""
+        async with self._read_lock:
+            await self._probe_central()
+            async with asyncio.timeout(self.config.request_timeout_s):
+                registry_warning: str | None = None
+                projects_omitted = 0
+                try:
+                    home_connection = self._read_client_factory(self.config)
+                    async with AsyncExitStack() as connection_stack:
+                        home_reader = await connection_stack.enter_async_context(
+                            home_connection
+                        )
+                        registry = await home_reader.board_state_get(
+                            key="project_registry"
+                        )
+                    projects, projects_omitted = self._fleet_registry_projects(
+                        registry
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except BaseException:
+                    projects = [
+                        {
+                            "name": self.config.board_id,
+                            "board_id": self.config.board_id,
+                            "status": "active",
+                        }
+                    ]
+                    registry_warning = (
+                        "project_registry unavailable or malformed; using the "
+                        "profile board only"
+                    )
+
+                project_rows: list[dict[str, Any]] = []
+                groups: dict[tuple[str, str], dict[str, Any]] = {}
+                unavailable_boards: list[str] = []
+                truncation_counts = {
+                    "projects": projects_omitted,
+                    "boards": 0,
+                    "agents": 0,
+                    "tickets": 0,
+                    "pool": 0,
+                }
+                for project in projects:
+                    try:
+                        status, snapshot = await self._fleet_board_read(project)
+                    except asyncio.CancelledError:
+                        raise
+                    except BaseException:
+                        unavailable_boards.append(project["board_id"])
+                        project_rows.append(
+                            {
+                                **project,
+                                "tickets_open": 0,
+                                "tickets_claimed": 0,
+                                "tickets_submitted": 0,
+                            }
+                        )
+                        continue
+
+                    counts = status.get("ticket_status_counts", {})
+                    project_rows.append(
+                        {
+                            **project,
+                            "tickets_open": self._fleet_status_count(counts, "open"),
+                            "tickets_claimed": self._fleet_status_count(
+                                counts, *sorted(FLEET_CLAIM_STATES)
+                            ),
+                            "tickets_submitted": self._fleet_status_count(
+                                counts, "submitted"
+                            ),
+                        }
+                    )
+                    omitted = snapshot.get("omitted_counts", {})
+                    if isinstance(omitted, dict):
+                        for name in ("agents", "tickets"):
+                            value = omitted.get(name, 0)
+                            if isinstance(value, int) and not isinstance(value, bool):
+                                truncation_counts[name] += max(0, value)
+                    if snapshot.get("truncated"):
+                        truncation_counts["boards"] += 1
+
+                    current_by_agent: dict[str, str] = {}
+                    for ticket in snapshot.get("tickets", []):
+                        if not isinstance(ticket, dict):
+                            continue
+                        if ticket.get("status") not in FLEET_CLAIM_STATES:
+                            continue
+                        holder = ticket.get("claimed_by_agent_id")
+                        ticket_id = ticket.get("ticket_id")
+                        if (
+                            isinstance(holder, str)
+                            and holder
+                            and isinstance(ticket_id, str)
+                            and ticket_id
+                        ):
+                            current_by_agent.setdefault(holder, ticket_id)
+
+                    for agent in snapshot.get("agents", []):
+                        if not isinstance(agent, dict):
+                            continue
+                        principal_id = agent.get("principal_id")
+                        agent_name = agent.get("agent_name")
+                        agent_id = agent.get("agent_id")
+                        if (
+                            not isinstance(principal_id, str)
+                            or not principal_id
+                            or not isinstance(agent_name, str)
+                            or not agent_name
+                            or not isinstance(agent_id, str)
+                        ):
+                            truncation_counts["agents"] += 1
+                            continue
+                        stale = self._agent_activity_age(
+                            agent.get("last_activity_at")
+                        )[1]
+                        handed_off = (
+                            agent.get("lifecycle_status") == "handed_off"
+                            or agent.get("status") == "handed_off"
+                        )
+                        live = not stale and not handed_off
+                        current_ticket_id = current_by_agent.get(agent_id)
+                        if not live:
+                            current_ticket_id = None
+                        busy = live and (
+                            current_ticket_id is not None
+                            or (
+                                agent.get("status") == "working"
+                                and agent.get("lease_expires_at") is not None
+                            )
+                        )
+                        key = (principal_id, agent_name)
+                        group = groups.setdefault(
+                            key,
+                            {
+                                "principal_id": principal_id,
+                                "agent_name": agent_name,
+                                "seats_by_board": {},
+                            },
+                        )
+                        seat = {
+                            "board_id": project["board_id"],
+                            "project": project["name"],
+                            "live": live,
+                            "current_ticket_id": current_ticket_id,
+                            "_busy": busy,
+                        }
+                        existing = group["seats_by_board"].get(project["board_id"])
+                        if existing is None:
+                            group["seats_by_board"][project["board_id"]] = seat
+                        else:
+                            existing["live"] = existing["live"] or live
+                            existing["current_ticket_id"] = (
+                                existing["current_ticket_id"] or current_ticket_id
+                            )
+                            existing["_busy"] = existing["_busy"] or busy
+
+                if unavailable_boards:
+                    suffix = "unavailable active boards: " + ", ".join(
+                        sorted(unavailable_boards)
+                    )
+                    registry_warning = (
+                        f"{registry_warning}; {suffix}"
+                        if registry_warning
+                        else suffix
+                    )
+
+                pool: list[dict[str, Any]] = []
+                for group in groups.values():
+                    seats = sorted(
+                        group.pop("seats_by_board").values(),
+                        key=lambda item: (str(item["project"]), item["board_id"]),
+                    )
+                    live_seats = [seat for seat in seats if seat["live"]]
+                    busy = any(seat["_busy"] for seat in live_seats)
+                    for seat in seats:
+                        seat.pop("_busy")
+                    if busy:
+                        pool_status = "busy"
+                    elif live_seats:
+                        pool_status = "available"
+                    else:
+                        pool_status = "stale"
+                    pool.append({**group, "pool_status": pool_status, "seats": seats})
+                pool.sort(
+                    key=lambda item: (item["agent_name"], item["principal_id"])
+                )
+                totals = {
+                    "agents": len(pool),
+                    "busy": sum(item["pool_status"] == "busy" for item in pool),
+                    "available": sum(
+                        item["pool_status"] == "available" for item in pool
+                    ),
+                    "stale": sum(item["pool_status"] == "stale" for item in pool),
+                }
+                payload = {
+                    "schema_version": FLEET_SCHEMA_VERSION,
+                    "registry_warning": registry_warning,
+                    "projects": project_rows,
+                    "pool": pool,
+                    "totals": totals,
+                    "truncation_counts": truncation_counts,
+                }
+                while (
+                    len(
+                        json.dumps(
+                            payload, ensure_ascii=False, sort_keys=True
+                        ).encode("utf-8")
+                    )
+                    > FLEET_RESPONSE_MAX_BYTES
+                    and payload["pool"]
+                ):
+                    payload["pool"].pop()
+                    truncation_counts["pool"] += 1
+                return payload
 
     async def _worker(self) -> None:
         assert self._first_attempt is not None
@@ -1128,6 +1447,17 @@ def build_dashboard_server(
     )
     async def board_snapshot() -> dict[str, Any]:
         return await state.snapshot()
+
+    @apps.tool(
+        resource_uri=UI_URI,
+        description=(
+            "Get the bounded authorization-scoped fleet projection across active "
+            "project-registry boards."
+        ),
+        visibility=MODEL_AND_APP,
+    )
+    async def fleet_snapshot() -> dict[str, Any]:
+        return await state.fleet()
 
     @apps.tool(
         resource_uri=UI_URI,
