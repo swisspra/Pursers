@@ -135,3 +135,29 @@ Run this loop continuously. Each pass is one unit of work:
 - **Cross-project view:** an orchestrator that calls `a2a_wait` (or `ticket_list`)
   **without** a `project` filter sees every project's queue on the one board —
   that is the intended single-board, manage-across-projects control point.
+
+## 7. Cross-project worker pool mode
+
+A pool worker may call `a2a_wait(boards="registry")`. At the start of each
+call, the bridge reads the shared project registry from the home board's
+`board_state` entry named `project_registry` and resolves its active boards.
+Use `project_registry_get()` to inspect that parsed registry directly.
+
+Pool mode keeps one cursor per board. Pass `since_seq` as a
+`{board_id: cursor}` map and re-arm with the returned `new_seq` map; never use
+one board's cursor for another. Each returned event includes `board_id`,
+`resynced` is also per-board, and boards that could not be joined are reported
+under `skipped_boards` without aborting the other boards.
+
+After claiming a ticket, use `project_registry_get()` to resolve its project's
+`work_dir`. That absolute directory is the **only authorized tree** for the
+ticket. Keep the claim, lease renewal, submission, and review on the event's
+`board_id`: a heartbeat renews a held claim only on the board that owns it.
+The one-ticket-at-a-time loop and every governance rule in this directive apply
+unchanged on every board.
+
+## 8. Browser verification uses ego lite only
+
+Use the `ego-browser` CLI for every browser-based verification. Do not use
+Chrome or Playwright-on-Chrome as a fallback. If ego lite is unavailable, stop
+and report that verification as blocked instead of switching browser tooling.
