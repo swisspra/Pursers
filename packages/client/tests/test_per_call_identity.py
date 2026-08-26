@@ -104,6 +104,42 @@ async def test_board_catchup_uses_explicit_or_default_name(monkeypatch) -> None:
 
 
 @pytest.mark.anyio
+async def test_bounded_read_parameters_are_forwarded(monkeypatch) -> None:
+    board = client()
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    async def call(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        calls.append((name, arguments))
+        return {"tickets": [], "events": []}
+
+    monkeypatch.setattr(board, "_call", call)
+
+    await board.board_snapshot(limit=50, max_bytes=200_000)
+    await board.board_catchup(
+        cursor=4,
+        limit=20,
+        ack=False,
+        max_events=20,
+        max_bytes=100_000,
+    )
+
+    assert calls == [
+        ("board_snapshot", {"limit": 50, "max_bytes": 200_000}),
+        (
+            "board_catchup",
+            {
+                "agent_name": "env-default",
+                "cursor": 4,
+                "limit": 20,
+                "ack": False,
+                "max_events": 20,
+                "max_bytes": 100_000,
+            },
+        ),
+    ]
+
+
+@pytest.mark.anyio
 async def test_interleaved_per_call_joins_do_not_clobber_state(monkeypatch) -> None:
     board = client()
     original_identity = JoinedIdentity(

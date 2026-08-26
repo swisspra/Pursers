@@ -308,8 +308,18 @@ class BoardClient:
         )
         return result
 
-    async def board_snapshot(self) -> dict[str, Any]:
-        result = await self._call("board_snapshot", {})
+    async def board_snapshot(
+        self,
+        *,
+        limit: int | None = None,
+        max_bytes: int | None = None,
+    ) -> dict[str, Any]:
+        arguments: dict[str, Any] = {}
+        if limit is not None:
+            arguments["limit"] = limit
+        if max_bytes is not None:
+            arguments["max_bytes"] = max_bytes
+        result = await self._call("board_snapshot", arguments)
         for ticket in result.get("tickets", []):
             payload_ref = ticket.get("payload_ref")
             if payload_ref:
@@ -644,16 +654,20 @@ class BoardClient:
         limit: int = 100,
         ack: bool = True,
         agent_name: str | None = None,
+        max_events: int | None = None,
+        max_bytes: int | None = None,
     ) -> dict[str, Any]:
-        result = await self._call(
-            "board_catchup",
-            {
-                "agent_name": self.agent_name if agent_name is None else agent_name,
-                "cursor": cursor,
-                "limit": limit,
-                "ack": ack,
-            },
-        )
+        arguments: dict[str, Any] = {
+            "agent_name": self.agent_name if agent_name is None else agent_name,
+            "cursor": cursor,
+            "limit": limit,
+            "ack": ack,
+        }
+        if max_events is not None:
+            arguments["max_events"] = max_events
+        if max_bytes is not None:
+            arguments["max_bytes"] = max_bytes
+        result = await self._call("board_catchup", arguments)
         for event in result.get("events", []):
             payload_ref = event.get("payload_ref")
             if payload_ref:
