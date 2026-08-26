@@ -5,6 +5,7 @@ import os
 import sys
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -187,6 +188,121 @@ class ResponseBoundsTests(unittest.IsolatedAsyncioTestCase):
             "fat-briefing bytes: "
             f"before={briefing_before_bytes} after={len(serialized)}"
         )
+
+    async def test_onboard_bounds_fat_snapshot_under_byte_ceiling(self) -> None:
+        self.seed_fat_briefing()
+
+        result = await self.call(
+            "board_onboard",
+            agent_name="admin-agent",
+            token_budget=256,
+        )
+
+        self.assertFalse(result.is_error)
+        payload = result.structured_content
+        snapshot = payload["snapshot"]
+        serialized = json.dumps(
+            payload, ensure_ascii=False, sort_keys=True
+        ).encode("utf-8")
+        snapshot_bytes = json.dumps(
+            snapshot, ensure_ascii=False, sort_keys=True
+        ).encode("utf-8")
+        self.assertLess(len(serialized), 800_000)
+        self.assertLessEqual(
+            len(snapshot_bytes), central.DEFAULT_SNAPSHOT_MAX_BYTES
+        )
+        self.assertTrue(snapshot["truncated"])
+        self.assertEqual(
+            snapshot["bounds"],
+            {
+                "limit_per_collection": central.DEFAULT_SNAPSHOT_LIMIT,
+                "max_bytes": central.DEFAULT_SNAPSHOT_MAX_BYTES,
+            },
+        )
+        self.assertEqual(snapshot["total_counts"]["tickets"], 25)
+        self.assertGreater(snapshot["omitted_counts"]["tickets"], 0)
+        for name, total in snapshot["total_counts"].items():
+            self.assertEqual(
+                total,
+                snapshot["returned_counts"][name]
+                + snapshot["omitted_counts"][name],
+            )
+        self.assertFalse(snapshot["memories_included"])
+        self.assertEqual(snapshot["latest_seq"], payload["briefing"]["latest_seq"])
+        datetime.fromisoformat(snapshot["snapshot_at"])
+        print(
+            "fat-onboard bytes: "
+            f"after={len(serialized)} snapshot={len(snapshot_bytes)}"
+        )
+
+    async def test_onboard_small_snapshot_preserves_all_collections(self) -> None:
+        onboard = await self.call(
+            "board_onboard",
+            agent_name="admin-agent",
+            snapshot_limit=10,
+            snapshot_max_bytes=100_000,
+        )
+        expected = await self.call(
+            "board_snapshot",
+            limit=10,
+            max_bytes=100_000,
+        )
+
+        self.assertFalse(onboard.is_error)
+        self.assertFalse(expected.is_error)
+        snapshot = onboard.structured_content["snapshot"]
+        expected_snapshot = expected.structured_content
+        for name in ("board", "agents", "tickets", "state"):
+            self.assertEqual(snapshot[name], expected_snapshot[name])
+        self.assertFalse(snapshot["truncated"])
+        self.assertTrue(
+            all(count == 0 for count in snapshot["omitted_counts"].values())
+        )
+        self.assertEqual(snapshot["total_counts"], snapshot["returned_counts"])
+        self.assertFalse(snapshot["memories_included"])
+        self.assertIsInstance(snapshot["latest_seq"], int)
+        datetime.fromisoformat(snapshot["snapshot_at"])
+
+    async def test_onboard_rejects_invalid_snapshot_bounds(self) -> None:
+        invalid = (
+            {"snapshot_limit": -1},
+            {"snapshot_limit": 1_001},
+            {"snapshot_max_bytes": 4_095},
+            {"snapshot_max_bytes": 750_001},
+        )
+        for bounds in invalid:
+            with self.subTest(bounds=bounds), self.assertRaisesRegex(
+                Exception, "must be between"
+            ):
+                await self.call(
+                    "board_onboard",
+                    agent_name="admin-agent",
+                    **bounds,
+                )
+
+    async def test_onboard_applies_custom_snapshot_bounds(self) -> None:
+        self.seed_fat_briefing()
+
+        result = await self.call(
+            "board_onboard",
+            agent_name="admin-agent",
+            token_budget=256,
+            snapshot_limit=2,
+            snapshot_max_bytes=100_000,
+        )
+
+        self.assertFalse(result.is_error)
+        snapshot = result.structured_content["snapshot"]
+        serialized = json.dumps(
+            snapshot, ensure_ascii=False, sort_keys=True
+        ).encode("utf-8")
+        self.assertLessEqual(len(serialized), 100_000)
+        self.assertEqual(
+            snapshot["bounds"],
+            {"limit_per_collection": 2, "max_bytes": 100_000},
+        )
+        self.assertLessEqual(snapshot["returned_counts"]["tickets"], 2)
+        self.assertGreater(snapshot["omitted_counts"]["tickets"], 0)
 
     async def test_catchup_pages_fat_journal_losslessly_under_byte_ceiling(
         self,

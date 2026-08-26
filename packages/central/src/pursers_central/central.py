@@ -1914,6 +1914,23 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             "state": copy.deepcopy(document.get("state", {})),
         }
 
+    def validate_snapshot_bounds(limit: int, max_bytes: int) -> None:
+        if (
+            not isinstance(limit, int)
+            or isinstance(limit, bool)
+            or not 0 <= limit <= MAX_SNAPSHOT_LIMIT
+        ):
+            raise ValueError(f"limit must be between 0 and {MAX_SNAPSHOT_LIMIT}")
+        if (
+            not isinstance(max_bytes, int)
+            or isinstance(max_bytes, bool)
+            or not MIN_SNAPSHOT_MAX_BYTES <= max_bytes <= MAX_SNAPSHOT_MAX_BYTES
+        ):
+            raise ValueError(
+                f"max_bytes must be between {MIN_SNAPSHOT_MAX_BYTES} "
+                f"and {MAX_SNAPSHOT_MAX_BYTES}"
+            )
+
     def bounded_snapshot_payload(
         document: dict[str, Any],
         *,
@@ -2270,6 +2287,8 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         task_focus: str | None = None,
         token_budget: int = 4_000,
         ticket_id: str | None = None,
+        snapshot_limit: int = DEFAULT_SNAPSHOT_LIMIT,
+        snapshot_max_bytes: int = DEFAULT_SNAPSHOT_MAX_BYTES,
     ) -> dict[str, Any]:
         """Join or reactivate an identity and return a compact bounded board briefing."""
         board_id = require_id("board_id", board_id)
@@ -2280,6 +2299,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             )
         if not 256 <= token_budget <= 50_000:
             raise ValueError("token_budget must be between 256 and 50000")
+        validate_snapshot_bounds(snapshot_limit, snapshot_max_bytes)
         if ticket_id is not None:
             ticket_id = require_id("ticket_id", ticket_id)
         principal = current_principal()
@@ -2306,7 +2326,6 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 "generation_token": document.get("generation_token"),
                 "generation_revision": int(document.get("generation_revision", 0)),
                 "briefing": briefing,
-                "snapshot": snapshot_payload(document),
                 "admission_change": admission_change,
                 "admission_recipients": service.admitted_agent_ids(
                     document, joined["actor"]["agent_id"]
@@ -2325,11 +2344,16 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             ctx,
         )
         briefing = result["briefing"]
-        snapshot = result["snapshot"]
+        snapshot_document = service.load(board_id)
         watermark = latest_seq(board_id)
-        snapshot["latest_seq"] = watermark
-        snapshot["snapshot_at"] = datetime.now(timezone.utc).isoformat()
-        snapshot["memories_included"] = False
+        snapshot_at = datetime.now(timezone.utc).isoformat()
+        snapshot = bounded_snapshot_payload(
+            snapshot_document,
+            limit=snapshot_limit,
+            max_bytes=snapshot_max_bytes,
+            watermark=watermark,
+            snapshot_at=snapshot_at,
+        )
         briefing["latest_seq"] = watermark
         return {
             "ok": True,
@@ -2363,21 +2387,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         JSON payload; explicit counts report every omitted entry.
         """
         board_id = require_id("board_id", board_id)
-        if (
-            not isinstance(limit, int)
-            or isinstance(limit, bool)
-            or not 0 <= limit <= MAX_SNAPSHOT_LIMIT
-        ):
-            raise ValueError(f"limit must be between 0 and {MAX_SNAPSHOT_LIMIT}")
-        if (
-            not isinstance(max_bytes, int)
-            or isinstance(max_bytes, bool)
-            or not MIN_SNAPSHOT_MAX_BYTES <= max_bytes <= MAX_SNAPSHOT_MAX_BYTES
-        ):
-            raise ValueError(
-                f"max_bytes must be between {MIN_SNAPSHOT_MAX_BYTES} "
-                f"and {MAX_SNAPSHOT_MAX_BYTES}"
-            )
+        validate_snapshot_bounds(limit, max_bytes)
         principal = current_principal()
         require_scope(principal, "board:read")
         document = service.load(board_id)
