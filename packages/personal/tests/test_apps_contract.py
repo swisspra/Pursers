@@ -69,8 +69,8 @@ def test_exact_view_lock_and_embedded_external_attestation_boundary() -> None:
     lock_path = root / "src/pursers_personal/resources/component-lock.json"
     payload = view_path.read_bytes()
     lock = json.loads(lock_path.read_text(encoding="utf-8"))
-    expected = "a1d0fda1a8ef01693908c65332da0e7f2cf489134e08cf2b18add23c8c8fa96b"
-    assert len(payload) == 388_632
+    expected = "1591fae7fbcdb1ad87d87b556a5d54871b63597737267524c64ce3614a4363c2"
+    assert len(payload) == 396_499
     assert hashlib.sha256(payload).hexdigest() == expected
     assert lock["product_version"] == PRODUCT_VERSION == "5.0.0a2"
     assert lock["view"] == {
@@ -174,6 +174,19 @@ async def test_discovery_envelope_partitions_app_and_model_surfaces(
             assert all(name not in html.text for name in CHAT_TOOL_NAMES)
             assert html.text.count("board_snapshot") == 1
             assert html.text.count("board_event_feed") == 1
+            for fleet_marker in (
+                "fleet_snapshot",
+                "tab-fleet",
+                "fleet-projects",
+                "fleet-pool",
+                "registry_warning",
+                "tickets_open",
+                "tickets_claimed",
+                "tickets_submitted",
+                "pool_status",
+                "current_ticket_id",
+            ):
+                assert fleet_marker in html.text
             assert verified == [None]
 
             model_calls: list[tuple[str, tuple[Any, ...], dict[str, Any]]] = []

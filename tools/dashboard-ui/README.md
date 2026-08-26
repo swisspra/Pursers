@@ -4,8 +4,8 @@ Source for the single-file MCP App bundle served as `ui://pursers/dashboard`.
 
 Build:
 
-    npm ci
-    npm run build        # writes ./dashboard.html (single file)
+    NODE_ENV= npm ci --include=dev
+    NODE_ENV= npm run build        # writes ./dashboard.html (single file)
 
 Then copy `dashboard.html` to
 `packages/personal/src/pursers_personal/resources/dashboard.html`,

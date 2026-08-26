@@ -9,7 +9,7 @@ import {
 import "./dashboard.css";
 
 type DataMode = "live" | "stale" | "demo" | "demo-error";
-type ViewName = "today" | "work" | "agents" | "activity";
+type ViewName = "today" | "work" | "agents" | "fleet" | "activity";
 type Agent = {
   id: string | null;
   name: string;
@@ -94,6 +94,38 @@ type Snapshot = {
   resync_notice: string | null;
   snapshot_at: string | null;
 };
+type FleetProject = {
+  name: string | null;
+  board_id: string | null;
+  status: string | null;
+  tickets_open: number | null;
+  tickets_claimed: number | null;
+  tickets_submitted: number | null;
+};
+type FleetSeat = {
+  board_id: string | null;
+  project: string | null;
+  live: boolean | null;
+  current_ticket_id: string | null;
+};
+type FleetPoolEntry = {
+  principal_id: string | null;
+  agent_name: string | null;
+  pool_status: string | null;
+  seats: FleetSeat[];
+};
+type FleetSnapshot = {
+  schema_version: number | null;
+  registry_warning: string | null;
+  projects: FleetProject[];
+  pool: FleetPoolEntry[];
+  totals: {
+    agents: number | null;
+    busy: number | null;
+    available: number | null;
+    stale: number | null;
+  };
+};
 
 type SearchHit = { view: ViewName; kind: string; title: string; detail: string };
 
@@ -135,6 +167,30 @@ const fallback: Snapshot = {
   snapshot_at: null,
 };
 
+const fleetFallback: FleetSnapshot = {
+  schema_version: 1,
+  registry_warning: "Synthetic fleet preview — no organization data is loaded.",
+  projects: [
+    { name: "preview", board_id: "board-synthetic", status: "active", tickets_open: 2, tickets_claimed: 1, tickets_submitted: 1 },
+    { name: "paused-example", board_id: "board-paused", status: "paused", tickets_open: 0, tickets_claimed: 0, tickets_submitted: 0 },
+  ],
+  pool: [
+    {
+      principal_id: "PR-DEMO-1",
+      agent_name: "agent-alpha",
+      pool_status: "busy",
+      seats: [{ board_id: "board-synthetic", project: "preview", live: true, current_ticket_id: "TK-DEMO-1" }],
+    },
+    {
+      principal_id: "PR-DEMO-2",
+      agent_name: "reviewer-β",
+      pool_status: "available",
+      seats: [{ board_id: "board-synthetic", project: "preview", live: true, current_ticket_id: null }],
+    },
+  ],
+  totals: { agents: 2, busy: 1, available: 1, stale: 0 },
+};
+
 const BASE_FEED_DELAY_MS = 5_000;
 const MAX_FEED_DELAY_MS = 60_000;
 const MAX_AGENTS = 200;
@@ -150,6 +206,9 @@ const refreshButton = byId<HTMLButtonElement>("refresh");
 const searchInput = byId<HTMLInputElement>("global-search");
 const main = byId<HTMLElement>("main-content");
 let snapshot = fallback;
+let fleetSnapshot: FleetSnapshot | null = fleetFallback;
+let fleetUnavailable = false;
+let fleetBusy = false;
 let connected = false;
 let feedBusy = false;
 let feedTimer: number | undefined;
@@ -162,6 +221,7 @@ const text = (value: unknown, fallbackValue = "", maxLength = MAX_SHORT_TEXT_LEN
 const optionalText = (value: unknown, maxLength = MAX_SHORT_TEXT_LENGTH) => typeof value === "string" && value.length ? value.slice(0, maxLength) : null;
 const finiteNumber = (value: unknown, fallbackValue = 0) => typeof value === "number" && Number.isFinite(value) ? value : fallbackValue;
 const nonNegative = (value: unknown) => Math.max(0, finiteNumber(value));
+const optionalNonNegative = (value: unknown) => typeof value === "number" && Number.isFinite(value) ? Math.max(0, value) : null;
 const boolean = (value: unknown, fallbackValue = false) => typeof value === "boolean" ? value : fallbackValue;
 const stringList = (value: unknown) => (Array.isArray(value) ? value : [])
   .filter((item): item is string => typeof item === "string")
@@ -314,6 +374,70 @@ function decodeSnapshot(value: unknown): Snapshot | null {
     resync_notice: optionalText(raw.resync_notice),
     snapshot_at: optionalText(raw.snapshot_at),
   };
+}
+
+function decodeFleetProject(value: unknown): FleetProject | null {
+  if (!record(value)) return null;
+  return {
+    name: optionalText(value.name),
+    board_id: optionalText(value.board_id),
+    status: optionalText(value.status),
+    tickets_open: optionalNonNegative(value.tickets_open),
+    tickets_claimed: optionalNonNegative(value.tickets_claimed),
+    tickets_submitted: optionalNonNegative(value.tickets_submitted),
+  };
+}
+
+function decodeFleetSeat(value: unknown): FleetSeat | null {
+  if (!record(value)) return null;
+  return {
+    board_id: optionalText(value.board_id),
+    project: optionalText(value.project),
+    live: typeof value.live === "boolean" ? value.live : null,
+    current_ticket_id: optionalText(value.current_ticket_id),
+  };
+}
+
+function decodeFleetPoolEntry(value: unknown): FleetPoolEntry | null {
+  if (!record(value)) return null;
+  return {
+    principal_id: optionalText(value.principal_id),
+    agent_name: optionalText(value.agent_name),
+    pool_status: optionalText(value.pool_status),
+    seats: (Array.isArray(value.seats) ? value.seats : [])
+      .slice(0, MAX_AGENTS)
+      .map(decodeFleetSeat)
+      .filter((item): item is FleetSeat => item !== null),
+  };
+}
+
+function decodeFleetSnapshot(value: unknown): FleetSnapshot | null {
+  if (!record(value)) return null;
+  const totals = record(value.totals) ? value.totals : {};
+  return {
+    schema_version: optionalNonNegative(value.schema_version),
+    registry_warning: optionalText(value.registry_warning, MAX_LONG_TEXT_LENGTH),
+    projects: (Array.isArray(value.projects) ? value.projects : [])
+      .slice(0, MAX_TICKETS)
+      .map(decodeFleetProject)
+      .filter((item): item is FleetProject => item !== null),
+    pool: (Array.isArray(value.pool) ? value.pool : [])
+      .slice(0, MAX_AGENTS)
+      .map(decodeFleetPoolEntry)
+      .filter((item): item is FleetPoolEntry => item !== null),
+    totals: {
+      agents: optionalNonNegative(totals.agents),
+      busy: optionalNonNegative(totals.busy),
+      available: optionalNonNegative(totals.available),
+      stale: optionalNonNegative(totals.stale),
+    },
+  };
+}
+
+function looksLikeFleetSnapshot(value: unknown): boolean {
+  if (!record(value)) return false;
+  return ["schema_version", "registry_warning", "projects", "pool", "totals"]
+    .some((key) => key in value);
 }
 
 function serializedWithinLimit(value: unknown): boolean {
@@ -679,6 +803,115 @@ function renderAgents(data: Snapshot): void {
   byId("agents-grid").replaceChildren(...(cards.length ? cards : [emptyState("No agents yet", "Agents appear after they join this local board.")]));
 }
 
+function fleetValue(value: number | null): string {
+  return value === null ? "—" : String(value);
+}
+
+function tableHeading(label: string): HTMLTableCellElement {
+  const heading = element("th", undefined, label);
+  heading.scope = "col";
+  return heading;
+}
+
+function fleetTable(headers: string[]): { wrapper: HTMLElement; body: HTMLTableSectionElement } {
+  const wrapper = element("div", "fleet-table-wrap");
+  const table = element("table", "fleet-table");
+  const head = element("thead");
+  const row = element("tr");
+  row.append(...headers.map(tableHeading));
+  head.append(row);
+  const body = element("tbody");
+  table.append(head, body);
+  wrapper.append(table);
+  return { wrapper, body };
+}
+
+function renderFleet(data: FleetSnapshot | null): void {
+  const unavailable = fleetUnavailable || data === null;
+  const totals = unavailable ? null : data.totals;
+  byId("fleet-agents").textContent = fleetValue(totals?.agents ?? null);
+  byId("fleet-busy").textContent = fleetValue(totals?.busy ?? null);
+  byId("fleet-available").textContent = fleetValue(totals?.available ?? null);
+  byId("fleet-stale").textContent = fleetValue(totals?.stale ?? null);
+
+  const warning = byId<HTMLElement>("fleet-warning");
+  warning.replaceChildren();
+  const warningText = unavailable
+    ? "Fleet snapshot is unavailable on this server."
+    : data.registry_warning;
+  if (warningText) {
+    const notice = element("div", "notice");
+    notice.dataset.tone = "warning";
+    notice.append(element("p", undefined, warningText));
+    warning.append(notice);
+  }
+
+  const projects = unavailable ? [] : data.projects;
+  const projectContainer = byId<HTMLElement>("fleet-projects");
+  if (!projects.length) {
+    projectContainer.replaceChildren(emptyState(
+      unavailable ? "Fleet data unavailable" : "No registered projects",
+      unavailable ? "This server may not expose the fleet_snapshot tool yet." : "Active and paused registry projects will appear here.",
+    ));
+  } else {
+    const { wrapper, body } = fleetTable(["Name", "Board", "Status", "Open", "Claimed", "Submitted"]);
+    projects.forEach((project) => {
+      const row = element("tr");
+      row.append(
+        element("td", undefined, project.name ?? "—"),
+        element("td", "fleet-mono", project.board_id ?? "—"),
+        element("td", undefined, project.status ?? "—"),
+        element("td", "fleet-number", fleetValue(project.tickets_open)),
+        element("td", "fleet-number", fleetValue(project.tickets_claimed)),
+        element("td", "fleet-number", fleetValue(project.tickets_submitted)),
+      );
+      body.append(row);
+    });
+    projectContainer.replaceChildren(wrapper);
+  }
+
+  const pool = unavailable ? [] : data.pool;
+  const poolContainer = byId<HTMLElement>("fleet-pool");
+  if (!pool.length) {
+    poolContainer.replaceChildren(emptyState(
+      unavailable ? "Agent pool unavailable" : "No pool entries",
+      unavailable ? "Counts and seats remain as em dashes until the tool is available." : "Cross-project worker seats will appear here.",
+    ));
+  } else {
+    const { wrapper, body } = fleetTable(["Agent", "Pool status", "Seats"]);
+    pool.forEach((entry) => {
+      const row = element("tr");
+      row.dataset.stale = String(entry.pool_status === "stale");
+      const identity = element("td");
+      identity.append(
+        element("strong", undefined, entry.agent_name ?? "—"),
+        element("small", "fleet-principal", entry.principal_id ?? "—"),
+      );
+      const status = element("td");
+      status.append(pill(entry.pool_status ?? "—", entry.pool_status === "busy" ? "working" : entry.pool_status === "available" ? "submitted" : undefined));
+      const seats = element("td");
+      const seatList = element("div", "fleet-seats");
+      if (entry.seats.length) {
+        entry.seats.forEach((seat) => {
+          const project = seat.project ?? seat.board_id ?? "—";
+          const ticket = shortTicketId(seat.current_ticket_id) ?? "—";
+          const chip = pill(`${project}:${ticket}`, seat.live === false ? "warning" : undefined);
+          if (seat.board_id) chip.title = `board ${seat.board_id}`;
+          seatList.append(chip);
+        });
+      } else {
+        const empty = pill("—");
+        empty.dataset.empty = "true";
+        seatList.append(empty);
+      }
+      seats.append(seatList);
+      row.append(identity, status, seats);
+      body.append(row);
+    });
+    poolContainer.replaceChildren(wrapper);
+  }
+}
+
 function newestEvents(events: BoardEvent[]): BoardEvent[] {
   return [...events].sort((left, right) => (right.seq ?? -1) - (left.seq ?? -1));
 }
@@ -733,6 +966,7 @@ function renderActivePanel(data: Snapshot): void {
   if (activeView === "today") renderToday(data);
   else if (activeView === "work") renderWork(data);
   else if (activeView === "agents") renderAgents(data);
+  else if (activeView === "fleet") renderFleet(fleetSnapshot);
   else renderActivity(data);
 }
 
@@ -765,6 +999,8 @@ function searchCorpus(data: Snapshot): SearchHit[] {
   const hits: SearchHit[] = [];
   data.tickets.forEach((ticket) => hits.push({ view: "work", kind: "Ticket", title: `${ticket.id} · ${ticket.title}`, detail: `${ticket.status} ${ticket.priority} ${ticket.description} ${ticket.assigned_to ?? ""} ${ticket.assigned_agent_id ?? ""}` }));
   data.agents.forEach((agent) => hits.push({ view: "agents", kind: "Agent", title: agent.name, detail: `${agent.status} ${agent.role ?? ""} ${agent.focus ?? ""} ${agent.platform ?? ""}` }));
+  fleetSnapshot?.projects.forEach((project) => hits.push({ view: "fleet", kind: "Project", title: project.name ?? "—", detail: `${project.board_id ?? ""} ${project.status ?? ""}` }));
+  fleetSnapshot?.pool.forEach((entry) => hits.push({ view: "fleet", kind: "Pool", title: entry.agent_name ?? "—", detail: `${entry.pool_status ?? ""} ${entry.principal_id ?? ""} ${entry.seats.map((seat) => `${seat.project ?? seat.board_id ?? ""} ${seat.current_ticket_id ?? ""}`).join(" ")}` }));
   data.events.forEach((event) => hits.push({ view: "activity", kind: "Activity", title: event.text, detail: `${event.kind} ${event.actor_id ?? ""} ${event.ticket_id ?? ""} ${event.memory_id ?? ""} ${event.status_from ?? ""} ${event.status_to ?? ""}` }));
   const highlights = [data.highlights.latest_handoff, data.highlights.important_pinned].filter((item): item is Highlight => item !== null);
   highlights.forEach((item) => hits.push({ view: "today", kind: item.type, title: item.title, detail: `${item.summary} ${item.author ?? ""} ${item.next_steps.join(" ")} ${item.warnings.join(" ")}` }));
@@ -824,12 +1060,16 @@ function selectView(view: ViewName, focusTab = false): void {
     const selected = tab.dataset.view === view;
     tab.setAttribute("aria-selected", String(selected));
     tab.tabIndex = selected ? 0 : -1;
-    if (selected && focusTab) tab.focus();
+    if (selected) {
+      tab.scrollIntoView({ block: "nearest", inline: "nearest" });
+      if (focusTab) tab.focus();
+    }
   });
   document.querySelectorAll<HTMLElement>("[data-panel]").forEach((panel) => {
     panel.hidden = panel.dataset.panel !== view;
   });
   renderActivePanel(snapshot);
+  if (view === "fleet" && connected && fleetUnavailable && !fleetBusy) void refreshFleet();
 }
 
 function setLoading(loading: boolean, message = "Loading authorized board state"): void {
@@ -864,6 +1104,34 @@ async function refreshSnapshot(): Promise<void> {
     render(failureSnapshot("Local bridge request failed"));
   } finally {
     setLoading(false);
+  }
+}
+
+function acceptFleetSnapshot(value: FleetSnapshot): void {
+  fleetSnapshot = value;
+  fleetUnavailable = false;
+  if (activeView === "fleet") renderFleet(fleetSnapshot);
+  renderSearch(searchInput.value);
+}
+
+async function refreshFleet(): Promise<void> {
+  if (!connected || fleetBusy) return;
+  fleetBusy = true;
+  try {
+    const result = await app.callServerTool({ name: "fleet_snapshot", arguments: {} });
+    const value = decodeFleetSnapshot(structured(result));
+    if (value) acceptFleetSnapshot(value);
+    else {
+      fleetSnapshot = null;
+      fleetUnavailable = true;
+    }
+  } catch {
+    fleetSnapshot = null;
+    fleetUnavailable = true;
+  } finally {
+    fleetBusy = false;
+    if (activeView === "fleet") renderFleet(fleetSnapshot);
+    renderSearch(searchInput.value);
   }
 }
 
@@ -923,7 +1191,7 @@ document.querySelectorAll<HTMLButtonElement>("[role=tab][data-view]").forEach((t
   tab.addEventListener("keydown", (event) => {
     if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
     event.preventDefault();
-    const order: ViewName[] = ["today", "work", "agents", "activity"];
+    const order: ViewName[] = ["today", "work", "agents", "fleet", "activity"];
     const current = order.indexOf(activeView);
     const next = event.key === "Home" ? 0 : event.key === "End" ? order.length - 1 : (current + (event.key === "ArrowRight" ? 1 : -1) + order.length) % order.length;
     selectView(order[next], true);
@@ -939,7 +1207,7 @@ byId("search-results-list").addEventListener("click", (event) => {
   selectView(button.dataset.targetView as ViewName, true);
 });
 searchInput.addEventListener("input", () => renderSearch(searchInput.value));
-refreshButton.addEventListener("click", () => void refreshSnapshot());
+refreshButton.addEventListener("click", () => void Promise.all([refreshSnapshot(), refreshFleet()]));
 document.addEventListener("keydown", (event) => {
   const target = event.target as HTMLElement;
   const typing = target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target.isContentEditable;
@@ -962,8 +1230,14 @@ render(fallback);
 // Register every Host handler before connect, as required by the SDK lifecycle.
 app.addEventListener("toolinput", () => setLoading(true, "Receiving board state"));
 app.addEventListener("toolresult", (result) => {
-  const value = decodeSnapshot(structured(result));
-  if (value) render(value);
+  const payload = structured(result);
+  const value = decodeSnapshot(payload);
+  if (value) {
+    render(value);
+    return;
+  }
+  const fleet = looksLikeFleetSnapshot(payload) ? decodeFleetSnapshot(payload) : null;
+  if (fleet) acceptFleetSnapshot(fleet);
   else if (connected) void refreshSnapshot();
 });
 app.addEventListener("hostcontextchanged", applyHostContext);
@@ -981,6 +1255,7 @@ void app
     connected = true;
     const context = app.getHostContext();
     if (context) applyHostContext(context);
+    void refreshFleet();
     scheduleFeed(0);
   })
   .catch(() => {

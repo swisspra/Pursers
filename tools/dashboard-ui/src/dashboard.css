@@ -259,6 +259,8 @@ main[aria-busy="true"] { opacity: 0.72; }
 .today-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
 .span-two { grid-column: span 2; }
 .metrics-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin: 0; }
+.fleet-metrics { margin-bottom: 12px; }
+.fleet-grid { display: grid; gap: 12px; }
 
 .card,
 .search-panel {
@@ -370,6 +372,26 @@ main[aria-busy="true"] { opacity: 0.72; }
 .agent-heading { display: flex; min-width: 0; align-items: flex-start; justify-content: space-between; gap: 8px; }
 .agent-state-badges { display: flex; flex: 0 0 auto; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
 .agent-avatar { display: grid; width: 38px; height: 38px; place-items: center; border-radius: 12px; background: var(--accent-soft); color: var(--accent); font-weight: 800; }
+
+.fleet-table-wrap {
+  width: 100%;
+  margin-top: 10px;
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--inset-background);
+}
+.fleet-table { width: 100%; min-width: 620px; border-collapse: collapse; text-align: left; }
+.fleet-table th,
+.fleet-table td { padding: 11px 13px; border-bottom: 1px solid var(--border); vertical-align: top; overflow-wrap: anywhere; unicode-bidi: plaintext; }
+.fleet-table th { color: var(--text-muted); font-size: 11px; font-weight: 750; letter-spacing: 0.05em; text-transform: uppercase; }
+.fleet-table tbody tr:last-child td { border-bottom: 0; }
+.fleet-table tbody tr[data-stale="true"] { filter: grayscale(0.65); opacity: 0.58; }
+.fleet-table strong { display: block; }
+.fleet-principal { display: block; margin-top: 3px; color: var(--text-muted); font-family: var(--font-mono, ui-monospace, monospace); }
+.fleet-mono { font-family: var(--font-mono, ui-monospace, monospace); font-size: 12px; }
+.fleet-number { font-variant-numeric: tabular-nums; }
+.fleet-seats { display: flex; min-width: 0; flex-wrap: wrap; gap: 6px; }
 
 .timeline { position: relative; }
 .timeline-item { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 12px; }
@@ -537,6 +559,9 @@ main[aria-busy="true"] { opacity: 0.72; }
   .agent-card,
   .timeline-item,
   .highlight { border: 1px solid CanvasText; }
+  .fleet-table-wrap,
+  .fleet-table th,
+  .fleet-table td { border-color: CanvasText; }
   .status-dot,
   .health-icon { forced-color-adjust: none; }
 }
