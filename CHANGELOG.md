@@ -5,6 +5,58 @@ All notable changes to Pursers are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [5.0.0a4] - 2026-08-26
+
+This fleet-era release includes `pursers-personal==5.0.0a4`,
+`pursers==5.0.0a4`, and `pursers-central==0.1.0a10` (`36ef082`, `8572f18`).
+
+### Added
+
+- Added multi-board `a2a_wait` so one worker identity can wait across explicit
+  board lists with per-board cursors, board-tagged events, isolated push/poll
+  fallback, and lease renewal on the board holding the claim (`1044c3a`).
+- Added the `project_registry` board-state format, parsed
+  `project_registry_get`, and `boards="registry"` discovery for active project
+  boards, plus a validating `registry_admin.py` CLI with verified readback for
+  show, add, pause, activate, and remove operations (`07c2ff5`, `a4ba4d1`).
+- Added the bounded, non-joining `fleet_snapshot` projection across active
+  registry boards and a read-only Fleet dashboard tab for project ticket totals,
+  pooled agent seats, current work, and unavailable-board warnings
+  (`3a32643`, `160efb3`).
+- Added push-mode invariant coverage proving stable journal-only subscriptions,
+  backlog-before-subscribe ordering, authoritative refetch after a cue, and
+  byte-identical polling fallback when subscriptions fail (`cf71cfe`).
+
+### Changed
+
+- Expanded the agent roster projection and UI columns with project, current
+  ticket, and duplicate-name state, including recent-ticket project fallback
+  for agents that are no longer holding work (`f3d7760`, `7d0f14d`).
+- Completed the JWT-only cutover: Central rejects every non-`jwt` authentication
+  mode and Personal derives connection credentials from its verified profile
+  rather than legacy `ONBOARD_*` connection defaults (`83ad38c`).
+- Moved all six distributions to PyPI Trusted Publishing with GitHub OIDC and no
+  API tokens, using the `pypi` and `pypi-bridge` environments (`67848a1`).
+
+### Fixed
+
+- Fixed Central `board_state_update` to honor each board's scrub profile, so an
+  internal registry can retain machine-local absolute work directories while
+  strict boards still reject them; released as `pursers-central==0.1.0a10`
+  (`6b7a1cf`, `36ef082`).
+- Corrected the Personal dependency pin from `pursers-central==0.1.0a9` to
+  `pursers-central==0.1.0a10` and rebuilt Personal and the meta-package as a4
+  after the incompatible a3 publication (`f18e380`, `8572f18`).
+
+## [5.0.0a3] - 2026-08-26
+
+### Withdrawn
+
+- Withdrawn after publication: `pursers-personal==5.0.0a3` pinned
+  `pursers-central==0.1.0a9`, while `pursers==5.0.0a3` pinned Central a10 and
+  Personal a3, making that package set co-uninstallable. Use 5.0.0a4 instead
+  (`36ef082`, `f18e380`, `8572f18`).
+
 ## [5.0.0a2] - 2026-08-25
 
 ### Added
@@ -38,9 +90,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - Renamed internal distributions, modules, entry points, resources, and imports
   from `onboard_*` / `onboard-` to `pursers_*` / `pursers-`, including the wait
   bridge client import (`19a44f8`, `22aa1a0`).
-- Transitioned Central authentication to signed JWT capabilities with fail-closed
-  RS256/JWKS verification, issuer and audience checks, and documented the temporary
-  legacy-token transition boundary (`83ad38c`, `f0f02da`).
+- Transitioned Central authentication to signed JWT capabilities only, with
+  fail-closed RS256/JWKS verification plus issuer and audience checks; the a2
+  README's legacy-token transition language did not match the shipped code
+  (`83ad38c`, `f0f02da`).
 - Made wheel and dashboard artifacts reproducible with a pinned build toolchain,
   deterministic build epoch, byte-level hashes, and a generated component lock
   (`19a44f8`, `00dc188`, `05aec22`).
