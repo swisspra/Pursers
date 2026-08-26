@@ -17,12 +17,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Protocol
 
-try:
-    from pursers_client import BoardClient
-except ModuleNotFoundError:  # Make the source checkout directly runnable.
-    _CLIENT_SRC = Path(__file__).resolve().parents[2] / "packages" / "client" / "src"
+# Prefer the sibling source checkout over any installed pursers-client wheel:
+# the dashboard depends on keyword arguments newer than the last published wheel.
+_CLIENT_SRC = Path(__file__).resolve().parents[2] / "packages" / "client" / "src"
+if (_CLIENT_SRC / "pursers_client").is_dir():
     sys.path.insert(0, str(_CLIENT_SRC))
-    from pursers_client import BoardClient
+from pursers_client import BoardClient
 
 
 DEFAULT_URL = "https://127.0.0.1:8766/mcp"
