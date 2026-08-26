@@ -5,6 +5,33 @@ All notable changes to Pursers are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [5.0.0a6] - 2026-08-27
+
+This release includes `pursers-personal==5.0.0a6`, `pursers==5.0.0a6`, and
+`pursers-central==0.1.0a12`.
+
+### Fixed
+
+- Bounded the snapshot attached to `board_onboard` responses through the same
+  `bounded_snapshot_payload` machinery as `board_snapshot`, with optional
+  validated `snapshot_limit` / `snapshot_max_bytes` parameters and explicit
+  truncation metadata. Previously a data-heavy board could push the onboard
+  response past the ~1MB MCP frame cap even after the briefing fix (`2babe77`).
+
+## [5.0.0a5] - 2026-08-26
+
+This release includes `pursers-personal==5.0.0a5`, `pursers==5.0.0a5`, and
+`pursers-central==0.1.0a11` (`36e0540`).
+
+### Fixed
+
+- Bounded briefing payloads: `open_tickets` became a compact projection with
+  capped list length, and pinned digest / handoff entries carry per-entry
+  content caps with explicit truncation flags (`7093565`).
+- Paginated `board_catchup` with `max_events` / `max_bytes` and a monotonic
+  cursor (`has_more` / `new_seq`), so a fresh cursor on a data-heavy board no
+  longer streams the entire journal in one response (`7093565`).
+
 ## [5.0.0a4] - 2026-08-26
 
 This fleet-era release includes `pursers-personal==5.0.0a4`,

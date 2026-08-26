@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "product_version": "5.0.0a5",
+  "product_version": "5.0.0a6",
   "build_toolchain": {
     "build": "1.3.0",
     "setuptools": "80.9.0",
@@ -10,15 +10,15 @@
   },
   "components": {
     "pursers-central": {
-      "version": "0.1.0a11",
-      "wheel_sha256": "7ae8b8425990dc258a44c4bd8b1816fc1e1ebc1a2705d517aea2d5a2a6629a47",
+      "version": "0.1.0a12",
+      "wheel_sha256": "9ae54d77f51ff6308d731ef497357ce4af9b387c06156abda9b5007a11a898ac",
       "members": {
-        "pursers_central-0.1.0a11.dist-info/METADATA": "76c4c516ac01e26b6078e402a3dbb8797faf65f217946eabf8d9cc67b685b0ec",
-        "pursers_central-0.1.0a11.dist-info/WHEEL": "ff309ddcdd65ebd02bc724dbf2bcc4a0ff53a5b61792a44548d383e4ebb19d3b",
-        "pursers_central-0.1.0a11.dist-info/licenses/LICENSE": "c48efd75374a365d9d9f3e24c5b4148d53ce8621dd55bf470c9b4c513d03d84d",
-        "pursers_central-0.1.0a11.dist-info/top_level.txt": "36b183999f65ce4c6f41b59602a397b8c3c0b3db4fd216bdf5b9c8c45d9cc55e",
+        "pursers_central-0.1.0a12.dist-info/METADATA": "977dab9cec81df53274d44b9b379a8f05578bf875bbf8d5109800749759aa3d9",
+        "pursers_central-0.1.0a12.dist-info/WHEEL": "ff309ddcdd65ebd02bc724dbf2bcc4a0ff53a5b61792a44548d383e4ebb19d3b",
+        "pursers_central-0.1.0a12.dist-info/licenses/LICENSE": "c48efd75374a365d9d9f3e24c5b4148d53ce8621dd55bf470c9b4c513d03d84d",
+        "pursers_central-0.1.0a12.dist-info/top_level.txt": "36b183999f65ce4c6f41b59602a397b8c3c0b3db4fd216bdf5b9c8c45d9cc55e",
         "pursers_central/__init__.py": "5a383eb8bb37e6f3a14557297c56c692965d0e874623bdcbbd257ceb21a8f612",
-        "pursers_central/central.py": "75f6d6082451d84b93afb693219822624c763363389250ec8561a0208cb39578",
+        "pursers_central/central.py": "6e5c50bfcbc014003635edf1f903c4c690be09555d8c57d63661586762547abe",
         "pursers_central/cursor.py": "5f57c3d58bdb88ca9f01497e518de96c9651063047b0928689a0fda58cceeb2b",
         "pursers_central/journal.py": "bb2f894fe7799d6173f4c834f0a2fd6a5443ca541ce585db342783725cae0bfb",
         "pursers_central/jwt_verifier.py": "e4ad036ae4db25da6f85a82268b827686259507f266e3d53c6a3c50a3964ca25",
@@ -46,6 +46,6 @@
   "view": {
     "resource": "pursers_personal/resources/dashboard.html",
     "size_bytes": 396499,
-    "sha256": "0ebe5bd468d4c3588f1611c084652d8243ae75ffb69ab10a1496782e83d81ca1"
+    "sha256": "386e75449cdffbd5d46e2b620a6517ff5ddc5918026c58dcfa19c5999885a631"
   }
 }
