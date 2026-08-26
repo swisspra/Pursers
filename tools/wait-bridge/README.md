@@ -1,7 +1,8 @@
 # Pursers wait bridge
 
 `pursers_wait_server.py` is a stdio MCP server that exposes blocking
-`a2a_wait`. Polling is the default. An opt-in MCP v2 push mode uses
+`a2a_wait` and parsed registry lookup through `project_registry_get`. Polling
+is the default. An opt-in MCP v2 push mode uses
 `subscriptions/listen` on the stable `board://<board>/journal` cue only to wake
 the bridge, then refetches and filters the same journal events as polling.
 Keep it on stdio; wrapping it in an HTTP transport adds request timeouts that
@@ -100,6 +101,65 @@ mode, each accessible board subscribes independently to
 subscription degrades only that board to polling. Heartbeats scan each board
 but renew a lease only on the board where the exact derived agent ID holds the
 claim.
+
+## Project registry
+
+The home board stores one string-valued board-state entry under the namespaced
+key `project_registry`. Its value is JSON with this schema:
+
+```json
+{
+  "schema_version": 1,
+  "projects": {
+    "project-a": {
+      "board_id": "project-a-board",
+      "work_dir": "/ABSOLUTE/PATH/TO/PROJECT-A",
+      "status": "active"
+    },
+    "project-b": {
+      "board_id": "project-b-board",
+      "work_dir": "/ABSOLUTE/PATH/TO/PROJECT-B",
+      "status": "paused"
+    }
+  }
+}
+```
+
+`board_state_update` receives that serialized JSON string as `value`.
+`project_registry_get()` reads the home board and returns the parsed object
+directly in the same `{schema_version, projects}` shape, so a worker can map a
+claimed ticket's board to its `work_dir`.
+
+Pass the sentinel `boards="registry"` to read the registry once at the start
+of that `a2a_wait` invocation. The bridge selects all active project board IDs,
+deduplicates them in registry order, and always puts the configured home board
+first. It never refetches the registry while the call is blocked:
+
+```text
+a2a_wait(
+  boards="registry",
+  since_seq={"pursers": 20, "project-a-board": 7},
+  agent_name="pool-worker"
+)
+```
+
+A valid sentinel call uses the multi-board response documented above. An
+explicit list never consults the registry, and omitting `boards` retains the
+original single-board behavior. If the registry is missing, unreadable, or
+malformed, the sentinel call waits only on the home board and returns the
+original single-board fields plus `registry_warning`; if `since_seq` was a
+map, the home board's cursor is preserved:
+
+```json
+{
+  "new_seq": 20,
+  "events": [],
+  "waited_s": 180.0,
+  "timed_out": true,
+  "resynced": false,
+  "registry_warning": "project_registry unavailable; using 'pursers' only: reason"
+}
+```
 
 ## Connector examples
 

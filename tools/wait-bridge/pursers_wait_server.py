@@ -85,6 +85,9 @@ BACKLOG_SCAN_LIMIT = 100
 RELEVANT_KINDS = frozenset({"ticket_created", "ticket_status_changed"})
 CLAIMED_STATES = frozenset({"claimed", "in_progress", "creating_report"})
 HANDOFF_REJOIN_MESSAGE = "call board_onboard or board_join before more work"
+PROJECT_REGISTRY_KEY = "project_registry"
+PROJECT_REGISTRY_SCHEMA_VERSION = 1
+PROJECT_STATUSES = frozenset({"active", "paused"})
 
 
 def clamp_timeout(timeout_s: Any) -> int:
@@ -225,6 +228,100 @@ async def _lifespan(server: MCPServer) -> AsyncIterator[dict[str, Any]]:
 
 
 mcp = MCPServer("Pursers Wait Bridge", version="0.1.0", lifespan=_lifespan)
+
+
+def _parse_project_registry(result: dict[str, Any]) -> dict[str, Any]:
+    """Validate and normalize Central's string-valued board-state entry."""
+    state = result.get("state")
+    if not isinstance(state, dict):
+        raise ValueError("project_registry state entry is missing")
+    raw_value = state.get("value")
+    if not isinstance(raw_value, str):
+        raise ValueError("project_registry state value must be a JSON string")
+    try:
+        registry = json.loads(raw_value)
+    except json.JSONDecodeError as exc:
+        raise ValueError("project_registry state value is not valid JSON") from exc
+    if not isinstance(registry, dict):
+        raise ValueError("project_registry must be a JSON object")
+    schema_version = registry.get("schema_version")
+    if (
+        type(schema_version) is not int
+        or schema_version != PROJECT_REGISTRY_SCHEMA_VERSION
+    ):
+        raise ValueError(
+            f"project_registry schema_version must be {PROJECT_REGISTRY_SCHEMA_VERSION}"
+        )
+    projects = registry.get("projects")
+    if not isinstance(projects, dict):
+        raise ValueError("project_registry projects must be an object")
+
+    normalized_projects: dict[str, dict[str, str]] = {}
+    for name, project in projects.items():
+        if not isinstance(name, str) or not name or name != name.strip():
+            raise ValueError(
+                "project_registry project names must be non-empty strings"
+            )
+        if not isinstance(project, dict):
+            raise ValueError(f"project_registry project {name!r} must be an object")
+        board_id = project.get("board_id")
+        work_dir = project.get("work_dir")
+        status = project.get("status")
+        if (
+            not isinstance(board_id, str)
+            or not board_id
+            or board_id != board_id.strip()
+        ):
+            raise ValueError(
+                f"project_registry project {name!r} has an invalid board_id"
+            )
+        if not isinstance(work_dir, str) or not os.path.isabs(work_dir):
+            raise ValueError(
+                f"project_registry project {name!r} work_dir must be absolute"
+            )
+        if status not in PROJECT_STATUSES:
+            raise ValueError(
+                f"project_registry project {name!r} status must be active or paused"
+            )
+        normalized_projects[name] = {
+            "board_id": board_id,
+            "work_dir": work_dir,
+            "status": status,
+        }
+    return {
+        "schema_version": PROJECT_REGISTRY_SCHEMA_VERSION,
+        "projects": normalized_projects,
+    }
+
+
+async def _read_project_registry(client: BoardClient) -> dict[str, Any]:
+    result = await client.board_state_get(key=PROJECT_REGISTRY_KEY)
+    return _parse_project_registry(result)
+
+
+def _registry_boards(registry: dict[str, Any]) -> list[str]:
+    """Return active boards in registry order, always led by the home board."""
+    selected = [BOARD_ID]
+    seen = {BOARD_ID}
+    for project in registry["projects"].values():
+        board_id = project["board_id"]
+        if project["status"] == "active" and board_id not in seen:
+            selected.append(board_id)
+            seen.add(board_id)
+    return selected
+
+
+def _home_cursor(since_seq: int | dict[str, int]) -> int:
+    if isinstance(since_seq, dict):
+        return max(0, int(since_seq.get(BOARD_ID, 0)))
+    return max(0, int(since_seq))
+
+
+@mcp.tool()
+async def project_registry_get(ctx: Context) -> dict[str, Any]:
+    """Return the parsed project registry stored on the home board."""
+    client: BoardClient = ctx.request_context.lifespan_context["client"]
+    return await _read_project_registry(client)
 
 
 async def _catchup_all(
@@ -375,7 +472,7 @@ async def a2a_wait(
     only_mine: bool = True,
     project: str | None = None,
     agent_name: str | None = None,
-    boards: list[str] | None = None,
+    boards: list[str] | str | None = None,
 ) -> dict[str, Any]:
     """Block until pursers board work arrives, or until timeout_s elapses.
 
@@ -396,11 +493,15 @@ async def a2a_wait(
     process-level ONBOARD_AGENT_NAME/INSTANCE identity exactly. An explicit
     name is joined statelessly for this call on the existing connection.
 
-    boards: optional board IDs for a cross-project worker pool. Omit it for
-    the permanent single-board compatibility path and its original response.
-    When supplied, since_seq may be a {board_id: cursor} map. Multi-board
-    events include board_id; new_seq and resynced are per-board maps; boards
-    denied at join are reported in skipped_boards without aborting the call.
+    boards: optional board IDs for a cross-project worker pool, or the string
+    sentinel "registry" to resolve active boards from the home board's
+    project_registry state at the start of this invocation. Omit it for the
+    permanent single-board compatibility path and its original response. When
+    supplied, since_seq may be a {board_id: cursor} map. Multi-board events
+    include board_id; new_seq and resynced are per-board maps; boards denied at
+    join are reported in skipped_boards without aborting the call. An
+    unreadable or malformed registry falls back to the single home board and
+    adds registry_warning to that otherwise original response shape.
 
     Returns {new_seq, events, waited_s, timed_out, resynced}. timed_out=True
     means "no work" -- call again with since_seq=new_seq to re-arm. resynced=True
@@ -413,6 +514,35 @@ async def a2a_wait(
     or the reaper can reclaim it. See WORKER-DIRECTIVE.md step DO.
     """
     client: BoardClient = ctx.request_context.lifespan_context["client"]
+    if boards == "registry":
+        try:
+            registry = await _read_project_registry(client)
+        except Exception as exc:
+            result = await _wait_for_work(
+                client,
+                since_seq=_home_cursor(since_seq),
+                timeout_s=timeout_s,
+                only_mine=only_mine,
+                project=project,
+                agent_name=agent_name,
+            )
+            return {
+                **result,
+                "registry_warning": (
+                    f"project_registry unavailable; using {BOARD_ID!r} only: {exc}"
+                ),
+            }
+        return await _wait_for_work_many(
+            client,
+            boards=_registry_boards(registry),
+            since_seq=since_seq,
+            timeout_s=timeout_s,
+            only_mine=only_mine,
+            project=project,
+            agent_name=agent_name,
+        )
+    if isinstance(boards, str):
+        raise ValueError('boards must be a list of board IDs or "registry"')
     if boards is not None:
         return await _wait_for_work_many(
             client,
