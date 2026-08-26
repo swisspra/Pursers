@@ -130,6 +130,43 @@ key `project_registry`. Its value is JSON with this schema:
 directly in the same `{schema_version, projects}` shape, so a worker can map a
 claimed ticket's board to its `work_dir`.
 
+### Registry administration CLI
+
+Use `registry_admin.py` to validate, inspect, and edit the registry without
+calling raw board-state tools. It reads the current document, validates the
+complete schema before any mutation, writes to the home `pursers` board, then
+reads back and compares the stored document. A mismatch exits non-zero and
+prints a diff. The bearer token is read only from `ONBOARD_CENTRAL_TOKEN` and
+is never printed.
+
+```sh
+python tools/wait-bridge/registry_admin.py show
+python tools/wait-bridge/registry_admin.py add project-a \
+  --board-id project-a-board --work-dir /ABSOLUTE/PATH/TO/PROJECT-A
+python tools/wait-bridge/registry_admin.py pause project-a
+python tools/wait-bridge/registry_admin.py activate project-a
+python tools/wait-bridge/registry_admin.py remove project-a
+```
+
+`add` refuses an existing name unless `--force` is supplied. All mutations
+refuse malformed current state, unknown names, relative work directories, and
+empty board IDs before writing. `remove` prints the removed entry so it can be
+restored by hand. Override the default Central URL with
+`ONBOARD_CENTRAL_URL` or the global `--central-url` option.
+
+After Central is deployed with board-state support for the board's scrub
+profile, seed and verify the initial registry with the bridge environment:
+
+```sh
+ONBOARD_CENTRAL_TOKEN=TOKEN_PLACEHOLDER \
+  tools/wait-bridge/.venv/bin/python \
+  tools/wait-bridge/seed_project_registry.py
+```
+
+The script writes the operator-supplied initial project entries from the
+registry JSON file, reads the state back, fails if it differs, and prints the
+verified parsed JSON. Never commit or print the real bearer token.
+
 Pass the sentinel `boards="registry"` to read the registry once at the start
 of that `a2a_wait` invocation. The bridge selects all active project board IDs,
 deduplicates them in registry order, and always puts the configured home board

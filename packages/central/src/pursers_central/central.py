@@ -4572,11 +4572,16 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         key = require_id("key", key)
         principal = current_principal()
         require_scope(principal, "board:write")
-        safe_value = clean_text("value", value, max_length=5_000)
-        assert safe_value is not None
         now = time.time()
 
         def update(document: dict[str, Any]) -> dict[str, Any]:
+            safe_value = clean_text(
+                "value",
+                value,
+                max_length=5_000,
+                scrub_profile=board_scrub_profile(document),
+            )
+            assert safe_value is not None
             actor, released, renewed = prepare_board_call(
                 document, principal, agent_name, now
             )
