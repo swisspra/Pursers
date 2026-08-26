@@ -137,6 +137,16 @@ MAX_SNAPSHOT_LIMIT = 1_000
 DEFAULT_SNAPSHOT_MAX_BYTES = 300_000
 MIN_SNAPSHOT_MAX_BYTES = 4_096
 MAX_SNAPSHOT_MAX_BYTES = 750_000
+DEFAULT_CATCHUP_MAX_EVENTS = 200
+MAX_CATCHUP_MAX_EVENTS = 1_000
+DEFAULT_CATCHUP_MAX_BYTES = DEFAULT_SNAPSHOT_MAX_BYTES
+MIN_CATCHUP_MAX_BYTES = MIN_SNAPSHOT_MAX_BYTES
+MAX_CATCHUP_MAX_BYTES = MAX_SNAPSHOT_MAX_BYTES
+BRIEFING_OPEN_TICKET_LIMIT = 20
+BRIEFING_PINNED_DIGEST_LIMIT = 8
+BRIEFING_MEMORY_CONTENT_MAX_CHARS = 2_000
+BRIEFING_MEMORY_LIST_LIMIT = 20
+BRIEFING_HANDOFF_NEXT_STEPS_LIMIT = 8
 
 
 @dataclass(frozen=True)
@@ -1485,6 +1495,88 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         projected.setdefault("created_at_epoch", projected.get("timestamp", 0.0))
         return projected
 
+    def briefing_ticket_payload(ticket: dict[str, Any]) -> dict[str, Any]:
+        """Return only the fields needed to identify and rank active work."""
+        title = str(ticket.get("title", ""))
+        if len(title) > 120:
+            title = title[:119].rstrip() + "…"
+        return {
+            "ticket_id": ticket["ticket_id"],
+            "title": title,
+            "status": ticket.get("status"),
+            "claimed_by": ticket.get("claimed_by"),
+            "priority": ticket.get("priority", "medium"),
+            "updated_at": ticket.get("updated_at"),
+        }
+
+    def briefing_memory_payload(entry: dict[str, Any]) -> dict[str, Any]:
+        """Project one memory without returning legacy or arbitrary raw payloads."""
+        projected = project_memory(entry)
+        scalar_fields = (
+            "memory_id",
+            "title",
+            "scope",
+            "author_principal_id",
+            "author_agent_id",
+            "author_agent_name",
+            "memory_type",
+            "priority",
+            "pinned",
+            "pinned_summary",
+            "created_at",
+            "created_at_epoch",
+        )
+        result = {
+            key: copy.deepcopy(projected[key])
+            for key in scalar_fields
+            if key in projected
+        }
+        omitted: dict[str, int] = {}
+
+        content = projected.get("content", "")
+        content = content if isinstance(content, str) else str(content)
+        content_truncated = len(content) > BRIEFING_MEMORY_CONTENT_MAX_CHARS
+        if content_truncated:
+            content = (
+                content[: BRIEFING_MEMORY_CONTENT_MAX_CHARS - 1].rstrip() + "…"
+            )
+        result["content"] = content
+        result["content_truncated"] = content_truncated
+
+        summary = projected.get("summary")
+        if isinstance(summary, str):
+            summary_truncated = len(summary) > BRIEFING_MEMORY_CONTENT_MAX_CHARS
+            if summary_truncated:
+                summary = (
+                    summary[: BRIEFING_MEMORY_CONTENT_MAX_CHARS - 1].rstrip()
+                    + "…"
+                )
+            result["summary"] = summary
+            result["summary_truncated"] = summary_truncated
+
+        list_limits = {
+            "tags": BRIEFING_MEMORY_LIST_LIMIT,
+            "related_files": BRIEFING_MEMORY_LIST_LIMIT,
+            "related_tickets": BRIEFING_MEMORY_LIST_LIMIT,
+            "files": BRIEFING_MEMORY_LIST_LIMIT,
+            "warnings": BRIEFING_MEMORY_LIST_LIMIT,
+            "next_steps": BRIEFING_HANDOFF_NEXT_STEPS_LIMIT,
+        }
+        for field, field_limit in list_limits.items():
+            values = projected.get(field)
+            if not isinstance(values, list):
+                continue
+            result[field] = copy.deepcopy(values[:field_limit])
+            if len(values) > field_limit:
+                omitted[field] = len(values) - field_limit
+        result["omitted_counts"] = omitted
+        result["truncated"] = bool(
+            content_truncated
+            or result.get("summary_truncated")
+            or omitted
+        )
+        return result
+
     def memory_target(
         document: dict[str, Any], principal: Principal, memory_id: str
     ) -> dict[str, Any] | None:
@@ -2033,14 +2125,62 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             rendered_lines.append(line)
             used += cost
         rendered = "\n".join(rendered_lines)
+        compact_open_tickets = [
+            briefing_ticket_payload(item)
+            for item in tickets[:BRIEFING_OPEN_TICKET_LIMIT]
+        ]
+        compact_pinned = [
+            briefing_memory_payload(item)
+            for item in pinned[:BRIEFING_PINNED_DIGEST_LIMIT]
+        ]
+        compact_handoff = (
+            briefing_memory_payload(project_handoffs[0])
+            if project_handoffs
+            else None
+        )
+        omitted_open_tickets = max(
+            0, len(tickets) - len(compact_open_tickets)
+        )
+        omitted_pinned_digest = max(0, len(pinned) - len(compact_pinned))
+        memory_payload_truncated = any(
+            item["truncated"] for item in compact_pinned
+        ) or bool(compact_handoff and compact_handoff["truncated"])
         return {
             "rendered": rendered,
             "estimated_tokens": max(1, (len(rendered) + 3) // 4),
             "token_budget": token_budget,
             "truncated": truncated,
-            "latest_handoff": project_handoffs[0] if project_handoffs else None,
-            "pinned_digest": pinned[:8],
-            "open_tickets": tickets,
+            "latest_handoff": compact_handoff,
+            "pinned_digest": compact_pinned,
+            "open_tickets": compact_open_tickets,
+            "omitted_open_tickets": omitted_open_tickets,
+            "payload_bounds": {
+                "open_tickets": BRIEFING_OPEN_TICKET_LIMIT,
+                "pinned_digest": BRIEFING_PINNED_DIGEST_LIMIT,
+                "memory_content_chars": BRIEFING_MEMORY_CONTENT_MAX_CHARS,
+                "memory_list_items": BRIEFING_MEMORY_LIST_LIMIT,
+                "handoff_next_steps": BRIEFING_HANDOFF_NEXT_STEPS_LIMIT,
+            },
+            "payload_total_counts": {
+                "open_tickets": len(tickets),
+                "pinned_digest": len(pinned),
+                "latest_handoff": int(bool(project_handoffs)),
+            },
+            "payload_returned_counts": {
+                "open_tickets": len(compact_open_tickets),
+                "pinned_digest": len(compact_pinned),
+                "latest_handoff": int(compact_handoff is not None),
+            },
+            "payload_omitted_counts": {
+                "open_tickets": omitted_open_tickets,
+                "pinned_digest": omitted_pinned_digest,
+                "latest_handoff": 0,
+            },
+            "payload_truncated": bool(
+                omitted_open_tickets
+                or omitted_pinned_digest
+                or memory_payload_truncated
+            ),
             "review_policy": current_review_policy,
             "review_label_counts": review_label_counts,
         }
@@ -4671,11 +4811,31 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         cursor: int | None = None,
         limit: int = 100,
         ack: bool = True,
+        max_events: int = DEFAULT_CATCHUP_MAX_EVENTS,
+        max_bytes: int = DEFAULT_CATCHUP_MAX_BYTES,
         expected_generation: str | None = None,
     ) -> dict[str, Any]:
-        """Drain an authorized bounded journal page and optionally acknowledge it."""
+        """Drain a byte- and event-bounded journal page.
+
+        Optionally acknowledge only the cursor represented in this response.
+        """
         board_id = require_id("board_id", board_id)
         agent_name = require_id("agent_name", agent_name)
+        if (
+            type(max_events) is not int
+            or not 1 <= max_events <= MAX_CATCHUP_MAX_EVENTS
+        ):
+            raise ValueError(
+                f"max_events must be between 1 and {MAX_CATCHUP_MAX_EVENTS}"
+            )
+        if (
+            type(max_bytes) is not int
+            or not MIN_CATCHUP_MAX_BYTES <= max_bytes <= MAX_CATCHUP_MAX_BYTES
+        ):
+            raise ValueError(
+                f"max_bytes must be between {MIN_CATCHUP_MAX_BYTES} and "
+                f"{MAX_CATCHUP_MAX_BYTES}"
+            )
         principal = current_principal()
         require_scope(principal, "board:read")
         document = service.load(board_id)
@@ -4704,7 +4864,9 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             renewed = prepared["renewed"]
         document = service.load(board_id)
         actor = service.member(document, principal, agent_name)
-        page = service.journal.read_after(board_id, start, limit)
+        page = service.journal.read_after(
+            board_id, start, min(limit, max_events)
+        )
 
         def is_currently_open_ticket_event(event: dict[str, Any]) -> bool:
             ticket_id = event.get("ticket_id")
@@ -4725,20 +4887,98 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 or is_currently_open_ticket_event(event)
             )
         ]
-        acknowledged = start
+        returned = list(visible)
+
+        def payload(events: list[dict[str, Any]]) -> dict[str, Any]:
+            if page["resync_required"]:
+                effective_cursor = int(page["next_cursor"])
+            elif not visible or len(events) == len(visible):
+                # Advancing through invisible events is safe only when every
+                # visible event from this raw page was returned.
+                effective_cursor = int(page["next_cursor"])
+            elif events:
+                effective_cursor = int(events[-1]["seq"])
+            else:
+                effective_cursor = start
+            latest_cursor = int(page["latest_cursor"])
+            has_more = (
+                bool(page["has_more"])
+                if page["resync_required"]
+                else effective_cursor < latest_cursor
+            )
+            effective_scan_count = sum(
+                1
+                for event in page["events"]
+                if int(event["seq"]) <= effective_cursor
+            )
+            omitted_visible = len(visible) - len(events)
+            total_event_count = max(0, latest_cursor - start)
+            omitted_journal = (
+                0
+                if page["resync_required"]
+                else max(0, latest_cursor - effective_cursor)
+            )
+            return {
+                "ok": True,
+                **page,
+                "events": events,
+                "next_cursor": effective_cursor,
+                "new_seq": effective_cursor,
+                "has_more": has_more,
+                "scan_count": len(page["events"]),
+                "effective_scan_count": effective_scan_count,
+                "visible_count": len(events),
+                "acknowledged_cursor": effective_cursor if ack else start,
+                "release_events": release_events,
+                "implicitly_renewed": renewed,
+                "bounds": {
+                    "limit": limit,
+                    "max_events": max_events,
+                    "max_bytes": max_bytes,
+                },
+                "total_counts": {
+                    "events": total_event_count,
+                    "journal_events_after_cursor": total_event_count,
+                    "visible_events_in_page": len(visible),
+                },
+                "returned_counts": {
+                    "events": len(events),
+                    "journal_events_scanned": effective_scan_count,
+                },
+                "omitted_counts": {
+                    "events": max(0, total_event_count - len(events)),
+                    "visible_events": omitted_visible,
+                    "journal_events": omitted_journal,
+                },
+                "truncated": bool(has_more or omitted_visible),
+            }
+
+        result = payload(returned)
+
+        def serialized_size(value: Any) -> int:
+            return len(
+                json.dumps(value, ensure_ascii=False, sort_keys=True).encode(
+                    "utf-8"
+                )
+            )
+
+        while serialized_size(result) > max_bytes and returned:
+            returned.pop()
+            result = payload(returned)
+        if serialized_size(result) > max_bytes:
+            raise ValueError("max_bytes is too small for catchup metadata")
+        if visible and not returned:
+            raise ValueError("max_bytes is too small for one journal event")
+
         if ack and not page["resync_required"]:
             service.validate_generation(board_id)
-            acknowledged = service.cursors.ack(principal.principal_id, agent_name, board_id, page["next_cursor"])
-        return {
-            "ok": True,
-            **page,
-            "events": visible,
-            "scan_count": len(page["events"]),
-            "visible_count": len(visible),
-            "acknowledged_cursor": acknowledged,
-            "release_events": release_events,
-            "implicitly_renewed": renewed,
-        }
+            result["acknowledged_cursor"] = service.cursors.ack(
+                principal.principal_id,
+                agent_name,
+                board_id,
+                result["next_cursor"],
+            )
+        return result
 
     return mcp, service
 
