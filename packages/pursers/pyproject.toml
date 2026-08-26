@@ -12,7 +12,7 @@ license = "Apache-2.0"
 dependencies = [
   "pursers-central==0.1.0a10",
   "pursers-client==0.1.0a10",
-  "pursers-personal==5.0.0a2",
+  "pursers-personal==5.0.0a3",
   "pursers-personal-import==5.0.0a2",
 ]
 classifiers = [

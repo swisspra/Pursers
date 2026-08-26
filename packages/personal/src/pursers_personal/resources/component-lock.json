@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "product_version": "5.0.0a2",
+  "product_version": "5.0.0a3",
   "build_toolchain": {
     "build": "1.3.0",
     "setuptools": "80.9.0",
@@ -46,6 +46,6 @@
   "view": {
     "resource": "pursers_personal/resources/dashboard.html",
     "size_bytes": 396499,
-    "sha256": "1591fae7fbcdb1ad87d87b556a5d54871b63597737267524c64ce3614a4363c2"
+    "sha256": "d626b4d01db4bd21ba55e14f052776b7c71ccfff14d09934a676ada98bb95c62"
   }
 }
