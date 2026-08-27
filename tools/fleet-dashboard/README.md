@@ -19,11 +19,11 @@ The server refuses non-loopback binding. It never returns the token to the brows
 
 - online, busy, available, and stale pool counts;
 - open, claimed, submitted, and closed-today ticket counts per active board;
-- bounded open and claimed ticket rows;
+- bounded active ticket rows (open, claimed, and submitted);
 - a bounded recent activity feed per board; and
 - agents grouped across boards by principal and agent name.
 
-The browser polls `/api/fleet` every five seconds. Server reads are cached for five seconds. Every board snapshot is capped at 50 items per collection and 200,000 bytes; displayed board, ticket, event, title, and agent rows are capped again before JSON serialization. Paused registry projects are excluded.
+The browser polls `/api/fleet` every five seconds. Server reads are cached for five seconds. Every board snapshot is capped at 1,000 items per collection and 300,000 bytes; displayed board, ticket, event, title, and agent rows are capped again before JSON serialization. Truncated ticket counts are shown as lower bounds with a `>=` prefix. Paused registry projects are excluded.
 
 Useful options:
 

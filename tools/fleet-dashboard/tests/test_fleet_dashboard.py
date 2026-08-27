@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import json
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Self
 
 import pytest
 
@@ -61,16 +63,11 @@ def test_agents_group_by_principal_and_name_across_board_specific_ids() -> None:
                         "agent_name": "worker-a",
                         "agent_id": "AI-one",
                         "last_activity_at": recent,
+                        "lifecycle_status": "active",
+                        "status": "working",
                     }
                 ],
-                "tickets": [
-                    {
-                        "ticket_id": "TK-1",
-                        "title": "Work",
-                        "status": "claimed",
-                        "claimed_by_agent_id": "AI-one",
-                    }
-                ],
+                "tickets": [],
             },
             "events": [],
         },
@@ -84,6 +81,8 @@ def test_agents_group_by_principal_and_name_across_board_specific_ids() -> None:
                         "agent_name": "worker-a",
                         "agent_id": "AI-two",
                         "last_activity_at": recent,
+                        "lifecycle_status": "active",
+                        "status": "active",
                     }
                 ],
                 "tickets": [],
@@ -138,6 +137,171 @@ def test_available_and_stale_classification() -> None:
         "recent": "available",
         "old": "stale",
     }
+
+
+def test_agent_projection_marks_busy_when_claim_is_outside_ticket_window() -> None:
+    now = datetime(2030, 1, 2, 12, tzinfo=timezone.utc)
+    result = dashboard.aggregate_fleet(
+        [
+            {
+                "label": "Board",
+                "board_id": "board",
+                "snapshot": {
+                    "agents": [
+                        {
+                            "principal_id": "PR-1",
+                            "agent_name": "worker",
+                            "agent_id": "AI-1",
+                            "last_activity_at": now.isoformat(),
+                            "lifecycle_status": "active",
+                            "status": "working",
+                        }
+                    ],
+                    "tickets": [
+                        {
+                            "ticket_id": f"TK-{index:04d}",
+                            "status": "closed",
+                        }
+                        for index in range(50)
+                    ],
+                    "omitted_counts": {"tickets": 1},
+                    "truncated": True,
+                },
+                "events": [],
+            }
+        ],
+        stale_seconds=300,
+        now=now,
+    )
+
+    assert result["agents"][0]["pool_status"] == "busy"
+    assert result["pool_summary"]["busy"] == 1
+
+
+@pytest.mark.parametrize("lifecycle_status", ["handed_off", "inactive"])
+def test_non_active_lifecycle_is_not_busy(lifecycle_status: str) -> None:
+    now = datetime(2030, 1, 2, 12, tzinfo=timezone.utc)
+    result = dashboard.aggregate_fleet(
+        [
+            {
+                "label": "Board",
+                "board_id": "board",
+                "snapshot": {
+                    "agents": [
+                        {
+                            "principal_id": "PR-1",
+                            "agent_name": "worker",
+                            "last_activity_at": now.isoformat(),
+                            "lifecycle_status": lifecycle_status,
+                            "status": "working",
+                        }
+                    ],
+                    "tickets": [],
+                },
+                "events": [],
+            }
+        ],
+        stale_seconds=300,
+        now=now,
+    )
+
+    assert result["agents"][0]["pool_status"] == "available"
+
+
+def test_truncated_ticket_counts_are_rendered_as_lower_bounds() -> None:
+    result = dashboard.aggregate_fleet(
+        [
+            {
+                "label": "Board",
+                "board_id": "board",
+                "snapshot": {
+                    "agents": [],
+                    "tickets": [
+                        {"ticket_id": "TK-open", "status": "open"},
+                        {"ticket_id": "TK-claimed", "status": "claimed"},
+                    ],
+                    "omitted_counts": {"tickets": 3},
+                    "truncated": True,
+                },
+                "events": [],
+            }
+        ],
+        stale_seconds=300,
+    )
+
+    assert result["boards"][0]["counts"] == {
+        "open": ">=1",
+        "claimed": ">=1",
+        "submitted": ">=0",
+        "closed_today": ">=0",
+    }
+
+
+def test_ticket_table_filters_before_bounding_and_includes_submitted() -> None:
+    tickets = [
+        {"ticket_id": f"TK-closed-{index:03d}", "status": "closed"}
+        for index in range(dashboard.SNAPSHOT_LIMIT)
+    ]
+    tickets.extend(
+        [
+            {"ticket_id": "TK-open", "status": "open"},
+            {"ticket_id": "TK-submitted", "status": "submitted"},
+            {"ticket_id": "TK-claimed", "status": "claimed"},
+        ]
+    )
+
+    result = dashboard.aggregate_fleet(
+        [
+            {
+                "label": "Board",
+                "board_id": "board",
+                "snapshot": {"agents": [], "tickets": tickets},
+                "events": [],
+            }
+        ],
+        stale_seconds=300,
+    )
+
+    rows = result["boards"][0]["tickets"]
+    assert [row["id"] for row in rows] == [
+        "TK-claimed",
+        "TK-submitted",
+        "TK-open",
+    ]
+
+
+def test_fetcher_requests_central_max_snapshot_bounds() -> None:
+    requested: dict[str, int | None] = {}
+
+    class Client:
+        async def __aenter__(self) -> Self:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def board_snapshot(
+            self, *, limit: int | None = None, max_bytes: int | None = None
+        ) -> dict:
+            requested.update(limit=limit, max_bytes=max_bytes)
+            return {"latest_seq": 0, "agents": [], "tickets": []}
+
+        async def board_catchup(self, **_kwargs: object) -> dict:
+            return {"events": []}
+
+    config = dashboard.Config(
+        url="https://127.0.0.1:8766/mcp",
+        token="test-token",
+        home_board="pursers",
+        agent_name="viewer",
+        stale_seconds=300,
+        cache_seconds=5.0,
+    )
+    fetcher = dashboard.FleetFetcher(config, client_factory=lambda *_a, **_k: Client())
+
+    asyncio.run(fetcher._read_board("Board", "board"))
+
+    assert requested == {"limit": 1_000, "max_bytes": 300_000}
 
 
 def test_output_rows_and_titles_are_bounded() -> None:

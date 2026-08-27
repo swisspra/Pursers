@@ -22,13 +22,13 @@ from typing import Any, Protocol
 _CLIENT_SRC = Path(__file__).resolve().parents[2] / "packages" / "client" / "src"
 if (_CLIENT_SRC / "pursers_client").is_dir():
     sys.path.insert(0, str(_CLIENT_SRC))
-from pursers_client import BoardClient
+from pursers_client import BoardClient  # noqa: I001
 
 
 DEFAULT_URL = "https://127.0.0.1:8766/mcp"
 DEFAULT_HOME_BOARD = "pursers"
-SNAPSHOT_LIMIT = 50
-SNAPSHOT_MAX_BYTES = 200_000
+SNAPSHOT_LIMIT = 1_000
+SNAPSHOT_MAX_BYTES = 300_000
 EVENT_SCAN_LIMIT = 50
 EVENT_MAX_BYTES = 100_000
 MAX_BOARDS = 50
@@ -139,7 +139,6 @@ def aggregate_fleet(
     """Build the bounded API projection from already-bounded board reads."""
     now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     groups: dict[tuple[str, str], dict[str, Any]] = {}
-    busy_keys: set[tuple[str, str]] = set()
     boards: list[dict[str, Any]] = []
 
     for raw in board_rows[:MAX_BOARDS]:
@@ -174,7 +173,7 @@ def aggregate_fleet(
         )
         agent_keys: dict[str, tuple[str, str]] = {}
 
-        for agent in agents[:SNAPSHOT_LIMIT]:
+        for agent in agents:
             if not isinstance(agent, dict):
                 continue
             principal_id = agent.get("principal_id")
@@ -197,9 +196,14 @@ def aggregate_fleet(
                     "agent_name": _clip(agent_name, MAX_LABEL_CHARS),
                     "boards": set(),
                     "last_seen": None,
+                    "busy": False,
                 },
             )
             group["boards"].add(board_id)
+            if agent.get("status") == "working" and agent.get(
+                "lifecycle_status"
+            ) not in {"handed_off", "inactive"}:
+                group["busy"] = True
             if seen_at is not None and (
                 group["last_seen"] is None or seen_at > group["last_seen"]
             ):
@@ -207,7 +211,7 @@ def aggregate_fleet(
 
         counts = {"open": 0, "claimed": 0, "submitted": 0, "closed_today": 0}
         ticket_rows: list[dict[str, Any]] = []
-        for ticket in tickets[:SNAPSHOT_LIMIT]:
+        for ticket in tickets:
             if not isinstance(ticket, dict):
                 continue
             status = str(ticket.get("status") or "")
@@ -221,11 +225,11 @@ def aggregate_fleet(
                 counts["closed_today"] += 1
 
             claimed_id = ticket.get("claimed_by_agent_id")
-            if status in ACTIVE_CLAIM_STATES and isinstance(claimed_id, str):
-                key = agent_keys.get(claimed_id)
-                if key is not None:
-                    busy_keys.add(key)
-            if status == "open" or status in ACTIVE_CLAIM_STATES:
+            if (
+                status == "open"
+                or status in ACTIVE_CLAIM_STATES
+                or status in SUBMITTED_STATES
+            ):
                 claimed_by = ticket.get("claimed_by")
                 if not claimed_by and isinstance(claimed_id, str):
                     key = agent_keys.get(claimed_id)
@@ -258,14 +262,23 @@ def aggregate_fleet(
                 }
             )
 
-        ticket_rows.sort(
-            key=lambda item: (item["status"] != "open", item["updated_at"] or "")
-        )
+        ticket_rows.sort(key=lambda item: item["updated_at"] or "", reverse=True)
+        ticket_status_rank = {
+            **{status: 0 for status in ACTIVE_CLAIM_STATES},
+            **{status: 1 for status in SUBMITTED_STATES},
+            "open": 2,
+        }
+        ticket_rows.sort(key=lambda item: ticket_status_rank.get(item["status"], 3))
+        ticket_counts_truncated = bool(snapshot.get("truncated"))
+        rendered_counts = {
+            name: f">={value}" if ticket_counts_truncated else value
+            for name, value in counts.items()
+        }
         boards.append(
             {
                 "board_id": board_id,
                 "label": label,
-                "counts": counts,
+                "counts": rendered_counts,
                 "tickets": ticket_rows[:MAX_TICKET_ROWS],
                 "events": events,
                 "truncated": bool(
@@ -275,9 +288,9 @@ def aggregate_fleet(
         )
 
     agent_rows: list[dict[str, Any]] = []
-    for key, group in groups.items():
+    for group in groups.values():
         last_seen = group["last_seen"]
-        if key in busy_keys:
+        if group["busy"]:
             status = "busy"
         elif (
             last_seen is not None and (now - last_seen).total_seconds() <= stale_seconds
@@ -413,7 +426,7 @@ HTML = r"""<!doctype html>
 </style></head><body><main><div class="top"><div><h1>Fleet Dashboard</h1><p class="muted">Live boards and shared agent pool</p></div><div id="state" class="muted">Loading…</div></div><section id="summary" class="strip"></section><section id="boards" class="grid"></section><section class="card pool"><h2>Agent pool</h2><div id="agents"></div></section></main><script>
 const esc=v=>String(v??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
 const fmt=v=>v?new Date(v).toLocaleString():'—';
-function render(d){const s=d.pool_summary;document.querySelector('#summary').innerHTML=['online','busy','available','stale'].map(k=>`<div class="metric"><span class="${k}">${esc(k)}</span><b>${esc(s[k])}</b></div>`).join('');document.querySelector('#boards').innerHTML=d.boards.map(b=>`<article class="card"><div class="top"><div><h2>${esc(b.label)}</h2><span class="meta">${esc(b.board_id)}</span></div>${b.truncated?'<span class="status">bounded view</span>':''}</div>${b.error?`<p class="error">Unavailable: ${esc(b.error)}</p>`:`<div class="counts">${Object.entries(b.counts).map(([k,v])=>`<span class="pill">${esc(k.replace('_',' '))}: <b>${esc(v)}</b></span>`).join('')}</div><table class="tickets"><thead><tr><th>Ticket</th><th>Title</th><th>Status</th><th class="hide-small">Claimed by</th></tr></thead><tbody>${b.tickets.length?b.tickets.map(t=>`<tr><td class="id">${esc(t.id)}</td><td>${esc(t.title)}</td><td><span class="status">${esc(t.status)}</span></td><td class="hide-small">${esc(t.claimed_by||'—')}</td></tr>`).join(''):'<tr><td colspan="4" class="empty">No open or claimed tickets</td></tr>'}</tbody></table><h3 style="margin-top:14px">Recent activity</h3><table class="events"><tbody>${b.events.length?b.events.map(e=>`<tr><td class="id">${esc(e.seq??'—')}</td><td>${esc(e.kind)}</td><td>${esc(e.ticket_id||'')}</td><td class="meta hide-small">${esc(fmt(e.occurred_at))}</td></tr>`).join(''):'<tr><td class="empty">No recent visible activity</td></tr>'}</tbody></table>`}</article>`).join('');document.querySelector('#agents').innerHTML=`<table class="agents"><thead><tr><th>Agent</th><th>Status</th><th>Boards</th><th>Last seen</th></tr></thead><tbody>${d.agents.map(a=>`<tr><td>${esc(a.agent_name)}</td><td class="${esc(a.pool_status)}">${esc(a.pool_status)}</td><td>${esc(a.boards.join(', '))}</td><td>${esc(fmt(a.last_seen))}</td></tr>`).join('')}</tbody></table>`;document.querySelector('#state').textContent=`Updated ${fmt(d.generated_at)}`}
+function render(d){const s=d.pool_summary;document.querySelector('#summary').innerHTML=['online','busy','available','stale'].map(k=>`<div class="metric"><span class="${k}">${esc(k)}</span><b>${esc(s[k])}</b></div>`).join('');document.querySelector('#boards').innerHTML=d.boards.map(b=>`<article class="card"><div class="top"><div><h2>${esc(b.label)}</h2><span class="meta">${esc(b.board_id)}</span></div>${b.truncated?'<span class="status">bounded view</span>':''}</div>${b.error?`<p class="error">Unavailable: ${esc(b.error)}</p>`:`<div class="counts">${Object.entries(b.counts).map(([k,v])=>`<span class="pill">${esc(k.replace('_',' '))}: <b>${esc(v)}</b></span>`).join('')}</div><table class="tickets"><thead><tr><th>Ticket</th><th>Title</th><th>Status</th><th class="hide-small">Claimed by</th></tr></thead><tbody>${b.tickets.length?b.tickets.map(t=>`<tr><td class="id">${esc(t.id)}</td><td>${esc(t.title)}</td><td><span class="status">${esc(t.status)}</span></td><td class="hide-small">${esc(t.claimed_by||'—')}</td></tr>`).join(''):'<tr><td colspan="4" class="empty">No active tickets</td></tr>'}</tbody></table><h3 style="margin-top:14px">Recent activity</h3><table class="events"><tbody>${b.events.length?b.events.map(e=>`<tr><td class="id">${esc(e.seq??'—')}</td><td>${esc(e.kind)}</td><td>${esc(e.ticket_id||'')}</td><td class="meta hide-small">${esc(fmt(e.occurred_at))}</td></tr>`).join(''):'<tr><td class="empty">No recent visible activity</td></tr>'}</tbody></table>`}</article>`).join('');document.querySelector('#agents').innerHTML=`<table class="agents"><thead><tr><th>Agent</th><th>Status</th><th>Boards</th><th>Last seen</th></tr></thead><tbody>${d.agents.map(a=>`<tr><td>${esc(a.agent_name)}</td><td class="${esc(a.pool_status)}">${esc(a.pool_status)}</td><td>${esc(a.boards.join(', '))}</td><td>${esc(fmt(a.last_seen))}</td></tr>`).join('')}</tbody></table>`;document.querySelector('#state').textContent=`Updated ${fmt(d.generated_at)}`}
 async function refresh(){try{const r=await fetch('/api/fleet',{cache:'no-store'});if(!r.ok)throw new Error(`HTTP ${r.status}`);render(await r.json())}catch(e){document.querySelector('#state').textContent=`Refresh failed: ${e.message}`}}refresh();setInterval(refresh,5000);
 </script></body></html>"""
 
