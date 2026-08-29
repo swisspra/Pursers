@@ -416,6 +416,38 @@ async def test_rpc_surfaces_allowlisted_central_validation_detail() -> None:
         await state.stop()
 
 
+@pytest.mark.anyio
+async def test_rpc_redacts_bare_hostname_in_wrapped_client_error() -> None:
+    leaked_host = "sensitive.central.example"
+    wrapped = (
+        "[TextContent(type='text', text='Error executing tool ticket_create: "
+        f"target must be {leaked_host}', annotations=None, meta=None)]"
+    )
+
+    class WrappedHostFailureClient(FakeClient):
+        async def ticket_create(self) -> None:
+            raise FakeClientError(wrapped)
+
+    state = LiveDashboard(
+        fake_config(),
+        client_class=WrappedHostFailureClient,
+        client_error_class=FakeClientError,
+    )
+
+    async def healthy_probe() -> None:
+        return None
+
+    state._probe_central = healthy_probe  # type: ignore[method-assign]
+    try:
+        with pytest.raises(RuntimeError) as caught:
+            await state._rpc("ticket_create")
+        message = str(caught.value)
+        assert message == "Central request failed (FakeClientError)"
+        assert leaked_host not in message
+    finally:
+        await state.stop()
+
+
 @pytest.mark.parametrize("error_type", [ValueError, TypeError])
 def test_request_error_surfaces_direct_validation_types(
     error_type: type[Exception],
@@ -461,6 +493,38 @@ async def test_rpc_redacts_sensitive_direct_validation_types(
         assert leaked_url not in message
         assert "credential" not in message
         assert "token" not in message
+    finally:
+        await state.stop()
+
+
+@pytest.mark.parametrize("error_type", [ValueError, TypeError])
+@pytest.mark.anyio
+async def test_rpc_redacts_bare_hostname_in_direct_validation_types(
+    error_type: type[Exception],
+) -> None:
+    leaked_host = "sensitive.central.example"
+    detail = f"target must be {leaked_host}"
+
+    class DirectHostFailureClient(FakeClient):
+        async def ticket_create(self) -> None:
+            raise error_type(detail)
+
+    state = LiveDashboard(
+        fake_config(),
+        client_class=DirectHostFailureClient,
+        client_error_class=FakeClientError,
+    )
+
+    async def healthy_probe() -> None:
+        return None
+
+    state._probe_central = healthy_probe  # type: ignore[method-assign]
+    try:
+        with pytest.raises(RuntimeError) as caught:
+            await state._rpc("ticket_create")
+        message = str(caught.value)
+        assert message == f"Central request failed ({error_type.__name__})"
+        assert leaked_host not in message
     finally:
         await state.stop()
 

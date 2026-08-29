@@ -86,16 +86,12 @@ _CENTRAL_TOOL_ERROR_RE = re.compile(
 _SAFE_CENTRAL_VALIDATION_DETAILS = (
     re.compile(
         r"^generated-ID tickets require: "
-        r"[a-z][a-z0-9_]*(?:, [a-z][a-z0-9_]*)*$"
+        r"(?:description|target_url|scope|required_fields)"
+        r"(?:, (?:description|target_url|scope|required_fields))*$"
     ),
-    re.compile(
-        r"^[a-z][a-z0-9_ ]* "
-        r"(?:is required|is missing|is invalid|are mutually exclusive)$"
-    ),
-    re.compile(
-        r"^[a-z][a-z0-9_ ]* must "
-        r"(?:be|match|not be) [A-Za-z0-9_. ,+\-]+$"
-    ),
+    re.compile(r"^(?:summary|review_notes) is required for generated-ID tickets$"),
+    re.compile(r"^priority must be low, medium, high, or critical$"),
+    re.compile(r"^assigned_to and unassigned=true are mutually exclusive$"),
     re.compile(r"^ticket (?:not found|already exists|is [a-z_]+)$"),
 )
 _SENSITIVE_ERROR_DETAIL_RE = re.compile(
@@ -103,6 +99,10 @@ _SENSITIVE_ERROR_DETAIL_RE = re.compile(
     r"principal|capability|credential|secret|bearer|password|token|connection|"
     r"transport|host)\b",
     re.IGNORECASE,
+)
+_HOSTNAME_ERROR_DETAIL_RE = re.compile(
+    r"(?<![A-Za-z0-9_-])(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}"
+    r"(?::[0-9]{1,5})?(?![A-Za-z0-9_-])"
 )
 
 
@@ -538,6 +538,7 @@ class LiveDashboard:
             "://" in detail
             or "@" in detail
             or _SENSITIVE_ERROR_DETAIL_RE.search(detail)
+            or _HOSTNAME_ERROR_DETAIL_RE.search(detail)
         ):
             return None
         if any(
