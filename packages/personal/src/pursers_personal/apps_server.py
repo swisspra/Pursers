@@ -7,6 +7,7 @@ pass its resulting context to :func:`build_profile_apps_server`.
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import copy
 import hashlib
@@ -14,6 +15,7 @@ import importlib
 import importlib.resources
 import ipaddress
 import json
+import re
 import sys
 from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from dataclasses import dataclass, field, replace
@@ -70,6 +72,37 @@ CHAT_TOOL_NAMES = frozenset(
         "board_state_get",
         "board_state_update",
     }
+)
+
+_WRAPPED_TOOL_ERROR_RE = re.compile(
+    r"^\[TextContent\(type='text', text=(?P<text>'.*'), "
+    r"annotations=None, meta=None\)\]$",
+    re.DOTALL,
+)
+_CENTRAL_TOOL_ERROR_RE = re.compile(
+    r"^Error executing tool [a-z][a-z0-9_]*: (?P<detail>.+)$",
+    re.DOTALL,
+)
+_SAFE_CENTRAL_VALIDATION_DETAILS = (
+    re.compile(
+        r"^generated-ID tickets require: "
+        r"[a-z][a-z0-9_]*(?:, [a-z][a-z0-9_]*)*$"
+    ),
+    re.compile(
+        r"^[a-z][a-z0-9_ ]* "
+        r"(?:is required|is missing|is invalid|are mutually exclusive)$"
+    ),
+    re.compile(
+        r"^[a-z][a-z0-9_ ]* must "
+        r"(?:be|match|not be) [A-Za-z0-9_. ,+\-]+$"
+    ),
+    re.compile(r"^ticket (?:not found|already exists|is [a-z_]+)$"),
+)
+_SENSITIVE_ERROR_DETAIL_RE = re.compile(
+    r"\b(?:auth(?:entication|orization)?|unauthorized|forbidden|permission|"
+    r"principal|capability|credential|secret|bearer|password|token|connection|"
+    r"transport|host)\b",
+    re.IGNORECASE,
 )
 
 
@@ -499,6 +532,47 @@ class LiveDashboard:
         return f"Central unavailable ({type(exc).__name__})"
 
     @staticmethod
+    def _wrapped_validation_detail(exc: BaseException) -> str | None:
+        """Extract only allowlisted Central validation text from client errors."""
+        match = _WRAPPED_TOOL_ERROR_RE.fullmatch(str(exc))
+        if match is None:
+            return None
+        try:
+            text = ast.literal_eval(match.group("text"))
+        except (SyntaxError, ValueError):
+            return None
+        if not isinstance(text, str):
+            return None
+        tool_error = _CENTRAL_TOOL_ERROR_RE.fullmatch(text)
+        if tool_error is None:
+            return None
+        detail = tool_error.group("detail")
+        if (
+            "://" in detail
+            or "@" in detail
+            or _SENSITIVE_ERROR_DETAIL_RE.search(detail)
+        ):
+            return None
+        if any(
+            pattern.fullmatch(detail) for pattern in _SAFE_CENTRAL_VALIDATION_DETAILS
+        ):
+            return detail
+        return None
+
+    def _safe_request_error(self, exc: BaseException) -> str:
+        """Expose operator-authored validation details, never transport/auth text."""
+        detail: str | None = None
+        if isinstance(exc, (ValueError, TypeError)):
+            detail = str(exc)
+        elif isinstance(exc, self._client_error_class):
+            # pursers-client a10 wraps Central tool failures in BoardClientError.
+            # Only the pinned, canonical envelope plus a validation allowlist is
+            # trusted; generic client/auth failures remain class-name-only.
+            detail = self._wrapped_validation_detail(exc)
+        prefix = f"Central request failed ({type(exc).__name__})"
+        return f"{prefix}: {detail}" if detail else prefix
+
+    @staticmethod
     def _fleet_registry_projects(
         result: dict[str, Any],
     ) -> tuple[list[dict[str, str]], int]:
@@ -845,9 +919,7 @@ class LiveDashboard:
                                     raise
                                 if not future.done():
                                     future.set_exception(
-                                        RuntimeError(
-                                            f"Central request failed ({type(exc).__name__})"
-                                        )
+                                        RuntimeError(self._safe_request_error(exc))
                                     )
                             else:
                                 if not future.done():

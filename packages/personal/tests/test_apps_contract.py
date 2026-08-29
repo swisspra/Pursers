@@ -385,6 +385,92 @@ async def test_rpc_envelope_preserves_kwargs() -> None:
 
 
 @pytest.mark.anyio
+async def test_rpc_surfaces_allowlisted_central_validation_detail() -> None:
+    detail = "generated-ID tickets require: description, target_url"
+    wrapped = (
+        "[TextContent(type='text', text='Error executing tool ticket_create: "
+        f"{detail}', annotations=None, meta=None)]"
+    )
+
+    class ValidationClient(FakeClient):
+        async def ticket_create(self) -> None:
+            raise FakeClientError(wrapped)
+
+    state = LiveDashboard(
+        fake_config(),
+        client_class=ValidationClient,
+        client_error_class=FakeClientError,
+    )
+
+    async def healthy_probe() -> None:
+        return None
+
+    state._probe_central = healthy_probe  # type: ignore[method-assign]
+    try:
+        with pytest.raises(RuntimeError) as caught:
+            await state._rpc("ticket_create")
+        assert str(caught.value) == (
+            f"Central request failed (FakeClientError): {detail}"
+        )
+    finally:
+        await state.stop()
+
+
+@pytest.mark.parametrize("error_type", [ValueError, TypeError])
+def test_request_error_surfaces_direct_validation_types(
+    error_type: type[Exception],
+) -> None:
+    state = LiveDashboard(
+        fake_config(),
+        client_class=FakeClient,
+        client_error_class=FakeClientError,
+    )
+    detail = "operator-authored validation detail"
+    assert state._safe_request_error(error_type(detail)) == (
+        f"Central request failed ({error_type.__name__}): {detail}"
+    )
+
+
+@pytest.mark.anyio
+async def test_rpc_redacts_transport_and_auth_error_details() -> None:
+    leaked_url = "https://user:credential@central.example/mcp"
+    wrapped_auth = (
+        "[TextContent(type='text', text='Error executing tool ticket_create: "
+        f"unauthorized token at {leaked_url}', annotations=None, meta=None)]"
+    )
+
+    class AuthFailureClient(FakeClient):
+        async def ticket_create(self) -> None:
+            raise FakeClientError(wrapped_auth)
+
+    state = LiveDashboard(
+        fake_config(),
+        client_class=AuthFailureClient,
+        client_error_class=FakeClientError,
+    )
+
+    async def healthy_probe() -> None:
+        return None
+
+    state._probe_central = healthy_probe  # type: ignore[method-assign]
+    try:
+        with pytest.raises(RuntimeError) as caught:
+            await state._rpc("ticket_create")
+        message = str(caught.value)
+        assert message == "Central request failed (FakeClientError)"
+        assert leaked_url not in message
+        assert "credential" not in message
+        assert "token" not in message
+    finally:
+        await state.stop()
+
+    transport = ConnectionError(f"lost connection to {leaked_url}")
+    assert state._safe_connection_error(transport) == (
+        "Central unavailable (ConnectionError)"
+    )
+
+
+@pytest.mark.anyio
 async def test_app_reads_use_only_the_non_joining_pure_reader() -> None:
     calls: list[str] = []
 
