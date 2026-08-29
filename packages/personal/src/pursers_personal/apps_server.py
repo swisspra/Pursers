@@ -532,7 +532,21 @@ class LiveDashboard:
         return f"Central unavailable ({type(exc).__name__})"
 
     @staticmethod
-    def _wrapped_validation_detail(exc: BaseException) -> str | None:
+    def _safe_validation_detail(detail: str) -> str | None:
+        """Return only validation-shaped text without sensitive markers."""
+        if (
+            "://" in detail
+            or "@" in detail
+            or _SENSITIVE_ERROR_DETAIL_RE.search(detail)
+        ):
+            return None
+        if any(
+            pattern.fullmatch(detail) for pattern in _SAFE_CENTRAL_VALIDATION_DETAILS
+        ):
+            return detail
+        return None
+
+    def _wrapped_validation_detail(self, exc: BaseException) -> str | None:
         """Extract only allowlisted Central validation text from client errors."""
         match = _WRAPPED_TOOL_ERROR_RE.fullmatch(str(exc))
         if match is None:
@@ -546,24 +560,13 @@ class LiveDashboard:
         tool_error = _CENTRAL_TOOL_ERROR_RE.fullmatch(text)
         if tool_error is None:
             return None
-        detail = tool_error.group("detail")
-        if (
-            "://" in detail
-            or "@" in detail
-            or _SENSITIVE_ERROR_DETAIL_RE.search(detail)
-        ):
-            return None
-        if any(
-            pattern.fullmatch(detail) for pattern in _SAFE_CENTRAL_VALIDATION_DETAILS
-        ):
-            return detail
-        return None
+        return self._safe_validation_detail(tool_error.group("detail"))
 
     def _safe_request_error(self, exc: BaseException) -> str:
         """Expose operator-authored validation details, never transport/auth text."""
         detail: str | None = None
         if isinstance(exc, (ValueError, TypeError)):
-            detail = str(exc)
+            detail = self._safe_validation_detail(str(exc))
         elif isinstance(exc, self._client_error_class):
             # pursers-client a10 wraps Central tool failures in BoardClientError.
             # Only the pinned, canonical envelope plus a validation allowlist is
@@ -908,7 +911,8 @@ class LiveDashboard:
                                 raise
                             except BaseException as exc:
                                 if not isinstance(
-                                    exc, (self._client_error_class, ValueError)
+                                    exc,
+                                    (self._client_error_class, ValueError, TypeError),
                                 ):
                                     self._connected = False
                                     self._feed_error = self._safe_connection_error(exc)

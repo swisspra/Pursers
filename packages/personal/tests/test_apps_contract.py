@@ -425,10 +425,44 @@ def test_request_error_surfaces_direct_validation_types(
         client_class=FakeClient,
         client_error_class=FakeClientError,
     )
-    detail = "operator-authored validation detail"
+    detail = "priority must be low, medium, high, or critical"
     assert state._safe_request_error(error_type(detail)) == (
         f"Central request failed ({error_type.__name__}): {detail}"
     )
+
+
+@pytest.mark.parametrize("error_type", [ValueError, TypeError])
+@pytest.mark.anyio
+async def test_rpc_redacts_sensitive_direct_validation_types(
+    error_type: type[Exception],
+) -> None:
+    leaked_url = "https://user:credential@central.example/mcp"
+    detail = f"token must be valid at {leaked_url}"
+
+    class DirectFailureClient(FakeClient):
+        async def ticket_create(self) -> None:
+            raise error_type(detail)
+
+    state = LiveDashboard(
+        fake_config(),
+        client_class=DirectFailureClient,
+        client_error_class=FakeClientError,
+    )
+
+    async def healthy_probe() -> None:
+        return None
+
+    state._probe_central = healthy_probe  # type: ignore[method-assign]
+    try:
+        with pytest.raises(RuntimeError) as caught:
+            await state._rpc("ticket_create")
+        message = str(caught.value)
+        assert message == f"Central request failed ({error_type.__name__})"
+        assert leaked_url not in message
+        assert "credential" not in message
+        assert "token" not in message
+    finally:
+        await state.stop()
 
 
 @pytest.mark.anyio
