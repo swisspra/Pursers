@@ -92,7 +92,11 @@ _SAFE_CENTRAL_VALIDATION_DETAILS = (
     re.compile(r"^(?:summary|review_notes) is required for generated-ID tickets$"),
     re.compile(r"^priority must be low, medium, high, or critical$"),
     re.compile(r"^assigned_to and unassigned=true are mutually exclusive$"),
-    re.compile(r"^ticket (?:not found|already exists|is [a-z_]+)$"),
+    re.compile(r"^ticket (?:not found|already exists)$"),
+    re.compile(
+        r"^ticket is (?:open|claimed|in_progress|creating_report|submitted|"
+        r"reviewing|in_review|closed|rejected|canceled|terminated)$"
+    ),
 )
 _SENSITIVE_ERROR_DETAIL_RE = re.compile(
     r"\b(?:auth(?:entication|orization)?|unauthorized|forbidden|permission|"

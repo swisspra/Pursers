@@ -417,6 +417,38 @@ async def test_rpc_surfaces_allowlisted_central_validation_detail() -> None:
 
 
 @pytest.mark.anyio
+async def test_rpc_surfaces_fixed_central_ticket_status_detail() -> None:
+    detail = "ticket is submitted"
+    wrapped = (
+        "[TextContent(type='text', text='Error executing tool ticket_claim: "
+        f"{detail}', annotations=None, meta=None)]"
+    )
+
+    class FixedStatusClient(FakeClient):
+        async def ticket_claim(self) -> None:
+            raise FakeClientError(wrapped)
+
+    state = LiveDashboard(
+        fake_config(),
+        client_class=FixedStatusClient,
+        client_error_class=FakeClientError,
+    )
+
+    async def healthy_probe() -> None:
+        return None
+
+    state._probe_central = healthy_probe  # type: ignore[method-assign]
+    try:
+        with pytest.raises(RuntimeError) as caught:
+            await state._rpc("ticket_claim")
+        assert str(caught.value) == (
+            f"Central request failed (FakeClientError): {detail}"
+        )
+    finally:
+        await state.stop()
+
+
+@pytest.mark.anyio
 async def test_rpc_redacts_bare_hostname_in_wrapped_client_error() -> None:
     leaked_host = "sensitive.central.example"
     wrapped = (
@@ -444,6 +476,38 @@ async def test_rpc_redacts_bare_hostname_in_wrapped_client_error() -> None:
         message = str(caught.value)
         assert message == "Central request failed (FakeClientError)"
         assert leaked_host not in message
+    finally:
+        await state.stop()
+
+
+@pytest.mark.anyio
+async def test_rpc_redacts_unrecognized_wrapped_ticket_status() -> None:
+    leaked_value = "syntheticprivatevalue"
+    wrapped = (
+        "[TextContent(type='text', text='Error executing tool ticket_claim: "
+        f"ticket is {leaked_value}', annotations=None, meta=None)]"
+    )
+
+    class WrappedStatusFailureClient(FakeClient):
+        async def ticket_claim(self) -> None:
+            raise FakeClientError(wrapped)
+
+    state = LiveDashboard(
+        fake_config(),
+        client_class=WrappedStatusFailureClient,
+        client_error_class=FakeClientError,
+    )
+
+    async def healthy_probe() -> None:
+        return None
+
+    state._probe_central = healthy_probe  # type: ignore[method-assign]
+    try:
+        with pytest.raises(RuntimeError) as caught:
+            await state._rpc("ticket_claim")
+        message = str(caught.value)
+        assert message == "Central request failed (FakeClientError)"
+        assert leaked_value not in message
     finally:
         await state.stop()
 
@@ -525,6 +589,37 @@ async def test_rpc_redacts_bare_hostname_in_direct_validation_types(
         message = str(caught.value)
         assert message == f"Central request failed ({error_type.__name__})"
         assert leaked_host not in message
+    finally:
+        await state.stop()
+
+
+@pytest.mark.parametrize("error_type", [ValueError, TypeError])
+@pytest.mark.anyio
+async def test_rpc_redacts_unrecognized_direct_ticket_status(
+    error_type: type[Exception],
+) -> None:
+    leaked_value = "syntheticprivatevalue"
+
+    class DirectStatusFailureClient(FakeClient):
+        async def ticket_claim(self) -> None:
+            raise error_type(f"ticket is {leaked_value}")
+
+    state = LiveDashboard(
+        fake_config(),
+        client_class=DirectStatusFailureClient,
+        client_error_class=FakeClientError,
+    )
+
+    async def healthy_probe() -> None:
+        return None
+
+    state._probe_central = healthy_probe  # type: ignore[method-assign]
+    try:
+        with pytest.raises(RuntimeError) as caught:
+            await state._rpc("ticket_claim")
+        message = str(caught.value)
+        assert message == f"Central request failed ({error_type.__name__})"
+        assert leaked_value not in message
     finally:
         await state.stop()
 
