@@ -656,6 +656,153 @@ def test_multi_central_routes_and_complete_javascript_are_valid() -> None:
     assert "Saved ${body.central}" in dashboard.HTML
 
 
+def test_global_search_groups_escaped_results_and_enter_jumps_to_item() -> None:
+    script = dashboard.HTML.split("<script>", 1)[1].split("</script>", 1)[0]
+    lines = script.splitlines()
+
+    def source(prefix: str) -> str:
+        return next(line for line in lines if line.startswith(prefix))
+
+    hostile = '<img src=x onerror="alert(1)"> needle'
+    fixture = {
+        "personal": {
+            "boards": [
+                {
+                    "label": hostile,
+                    "board_id": "board-one",
+                    "tickets": [
+                        {
+                            "id": "TK-needle",
+                            "title": hostile,
+                            "status": "open",
+                            "claimed_by": None,
+                        }
+                    ],
+                }
+            ],
+            "agents": [
+                {
+                    "agent_name": hostile,
+                    "pool_status": "available",
+                    "boards": ["board-one"],
+                }
+            ],
+        }
+    }
+    program = "\n".join(
+        [
+            source("const esc="),
+            source("const fmt="),
+            source("const ticketMatches="),
+            source("function groupSearchResults("),
+            source("function renderSearchResults("),
+            source("function jumpSearchResult("),
+            f"let fleetData={json.dumps(fixture)},detailData=null,filterNeedle='needle',searchItems=[],searchSelection=0;",
+            "const host={innerHTML:'',hidden:true},input={setAttribute(){}};",
+            "const document={querySelector:key=>key==='#search-results'?host:input};",
+            "const location={hash:''};const sectionStates=new Map();",
+            "renderSearchResults();",
+            "const grouped=groupSearchResults(fleetData,detailData,filterNeedle);",
+            "jumpSearchResult(1);",
+            "console.log(JSON.stringify({counts:Object.fromEntries(Object.entries(grouped).map(([k,v])=>[k,v.length])),html:host.innerHTML,hash:location.hash}));",
+        ]
+    )
+    completed = subprocess.run(
+        ["node", "-e", program],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    result = json.loads(completed.stdout)
+
+    assert result["counts"] == {"Boards": 1, "Tickets": 1, "Agents": 1}
+    assert hostile not in result["html"]
+    assert "&lt;img src=x onerror=&quot;alert(1)&quot;&gt; needle" in result["html"]
+    assert result["hash"] == "#/central/personal/board/board-one/tickets?ticket=TK-needle"
+
+
+def test_collapsed_state_survives_rebinding_without_local_storage() -> None:
+    script = dashboard.HTML.split("<script>", 1)[1].split("</script>", 1)[0]
+    line = next(
+        item for item in script.splitlines() if item.startswith("function bindInteractive(")
+    )
+    program = "\n".join(  # noqa: FLY002 - extracted JS stays line-addressable
+        [
+            line,
+            "const sectionStates=new Map([['ticket:one',true]]);",
+            "const makeDetail=()=>({dataset:{stateKey:'ticket:one'},open:false,listeners:{},addEventListener(name,fn){this.listeners[name]=fn}});",
+            "const rootFor=detail=>({querySelectorAll(selector){return selector==='details[data-state-key]'?[detail]:[]}});",
+            "const first=makeDetail();bindInteractive(rootFor(first));const restoredOpen=first.open;first.open=false;first.listeners.toggle();",
+            "const second=makeDetail();bindInteractive(rootFor(second));",
+            "console.log(JSON.stringify({restoredOpen,restoredClosed:!second.open,stored:sectionStates.get('ticket:one')}));",
+        ]
+    )
+    completed = subprocess.run(
+        ["node", "-e", program],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert json.loads(completed.stdout) == {
+        "restoredOpen": True,
+        "restoredClosed": True,
+        "stored": False,
+    }
+    assert "localStorage" not in dashboard.HTML
+    assert "detailSort='newest'" in dashboard.HTML
+    assert "filterNeedle=''" in dashboard.HTML
+
+
+def test_reconnect_banner_keeps_cached_fleet_and_recovers_silently() -> None:
+    script = dashboard.HTML.split("<script>", 1)[1].split("</script>", 1)[0]
+    lines = script.splitlines()
+
+    def source(prefix: str) -> str:
+        return next(line for line in lines if line.startswith(prefix))
+
+    program = "\n".join(
+        [
+            source("const connectionBannerText="),
+            source("function updateConnectionState("),
+            source("function markConnectionSuccess("),
+            source("function markConnectionFailure("),
+            source("async function refreshCentral("),
+            "const banner={hidden:true,textContent:''},document={querySelector:()=>banner};",
+            "const connectionFailures=new Set();let lastSuccessAt=null;",
+            "let fleetData={personal:{central:'personal',cached:true}},fleetErrors={},rendered=0;",
+            "const CENTRAL_REQUEST_TIMEOUT_MS=4000;",
+            "const apiCentral=x=>x,route=()=>null,renderFleet=()=>rendered++;",
+            "const fetchWithTimeout=async()=>{throw new Error('offline secret')};",
+            "(async()=>{markConnectionSuccess('fleet:personal',new Date('2030-01-02T03:04:05Z'));await refreshCentral('personal');const failed={hidden:banner.hidden,text:banner.textContent,cached:fleetData.personal.cached,error:fleetErrors.personal,rendered};markConnectionSuccess('fleet:personal',new Date('2030-01-02T03:05:06Z'));console.log(JSON.stringify({failed,recovered:{hidden:banner.hidden,text:banner.textContent}}))})()",
+        ]
+    )
+    completed = subprocess.run(
+        ["node", "-e", program],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    result = json.loads(completed.stdout)
+
+    assert result["failed"]["hidden"] is False
+    assert result["failed"]["text"].startswith("reconnecting… last success ")
+    assert result["failed"]["cached"] is True
+    assert result["failed"]["rendered"] == 1
+    assert result["recovered"] == {"hidden": True, "text": ""}
+
+
+def test_help_theme_density_and_keyboard_controls_render() -> None:
+    assert 'id="help-overlay"' in dashboard.HTML
+    assert "g then f" in dashboard.HTML
+    assert "Move within tables or search results" in dashboard.HTML
+    assert 'id="theme-toggle"' in dashboard.HTML
+    assert 'id="density-toggle"' in dashboard.HTML
+    assert ':root[data-theme="light"]' in dashboard.HTML
+    assert '@media print' in dashboard.HTML
+    assert "e.key==='g'" in dashboard.HTML
+
+
 def test_two_central_dom_groups_are_rendered_without_pool_merge() -> None:
     script = dashboard.HTML.split("<script>", 1)[1].split("</script>", 1)[0]
     lines = script.splitlines()
