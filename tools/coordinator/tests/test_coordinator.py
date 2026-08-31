@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
 import importlib.util
 import json
 import subprocess
@@ -825,6 +827,8 @@ def test_write_reports_isolates_failed_board_and_mirrors_degraded_finding(
     published: dict[str, dict[str, Any]] = {}
 
     class FakeBoardClient:
+        agent_name = "coordinator-test"
+
         def __init__(
             self, _url: str, _token: str, board_id: str, *, agent_name: str
         ) -> None:
@@ -1281,6 +1285,20 @@ def test_deterministic_intake_classifier(text: str, category: str) -> None:
     assert coordinator.classify_intake(text)[0] == category
 
 
+@pytest.mark.parametrize(
+    ("text", "category"),
+    [
+        ("Change production code and update docs", "production-code"),
+        ("Implement a new API endpoint with tests", "production-code"),
+        ("Fix bug in docs", "bug"),
+    ],
+)
+def test_intake_classifier_conservative_mixed_intent(
+    text: str, category: str
+) -> None:
+    assert coordinator.classify_intake(text)[0] == category
+
+
 def _intake_state(rows: list[dict[str, str]]) -> dict[str, Any]:
     return {"state": {"value": json.dumps(rows)}}
 
@@ -1365,7 +1383,7 @@ def test_intake_rate_limit_converts_auto_to_bounded_pending_draft() -> None:
 
     assert findings[0]["kind"] == "intake-pending"
     assert findings[0]["matrix_rule"] == "hourly-auto-create-limit"
-    assert len(findings[0]["evidence"]) <= coordinator.MAX_EVIDENCE_CHARS
+    assert len(findings[0]["evidence"]) <= coordinator.MAX_INTAKE_EVIDENCE_CHARS
     assert updates == {"board-a": frozenset({"ask-docs"})}
 
 
@@ -1448,9 +1466,73 @@ def test_bounded_state_reserves_intake_record_before_other_warnings() -> None:
         "personal-docs-auto",
     )
     state = coordinator.bound_findings_state(
-        [*ordinary, intake], NOW, max_chars=1_200
+        [*ordinary, intake], NOW, max_chars=2_500
     )
     assert any(item.get("ask_id") == "ask-reserved" for item in state["findings"])
+
+
+def test_intake_evidence_remains_valid_actionable_json_after_bounding() -> None:
+    ask = coordinator.IntakeAsk(
+        "ask-evidence", "Implement a new API endpoint with tests", "operator", "board-a"
+    )
+    draft = coordinator.deterministic_intake_draft(ask, _intake_project())
+    finding = coordinator.intake_finding(
+        "intake-pending",
+        "warn",
+        ask,
+        draft,
+        "ask",
+        "personal-production-code-always-ask",
+    )
+    state = coordinator.bound_findings_state([finding], NOW)
+    payload = json.loads(state["findings"][0]["evidence"])
+    bounded_draft = payload["draft"]
+    assert bounded_draft["title"] == draft.title
+    assert bounded_draft["description"] == draft.description
+    assert bounded_draft["scope"] == draft.scope
+    assert bounded_draft["target_url"] == draft.target_url
+    assert bounded_draft["required_fields"] == list(draft.required_fields)
+    assert bounded_draft["coordinator_op_key"] == draft.op_key
+
+
+def test_intake_without_grant_degrades_auto_to_draft_and_keeps_queue() -> None:
+    row = _intake_row("ask-no-grant", "Update the README documentation")
+
+    async def unexpected_create(*_args: Any) -> str:
+        raise AssertionError("missing board:intake must not attempt creation")
+
+    findings, updates = asyncio.run(
+        coordinator.process_intakes(
+            [_intake_project()],
+            {
+                "board-a": {
+                    "tickets": [],
+                    "coordinator_intake_state": _intake_state([row]),
+                }
+            },
+            NOW,
+            coordinator.RuntimeState.for_mode("active"),
+            enabled=True,
+            dry_run=False,
+            create_ticket=unexpected_create,
+            intake_authorized=False,
+        )
+    )
+    assert findings[0]["kind"] == "intake-pending"
+    assert findings[0]["matrix_rule"] == "missing-board-intake-grant"
+    assert "Grant board:intake" in findings[0]["next_action"]
+    assert updates == {}
+
+
+def test_capability_scopes_reads_jwt_hint_without_trusting_it() -> None:
+    def encode(value: dict[str, Any]) -> str:
+        payload = base64.urlsafe_b64encode(json.dumps(value).encode()).decode().rstrip("=")
+        return f"header.{payload}.signature"
+
+    assert coordinator.capability_scopes(
+        encode({"scope": "board:read board:coordinate board:intake"})
+    ) == frozenset({"board:read", "board:coordinate", "board:intake"})
+    assert coordinator.capability_scopes("opaque") == frozenset()
 
 
 def test_intake_is_disabled_by_default(tmp_path: Path) -> None:
@@ -1476,6 +1558,8 @@ def test_intake_queue_is_drained_only_after_finding_publish(
     calls: list[tuple[str, str]] = []
 
     class FakeBoardClient:
+        agent_name = "coordinator-test"
+
         def __init__(self, *_args: Any, **_kwargs: Any) -> None:
             pass
 
@@ -1487,6 +1571,21 @@ def test_intake_queue_is_drained_only_after_finding_publish(
 
         async def board_state_update(self, key: str, value: str) -> dict[str, bool]:
             calls.append((key, value))
+            return {"ok": True}
+
+        async def _call(self, name: str, arguments: dict[str, Any]) -> dict[str, bool]:
+            assert name == "board_state_update"
+            assert arguments["agent_name"] == "coordinator-test"
+            raw = json.dumps(
+                [
+                    _intake_row("ask-done", "Update docs"),
+                    _intake_row("ask-appended", "Add tests"),
+                ]
+            )
+            assert arguments["expected_sha256"] == hashlib.sha256(
+                raw.encode()
+            ).hexdigest()
+            calls.append((arguments["key"], arguments["value"]))
             return {"ok": True}
 
         async def board_state_get(self, key: str) -> dict[str, Any]:
@@ -1531,3 +1630,40 @@ def test_intake_queue_is_drained_only_after_finding_publish(
         coordinator.INTAKE_STATE_KEY,
     ]
     assert [item["id"] for item in json.loads(calls[1][1])] == ["ask-appended"]
+
+
+def test_intake_cas_drain_rejects_append_between_read_and_write() -> None:
+    initial = [_intake_row("ask-done", "Update docs")]
+    appended = _intake_row("ask-appended", "Add tests")
+
+    class RacingClient:
+        agent_name = "coordinator-test"
+
+        def __init__(self) -> None:
+            self.value = json.dumps(initial)
+
+        async def board_state_get(self, key: str) -> dict[str, Any]:
+            assert key == coordinator.INTAKE_STATE_KEY
+            observed = self.value
+            self.value = json.dumps([*initial, appended])
+            return {"state": {"value": observed}}
+
+        async def _call(self, name: str, arguments: dict[str, Any]) -> None:
+            assert name == "board_state_update"
+            if arguments["expected_sha256"] != hashlib.sha256(
+                self.value.encode()
+            ).hexdigest():
+                raise RuntimeError("state precondition failed")
+            self.value = arguments["value"]
+
+    client = RacingClient()
+    with pytest.raises(RuntimeError, match="state precondition failed"):
+        asyncio.run(
+            coordinator.drain_intake(
+                client, "board-a", frozenset({"ask-done"})
+            )
+        )
+    assert [item["id"] for item in json.loads(client.value)] == [
+        "ask-done",
+        "ask-appended",
+    ]

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import hashlib
 import json
 import os
@@ -27,6 +28,8 @@ MAX_SNAPSHOT_BYTES = 750_000
 MAX_FINDINGS = 50
 MAX_FINDING_CHARS = 500
 MAX_EVIDENCE_CHARS = 300
+MAX_INTAKE_FINDING_CHARS = 4_000
+MAX_INTAKE_EVIDENCE_CHARS = 3_500
 MAX_STATE_CHARS = 5_000
 MAX_PRIVACY_COMMITS_PER_CYCLE = 1_000
 COMMIT_RE = re.compile(r"(?<![0-9a-fA-F])([0-9a-fA-F]{7,64})(?![0-9a-fA-F])")
@@ -41,6 +44,7 @@ NUDGE_EXPIRY_SECONDS = 600
 INTAKE_RATE_LIMIT = 5
 INTAKE_RATE_WINDOW_SECONDS = 3_600
 INTAKE_BREAKER_FAILURES = 3
+INTAKE_SCOPE = "board:intake"
 INTAKE_CATEGORIES = (
     "docs",
     "tests",
@@ -244,14 +248,21 @@ def classify_intake(text: str) -> tuple[str, bool]:
         re.search(r"\b(repro(?:duce|duction)?|steps? to reproduce|failing example|traceback)\b", lowered)
         or re.search(r"\bexpected\b.+\b(actual|got|observed)\b", lowered)
     )
+    production_change = (
+        r"\b(change|modify|refactor|remove|delete)\b.{0,80}"
+        r"\b(production code|source code|runtime|service|endpoint|parser)\b"
+        r"|\bimplement\b.{0,80}\b(api endpoint|endpoint|feature|parser|runtime|service)\b"
+        r"|\bproduction code\b.{0,40}\b(change|implementation|modification)\b"
+    )
     rules = (
         ("release-ci", r"\b(release|publish|pypi|npm|deploy|deployment|ci|github actions?)\b"),
         ("membership-roles", r"\b(member(?:ship)?|role|seat|invite|permission)\b"),
         ("board-registry", r"\b(board|registry|project_registry)\b"),
+        ("production-code", production_change),
+        ("bug", r"\b(bug|fix|broken|crash|error|fails?|regression)\b"),
         ("docs", r"\b(doc(?:s|umentation)?|readme|guide|runbook)\b"),
         ("tests", r"\b(test(?:s|ing)?|pytest|unittest|fixture|coverage)\b"),
         ("audit-analysis", r"\b(read[- ]only|audit|analyse|analyze|analysis|inspect|report)\b"),
-        ("bug", r"\b(bug|fix|broken|crash|error|fails?|regression)\b"),
     )
     for category, pattern in rules:
         if re.search(pattern, lowered):
@@ -360,11 +371,15 @@ def _draft_evidence(
             "scope": draft.scope,
             "target_url": draft.target_url,
             "required_fields": list(draft.required_fields),
+            "coordinator_op_key": draft.op_key,
         },
     }
-    return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))[
-        :MAX_EVIDENCE_CHARS
-    ]
+    encoded = json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
+    if len(encoded) > MAX_INTAKE_EVIDENCE_CHARS:
+        raise ValueError("actionable intake draft exceeds its evidence bound")
+    return encoded
 
 
 def intake_finding(
@@ -389,7 +404,12 @@ def intake_finding(
         "message": messages.get(kind, "Structured intake produced a finding."),
         "evidence": _draft_evidence(ask, draft, decision, rule),
         "next_action": (
-            f"Review and fire the drafted {draft.category} ticket for ask {ask.ask_id}."
+            (
+                f"Grant {INTAKE_SCOPE} alongside board:coordinate, then retry ask "
+                f"{ask.ask_id}; the queue remains intact."
+                if rule == "missing-board-intake-grant"
+                else f"Review and fire the drafted {draft.category} ticket for ask {ask.ask_id}."
+            )
             if decision == "ask"
             else (
                 f"Run with --enable-intake without --dry-run to create {draft.ticket_id}."
@@ -1395,6 +1415,11 @@ def privacy_findings(
 
 def _bounded_finding(item: Mapping[str, Any]) -> dict[str, Any]:
     result = dict(item)
+    is_intake = str(result.get("kind", "")).startswith("intake-")
+    evidence_limit = (
+        MAX_INTAKE_EVIDENCE_CHARS if is_intake else MAX_EVIDENCE_CHARS
+    )
+    finding_limit = MAX_INTAKE_FINDING_CHARS if is_intake else MAX_FINDING_CHARS
     result["kind"] = str(result.get("kind", "finding"))[:80]
     result["level"] = str(result.get("level", "info"))[:16]
     result["board_id"] = str(result.get("board_id", "unknown"))[:80]
@@ -1403,7 +1428,7 @@ def _bounded_finding(item: Mapping[str, Any]) -> dict[str, Any]:
     result["evidence"] = str(
         result.get("evidence")
         or _finding_evidence(result["board_id"], result)
-    )[:MAX_EVIDENCE_CHARS]
+    )[:evidence_limit]
     result["next_action"] = str(
         result.get("next_action")
         or _finding_next_action(result["kind"], result["board_id"], result)
@@ -1416,11 +1441,11 @@ def _bounded_finding(item: Mapping[str, Any]) -> dict[str, Any]:
         "evidence",
         "next_action",
     }
-    if result["kind"].startswith("intake-"):
+    if is_intake:
         protected.update(
             {"ask_id", "category", "matrix_rule", "ticket_id", "op_key"}
         )
-    while len(json.dumps(result, sort_keys=True, separators=(",", ":"))) > MAX_FINDING_CHARS:
+    while len(json.dumps(result, sort_keys=True, separators=(",", ":"))) > finding_limit:
         removable = next(
             (key for key in reversed(result) if key not in protected), None
         )
@@ -1431,7 +1456,7 @@ def _bounded_finding(item: Mapping[str, Any]) -> dict[str, Any]:
             message = message[:-1]
             result["message"] = message + ("…" if message else "")
             continue
-        if len(result["evidence"]) > 40:
+        if not is_intake and len(result["evidence"]) > 40:
             result["evidence"] = result["evidence"][:-1]
             continue
         if len(result["next_action"]) > 40:
@@ -2078,15 +2103,20 @@ async def create_intake_ticket(
 
     async with BoardClient(url, token, board_id, agent_name=agent_name) as client:
         try:
-            result = await client.ticket_create(
-                draft.ticket_id,
-                draft.title,
-                description=draft.description,
-                scope=draft.scope,
-                required_fields=list(draft.required_fields),
-                tags=["coordinator-intake", f"op:{draft.op_key}"],
-                target_url=draft.target_url,
-                unassigned=True,
+            result = await client._call(  # noqa: SLF001 - new narrow capability.
+                "ticket_create",
+                {
+                    "agent_name": agent_name,
+                    "ticket_id": draft.ticket_id,
+                    "title": draft.title,
+                    "description": draft.description,
+                    "scope": draft.scope,
+                    "required_fields": list(draft.required_fields),
+                    "tags": ["coordinator-intake", f"op:{draft.op_key}"],
+                    "target_url": draft.target_url,
+                    "unassigned": True,
+                    "coordinator_op_key": draft.op_key,
+                },
             )
         except BoardClientError as exc:
             if "ticket already exists" not in str(exc):
@@ -2112,6 +2142,7 @@ async def process_intakes(
     dry_run: bool,
     create_ticket: Callable[[str, IntakeDraft], Awaitable[str]],
     drafter: IntakeDrafter = deterministic_intake_draft,
+    intake_authorized: bool = True,
 ) -> tuple[list[dict[str, Any]], dict[str, frozenset[str]]]:
     """Classify, validate and consume queues; mutations remain injected/testable."""
     if not enabled:
@@ -2161,6 +2192,8 @@ async def process_intakes(
             decision, rule = intake_matrix_decision(
                 draft.category, project.domain, draft.has_clear_reproduction
             )
+            if decision == "auto" and not intake_authorized and not dry_run:
+                decision, rule = "ask", "missing-board-intake-grant"
             if decision == "auto" and board_id in breakers:
                 decision, rule = "ask", "create-breaker-draft-only"
             if decision == "auto" and recent_creates is None:
@@ -2175,7 +2208,7 @@ async def process_intakes(
                 findings.append(
                     intake_finding("intake-pending", "warn", ask, draft, decision, rule)
                 )
-                if not dry_run:
+                if not dry_run and intake_authorized:
                     processed.add(ask.ask_id)
                 continue
             if dry_run:
@@ -2243,7 +2276,21 @@ async def drain_intake(
     raw = await client.board_state_get(INTAKE_STATE_KEY)
     current = parse_intake(raw, board_id)
     remaining = [ask for ask in current if ask.ask_id not in processed_ids]
-    await client.board_state_update(INTAKE_STATE_KEY, _serialize_intake(remaining))
+    state = raw.get("state") if isinstance(raw, Mapping) else None
+    expected_value = state.get("value") if isinstance(state, Mapping) else None
+    if not isinstance(expected_value, str):
+        raise RuntimeError("coordinator_intake read did not return a string value")
+    await client._call(  # noqa: SLF001 - narrow CAS is not yet public client API.
+        "board_state_update",
+        {
+            "agent_name": client.agent_name,
+            "key": INTAKE_STATE_KEY,
+            "value": _serialize_intake(remaining),
+            "expected_sha256": hashlib.sha256(
+                expected_value.encode("utf-8")
+            ).hexdigest(),
+        },
+    )
 
 
 def home_audit_state(
@@ -2394,6 +2441,22 @@ def _read_token(path_value: str) -> str:
     return token
 
 
+def capability_scopes(token: str) -> frozenset[str]:
+    """Read only the unverified scope hint; Central remains authoritative."""
+    try:
+        payload = token.split(".")[1]
+        padding = "=" * (-len(payload) % 4)
+        claims = json.loads(base64.urlsafe_b64decode(payload + padding))
+        raw = claims.get("scope") if isinstance(claims, Mapping) else None
+    except (IndexError, TypeError, ValueError, json.JSONDecodeError):
+        return frozenset()
+    if isinstance(raw, str):
+        return frozenset(raw.split())
+    if isinstance(raw, list) and all(isinstance(item, str) for item in raw):
+        return frozenset(raw)
+    return frozenset()
+
+
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the fleet coordinator")
     parser.add_argument("--url", default=os.environ.get("ONBOARD_CENTRAL_URL", DEFAULT_URL))
@@ -2441,6 +2504,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 async def run(args: argparse.Namespace) -> None:
     token = _read_token(args.token_path)
+    intake_authorized = INTAKE_SCOPE in capability_scopes(token)
     terms_path = os.environ.get("PURSERS_PRIVACY_TERMS")
     integration_watch_since = parse_time(args.integration_watch_since)
     runtime = RuntimeState.for_mode("shadow" if args.dry_run else args.mode)
@@ -2497,6 +2561,7 @@ async def run(args: argparse.Namespace) -> None:
                 board_id,
                 draft,
             ),
+            intake_authorized=intake_authorized,
         )
         states = merge_action_results(
             states,

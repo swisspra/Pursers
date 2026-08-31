@@ -129,9 +129,17 @@ REVIEW_EVENT_FIELDS = frozenset(
     }
 )
 COORDINATOR_SCOPE = "board:coordinate"
+INTAKE_SCOPE = "board:intake"
+INTAKE_ORIGIN = "coordinator-intake"
+INTAKE_STATE_KEYS = frozenset({"coordinator_intake", "coordinator_findings"})
+INTAKE_CORE_OVERRIDE_FIELDS = frozenset({"origin", "coordinator_op_key"})
+DEFAULT_INTAKE_RATE_LIMIT_PER_HOUR = 10
+MAX_INTAKE_RATE_LIMIT_PER_HOUR = 1_000
+INTAKE_RATE_WINDOW_SECONDS = 3_600
 COORDINATOR_EVENT_FIELDS = frozenset(
     {
         "ticket_id",
+        "origin",
         "target_agent_id",
         "coordinator_op_key",
         "coordination_reason",
@@ -226,7 +234,8 @@ class CentralJournal(Journal):
 
     def append(self, board_id: str, event: dict[str, Any]) -> dict[str, Any]:
         kind = _require_text("kind", event.get("kind"))
-        if kind in CORE_JOURNAL_KINDS and not REVIEW_CORE_OVERRIDE_FIELDS.intersection(event):
+        custom_core_fields = REVIEW_CORE_OVERRIDE_FIELDS | INTAKE_CORE_OVERRIDE_FIELDS
+        if kind in CORE_JOURNAL_KINDS and not custom_core_fields.intersection(event):
             return super().append(board_id, event)
         if kind not in (
             CORE_JOURNAL_KINDS
@@ -485,6 +494,7 @@ class CentralBoard:
                 "scrub_profile": "strict",
                 "review_policy": "strict",
                 "scrub_allow_counts": {},
+                "intake_rate_limit_per_hour": DEFAULT_INTAKE_RATE_LIMIT_PER_HOUR,
             },
             "members": {},
             "principal_memberships": {},
@@ -552,6 +562,15 @@ class CentralBoard:
         review_policy = config.setdefault("review_policy", "strict")
         if review_policy not in REVIEW_POLICIES:
             raise ValueError("board review policy is invalid")
+        intake_rate_limit = config.setdefault(
+            "intake_rate_limit_per_hour", DEFAULT_INTAKE_RATE_LIMIT_PER_HOUR
+        )
+        if (
+            isinstance(intake_rate_limit, bool)
+            or not isinstance(intake_rate_limit, int)
+            or not 1 <= intake_rate_limit <= MAX_INTAKE_RATE_LIMIT_PER_HOUR
+        ):
+            raise ValueError("board intake rate limit is invalid")
         allow_counts = config.setdefault("scrub_allow_counts", {})
         if not isinstance(allow_counts, dict) or any(
             not isinstance(rule, str)
@@ -3080,6 +3099,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         target_url: str | None = None,
         assigned_to: str | None = None,
         unassigned: bool = False,
+        coordinator_op_key: str | None = None,
         expected_generation: str | None = None,
     ) -> dict[str, Any]:
         """Create a ticket; omitted IDs are generated inside the board transaction.
@@ -3104,7 +3124,22 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         if assigned_to is not None and unassigned:
             raise ValueError("assigned_to and unassigned=true are mutually exclusive")
         principal = current_principal()
-        require_scope(principal, "board:write")
+        intake_only = "board:write" not in principal.scopes
+        if intake_only:
+            require_scope(principal, INTAKE_SCOPE)
+            if coordinator_op_key is None:
+                raise ValueError("board:intake ticket creation requires coordinator_op_key")
+            coordinator_op_key = require_id(
+                "coordinator_op_key", coordinator_op_key
+            )
+            if assigned_to is not None or not unassigned:
+                raise PermissionError(
+                    "board:intake creates only unassigned tickets"
+                )
+        elif coordinator_op_key is not None:
+            raise PermissionError(
+                "coordinator_op_key is reserved for board:intake"
+            )
         now = time.time()
 
         def create(document: dict[str, Any]) -> dict[str, Any]:
@@ -3143,7 +3178,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 scrub_profile=profile, allow_counts=allow_counts,
             )
             assert safe_title is not None
-            if not explicit_id:
+            if not explicit_id or intake_only:
                 missing = []
                 if not safe_description:
                     missing.append("description")
@@ -3157,10 +3192,48 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                     raise ValueError(
                         "generated-ID tickets require: " + ", ".join(missing)
                     )
-            actor, released, renewed = prepare_board_call(document, principal, agent_name, now)
-            actual_id = ticket_id or allocate_ticket_id(document)
-            if actual_id in document["tickets"]:
-                raise ValueError("ticket already exists")
+            if intake_only:
+                service.resolve_board_context(
+                    document, principal.principal_id, {"member"}
+                )
+                actor = service.member(document, principal, agent_name)
+                released, renewed = [], []
+                actual_id = ticket_id or allocate_ticket_id(document)
+                if actual_id in document["tickets"]:
+                    raise ValueError("ticket already exists")
+                cutoff = now - INTAKE_RATE_WINDOW_SECONDS
+                recent = 0
+                for existing in document["tickets"].values():
+                    if existing.get("origin") != INTAKE_ORIGIN:
+                        continue
+                    created_epoch = existing.get("created_at_epoch")
+                    if not isinstance(created_epoch, (int, float)) or isinstance(
+                        created_epoch, bool
+                    ):
+                        try:
+                            created_epoch = datetime.fromisoformat(
+                                str(existing.get("created_at", "")).replace(
+                                    "Z", "+00:00"
+                                )
+                            ).timestamp()
+                        except (TypeError, ValueError):
+                            created_epoch = now
+                    if float(created_epoch) >= cutoff:
+                        recent += 1
+                rate_limit = int(
+                    document["config"]["intake_rate_limit_per_hour"]
+                )
+                if recent >= rate_limit:
+                    raise PermissionError(
+                        "board:intake hourly ticket creation limit reached"
+                    )
+            else:
+                actor, released, renewed = prepare_board_call(
+                    document, principal, agent_name, now
+                )
+                actual_id = ticket_id or allocate_ticket_id(document)
+                if actual_id in document["tickets"]:
+                    raise ValueError("ticket already exists")
             requested_assignment = safe_assigned
             if explicit_id and safe_assigned is None and not unassigned:
                 requested_assignment = actor["agent_name"]
@@ -3192,6 +3265,10 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 "created_at": iso_at(now),
                 "updated_at": iso_at(now),
             }
+            if intake_only:
+                ticket["created_at_epoch"] = now
+                ticket["origin"] = INTAKE_ORIGIN
+                ticket["coordinator_op_key"] = coordinator_op_key
             document["tickets"][actual_id] = ticket
             scrub_audit = record_scrub_allows(
                 document, actor, now, allow_counts
@@ -3211,6 +3288,14 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         actual_id = changed["ticket"]["ticket_id"]
         release_events = await publish_releases(board_id, changed["released"], principal, ctx)
         uri = resource_uri(board_id, "ticket", actual_id)
+        intake_event = (
+            {
+                "origin": INTAKE_ORIGIN,
+                "coordinator_op_key": coordinator_op_key,
+            }
+            if intake_only
+            else {}
+        )
         event = await append_and_publish(
             board_id,
             changed["actor"],
@@ -3221,6 +3306,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             ticket_id=actual_id,
             status_from="missing",
             status_to="open",
+            **intake_event,
         )
         return {
             "ok": True,
@@ -5135,16 +5221,32 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         value: str,
         ctx: Context,
         expected_generation: str | None = None,
+        expected_sha256: str | None = None,
     ) -> dict[str, Any]:
         """Atomically set one project-scoped board state value."""
         board_id = require_id("board_id", board_id)
         key = require_id("key", key)
         principal = current_principal()
-        coordinate_only = require_board_write_or_coordinate(principal)
-        if coordinate_only and key != "coordinator_findings":
+        if "board:write" in principal.scopes:
+            authority = "write"
+        elif INTAKE_SCOPE in principal.scopes:
+            authority = "intake"
+        else:
+            require_scope(principal, COORDINATOR_SCOPE)
+            authority = "coordinate"
+        if authority == "coordinate" and key != "coordinator_findings":
             raise PermissionError(
                 "coordinator authorization permits only coordinator_findings state"
             )
+        if authority == "intake" and key not in INTAKE_STATE_KEYS:
+            raise PermissionError(
+                "board:intake authorization permits only coordinator_intake "
+                "and coordinator_findings state"
+            )
+        if expected_sha256 is not None and not re.fullmatch(
+            r"[0-9a-f]{64}", expected_sha256
+        ):
+            raise ValueError("expected_sha256 must be a lowercase SHA-256 digest")
         now = time.time()
 
         def update(document: dict[str, Any]) -> dict[str, Any]:
@@ -5155,7 +5257,20 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 scrub_profile=board_scrub_profile(document),
             )
             assert safe_value is not None
-            if coordinate_only:
+            if expected_sha256 is not None:
+                current = document.setdefault("state", {}).get(key)
+                current_value = (
+                    current.get("value") if isinstance(current, dict) else None
+                )
+                if (
+                    not isinstance(current_value, str)
+                    or not hmac.compare_digest(
+                        hashlib.sha256(current_value.encode("utf-8")).hexdigest(),
+                        expected_sha256,
+                    )
+                ):
+                    raise ValueError("state precondition failed")
+            if authority != "write":
                 service.resolve_board_context(
                     document, principal.principal_id, {"member"}
                 )
@@ -5202,7 +5317,13 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         if key is not None:
             key = require_id("key", key)
         principal = current_principal()
-        require_scope(principal, "board:read")
+        if "board:read" not in principal.scopes:
+            require_scope(principal, INTAKE_SCOPE)
+            if key is None or key not in INTAKE_STATE_KEYS:
+                raise PermissionError(
+                    "board:intake authorization reads only coordinator_intake "
+                    "and coordinator_findings state"
+                )
         document = service.load(board_id)
         service.principal_members(document, principal.principal_id)
         state = document.get("state", {})

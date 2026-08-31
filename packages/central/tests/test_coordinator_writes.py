@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import sys
 import tempfile
@@ -57,11 +58,31 @@ class CoordinatorWriteTests(unittest.IsolatedAsyncioTestCase):
             "coordinator-canonical",
             frozenset({"board:read", "board:coordinate"}),
         )
+        self.intake_joiner = central.Principal(
+            "PR-intake",
+            "intake-canonical",
+            frozenset({"board:coordinate", "board:intake"}),
+        )
+        self.intake = central.Principal(
+            "PR-intake",
+            "intake-canonical",
+            frozenset({"board:intake"}),
+        )
+        self.intake_runtime = central.Principal(
+            "PR-intake",
+            "intake-canonical",
+            frozenset({"board:read", "board:coordinate", "board:intake"}),
+        )
         self.principal = self.admin
         self.original_current_principal = central.current_principal
         central.current_principal = lambda: self.principal
         await self.call("board_join", agent_name="admin-agent")
-        for principal in (self.worker, self.other_worker, self.coordinator):
+        for principal in (
+            self.worker,
+            self.other_worker,
+            self.coordinator,
+            self.intake_joiner,
+        ):
             await self.call(
                 "board_member_add",
                 agent_name="admin-agent",
@@ -74,6 +95,9 @@ class CoordinatorWriteTests(unittest.IsolatedAsyncioTestCase):
         self.principal = self.coordinator
         joined = await self.call("board_join", agent_name="coordinator-1")
         self.coordinator_id = joined.structured_content["agent_id"]
+        self.principal = self.intake_joiner
+        joined = await self.call("board_join", agent_name="intake-coordinator")
+        self.intake_id = joined.structured_content["agent_id"]
 
     async def join_other_worker(self) -> str:
         self.principal = self.other_worker
@@ -334,6 +358,252 @@ class CoordinatorWriteTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(report.is_error)
         self.assertFalse(digest.is_error)
+
+    async def test_intake_scope_creates_origin_journaled_unassigned_ticket(self) -> None:
+        self.principal = self.intake
+        created = await self.call(
+            "ticket_create",
+            agent_name="intake-coordinator",
+            ticket_id="TK-intake-allowed",
+            title="Update the operator guide",
+            description="Structured coordinator intake.",
+            target_url="pursers/docs",
+            scope="interactive-no-send",
+            required_fields=["commit_hash", "test_output"],
+            tags=["coordinator-intake"],
+            unassigned=True,
+            coordinator_op_key="coord-intake-allowed",
+        )
+
+        self.assertFalse(created.is_error)
+        ticket = created.structured_content["ticket"]
+        self.assertEqual(ticket["origin"], "coordinator-intake")
+        self.assertEqual(ticket["coordinator_op_key"], "coord-intake-allowed")
+        self.assertIsNone(ticket["assigned_to_agent_id"])
+        event = created.structured_content["event"]
+        self.assertEqual(event["origin"], "coordinator-intake")
+        self.assertEqual(event["coordinator_op_key"], "coord-intake-allowed")
+
+    async def test_intake_scope_state_keys_and_compare_and_set(self) -> None:
+        self.principal = self.admin
+        seeded = await self.call(
+            "board_state_update",
+            agent_name="admin-agent",
+            key="coordinator_intake",
+            value='[{"id":"ask-1"}]',
+        )
+        self.assertFalse(seeded.is_error)
+
+        self.principal = self.intake
+        read = await self.call("board_state_get", key="coordinator_intake")
+        self.assertEqual(read.structured_content["state"]["value"], '[{"id":"ask-1"}]')
+        expected_sha256 = hashlib.sha256(b'[{"id":"ask-1"}]').hexdigest()
+        updated = await self.call(
+            "board_state_update",
+            agent_name="intake-coordinator",
+            key="coordinator_intake",
+            value="[]",
+            expected_sha256=expected_sha256,
+        )
+        self.assertFalse(updated.is_error)
+        finding = await self.call(
+            "board_state_update",
+            agent_name="intake-coordinator",
+            key="coordinator_findings",
+            value='{"findings":[]}',
+        )
+        self.assertFalse(finding.is_error)
+        with self.assertRaisesRegex(ToolError, "state precondition failed"):
+            await self.call(
+                "board_state_update",
+                agent_name="intake-coordinator",
+                key="coordinator_intake",
+                value='[{"id":"lost"}]',
+                expected_sha256=expected_sha256,
+            )
+        with self.assertRaisesRegex(ToolError, "reads only"):
+            await self.call("board_state_get", key="project_registry")
+        with self.assertRaisesRegex(ToolError, "reads only"):
+            await self.call("board_state_get")
+
+    async def test_intake_scope_server_rate_limit(self) -> None:
+        self.service.mutate(
+            "pursers",
+            lambda document: document["config"].update(
+                {"intake_rate_limit_per_hour": 2}
+            ),
+        )
+        self.principal = self.intake
+        for index in range(2):
+            created = await self.call(
+                "ticket_create",
+                agent_name="intake-coordinator",
+                ticket_id=f"TK-intake-rate-{index}",
+                title=f"Intake {index}",
+                description="Rate limit probe.",
+                target_url="pursers/tests",
+                scope="interactive-no-send",
+                required_fields=["test_output"],
+                unassigned=True,
+                coordinator_op_key=f"coord-intake-rate-{index}",
+            )
+            self.assertFalse(created.is_error)
+        with self.assertRaisesRegex(ToolError, "ticket already exists"):
+            await self.call(
+                "ticket_create",
+                agent_name="intake-coordinator",
+                ticket_id="TK-intake-rate-0",
+                title="Intake 0",
+                description="Rate limit probe.",
+                target_url="pursers/tests",
+                scope="interactive-no-send",
+                required_fields=["test_output"],
+                unassigned=True,
+                coordinator_op_key="coord-intake-rate-0",
+            )
+        with self.assertRaisesRegex(ToolError, "hourly ticket creation limit"):
+            await self.call(
+                "ticket_create",
+                agent_name="intake-coordinator",
+                ticket_id="TK-intake-rate-denied",
+                title="Intake denied",
+                description="Rate limit probe.",
+                target_url="pursers/tests",
+                scope="interactive-no-send",
+                required_fields=["test_output"],
+                unassigned=True,
+                coordinator_op_key="coord-intake-rate-denied",
+            )
+
+    async def test_intake_scope_denied_call_matrix(self) -> None:
+        ticket_id = await self.create_ticket("intake denial target")
+        self.principal = self.intake
+        forbidden_calls = (
+            ("ticket_claim", {"agent_name": "intake-coordinator", "ticket_id": ticket_id}),
+            ("ticket_submit", {"agent_name": "intake-coordinator", "ticket_id": ticket_id}),
+            (
+                "ticket_review",
+                {
+                    "agent_name": "intake-coordinator",
+                    "ticket_id": ticket_id,
+                    "verdict": "approve",
+                },
+            ),
+            ("ticket_cancel", {"agent_name": "intake-coordinator", "ticket_id": ticket_id}),
+            ("ticket_terminate", {"agent_name": "intake-coordinator", "ticket_id": ticket_id}),
+            (
+                "ticket_assign",
+                {
+                    "agent_name": "intake-coordinator",
+                    "ticket_id": ticket_id,
+                    "assigned_to_agent_id": self.worker_id,
+                    "expected_status": "open",
+                    "coordinator_op_key": "coord-intake-no-assign",
+                    "reason": "must be denied",
+                },
+            ),
+            (
+                "board_member_add",
+                {
+                    "agent_name": "intake-coordinator",
+                    "principal_id": "PR-forbidden",
+                    "role": "member",
+                },
+            ),
+            (
+                "memory_write",
+                {
+                    "agent_name": "intake-coordinator",
+                    "title": "forbidden",
+                    "content": "forbidden",
+                    "scope": "project",
+                },
+            ),
+        )
+        for name, arguments in forbidden_calls:
+            with self.subTest(name=name), self.assertRaises(ToolError):
+                await self.call(name, **arguments)
+
+        with self.assertRaisesRegex(ToolError, "requires coordinator_op_key"):
+            await self.call(
+                "ticket_create",
+                agent_name="intake-coordinator",
+                ticket_id="TK-intake-no-key",
+                title="forbidden",
+                description="missing op key",
+                target_url="pursers",
+                scope="interactive-no-send",
+                required_fields=["test_output"],
+                unassigned=True,
+            )
+        with self.assertRaisesRegex(ToolError, "only unassigned"):
+            await self.call(
+                "ticket_create",
+                agent_name="intake-coordinator",
+                ticket_id="TK-intake-assigned",
+                title="forbidden",
+                description="assignment escalation",
+                target_url="pursers",
+                scope="interactive-no-send",
+                required_fields=["test_output"],
+                coordinator_op_key="coord-intake-assigned",
+            )
+        with self.assertRaisesRegex(ToolError, "permits only"):
+            await self.call(
+                "board_state_update",
+                agent_name="intake-coordinator",
+                key="project_registry",
+                value="{}",
+            )
+
+    async def test_runtime_scope_create_publish_and_cas_drain(self) -> None:
+        queue = '[{"id":"ask-live","text":"Update docs"}]'
+        self.principal = self.admin
+        await self.call(
+            "board_state_update",
+            agent_name="admin-agent",
+            key="coordinator_intake",
+            value=queue,
+        )
+
+        self.principal = self.intake_runtime
+        created = await self.call(
+            "ticket_create",
+            agent_name="intake-coordinator",
+            ticket_id="TK-intake-live",
+            title="Update docs",
+            description="Structured coordinator intake.",
+            target_url="pursers/docs",
+            scope="interactive-no-send",
+            required_fields=["commit_hash", "test_output"],
+            unassigned=True,
+            coordinator_op_key="coord-intake-live",
+        )
+        published = await self.call(
+            "board_state_update",
+            agent_name="intake-coordinator",
+            key="coordinator_findings",
+            value='{"findings":[{"ask_id":"ask-live","kind":"intake-created"}]}',
+        )
+        observed = await self.call("board_state_get", key="coordinator_intake")
+        drained = await self.call(
+            "board_state_update",
+            agent_name="intake-coordinator",
+            key="coordinator_intake",
+            value="[]",
+            expected_sha256=hashlib.sha256(queue.encode()).hexdigest(),
+        )
+
+        self.assertFalse(created.is_error)
+        self.assertFalse(published.is_error)
+        self.assertEqual(observed.structured_content["state"]["value"], queue)
+        self.assertFalse(drained.is_error)
+        document = self.service.load("pursers")
+        self.assertEqual(document["state"]["coordinator_intake"]["value"], "[]")
+        self.assertEqual(
+            document["tickets"]["TK-intake-live"]["origin"],
+            "coordinator-intake",
+        )
 
 
 if __name__ == "__main__":
