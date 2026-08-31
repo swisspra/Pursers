@@ -21,9 +21,23 @@ The server refuses non-loopback binding. It never returns the token to the brows
 - open, claimed, submitted, and closed-today ticket counts per active board;
 - bounded active ticket rows (open, claimed, and submitted);
 - a bounded recent activity feed per board; and
-- agents grouped across boards by principal and agent name.
+- agents grouped across boards by principal and agent name, with expandable
+  per-board role, claim, and last-seen details.
 
-The browser polls `/api/fleet` every five seconds. Server reads are cached for five seconds. Every board snapshot is capped at 1,000 items per collection and 300,000 bytes; displayed board, ticket, event, title, and agent rows are capped again before JSON serialization. Truncated ticket counts are shown as lower bounds with a `>=` prefix. Paused registry projects are excluded.
+Select a board to open its hash-routed detail view. The detail API returns all
+statuses from a `board_snapshot(limit=1000, max_bytes=300000)` source, ordered
+with active claims first and then by update time. Ticket descriptions, required
+fields, latest submission summaries, and review labels are compact projections;
+full submission history is never sent to the browser. The activity feed uses
+`board_catchup(max_events=100, ack=false)` and stays oldest-to-newest.
+
+The browser polls `/api/fleet` every five seconds. While a detail route is open,
+it also polls `/api/board/<board-id>` every five seconds; the detail poll stops
+when the route closes. Server reads are cached for five seconds. Every board
+snapshot is capped at 1,000 items per collection and 300,000 bytes; detail JSON
+is capped at 300,000 bytes and reports omitted ticket rows. Truncated fleet
+ticket counts are shown as lower bounds with a `>=` prefix. Paused registry
+projects and unknown detail routes are excluded.
 
 Useful options:
 
