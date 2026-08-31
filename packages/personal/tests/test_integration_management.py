@@ -9,7 +9,18 @@ from dataclasses import replace
 from types import SimpleNamespace
 from pathlib import Path
 
+import sys
+
 import pytest
+
+pytestmark = pytest.mark.skipif(
+    sys.platform != "darwin",
+    reason=(
+        "host integration performs its compare-and-swap with the macOS-only "
+        "renameatx_np syscall; the feature (and these tests) are Darwin-only "
+        "by design — integration.py raises IntegrationError elsewhere"
+    ),
+)
 
 import pursers_personal.integration as integration_module
 from pursers_personal.integration import (
