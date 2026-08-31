@@ -5,6 +5,30 @@ All notable changes to Pursers are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [5.0.0a9] - 2026-08-31
+
+This release includes `pursers-personal==5.0.0a9`, `pursers==5.0.0a9`,
+`pursers-central==0.1.0a15`, and `pursers-wait-bridge==0.1.0a2`.
+
+### Added
+
+- `seat_admin.py`: one-command provisioning for worker and reviewer seats —
+  duplicate-name guard against the live pool, membership plus reviewer-role
+  runbook applied across all registry boards, `new-board` propagation, and a
+  ready-to-paste config block that never prints credentials (`159c32c`).
+- Fleet Dashboard board and agent drill-down: bounded per-board detail views
+  with ticket expansion, per-agent seats and current claims, and a linked
+  activity feed (`8b13673`).
+- `docs/coordinator-design.md`: phase 0 design for the coordinator control
+  seat (`93f9752`), and `docs/v4-port-audit.md`: ranked inventory of v4
+  features worth porting (`22e05c1`).
+
+### Changed
+
+- Cache-friendly response layout: briefing, catchup, and journal envelopes now
+  serialize stable-first with deterministic field ordering, so provider prompt
+  caches see a stable prefix (`98094d9`, `docs/cache-friendly-prose.md`).
+
 ## [5.0.0a8] - 2026-08-31
 
 This release includes `pursers-personal==5.0.0a8`, `pursers==5.0.0a8`,
