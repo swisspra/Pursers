@@ -718,6 +718,43 @@ def test_two_central_dom_groups_are_rendered_without_pool_merge() -> None:
     assert "work-seat" in work_group
 
 
+def test_hung_central_times_out_after_healthy_central_renders() -> None:
+    script = dashboard.HTML.split("<script>", 1)[1].split("</script>", 1)[0]
+    lines = script.splitlines()
+
+    def source(prefix: str) -> str:
+        return next(line for line in lines if line.startswith(prefix))
+
+    program = "\n".join(
+        [
+            source("const CENTRAL_REQUEST_TIMEOUT_MS="),
+            source("async function fetchJson("),
+            source("async function fetchWithTimeout("),
+            source("async function refreshCentral("),
+            source("async function refreshFleet("),
+            "const apiCentral=label=>`central=${encodeURIComponent(label)}`;",
+            "const route=()=>null;",
+            "let centralLabels=['personal','work'],fleetData={},fleetErrors={};",
+            "const renders=[];",
+            "function renderFleet(){renders.push({data:Object.keys(fleetData),errors:{...fleetErrors}})}",
+            "global.fetch=path=>path.includes('work')?new Promise(()=>{}):Promise.resolve({ok:true,json:async()=>({central:'personal'})});",
+            "refreshFleet(20).then(()=>console.log(JSON.stringify(renders)));",
+        ]
+    )
+    completed = subprocess.run(
+        ["node", "-e", program],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=2,
+    )
+    renders = json.loads(completed.stdout)
+
+    assert renders[0] == {"data": ["personal"], "errors": {}}
+    assert renders[-1]["data"] == ["personal"]
+    assert renders[-1]["errors"] == {"work": "central request timed out"}
+
+
 def test_filter_behavior_removes_unrelated_home_rows_and_change_counts() -> None:
     script = dashboard.HTML.split("<script>", 1)[1].split("</script>", 1)[0]
     lines = script.splitlines()
@@ -1155,7 +1192,9 @@ def valid_coordinator_config() -> dict:
 
 
 class FakeCentralFetcher:
-    def __init__(self, label: str, *, fail: bool = False) -> None:
+    def __init__(
+        self, label: str, *, fail: bool = False, overhead_path: Path | None = None
+    ) -> None:
         self.config = dashboard.Config(
             url=f"https://{label}.example/mcp",
             token=f"secret-{label}",
@@ -1164,6 +1203,7 @@ class FakeCentralFetcher:
             stale_seconds=300,
             cache_seconds=5,
             label=label,
+            overhead_path=overhead_path,
         )
         self.fail = fail
         self.saved: list[tuple[dict, str | None]] = []
@@ -1240,6 +1280,107 @@ def test_two_fake_central_aggregation_and_failure_isolation() -> None:
     assert "secret-personal" not in json.dumps(index)
     assert "secret-work" not in json.dumps([personal_result, work_result])
     assert "personal.example" not in json.dumps(index)
+
+
+def test_multi_central_overhead_is_scoped_even_with_identical_board_ids(
+    tmp_path: Path,
+) -> None:
+    today = datetime.now(timezone.utc).date().isoformat()
+
+    def stats(agent_name: str, byte_count: int) -> dict:
+        return {
+            "schema_version": 1,
+            "days": {
+                today: {
+                    "seats": {
+                        "same-seat-key": {
+                            "board_id": "shared-board-id",
+                            "agent_name": agent_name,
+                            "request_bytes": byte_count,
+                            "response_bytes": 0,
+                            "calls": {},
+                        }
+                    }
+                }
+            },
+        }
+
+    personal_stats = tmp_path / "personal-stats.json"
+    work_stats = tmp_path / "work-stats.json"
+    personal_stats.write_text(json.dumps(stats("personal-seat", 101)), encoding="utf-8")
+    work_stats.write_text(json.dumps(stats("work-seat", 202)), encoding="utf-8")
+    cache = dashboard.DashboardCache(
+        [
+            FakeCentralFetcher("personal", overhead_path=personal_stats),
+            FakeCentralFetcher("work", overhead_path=work_stats),
+        ],
+        60,
+    )
+    server, thread = _serve_cache(cache)
+    root = f"http://127.0.0.1:{server.server_port}"
+    try:
+        with urllib.request.urlopen(f"{root}/api/overhead?central=personal") as response:
+            personal = json.load(response)
+        with urllib.request.urlopen(f"{root}/api/overhead?central=work") as response:
+            work = json.load(response)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+    assert personal["central"] == "personal"
+    assert personal["seats"] == [
+        {
+            **personal["seats"][0],
+            "board_id": "shared-board-id",
+            "agent_name": "personal-seat",
+            "today_bytes": 101,
+        }
+    ]
+    assert work["central"] == "work"
+    assert work["seats"] == [
+        {
+            **work["seats"][0],
+            "board_id": "shared-board-id",
+            "agent_name": "work-seat",
+            "today_bytes": 202,
+        }
+    ]
+    assert "work-seat" not in json.dumps(personal)
+    assert "personal-seat" not in json.dumps(work)
+
+
+def test_multi_central_overhead_without_scoped_source_fails_closed(
+    tmp_path: Path,
+) -> None:
+    global_stats = tmp_path / "global-stats.json"
+    global_stats.write_text(
+        json.dumps({"schema_version": 1, "days": {}}), encoding="utf-8"
+    )
+    cache = dashboard.DashboardCache(
+        [FakeCentralFetcher("personal"), FakeCentralFetcher("work")], 60
+    )
+    server = dashboard.ThreadingHTTPServer(
+        ("127.0.0.1", 0), dashboard.make_handler(cache, global_stats)
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with pytest.raises(urllib.error.HTTPError) as captured:
+            urllib.request.urlopen(
+                f"http://127.0.0.1:{server.server_port}/api/overhead?central=personal"
+            )
+        assert captured.value.code == 503
+        body = json.load(captured.value)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+    assert body == {
+        "error": "central overhead source is not configured",
+        "central": "personal",
+    }
 
 
 def test_multi_central_param_routing_and_config_save_target() -> None:
@@ -1326,6 +1467,7 @@ def test_centrals_file_and_tokens_require_0600(tmp_path: Path) -> None:
                     "url": "https://personal.example/mcp",
                     "token_path": "personal.token",
                     "home_board": "personal-home",
+                    "stats_path": "personal-stats.json",
                 },
                 {
                     "label": "work",
@@ -1353,6 +1495,8 @@ def test_centrals_file_and_tokens_require_0600(tmp_path: Path) -> None:
         ("personal", "personal-secret"),
         ("work", "work-secret"),
     ]
+    assert configs[0].overhead_path == tmp_path / "personal-stats.json"
+    assert configs[1].overhead_path is None
 
     central_file.chmod(0o644)
     with pytest.raises(SystemExit, match="centrals config must be a regular 0600 file"):

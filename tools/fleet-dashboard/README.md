@@ -27,20 +27,23 @@ Use one viewer process for several independent trust domains with `--centrals`:
     "label": "personal",
     "url": "https://127.0.0.1:8766/mcp",
     "token_path": "personal.token",
-    "home_board": "pursers"
+    "home_board": "pursers",
+    "stats_path": "personal-bridge-stats.json"
   },
   {
     "label": "work",
     "url": "https://127.0.0.1:9766/mcp",
     "token_path": "work.token",
-    "home_board": "work-registry"
+    "home_board": "work-registry",
+    "stats_path": "work-bridge-stats.json"
   }
 ]
 ```
 
 The JSON file and every referenced token file must be regular files with mode
-`0600`. Relative token paths resolve from the JSON file's directory. Labels must
-be unique and contain only letters, digits, `.`, `_`, or `-`.
+`0600`. Relative token and optional `stats_path` paths resolve from the JSON
+file's directory. Labels must be unique and contain only letters, digits, `.`,
+`_`, or `-`.
 
 ```bash
 chmod 600 centrals.json personal.token work.token
@@ -49,9 +52,12 @@ python tools/fleet-dashboard/fleet_dashboard.py --centrals centrals.json
 
 Each central gets its own summary, board group, agent pool, cache, error state,
 detail routes, findings, overhead route, and coordinator config target. The
-browser requests each central independently, so an unavailable central does not
-hide healthy ones. Tokens remain server-side. Without `--centrals`, all existing
-single-central flags and defaults continue to work.
+browser requests and renders each central independently with a four-second
+timeout, so an unavailable or nonresponsive central does not hide healthy ones.
+In multi-central mode, overhead is read only from that entry's `stats_path`; an
+entry without one reports its overhead unavailable instead of using another
+trust domain's global stats. Tokens remain server-side. Without `--centrals`,
+all existing single-central flags and the global overhead path continue to work.
 
 ## What it shows
 

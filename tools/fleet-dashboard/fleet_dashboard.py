@@ -162,6 +162,7 @@ class Config:
     stale_seconds: int
     cache_seconds: float
     label: str = "default"
+    overhead_path: Path | None = None
 
 
 def _clip(value: Any, limit: int) -> str:
@@ -1153,6 +1154,17 @@ class DashboardCache:
             raise KeyError(label)
         return label
 
+    def overhead_path(
+        self, central: str | None, single_central_fallback: Path
+    ) -> Path:
+        label = self.resolve_central(central)
+        configured = self.fetchers[label].config.overhead_path
+        if configured is not None:
+            return configured
+        if len(self.fetchers) == 1:
+            return single_central_fallback
+        raise RuntimeError("central overhead source is not configured")
+
     @staticmethod
     def _labeled(value: dict[str, Any], label: str) -> dict[str, Any]:
         return {**value, "central": label}
@@ -1225,9 +1237,12 @@ function changesView(d,r){const valid=r.since!==null&&/^\d+$/.test(r.since),sinc
 function flowView(d,r){const byId=new Map(d.tickets.map(t=>[t.id,t])),labels={open:'Open',claimed:'Claimed',submitted:'Submitted',closed_today:'Closed today'};return `<p class="muted bounded-note">Classified from ${esc(d.ticket_returned)} returned tickets; omitted snapshot rows are not inferred.</p><section class="flow">${Object.entries(labels).map(([key,label])=>{const tickets=d.ticket_flow[key].map(id=>byId.get(id)).filter(Boolean).filter(t=>matches([t.id,t.title,t.claimed_by,t.status],filterNeedle));return `<div class="flow-column"><h3>${esc(label)} · ${esc(tickets.length)}</h3>${tickets.map(t=>`<a class="flow-card" href="${ticketHref(r.central,d.board.board_id,t.id)}"><span class="id">${esc(t.id)}</span><div>${esc(t.title)}</div><span class="meta">${esc(t.claimed_by||'Unassigned')}</span></a>`).join('')||'<p class="empty">No matching tickets</p>'}</div>`}).join('')}</section>`}
 function findings(d){if(!d.coordinator_findings)return'';return `<section class="card"><h3>Coordinator findings</h3><div class="finding-list">${d.coordinator_findings.items.map(f=>`<div class="finding"><b>${esc(f.kind)}</b>${f.ticket_id?` <span class="id">${esc(f.ticket_id)}</span>`:''}<p>${esc(f.text)}</p></div>`).join('')||'<p class="empty">No current findings</p>'}</div>${d.coordinator_findings.truncated_count?`<p class="warning">${esc(d.coordinator_findings.truncated_count)} findings omitted by the bounded state.</p>`:''}</section>`}
 function renderDetail(d){const r=route();if(!r||r.kind!=='board'||r.central!==d.central||r.board!==d.board.board_id)return;const views={tickets:ticketView,timeline:timelineView,changes:changesView,flow:flowView};document.querySelector('#detail-view').innerHTML=`<a class="back" href="#/">← All centrals</a><div class="top"><div><h2>${esc(d.board.label)} · ${esc(d.central)}</h2><span class="meta">${esc(d.board.board_id)}</span></div>${d.truncated?`<span class="status">${esc(d.ticket_returned)} of ${esc(d.ticket_total)} tickets shown</span>`:''}</div><div class="toolbar">${tabs(d,r)}<span class="muted">Read-only bounded view · ${esc(d.central)}</span></div>${r.view==='tickets'?findings(d):''}${views[r.view](d,r)}`;document.querySelector('#ticket-sort')?.addEventListener('change',e=>{detailSort=e.target.value;renderDetail(d)});document.querySelector('#changes-form')?.addEventListener('submit',e=>{e.preventDefault();const value=document.querySelector('#since-seq').value.trim();location.hash=`/central/${encodeURIComponent(r.central)}/board/${encodeURIComponent(d.board.board_id)}/changes${value?`?since=${encodeURIComponent(value)}`:''}`});document.querySelector('#state').textContent=`Updated ${fmt(d.generated_at)} · ${esc(d.central)}`;if(r.ticket){const target=[...document.querySelectorAll('[data-ticket]')].find(x=>x.dataset.ticket===r.ticket);target?.scrollIntoView({block:'center'})}}
-async function fetchJson(path){const response=await fetch(path,{cache:'no-store'});if(!response.ok)throw new Error(`HTTP ${response.status}`);return response.json()}
+const CENTRAL_REQUEST_TIMEOUT_MS=4000;
+async function fetchJson(path,options={}){const response=await fetch(path,{cache:'no-store',...options});if(!response.ok)throw new Error(`HTTP ${response.status}`);return response.json()}
+async function fetchWithTimeout(path,timeoutMs=CENTRAL_REQUEST_TIMEOUT_MS){const controller=new AbortController();let timer;const timeout=new Promise((_,reject)=>{timer=setTimeout(()=>{controller.abort();reject(new Error('central request timed out'))},timeoutMs)});try{return await Promise.race([fetchJson(path,{signal:controller.signal}),timeout])}finally{clearTimeout(timer)}}
 async function loadCentrals(){const d=await fetchJson('/api/centrals');centralLabels=d.centrals;defaultCentral=d.default}
-async function refreshFleet(){if(!centralLabels.length)await loadCentrals();await Promise.all(centralLabels.map(async label=>{try{fleetData[label]=await fetchJson(`/api/fleet?${apiCentral(label)}`);delete fleetErrors[label]}catch(e){delete fleetData[label];fleetErrors[label]=e.message}}));if(!route())renderFleet()}
+async function refreshCentral(label,timeoutMs=CENTRAL_REQUEST_TIMEOUT_MS){try{fleetData[label]=await fetchWithTimeout(`/api/fleet?${apiCentral(label)}`,timeoutMs);delete fleetErrors[label]}catch(e){delete fleetData[label];fleetErrors[label]=e.message}finally{if(!route())renderFleet()}}
+async function refreshFleet(timeoutMs=CENTRAL_REQUEST_TIMEOUT_MS){if(!centralLabels.length)await loadCentrals();await Promise.allSettled(centralLabels.map(label=>refreshCentral(label,timeoutMs)))}
 async function refreshOverhead(){const r=route();if(!r||r.kind!=='overhead')return;try{const data=await fetchJson(`/api/overhead?${apiCentral(r.central)}`);if(route()?.central!==r.central)return;renderOverhead(data)}catch(e){document.querySelector('#detail-view').innerHTML=`<a class="back" href="#/">← All centrals</a><p class="error">Overhead unavailable for ${esc(r.central)}: ${esc(e.message)}</p>`}}
 async function refreshDetail(){const r=route();if(!r||r.kind!=='board')return;try{const data=await fetchJson(`/api/board/${encodeURIComponent(r.board)}?${apiCentral(r.central)}`);const current=route();if(current?.central!==r.central||current?.board!==r.board)return;detailData=data;renderDetail(data)}catch(e){document.querySelector('#detail-view').innerHTML=`<a class="back" href="#/">← All centrals</a><p class="error">Board detail unavailable for ${esc(r.central)}: ${esc(e.message)}</p>`;document.querySelector('#state').textContent='Detail refresh failed'}}
 function syncRoute(){const r=route();document.querySelector('#home-view').hidden=!!r;document.querySelector('#detail-view').hidden=!r||r.kind==='config';if(detailTimer){clearInterval(detailTimer);detailTimer=null}if(r?.kind==='board'){document.querySelector('#detail-view').innerHTML='<p class="empty">Loading board detail…</p>';refreshDetail();detailTimer=setInterval(refreshDetail,5000)}else if(r?.kind==='overhead'){document.querySelector('#detail-view').innerHTML='<p class="empty">Loading overhead…</p>';refreshOverhead();detailTimer=setInterval(refreshOverhead,5000)}else if(!r)renderFleet()}
@@ -1336,9 +1351,26 @@ def make_handler(
                 self._send(200, "application/json; charset=utf-8", body)
                 return
             if route == "/api/overhead":
-                body = _json_bytes(
-                    {**read_overhead_stats(selected_stats_path), "central": label}
-                )
+                try:
+                    resolver = getattr(cache, "overhead_path", None)
+                    overhead_path = (
+                        resolver(central, selected_stats_path)
+                        if callable(resolver)
+                        else selected_stats_path
+                    )
+                    body = _json_bytes(
+                        {**read_overhead_stats(overhead_path), "central": label}
+                    )
+                except RuntimeError as exc:
+                    body = _json_bytes({"error": str(exc), "central": label})
+                    self._send(503, "application/json; charset=utf-8", body)
+                    return
+                except Exception as exc:  # noqa: BLE001 - bounded HTTP error.
+                    body = _json_bytes(
+                        {"error": type(exc).__name__, "central": label}
+                    )
+                    self._send(503, "application/json; charset=utf-8", body)
+                    return
                 self._send(200, "application/json; charset=utf-8", body)
                 return
             if route == "/api/config":
@@ -1504,12 +1536,16 @@ def load_central_configs(args: argparse.Namespace) -> list[Config]:
     configs: list[Config] = []
     seen: set[str] = set()
     for index, entry in enumerate(entries):
-        if not isinstance(entry, dict) or set(entry) != {
-            "label", "url", "token_path", "home_board"
-        }:
+        required = {"label", "url", "token_path", "home_board"}
+        allowed = required | {"stats_path"}
+        if (
+            not isinstance(entry, dict)
+            or not required <= set(entry)
+            or not set(entry) <= allowed
+        ):
             raise SystemExit(
-                f"centrals entry {index} must contain only label, url, "
-                "token_path, and home_board"
+                f"centrals entry {index} must contain label, url, token_path, "
+                "and home_board, with optional stats_path"
             )
         label, url, token_path, home_board = (
             entry.get("label"),
@@ -1527,6 +1563,11 @@ def load_central_configs(args: argparse.Namespace) -> list[Config]:
             raise SystemExit(f"centrals entry {index} has an invalid home_board")
         if not isinstance(token_path, str) or not token_path:
             raise SystemExit(f"centrals entry {index} has an invalid token_path")
+        raw_stats_path = entry.get("stats_path")
+        if raw_stats_path is not None and (
+            not isinstance(raw_stats_path, str) or not raw_stats_path
+        ):
+            raise SystemExit(f"centrals entry {index} has an invalid stats_path")
         token_file = Path(token_path).expanduser()
         if not token_file.is_absolute():
             token_file = source.parent / token_file
@@ -1534,6 +1575,12 @@ def load_central_configs(args: argparse.Namespace) -> list[Config]:
         token = _read_mode_0600(token_file, f"token file for central {label}").strip()
         if not token:
             raise SystemExit(f"token file for central {label} is empty")
+        stats_path = None
+        if raw_stats_path is not None:
+            stats_path = Path(raw_stats_path).expanduser()
+            if not stats_path.is_absolute():
+                stats_path = source.parent / stats_path
+            stats_path = stats_path.resolve()
         configs.append(
             Config(
                 url=url.strip(),
@@ -1543,6 +1590,7 @@ def load_central_configs(args: argparse.Namespace) -> list[Config]:
                 stale_seconds=args.stale_seconds,
                 cache_seconds=args.cache_seconds,
                 label=label,
+                overhead_path=stats_path,
             )
         )
         seen.add(label)
@@ -1559,7 +1607,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--token-file")
     parser.add_argument(
         "--centrals",
-        help="0600 JSON list of {label,url,token_path,home_board} entries",
+        help=(
+            "0600 JSON list of "
+            "{label,url,token_path,home_board[,stats_path]} entries"
+        ),
     )
     parser.add_argument("--home-board", default=DEFAULT_HOME_BOARD)
     parser.add_argument("--agent-name", default="fleet-dashboard-viewer")
