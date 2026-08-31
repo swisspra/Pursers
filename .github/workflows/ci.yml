@@ -42,7 +42,7 @@ jobs:
           PY
           )
           python -m pip install --disable-pip-version-check --no-input \
-            "${build_toolchain[@]}" "pytest>=8"
+            "${build_toolchain[@]}" "pytest>=8" "uv"
           python - <<'PY' >> "$GITHUB_ENV"
           from tools.regenerate_component_lock import SOURCE_DATE_EPOCH
 
