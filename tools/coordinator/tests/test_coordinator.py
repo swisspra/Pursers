@@ -1290,6 +1290,14 @@ def test_deterministic_intake_classifier(text: str, category: str) -> None:
     [
         ("Change production code and update docs", "production-code"),
         ("Implement a new API endpoint with tests", "production-code"),
+        ("Update the parser and its documentation", "production-code"),
+        ("Add a new API endpoint with tests", "production-code"),
+        ("Rewrite the service and add pytest coverage", "production-code"),
+        ("Improve runtime behavior and update the README", "production-code"),
+        ("Build the backend and document it", "production-code"),
+        ("Extend the handler with unit tests", "production-code"),
+        ("Optimize the database and update the guide", "production-code"),
+        ("Replace the runtime module and add coverage", "production-code"),
         ("Fix bug in docs", "bug"),
     ],
 )
@@ -1297,6 +1305,40 @@ def test_intake_classifier_conservative_mixed_intent(
     text: str, category: str
 ) -> None:
     assert coordinator.classify_intake(text)[0] == category
+
+
+def test_mixed_production_intakes_are_draft_only_in_dry_run() -> None:
+    texts = [
+        "Update the parser and its documentation",
+        "Add a new API endpoint with tests",
+        "Rewrite the service and add pytest coverage",
+        "Improve runtime behavior and update the README",
+    ]
+    rows = [_intake_row(f"ask-mixed-{index}", text) for index, text in enumerate(texts)]
+
+    async def unexpected_create(*_args: Any) -> str:
+        raise AssertionError("dry-run must not create")
+
+    findings, updates = asyncio.run(
+        coordinator.process_intakes(
+            [_intake_project()],
+            {
+                "board-a": {
+                    "tickets": [],
+                    "coordinator_intake_state": _intake_state(rows),
+                }
+            },
+            NOW,
+            coordinator.RuntimeState.for_mode("active"),
+            enabled=True,
+            dry_run=True,
+            create_ticket=unexpected_create,
+        )
+    )
+
+    assert {item["kind"] for item in findings} == {"intake-pending"}
+    assert {item["category"] for item in findings} == {"production-code"}
+    assert updates == {}
 
 
 def _intake_state(rows: list[dict[str, str]]) -> dict[str, Any]:

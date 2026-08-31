@@ -248,10 +248,25 @@ def classify_intake(text: str) -> tuple[str, bool]:
         re.search(r"\b(repro(?:duce|duction)?|steps? to reproduce|failing example|traceback)\b", lowered)
         or re.search(r"\bexpected\b.+\b(actual|got|observed)\b", lowered)
     )
+    mutation_verb = (
+        r"change|modify|refactor|remove|delete|implement|update|add|create|build|"
+        r"develop|introduce|extend|rewrite|improve|replace|migrate|optimi[sz]e|"
+        r"enhance|adjust|alter|upgrade|overhaul|redesign"
+    )
+    production_object = (
+        r"production code|source code|api endpoint|endpoint|feature|parser|runtime|"
+        r"service|application|backend|frontend|database|schema|worker|handler|"
+        r"library|package|module|algorithm|business logic|runtime behavior"
+    )
+    supporting_change = r"doc(?:s|umentation)?|readme|guide|runbook|tests?|pytest|coverage"
+    mixed_connector = r"and|plus|with|along with|together with"
     production_change = (
-        r"\b(change|modify|refactor|remove|delete)\b.{0,80}"
-        r"\b(production code|source code|runtime|service|endpoint|parser)\b"
-        r"|\bimplement\b.{0,80}\b(api endpoint|endpoint|feature|parser|runtime|service)\b"
+        rf"\b(?:{mutation_verb})\b.{{0,120}}\b(?:{production_object})\b"
+        rf"|\b(?:{production_object})\b.{{0,120}}\b(?:{mutation_verb})\b"
+        rf"|\b(?:{production_object})\b.{{0,80}}\b(?:{mixed_connector})\b"
+        rf".{{0,80}}\b(?:{supporting_change})\b"
+        rf"|\b(?:{supporting_change})\b.{{0,80}}\b(?:{mixed_connector})\b"
+        rf".{{0,80}}\b(?:{production_object})\b"
         r"|\bproduction code\b.{0,40}\b(change|implementation|modification)\b"
     )
     rules = (
