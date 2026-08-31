@@ -16,11 +16,11 @@ from pathlib import Path
 
 
 SOURCE_DATE_EPOCH = "315532800"
-PRODUCT_VERSION = "5.0.0a11"
+PRODUCT_VERSION = "5.0.0a12"
 EXPECTED_VIEW_SHA256 = (
-    "4f3822dfd13529e84968c2e56f11c1d7c5f0c38c00abe039ccbfd9be21294f33"
+    "7140ee147086d6ca0c47c8182fae5ebcc59eddc98b5ad2bd4924ac4a2d51d11e"
 )
-EXPECTED_VIEW_SIZE = 396500
+EXPECTED_VIEW_SIZE = 404280
 PROJECTS = (
     ("central", "pursers-central", "0.1.0a17"),
     ("client", "pursers-client", "0.1.0a13"),

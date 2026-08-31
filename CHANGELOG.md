@@ -5,6 +5,18 @@ All notable changes to Pursers are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [5.0.0a12] - 2026-08-31
+
+This release includes `pursers-personal==5.0.0a12` and `pursers==5.0.0a12`.
+
+### Added
+
+- MCP App Link Explorer: per-project ticket-memory-file-tag links from
+  `memory_links` with copy actions, served by a new bounded read-only
+  projection.
+- Fleet Dashboard Timeline, Changes, and Ticket Flow views with a keyboard
+  filter — all read-only and bounded.
+
 ## [5.0.0a11] - 2026-08-31
 
 This release includes `pursers-personal==5.0.0a11`, `pursers==5.0.0a11`, and

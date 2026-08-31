@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pursers-personal"
-version = "5.0.0a11"
+version = "5.0.0a12"
 description = "On Board Personal Preview: one owner, multiple local agents, and an MCP Apps dashboard"
 readme = "README.md"
 requires-python = ">=3.11"

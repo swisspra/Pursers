@@ -69,10 +69,10 @@ def test_exact_view_lock_and_embedded_external_attestation_boundary() -> None:
     lock_path = root / "src/pursers_personal/resources/component-lock.json"
     payload = view_path.read_bytes()
     lock = json.loads(lock_path.read_text(encoding="utf-8"))
-    expected = "4f3822dfd13529e84968c2e56f11c1d7c5f0c38c00abe039ccbfd9be21294f33"
-    assert len(payload) == 396_500
+    expected = "7140ee147086d6ca0c47c8182fae5ebcc59eddc98b5ad2bd4924ac4a2d51d11e"
+    assert len(payload) == 404280
     assert hashlib.sha256(payload).hexdigest() == expected
-    assert lock["product_version"] == PRODUCT_VERSION == "5.0.0a11"
+    assert lock["product_version"] == PRODUCT_VERSION == "5.0.0a12"
     assert lock["view"] == {
         "resource": "pursers_personal/resources/dashboard.html",
         "size_bytes": len(payload),
@@ -138,6 +138,7 @@ async def test_discovery_envelope_partitions_app_and_model_surfaces(
             assert visibility("board_snapshot") == MODEL_AND_APP
             assert visibility("fleet_snapshot") == MODEL_AND_APP
             assert visibility("board_event_feed") == APP_ONLY
+            assert visibility("link_snapshot") == APP_ONLY
             assert all(visibility(name) == MODEL_ONLY for name in CHAT_TOOL_NAMES)
             catchup_description = tools["board_catchup"].description or ""
             assert "even when ack is false" in catchup_description
@@ -147,7 +148,7 @@ async def test_discovery_envelope_partitions_app_and_model_surfaces(
                 for tool in tools.values()
             )
 
-            # A hostile View is discoverably authorized for only these two tools.
+            # A hostile View is authorized only for bounded read-only tools.
             app_callable = {
                 name for name in tools if "app" in visibility(name)
             }
@@ -171,7 +172,10 @@ async def test_discovery_envelope_partitions_app_and_model_surfaces(
             assert html.meta["ui"]["csp"] == {}
             assert "On Board Personal Preview" in html.text
             assert fake_config().token not in html.text
-            assert all(name not in html.text for name in CHAT_TOOL_NAMES)
+            assert all(
+                name not in html.text
+                for name in CHAT_TOOL_NAMES - {"memory_links"}
+            )
             assert html.text.count("board_snapshot") == 1
             assert html.text.count("board_event_feed") == 1
             for fleet_marker in (
@@ -187,6 +191,15 @@ async def test_discovery_envelope_partitions_app_and_model_surfaces(
                 "current_ticket_id",
             ):
                 assert fleet_marker in html.text
+            for link_marker in (
+                "link_snapshot",
+                "tab-links",
+                "links-groups",
+                "memory_links",
+                "Authoritative",
+                "Copy path",
+            ):
+                assert link_marker in html.text
             assert verified == [None]
 
             model_calls: list[tuple[str, tuple[Any, ...], dict[str, Any]]] = []
@@ -205,6 +218,23 @@ async def test_discovery_envelope_partitions_app_and_model_surfaces(
             assert model_calls == [
                 ("board_catchup", (), {"cursor": 11, "limit": 25, "ack": False})
             ]
+
+            app_reads: list[str] = []
+
+            async def link_projection() -> dict[str, Any]:
+                app_reads.append("link_snapshot")
+                return {
+                    "schema_version": 1,
+                    "source_tool": "memory_links",
+                    "relationship_authority": "authoritative",
+                    "nodes": [],
+                    "edges": [],
+                }
+
+            state.links = link_projection  # type: ignore[method-assign]
+            result = await client.call_tool("link_snapshot", {})
+            assert result.is_error is False
+            assert app_reads == ["link_snapshot"]
     finally:
         await state.stop()
 
@@ -747,6 +777,93 @@ async def test_app_reads_use_only_the_non_joining_pure_reader() -> None:
 
 
 @pytest.mark.anyio
+async def test_link_snapshot_is_bounded_authoritative_and_non_joining() -> None:
+    calls: list[Any] = []
+
+    class ModelClientMustNotStart:
+        def __init__(self, *_args: Any, **_kwargs: Any):
+            raise AssertionError("Link read started the joined model client")
+
+    class PureReader:
+        def __init__(self, config: DashboardConfig):
+            assert config.board_id == "board-personal-test"
+
+        async def __aenter__(self) -> "PureReader":
+            calls.append("enter")
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            calls.append("exit")
+
+        async def memory_links(self, **kwargs: Any) -> dict[str, Any]:
+            calls.append(kwargs)
+            long_value = "x" * (apps_server.LINK_VALUE_MAX_LENGTH + 50)
+            return {
+                "nodes": [
+                    {
+                        "memory_id": "MEM-000001",
+                        "title": "Explicit link",
+                        "memory_type": "decision",
+                        "created_at": "2026-08-31T00:00:00Z",
+                        "pinned": True,
+                        "content": "must not reach the App",
+                    }
+                ],
+                "edges": [
+                    {"kind": "ticket", "from": "MEM-000001", "to": "TK-1"},
+                    {"kind": "file", "from": "MEM-000001", "to": long_value},
+                    {"kind": "tag", "from": "MEM-000001", "to": "release"},
+                    {"kind": "unknown", "from": "MEM-000001", "to": "drop"},
+                ],
+                "node_count": 1,
+                "edge_count": 4,
+            }
+
+    state = LiveDashboard(
+        fake_config(),
+        client_class=ModelClientMustNotStart,
+        client_error_class=FakeClientError,
+        read_client_factory=PureReader,
+    )
+
+    async def healthy_probe() -> None:
+        calls.append("probe")
+
+    state._probe_central = healthy_probe  # type: ignore[method-assign]
+    payload = await state.links()
+
+    assert calls == [
+        "probe",
+        "enter",
+        {"depth": 1, "limit": apps_server.LINK_MEMORY_LIMIT},
+        "exit",
+    ]
+    assert payload["source_tool"] == "memory_links"
+    assert payload["relationship_authority"] == "authoritative"
+    assert payload["nodes"] == [
+        {
+            "memory_id": "MEM-000001",
+            "title": "Explicit link",
+            "memory_type": "decision",
+            "created_at": "2026-08-31T00:00:00Z",
+            "pinned": True,
+        }
+    ]
+    assert [edge["kind"] for edge in payload["edges"]] == [
+        "ticket",
+        "file",
+        "tag",
+    ]
+    assert all(edge["authority"] == "authoritative" for edge in payload["edges"])
+    assert len(payload["edges"][1]["to"]) == apps_server.LINK_VALUE_MAX_LENGTH
+    assert payload["truncated"] is True
+    assert "content" not in json.dumps(payload)
+    assert len(json.dumps(payload, ensure_ascii=False).encode("utf-8")) <= (
+        apps_server.LINK_RESPONSE_MAX_BYTES
+    )
+
+
+@pytest.mark.anyio
 async def test_fleet_snapshot_groups_cross_board_seats_and_classifies_pool() -> None:
     registry = json.dumps(
         {
@@ -1226,6 +1343,15 @@ async def test_raw_reader_rejects_non_pure_tools_before_transport() -> None:
             },
         )
     ]
+    await reader.memory_links(depth=1, limit=17)
+    assert transport_calls[-1] == (
+        "memory_links",
+        {
+            "board_id": "board-personal-test",
+            "depth": 1,
+            "limit": 17,
+        },
+    )
     transport_calls.clear()
     with pytest.raises(RuntimeError, match="rejected a non-pure tool"):
         await reader._call("board_catchup", {"ack": False})
