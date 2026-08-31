@@ -31,15 +31,49 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Install pinned wheel-build toolchain
+        run: |
+          set -euo pipefail
+          mapfile -t build_toolchain < <(python - <<'PY'
+          from tools.regenerate_component_lock import BUILD_TOOLCHAIN
+
+          for name, version in BUILD_TOOLCHAIN:
+              print(f"{name}=={version}")
+          PY
+          )
+          python -m pip install --disable-pip-version-check --no-input \
+            "${build_toolchain[@]}"
+          python - <<'PY' >> "$GITHUB_ENV"
+          from tools.regenerate_component_lock import SOURCE_DATE_EPOCH
+
+          print(f"SOURCE_DATE_EPOCH={SOURCE_DATE_EPOCH}")
+          PY
+          python - <<'PY'
+          import importlib.metadata as metadata
+          from tools.regenerate_component_lock import BUILD_TOOLCHAIN
+
+          expected = dict(BUILD_TOOLCHAIN)
+          actual = {name: metadata.version(name) for name in expected}
+          if actual != expected:
+              raise SystemExit(f"build toolchain mismatch: {actual!r} != {expected!r}")
+          print(f"build_toolchain={actual}")
+          PY
+
       - name: Build the five main-environment wheels
         run: |
-          python -m pip install --upgrade pip build
-          python -m build --wheel --outdir dist packages/pursers
-          python -m build --wheel --outdir dist packages/central
-          python -m build --wheel --outdir dist packages/client
-          python -m build --wheel --outdir dist packages/personal
-          python -m build --wheel --outdir dist packages/import
+          set -euo pipefail
+          mkdir dist
+          python -m build --wheel --no-isolation --outdir dist packages/pursers
+          python -m build --wheel --no-isolation --outdir dist packages/central
+          python -m build --wheel --no-isolation --outdir dist packages/client
+          python -m build --wheel --no-isolation --outdir dist packages/personal
+          python -m build --wheel --no-isolation --outdir dist packages/import
           ls -l dist
+
+      - name: Verify component lock and wheel generators
+        run: |
+          set -euo pipefail
+          python tools/verify_publish_wheels.py --wheel-dir dist
 
       - name: Publish to PyPI (Trusted Publishing)
         uses: pypa/gh-action-pypi-publish@release/v1
@@ -59,11 +93,46 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Install pinned wheel-build toolchain
+        run: |
+          set -euo pipefail
+          mapfile -t build_toolchain < <(python - <<'PY'
+          from tools.regenerate_component_lock import BUILD_TOOLCHAIN
+
+          for name, version in BUILD_TOOLCHAIN:
+              print(f"{name}=={version}")
+          PY
+          )
+          python -m pip install --disable-pip-version-check --no-input \
+            "${build_toolchain[@]}"
+          python - <<'PY' >> "$GITHUB_ENV"
+          from tools.regenerate_component_lock import SOURCE_DATE_EPOCH
+
+          print(f"SOURCE_DATE_EPOCH={SOURCE_DATE_EPOCH}")
+          PY
+          python - <<'PY'
+          import importlib.metadata as metadata
+          from tools.regenerate_component_lock import BUILD_TOOLCHAIN
+
+          expected = dict(BUILD_TOOLCHAIN)
+          actual = {name: metadata.version(name) for name in expected}
+          if actual != expected:
+              raise SystemExit(f"build toolchain mismatch: {actual!r} != {expected!r}")
+          print(f"build_toolchain={actual}")
+          PY
+
       - name: Build pursers-wait-bridge wheel
         run: |
-          python -m pip install --upgrade pip build
-          python -m build --wheel --outdir dist tools/wait-bridge
+          set -euo pipefail
+          mkdir dist
+          python -m build --wheel --no-isolation --outdir dist tools/wait-bridge
           ls -l dist
+
+      - name: Verify wheel generator
+        run: |
+          set -euo pipefail
+          python tools/verify_publish_wheels.py \
+            --wheel-dir dist --generators-only
 
       - name: Publish to PyPI (Trusted Publishing)
         uses: pypa/gh-action-pypi-publish@release/v1
