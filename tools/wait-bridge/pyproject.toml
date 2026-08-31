@@ -9,11 +9,11 @@ description = "Blocking wait-for-work MCP bridge for Pursers"
 requires-python = ">=3.11"
 license = "Apache-2.0"
 dependencies = [
-  "pursers-client==0.1.0a10",
+  "pursers-client==0.1.0a12",
 ]
 
 [project.scripts]
 pursers-wait-bridge = "pursers_wait_server:main"
 
 [tool.setuptools]
-py-modules = ["pursers_wait_server", "agent_naming", "backlog"]
+py-modules = ["pursers_wait_server", "agent_naming", "backlog", "registry_admin", "seat_admin"]
