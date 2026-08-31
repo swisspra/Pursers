@@ -11,6 +11,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 from collections import Counter
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
@@ -2710,6 +2711,7 @@ def capability_scopes(token: str) -> frozenset[str]:
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    effective_argv = list(sys.argv[1:] if argv is None else argv)
     parser = argparse.ArgumentParser(description="Run the fleet coordinator")
     parser.add_argument("--url", default=os.environ.get("ONBOARD_CENTRAL_URL", DEFAULT_URL))
     parser.add_argument("--token-path", default=os.environ.get("PURSERS_COORDINATOR_TOKEN_PATH") or os.environ.get("ONBOARD_TOKEN_FILE"))
@@ -2756,8 +2758,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--integration-watch-since",
         help="Ignore closed-ticket integration checks before this ISO-8601 timestamp",
     )
-    args = parser.parse_args(argv)
-    raw_argv = list(argv or ())
+    args = parser.parse_args(effective_argv)
+    raw_argv = effective_argv
     seen_flags = {item.split("=", 1)[0] for item in raw_argv if item.startswith("--")}
     flag_names = {
         "--stale-seconds": "stale_seconds",

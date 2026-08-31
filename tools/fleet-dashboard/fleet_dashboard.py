@@ -69,6 +69,10 @@ CONFIG_THRESHOLD_FIELDS = (
 )
 
 
+class ConfigConflictError(RuntimeError):
+    """The dashboard form was based on missing or superseded state."""
+
+
 class FleetClient(Protocol):
     async def board_state_get(self, key: str | None = None) -> dict[str, Any]: ...
 
@@ -1052,6 +1056,27 @@ class FleetFetcher:
         clean["updated_by"] = self.config.agent_name
         encoded = json.dumps(clean, sort_keys=True, separators=(",", ":"))
         async with self._client(self.config.home_board) as client:
+            try:
+                current = await client.board_state_get(key=CONFIG_STATE_KEY)
+            except BoardClientError as exc:
+                if "state key not found" not in str(exc):
+                    raise
+                current_text = None
+            else:
+                _current_document, current_text = _state_value(current)
+                if current_text is None:
+                    raise ConfigConflictError("coordinator_config state is malformed")
+            current_digest = (
+                hashlib.sha256(current_text.encode("utf-8")).hexdigest()
+                if current_text is not None else None
+            )
+            if current_digest is None:
+                if expected_sha256 is not None:
+                    raise ConfigConflictError("coordinator_config does not exist")
+            elif expected_sha256 is None:
+                raise ConfigConflictError("expected_sha256 is required for an existing config")
+            elif expected_sha256 != current_digest:
+                raise ConfigConflictError("coordinator_config changed; reload before saving")
             arguments = {
                 "agent_name": self.config.agent_name,
                 "key": CONFIG_STATE_KEY,
@@ -1278,6 +1303,9 @@ def make_handler(
                 body = _json_bytes(cache.save_config(request["config"], request["expected_sha256"]))
             except (ValueError, TypeError, json.JSONDecodeError) as exc:
                 self._send(400, "application/json; charset=utf-8", _json_bytes({"error": str(exc)}))
+                return
+            except ConfigConflictError as exc:
+                self._send(409, "application/json; charset=utf-8", _json_bytes({"error": str(exc)}))
                 return
             except Exception as exc:  # noqa: BLE001 - stale CAS is a safe conflict.
                 self._send(409, "application/json; charset=utf-8", _json_bytes({"error": type(exc).__name__}))

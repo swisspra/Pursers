@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import importlib.util
 import json
 import subprocess
@@ -1119,11 +1120,19 @@ def test_config_save_writes_only_coordinator_config_with_cas() -> None:
     calls: list[tuple[str, dict]] = []
 
     class Client:
+        value = json.dumps(
+            valid_coordinator_config(), sort_keys=True, separators=(",", ":")
+        )
+
         async def __aenter__(self) -> Self:
             return self
 
         async def __aexit__(self, *_args: object) -> None:
             return None
+
+        async def board_state_get(self, *, key: str) -> dict:
+            assert key == "coordinator_config"
+            return {"state": {"value": self.value}}
 
         async def _call(self, name: str, arguments: dict) -> dict:
             calls.append((name, arguments))
@@ -1134,7 +1143,7 @@ def test_config_save_writes_only_coordinator_config_with_cas() -> None:
         agent_name="dashboard-seat", stale_seconds=300, cache_seconds=5,
     )
     fetcher = dashboard.FleetFetcher(config, client_factory=lambda *_a, **_k: Client())
-    digest = "a" * 64
+    digest = hashlib.sha256(Client.value.encode()).hexdigest()
 
     result = asyncio.run(fetcher.save_config(valid_coordinator_config(), digest))
 
@@ -1143,6 +1152,72 @@ def test_config_save_writes_only_coordinator_config_with_cas() -> None:
     assert calls[0][1]["key"] == "coordinator_config"
     assert calls[0][1]["expected_sha256"] == digest
     assert json.loads(calls[0][1]["value"])["updated_by"] == "dashboard-seat"
+
+
+def test_config_endpoint_enforces_create_then_cas() -> None:
+    class Client:
+        value: str | None = None
+
+        async def __aenter__(self) -> Self:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def board_state_get(self, *, key: str) -> dict:
+            assert key == "coordinator_config"
+            if self.value is None:
+                raise dashboard.BoardClientError("state key not found")
+            return {"state": {"value": self.value}}
+
+        async def _call(self, name: str, arguments: dict) -> dict:
+            assert name == "board_state_update"
+            if self.value is not None:
+                digest = hashlib.sha256(self.value.encode()).hexdigest()
+                assert arguments["expected_sha256"] == digest
+            self.value = arguments["value"]
+            return {"ok": True}
+
+    client = Client()
+    config = dashboard.Config(
+        url="https://127.0.0.1:8766/mcp", token="token", home_board="pursers",
+        agent_name="dashboard-seat", stale_seconds=300, cache_seconds=5,
+    )
+    fetcher = dashboard.FleetFetcher(config, client_factory=lambda *_a, **_k: client)
+    cache = dashboard.DashboardCache(fetcher, 5)
+    server = dashboard.ThreadingHTTPServer(
+        ("127.0.0.1", 0), dashboard.make_handler(cache)
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    def post(expected: str | None, *, include_expected: bool = True) -> int:
+        body = {"config": valid_coordinator_config()}
+        if include_expected:
+            body["expected_sha256"] = expected
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{server.server_port}/api/config",
+            data=json.dumps(body).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request) as response:
+                return response.status
+        except urllib.error.HTTPError as exc:
+            return exc.code
+
+    try:
+        assert post(None) == 200  # First create may use LWW.
+        assert post(None) == 409
+        assert post("0" * 64) == 409
+        assert post(None, include_expected=False) == 400
+        matching = hashlib.sha256(client.value.encode()).hexdigest()
+        assert post(matching) == 200
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
 
 
 def test_config_hash_page_renders_all_knobs_and_sources() -> None:

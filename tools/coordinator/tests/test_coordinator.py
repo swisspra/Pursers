@@ -2139,3 +2139,49 @@ def test_missing_config_uses_builtins_without_invalid_finding(tmp_path: Path) ->
     assert resolved.thresholds == coordinator.Thresholds()
     assert set(resolved.sources.values()) == {"default"}
     assert coordinator.config_invalid_finding("pursers", resolved) is None
+
+
+def test_parse_args_none_tracks_explicit_process_argv(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    token = tmp_path / "token"
+    token.write_text("opaque", encoding="utf-8")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "coordinator.py", "--token-path", str(token),
+            "--stale-seconds", "999", "--enable-intake",
+            "--intake-rate-per-hour", "9",
+        ],
+    )
+    args = coordinator.parse_args(None)
+    document = {
+        "schema_version": 1,
+        "thresholds": {
+            "stale_seconds": 1,
+            "lease_warning_ratio": 0.8,
+            "grace_seconds": 600,
+            "starved_seconds": 1800,
+            "critical_starved_seconds": 600,
+            "review_backlog_seconds": 1800,
+            "abandoner_drops": 3,
+            "abandoner_window_days": 7,
+        },
+        "integration_watch_since": None,
+        "intake": {
+            "auto_categories": list(coordinator.DEFAULT_AUTO_CATEGORIES),
+            "always_ask_categories": list(coordinator.DEFAULT_ALWAYS_ASK_CATEGORIES),
+            "work_domain_always_ask": True,
+            "rate_per_hour": 99,
+        },
+    }
+
+    resolved = coordinator.resolve_coordinator_config(_config_state(document), args)
+
+    assert resolved.thresholds.stale_seconds == 999
+    assert resolved.intake_enabled is True
+    assert resolved.rate_per_hour == 9
+    assert resolved.sources["thresholds.stale_seconds"] == "flag"
+    assert resolved.sources["intake.enabled"] == "flag"
+    assert resolved.sources["intake.rate_per_hour"] == "flag"
