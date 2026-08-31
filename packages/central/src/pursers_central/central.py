@@ -2968,7 +2968,14 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         unassigned: bool = False,
         expected_generation: str | None = None,
     ) -> dict[str, Any]:
-        """Create a rich ticket; omitted IDs are generated inside the board transaction."""
+        """Create a ticket; omitted IDs are generated inside the board transaction.
+
+        If ``ticket_id`` is omitted, ``description``, ``target_url``, ``scope``,
+        and ``required_fields`` are all required. Supplying ``ticket_id``
+        currently enforces none of those fields. The first path segment of
+        ``target_url`` is the project slug used to route work to
+        project-filtered workers.
+        """
         board_id = require_id("board_id", board_id)
         agent_name = require_id("agent_name", agent_name)
         explicit_id = ticket_id is not None
