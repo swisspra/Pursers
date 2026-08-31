@@ -5,6 +5,38 @@ All notable changes to Pursers are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [5.0.0a10] - 2026-08-31
+
+This release includes `pursers-personal==5.0.0a10`, `pursers==5.0.0a10`,
+`pursers-central==0.1.0a16`, and `pursers-wait-bridge==0.1.0a3`.
+
+### Added
+
+- Coordinator phase 1 (`tools/coordinator/`): read-only findings engine —
+  stale/starved/abandoner detection with the approved thresholds, an
+  escalation ladder that records the would-be force-assignee, integration
+  watch (`integration_ref` ancestry + `no-merge-needed`), a privacy gate fed
+  from a private terms file, findings in board state, and digest memories.
+  Plus a dispatch simulation harness replaying real history.
+- `tools/board_move/`: offline board export/import between central instances
+  with principal mapping, scrub gate, and dry-run-by-default — the migration
+  path for splitting trust domains. Central gained a shared instance lock.
+- `tools/worker-runtime/pursers_worker.py`: headless API-driven worker for any
+  OpenAI-compatible endpoint — config-file driven, work-dir-jailed tools, lease
+  renewal, same seat/review governance as every other worker.
+- `pursers-client` 0.1.0a13: version bump for artifact parity — the a12 wheel
+  on PyPI predates the pinned-toolchain publish fix and can never match the
+  component lock; a13 republishes identical source under the pinned toolchain.
+- Wait-bridge per-seat overhead metering (bytes and estimated tokens per
+  agent per day) surfaced on the Fleet Dashboard at `/api/overhead`, and a
+  coordinator findings panel on board detail views.
+
+### Fixed
+
+- The coordinator's first live run surfaced a closed-but-unmerged commit from
+  an earlier ticket; its content was already subsumed — the merge now records
+  ancestry so the finding clears.
+
 ## [5.0.0a9] - 2026-08-31
 
 This release includes `pursers-personal==5.0.0a9`, `pursers==5.0.0a9`,

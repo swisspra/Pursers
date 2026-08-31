@@ -4,15 +4,15 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pursers"
-version = "5.0.0a9"
+version = "5.0.0a10"
 description = "Dependency-only installer for the Pursers local agent work board"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"
 dependencies = [
-  "pursers-central==0.1.0a15",
-  "pursers-client==0.1.0a12",
-  "pursers-personal==5.0.0a9",
+  "pursers-central==0.1.0a16",
+  "pursers-client==0.1.0a13",
+  "pursers-personal==5.0.0a10",
   "pursers-personal-import==5.0.0a2",
 ]
 classifiers = [
