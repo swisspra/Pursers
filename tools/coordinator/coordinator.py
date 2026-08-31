@@ -2130,6 +2130,28 @@ def _recent_intake_creates(
     return count
 
 
+def _matches_intake_replay(
+    existing: Mapping[str, Any], draft: IntakeDraft
+) -> bool:
+    expected = {
+        "ticket_id": draft.ticket_id,
+        "title": draft.title,
+        "description": draft.description,
+        "scope": draft.scope,
+        "target_url": draft.target_url,
+        "required_fields": list(draft.required_fields),
+        "tags": ["coordinator-intake", f"op:{draft.op_key}"],
+        "origin": "coordinator-intake",
+        "coordinator_op_key": draft.op_key,
+        "priority": "medium",
+        "server_generated_id": False,
+        "assigned_to": None,
+        "assigned_to_agent_id": None,
+        "assigned_to_kind": None,
+    }
+    return all(key in existing and existing[key] == value for key, value in expected.items())
+
+
 async def create_intake_ticket(
     url: str,
     token: str,
@@ -2161,10 +2183,8 @@ async def create_intake_ticket(
             if "ticket already exists" not in str(exc):
                 raise
             existing = (await client.ticket_get(draft.ticket_id)).get("ticket", {})
-            if (
-                existing.get("title") != draft.title
-                or existing.get("target_url") != draft.target_url
-                or f"op:{draft.op_key}" not in existing.get("tags", [])
+            if not isinstance(existing, Mapping) or not _matches_intake_replay(
+                existing, draft
             ):
                 raise RuntimeError("intake idempotency collision") from exc
             return draft.ticket_id

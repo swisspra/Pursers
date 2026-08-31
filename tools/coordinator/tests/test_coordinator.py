@@ -9,7 +9,7 @@ import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 import pytest
 
@@ -1450,6 +1450,200 @@ def _intake_row(ask_id: str, text: str) -> dict[str, str]:
         "requested_by": "operator",
         "board_id": "board-a",
     }
+
+
+def _matching_replay_ticket(draft: coordinator.IntakeDraft) -> dict[str, Any]:
+    return {
+        "ticket_id": draft.ticket_id,
+        "title": draft.title,
+        "description": draft.description,
+        "scope": draft.scope,
+        "target_url": draft.target_url,
+        "required_fields": list(draft.required_fields),
+        "tags": ["coordinator-intake", f"op:{draft.op_key}"],
+        "origin": "coordinator-intake",
+        "coordinator_op_key": draft.op_key,
+        "priority": "medium",
+        "server_generated_id": False,
+        "assigned_to": None,
+        "assigned_to_agent_id": None,
+        "assigned_to_kind": None,
+    }
+
+
+def _install_replay_client(
+    monkeypatch: pytest.MonkeyPatch, existing: Mapping[str, Any]
+) -> None:
+    class ReplayError(Exception):
+        pass
+
+    class ReplayClient:
+        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+            pass
+
+        async def __aenter__(self) -> "ReplayClient":
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+        async def _call(self, *_args: Any, **_kwargs: Any) -> None:
+            raise ReplayError("ticket already exists")
+
+        async def ticket_get(self, _ticket_id: str) -> dict[str, Any]:
+            return {"ticket": dict(existing)}
+
+    fake_module = type(
+        "FakePursersClient",
+        (),
+        {"BoardClient": ReplayClient, "BoardClientError": ReplayError},
+    )
+    monkeypatch.setitem(sys.modules, "pursers_client", fake_module)
+
+
+def test_existing_intake_ticket_exact_replay_is_accepted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    draft = coordinator.deterministic_intake_draft(
+        coordinator.IntakeAsk(
+            "ask-replay", "Update the README guide", "operator", "board-a"
+        ),
+        _intake_project(),
+    )
+    _install_replay_client(monkeypatch, _matching_replay_ticket(draft))
+
+    ticket_id = asyncio.run(
+        coordinator.create_intake_ticket(
+            "https://board.invalid/mcp",
+            "opaque",
+            "coordinator-test",
+            "board-a",
+            draft,
+        )
+    )
+
+    assert ticket_id == draft.ticket_id
+
+
+@pytest.mark.parametrize(
+    ("field", "bad_value"),
+    [
+        ("ticket_id", "TK-collision"),
+        ("title", "Wrong title"),
+        ("description", "Wrong description"),
+        ("scope", "read-only"),
+        ("target_url", "wrong/target"),
+        ("required_fields", ["wrong"]),
+        ("tags", ["coordinator-intake"]),
+        ("origin", "ordinary-ticket"),
+        ("coordinator_op_key", "coord-wrong"),
+        ("priority", "critical"),
+        ("server_generated_id", True),
+        ("assigned_to", "attacker"),
+        ("assigned_to_agent_id", "AI-attacker"),
+        ("assigned_to_kind", "agent_name"),
+    ],
+)
+def test_existing_intake_ticket_mismatch_is_collision(
+    monkeypatch: pytest.MonkeyPatch, field: str, bad_value: Any
+) -> None:
+    draft = coordinator.deterministic_intake_draft(
+        coordinator.IntakeAsk(
+            "ask-collision", "Update the README guide", "operator", "board-a"
+        ),
+        _intake_project(),
+    )
+    existing = _matching_replay_ticket(draft)
+    existing[field] = bad_value
+    _install_replay_client(monkeypatch, existing)
+
+    with pytest.raises(RuntimeError, match="intake idempotency collision"):
+        asyncio.run(
+            coordinator.create_intake_ticket(
+                "https://board.invalid/mcp",
+                "opaque",
+                "coordinator-test",
+                "board-a",
+                draft,
+            )
+        )
+
+
+@pytest.mark.parametrize("field", list(_matching_replay_ticket(
+    coordinator.deterministic_intake_draft(
+        coordinator.IntakeAsk("ask-fields", "Update the README guide", "operator", "board-a"),
+        _intake_project(),
+    )
+)))
+def test_existing_intake_ticket_missing_field_is_collision(
+    monkeypatch: pytest.MonkeyPatch, field: str
+) -> None:
+    draft = coordinator.deterministic_intake_draft(
+        coordinator.IntakeAsk(
+            "ask-missing", "Update the README guide", "operator", "board-a"
+        ),
+        _intake_project(),
+    )
+    existing = _matching_replay_ticket(draft)
+    existing.pop(field)
+    _install_replay_client(monkeypatch, existing)
+
+    with pytest.raises(RuntimeError, match="intake idempotency collision"):
+        asyncio.run(
+            coordinator.create_intake_ticket(
+                "https://board.invalid/mcp",
+                "opaque",
+                "coordinator-test",
+                "board-a",
+                draft,
+            )
+        )
+
+
+def test_intake_collision_failure_keeps_queue_and_never_reports_created(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    row = _intake_row("ask-collision", "Update the README guide")
+    draft = coordinator.deterministic_intake_draft(
+        coordinator.IntakeAsk(
+            row["id"], row["text"], row["requested_by"], row["board_id"]
+        ),
+        _intake_project(),
+    )
+    existing = _matching_replay_ticket(draft)
+    existing["origin"] = "ordinary-ticket"
+    existing["assigned_to"] = "attacker"
+    _install_replay_client(monkeypatch, existing)
+
+    async def replay_create(board_id: str, candidate: coordinator.IntakeDraft) -> str:
+        return await coordinator.create_intake_ticket(
+            "https://board.invalid/mcp",
+            "opaque",
+            "coordinator-test",
+            board_id,
+            candidate,
+        )
+
+    findings, updates = asyncio.run(
+        coordinator.process_intakes(
+            [_intake_project()],
+            {
+                "board-a": {
+                    "tickets": [],
+                    "coordinator_intake_state": _intake_state([row]),
+                }
+            },
+            NOW,
+            coordinator.RuntimeState.for_mode("active"),
+            enabled=True,
+            dry_run=False,
+            create_ticket=replay_create,
+        )
+    )
+
+    assert [item["kind"] for item in findings] == ["intake-create-failed"]
+    assert findings[0]["error_class"] == "RuntimeError"
+    assert updates == {}
 
 
 def test_intake_retry_uses_one_deterministic_ticket_identity() -> None:
