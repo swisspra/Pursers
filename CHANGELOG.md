@@ -5,6 +5,19 @@ All notable changes to Pursers are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [5.0.0a8] - 2026-08-31
+
+This release includes `pursers-personal==5.0.0a8`, `pursers==5.0.0a8`,
+`pursers-central==0.1.0a14`, and `pursers-client==0.1.0a12`.
+
+### Changed
+
+- Upgraded the MCP SDK across central, client, and personal from 2.0.0 to the
+  current stable 2.1.1. Central converts intentional validation failures to
+  `ToolError` at the tool boundary so safe client-visible validation details
+  survive the 2.1.0 exception hardening; all suites pass with
+  `MCPDeprecationWarning` promoted to an error (`51abb57`).
+
 ## [5.0.0a7] - 2026-08-31
 
 This release includes `pursers-personal==5.0.0a7`, `pursers==5.0.0a7`,

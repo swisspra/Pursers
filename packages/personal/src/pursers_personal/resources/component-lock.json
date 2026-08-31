@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "product_version": "5.0.0a7",
+  "product_version": "5.0.0a8",
   "build_toolchain": {
     "build": "1.3.0",
     "setuptools": "80.9.0",
@@ -10,15 +10,15 @@
   },
   "components": {
     "pursers-central": {
-      "version": "0.1.0a13",
-      "wheel_sha256": "7f613fa9e2a7e478d562b92c03484278a53bd5d54e7c8dcdd8bfcac2e9b525b6",
+      "version": "0.1.0a14",
+      "wheel_sha256": "fac345a4e502b057602289fba801da68e4194a2692abb7636f9eedd1c6bb8ef1",
       "members": {
-        "pursers_central-0.1.0a13.dist-info/METADATA": "aa3699cfb8a1fdc5a7b1d0add9bb48a70c2e5f413118555c103531f27be27e19",
-        "pursers_central-0.1.0a13.dist-info/WHEEL": "ff309ddcdd65ebd02bc724dbf2bcc4a0ff53a5b61792a44548d383e4ebb19d3b",
-        "pursers_central-0.1.0a13.dist-info/licenses/LICENSE": "c48efd75374a365d9d9f3e24c5b4148d53ce8621dd55bf470c9b4c513d03d84d",
-        "pursers_central-0.1.0a13.dist-info/top_level.txt": "36b183999f65ce4c6f41b59602a397b8c3c0b3db4fd216bdf5b9c8c45d9cc55e",
+        "pursers_central-0.1.0a14.dist-info/METADATA": "fe141aa4eba7195b082e1ddf85a042e774efd3069f041ec3b10bc606959a570b",
+        "pursers_central-0.1.0a14.dist-info/WHEEL": "ff309ddcdd65ebd02bc724dbf2bcc4a0ff53a5b61792a44548d383e4ebb19d3b",
+        "pursers_central-0.1.0a14.dist-info/licenses/LICENSE": "c48efd75374a365d9d9f3e24c5b4148d53ce8621dd55bf470c9b4c513d03d84d",
+        "pursers_central-0.1.0a14.dist-info/top_level.txt": "36b183999f65ce4c6f41b59602a397b8c3c0b3db4fd216bdf5b9c8c45d9cc55e",
         "pursers_central/__init__.py": "5a383eb8bb37e6f3a14557297c56c692965d0e874623bdcbbd257ceb21a8f612",
-        "pursers_central/central.py": "3075c3079b70cfb51e11d8dac53281cfa108af67b353b0bd3a70f33620f80752",
+        "pursers_central/central.py": "eb0dd62c13d0e14f51f9f3564fea0c83ed8dc43589cbaad115ca5ca8b0c3214e",
         "pursers_central/cursor.py": "5f57c3d58bdb88ca9f01497e518de96c9651063047b0928689a0fda58cceeb2b",
         "pursers_central/journal.py": "bb2f894fe7799d6173f4c834f0a2fd6a5443ca541ce585db342783725cae0bfb",
         "pursers_central/jwt_verifier.py": "e4ad036ae4db25da6f85a82268b827686259507f266e3d53c6a3c50a3964ca25",
@@ -30,13 +30,13 @@
       }
     },
     "pursers-client": {
-      "version": "0.1.0a11",
-      "wheel_sha256": "f6b1d1197b257d3dbbd960f66d113cc5070c667e034007bb54affd65de8c2a32",
+      "version": "0.1.0a12",
+      "wheel_sha256": "ec41c18b7751867662808f87927ef95dd0a857759b49aca30107df9b07fe7c36",
       "members": {
-        "pursers_client-0.1.0a11.dist-info/METADATA": "83c89b4006ee3a1003a1661eb4973c1091840dbe52eb8a06aa941dc0299eeb41",
-        "pursers_client-0.1.0a11.dist-info/WHEEL": "ff309ddcdd65ebd02bc724dbf2bcc4a0ff53a5b61792a44548d383e4ebb19d3b",
-        "pursers_client-0.1.0a11.dist-info/licenses/LICENSE": "c48efd75374a365d9d9f3e24c5b4148d53ce8621dd55bf470c9b4c513d03d84d",
-        "pursers_client-0.1.0a11.dist-info/top_level.txt": "f1c543c98535c0f218812ac0a8b29ce27e28b6430eda69116c789ecc853cf7b4",
+        "pursers_client-0.1.0a12.dist-info/METADATA": "ada739e503e795fd47668412b30a3c4d5008881897b8ed0c42264a6190fc5831",
+        "pursers_client-0.1.0a12.dist-info/WHEEL": "ff309ddcdd65ebd02bc724dbf2bcc4a0ff53a5b61792a44548d383e4ebb19d3b",
+        "pursers_client-0.1.0a12.dist-info/licenses/LICENSE": "c48efd75374a365d9d9f3e24c5b4148d53ce8621dd55bf470c9b4c513d03d84d",
+        "pursers_client-0.1.0a12.dist-info/top_level.txt": "f1c543c98535c0f218812ac0a8b29ce27e28b6430eda69116c789ecc853cf7b4",
         "pursers_client/__init__.py": "1ee773eb9253f30d13fc18f61743f057e59571c24c6f6893c6afdaf9f3f994f8",
         "pursers_client/client.py": "3b2fc21229fa0b4f34919042cb76c10ed9d8f967fc47dbac474aa7b2ed38136d",
         "pursers_client/personal_profile.py": "07b9e9c5e3e994932869bf8668e8208d58a6c84e306a72553f7a79a8aa7507e8"
@@ -46,6 +46,6 @@
   "view": {
     "resource": "pursers_personal/resources/dashboard.html",
     "size_bytes": 396499,
-    "sha256": "46e4eb01e18fa7e285c7ed4dc7600c81086d30fb83e168874d61abaafdc6c243"
+    "sha256": "0680cab7175e3ca2e51ab3f8b86d9b65418b58b7b856961ef4eab686c6244b17"
   }
 }

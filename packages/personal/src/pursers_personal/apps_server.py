@@ -29,8 +29,8 @@ from mcp.server.mcpserver import MCPServer
 
 from .artifacts import import_verified_component, verify_component_artifacts
 
-PINNED_CLIENT_VERSION = "0.1.0a11"
-PRODUCT_VERSION = "5.0.0a7"
+PINNED_CLIENT_VERSION = "0.1.0a12"
+PRODUCT_VERSION = "5.0.0a8"
 MAX_EVENTS = 200
 MAX_TICKETS = 500
 AGENT_STALE_AFTER_MINUTES = 60
