@@ -1,0 +1,134 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing v* tag to release
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      PYTHONHASHSEED: "0"
+    steps:
+      - name: Resolve release tag
+        id: release
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$TAG" =~ ^v[0-9A-Za-z][0-9A-Za-z.+-]*$ ]]; then
+            echo "release tag must match v* and contain only version characters: $TAG" >&2
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.release.outputs.tag }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install pinned wheel-build toolchain
+        run: |
+          set -euo pipefail
+          mapfile -t build_toolchain < <(python - <<'PY'
+          from tools.regenerate_component_lock import BUILD_TOOLCHAIN
+
+          for name, version in BUILD_TOOLCHAIN:
+              print(f"{name}=={version}")
+          PY
+          )
+          python -m pip install --disable-pip-version-check --no-input \
+            "${build_toolchain[@]}"
+          python - <<'PY' >> "$GITHUB_ENV"
+          from tools.regenerate_component_lock import SOURCE_DATE_EPOCH
+
+          print(f"SOURCE_DATE_EPOCH={SOURCE_DATE_EPOCH}")
+          PY
+          python - <<'PY'
+          import importlib.metadata as metadata
+          from tools.regenerate_component_lock import BUILD_TOOLCHAIN
+
+          expected = dict(BUILD_TOOLCHAIN)
+          actual = {name: metadata.version(name) for name in expected}
+          if actual != expected:
+              raise SystemExit(f"build toolchain mismatch: {actual!r} != {expected!r}")
+          print(f"build_toolchain={actual}")
+          PY
+
+      - name: Build all six wheels
+        run: |
+          set -euo pipefail
+          mkdir dist
+          for project in central client import personal; do
+            python -m build --wheel --no-isolation \
+              --outdir dist "packages/$project"
+          done
+          python -m pip wheel --no-deps --no-build-isolation \
+            --wheel-dir dist packages/pursers tools/wait-bridge
+          python - <<'PY'
+          from pathlib import Path
+
+          wheels = sorted(Path("dist").glob("*.whl"))
+          if len(wheels) != 6:
+              raise SystemExit(f"expected 6 wheels, found {len(wheels)}: {wheels}")
+          print("release_wheels=" + ",".join(wheel.name for wheel in wheels))
+          PY
+          (cd dist && sha256sum -- ./*.whl > SHA256SUMS.txt)
+
+      - name: Extract non-empty CHANGELOG notes
+        run: |
+          python tools/release_notes.py \
+            "${{ steps.release.outputs.version }}" > release-notes.md
+          test -s release-notes.md
+
+      - name: Create or complete GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.release.outputs.tag }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          assets=(dist/*.whl dist/SHA256SUMS.txt)
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            declare -A uploaded=()
+            while IFS= read -r name; do
+              uploaded["$name"]=1
+            done < <(gh release view "$TAG" --json assets --jq '.assets[].name')
+            for asset in "${assets[@]}"; do
+              name="$(basename "$asset")"
+              if [[ -n "${uploaded[$name]:-}" ]]; then
+                echo "asset already present: $name"
+              else
+                gh release upload "$TAG" "$asset"
+              fi
+            done
+            gh release edit "$TAG" \
+              --title "Pursers $VERSION" \
+              --notes-file release-notes.md \
+              --prerelease=false \
+              --latest
+          else
+            gh release create "$TAG" "${assets[@]}" \
+              --verify-tag \
+              --title "Pursers $VERSION" \
+              --notes-file release-notes.md \
+              --latest
+          fi
