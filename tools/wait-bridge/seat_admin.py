@@ -11,6 +11,7 @@ import re
 import shlex
 import sys
 from collections.abc import Callable, Sequence
+from datetime import datetime, timedelta, timezone
 from typing import Any, Protocol
 
 from pursers_client import BoardClient, BoardClientError
@@ -25,6 +26,8 @@ VALID_ROLES = frozenset({"worker", "reviewer"})
 CENTRAL_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,80}$")
 SEAT_REGISTRY_KEY = "seat_registry"
 SEAT_REGISTRY_SCHEMA_VERSION = 1
+DEFAULT_STALE_SECONDS = 300
+ACTIVE_CLAIM_STATES = frozenset({"claimed", "in_progress", "creating_report"})
 
 
 class SeatBackend(Protocol):
@@ -45,6 +48,8 @@ class SeatBackend(Protocol):
     async def member_set_role(
         self, board_id: str, principal_id: str, role: str
     ) -> None: ...
+
+    async def member_remove(self, board_id: str, principal_id: str) -> None: ...
 
 
 ClientFactory = Callable[..., Any]
@@ -77,6 +82,15 @@ class SeatBoardClient(BoardClient):
                 "agent_name": self.agent_name,
                 "principal_id": principal_id,
                 "role": role,
+            },
+        )
+
+    async def board_member_remove(self, principal_id: str) -> dict[str, Any]:
+        return await self._call(
+            "board_member_remove",
+            {
+                "agent_name": self.agent_name,
+                "principal_id": principal_id,
             },
         )
 
@@ -150,6 +164,10 @@ class LiveBackend:
     ) -> None:
         async with self._client(board_id) as client:
             await client.board_member_set_role(principal_id, role)
+
+    async def member_remove(self, board_id: str, principal_id: str) -> None:
+        async with self._client(board_id) as client:
+            await client.board_member_remove(principal_id)
 
 
 def _clean(value: str, label: str) -> str:
@@ -232,37 +250,161 @@ def _parse_boards(raw: str, registry: dict[str, Any], home_board: str) -> list[s
     return boards
 
 
-async def _seat_rows(backend: SeatBackend, boards: list[str]) -> list[dict[str, str]]:
-    rows: list[dict[str, str]] = []
+async def _inventory(
+    backend: SeatBackend, boards: list[str]
+) -> tuple[
+    list[dict[str, Any]],
+    dict[str, dict[str, Any]],
+    dict[str, dict[str, Any]],
+]:
+    rows: list[dict[str, Any]] = []
+    memberships: dict[str, dict[str, Any]] = {}
+    snapshots: dict[str, dict[str, Any]] = {}
     for board_id in boards:
         members = await backend.members(board_id)
-        snapshots = await backend.snapshot(board_id)
-        omitted_agents = int(snapshots.get("omitted_counts", {}).get("agents", 0))
+        snapshot = await backend.snapshot(board_id)
+        memberships[board_id] = members
+        snapshots[board_id] = snapshot
+        omitted_agents = int(snapshot.get("omitted_counts", {}).get("agents", 0))
         if omitted_agents:
             raise RegistryError(
                 f"agent scan on {board_id!r} omitted {omitted_agents} rows; "
                 "refusing an incomplete duplicate-name check"
             )
-        statuses = {
-            (agent.get("principal_id"), agent.get("agent_name")): agent.get(
-                "status", "unknown"
-            )
-            for agent in snapshots.get("agents", [])
+        agents = {
+            (agent.get("principal_id"), agent.get("agent_name")): agent
+            for agent in snapshot.get("agents", [])
+            if isinstance(agent, dict)
         }
         for member in members.get("members", []):
             for name in member.get("agent_names", []):
+                agent = agents.get((member["principal_id"], name), {})
                 rows.append(
                     {
                         "board_id": board_id,
                         "principal_id": member["principal_id"],
                         "name": name,
                         "role": member["role"],
-                        "status": str(
-                            statuses.get((member["principal_id"], name), "inactive")
-                        ),
+                        "agent_id": agent.get("agent_id"),
+                        "status": str(agent.get("status", "inactive")),
+                        "lifecycle_status": agent.get("lifecycle_status"),
+                        "last_seen": agent.get("last_activity_at")
+                        or agent.get("last_seen"),
                     }
                 )
+    return rows, memberships, snapshots
+
+
+async def _seat_rows(backend: SeatBackend, boards: list[str]) -> list[dict[str, Any]]:
+    rows, _memberships, _snapshots = await _inventory(backend, boards)
     return rows
+
+
+def _parse_time(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _snapshot_omitted(snapshot: dict[str, Any], collection: str) -> int:
+    value = snapshot.get("omitted_counts", {}).get(collection, 0)
+    return value if type(value) is int and value >= 0 else 0
+
+
+def _active_claims(
+    snapshots: dict[str, dict[str, Any]], principals: set[str]
+) -> list[dict[str, str]]:
+    claims: list[dict[str, str]] = []
+    for board_id, snapshot in snapshots.items():
+        omitted = _snapshot_omitted(snapshot, "tickets")
+        if omitted:
+            raise RegistryError(
+                f"ticket scan on {board_id!r} omitted {omitted} rows; "
+                "refusing an incomplete active-claim check"
+            )
+        agent_ids = {
+            agent.get("agent_id")
+            for agent in snapshot.get("agents", [])
+            if isinstance(agent, dict) and agent.get("principal_id") in principals
+        }
+        for ticket in snapshot.get("tickets", []):
+            if (
+                isinstance(ticket, dict)
+                and ticket.get("status") in ACTIVE_CLAIM_STATES
+                and ticket.get("claimed_by_agent_id") in agent_ids
+            ):
+                claims.append(
+                    {
+                        "board_id": board_id,
+                        "ticket_id": str(ticket.get("ticket_id", "unknown")),
+                        "claimed_by": str(ticket.get("claimed_by", "unknown")),
+                    }
+                )
+    return claims
+
+
+def _member_role(
+    memberships: dict[str, dict[str, Any]], board_id: str, principal_id: str
+) -> str | None:
+    match = next(
+        (
+            item
+            for item in memberships[board_id].get("members", [])
+            if item.get("principal_id") == principal_id
+        ),
+        None,
+    )
+    return None if match is None else str(match.get("role"))
+
+
+async def _remove_and_verify(
+    backend: SeatBackend, board_id: str, principal_id: str
+) -> dict[str, Any]:
+    await backend.member_remove(board_id, principal_id)
+    members = await backend.members(board_id)
+    if any(
+        item.get("principal_id") == principal_id
+        for item in members.get("members", [])
+    ):
+        raise RegistryError(
+            f"read-back failed on {board_id!r}: principal membership remains"
+        )
+    snapshot = await backend.snapshot(board_id)
+    omitted = _snapshot_omitted(snapshot, "agents")
+    if omitted:
+        raise RegistryError(
+            f"read-back agent scan on {board_id!r} omitted {omitted} rows"
+        )
+    remaining = [
+        agent
+        for agent in snapshot.get("agents", [])
+        if isinstance(agent, dict) and agent.get("principal_id") == principal_id
+    ]
+    if remaining:
+        raise RegistryError(
+            f"read-back failed on {board_id!r}: seat remains in agents projection"
+        )
+    return {
+        "board_id": board_id,
+        "principal_id": principal_id,
+        "membership_present": False,
+        "agents_present": 0,
+        "verified": True,
+    }
+
+
+def _protected_names(values: list[str]) -> set[str]:
+    protected: set[str] = set()
+    for value in values:
+        for item in value.split(","):
+            protected.add(_identifier(item, "protected agent name"))
+    return protected
 
 
 async def _verified_role(
@@ -383,6 +525,311 @@ def _config(
     return json.dumps(values, indent=2, sort_keys=True)
 
 
+async def _retire(
+    args: argparse.Namespace,
+    backend: SeatBackend,
+    registry: dict[str, Any],
+    seat_registry: dict[str, Any],
+) -> None:
+    name = _identifier(args.name, "agent name")
+    if args.stale_seconds < 1:
+        raise RegistryError("--stale-seconds must be positive")
+    boards = _parse_boards(args.boards, registry, backend.home_board)
+    active_boards = _active_boards(registry, backend.home_board)
+    scan_boards = list(dict.fromkeys([*active_boards, *boards]))
+    rows, memberships, snapshots = await _inventory(backend, scan_boards)
+    definition = seat_registry["seats"].get(name)
+    candidates = {
+        row["principal_id"] for row in rows if row["name"] == name
+    }
+    if definition is not None:
+        candidates.add(definition["principal_id"])
+    if args.principal is not None:
+        principal = _identifier(args.principal, "principal id")
+        if not candidates:
+            raise RegistryError(f"agent name {name!r} was not found")
+        if principal not in candidates:
+            raise RegistryError(
+                f"agent name {name!r} is not associated with {principal!r}"
+            )
+    elif len(candidates) > 1:
+        raise RegistryError(
+            f"agent name {name!r} exists across principals "
+            f"{', '.join(sorted(candidates))}; --principal is required"
+        )
+    elif candidates:
+        principal = next(iter(candidates))
+    else:
+        raise RegistryError(f"agent name {name!r} was not found")
+
+    principal_definitions = {
+        stored_name: stored
+        for stored_name, stored in seat_registry["seats"].items()
+        if stored["principal_id"] == principal
+    }
+    if args.boards != "registry" and any(
+        stored["board_mode"] == "registry"
+        for stored in principal_definitions.values()
+    ):
+        raise RegistryError(
+            "a principal with a registry-mode seat must be retired with "
+            "--boards registry"
+        )
+
+    target_boards = [
+        board_id
+        for board_id in boards
+        if _member_role(memberships, board_id, principal) is not None
+    ]
+    definition_targeted = args.boards == "registry" and bool(principal_definitions)
+    if args.boards != "registry":
+        definition_targeted = any(
+            bool(set(stored["board_mode"]) & set(boards))
+            for stored in principal_definitions.values()
+        )
+    if not target_boards and not definition_targeted:
+        raise RegistryError(
+            f"principal {principal!r} has no selected membership or seat definition"
+        )
+    admin_boards = [
+        board_id
+        for board_id in target_boards
+        if _member_role(memberships, board_id, principal) == "admin"
+    ]
+    if admin_boards:
+        raise RegistryError(
+            "refusing to retire an admin principal from "
+            f"{', '.join(admin_boards)}"
+        )
+    target_snapshots = {
+        board_id: snapshots[board_id] for board_id in target_boards
+    }
+    claims = _active_claims(target_snapshots, {principal})
+    if claims:
+        listed = ", ".join(
+            f"{item['board_id']}/{item['ticket_id']}" for item in claims
+        )
+        raise RegistryError(f"active claims prevent retirement: {listed}")
+
+    relevant_rows = [
+        row
+        for row in rows
+        if row["board_id"] in target_boards
+        and row["principal_id"] == principal
+    ]
+    now = datetime.now(timezone.utc)
+    recent = []
+    for row in relevant_rows:
+        seen = _parse_time(row.get("last_seen"))
+        if seen is None or now - seen <= timedelta(seconds=args.stale_seconds):
+            recent.append(f"{row['board_id']}/{row['name']}")
+    if recent and not args.force:
+        raise RegistryError(
+            "seat may still be alive on "
+            f"{', '.join(sorted(recent))}; pass --force"
+        )
+
+    verified = [
+        await _remove_and_verify(backend, board_id, principal)
+        for board_id in target_boards
+    ]
+    updated_registry = json.loads(json.dumps(seat_registry))
+    removed_definitions: list[str] = []
+    for stored_name in sorted(principal_definitions):
+        stored = updated_registry["seats"][stored_name]
+        if args.boards == "registry":
+            del updated_registry["seats"][stored_name]
+            removed_definitions.append(stored_name)
+        else:
+            remaining = [
+                board_id
+                for board_id in stored["board_mode"]
+                if board_id not in boards
+            ]
+            if remaining:
+                stored["board_mode"] = remaining
+            else:
+                del updated_registry["seats"][stored_name]
+                removed_definitions.append(stored_name)
+    registry_updated = updated_registry != seat_registry
+    if registry_updated:
+        await backend.write_seat_registry(updated_registry)
+    affected_names = sorted(
+        {str(row["name"]) for row in relevant_rows}
+        | set(principal_definitions)
+    )
+    print(
+        json.dumps(
+            {
+                "action": "retire",
+                "name": name,
+                "principal_id": principal,
+                "affected_names": affected_names,
+                "boards_requested": boards,
+                "boards_removed": [item["board_id"] for item in verified],
+                "seat_registry_definitions_removed": removed_definitions,
+                "seat_registry_read_back_verified": registry_updated,
+                "verified_read_back": verified,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
+async def _prune_stale(
+    args: argparse.Namespace,
+    backend: SeatBackend,
+    registry: dict[str, Any],
+    seat_registry: dict[str, Any],
+) -> None:
+    if args.older_than_days < 1:
+        raise RegistryError("--older-than-days must be positive")
+    protected = _protected_names(args.protected)
+    boards = _active_boards(registry, backend.home_board)
+    rows, memberships, snapshots = await _inventory(backend, boards)
+    by_principal: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        by_principal.setdefault(row["principal_id"], []).append(row)
+    durable_by_principal: dict[str, list[tuple[str, str]]] = {}
+    for name, definition in seat_registry["seats"].items():
+        durable_by_principal.setdefault(definition["principal_id"], []).append(
+            (name, definition["role"])
+        )
+
+    cutoff = datetime.now(timezone.utc) - timedelta(days=args.older_than_days)
+    plan: list[dict[str, Any]] = []
+    excluded: list[dict[str, Any]] = []
+    for principal, principal_rows in sorted(by_principal.items()):
+        names = sorted({str(row["name"]) for row in principal_rows})
+        durable = durable_by_principal.get(principal, [])
+        all_names = sorted(set(names) | {name for name, _role in durable})
+        roles = {str(row["role"]) for row in principal_rows} | {
+            role for _name, role in durable
+        }
+        reasons = []
+        if roles & {"reviewer", "admin"}:
+            reasons.append("protected-role")
+        if protected & set(all_names):
+            reasons.append("protected-name")
+        observed = [_parse_time(row.get("last_seen")) for row in principal_rows]
+        if any(value is None for value in observed):
+            reasons.append("unknown-last-seen")
+        latest = max((value for value in observed if value is not None), default=None)
+        if latest is not None and latest >= cutoff:
+            reasons.append("not-stale")
+        if reasons:
+            excluded.append(
+                {
+                    "principal_id": principal,
+                    "names": all_names,
+                    "reasons": sorted(set(reasons)),
+                }
+            )
+            continue
+        target_boards = sorted(
+            {
+                row["board_id"]
+                for row in principal_rows
+                if _member_role(memberships, row["board_id"], principal)
+                is not None
+            }
+        )
+        plan.append(
+            {
+                "principal_id": principal,
+                "names": all_names,
+                "boards": target_boards,
+                "last_seen": latest.isoformat() if latest is not None else None,
+            }
+        )
+
+    principals = {item["principal_id"] for item in plan}
+    claims = _active_claims(snapshots, principals)
+    claims_by_principal: dict[str, list[dict[str, str]]] = {}
+    agent_principals = {
+        agent.get("agent_id"): agent.get("principal_id")
+        for snapshot in snapshots.values()
+        for agent in snapshot.get("agents", [])
+        if isinstance(agent, dict)
+    }
+    for claim in claims:
+        snapshot = snapshots[claim["board_id"]]
+        ticket = next(
+            (
+                item
+                for item in snapshot.get("tickets", [])
+                if isinstance(item, dict)
+                and str(item.get("ticket_id")) == claim["ticket_id"]
+            ),
+            {},
+        )
+        principal = agent_principals.get(ticket.get("claimed_by_agent_id"))
+        if isinstance(principal, str):
+            claims_by_principal.setdefault(principal, []).append(claim)
+    for item in plan:
+        item["active_claims"] = claims_by_principal.get(item["principal_id"], [])
+
+    if not args.commit:
+        print(
+            json.dumps(
+                {
+                    "action": "prune-stale",
+                    "mode": "dry-run",
+                    "older_than_days": args.older_than_days,
+                    "protected": sorted(protected),
+                    "plan": plan,
+                    "excluded": excluded,
+                    "writes": 0,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return
+    if claims:
+        listed = ", ".join(
+            f"{item['board_id']}/{item['ticket_id']}" for item in claims
+        )
+        raise RegistryError(f"active claims prevent prune commit: {listed}")
+
+    verified: list[dict[str, Any]] = []
+    for item in plan:
+        for board_id in item["boards"]:
+            verified.append(
+                await _remove_and_verify(
+                    backend, board_id, item["principal_id"]
+                )
+            )
+    updated_registry = json.loads(json.dumps(seat_registry))
+    removed_definitions = sorted(
+        name
+        for name, definition in seat_registry["seats"].items()
+        if definition["principal_id"] in principals
+    )
+    for name in removed_definitions:
+        del updated_registry["seats"][name]
+    registry_updated = updated_registry != seat_registry
+    if registry_updated:
+        await backend.write_seat_registry(updated_registry)
+    print(
+        json.dumps(
+            {
+                "action": "prune-stale",
+                "mode": "commit",
+                "older_than_days": args.older_than_days,
+                "plan": plan,
+                "excluded": excluded,
+                "seat_registry_definitions_removed": removed_definitions,
+                "seat_registry_read_back_verified": registry_updated,
+                "verified_read_back": verified,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
 async def execute(args: argparse.Namespace, backend: SeatBackend) -> None:
     _identifier(backend.home_board, "home board id")
     if args.command == "add":
@@ -404,14 +851,25 @@ async def execute(args: argparse.Namespace, backend: SeatBackend) -> None:
         if args.boards != "registry":
             for item in args.boards.split(","):
                 _identifier(item, "board id")
-    elif args.command == "check":
+    elif args.command in {"check", "retire"}:
         _identifier(args.name, "agent name")
-    else:
+        if args.command == "retire" and args.principal is not None:
+            _identifier(args.principal, "principal id")
+    elif args.command == "prune-stale":
+        _protected_names(args.protected)
+    else:  # new-board
         _identifier(args.board, "board id")
 
     registry = await backend.registry()
-    active_boards = _active_boards(registry, backend.home_board)
     seat_registry = _validate_seat_registry(await backend.seat_registry())
+    if args.command == "retire":
+        await _retire(args, backend, registry, seat_registry)
+        return
+    if args.command == "prune-stale":
+        await _prune_stale(args, backend, registry, seat_registry)
+        return
+
+    active_boards = _active_boards(registry, backend.home_board)
     rows = await _seat_rows(backend, active_boards)
 
     if args.command == "check":
@@ -573,6 +1031,32 @@ def build_parser() -> argparse.ArgumentParser:
     check = subparsers.add_parser("check")
     check.add_argument("--name", required=True)
 
+    retire = subparsers.add_parser("retire")
+    retire.add_argument("--name", required=True)
+    retire.add_argument("--boards", default="registry")
+    retire.add_argument("--principal")
+    retire.add_argument(
+        "--stale-seconds",
+        type=int,
+        default=int(os.environ.get("PURSERS_STALE_SECONDS", DEFAULT_STALE_SECONDS)),
+    )
+    retire.add_argument("--force", action="store_true")
+
+    prune = subparsers.add_parser("prune-stale")
+    prune.add_argument("--older-than-days", type=int, required=True)
+    prune.add_argument(
+        "--protect",
+        "--protected",
+        dest="protected",
+        action="append",
+        default=[],
+        metavar="NAME[,NAME...]",
+    )
+    mode = prune.add_mutually_exclusive_group()
+    mode.add_argument("--dry-run", dest="commit", action="store_false")
+    mode.add_argument("--commit", action="store_true")
+    prune.set_defaults(commit=False)
+
     new_board = subparsers.add_parser("new-board")
     new_board.add_argument("--board", required=True)
     return parser
@@ -601,7 +1085,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         asyncio.run(run(args))
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - CLI boundary renders a safe error.
         token = os.environ.get("ONBOARD_CENTRAL_TOKEN", "")
         print(f"ERROR: {_safe_error(exc, token)}", file=sys.stderr)
         return 1

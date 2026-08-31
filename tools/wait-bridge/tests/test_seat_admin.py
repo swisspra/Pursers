@@ -11,6 +11,7 @@ import sys
 import tempfile
 import unittest
 from contextlib import redirect_stdout
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -20,7 +21,7 @@ sys.path.insert(0, str(CLIENT_SRC))
 sys.path.insert(0, str(ROOT))
 os.environ.setdefault("ONBOARD_CENTRAL_TOKEN", "TOKEN_PLACEHOLDER")
 
-import seat_admin  # noqa: E402
+import seat_admin
 
 REGISTRY = {
     "schema_version": 1,
@@ -42,9 +43,16 @@ class StrictFakeBackend:
     home_board = "home"
     admin_principal = "PR-admin"
 
-    def __init__(self, *, mismatch: bool = False, omitted_agents: int = 0) -> None:
+    def __init__(
+        self,
+        *,
+        mismatch: bool = False,
+        omitted_agents: int = 0,
+        omitted_tickets: int = 0,
+    ) -> None:
         self.mismatch = mismatch
         self.omitted_agents = omitted_agents
+        self.omitted_tickets = omitted_tickets
         self.calls: list[tuple[str, str, str]] = []
         self.roles: dict[str, dict[str, str]] = {
             board: {
@@ -67,6 +75,15 @@ class StrictFakeBackend:
             ],
             "board-two": [(self.admin_principal, "seat-admin", "active")],
         }
+        old = "2020-01-01T00:00:00+00:00"
+        self.last_activity = {
+            (board, principal, name): old
+            for board, agents in self.agents.items()
+            for principal, name, _status in agents
+        }
+        self.tickets: dict[str, list[dict[str, Any]]] = {
+            board: [] for board in ("home", "board-one", "board-two")
+        }
         self.seats = seat_admin._empty_seat_registry()
 
     def _auto_join_admin(self, board_id: str) -> None:
@@ -74,6 +91,10 @@ class StrictFakeBackend:
         agents = self.agents.setdefault(board_id, [])
         if not any(principal == self.admin_principal for principal, _, _ in agents):
             agents.append((self.admin_principal, "seat-admin", "active"))
+            self.last_activity[
+                (board_id, self.admin_principal, "seat-admin")
+            ] = "2020-01-01T00:00:00+00:00"
+        self.tickets.setdefault(board_id, [])
 
     async def registry(self) -> dict[str, Any]:
         return json.loads(json.dumps(REGISTRY))
@@ -104,10 +125,23 @@ class StrictFakeBackend:
         self._auto_join_admin(board_id)
         return {
             "agents": [
-                {"principal_id": principal, "agent_name": name, "status": status}
+                {
+                    "agent_id": f"AI-{board_id}-{principal}-{name}",
+                    "principal_id": principal,
+                    "agent_name": name,
+                    "status": status,
+                    "lifecycle_status": status,
+                    "last_activity_at": self.last_activity[
+                        (board_id, principal, name)
+                    ],
+                }
                 for principal, name, status in self.agents[board_id]
             ],
-            "omitted_counts": {"agents": self.omitted_agents},
+            "tickets": json.loads(json.dumps(self.tickets[board_id])),
+            "omitted_counts": {
+                "agents": self.omitted_agents,
+                "tickets": self.omitted_tickets,
+            },
         }
 
     async def member_add(self, board_id: str, principal_id: str) -> None:
@@ -126,6 +160,18 @@ class StrictFakeBackend:
         if principal_id not in self.roles[board_id]:
             raise ValueError("principal is not a board member")
         self.roles[board_id][principal_id] = role
+
+    async def member_remove(self, board_id: str, principal_id: str) -> None:
+        self._auto_join_admin(board_id)
+        self.calls.append(("remove", board_id, principal_id))
+        if principal_id not in self.roles[board_id]:
+            raise ValueError("principal is not a board member")
+        if self.mismatch:
+            return
+        del self.roles[board_id][principal_id]
+        self.agents[board_id] = [
+            item for item in self.agents[board_id] if item[0] != principal_id
+        ]
 
 
 def parse(*arguments: str) -> argparse.Namespace:
@@ -159,6 +205,7 @@ class SeatAdminTests(unittest.TestCase):
             await board.board_members()
             await board.board_member_add("PR-new")
             await board.board_member_set_role("PR-new", "reviewer")
+            await board.board_member_remove("PR-new")
 
         asyncio.run(scenario())
 
@@ -180,6 +227,13 @@ class SeatAdminTests(unittest.TestCase):
                         "agent_name": "seat-admin",
                         "principal_id": "PR-new",
                         "role": "reviewer",
+                    },
+                ),
+                (
+                    "board_member_remove",
+                    {
+                        "agent_name": "seat-admin",
+                        "principal_id": "PR-new",
                     },
                 ),
             ],
@@ -226,6 +280,7 @@ class SeatAdminTests(unittest.TestCase):
                         "assert version('mcp') == '2.1.1'; "
                         "assert hasattr(registry_doctor.LiveBackend, 'board_snapshot'); "
                         "assert hasattr(seat_admin.SeatBoardClient, 'board_member_add'); "
+                        "assert hasattr(seat_admin.SeatBoardClient, 'board_member_remove'); "
                         "print(seat_admin.__file__)"
                     ),
                 ],
@@ -243,6 +298,8 @@ class SeatAdminTests(unittest.TestCase):
             )
             self.assertIn(str(environment), imported.stdout)
             self.assertIn("Provision and inspect", helped.stdout)
+            self.assertIn("retire", helped.stdout)
+            self.assertIn("prune-stale", helped.stdout)
             doctor_help = subprocess.run(
                 [str(python), "-I", "-m", "registry_doctor", "--help"],
                 check=True,
@@ -449,6 +506,225 @@ class SeatAdminTests(unittest.TestCase):
             [("home", "reviewer", "working"), ("board-one", "reviewer", "active")],
         )
         self.assertEqual(backend.calls, [])
+
+    def test_retire_refuses_active_claim_before_any_write(self) -> None:
+        backend = StrictFakeBackend()
+        backend.tickets["board-one"] = [
+            {
+                "ticket_id": "TK-active",
+                "status": "claimed",
+                "claimed_by": "worker-a",
+                "claimed_by_agent_id": "AI-board-one-PR-worker-worker-a",
+            }
+        ]
+
+        with self.assertRaisesRegex(
+            seat_admin.RegistryError, "board-one/TK-active"
+        ):
+            invoke(
+                backend,
+                "retire",
+                "--name",
+                "worker-a",
+                "--boards",
+                "board-one",
+                "--force",
+            )
+
+        self.assertEqual(backend.calls, [])
+        self.assertIn("PR-worker", backend.roles["board-one"])
+
+    def test_retire_requires_force_for_recent_seat_and_verifies_read_back(
+        self,
+    ) -> None:
+        backend = StrictFakeBackend()
+        backend.last_activity[("board-one", "PR-worker", "worker-a")] = (
+            datetime.now(timezone.utc).isoformat()
+        )
+
+        with self.assertRaisesRegex(seat_admin.RegistryError, "pass --force"):
+            invoke(
+                backend,
+                "retire",
+                "--name",
+                "worker-a",
+                "--boards",
+                "board-one",
+            )
+        self.assertEqual(backend.calls, [])
+
+        result = json.loads(
+            invoke(
+                backend,
+                "retire",
+                "--name",
+                "worker-a",
+                "--boards",
+                "board-one",
+                "--force",
+            )
+        )
+        self.assertEqual(backend.calls, [("remove", "board-one", "PR-worker")])
+        self.assertEqual(result["boards_removed"], ["board-one"])
+        self.assertEqual(
+            result["verified_read_back"],
+            [
+                {
+                    "board_id": "board-one",
+                    "principal_id": "PR-worker",
+                    "membership_present": False,
+                    "agents_present": 0,
+                    "verified": True,
+                }
+            ],
+        )
+
+    def test_retire_read_back_mismatch_is_fatal(self) -> None:
+        backend = StrictFakeBackend(mismatch=True)
+        with self.assertRaisesRegex(seat_admin.RegistryError, "membership remains"):
+            invoke(
+                backend,
+                "retire",
+                "--name",
+                "worker-a",
+                "--boards",
+                "board-one",
+            )
+        self.assertEqual(backend.calls, [("remove", "board-one", "PR-worker")])
+
+    def test_retire_duplicate_name_requires_principal_disambiguation(self) -> None:
+        backend = StrictFakeBackend()
+        backend.roles["board-two"]["PR-other"] = "member"
+        backend.agents["board-two"].append(("PR-other", "worker-a", "stale"))
+        backend.last_activity[("board-two", "PR-other", "worker-a")] = (
+            datetime.now(timezone.utc) - timedelta(days=60)
+        ).isoformat()
+
+        with self.assertRaisesRegex(seat_admin.RegistryError, "--principal is required"):
+            invoke(backend, "retire", "--name", "worker-a")
+        self.assertEqual(backend.calls, [])
+
+        result = json.loads(
+            invoke(
+                backend,
+                "retire",
+                "--name",
+                "worker-a",
+                "--boards",
+                "board-one",
+                "--principal",
+                "PR-worker",
+            )
+        )
+        self.assertEqual(result["principal_id"], "PR-worker")
+        self.assertNotIn("PR-worker", backend.roles["board-one"])
+        self.assertIn("PR-other", backend.roles["board-two"])
+
+    def test_prune_stale_defaults_to_dry_run_with_zero_writes(self) -> None:
+        backend = StrictFakeBackend()
+        result = json.loads(
+            invoke(backend, "prune-stale", "--older-than-days", "30")
+        )
+
+        self.assertEqual(result["mode"], "dry-run")
+        self.assertEqual(result["writes"], 0)
+        self.assertEqual(
+            [item["principal_id"] for item in result["plan"]], ["PR-worker"]
+        )
+        self.assertEqual(backend.calls, [])
+
+    def test_prune_commit_refuses_active_claim_before_any_write(self) -> None:
+        backend = StrictFakeBackend()
+        backend.tickets["board-one"] = [
+            {
+                "ticket_id": "TK-active",
+                "status": "in_progress",
+                "claimed_by": "worker-a",
+                "claimed_by_agent_id": "AI-board-one-PR-worker-worker-a",
+            }
+        ]
+
+        dry_run = json.loads(
+            invoke(backend, "prune-stale", "--older-than-days", "30")
+        )
+        self.assertEqual(
+            dry_run["plan"][0]["active_claims"][0]["ticket_id"], "TK-active"
+        )
+        with self.assertRaisesRegex(seat_admin.RegistryError, "TK-active"):
+            invoke(
+                backend,
+                "prune-stale",
+                "--older-than-days",
+                "30",
+                "--commit",
+            )
+        self.assertEqual(backend.calls, [])
+
+    def test_retire_refuses_incomplete_ticket_scan(self) -> None:
+        backend = StrictFakeBackend(omitted_tickets=1)
+        with self.assertRaisesRegex(seat_admin.RegistryError, "incomplete"):
+            invoke(
+                backend,
+                "retire",
+                "--name",
+                "worker-a",
+                "--boards",
+                "board-one",
+            )
+        self.assertEqual(backend.calls, [])
+
+    def test_prune_stale_excludes_reviewer_and_protected_names(self) -> None:
+        backend = StrictFakeBackend()
+        result = json.loads(
+            invoke(
+                backend,
+                "prune-stale",
+                "--older-than-days",
+                "30",
+                "--dry-run",
+                "--protect",
+                "worker-a",
+            )
+        )
+
+        self.assertEqual(result["plan"], [])
+        excluded = {
+            item["principal_id"]: item["reasons"] for item in result["excluded"]
+        }
+        self.assertIn("protected-name", excluded["PR-worker"])
+        self.assertIn("protected-role", excluded["PR-reviewer"])
+        self.assertIn("protected-role", excluded[backend.admin_principal])
+        self.assertEqual(backend.calls, [])
+
+    def test_prune_stale_commit_removes_and_verifies_worker_only(self) -> None:
+        backend = StrictFakeBackend()
+        backend.seats["seats"]["worker-a"] = {
+            "principal_id": "PR-worker",
+            "role": "worker",
+            "board_mode": "registry",
+        }
+        result = json.loads(
+            invoke(
+                backend,
+                "prune-stale",
+                "--older-than-days",
+                "30",
+                "--commit",
+            )
+        )
+
+        self.assertEqual(result["mode"], "commit")
+        self.assertEqual(
+            backend.calls,
+            [
+                ("remove", "board-one", "PR-worker"),
+                ("remove", "home", "PR-worker"),
+                ("state_write", "home", "seat_registry"),
+            ],
+        )
+        self.assertNotIn("worker-a", backend.seats["seats"])
+        self.assertIn("PR-reviewer", backend.roles["board-one"])
+        self.assertTrue(all(item["verified"] for item in result["verified_read_back"]))
 
 
 if __name__ == "__main__":

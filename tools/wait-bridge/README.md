@@ -178,11 +178,36 @@ python tools/wait-bridge/seat_admin.py add \
   --principal PR-PLACEHOLDER --token-path /PATH/TO/TOKEN
 python tools/wait-bridge/seat_admin.py check --name worker-a
 python tools/wait-bridge/seat_admin.py new-board --board board-new
+python tools/wait-bridge/seat_admin.py retire \
+  --name worker-a --boards registry
+python tools/wait-bridge/seat_admin.py prune-stale \
+  --older-than-days 30 --dry-run --protect worker-a
+python tools/wait-bridge/seat_admin.py prune-stale \
+  --older-than-days 30 --commit --protect worker-a
 ```
 
 `add` rejects a seat name already used on any active registry board unless
 `--force` is explicit. `new-board` discovers existing principals and roles
 from active registry boards; it contains no board or project allowlist.
+
+`retire` uses Central's principal membership removal, which clears the
+principal's seats from the selected board pool while preserving tickets,
+journal history, and other durable board data. It refuses every mutation when
+the principal holds an active claim. A seat seen within the stale threshold
+(300 seconds by default) also requires `--force`. Duplicate names across
+principals require `--principal`; registry-mode seat definitions must be
+retired with `--boards registry`. Each removed membership is read back from
+both membership and agents projections before success is printed.
+
+`prune-stale` aggregates each principal's latest seat activity across every
+active registry board. It excludes reviewer/admin roles, names supplied by
+repeatable `--protect`/`--protected` flags (comma-separated names are accepted),
+unknown timestamps, and recent seats. Active claims are included in the plan
+as blockers and make `--commit` fail before any write. Dry-run is the default
+and performs no membership or seat-registry writes; `--commit` executes the
+printed plan, verifies every board read-back, and removes matching durable seat
+definitions. Run live cleanup only with an operator admin token and only after
+reviewing the dry-run plan.
 
 ### Registry doctor CLI
 
