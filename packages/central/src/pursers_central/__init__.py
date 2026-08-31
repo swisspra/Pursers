@@ -17,6 +17,7 @@ _names = (
     "jwt_verifier",
     "sqlite_store",
     "transactional_sqlite",
+    "instance_lock",
 )
 _previous = {name: sys.modules.get(name) for name in _names}
 try:

@@ -59,8 +59,9 @@ def main() -> None:
             )
         )
         return
-    mcp, _ = central.build_server(args.host, args.port, args.data_dir)
-    mcp.run(
-        transport="streamable-http", host=args.host, port=args.port,
-        streamable_http_path="/mcp", stateless_http=True,
-    )
+    with central.CentralDataLock(args.data_dir):
+        mcp, _ = central.build_server(args.host, args.port, args.data_dir)
+        mcp.run(
+            transport="streamable-http", host=args.host, port=args.port,
+            streamable_http_path="/mcp", stateless_http=True,
+        )
