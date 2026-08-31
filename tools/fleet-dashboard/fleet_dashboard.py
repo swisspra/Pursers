@@ -13,7 +13,7 @@ import threading
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Protocol
@@ -154,17 +154,26 @@ def read_overhead_stats(
         document = json.loads(source.read_text(encoding="utf-8"))
     except FileNotFoundError:
         return empty
-    except (OSError, json.JSONDecodeError):
+    except (OSError, UnicodeError, json.JSONDecodeError):
         return {**empty, "source_status": "malformed"}
     if not isinstance(document, dict) or document.get("schema_version") != 1:
         return {**empty, "source_status": "malformed"}
     raw_days = document.get("days")
     if not isinstance(raw_days, dict):
         return {**empty, "source_status": "malformed"}
-    selected_days = sorted(
-        day for day, value in raw_days.items()
-        if isinstance(day, str) and day <= today and isinstance(value, dict)
-    )[-OVERHEAD_DAYS:]
+    first_day = (current.date() - timedelta(days=OVERHEAD_DAYS - 1)).isoformat()
+    selected_days = []
+    for raw_day, value in raw_days.items():
+        if not isinstance(raw_day, str) or not isinstance(value, dict):
+            continue
+        try:
+            parsed_day = date.fromisoformat(raw_day)
+        except ValueError:
+            continue
+        day = parsed_day.isoformat()
+        if day == raw_day and first_day <= day <= today:
+            selected_days.append(day)
+    selected_days.sort()
     aggregate: dict[tuple[str, str], dict[str, Any]] = {}
     for day in selected_days:
         seats = raw_days[day].get("seats")
@@ -258,9 +267,12 @@ def project_coordinator_findings(snapshot: dict[str, Any]) -> dict[str, Any] | N
         findings = raw
     elif isinstance(raw, dict):
         findings = raw.get("findings", raw.get("items", []))
+        truncation = raw.get("truncation")
+        if isinstance(truncation, dict):
+            reported_truncated = _nonnegative_int(truncation.get("findings"))
         for name in ("truncated_count", "omitted_count", "truncated"):
             value = raw.get(name)
-            if type(value) is int and value > 0:
+            if reported_truncated == 0 and type(value) is int and value > 0:
                 reported_truncated = value
                 break
     else:

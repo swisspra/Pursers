@@ -599,6 +599,44 @@ def test_overhead_projection_aggregates_today_and_seven_day_tools() -> None:
     ]
 
 
+def test_overhead_uses_inclusive_seven_utc_calendar_days() -> None:
+    document = {
+        "schema_version": 1,
+        "days": {
+            "2030-01-01": {
+                "seats": {
+                    "old": {
+                        "board_id": "board",
+                        "agent_name": "worker",
+                        "request_bytes": 40,
+                        "response_bytes": 60,
+                        "calls": {},
+                    }
+                }
+            },
+            "2030-01-10": {
+                "seats": {
+                    "today": {
+                        "board_id": "board",
+                        "agent_name": "worker",
+                        "request_bytes": 100,
+                        "response_bytes": 300,
+                        "calls": {},
+                    }
+                }
+            },
+        },
+    }
+    with tempfile.TemporaryDirectory() as raw:
+        path = Path(raw) / "stats.json"
+        path.write_text(json.dumps(document), encoding="utf-8")
+        result = dashboard.read_overhead_stats(
+            path, now=datetime(2030, 1, 10, 12, tzinfo=timezone.utc)
+        )
+
+    assert result["seats"][0]["seven_day_bytes"] == 400
+
+
 def test_findings_panel_projection_handles_absent_present_and_truncated_state() -> None:
     absent = dashboard.project_board_detail(
         {
@@ -628,7 +666,11 @@ def test_findings_panel_projection_handles_absent_present_and_truncated_state() 
                 "state": {
                     "coordinator_findings": {
                         "value": json.dumps(
-                            {"findings": findings, "truncated_count": 2}
+                            {
+                                "schema_version": 1,
+                                "findings": findings,
+                                "truncation": {"findings": 2},
+                            }
                         )
                     }
                 },
@@ -643,3 +685,33 @@ def test_findings_panel_projection_handles_absent_present_and_truncated_state() 
     assert len(present["items"][0]["text"]) <= dashboard.MAX_FINDING_CHARS
     assert "Coordinator findings" in dashboard.HTML
     assert "/api/overhead" in dashboard.HTML
+
+
+def test_overhead_endpoint_treats_invalid_utf8_as_malformed_empty_state() -> None:
+    class Cache:
+        def get(self) -> dict:
+            return {}
+
+        def get_board(self, _board_id: str) -> dict:
+            return {}
+
+    with tempfile.TemporaryDirectory() as raw:
+        stats = Path(raw) / "stats.json"
+        stats.write_bytes(b"\xff\xfe")
+        server = dashboard.ThreadingHTTPServer(
+            ("127.0.0.1", 0), dashboard.make_handler(Cache(), stats)
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with urllib.request.urlopen(
+                f"http://127.0.0.1:{server.server_port}/api/overhead"
+            ) as response:
+                result = json.load(response)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
+
+    assert result["source_status"] == "malformed"
+    assert result["seats"] == []

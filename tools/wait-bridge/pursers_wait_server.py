@@ -49,7 +49,7 @@ import sys
 import tempfile
 import time
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
 from collections.abc import Awaitable, Callable
@@ -166,17 +166,28 @@ class BridgeStats:
             fcntl.flock(descriptor, fcntl.LOCK_EX)
             try:
                 document = json.loads(self.path.read_text(encoding="utf-8"))
-            except (FileNotFoundError, json.JSONDecodeError, OSError):
+            except (FileNotFoundError, UnicodeError, json.JSONDecodeError, OSError):
                 document = {}
             if not isinstance(document, dict):
                 document = {}
             days = document.get("days")
             if not isinstance(days, dict):
                 days = {}
-            today = self.clock().astimezone(timezone.utc).date().isoformat()
+            today_date = self.clock().astimezone(timezone.utc).date()
+            today = today_date.isoformat()
+            first_day = (today_date - timedelta(days=STATS_RETENTION_DAYS - 1)).isoformat()
+            valid_days = set()
+            for raw_day in days:
+                try:
+                    parsed_day = date.fromisoformat(str(raw_day))
+                except ValueError:
+                    continue
+                day = parsed_day.isoformat()
+                if day == raw_day and first_day <= day <= today:
+                    valid_days.add(day)
             retained = sorted(
-                {str(day) for day in days if str(day) <= today} | {today}
-            )[-STATS_RETENTION_DAYS:]
+                valid_days | {today}
+            )
             days = {
                 day: value
                 for day in retained

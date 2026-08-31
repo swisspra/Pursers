@@ -87,6 +87,14 @@ class BridgeStatsTests(unittest.TestCase):
             ],
         )
 
+    def test_retention_is_an_inclusive_utc_calendar_window(self) -> None:
+        self.record("board_catchup", 40, 60)
+        self.now = datetime(2030, 1, 10, 12, tzinfo=timezone.utc)
+        self.record("board_catchup", 100, 300)
+
+        document = json.loads(self.path.read_text(encoding="utf-8"))
+        self.assertEqual(list(document["days"]), ["2030-01-10"])
+
 
 if __name__ == "__main__":
     unittest.main()
