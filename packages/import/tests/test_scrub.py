@@ -13,9 +13,10 @@ from __future__ import annotations
 
 import pytest
 
-from scrub import Policy, scrub
+from scrub import Policy, ScrubRejected, scrub
 
 EMAIL_ONLY = Policy(mode="reject", enabled_rules=frozenset({"email"}))
+BEARER_ONLY = Policy(mode="reject", enabled_rules=frozenset({"bearer_token"}))
 
 
 def _hits(text: str) -> bool:
@@ -63,3 +64,33 @@ def test_domain_continuation_is_not_truncated() -> None:
     m = re.search(email_rule.pattern, "bob@example.com.au", re.IGNORECASE)
     assert m is not None
     assert m.group("secret") == "bob@example.com.au"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "The literal Bearer scheme word is harmless prose.",
+        "Authorization: Bearer <placeholder>",
+        "Authorization: Bearer [REDACTED]",
+        "Authorization: Bearer placeholder_value",
+        "Authorization: Bearer REDACTED_BEARER_TOKEN",
+    ],
+)
+def test_bearer_documentation_and_placeholders_are_not_flagged(text: str) -> None:
+    try:
+        scrub(text, BEARER_ONLY)
+    except ScrubRejected as exc:  # pragma: no cover - assertion reports violation
+        pytest.fail(f"bearer documentation should be allowed: {exc}")
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+        "z9F4mQ2vL8sT6nP1xR5c",
+        "placeholder_value_7f2a9c4e",
+    ],
+)
+def test_credential_like_bearer_values_remain_blocked(value: str) -> None:
+    with pytest.raises(ScrubRejected, match="bearer_token"):
+        scrub(f"Authorization: Bearer {value}", BEARER_ONLY)
