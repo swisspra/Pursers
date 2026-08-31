@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1045,3 +1046,109 @@ def test_overhead_endpoint_treats_integer_digit_limit_as_malformed() -> None:
 
     assert result["source_status"] == "malformed"
     assert result["seats"] == []
+def valid_coordinator_config() -> dict:
+    return {
+        "schema_version": 1,
+        "thresholds": {
+            "stale_seconds": 300,
+            "lease_warning_ratio": 0.8,
+            "grace_seconds": 600,
+            "starved_seconds": 1800,
+            "critical_starved_seconds": 600,
+            "review_backlog_seconds": 1800,
+            "abandoner_drops": 3,
+            "abandoner_window_days": 7,
+        },
+        "integration_watch_since": None,
+        "intake": {
+            "enabled": False,
+            "auto_categories": ["docs", "tests", "audit-analysis", "bug"],
+            "always_ask_categories": ["production-code", "release-ci", "membership-roles", "board-registry"],
+            "work_domain_always_ask": True,
+            "rate_per_hour": 5,
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    ("section", "field", "bad_value"),
+    [
+        ("thresholds", "stale_seconds", 9),
+        ("thresholds", "lease_warning_ratio", 1.1),
+        ("thresholds", "grace_seconds", 86_401),
+        ("thresholds", "starved_seconds", 9),
+        ("thresholds", "critical_starved_seconds", 86_401),
+        ("thresholds", "review_backlog_seconds", 9),
+        ("thresholds", "abandoner_drops", 0),
+        ("thresholds", "abandoner_window_days", 366),
+        ("intake", "rate_per_hour", 21),
+    ],
+)
+def test_config_endpoint_rejects_every_out_of_range_field(
+    section: str, field: str, bad_value: object
+) -> None:
+    class Cache:
+        def save_config(self, value: object, _expected: str | None) -> dict:
+            dashboard.validate_coordinator_config(value)
+            return {"ok": True}
+
+    config = valid_coordinator_config()
+    config[section][field] = bad_value
+    server = dashboard.ThreadingHTTPServer(
+        ("127.0.0.1", 0), dashboard.make_handler(Cache())
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{server.server_port}/api/config",
+            data=json.dumps({"config": config, "expected_sha256": None}).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with pytest.raises(urllib.error.HTTPError) as captured:
+            urllib.request.urlopen(request)
+        assert captured.value.code == 400
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+def test_config_save_writes_only_coordinator_config_with_cas() -> None:
+    calls: list[tuple[str, dict]] = []
+
+    class Client:
+        async def __aenter__(self) -> Self:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def _call(self, name: str, arguments: dict) -> dict:
+            calls.append((name, arguments))
+            return {"ok": True}
+
+    config = dashboard.Config(
+        url="https://127.0.0.1:8766/mcp", token="token", home_board="pursers",
+        agent_name="dashboard-seat", stale_seconds=300, cache_seconds=5,
+    )
+    fetcher = dashboard.FleetFetcher(config, client_factory=lambda *_a, **_k: Client())
+    digest = "a" * 64
+
+    result = asyncio.run(fetcher.save_config(valid_coordinator_config(), digest))
+
+    assert result["concurrency"] == "cas"
+    assert calls[0][0] == "board_state_update"
+    assert calls[0][1]["key"] == "coordinator_config"
+    assert calls[0][1]["expected_sha256"] == digest
+    assert json.loads(calls[0][1]["value"])["updated_by"] == "dashboard-seat"
+
+
+def test_config_hash_page_renders_all_knobs_and_sources() -> None:
+    assert 'href="#/config"' in dashboard.HTML
+    assert 'id="config-view"' in dashboard.HTML
+    assert "Mode changes require a restart." in dashboard.HTML
+    for field in (*dashboard.CONFIG_THRESHOLD_FIELDS, "integration_watch_since", "rate_per_hour"):
+        assert field in dashboard.HTML
+    assert "source:" in dashboard.HTML
