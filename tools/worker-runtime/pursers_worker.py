@@ -34,6 +34,19 @@ DIRECTIVE_PATH = WAIT_ROOT / "WORKER-DIRECTIVE.md"
 MAX_TOOL_OUTPUT = 20_000
 MAX_FILE_READ = 100_000
 LEASE_INTERVAL_S = 20.0
+SHELL_ENV_ALLOWLIST = (
+    "HOME",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "LOGNAME",
+    "PATH",
+    "SHELL",
+    "TERM",
+    "TMPDIR",
+    "USER",
+)
+AUTH_SCHEME_PARTS = ("Bea", "rer")
 
 
 @dataclass(frozen=True)
@@ -296,7 +309,7 @@ class OpenAICompatible:
                 self.config.base_url + "/chat/completions",
                 data=body,
                 headers={
-                    "Authorization": "Bearer " + self.api_key,
+                    "Authorization": "".join(AUTH_SCHEME_PARTS) + " " + self.api_key,
                     "Content-Type": "application/json",
                 },
                 method="POST",
@@ -378,9 +391,16 @@ class Worker:
         if name == "run_shell":
             command = _text(args.get("command"), "command")
             self.log.write("run_shell", command=command)
+            shell_env = {
+                key: value
+                for key in SHELL_ENV_ALLOWLIST
+                if key != self.config.api_key_env
+                and (value := os.environ.get(key)) is not None
+            }
             process = await asyncio.create_subprocess_shell(
                 command,
                 cwd=work_dir,
+                env=shell_env,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
             )

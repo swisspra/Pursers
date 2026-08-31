@@ -211,6 +211,43 @@ def test_path_escape_rejected_then_give_up_releases_claim() -> None:
         assert "PermissionError" in server.requests[1]["messages"][-1]["content"]
 
 
+def test_shell_cannot_inherit_configured_api_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret = "SYNTHETIC_API_KEY_MUST_NOT_ESCAPE"
+    monkeypatch.setenv("WORKER_TEST_KEY", secret)
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        work = root / "work"
+        work.mkdir()
+        board = FakeBoard()
+        with FakeLLMServer(
+            [
+                tool_call(
+                    "one",
+                    "run_shell",
+                    {"command": "printf '%s' \"$WORKER_TEST_KEY\""},
+                ),
+                tool_call("two", "give_up", {"reason": "probe complete"}),
+            ]
+        ) as server:
+            selected = config(root, server.url)
+            worker = worker_module.Worker(
+                selected,
+                board,
+                worker_module.OpenAICompatible(selected, secret),
+                worker_module.SessionLog(selected.log_file),
+                directive="STATIC",
+            )
+            asyncio.run(
+                worker.run_ticket("board-one", {"ticket_id": "TK-one"}, work)
+            )
+
+        tool_output = server.requests[1]["messages"][-1]["content"]
+        assert secret not in tool_output
+        assert secret not in selected.log_file.read_text()
+
+
 def test_max_iterations_releases_claim() -> None:
     class NoTools:
         async def complete(self, _messages: Any, _tools: Any) -> dict[str, Any]:
