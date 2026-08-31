@@ -5,6 +5,22 @@ All notable changes to Pursers are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [5.0.0a11] - 2026-08-31
+
+This release includes `pursers-personal==5.0.0a11`, `pursers==5.0.0a11`, and
+`pursers-central==0.1.0a17`.
+
+### Added
+
+- Coordinator phase 2: shadow-by-default dispatch writes — targeted nudges and
+  atomic force-assign at the escalation thresholds, with idempotency op-keys,
+  rate limits, a circuit breaker back to shadow, and full audit findings.
+- Central: atomic `ticket_assign` (open/unclaimed/expected-assignee
+  preconditions) and exact-recipient `coordinator_nudge` /
+  `coordinator_assignment` journal kinds.
+- Coordinator integration watch: `--integration-watch-since` watermark with
+  visible suppression counts and an `unverifiable-commit` classification.
+
 ## [5.0.0a10] - 2026-08-31
 
 This release includes `pursers-personal==5.0.0a10`, `pursers==5.0.0a10`,

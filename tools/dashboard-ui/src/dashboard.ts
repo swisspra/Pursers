@@ -200,7 +200,7 @@ const MAX_MAP_ENTRIES = 100;
 const MAX_SHORT_TEXT_LENGTH = 512;
 const MAX_LONG_TEXT_LENGTH = 4_096;
 const MAX_SERIALIZED_RESULT_LENGTH = 4_000_000;
-const app = new App({ name: "On Board Personal Preview", version: "5.0.0a10" });
+const app = new App({ name: "On Board Personal Preview", version: "5.0.0a11" });
 const byId = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 const refreshButton = byId<HTMLButtonElement>("refresh");
 const searchInput = byId<HTMLInputElement>("global-search");
