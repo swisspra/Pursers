@@ -62,6 +62,7 @@ class StrictFakeBackend:
             }
             for board in ("home", "board-one", "board-two")
         }
+        self.roles["board-two"] = {self.admin_principal: "admin"}
         self.agents = {
             "home": [
                 (self.admin_principal, "seat-admin", "active"),
@@ -695,6 +696,66 @@ class SeatAdminTests(unittest.TestCase):
         self.assertIn("protected-role", excluded["PR-reviewer"])
         self.assertIn("protected-role", excluded[backend.admin_principal])
         self.assertEqual(backend.calls, [])
+
+    def test_prune_commit_does_not_orphan_sessionless_membership(self) -> None:
+        backend = StrictFakeBackend()
+        backend.roles["board-two"]["PR-worker"] = "member"
+        backend.seats["seats"]["worker-a"] = {
+            "principal_id": "PR-worker",
+            "role": "worker",
+            "board_mode": "registry",
+        }
+
+        result = json.loads(
+            invoke(
+                backend,
+                "prune-stale",
+                "--older-than-days",
+                "30",
+                "--commit",
+            )
+        )
+
+        self.assertEqual(result["plan"], [])
+        worker = next(
+            item
+            for item in result["excluded"]
+            if item["principal_id"] == "PR-worker"
+        )
+        self.assertIn("missing-activity-evidence", worker["reasons"])
+        self.assertEqual(worker["missing_activity_boards"], ["board-two"])
+        self.assertEqual(backend.calls, [])
+        self.assertIn("PR-worker", backend.roles["home"])
+        self.assertIn("PR-worker", backend.roles["board-one"])
+        self.assertIn("PR-worker", backend.roles["board-two"])
+        self.assertIn("worker-a", backend.seats["seats"])
+
+    def test_prune_excludes_sessionless_reviewer_membership_with_zero_writes(
+        self,
+    ) -> None:
+        backend = StrictFakeBackend()
+        backend.roles["board-two"]["PR-worker"] = "reviewer"
+
+        result = json.loads(
+            invoke(
+                backend,
+                "prune-stale",
+                "--older-than-days",
+                "30",
+                "--commit",
+            )
+        )
+
+        worker = next(
+            item
+            for item in result["excluded"]
+            if item["principal_id"] == "PR-worker"
+        )
+        self.assertIn("protected-role", worker["reasons"])
+        self.assertIn("missing-activity-evidence", worker["reasons"])
+        self.assertEqual(worker["missing_activity_boards"], ["board-two"])
+        self.assertEqual(backend.calls, [])
+        self.assertEqual(backend.roles["board-two"]["PR-worker"], "reviewer")
 
     def test_prune_stale_commit_removes_and_verifies_worker_only(self) -> None:
         backend = StrictFakeBackend()

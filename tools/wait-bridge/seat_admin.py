@@ -399,6 +399,25 @@ async def _remove_and_verify(
     }
 
 
+async def _remaining_memberships(
+    backend: SeatBackend, boards: list[str], principals: set[str]
+) -> list[dict[str, str]]:
+    remaining: list[dict[str, str]] = []
+    for board_id in boards:
+        members = await backend.members(board_id)
+        for member in members.get("members", []):
+            principal_id = member.get("principal_id")
+            if principal_id in principals:
+                remaining.append(
+                    {
+                        "board_id": board_id,
+                        "principal_id": str(principal_id),
+                        "role": str(member.get("role", "unknown")),
+                    }
+                )
+    return remaining
+
+
 def _protected_names(values: list[str]) -> set[str]:
     protected: set[str] = set()
     for value in values:
@@ -688,9 +707,26 @@ async def _prune_stale(
     protected = _protected_names(args.protected)
     boards = _active_boards(registry, backend.home_board)
     rows, memberships, snapshots = await _inventory(backend, boards)
-    by_principal: dict[str, list[dict[str, Any]]] = {}
+    rows_by_principal: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
-        by_principal.setdefault(row["principal_id"], []).append(row)
+        rows_by_principal.setdefault(row["principal_id"], []).append(row)
+    memberships_by_principal: dict[str, list[dict[str, Any]]] = {}
+    for board_id, result in memberships.items():
+        for member in result.get("members", []):
+            principal_id = member.get("principal_id")
+            if not isinstance(principal_id, str):
+                continue
+            memberships_by_principal.setdefault(principal_id, []).append(
+                {
+                    "board_id": board_id,
+                    "role": str(member.get("role", "unknown")),
+                    "agent_names": [
+                        name
+                        for name in member.get("agent_names", [])
+                        if isinstance(name, str) and name
+                    ],
+                }
+            )
     durable_by_principal: dict[str, list[tuple[str, str]]] = {}
     for name, definition in seat_registry["seats"].items():
         durable_by_principal.setdefault(definition["principal_id"], []).append(
@@ -700,11 +736,20 @@ async def _prune_stale(
     cutoff = datetime.now(timezone.utc) - timedelta(days=args.older_than_days)
     plan: list[dict[str, Any]] = []
     excluded: list[dict[str, Any]] = []
-    for principal, principal_rows in sorted(by_principal.items()):
-        names = sorted({str(row["name"]) for row in principal_rows})
+    for principal, principal_memberships in sorted(
+        memberships_by_principal.items()
+    ):
+        principal_rows = rows_by_principal.get(principal, [])
+        names = sorted(
+            {
+                name
+                for membership in principal_memberships
+                for name in membership["agent_names"]
+            }
+        )
         durable = durable_by_principal.get(principal, [])
         all_names = sorted(set(names) | {name for name, _role in durable})
-        roles = {str(row["role"]) for row in principal_rows} | {
+        roles = {membership["role"] for membership in principal_memberships} | {
             role for _name, role in durable
         }
         reasons = []
@@ -712,6 +757,21 @@ async def _prune_stale(
             reasons.append("protected-role")
         if protected & set(all_names):
             reasons.append("protected-name")
+        missing_activity_boards = sorted(
+            membership["board_id"]
+            for membership in principal_memberships
+            if not membership["agent_names"]
+            or any(
+                not any(
+                    row["board_id"] == membership["board_id"]
+                    and row["name"] == name
+                    for row in principal_rows
+                )
+                for name in membership["agent_names"]
+            )
+        )
+        if missing_activity_boards:
+            reasons.append("missing-activity-evidence")
         observed = [_parse_time(row.get("last_seen")) for row in principal_rows]
         if any(value is None for value in observed):
             reasons.append("unknown-last-seen")
@@ -724,16 +784,12 @@ async def _prune_stale(
                     "principal_id": principal,
                     "names": all_names,
                     "reasons": sorted(set(reasons)),
+                    "missing_activity_boards": missing_activity_boards,
                 }
             )
             continue
         target_boards = sorted(
-            {
-                row["board_id"]
-                for row in principal_rows
-                if _member_role(memberships, row["board_id"], principal)
-                is not None
-            }
+            {membership["board_id"] for membership in principal_memberships}
         )
         plan.append(
             {
@@ -801,6 +857,18 @@ async def _prune_stale(
                     backend, board_id, item["principal_id"]
                 )
             )
+    remaining_memberships = await _remaining_memberships(
+        backend, boards, principals
+    )
+    if remaining_memberships:
+        listed = ", ".join(
+            f"{item['board_id']}/{item['principal_id']}"
+            for item in remaining_memberships
+        )
+        raise RegistryError(
+            "membership read-back remains after prune; preserving seat_registry: "
+            f"{listed}"
+        )
     updated_registry = json.loads(json.dumps(seat_registry))
     removed_definitions = sorted(
         name

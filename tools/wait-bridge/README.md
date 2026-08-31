@@ -202,8 +202,11 @@ both membership and agents projections before success is printed.
 `prune-stale` aggregates each principal's latest seat activity across every
 active registry board. It excludes reviewer/admin roles, names supplied by
 repeatable `--protect`/`--protected` flags (comma-separated names are accepted),
-unknown timestamps, and recent seats. Active claims are included in the plan
-as blockers and make `--commit` fail before any write. Dry-run is the default
+unknown timestamps, recent seats, and memberships without complete agent
+activity evidence on every board. Role aggregation and removal targets come
+from membership rows even when `agent_names` is empty. Active claims are
+included in the plan as blockers and make `--commit` fail before any write.
+Dry-run is the default
 and performs no membership or seat-registry writes; `--commit` executes the
 printed plan, verifies every board read-back, and removes matching durable seat
 definitions. Run live cleanup only with an operator admin token and only after
