@@ -120,12 +120,19 @@ def test_repeat_abandoner_first_snapshot_reports_unproven_window() -> None:
     findings, counters, history, uncertainty = coordinator.update_drop_evidence(
         "board-a", [ticket], {}, NOW
     )
-    assert history == []
+    assert history == [
+        {
+            "ticket_id": "TK-baseline",
+            "holder_agent_id": "AI-unknown-history",
+            "observed_at": ago(10),
+            "count": 1,
+        }
+    ]
     assert uncertainty == [
         {
             "ticket_id": "TK-baseline",
             "observed_at": NOW.isoformat(),
-            "count": 3,
+            "count": 2,
         }
     ]
     assert [item["kind"] for item in findings] == [
@@ -172,11 +179,11 @@ def test_baseline_two_then_three_keeps_incomplete_history() -> None:
     assert [item["kind"] for item in findings] == [
         "repeat-abandoner-history-incomplete"
     ]
-    assert len(history2) == 1 and history2[0]["count"] == 1
-    assert uncertainty2[0]["count"] == 2
+    assert len(history2) == 2 and all(item["count"] == 1 for item in history2)
+    assert uncertainty2[0]["count"] == 1
 
 
-def test_multi_count_delta_is_not_attributed_to_latest_holder() -> None:
+def test_multi_count_delta_attributes_only_latest_proven_drop() -> None:
     ticket = {
         "ticket_id": "TK-multi",
         "abandoned_count": 3,
@@ -186,8 +193,15 @@ def test_multi_count_delta_is_not_attributed_to_latest_holder() -> None:
     findings, _, history, uncertainty = coordinator.update_drop_evidence(
         "board-a", [ticket], {"drop_counters": {"TK-multi": 0}}, NOW
     )
-    assert history == []
-    assert uncertainty[0]["count"] == 3
+    assert history == [
+        {
+            "ticket_id": "TK-multi",
+            "holder_agent_id": "AI-latest-only",
+            "observed_at": ago(10),
+            "count": 1,
+        }
+    ]
+    assert uncertainty[0]["count"] == 2
     assert [item["kind"] for item in findings] == [
         "repeat-abandoner-history-incomplete"
     ]
@@ -214,6 +228,71 @@ def test_baseline_uncertainty_expires_after_full_observation_window() -> None:
     assert findings == []
     assert history == []
     assert uncertainty == []
+
+
+def test_three_baseline_one_tickets_repeat_same_seat() -> None:
+    tickets = [
+        {
+            "ticket_id": f"TK-one-{index}",
+            "abandoned_count": 1,
+            "last_abandoned_by": "AI-repeat",
+            "last_abandoned_at": ago(10 + index),
+        }
+        for index in range(3)
+    ]
+    findings, _, history, uncertainty = coordinator.update_drop_evidence(
+        "board-a", tickets, {}, NOW
+    )
+    assert uncertainty == []
+    assert len(history) == 3
+    repeats = [item for item in findings if item["kind"] == "repeat-abandoner"]
+    assert len(repeats) == 1
+    assert repeats[0]["holder_agent_id"] == "AI-repeat"
+    assert repeats[0]["dropped_claims"] == 3
+
+
+def test_uncertainty_aggregates_across_tickets_and_persists() -> None:
+    tickets = [
+        {
+            "ticket_id": "TK-unknown-two",
+            "abandoned_count": 3,
+            "last_abandoned_by": "AI-one-proven",
+            "last_abandoned_at": ago(10),
+        },
+        {
+            "ticket_id": "TK-another-exact",
+            "abandoned_count": 1,
+            "last_abandoned_by": "AI-other",
+            "last_abandoned_at": ago(20),
+        },
+    ]
+    findings, counters, history, uncertainty = coordinator.update_drop_evidence(
+        "board-a",
+        tickets,
+        {"drop_counters": {"TK-unknown-two": 0, "TK-another-exact": 0}},
+        NOW,
+    )
+    incomplete = [
+        item for item in findings if item["kind"] == "repeat-abandoner-history-incomplete"
+    ]
+    assert len(incomplete) == 1
+    assert incomplete[0]["unattributed_dropped_claims"] == 2
+    assert incomplete[0]["possible_dropped_claims"] == 3
+
+    findings2, _, _, uncertainty2 = coordinator.update_drop_evidence(
+        "board-a",
+        tickets,
+        {
+            "drop_counters": counters,
+            "drop_history": history,
+            "drop_uncertainty": uncertainty,
+        },
+        NOW + timedelta(seconds=60),
+    )
+    assert [item["kind"] for item in findings2] == [
+        "repeat-abandoner-history-incomplete"
+    ]
+    assert uncertainty2 == uncertainty
 
 
 def _git(path: Path, *args: str) -> str:

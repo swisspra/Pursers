@@ -370,9 +370,10 @@ def update_drop_evidence(
             drop_age is not None
             and drop_age <= thresholds.repeat_abandon_window_seconds
         )
-        if prior is not None and current > prior and is_recent:
-            delta = current - prior
-            if delta == 1 and holder:
+        delta = current if prior is None else max(0, current - prior)
+        if delta:
+            proven_latest = bool(holder and is_recent)
+            if proven_latest:
                 history.append(
                     {
                         "ticket_id": ticket_id,
@@ -381,22 +382,15 @@ def update_drop_evidence(
                         "count": 1,
                     }
                 )
-            else:
+            unattributed = delta - int(proven_latest)
+            if unattributed:
                 uncertainty.append(
                     {
                         "ticket_id": ticket_id,
                         "observed_at": now.isoformat(),
-                        "count": delta,
+                        "count": unattributed,
                     }
                 )
-        elif prior is None and current > 0:
-            uncertainty.append(
-                {
-                    "ticket_id": ticket_id,
-                    "observed_at": now.isoformat(),
-                    "count": current,
-                }
-            )
 
     # Deduplicate stable observations across cycles, then classify exact counts.
     unique = {
@@ -436,26 +430,22 @@ def update_drop_evidence(
                 )
             )
 
-    exact_by_ticket = Counter()
-    for entry in history:
-        exact_by_ticket[entry["ticket_id"]] += entry["count"]
-    uncertain_by_ticket = Counter()
-    for entry in uncertainty:
-        uncertain_by_ticket[entry["ticket_id"]] += entry["count"]
-    for ticket_id, unknown_count in sorted(uncertain_by_ticket.items()):
-        possible = unknown_count + exact_by_ticket[ticket_id]
-        if possible >= thresholds.repeat_abandon_count:
-            findings.append(
-                _finding(
-                    "repeat-abandoner-history-incomplete",
-                    "warn",
-                    board_id,
-                    "Unknown drop timing or attribution could reach the repeat threshold; keep the limitation until seven-day coverage is complete.",
-                    ticket_id=ticket_id,
-                    possible_dropped_claims=possible,
-                    observation_window_days=7,
-                )
+    unknown_count = sum(entry["count"] for entry in uncertainty)
+    max_proven_for_one_seat = max(counts.values(), default=0)
+    possible = unknown_count + max_proven_for_one_seat
+    if unknown_count and possible >= thresholds.repeat_abandon_count:
+        findings.append(
+            _finding(
+                "repeat-abandoner-history-incomplete",
+                "warn",
+                board_id,
+                "Unattributed drops combined with board-level seat evidence could reach the repeat threshold; keep the limitation until seven-day coverage is complete.",
+                unattributed_dropped_claims=unknown_count,
+                max_proven_for_one_seat=max_proven_for_one_seat,
+                possible_dropped_claims=possible,
+                observation_window_days=7,
             )
+        )
     return findings, counters, history, uncertainty
 
 
