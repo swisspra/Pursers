@@ -63,19 +63,17 @@ def test_stage_two_names_least_loaded_live_assignee() -> None:
     assert finding["would_assign_to_agent_id"] == "AI-free"
 
 
-def test_repeat_abandoner_counts_recent_drops_per_seat() -> None:
-    tickets = [
-        {
-            "ticket_id": f"TK-{index}",
-            "status": "open",
-            "created_at": ago(10),
-            "last_abandoned_by": "AI-repeat",
-            "last_abandoned_at": ago(index * 86_400),
-        }
-        for index in range(1, 4)
-    ]
-    findings = coordinator.ticket_findings(
-        "board-a", {"board": {}, "agents": [], "tickets": tickets}, NOW
+def test_repeat_abandoner_counts_three_recent_drops_on_one_ticket() -> None:
+    ticket = {
+        "ticket_id": "TK-repeat",
+        "status": "open",
+        "created_at": ago(10),
+        "abandoned_count": 3,
+        "last_abandoned_by": "AI-repeat",
+        "last_abandoned_at": ago(10),
+    }
+    findings, counters, history = coordinator.update_drop_evidence(
+        "board-a", [ticket], {"drop_counters": {"TK-repeat": 0}}, NOW
     )
     repeats = [item for item in findings if item["kind"] == "repeat-abandoner"]
     assert repeats == [
@@ -83,11 +81,36 @@ def test_repeat_abandoner_counts_recent_drops_per_seat() -> None:
             "kind": "repeat-abandoner",
             "level": "warn",
             "board_id": "board-a",
-            "message": "A seat reached the repeated dropped-claim threshold within the reporting window.",
+            "message": "A seat reached the repeated dropped-claim threshold within the proven reporting window.",
             "holder_agent_id": "AI-repeat",
             "dropped_claims": 3,
             "window_days": 7,
         }
+    ]
+    assert counters == {"TK-repeat": 3}
+    assert history == [
+        {
+            "ticket_id": "TK-repeat",
+            "holder_agent_id": "AI-repeat",
+            "observed_at": ago(10),
+            "count": 3,
+        }
+    ]
+
+
+def test_repeat_abandoner_first_snapshot_reports_unproven_window() -> None:
+    ticket = {
+        "ticket_id": "TK-baseline",
+        "abandoned_count": 3,
+        "last_abandoned_by": "AI-unknown-history",
+        "last_abandoned_at": ago(10),
+    }
+    findings, _, history = coordinator.update_drop_evidence(
+        "board-a", [ticket], {}, NOW
+    )
+    assert history == []
+    assert [item["kind"] for item in findings] == [
+        "repeat-abandoner-history-incomplete"
     ]
 
 
@@ -173,6 +196,35 @@ def test_findings_are_bounded_with_explicit_truncation() -> None:
     assert state["truncation"]["findings"] == 80 - len(state["findings"])
     assert len(rendered) <= 5_000
     assert all(len(json.dumps(item, sort_keys=True, separators=(",", ":"))) <= 500 for item in state["findings"])
+
+
+def test_critical_privacy_finding_survives_warning_bound_and_digest() -> None:
+    findings = [
+        {
+            "kind": "warning",
+            "level": "warn",
+            "board_id": "board-a",
+            "message": f"warning {index}",
+        }
+        for index in range(50)
+    ]
+    findings.append(
+        {
+            "kind": "privacy-leak-suspect",
+            "level": "critical",
+            "board_id": "board-a",
+            "message": "A public integration commit requires privacy review.",
+            "commit_hash": "abcdef123456",
+            "matched_file_count": 1,
+        }
+    )
+    state = coordinator.bound_findings_state(findings, NOW)
+
+    assert state["findings"][0]["kind"] == "privacy-leak-suspect"
+    assert state["truncation"]["findings"] >= 1
+    digest = coordinator.format_digest("daily", NOW, {"board-a": state})
+    assert "critical=1" in digest
+    assert "privacy-leak-suspect=1" in digest
 
 
 def test_digest_formatting_reports_bounds_and_retention() -> None:

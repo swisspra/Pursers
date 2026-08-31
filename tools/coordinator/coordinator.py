@@ -213,7 +213,6 @@ def ticket_findings(
     if not isinstance(claim_ttl_s, int) or isinstance(claim_ttl_s, bool) or claim_ttl_s <= 0:
         claim_ttl_s = 900
     findings: list[dict[str, Any]] = []
-    recent_drops: Counter[str] = Counter()
 
     for ticket in tickets:
         ticket_id = str(ticket.get("ticket_id", "unknown"))
@@ -254,30 +253,6 @@ def ticket_findings(
                     )
                 )
 
-        drop_time = ticket.get("last_abandoned_at") or ticket.get("last_unclaimed_at")
-        drop_age = age_seconds(drop_time, now)
-        drop_holder = ticket.get("last_abandoned_by") or ticket.get("last_claimed_by_agent_id")
-        if (
-            drop_holder
-            and drop_age is not None
-            and drop_age <= thresholds.repeat_abandon_window_seconds
-        ):
-            recent_drops[str(drop_holder)] += 1
-
-    for holder, count in sorted(recent_drops.items()):
-        if count >= thresholds.repeat_abandon_count:
-            findings.append(
-                _finding(
-                    "repeat-abandoner",
-                    "warn",
-                    board_id,
-                    "A seat reached the repeated dropped-claim threshold within the reporting window.",
-                    holder_agent_id=holder,
-                    dropped_claims=count,
-                    window_days=7,
-                )
-            )
-
     omitted = snapshot.get("omitted_counts") or snapshot.get("truncation_counts")
     if isinstance(omitted, Mapping) and any(isinstance(value, int) and value > 0 for value in omitted.values()):
         findings.append(
@@ -290,6 +265,134 @@ def ticket_findings(
             )
         )
     return findings
+
+
+def update_drop_evidence(
+    board_id: str,
+    tickets: Sequence[Mapping[str, Any]],
+    previous: Mapping[str, Any],
+    now: datetime,
+    thresholds: Thresholds = Thresholds(),
+) -> tuple[list[dict[str, Any]], dict[str, int], list[dict[str, Any]]]:
+    """Build a bounded seven-day delta history from durable abandon counters.
+
+    A first observation is only a baseline: a cumulative counter plus one latest
+    timestamp cannot prove when or by whom every older drop happened.  Later
+    increases are recorded as observed deltas, which lets repeated drops of one
+    ticket reach the exact threshold without inventing history.
+    """
+
+    raw_counters = previous.get("drop_counters", {})
+    old_counters = (
+        {
+            str(key): value
+            for key, value in raw_counters.items()
+            if isinstance(key, str)
+            and isinstance(value, int)
+            and not isinstance(value, bool)
+            and value >= 0
+        }
+        if isinstance(raw_counters, Mapping)
+        else {}
+    )
+    raw_history = previous.get("drop_history", [])
+    history: list[dict[str, Any]] = []
+    if isinstance(raw_history, list):
+        for entry in raw_history:
+            if not isinstance(entry, Mapping):
+                continue
+            entry_age = age_seconds(entry.get("observed_at"), now)
+            count = entry.get("count")
+            if (
+                entry_age is not None
+                and entry_age <= thresholds.repeat_abandon_window_seconds
+                and isinstance(count, int)
+                and not isinstance(count, bool)
+                and count > 0
+                and entry.get("holder_agent_id")
+            ):
+                history.append(
+                    {
+                        "ticket_id": str(entry.get("ticket_id", "unknown")),
+                        "holder_agent_id": str(entry["holder_agent_id"]),
+                        "observed_at": str(entry["observed_at"]),
+                        "count": count,
+                    }
+                )
+
+    findings: list[dict[str, Any]] = []
+    counters: dict[str, int] = {}
+    for ticket in tickets:
+        ticket_id = ticket.get("ticket_id")
+        current = ticket.get("abandoned_count", 0)
+        if (
+            not isinstance(ticket_id, str)
+            or not isinstance(current, int)
+            or isinstance(current, bool)
+            or current < 0
+        ):
+            continue
+        counters[ticket_id] = current
+        prior = old_counters.get(ticket_id)
+        drop_at = ticket.get("last_abandoned_at")
+        holder = ticket.get("last_abandoned_by")
+        drop_age = age_seconds(drop_at, now)
+        is_recent = (
+            drop_age is not None
+            and drop_age <= thresholds.repeat_abandon_window_seconds
+        )
+        if prior is not None and current > prior and holder and is_recent:
+            history.append(
+                {
+                    "ticket_id": ticket_id,
+                    "holder_agent_id": str(holder),
+                    "observed_at": str(drop_at),
+                    "count": current - prior,
+                }
+            )
+        elif prior is None and current >= thresholds.repeat_abandon_count and is_recent:
+            findings.append(
+                _finding(
+                    "repeat-abandoner-history-incomplete",
+                    "warn",
+                    board_id,
+                    "A cumulative drop count reached the threshold, but the seven-day window cannot be proven from the first snapshot.",
+                    ticket_id=ticket_id,
+                    cumulative_dropped_claims=current,
+                )
+            )
+
+    # Deduplicate stable observations across cycles, then classify exact counts.
+    unique = {
+        (
+            item["ticket_id"],
+            item["holder_agent_id"],
+            item["observed_at"],
+            item["count"],
+        ): item
+        for item in history
+    }
+    history = sorted(
+        unique.values(),
+        key=lambda item: (item["observed_at"], item["ticket_id"], item["holder_agent_id"]),
+    )
+    counts = Counter()
+    for entry in history:
+        counts[entry["holder_agent_id"]] += entry["count"]
+    for holder, count in sorted(counts.items()):
+        if count >= thresholds.repeat_abandon_count:
+            findings.append(
+                _finding(
+                    "repeat-abandoner",
+                    "warn",
+                    board_id,
+                    "A seat reached the repeated dropped-claim threshold within the proven reporting window.",
+                    holder_agent_id=holder,
+                    dropped_claims=count,
+                    window_days=7,
+                )
+            )
+    return findings, counters, history
 
 
 def _git(
@@ -520,17 +623,44 @@ def _bounded_finding(item: Mapping[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _finding_sort_key(item: Mapping[str, Any]) -> tuple[Any, ...]:
+    severity = {"critical": 0, "warn": 1, "info": 2}
+    operational = {
+        "privacy-leak-suspect": 0,
+        "privacy-scan-unavailable": 1,
+        "claim-health": 2,
+        "starved": 3,
+        "repeat-abandoner": 4,
+        "closed-but-unmerged": 5,
+    }
+    return (
+        severity.get(str(item.get("level")), 9),
+        operational.get(str(item.get("kind")), 50),
+        str(item.get("board_id", "")),
+        str(item.get("ticket_id", "")),
+        str(item.get("commit_hash", "")),
+        str(item.get("kind", "")),
+        str(item.get("message", "")),
+    )
+
+
 def bound_findings_state(
     findings: Sequence[Mapping[str, Any]],
     generated_at: datetime,
     *,
     privacy_watermarks: Mapping[str, str] | None = None,
+    drop_counters: Mapping[str, int] | None = None,
+    drop_history: Sequence[Mapping[str, Any]] | None = None,
     max_findings: int = MAX_FINDINGS,
     max_chars: int = MAX_STATE_CHARS - 200,
 ) -> dict[str, Any]:
-    normalized = [_bounded_finding(item) for item in findings]
+    normalized = sorted(
+        (_bounded_finding(item) for item in findings), key=_finding_sort_key
+    )
     selected: list[dict[str, Any]] = []
     source_watermarks = dict(privacy_watermarks or {})
+    source_counters = dict(drop_counters or {})
+    source_history = [dict(item) for item in (drop_history or [])]
     base = {
         "schema_version": SCHEMA_VERSION,
         "generated_at": generated_at.isoformat(),
@@ -538,9 +668,55 @@ def bound_findings_state(
         "truncation": {
             "findings": len(normalized),
             "privacy_watermarks": len(source_watermarks),
+            "drop_counters": len(source_counters),
+            "drop_history": len(source_history),
         },
         "privacy_watermarks": {},
+        "drop_counters": {},
+        "drop_history": [],
     }
+    critical = [item for item in normalized if item.get("level") == "critical"]
+    remaining = [item for item in normalized if item.get("level") != "critical"]
+
+    def add_findings(rows: Sequence[dict[str, Any]]) -> None:
+        for item in rows:
+            if len(selected) >= max_findings:
+                break
+            selected.append(item)
+            base["truncation"]["findings"] = len(normalized) - len(selected)
+            if len(json.dumps(base, sort_keys=True, separators=(",", ":"))) > max_chars:
+                selected.pop()
+                base["truncation"]["findings"] = len(normalized) - len(selected)
+                break
+
+    # Critical alerts get first claim on the payload.  Delta evidence is then
+    # reserved before warnings so reporting volume cannot erase history.
+    add_findings(critical)
+    for item in sorted(
+        source_history,
+        key=lambda entry: (
+            str(entry.get("observed_at", "")),
+            str(entry.get("ticket_id", "")),
+        ),
+        reverse=True,
+    ):
+        base["drop_history"].append(item)
+        base["truncation"]["drop_history"] = (
+            len(source_history) - len(base["drop_history"])
+        )
+        if len(json.dumps(base, sort_keys=True, separators=(",", ":"))) > max_chars:
+            base["drop_history"].pop()
+            base["truncation"]["drop_history"] += 1
+            break
+    for key in sorted(source_counters):
+        base["drop_counters"][key] = source_counters[key]
+        base["truncation"]["drop_counters"] = (
+            len(source_counters) - len(base["drop_counters"])
+        )
+        if len(json.dumps(base, sort_keys=True, separators=(",", ":"))) > max_chars:
+            base["drop_counters"].pop(key)
+            base["truncation"]["drop_counters"] += 1
+            break
     for key in sorted(source_watermarks):
         base["privacy_watermarks"][key] = source_watermarks[key]
         base["truncation"]["privacy_watermarks"] = (
@@ -550,13 +726,7 @@ def bound_findings_state(
             base["privacy_watermarks"].pop(key)
             base["truncation"]["privacy_watermarks"] += 1
             break
-    for item in normalized[:max_findings]:
-        selected.append(item)
-        base["truncation"]["findings"] = len(normalized) - len(selected)
-        if len(json.dumps(base, sort_keys=True, separators=(",", ":"))) > max_chars:
-            selected.pop()
-            base["truncation"]["findings"] = len(normalized) - len(selected)
-            break
+    add_findings(remaining)
     return base
 
 
@@ -600,16 +770,15 @@ class RawReader:
     async def __aenter__(self) -> "RawReader":
         from mcp import Client
         from mcp.client.streamable_http import streamable_http_client
-        from pursers_client.client import BoardClient, httpx2
+        from pursers_client.client import BoardClient
 
         self._decode = BoardClient._decode
         self._stack = AsyncExitStack()
+        # Reuse the verified client's secret-bearing HTTP construction without
+        # entering BoardClient itself; entering it would join/mutate a seat.
+        transport_owner = BoardClient(self.url, self._token, "read-only")
         http = await self._stack.enter_async_context(
-            httpx2.AsyncClient(
-                headers={"Authorization": f"Bearer {self._token}"},
-                timeout=httpx2.Timeout(10.0, read=30.0),
-                trust_env=False,
-            )
+            transport_owner._http()  # noqa: SLF001 - intentional non-joining path.
         )
         transport = streamable_http_client(self.url, http_client=http)
         self._client = await self._stack.enter_async_context(Client(transport, mode="2026-07-28", cache=None))
@@ -662,8 +831,19 @@ def analyze_cycle(
 ) -> dict[str, dict[str, Any]]:
     findings_by_board: dict[str, list[dict[str, Any]]] = {}
     watermarks_by_board: dict[str, dict[str, str]] = {}
+    drop_counters_by_board: dict[str, dict[str, int]] = {}
+    drop_history_by_board: dict[str, list[dict[str, Any]]] = {}
     for board_id, snapshot in snapshots.items():
         findings_by_board[board_id] = ticket_findings(board_id, snapshot, now)
+        tickets = [
+            row for row in snapshot.get("tickets", []) if isinstance(row, Mapping)
+        ]
+        drop_findings, counters, history = update_drop_evidence(
+            board_id, tickets, previous.get(board_id, {}), now
+        )
+        findings_by_board[board_id].extend(drop_findings)
+        drop_counters_by_board[board_id] = counters
+        drop_history_by_board[board_id] = history
         prior_marks = previous.get(board_id, {}).get("privacy_watermarks", {})
         watermarks_by_board[board_id] = dict(prior_marks) if isinstance(prior_marks, Mapping) else {}
     for project in projects:
@@ -693,6 +873,8 @@ def analyze_cycle(
             findings,
             now,
             privacy_watermarks=watermarks_by_board[board_id],
+            drop_counters=drop_counters_by_board[board_id],
+            drop_history=drop_history_by_board[board_id],
         )
         for board_id, findings in findings_by_board.items()
     }
