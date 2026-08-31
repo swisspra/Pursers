@@ -221,7 +221,8 @@ class SeatAdminTests(unittest.TestCase):
                     (
                         "from importlib.metadata import version; "
                         "import registry_admin, registry_doctor, seat_admin; "
-                        "assert version('pursers-client') == '0.1.0a12'; "
+                        "assert version('pursers-wait-bridge') == '0.1.0a4'; "
+                        "assert version('pursers-client') == '0.1.0a13'; "
                         "assert version('mcp') == '2.1.1'; "
                         "assert hasattr(registry_doctor.LiveBackend, 'board_snapshot'); "
                         "assert hasattr(seat_admin.SeatBoardClient, 'board_member_add'); "

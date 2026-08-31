@@ -5,11 +5,11 @@ import importlib.util
 import json
 import subprocess
 import sys
+import tempfile
+import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
-
-import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -32,7 +32,9 @@ def stamp(seconds_ago: int) -> str:
     return (NOW - timedelta(seconds=seconds_ago)).isoformat()
 
 
-def completed(returncode: int = 0, stdout: str = "true\n") -> subprocess.CompletedProcess[str]:
+def completed(
+    returncode: int = 0, stdout: str = "true\n"
+) -> subprocess.CompletedProcess[str]:
     return subprocess.CompletedProcess(["git"], returncode, stdout, "")
 
 
@@ -104,7 +106,7 @@ def fresh_stats(path: Path) -> Path:
 
 def run_report(
     backend: FakeBackend,
-    tmp_path: Path,
+    root: Path,
     *,
     git_runner: doctor.GitRunner | None = None,
     stats_path: Path | None = None,
@@ -115,7 +117,7 @@ def run_report(
             home_board="home",
             token=TOKEN,
             now=NOW,
-            stats_path=stats_path or fresh_stats(tmp_path / "stats.json"),
+            stats_path=stats_path or fresh_stats(root / "stats.json"),
             git_runner=git_runner or (lambda _path, _args: completed()),
         )
     )
@@ -125,239 +127,268 @@ def rows(report: dict[str, Any]) -> dict[str, dict[str, str]]:
     return {item["check"]: item for item in report["checks"]}
 
 
-def test_all_checks_pass_with_bounded_read_only_calls(tmp_path: Path) -> None:
-    backend = FakeBackend(tmp_path)
+class RegistryDoctorTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
 
-    report = run_report(backend, tmp_path)
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
 
-    assert report["overall"] == "PASS"
-    assert report["exit_code"] == 0
-    assert all(item["status"] == "PASS" for item in report["checks"])
-    assert {call[0] for call in backend.calls} <= {
-        "board_status",
-        "board_snapshot",
-        "board_state_get",
-    }
+    def backend(self) -> FakeBackend:
+        return FakeBackend(self.root)
 
-
-def test_central_and_registry_failures_are_fail(tmp_path: Path) -> None:
-    backend = FakeBackend(tmp_path)
-    backend.status_errors["home"] = PermissionError(f"denied {TOKEN}")
-    backend.registry = {"schema_version": 1, "projects": []}
-
-    report = run_report(backend, tmp_path)
-    checks = rows(report)
-
-    assert checks["central"]["status"] == "FAIL"
-    assert checks["registry"]["status"] == "FAIL"
-    assert report["exit_code"] == 2
-
-
-def test_project_workdir_git_and_ref_matrix(tmp_path: Path) -> None:
-    missing = FakeBackend(tmp_path)
-    missing.registry["projects"]["alpha"]["work_dir"] = str(tmp_path / "missing")
-    assert rows(run_report(missing, tmp_path))["project:alpha"]["status"] == "FAIL"
-
-    non_git = FakeBackend(tmp_path)
-    non_git.registry["projects"]["alpha"]["git_repo"] = False
-
-    def must_not_run(_path: Path, _arguments: Any) -> Any:
-        raise AssertionError("explicit non-git project must not run git")
-
-    explicit = run_report(non_git, tmp_path, git_runner=must_not_run)
-    assert rows(explicit)["project:alpha"]["status"] == "PASS"
-
-    bad_ref = FakeBackend(tmp_path)
-
-    def fail_ref(_path: Path, arguments: Any) -> subprocess.CompletedProcess[str]:
-        return completed(1, "") if "--verify" in arguments else completed()
-
-    unresolved = run_report(bad_ref, tmp_path, git_runner=fail_ref)
-    assert rows(unresolved)["project:alpha"]["status"] == "FAIL"
-    assert "not resolvable" in rows(unresolved)["project:alpha"]["detail"]
-
-
-def test_board_access_and_snapshot_failures_are_fail(tmp_path: Path) -> None:
-    backend = FakeBackend(tmp_path)
-    backend.status_errors["alpha-board"] = ConnectionError("offline")
-    backend.snapshot_errors["alpha-board"] = TimeoutError("slow")
-
-    checks = rows(run_report(backend, tmp_path))
-
-    assert checks["board:alpha-board"]["status"] == "FAIL"
-    assert checks["snapshot:alpha-board"]["status"] == "FAIL"
-
-
-def test_snapshot_truncation_is_warn_with_counts(tmp_path: Path) -> None:
-    backend = FakeBackend(tmp_path)
-    backend.snapshots["alpha-board"]["truncated"] = True
-    backend.snapshots["alpha-board"]["omitted_counts"] = {
-        "agents": 2,
-        "tickets": 3,
-    }
-
-    checks = rows(run_report(backend, tmp_path))
-    check = checks["snapshot:alpha-board"]
-
-    assert check["status"] == "WARN"
-    assert "agents=2" in check["detail"]
-    assert "tickets=3" in check["detail"]
-    assert checks["seats"]["status"] == "WARN"
-    assert "scan incomplete" in checks["seats"]["detail"]
-    assert checks["claims"]["status"] == "WARN"
-    assert checks["review-backlog"]["status"] == "WARN"
-
-
-def test_seat_duplicates_and_staleness_are_warn(tmp_path: Path) -> None:
-    backend = FakeBackend(tmp_path)
-    backend.snapshots["home"]["agents"] = [
-        {
-            "agent_name": "pool-worker",
-            "principal_id": "PR-one",
-            "last_activity_at": stamp(301),
-        }
-    ]
-    backend.snapshots["alpha-board"]["agents"] = [
-        {
-            "agent_name": "pool-worker",
-            "principal_id": "PR-two",
-            "last_activity_at": stamp(10),
-        }
-    ]
-
-    check = rows(run_report(backend, tmp_path))["seats"]
-
-    assert check["status"] == "WARN"
-    assert "duplicate names" in check["detail"]
-    assert "stale seats" in check["detail"]
-
-
-def test_expired_claim_and_review_backlog_are_warn(tmp_path: Path) -> None:
-    backend = FakeBackend(tmp_path)
-    backend.snapshots["alpha-board"]["tickets"] = [
-        {
-            "ticket_id": "TK-expired",
-            "status": "claimed",
-            "lease_expires_at": stamp(1),
-        },
-        {
-            "ticket_id": "TK-review",
-            "status": "submitted",
-            "submitted_at": stamp(1_801),
-        },
-    ]
-
-    checks = rows(run_report(backend, tmp_path))
-
-    assert checks["claims"]["status"] == "WARN"
-    assert "TK-expired" in checks["claims"]["detail"]
-    assert checks["review-backlog"]["status"] == "WARN"
-    assert "TK-review" in checks["review-backlog"]["detail"]
-
-
-@pytest.mark.parametrize(
-    ("coordinator", "expected"),
-    [
-        ({"generated_at": stamp(301)}, "WARN"),
-        ({"findings": []}, "WARN"),
-        ({"generated_at": stamp(300)}, "PASS"),
-    ],
-)
-def test_coordinator_freshness_matrix(
-    tmp_path: Path, coordinator: dict[str, Any], expected: str
-) -> None:
-    backend = FakeBackend(tmp_path)
-    backend.coordinator = coordinator
-
-    check = rows(run_report(backend, tmp_path))["coordinator"]
-
-    assert check["status"] == expected
-    if coordinator.get("generated_at") == stamp(301):
-        assert "coordinator may be down" in check["detail"]
-
-
-@pytest.mark.parametrize("mode", ["missing", "malformed", "stale"])
-def test_bridge_stats_warn_matrix(tmp_path: Path, mode: str) -> None:
-    backend = FakeBackend(tmp_path)
-    path = tmp_path / f"{mode}.json"
-    if mode == "malformed":
-        path.write_text("not-json", encoding="utf-8")
-    elif mode == "stale":
-        path.write_text(
-            json.dumps({"schema_version": 1, "days": {"2030-01-07": {}}}),
-            encoding="utf-8",
+    def report(
+        self,
+        backend: FakeBackend,
+        *,
+        git_runner: doctor.GitRunner | None = None,
+        stats_path: Path | None = None,
+    ) -> dict[str, Any]:
+        return run_report(
+            backend,
+            self.root,
+            git_runner=git_runner,
+            stats_path=stats_path,
         )
 
-    check = rows(run_report(backend, tmp_path, stats_path=path))["bridge-stats"]
+    def test_all_checks_pass_with_bounded_read_only_calls(self) -> None:
+        backend = self.backend()
 
-    assert check["status"] == "WARN"
+        report = self.report(backend)
 
+        self.assertEqual(report["overall"], "PASS")
+        self.assertEqual(report["exit_code"], 0)
+        self.assertTrue(
+            all(item["status"] == "PASS" for item in report["checks"])
+        )
+        self.assertLessEqual(
+            {call[0] for call in backend.calls},
+            {"board_status", "board_snapshot", "board_state_get"},
+        )
 
-def test_exit_code_aggregates_worst_status() -> None:
-    checks = [
-        doctor.Check("PASS", "a", "ok"),
-        doctor.Check("WARN", "b", "warning"),
-    ]
-    assert doctor.report_document(checks, NOW)["exit_code"] == 1
-    checks.append(doctor.Check("FAIL", "c", "failure"))
-    assert doctor.report_document(checks, NOW)["exit_code"] == 2
+    def test_central_and_registry_failures_are_fail(self) -> None:
+        backend = self.backend()
+        backend.status_errors["home"] = PermissionError(f"denied {TOKEN}")
+        backend.registry = {"schema_version": 1, "projects": []}
 
+        report = self.report(backend)
+        checks = rows(report)
 
-def test_credential_never_appears_in_human_or_json_output(tmp_path: Path) -> None:
-    backend = FakeBackend(tmp_path)
-    backend.status_errors["home"] = PermissionError(f"auth failed for {TOKEN}")
-    backend.snapshot_errors["home"] = RuntimeError(f"transport used {TOKEN}")
+        self.assertEqual(checks["central"]["status"], "FAIL")
+        self.assertEqual(checks["registry"]["status"], "FAIL")
+        self.assertEqual(report["exit_code"], 2)
 
-    report = run_report(backend, tmp_path)
-    human = doctor.render_human(report)
-    machine = json.dumps(report)
+    def test_project_workdir_git_and_ref_matrix(self) -> None:
+        missing = self.backend()
+        missing.registry["projects"]["alpha"]["work_dir"] = str(
+            self.root / "missing"
+        )
+        self.assertEqual(
+            rows(self.report(missing))["project:alpha"]["status"], "FAIL"
+        )
 
-    assert TOKEN not in human
-    assert TOKEN not in machine
-    assert all(len(item["detail"]) <= doctor.MAX_DETAIL_CHARS for item in report["checks"])
+        non_git = self.backend()
+        non_git.registry["projects"]["alpha"]["git_repo"] = False
 
+        def must_not_run(_path: Path, _arguments: Any) -> Any:
+            raise AssertionError("explicit non-git project must not run git")
 
-def test_live_backend_uses_bounded_snapshot_and_has_no_write_surface() -> None:
-    calls: list[tuple[Any, ...]] = []
+        explicit = self.report(non_git, git_runner=must_not_run)
+        self.assertEqual(rows(explicit)["project:alpha"]["status"], "PASS")
 
-    class Client:
-        def __init__(
-            self, _url: str, _token: str, board_id: str, *, agent_name: str
-        ) -> None:
-            self.board_id = board_id
+        bad_ref = self.backend()
 
-        async def __aenter__(self) -> "Client":
-            return self
+        def fail_ref(
+            _path: Path, arguments: Any
+        ) -> subprocess.CompletedProcess[str]:
+            return completed(1, "") if "--verify" in arguments else completed()
 
-        async def __aexit__(self, *_args: Any) -> None:
-            return None
+        unresolved = self.report(bad_ref, git_runner=fail_ref)
+        self.assertEqual(rows(unresolved)["project:alpha"]["status"], "FAIL")
+        self.assertIn("not resolvable", rows(unresolved)["project:alpha"]["detail"])
 
-        async def board_snapshot(self, **kwargs: Any) -> dict[str, Any]:
-            calls.append(("snapshot", self.board_id, kwargs))
-            return {}
+    def test_board_access_and_snapshot_failures_are_fail(self) -> None:
+        backend = self.backend()
+        backend.status_errors["alpha-board"] = ConnectionError("offline")
+        backend.snapshot_errors["alpha-board"] = TimeoutError("slow")
 
-    backend = doctor.LiveBackend("https://board.invalid", TOKEN, "doctor", Client)
-    asyncio.run(backend.board_snapshot("alpha"))
+        checks = rows(self.report(backend))
 
-    assert calls == [
-        (
-            "snapshot",
-            "alpha",
+        self.assertEqual(checks["board:alpha-board"]["status"], "FAIL")
+        self.assertEqual(checks["snapshot:alpha-board"]["status"], "FAIL")
+
+    def test_snapshot_truncation_is_warn_with_counts(self) -> None:
+        backend = self.backend()
+        backend.snapshots["alpha-board"]["truncated"] = True
+        backend.snapshots["alpha-board"]["omitted_counts"] = {
+            "agents": 2,
+            "tickets": 3,
+        }
+
+        checks = rows(self.report(backend))
+        check = checks["snapshot:alpha-board"]
+
+        self.assertEqual(check["status"], "WARN")
+        self.assertIn("agents=2", check["detail"])
+        self.assertIn("tickets=3", check["detail"])
+        self.assertEqual(checks["seats"]["status"], "WARN")
+        self.assertIn("scan incomplete", checks["seats"]["detail"])
+        self.assertEqual(checks["claims"]["status"], "WARN")
+        self.assertEqual(checks["review-backlog"]["status"], "WARN")
+
+    def test_seat_duplicates_and_staleness_are_warn(self) -> None:
+        backend = self.backend()
+        backend.snapshots["home"]["agents"] = [
             {
-                "limit": doctor.SNAPSHOT_LIMIT,
-                "max_bytes": doctor.SNAPSHOT_MAX_BYTES,
+                "agent_name": "pool-worker",
+                "principal_id": "PR-one",
+                "last_activity_at": stamp(301),
+            }
+        ]
+        backend.snapshots["alpha-board"]["agents"] = [
+            {
+                "agent_name": "pool-worker",
+                "principal_id": "PR-two",
+                "last_activity_at": stamp(10),
+            }
+        ]
+
+        check = rows(self.report(backend))["seats"]
+
+        self.assertEqual(check["status"], "WARN")
+        self.assertIn("duplicate names", check["detail"])
+        self.assertIn("stale seats", check["detail"])
+
+    def test_expired_claim_and_review_backlog_are_warn(self) -> None:
+        backend = self.backend()
+        backend.snapshots["alpha-board"]["tickets"] = [
+            {
+                "ticket_id": "TK-expired",
+                "status": "claimed",
+                "lease_expires_at": stamp(1),
             },
+            {
+                "ticket_id": "TK-review",
+                "status": "submitted",
+                "submitted_at": stamp(1_801),
+            },
+        ]
+
+        checks = rows(self.report(backend))
+
+        self.assertEqual(checks["claims"]["status"], "WARN")
+        self.assertIn("TK-expired", checks["claims"]["detail"])
+        self.assertEqual(checks["review-backlog"]["status"], "WARN")
+        self.assertIn("TK-review", checks["review-backlog"]["detail"])
+
+    def test_coordinator_freshness_matrix(self) -> None:
+        cases = (
+            ({"generated_at": stamp(301)}, "WARN", "coordinator may be down"),
+            ({"findings": []}, "WARN", "unavailable"),
+            ({"generated_at": stamp(300)}, "PASS", "age=300s"),
         )
-    ]
-    assert not hasattr(backend, "board_state_update")
+        for coordinator, expected, detail in cases:
+            with self.subTest(coordinator=coordinator):
+                backend = self.backend()
+                backend.coordinator = coordinator
+                check = rows(self.report(backend))["coordinator"]
+                self.assertEqual(check["status"], expected)
+                self.assertIn(detail, check["detail"])
+
+    def test_bridge_stats_warn_matrix(self) -> None:
+        for mode in ("missing", "malformed", "stale"):
+            with self.subTest(mode=mode):
+                backend = self.backend()
+                path = self.root / f"{mode}.json"
+                if mode == "malformed":
+                    path.write_text("not-json", encoding="utf-8")
+                elif mode == "stale":
+                    path.write_text(
+                        json.dumps(
+                            {"schema_version": 1, "days": {"2030-01-07": {}}}
+                        ),
+                        encoding="utf-8",
+                    )
+                check = rows(self.report(backend, stats_path=path))["bridge-stats"]
+                self.assertEqual(check["status"], "WARN")
+
+    def test_exit_code_aggregates_worst_status(self) -> None:
+        checks = [
+            doctor.Check("PASS", "a", "ok"),
+            doctor.Check("WARN", "b", "warning"),
+        ]
+        self.assertEqual(doctor.report_document(checks, NOW)["exit_code"], 1)
+        checks.append(doctor.Check("FAIL", "c", "failure"))
+        self.assertEqual(doctor.report_document(checks, NOW)["exit_code"], 2)
+
+    def test_credential_never_appears_in_human_or_json_output(self) -> None:
+        backend = self.backend()
+        backend.status_errors["home"] = PermissionError(f"auth failed for {TOKEN}")
+        backend.snapshot_errors["home"] = RuntimeError(f"transport used {TOKEN}")
+
+        report = self.report(backend)
+        human = doctor.render_human(report)
+        machine = json.dumps(report)
+
+        self.assertNotIn(TOKEN, human)
+        self.assertNotIn(TOKEN, machine)
+        self.assertTrue(
+            all(
+                len(item["detail"]) <= doctor.MAX_DETAIL_CHARS
+                for item in report["checks"]
+            )
+        )
+
+    def test_live_backend_uses_bounded_snapshot_and_has_no_write_surface(self) -> None:
+        calls: list[tuple[Any, ...]] = []
+
+        class Client:
+            def __init__(
+                self, _url: str, _token: str, board_id: str, *, agent_name: str
+            ) -> None:
+                self.board_id = board_id
+
+            async def __aenter__(self) -> "Client":
+                return self
+
+            async def __aexit__(self, *_args: Any) -> None:
+                return None
+
+            async def board_snapshot(self, **kwargs: Any) -> dict[str, Any]:
+                calls.append(("snapshot", self.board_id, kwargs))
+                return {}
+
+        backend = doctor.LiveBackend("https://board.invalid", TOKEN, "doctor", Client)
+        asyncio.run(backend.board_snapshot("alpha"))
+
+        self.assertEqual(
+            calls,
+            [
+                (
+                    "snapshot",
+                    "alpha",
+                    {
+                        "limit": doctor.SNAPSHOT_LIMIT,
+                        "max_bytes": doctor.SNAPSHOT_MAX_BYTES,
+                    },
+                )
+            ],
+        )
+        self.assertFalse(hasattr(backend, "board_state_update"))
+
+    def test_cli_defaults_and_positive_threshold_validation(self) -> None:
+        token_path = self.root / "token"
+        token_path.write_text("placeholder", encoding="utf-8")
+        args = doctor.build_parser().parse_args(
+            ["--token-path", str(token_path), "--json"]
+        )
+        self.assertEqual(args.review_backlog_seconds, 1_800)
+        self.assertTrue(args.json_output)
+        args.review_backlog_seconds = 0
+        with self.assertRaisesRegex(doctor.DoctorError, "positive"):
+            asyncio.run(doctor.run(args))
 
 
-def test_cli_defaults_and_positive_threshold_validation(tmp_path: Path) -> None:
-    token_path = tmp_path / "token"
-    token_path.write_text("placeholder", encoding="utf-8")
-    args = doctor.build_parser().parse_args(["--token-path", str(token_path), "--json"])
-    assert args.review_backlog_seconds == 1_800
-    assert args.json_output is True
-    args.review_backlog_seconds = 0
-    with pytest.raises(doctor.DoctorError, match="positive"):
-        asyncio.run(doctor.run(args))
+if __name__ == "__main__":
+    unittest.main()
