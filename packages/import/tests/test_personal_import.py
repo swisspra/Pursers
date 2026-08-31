@@ -10,6 +10,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -696,7 +697,7 @@ def run_crash_worker(
     environment.pop("PYTHONPATH", None)
     return subprocess.run(
         command,
-        cwd="/private/tmp",
+        cwd=tempfile.gettempdir(),
         env=environment,
         capture_output=True,
         text=True,
@@ -2004,7 +2005,7 @@ def test_cli_success_and_errors_never_emit_paths_or_input_secrets(
             str(run),
             "--confirm-central-stopped",
         ],
-        cwd="/private/tmp",
+        cwd=tempfile.gettempdir(),
         env=environment,
         capture_output=True,
         text=True,
@@ -2024,7 +2025,7 @@ def test_cli_success_and_errors_never_emit_paths_or_input_secrets(
             "--unknown-secret",
             "/Users/private-account/Bearer-SECRET-INPUT-VALUE",
         ],
-        cwd="/private/tmp",
+        cwd=tempfile.gettempdir(),
         env=environment,
         capture_output=True,
         text=True,
@@ -2060,7 +2061,7 @@ def test_cli_success_and_errors_never_emit_paths_or_input_secrets(
             str(stable),
             "--confirm-central-stopped",
         ],
-        cwd="/private/tmp",
+        cwd=tempfile.gettempdir(),
         env=environment,
         capture_output=True,
         text=True,
@@ -2091,7 +2092,7 @@ def test_cli_success_and_errors_never_emit_paths_or_input_secrets(
             str(run),
             "--confirm-central-stopped",
         ],
-        cwd="/private/tmp",
+        cwd=tempfile.gettempdir(),
         env=environment,
         capture_output=True,
         text=True,
