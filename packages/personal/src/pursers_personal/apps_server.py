@@ -40,12 +40,17 @@ FLEET_SNAPSHOT_LIMIT = 500
 FLEET_SNAPSHOT_MAX_BYTES = 250_000
 FLEET_RESPONSE_MAX_BYTES = 250_000
 FLEET_CLAIM_STATES = frozenset({"claimed", "in_progress", "creating_report"})
+LINK_SCHEMA_VERSION = 1
+LINK_MEMORY_LIMIT = 200
+LINK_EDGE_LIMIT = 1_000
+LINK_VALUE_MAX_LENGTH = 1_000
+LINK_RESPONSE_MAX_BYTES = 250_000
 UI_URI = "ui://pursers/dashboard"
 MODEL_AND_APP = ["model", "app"]
 MODEL_ONLY = ["model"]
 APP_ONLY = ["app"]
 PRIMARY_UI_TOOL_NAMES = frozenset(
-    {"board_snapshot", "board_event_feed", "fleet_snapshot"}
+    {"board_snapshot", "board_event_feed", "fleet_snapshot", "link_snapshot"}
 )
 CHAT_TOOL_NAMES = frozenset(
     {
@@ -380,6 +385,7 @@ class RawBoardReader:
             "ticket_list",
             "board_get_briefing",
             "board_state_get",
+            "memory_links",
         }:
             raise RuntimeError("raw board reader rejected a non-pure tool")
         result = await self._client.call_tool(
@@ -434,6 +440,11 @@ class RawBoardReader:
         if key is not None:
             arguments["key"] = key
         return await self._call("board_state_get", arguments)
+
+    async def memory_links(
+        self, *, depth: int = 1, limit: int = LINK_MEMORY_LIMIT
+    ) -> dict[str, Any]:
+        return await self._call("memory_links", {"depth": depth, "limit": limit})
 
 
 ReadClientFactory = Callable[[DashboardConfig], Any]
@@ -872,6 +883,125 @@ class LiveDashboard:
                     payload["pool"].pop()
                     truncation_counts["pool"] += 1
                 return payload
+
+    @staticmethod
+    def _bounded_link_value(value: Any) -> str | None:
+        if not isinstance(value, str) or not value:
+            return None
+        return value[:LINK_VALUE_MAX_LENGTH]
+
+    @classmethod
+    def _link_projection(
+        cls, board_id: str, result: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Project explicit Central memory_links edges without memory content."""
+        raw_nodes = result.get("nodes")
+        raw_edges = result.get("edges")
+        if not isinstance(raw_nodes, list) or not isinstance(raw_edges, list):
+            raise ValueError("memory_links response is malformed")
+
+        nodes: list[dict[str, Any]] = []
+        selected: set[str] = set()
+        for raw in raw_nodes[:LINK_MEMORY_LIMIT]:
+            if not isinstance(raw, dict):
+                continue
+            memory_id = cls._bounded_link_value(raw.get("memory_id"))
+            if memory_id is None or memory_id in selected:
+                continue
+            selected.add(memory_id)
+            nodes.append(
+                {
+                    "memory_id": memory_id,
+                    "title": cls._bounded_link_value(raw.get("title"))
+                    or "Untitled memory",
+                    "memory_type": cls._bounded_link_value(raw.get("memory_type"))
+                    or "context",
+                    "created_at": cls._bounded_link_value(raw.get("created_at")),
+                    "pinned": raw.get("pinned") is True,
+                }
+            )
+
+        edges: list[dict[str, str]] = []
+        for raw in raw_edges:
+            if len(edges) >= LINK_EDGE_LIMIT:
+                break
+            if not isinstance(raw, dict):
+                continue
+            kind = cls._bounded_link_value(raw.get("kind"))
+            source = cls._bounded_link_value(raw.get("from"))
+            target = cls._bounded_link_value(raw.get("to"))
+            if (
+                kind not in {"ticket", "file", "tag", "retracts"}
+                or source not in selected
+                or target is None
+            ):
+                continue
+            edges.append(
+                {
+                    "kind": kind,
+                    "from": source,
+                    "to": target,
+                    "authority": "authoritative",
+                }
+            )
+
+        raw_node_count = result.get("node_count")
+        raw_edge_count = result.get("edge_count")
+        node_count = (
+            raw_node_count
+            if isinstance(raw_node_count, int) and not isinstance(raw_node_count, bool)
+            else len(raw_nodes)
+        )
+        edge_count = (
+            raw_edge_count
+            if isinstance(raw_edge_count, int) and not isinstance(raw_edge_count, bool)
+            else len(raw_edges)
+        )
+        payload: dict[str, Any] = {
+            "schema_version": LINK_SCHEMA_VERSION,
+            "board_id": board_id,
+            "source_tool": "memory_links",
+            "relationship_authority": "authoritative",
+            "nodes": nodes,
+            "edges": edges,
+            "node_count": max(0, node_count),
+            "edge_count": max(0, edge_count),
+            "truncated": max(0, node_count) >= LINK_MEMORY_LIMIT
+            or len(nodes) < max(0, node_count)
+            or len(edges) < max(0, edge_count),
+            "returned_node_count": len(nodes),
+            "returned_edge_count": len(edges),
+        }
+        while (
+            len(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+            > LINK_RESPONSE_MAX_BYTES
+            and (payload["edges"] or payload["nodes"])
+        ):
+            payload["truncated"] = True
+            if payload["edges"]:
+                payload["edges"].pop()
+            else:
+                removed = payload["nodes"].pop()
+                removed_id = removed["memory_id"]
+                payload["edges"] = [
+                    edge for edge in payload["edges"] if edge["from"] != removed_id
+                ]
+            payload["returned_node_count"] = len(payload["nodes"])
+            payload["returned_edge_count"] = len(payload["edges"])
+        return payload
+
+    async def links(self) -> dict[str, Any]:
+        """Return a bounded, non-joining projection of explicit memory links."""
+        async with self._read_lock:
+            await self._probe_central()
+            async with asyncio.timeout(self.config.request_timeout_s):
+                connection = self._read_client_factory(self.config)
+                async with AsyncExitStack() as connection_stack:
+                    reader = await connection_stack.enter_async_context(connection)
+                    result = await reader.memory_links(
+                        depth=1, limit=LINK_MEMORY_LIMIT
+                    )
+        return self._link_projection(self.config.board_id, result)
 
     async def _worker(self) -> None:
         assert self._first_attempt is not None
@@ -1539,6 +1669,17 @@ def build_dashboard_server(
     )
     async def fleet_snapshot() -> dict[str, Any]:
         return await state.fleet()
+
+    @apps.tool(
+        resource_uri=UI_URI,
+        description=(
+            "Get bounded authoritative ticket, memory, file, and tag links "
+            "from the selected board's memory_links projection."
+        ),
+        visibility=APP_ONLY,
+    )
+    async def link_snapshot() -> dict[str, Any]:
+        return await state.links()
 
     @apps.tool(
         resource_uri=UI_URI,
