@@ -18,6 +18,7 @@ import time
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from functools import wraps
 from pathlib import Path
 from typing import Any, Mapping
 from urllib.parse import urlparse
@@ -27,6 +28,7 @@ from mcp.server.auth.provider import TokenVerifier, principal_components
 from mcp.server.auth.settings import AuthSettings
 from mcp.server.context import HandlerResult, ServerRequestContext
 from mcp.server.mcpserver import Context, MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 from mcp.shared.exceptions import MCPError
 from mcp_types import INTERNAL_ERROR, INVALID_REQUEST
 from pydantic import AnyHttpUrl
@@ -1071,6 +1073,21 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         ),
         middleware=[SubscriptionAuthorization(service)],
     )
+
+    def tool() -> Any:
+        """Register tools while preserving intentional client-facing failures."""
+
+        def register(function: Any) -> Any:
+            @wraps(function)
+            async def wrapped(*args: Any, **kwargs: Any) -> Any:
+                try:
+                    return await function(*args, **kwargs)
+                except (PermissionError, ValueError) as exc:
+                    raise ToolError(str(exc)) from exc
+
+            return mcp.tool()(wrapped)
+
+        return register
 
     async def append_and_publish(
         board_id: str,
@@ -2202,7 +2219,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             "review_label_counts": review_label_counts,
         }
 
-    @mcp.tool()
+    @tool()
     async def board_join(
         board_id: str,
         agent_name: str,
@@ -2277,7 +2294,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         )
         return result
 
-    @mcp.tool()
+    @tool()
     async def board_onboard(
         board_id: str,
         agent_name: str,
@@ -2375,7 +2392,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             "briefing": briefing,
         }
 
-    @mcp.tool()
+    @tool()
     async def board_snapshot(
         board_id: str,
         limit: int = DEFAULT_SNAPSHOT_LIMIT,
@@ -2401,7 +2418,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             snapshot_at=datetime.now(timezone.utc).isoformat(),
         )
 
-    @mcp.tool()
+    @tool()
     async def board_list() -> dict[str, Any]:
         """List only boards containing the authenticated principal."""
         principal = current_principal()
@@ -2430,7 +2447,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             )
         return {"ok": True, "boards": sorted(boards, key=lambda item: item["board_id"])}
 
-    @mcp.tool()
+    @tool()
     async def board_scrub_profile_set(
         board_id: str,
         agent_name: str,
@@ -2494,7 +2511,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             "event": event,
         }
 
-    @mcp.tool()
+    @tool()
     async def board_review_policy_set(
         board_id: str,
         agent_name: str,
@@ -2554,7 +2571,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             "event": event,
         }
 
-    @mcp.tool()
+    @tool()
     async def board_invite(
         board_id: str,
         agent_name: str,
@@ -2650,7 +2667,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             "event": event,
         }
 
-    @mcp.tool()
+    @tool()
     async def board_member_add(
         board_id: str,
         agent_name: str,
@@ -2712,7 +2729,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             "event": event,
         }
 
-    @mcp.tool()
+    @tool()
     async def board_member_remove(
         board_id: str,
         agent_name: str,
@@ -2799,7 +2816,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             "event": event,
         }
 
-    @mcp.tool()
+    @tool()
     async def board_member_set_role(
         board_id: str,
         agent_name: str,
@@ -2887,7 +2904,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             "event": event,
         }
 
-    @mcp.tool()
+    @tool()
     async def board_members(board_id: str) -> dict[str, Any]:
         """List principal-level memberships without exposing canonical identities."""
         board_id = require_id("board_id", board_id)
@@ -2931,7 +2948,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             "principal_member_count": len(rows),
         }
 
-    @mcp.tool()
+    @tool()
     async def ticket_get(board_id: str, ticket_id: str) -> dict[str, Any]:
         """Refetch one full authorized ticket after a resource-updated cue."""
         board_id = require_id("board_id", board_id)
@@ -2949,7 +2966,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             "latest_seq": latest_seq(board_id),
         }
 
-    @mcp.tool()
+    @tool()
     async def ticket_create(
         board_id: str,
         agent_name: str,
@@ -3118,7 +3135,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             "scrub_audit": changed["scrub_audit"],
         }
 
-    @mcp.tool()
+    @tool()
     async def ticket_claim(
         board_id: str,
         agent_name: str,
@@ -3220,7 +3237,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             "implicitly_renewed": changed["renewed"],
         }
 
-    @mcp.tool()
+    @tool()
     async def ticket_unclaim(
         board_id: str,
         agent_name: str,
@@ -3317,7 +3334,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             "implicitly_renewed": changed["renewed"],
         }
 
-    @mcp.tool()
+    @tool()
     async def lease_renew(
         board_id: str,
         ticket_id: str,
@@ -3362,7 +3379,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             "release_events": release_events,
         }
 
-    @mcp.tool()
+    @tool()
     async def board_reap(
         board_id: str,
         ctx: Context,
@@ -3407,7 +3424,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             "post_submission_preserved": result["post_submission_preserved"],
         }
 
-    @mcp.tool()
+    @tool()
     async def ticket_submit(
         board_id: str,
         agent_name: str,
@@ -3515,7 +3532,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             "scrub_audit": changed["scrub_audit"],
         }
 
-    @mcp.tool()
+    @tool()
     async def ticket_review(
         board_id: str,
         agent_name: str,
@@ -3688,7 +3705,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             "scrub_audit": changed["scrub_audit"],
         }
 
-    @mcp.tool()
+    @tool()
     async def ticket_cancel(
         board_id: str,
         agent_name: str,
@@ -3778,7 +3795,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             "scrub_audit": changed["scrub_audit"],
         }
 
-    @mcp.tool()
+    @tool()
     async def ticket_terminate(
         board_id: str,
         agent_name: str,
@@ -3866,7 +3883,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             "scrub_audit": changed["scrub_audit"],
         }
 
-    @mcp.tool()
+    @tool()
     async def ticket_list(
         board_id: str,
         status: str | None = None,
@@ -3929,7 +3946,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             "latest_seq": latest_seq(board_id),
         }
 
-    @mcp.tool()
+    @tool()
     async def memory_write(
         board_id: str,
         agent_name: str,
@@ -4124,7 +4141,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             "scrub_audit": changed["scrub_audit"],
         }
 
-    @mcp.tool()
+    @tool()
     async def memory_read(
         board_id: str,
         agent_name: str,
@@ -4216,7 +4233,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             "implicitly_renewed": renewed,
         }
 
-    @mcp.tool()
+    @tool()
     async def memory_unpin(
         board_id: str,
         agent_name: str,
@@ -4279,7 +4296,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             "implicitly_renewed": result["renewed"],
         }
 
-    @mcp.tool()
+    @tool()
     async def memory_search(
         board_id: str,
         query: str,
@@ -4340,7 +4357,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             "include_archived": include_archived,
         }
 
-    @mcp.tool()
+    @tool()
     async def memory_links(
         board_id: str,
         memory_id: str | None = None,
@@ -4427,7 +4444,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             "depth": depth,
         }
 
-    @mcp.tool()
+    @tool()
     async def memory_checkpoint(
         board_id: str,
         agent_name: str,
@@ -4519,7 +4536,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             "implicitly_renewed": changed["renewed"],
         }
 
-    @mcp.tool()
+    @tool()
     async def memory_handoff(
         board_id: str,
         agent_name: str,
@@ -4627,7 +4644,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             "release_events": release_events,
         }
 
-    @mcp.tool()
+    @tool()
     async def board_get_briefing(
         board_id: str,
         token_budget: int = 4_000,
@@ -4649,7 +4666,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         )
         return result
 
-    @mcp.tool()
+    @tool()
     async def board_status(board_id: str) -> dict[str, Any]:
         """Return a pure structured and rendered board status summary."""
         board_id = require_id("board_id", board_id)
@@ -4715,7 +4732,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             "rendered": rendered,
         }
 
-    @mcp.tool()
+    @tool()
     async def board_state_update(
         board_id: str,
         agent_name: str,
@@ -4769,7 +4786,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             "implicitly_renewed": result["renewed"],
         }
 
-    @mcp.tool()
+    @tool()
     async def board_state_get(
         board_id: str,
         key: str | None = None,
@@ -4792,7 +4809,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             "state": copy.deepcopy(state[key] if key is not None else state),
         }
 
-    @mcp.tool()
+    @tool()
     async def journal_compact(
         board_id: str,
         retain_last: int,
@@ -4820,7 +4837,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             "durable_records_untouched": True,
         }
 
-    @mcp.tool()
+    @tool()
     async def board_catchup(
         board_id: str,
         agent_name: str,

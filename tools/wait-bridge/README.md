@@ -11,7 +11,7 @@ defeat the wait behavior.
 ## Requirements
 
 - Python 3.11 or newer
-- `mcp==2.0.0`
+- `mcp==2.1.1`
 - the repository's `packages/client/src` on `PYTHONPATH`
 - an On Board bearer token with access to the configured board
 
