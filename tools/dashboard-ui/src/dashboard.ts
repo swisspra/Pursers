@@ -9,7 +9,7 @@ import {
 import "./dashboard.css";
 
 type DataMode = "live" | "stale" | "demo" | "demo-error";
-type ViewName = "today" | "work" | "agents" | "fleet" | "activity";
+type ViewName = "today" | "work" | "agents" | "fleet" | "links" | "activity";
 type Agent = {
   id: string | null;
   name: string;
@@ -126,6 +126,32 @@ type FleetSnapshot = {
     stale: number | null;
   };
 };
+type LinkNode = {
+  memory_id: string;
+  title: string;
+  memory_type: string;
+  created_at: string | null;
+  pinned: boolean;
+};
+type LinkEdge = {
+  kind: "ticket" | "file" | "tag" | "retracts";
+  from: string;
+  to: string;
+  authority: "authoritative" | "suggested";
+};
+type LinkSnapshot = {
+  schema_version: number;
+  board_id: string;
+  source_tool: string;
+  relationship_authority: "authoritative";
+  nodes: LinkNode[];
+  edges: LinkEdge[];
+  node_count: number;
+  edge_count: number;
+  returned_node_count: number;
+  returned_edge_count: number;
+  truncated: boolean;
+};
 
 type SearchHit = { view: ViewName; kind: string; title: string; detail: string };
 
@@ -191,6 +217,26 @@ const fleetFallback: FleetSnapshot = {
   totals: { agents: 2, busy: 1, available: 1, stale: 0 },
 };
 
+const linkFallback: LinkSnapshot = {
+  schema_version: 1,
+  board_id: "board-synthetic",
+  source_tool: "synthetic-memory-links",
+  relationship_authority: "authoritative",
+  nodes: [
+    { memory_id: "MEM-DEMO-LINK", title: "Synthetic release note", memory_type: "context", created_at: "2099-01-01T00:05:00Z", pinned: false },
+  ],
+  edges: [
+    { kind: "ticket", from: "MEM-DEMO-LINK", to: "TK-DEMO-1", authority: "authoritative" },
+    { kind: "file", from: "MEM-DEMO-LINK", to: "tools/dashboard-ui/src/dashboard.ts", authority: "authoritative" },
+    { kind: "tag", from: "MEM-DEMO-LINK", to: "synthetic", authority: "authoritative" },
+  ],
+  node_count: 1,
+  edge_count: 3,
+  returned_node_count: 1,
+  returned_edge_count: 3,
+  truncated: false,
+};
+
 const BASE_FEED_DELAY_MS = 5_000;
 const MAX_FEED_DELAY_MS = 60_000;
 const MAX_AGENTS = 200;
@@ -209,6 +255,9 @@ let snapshot = fallback;
 let fleetSnapshot: FleetSnapshot | null = fleetFallback;
 let fleetUnavailable = false;
 let fleetBusy = false;
+let linkSnapshot: LinkSnapshot | null = linkFallback;
+let linksUnavailable = false;
+let linksBusy = false;
 let connected = false;
 let feedBusy = false;
 let feedTimer: number | undefined;
@@ -438,6 +487,51 @@ function looksLikeFleetSnapshot(value: unknown): boolean {
   if (!record(value)) return false;
   return ["schema_version", "registry_warning", "projects", "pool", "totals"]
     .some((key) => key in value);
+}
+
+function decodeLinkNode(value: unknown): LinkNode | null {
+  if (!record(value) || typeof value.memory_id !== "string") return null;
+  return {
+    memory_id: text(value.memory_id),
+    title: text(value.title, "Untitled memory"),
+    memory_type: text(value.memory_type, "context"),
+    created_at: optionalText(value.created_at),
+    pinned: boolean(value.pinned),
+  };
+}
+
+function decodeLinkEdge(value: unknown): LinkEdge | null {
+  if (!record(value) || typeof value.from !== "string" || typeof value.to !== "string") return null;
+  if (!["ticket", "file", "tag", "retracts"].includes(String(value.kind))) return null;
+  const authority = value.authority === "suggested" ? "suggested" : "authoritative";
+  return {
+    kind: value.kind as LinkEdge["kind"],
+    from: text(value.from),
+    to: text(value.to, "", MAX_LONG_TEXT_LENGTH),
+    authority,
+  };
+}
+
+function decodeLinkSnapshot(value: unknown): LinkSnapshot | null {
+  if (!record(value) || value.schema_version !== 1 || value.relationship_authority !== "authoritative") return null;
+  if (!Array.isArray(value.nodes) || !Array.isArray(value.edges)) return null;
+  return {
+    schema_version: 1,
+    board_id: text(value.board_id),
+    source_tool: text(value.source_tool, "memory_links"),
+    relationship_authority: "authoritative",
+    nodes: value.nodes.slice(0, MAX_TICKETS).map(decodeLinkNode).filter((item): item is LinkNode => item !== null),
+    edges: value.edges.slice(0, 1_000).map(decodeLinkEdge).filter((item): item is LinkEdge => item !== null),
+    node_count: nonNegative(value.node_count),
+    edge_count: nonNegative(value.edge_count),
+    returned_node_count: nonNegative(value.returned_node_count),
+    returned_edge_count: nonNegative(value.returned_edge_count),
+    truncated: boolean(value.truncated),
+  };
+}
+
+function looksLikeLinkSnapshot(value: unknown): boolean {
+  return record(value) && value.source_tool === "memory_links" && Array.isArray(value.nodes) && Array.isArray(value.edges);
 }
 
 function serializedWithinLimit(value: unknown): boolean {
@@ -912,6 +1006,128 @@ function renderFleet(data: FleetSnapshot | null): void {
   }
 }
 
+function copyButton(label: string, value: string): HTMLButtonElement {
+  const button = element("button", "copy-button", label) as HTMLButtonElement;
+  button.type = "button";
+  button.dataset.copyValue = value;
+  button.setAttribute("aria-label", `Copy ${value}`);
+  return button;
+}
+
+async function copyValue(value: string): Promise<boolean> {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(value);
+      return true;
+    }
+  } catch {
+    // Fall through to the selection-based copy path for restricted Hosts.
+  }
+  const textarea = element("textarea", "copy-fallback") as HTMLTextAreaElement;
+  textarea.value = value;
+  textarea.setAttribute("readonly", "");
+  document.body.append(textarea);
+  textarea.select();
+  let copied = false;
+  try {
+    copied = document.execCommand("copy");
+  } catch {
+    copied = false;
+  }
+  textarea.remove();
+  return copied;
+}
+
+function renderLinks(data: LinkSnapshot | null): void {
+  const container = byId<HTMLElement>("links-groups");
+  const notice = byId<HTMLElement>("links-notice");
+  const total = byId<HTMLElement>("links-total");
+  notice.replaceChildren();
+  if (linksUnavailable || data === null) {
+    total.textContent = "—";
+    container.replaceChildren(emptyState("Links unavailable", "This server may not expose the bounded link_snapshot tool yet."));
+    return;
+  }
+
+  const synthetic = data.source_tool.startsWith("synthetic-");
+  const authorityLabel = synthetic ? "Synthetic fixture" : "Authoritative";
+  total.textContent = `${data.returned_node_count} memories · ${data.returned_edge_count} links`;
+  byId("links-source").textContent = `${authorityLabel} · ${data.source_tool}`;
+  if (data.truncated) {
+    const warning = element("div", "notice");
+    warning.dataset.tone = "warning";
+    warning.append(element("p", undefined, `Showing ${data.returned_node_count} of ${data.node_count} memories and ${data.returned_edge_count} of ${data.edge_count} links.`));
+    notice.append(warning);
+  }
+
+  const ticketIdsByMemory = new Map<string, string[]>();
+  data.edges.filter((edge) => edge.kind === "ticket").forEach((edge) => {
+    const values = ticketIdsByMemory.get(edge.from) ?? [];
+    if (!values.includes(edge.to)) values.push(edge.to);
+    ticketIdsByMemory.set(edge.from, values);
+  });
+  const groups = new Map<string, LinkNode[]>();
+  data.nodes.forEach((node) => {
+    const tickets = ticketIdsByMemory.get(node.memory_id) ?? ["No ticket"];
+    tickets.forEach((ticket) => {
+      const values = groups.get(ticket) ?? [];
+      values.push(node);
+      groups.set(ticket, values);
+    });
+  });
+
+  const groupCards = [...groups.entries()]
+    .sort(([left], [right]) => left === "No ticket" ? 1 : right === "No ticket" ? -1 : left.localeCompare(right))
+    .map(([ticketId, nodes]) => {
+      const group = element("section", "link-group card");
+      const heading = element("div", "link-group-heading");
+      const headingCopy = element("div");
+      headingCopy.append(element("p", "section-kicker", ticketId === "No ticket" ? "Unlinked to a ticket" : "Ticket"), element("h2", undefined, ticketId));
+      heading.append(headingCopy);
+      if (ticketId !== "No ticket") heading.append(copyButton("Copy ID", ticketId));
+      group.append(heading);
+
+      const memoryList = element("div", "link-memory-list");
+      nodes.forEach((node) => {
+        const row = element("article", "link-memory");
+        const rowHeading = element("div", "link-memory-heading");
+        const title = element("div");
+        title.append(element("h3", undefined, node.title), element("p", "link-id", node.memory_id));
+        rowHeading.append(title, copyButton("Copy memory ID", node.memory_id));
+        row.append(rowHeading);
+        const meta = element("div", "meta-row");
+        meta.append(pill(authorityLabel, synthetic ? "warning" : "submitted"), pill(node.memory_type));
+        if (node.pinned) meta.append(pill("Pinned", "warning"));
+        if (node.created_at) meta.append(pill(formatTime(node.created_at)));
+        row.append(meta);
+
+        const files = data.edges.filter((edge) => edge.from === node.memory_id && edge.kind === "file");
+        const tags = data.edges.filter((edge) => edge.from === node.memory_id && edge.kind === "tag");
+        if (files.length) {
+          const fileList = element("div", "link-values");
+          fileList.append(element("strong", undefined, "Files"));
+          files.forEach((edge) => {
+            const item = element("div", "link-value");
+            item.append(element("code", undefined, edge.to), copyButton("Copy path", edge.to));
+            if (edge.authority === "suggested") item.append(pill("Suggested", "warning"));
+            fileList.append(item);
+          });
+          row.append(fileList);
+        }
+        if (tags.length) {
+          const tagList = element("div", "meta-row");
+          tagList.append(element("strong", undefined, "Tags"));
+          tags.forEach((edge) => tagList.append(pill(`${edge.authority === "suggested" ? "Suggested · " : ""}${edge.to}`, edge.authority === "suggested" ? "warning" : undefined)));
+          row.append(tagList);
+        }
+        memoryList.append(row);
+      });
+      group.append(memoryList);
+      return group;
+    });
+  container.replaceChildren(...(groupCards.length ? groupCards : [emptyState("No explicit links", "Ticket, file, and tag relationships appear when project memories declare them.")]));
+}
+
 function newestEvents(events: BoardEvent[]): BoardEvent[] {
   return [...events].sort((left, right) => (right.seq ?? -1) - (left.seq ?? -1));
 }
@@ -967,6 +1183,7 @@ function renderActivePanel(data: Snapshot): void {
   else if (activeView === "work") renderWork(data);
   else if (activeView === "agents") renderAgents(data);
   else if (activeView === "fleet") renderFleet(fleetSnapshot);
+  else if (activeView === "links") renderLinks(linkSnapshot);
   else renderActivity(data);
 }
 
@@ -1001,6 +1218,10 @@ function searchCorpus(data: Snapshot): SearchHit[] {
   data.agents.forEach((agent) => hits.push({ view: "agents", kind: "Agent", title: agent.name, detail: `${agent.status} ${agent.role ?? ""} ${agent.focus ?? ""} ${agent.platform ?? ""}` }));
   fleetSnapshot?.projects.forEach((project) => hits.push({ view: "fleet", kind: "Project", title: project.name ?? "—", detail: `${project.board_id ?? ""} ${project.status ?? ""}` }));
   fleetSnapshot?.pool.forEach((entry) => hits.push({ view: "fleet", kind: "Pool", title: entry.agent_name ?? "—", detail: `${entry.pool_status ?? ""} ${entry.principal_id ?? ""} ${entry.seats.map((seat) => `${seat.project ?? seat.board_id ?? ""} ${seat.current_ticket_id ?? ""}`).join(" ")}` }));
+  linkSnapshot?.nodes.forEach((node) => {
+    const linked = linkSnapshot?.edges.filter((edge) => edge.from === node.memory_id).map((edge) => edge.to).join(" ") ?? "";
+    hits.push({ view: "links", kind: "Link", title: `${node.memory_id} · ${node.title}`, detail: `${node.memory_type} ${linked}` });
+  });
   data.events.forEach((event) => hits.push({ view: "activity", kind: "Activity", title: event.text, detail: `${event.kind} ${event.actor_id ?? ""} ${event.ticket_id ?? ""} ${event.memory_id ?? ""} ${event.status_from ?? ""} ${event.status_to ?? ""}` }));
   const highlights = [data.highlights.latest_handoff, data.highlights.important_pinned].filter((item): item is Highlight => item !== null);
   highlights.forEach((item) => hits.push({ view: "today", kind: item.type, title: item.title, detail: `${item.summary} ${item.author ?? ""} ${item.next_steps.join(" ")} ${item.warnings.join(" ")}` }));
@@ -1070,6 +1291,7 @@ function selectView(view: ViewName, focusTab = false): void {
   });
   renderActivePanel(snapshot);
   if (view === "fleet" && connected && fleetUnavailable && !fleetBusy) void refreshFleet();
+  if (view === "links" && connected && linksUnavailable && !linksBusy) void refreshLinks();
 }
 
 function setLoading(loading: boolean, message = "Loading authorized board state"): void {
@@ -1135,6 +1357,34 @@ async function refreshFleet(): Promise<void> {
   }
 }
 
+function acceptLinkSnapshot(value: LinkSnapshot): void {
+  linkSnapshot = value;
+  linksUnavailable = false;
+  if (activeView === "links") renderLinks(linkSnapshot);
+  renderSearch(searchInput.value);
+}
+
+async function refreshLinks(): Promise<void> {
+  if (!connected || linksBusy) return;
+  linksBusy = true;
+  try {
+    const result = await app.callServerTool({ name: "link_snapshot", arguments: {} });
+    const value = decodeLinkSnapshot(structured(result));
+    if (value) acceptLinkSnapshot(value);
+    else {
+      linkSnapshot = null;
+      linksUnavailable = true;
+    }
+  } catch {
+    linkSnapshot = null;
+    linksUnavailable = true;
+  } finally {
+    linksBusy = false;
+    if (activeView === "links") renderLinks(linkSnapshot);
+    renderSearch(searchInput.value);
+  }
+}
+
 function clearFeedTimer(): void {
   if (feedTimer !== undefined) window.clearTimeout(feedTimer);
   feedTimer = undefined;
@@ -1191,7 +1441,7 @@ document.querySelectorAll<HTMLButtonElement>("[role=tab][data-view]").forEach((t
   tab.addEventListener("keydown", (event) => {
     if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
     event.preventDefault();
-    const order: ViewName[] = ["today", "work", "agents", "fleet", "activity"];
+    const order: ViewName[] = ["today", "work", "agents", "fleet", "links", "activity"];
     const current = order.indexOf(activeView);
     const next = event.key === "Home" ? 0 : event.key === "End" ? order.length - 1 : (current + (event.key === "ArrowRight" ? 1 : -1) + order.length) % order.length;
     selectView(order[next], true);
@@ -1207,7 +1457,16 @@ byId("search-results-list").addEventListener("click", (event) => {
   selectView(button.dataset.targetView as ViewName, true);
 });
 searchInput.addEventListener("input", () => renderSearch(searchInput.value));
-refreshButton.addEventListener("click", () => void Promise.all([refreshSnapshot(), refreshFleet()]));
+refreshButton.addEventListener("click", () => void Promise.all([refreshSnapshot(), refreshFleet(), refreshLinks()]));
+byId("links-groups").addEventListener("click", (event) => {
+  const button = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-copy-value]");
+  if (!button) return;
+  const original = button.textContent ?? "Copy";
+  void copyValue(button.dataset.copyValue ?? "").then((copied) => {
+    button.textContent = copied ? "Copied" : "Copy unavailable";
+    window.setTimeout(() => { button.textContent = original; }, 1_500);
+  });
+});
 document.addEventListener("keydown", (event) => {
   const target = event.target as HTMLElement;
   const typing = target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target.isContentEditable;
@@ -1237,7 +1496,12 @@ app.addEventListener("toolresult", (result) => {
     return;
   }
   const fleet = looksLikeFleetSnapshot(payload) ? decodeFleetSnapshot(payload) : null;
-  if (fleet) acceptFleetSnapshot(fleet);
+  if (fleet) {
+    acceptFleetSnapshot(fleet);
+    return;
+  }
+  const links = looksLikeLinkSnapshot(payload) ? decodeLinkSnapshot(payload) : null;
+  if (links) acceptLinkSnapshot(links);
   else if (connected) void refreshSnapshot();
 });
 app.addEventListener("hostcontextchanged", applyHostContext);
@@ -1255,7 +1519,7 @@ void app
     connected = true;
     const context = app.getHostContext();
     if (context) applyHostContext(context);
-    void refreshFleet();
+    void Promise.all([refreshFleet(), refreshLinks()]);
     scheduleFeed(0);
   })
   .catch(() => {

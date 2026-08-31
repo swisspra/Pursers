@@ -43,7 +43,7 @@
           <span aria-hidden="true">⌕</span>
           <span class="sr-only">Search this dashboard</span>
         </label>
-        <input id="global-search" type="search" autocomplete="off" placeholder="Search tickets, agents, activity" aria-describedby="search-help search-count" />
+        <input id="global-search" type="search" autocomplete="off" placeholder="Search tickets, agents, links, activity" aria-describedby="search-help search-count" />
         <kbd aria-hidden="true">/</kbd>
         <span id="search-help" class="sr-only">Searches only the authorized data loaded in this dashboard. Press Escape to clear.</span>
         <span id="search-count" class="search-count" aria-live="polite"></span>
@@ -54,6 +54,7 @@
         <button id="tab-work" role="tab" aria-selected="false" aria-controls="view-work" tabindex="-1" data-view="work" type="button">Work</button>
         <button id="tab-agents" role="tab" aria-selected="false" aria-controls="view-agents" tabindex="-1" data-view="agents" type="button">Agents</button>
         <button id="tab-fleet" role="tab" aria-selected="false" aria-controls="view-fleet" tabindex="-1" data-view="fleet" type="button">Fleet</button>
+        <button id="tab-links" role="tab" aria-selected="false" aria-controls="view-links" tabindex="-1" data-view="links" type="button">Links</button>
         <button id="tab-activity" role="tab" aria-selected="false" aria-controls="view-activity" tabindex="-1" data-view="activity" type="button">Activity</button>
       </nav>
 
@@ -124,6 +125,11 @@
               <div id="fleet-pool"></div>
             </section>
           </div>
+        </section>
+
+        <section id="view-links" class="view-panel" role="tabpanel" aria-labelledby="tab-links" data-panel="links" hidden>
+          <div class="page-heading"><div><p class="section-kicker">Explicit project relationships</p><h2>Links</h2><p class="muted">Ticket, memory, file, and tag relationships from the board's bounded memory_links projection.</p></div><div class="links-summary"><p id="links-source" class="label label-accent">Authoritative · memory_links</p><p id="links-total" class="count-badge"></p></div></div>
+          <div id="links-notice"></div><div id="links-groups" class="link-groups"></div>
         </section>
 
         <section id="view-activity" class="view-panel" role="tabpanel" aria-labelledby="tab-activity" data-panel="activity" hidden>
