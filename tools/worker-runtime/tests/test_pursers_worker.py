@@ -7,6 +7,7 @@ import os
 import sys
 import tempfile
 import threading
+from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -246,6 +247,60 @@ def test_shell_cannot_inherit_configured_api_key(
         tool_output = server.requests[1]["messages"][-1]["content"]
         assert secret not in tool_output
         assert secret not in selected.log_file.read_text()
+
+
+def test_shell_cannot_return_or_log_seat_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret = "SYNTHETIC_SEAT_TOKEN_MUST_NOT_ESCAPE"
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        private_home = root / "private-home"
+        private_home.mkdir()
+        token_file = private_home / "seat.jwt"
+        token_file.write_text(secret)
+        token_file.chmod(0o600)
+        monkeypatch.setenv("HOME", str(private_home))
+        work = root / "work"
+        work.mkdir()
+        board = FakeBoard()
+        with FakeLLMServer(
+            [
+                tool_call(
+                    "one",
+                    "run_shell",
+                    {"command": "cat \"$HOME/seat.jwt\""},
+                ),
+                tool_call(
+                    "two",
+                    "run_shell",
+                    {"command": f"cat {token_file}"},
+                ),
+                tool_call("three", "give_up", {"reason": secret}),
+            ]
+        ) as server:
+            selected = replace(
+                config(root, server.url), token_file=token_file.resolve()
+            )
+            worker = worker_module.Worker(
+                selected,
+                board,
+                worker_module.OpenAICompatible(selected, "key"),
+                worker_module.SessionLog(selected.log_file, secrets=(secret,)),
+                directive="STATIC",
+            )
+            asyncio.run(
+                worker.run_ticket("board-one", {"ticket_id": "TK-one"}, work)
+            )
+
+        inherited_home_output = server.requests[1]["messages"][-1]["content"]
+        direct_path_output = server.requests[2]["messages"][-1]["content"]
+        assert secret not in inherited_home_output
+        assert secret not in direct_path_output
+        if worker_module.sys.platform == "darwin" and worker_module.SANDBOX_EXEC.is_file():
+            assert "[REDACTED]" not in direct_path_output
+        assert secret not in selected.log_file.read_text()
+        assert worker.log.redact(secret) == "[REDACTED]"
 
 
 def test_max_iterations_releases_claim() -> None:

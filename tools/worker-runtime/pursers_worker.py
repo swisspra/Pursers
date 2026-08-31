@@ -7,7 +7,6 @@ import argparse
 import asyncio
 import json
 import os
-import shlex
 import signal
 import stat
 import sys
@@ -35,7 +34,6 @@ MAX_TOOL_OUTPUT = 20_000
 MAX_FILE_READ = 100_000
 LEASE_INTERVAL_S = 20.0
 SHELL_ENV_ALLOWLIST = (
-    "HOME",
     "LANG",
     "LC_ALL",
     "LC_CTYPE",
@@ -43,10 +41,10 @@ SHELL_ENV_ALLOWLIST = (
     "PATH",
     "SHELL",
     "TERM",
-    "TMPDIR",
     "USER",
 )
 AUTH_SCHEME_PARTS = ("Bea", "rer")
+SANDBOX_EXEC = Path("/usr/bin/sandbox-exec")
 
 
 @dataclass(frozen=True)
@@ -162,15 +160,32 @@ def read_secret(config: Config, kind: str) -> str:
 
 
 class SessionLog:
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, secrets: tuple[str, ...] = ()) -> None:
         self.path = path
+        self.secrets = tuple(
+            sorted((secret for secret in secrets if secret), key=len, reverse=True)
+        )
         path.parent.mkdir(parents=True, exist_ok=True)
         descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
         os.close(descriptor)
         os.chmod(path, 0o600)
 
+    def redact(self, value: str) -> str:
+        for secret in self.secrets:
+            value = value.replace(secret, "[REDACTED]")
+        return value
+
+    def scrub(self, value: Any) -> Any:
+        if isinstance(value, str):
+            return self.redact(value)
+        if isinstance(value, list):
+            return [self.scrub(item) for item in value]
+        if isinstance(value, dict):
+            return {key: self.scrub(item) for key, item in value.items()}
+        return value
+
     def write(self, event: str, **fields: Any) -> None:
-        safe = {"event": event, **fields}
+        safe = self.scrub({"event": event, **fields})
         with self.path.open("a", encoding="utf-8") as stream:
             stream.write(json.dumps(safe, sort_keys=True, separators=(",", ":")) + "\n")
 
@@ -369,6 +384,19 @@ class Worker:
             {"role": "user", "content": "DYNAMIC TICKET\n" + json.dumps(ticket, sort_keys=True)},
         ]
 
+    def _shell_argv(self, command: str) -> list[str] | None:
+        if sys.platform != "darwin" or not SANDBOX_EXEC.is_file():
+            return None
+        protected = [self.config.token_file]
+        if self.config.api_key_file is not None:
+            protected.append(self.config.api_key_file)
+        denies = "\n".join(
+            f"(deny file-read* (literal {json.dumps(str(path))}))"
+            for path in protected
+        )
+        profile = f"(version 1)\n(allow default)\n{denies}"
+        return [str(SANDBOX_EXEC), "-p", profile, "/bin/sh", "-lc", command]
+
     async def _tool(
         self,
         name: str,
@@ -397,10 +425,15 @@ class Worker:
                 if key != self.config.api_key_env
                 and (value := os.environ.get(key)) is not None
             }
-            process = await asyncio.create_subprocess_shell(
-                command,
+            shell_env["HOME"] = str(work_dir)
+            shell_env["TMPDIR"] = str(work_dir)
+            shell_argv = self._shell_argv(command)
+            process_args = shell_argv or ["/bin/sh", "-lc", command]
+            process = await asyncio.create_subprocess_exec(
+                *process_args,
                 cwd=work_dir,
                 env=shell_env,
+                stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
             )
@@ -429,8 +462,9 @@ class Worker:
                 return "command timed out", False
             return output.decode("utf-8", errors="replace"), False
         if name == "submit_work":
+            safe_args = self.log.scrub(args)
             try:
-                await self.board.submit(board_id, ticket_id, args)
+                await self.board.submit(board_id, ticket_id, safe_args)
             except Exception as exc:
                 self.log.write(
                     "submit_failed", ticket_id=ticket_id, error=type(exc).__name__
@@ -499,6 +533,7 @@ class Worker:
                         )
                     except Exception as exc:
                         output, done = f"error: {type(exc).__name__}: {exc}", False
+                    output = self.log.redact(output)
                     messages.append(
                         {
                             "role": "tool",
@@ -551,7 +586,7 @@ async def async_main(config_path: Path) -> None:
     config = load_config(config_path)
     token = read_secret(config, "token")
     api_key = read_secret(config, "API key")
-    log = SessionLog(config.log_file)
+    log = SessionLog(config.log_file, secrets=(token, api_key))
     async with PursersBoardAPI(config, token) as board:
         worker = Worker(config, board, OpenAICompatible(config, api_key), log)
         loop = asyncio.get_running_loop()

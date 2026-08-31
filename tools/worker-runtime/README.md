@@ -39,4 +39,8 @@ The model receives the static worker directive first, then board context, then
 the dynamic ticket. Available tools are bounded file reads/writes, timeboxed
 shell commands jailed to the registry work directory, submit, and give-up.
 Commands (not their output) are recorded in a mode-`0600` local session log.
-The runtime never reviews or merges its own work.
+The shell receives a non-secret environment with `HOME` and `TMPDIR` reset to
+the assigned work directory. Configured token/key values are redacted from
+model-visible output and logs; on macOS, the subprocess is additionally denied
+read access to the configured secret files. The runtime never reviews or merges
+its own work.
