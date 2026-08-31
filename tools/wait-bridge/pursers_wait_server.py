@@ -166,7 +166,7 @@ class BridgeStats:
             fcntl.flock(descriptor, fcntl.LOCK_EX)
             try:
                 document = json.loads(self.path.read_text(encoding="utf-8"))
-            except (FileNotFoundError, UnicodeError, json.JSONDecodeError, OSError):
+            except (FileNotFoundError, UnicodeError, ValueError, OSError):
                 document = {}
             if not isinstance(document, dict):
                 document = {}

@@ -154,7 +154,7 @@ def read_overhead_stats(
         document = json.loads(source.read_text(encoding="utf-8"))
     except FileNotFoundError:
         return empty
-    except (OSError, UnicodeError, json.JSONDecodeError):
+    except (OSError, UnicodeError, ValueError):
         return {**empty, "source_status": "malformed"}
     if not isinstance(document, dict) or document.get("schema_version") != 1:
         return {**empty, "source_status": "malformed"}

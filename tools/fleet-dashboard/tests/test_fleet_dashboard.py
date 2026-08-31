@@ -715,3 +715,39 @@ def test_overhead_endpoint_treats_invalid_utf8_as_malformed_empty_state() -> Non
 
     assert result["source_status"] == "malformed"
     assert result["seats"] == []
+
+
+def test_overhead_endpoint_treats_integer_digit_limit_as_malformed() -> None:
+    class Cache:
+        def get(self) -> dict:
+            return {}
+
+        def get_board(self, _board_id: str) -> dict:
+            return {}
+
+    with tempfile.TemporaryDirectory() as raw:
+        stats = Path(raw) / "stats.json"
+        stats.write_text(
+            '{"schema_version":1,"days":{"2030-01-01":{"seats":{},"bad":'
+            + "9" * 5_000
+            + "}}}",
+            encoding="utf-8",
+        )
+        assert stats.stat().st_size < dashboard.MAX_OVERHEAD_FILE_BYTES
+        server = dashboard.ThreadingHTTPServer(
+            ("127.0.0.1", 0), dashboard.make_handler(Cache(), stats)
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with urllib.request.urlopen(
+                f"http://127.0.0.1:{server.server_port}/api/overhead"
+            ) as response:
+                result = json.load(response)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
+
+    assert result["source_status"] == "malformed"
+    assert result["seats"] == []

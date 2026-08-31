@@ -95,6 +95,22 @@ class BridgeStatsTests(unittest.TestCase):
         document = json.loads(self.path.read_text(encoding="utf-8"))
         self.assertEqual(list(document["days"]), ["2030-01-10"])
 
+    def test_record_recovers_from_json_integer_digit_limit_failure(self) -> None:
+        self.path.write_text(
+            '{"schema_version":1,"days":{"2030-01-01":{"seats":{},"bad":'
+            + "9" * 5_000
+            + "}}}",
+            encoding="utf-8",
+        )
+
+        self.record("board_catchup", 100, 300)
+
+        document = json.loads(self.path.read_text(encoding="utf-8"))
+        self.assertEqual(document["schema_version"], 1)
+        seat = next(iter(document["days"]["2030-01-01"]["seats"].values()))
+        self.assertEqual(seat["request_bytes"], 100)
+        self.assertEqual(seat["response_bytes"], 300)
+
 
 if __name__ == "__main__":
     unittest.main()
