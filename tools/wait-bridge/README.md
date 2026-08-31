@@ -154,6 +154,36 @@ empty board IDs before writing. `remove` prints the removed entry so it can be
 restored by hand. Override the default Central URL with
 `ONBOARD_CENTRAL_URL` or the global `--central-url` option.
 
+### Seat administration CLI
+
+`seat_admin.py` provisions a principal across registry boards, applies the
+reviewer runbook in member-add-before-role order, and verifies every write by
+reading membership back. Token minting remains operator-run; the tool accepts
+only the resulting principal ID and token file path, and never reads the target
+seat token file or prints any JWT.
+
+Successful adds persist a validated `seat_registry` definition on the home
+board (name, principal, intended role, and registry/explicit board mode). This
+lets `check` report a pending seat and lets `new-board` provision it before the
+seat's first agent join. Existing memberships are read before writes: member
+and reviewer roles are reused, admins are preserved, and incompatible role
+requests fail closed.
+
+```sh
+python tools/wait-bridge/seat_admin.py add \
+  --name worker-a --role worker --boards registry \
+  --principal PR-PLACEHOLDER --token-path /PATH/TO/TOKEN
+python tools/wait-bridge/seat_admin.py add \
+  --name reviewer-a --role reviewer --boards board-a,board-b \
+  --principal PR-PLACEHOLDER --token-path /PATH/TO/TOKEN
+python tools/wait-bridge/seat_admin.py check --name worker-a
+python tools/wait-bridge/seat_admin.py new-board --board board-new
+```
+
+`add` rejects a seat name already used on any active registry board unless
+`--force` is explicit. `new-board` discovers existing principals and roles
+from active registry boards; it contains no board or project allowlist.
+
 After Central is deployed with board-state support for the board's scrub
 profile, seed and verify the initial registry with the bridge environment:
 
