@@ -11,6 +11,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 from collections import Counter
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
@@ -21,6 +22,7 @@ from typing import Any, Awaitable, Callable, Mapping, Protocol, Sequence
 
 STATE_KEY = "coordinator_findings"
 INTAKE_STATE_KEY = "coordinator_intake"
+CONFIG_STATE_KEY = "coordinator_config"
 SCHEMA_VERSION = 2
 DEFAULT_URL = "https://127.0.0.1:8766/mcp"
 MAX_SNAPSHOT_ITEMS = 1_000
@@ -55,6 +57,10 @@ INTAKE_CATEGORIES = (
     "membership-roles",
     "board-registry",
 )
+DEFAULT_AUTO_CATEGORIES = ("docs", "tests", "audit-analysis", "bug")
+DEFAULT_ALWAYS_ASK_CATEGORIES = tuple(
+    category for category in INTAKE_CATEGORIES if category not in DEFAULT_AUTO_CATEGORIES
+)
 
 
 @dataclass(frozen=True)
@@ -67,6 +73,20 @@ class Thresholds:
     repeat_abandon_count: int = 3
     repeat_abandon_window_seconds: int = 7 * 86_400
     review_backlog_seconds: int = 1_800
+
+
+@dataclass(frozen=True)
+class CoordinatorConfig:
+    thresholds: Thresholds
+    integration_watch_since: datetime | None
+    intake_enabled: bool
+    auto_categories: tuple[str, ...]
+    always_ask_categories: tuple[str, ...]
+    work_domain_always_ask: bool
+    rate_per_hour: int
+    effective: dict[str, Any]
+    sources: dict[str, str]
+    invalid_fields: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -152,6 +172,138 @@ def parse_time(value: Any) -> datetime | None:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
+
+
+def _state_json(raw: Mapping[str, Any] | None) -> tuple[dict[str, Any] | None, bool]:
+    """Decode one board-state value without letting bad operator input escape."""
+    if not raw or not isinstance(raw.get("state"), Mapping):
+        return None, False
+    value = raw["state"].get("value")
+    try:
+        parsed = json.loads(value) if isinstance(value, str) else None
+    except json.JSONDecodeError:
+        return None, True
+    return (dict(parsed), False) if isinstance(parsed, Mapping) else (None, True)
+
+
+def _csv_categories(value: Any) -> tuple[str, ...] | None:
+    if isinstance(value, str):
+        rows = tuple(item.strip() for item in value.split(",") if item.strip())
+    elif isinstance(value, (list, tuple)) and all(isinstance(item, str) for item in value):
+        rows = tuple(value)
+    else:
+        return None
+    if len(set(rows)) != len(rows) or any(item not in INTAKE_CATEGORIES for item in rows):
+        return None
+    return rows
+
+
+def resolve_coordinator_config(
+    raw: Mapping[str, Any] | None, args: argparse.Namespace
+) -> CoordinatorConfig:
+    """Resolve state > explicit CLI flag > built-in, independently per field."""
+    document, malformed = _state_json(raw)
+    explicit = frozenset(getattr(args, "_explicit_config_flags", ()))
+    invalid: list[str] = ["$"] if malformed else []
+    sources: dict[str, str] = {}
+
+    def choose(
+        path: str,
+        state_value: Any,
+        valid: Callable[[Any], bool],
+        cli_name: str,
+        builtin: Any,
+        *,
+        present: bool,
+        transform: Callable[[Any], Any] = lambda value: value,
+    ) -> Any:
+        if present and valid(state_value):
+            sources[path] = "config"
+            return transform(state_value)
+        if document is not None:
+            invalid.append(path)
+        cli_value = getattr(args, cli_name, builtin)
+        if cli_name in explicit:
+            sources[path] = "flag"
+            return transform(cli_value)
+        sources[path] = "default"
+        return builtin
+
+    thresholds_doc = document.get("thresholds") if document else None
+    thresholds_doc = thresholds_doc if isinstance(thresholds_doc, Mapping) else {}
+    intake_doc = document.get("intake") if document else None
+    intake_doc = intake_doc if isinstance(intake_doc, Mapping) else {}
+    second = lambda value: type(value) is int and 10 <= value <= 86_400
+    ratio = lambda value: type(value) in (int, float) and 0.1 <= value <= 1
+    fields = {
+        "stale_seconds": choose("thresholds.stale_seconds", thresholds_doc.get("stale_seconds"), second, "stale_seconds", Thresholds.stale_seconds, present="stale_seconds" in thresholds_doc),
+        "lease_warning_fraction": choose("thresholds.lease_warning_ratio", thresholds_doc.get("lease_warning_ratio"), ratio, "lease_warning_ratio", Thresholds.lease_warning_fraction, present="lease_warning_ratio" in thresholds_doc, transform=float),
+        "lease_grace_seconds": choose("thresholds.grace_seconds", thresholds_doc.get("grace_seconds"), second, "grace_seconds", Thresholds.lease_grace_seconds, present="grace_seconds" in thresholds_doc),
+        "starved_seconds": choose("thresholds.starved_seconds", thresholds_doc.get("starved_seconds"), second, "starved_seconds", Thresholds.starved_seconds, present="starved_seconds" in thresholds_doc),
+        "critical_starved_seconds": choose("thresholds.critical_starved_seconds", thresholds_doc.get("critical_starved_seconds"), second, "critical_starved_seconds", Thresholds.critical_starved_seconds, present="critical_starved_seconds" in thresholds_doc),
+        "review_backlog_seconds": choose("thresholds.review_backlog_seconds", thresholds_doc.get("review_backlog_seconds"), second, "review_backlog_seconds", Thresholds.review_backlog_seconds, present="review_backlog_seconds" in thresholds_doc),
+        "repeat_abandon_count": choose("thresholds.abandoner_drops", thresholds_doc.get("abandoner_drops"), lambda value: type(value) is int and 1 <= value <= 20, "abandoner_drops", Thresholds.repeat_abandon_count, present="abandoner_drops" in thresholds_doc),
+        "repeat_abandon_window_seconds": choose("thresholds.abandoner_window_days", thresholds_doc.get("abandoner_window_days"), lambda value: type(value) is int and 1 <= value <= 365, "abandoner_window_days", 7, present="abandoner_window_days" in thresholds_doc) * 86_400,
+    }
+    integration = choose(
+        "integration_watch_since",
+        document.get("integration_watch_since") if document else None,
+        lambda value: value is None or parse_time(value) is not None,
+        "integration_watch_since",
+        None,
+        present=document is not None and "integration_watch_since" in document,
+        transform=parse_time,
+    )
+    if document is not None and document.get("schema_version") != 1:
+        invalid.append("schema_version")
+    auto = choose("intake.auto_categories", intake_doc.get("auto_categories"), lambda value: _csv_categories(value) is not None, "intake_auto_categories", DEFAULT_AUTO_CATEGORIES, present="auto_categories" in intake_doc, transform=lambda value: _csv_categories(value) or ())
+    always = choose("intake.always_ask_categories", intake_doc.get("always_ask_categories"), lambda value: _csv_categories(value) is not None, "intake_always_ask_categories", DEFAULT_ALWAYS_ASK_CATEGORIES, present="always_ask_categories" in intake_doc, transform=lambda value: _csv_categories(value) or ())
+    if set(auto) & set(always) or set(auto) | set(always) != set(INTAKE_CATEGORIES):
+        invalid.extend(("intake.auto_categories", "intake.always_ask_categories"))
+        auto = (
+            _csv_categories(getattr(args, "intake_auto_categories", ""))
+            if "intake_auto_categories" in explicit else DEFAULT_AUTO_CATEGORIES
+        ) or DEFAULT_AUTO_CATEGORIES
+        always = (
+            _csv_categories(getattr(args, "intake_always_ask_categories", ""))
+            if "intake_always_ask_categories" in explicit else DEFAULT_ALWAYS_ASK_CATEGORIES
+        ) or DEFAULT_ALWAYS_ASK_CATEGORIES
+        sources["intake.auto_categories"] = "flag" if "intake_auto_categories" in explicit else "default"
+        sources["intake.always_ask_categories"] = "flag" if "intake_always_ask_categories" in explicit else "default"
+    enabled = choose("intake.enabled", intake_doc.get("enabled"), lambda value: type(value) is bool, "intake_enabled", False, present="enabled" in intake_doc)
+    work_ask = choose("intake.work_domain_always_ask", intake_doc.get("work_domain_always_ask"), lambda value: type(value) is bool, "work_domain_always_ask", True, present="work_domain_always_ask" in intake_doc)
+    rate = choose("intake.rate_per_hour", intake_doc.get("rate_per_hour"), lambda value: type(value) is int and 1 <= value <= 20, "intake_rate_per_hour", INTAKE_RATE_LIMIT, present="rate_per_hour" in intake_doc)
+    threshold_values = Thresholds(**fields)
+    effective = {
+        "schema_version": 1,
+        "thresholds": {
+            "stale_seconds": threshold_values.stale_seconds,
+            "lease_warning_ratio": threshold_values.lease_warning_fraction,
+            "grace_seconds": threshold_values.lease_grace_seconds,
+            "starved_seconds": threshold_values.starved_seconds,
+            "critical_starved_seconds": threshold_values.critical_starved_seconds,
+            "review_backlog_seconds": threshold_values.review_backlog_seconds,
+            "abandoner_drops": threshold_values.repeat_abandon_count,
+            "abandoner_window_days": threshold_values.repeat_abandon_window_seconds // 86_400,
+        },
+        "integration_watch_since": integration.isoformat() if integration else None,
+        "intake": {"enabled": enabled, "auto_categories": list(auto), "always_ask_categories": list(always), "work_domain_always_ask": work_ask, "rate_per_hour": rate},
+    }
+    return CoordinatorConfig(threshold_values, integration, enabled, tuple(auto), tuple(always), work_ask, rate, effective, sources, tuple(sorted(set(invalid))))
+
+
+def config_invalid_finding(
+    board_id: str, config: CoordinatorConfig
+) -> dict[str, Any] | None:
+    if not config.invalid_fields:
+        return None
+    return _finding(
+        "config-invalid",
+        "warn",
+        board_id,
+        "Coordinator config contains missing or invalid fields; safe fallbacks are active.",
+        invalid_fields=list(config.invalid_fields),
+    )
 
 
 def age_seconds(value: Any, now: datetime) -> float | None:
@@ -306,20 +458,26 @@ def classify_intake(text: str) -> tuple[str, bool]:
 
 
 def intake_matrix_decision(
-    category: str, domain: str, has_clear_reproduction: bool = False
+    category: str,
+    domain: str,
+    has_clear_reproduction: bool = False,
+    *,
+    auto_categories: Sequence[str] = DEFAULT_AUTO_CATEGORIES,
+    always_ask_categories: Sequence[str] = DEFAULT_ALWAYS_ASK_CATEGORIES,
+    work_domain_always_ask: bool = True,
 ) -> tuple[str, str]:
     if category not in INTAKE_CATEGORIES:
         raise ValueError("unsupported intake category")
     if domain not in {"personal", "work"}:
         raise ValueError("unsupported board domain")
-    if domain == "work":
+    if domain == "work" and work_domain_always_ask:
         return "ask", "work-domain-always-ask"
-    if category in {"docs", "tests", "audit-analysis"}:
+    if category in auto_categories:
+        if category == "bug" and not has_clear_reproduction:
+            return "ask", "bug-requires-clear-reproduction"
         return "auto", f"personal-{category}-auto"
-    if category == "bug" and has_clear_reproduction:
-        return "auto", "personal-reproduced-bug-auto"
-    if category == "bug":
-        return "ask", "bug-requires-clear-reproduction"
+    if category in always_ask_categories:
+        return "ask", f"personal-{category}-always-ask"
     return "ask", f"personal-{category}-always-ask"
 
 
@@ -1540,6 +1698,8 @@ def bound_findings_state(
     action_history_incomplete_until: str | None = None,
     effective_mode: str = "shadow",
     board_health: Mapping[str, Any] | None = None,
+    effective_config: Mapping[str, Any] | None = None,
+    config_sources: Mapping[str, str] | None = None,
     max_findings: int = MAX_FINDINGS,
     max_chars: int = MAX_STATE_CHARS - 200,
 ) -> dict[str, Any]:
@@ -1563,6 +1723,8 @@ def bound_findings_state(
         "suppressed_pre_watermark": suppressed_pre_watermark,
         "effective_mode": effective_mode,
         "board_health": dict(board_health or {}),
+        "effective_config": dict(effective_config or {}),
+        "config_sources": dict(config_sources or {}),
         "findings": selected,
         "truncation": {
             "findings": len(normalized),
@@ -1818,6 +1980,12 @@ async def read_cycle(reader: RawReader, home_board: str) -> tuple[list[Project],
         except Exception:  # An absent opt-in queue is the normal default.
             intake = None
         snapshots[board_id]["coordinator_intake_state"] = intake
+    try:
+        config = await reader.call("board_state_get", home_board, key=CONFIG_STATE_KEY)
+    except Exception:  # An absent config uses flags then built-ins.
+        config = None
+    if home_board in snapshots:
+        snapshots[home_board]["coordinator_config_state"] = config
     return projects, snapshots, previous
 
 
@@ -1987,6 +2155,16 @@ def merge_action_results(
             board_health=(
                 state.get("board_health", {})
                 if isinstance(state.get("board_health"), Mapping)
+                else {}
+            ),
+            effective_config=(
+                state.get("effective_config", {})
+                if isinstance(state.get("effective_config"), Mapping)
+                else {}
+            ),
+            config_sources=(
+                state.get("config_sources", {})
+                if isinstance(state.get("config_sources"), Mapping)
                 else {}
             ),
         )
@@ -2202,6 +2380,10 @@ async def process_intakes(
     create_ticket: Callable[[str, IntakeDraft], Awaitable[str]],
     drafter: IntakeDrafter = deterministic_intake_draft,
     intake_authorized: bool = True,
+    auto_categories: Sequence[str] = DEFAULT_AUTO_CATEGORIES,
+    always_ask_categories: Sequence[str] = DEFAULT_ALWAYS_ASK_CATEGORIES,
+    work_domain_always_ask: bool = True,
+    rate_per_hour: int = INTAKE_RATE_LIMIT,
 ) -> tuple[list[dict[str, Any]], dict[str, frozenset[str]]]:
     """Classify, validate and consume queues; mutations remain injected/testable."""
     if not enabled:
@@ -2249,7 +2431,12 @@ async def process_intakes(
             draft = drafter(ask, project)
             validate_intake_draft(ask, draft, project)
             decision, rule = intake_matrix_decision(
-                draft.category, project.domain, draft.has_clear_reproduction
+                draft.category,
+                project.domain,
+                draft.has_clear_reproduction,
+                auto_categories=auto_categories,
+                always_ask_categories=always_ask_categories,
+                work_domain_always_ask=work_domain_always_ask,
             )
             if decision == "auto" and not intake_authorized and not dry_run:
                 decision, rule = "ask", "missing-board-intake-grant"
@@ -2260,7 +2447,7 @@ async def process_intakes(
             if (
                 decision == "auto"
                 and recent_creates is not None
-                and recent_creates >= INTAKE_RATE_LIMIT
+                and recent_creates >= rate_per_hour
             ):
                 decision, rule = "ask", "hourly-auto-create-limit"
             if decision == "ask":
@@ -2407,6 +2594,16 @@ def home_audit_state(
             if isinstance(source.get("board_health"), Mapping)
             else {}
         ),
+        effective_config=(
+            source.get("effective_config", {})
+            if isinstance(source.get("effective_config"), Mapping)
+            else {}
+        ),
+        config_sources=(
+            source.get("config_sources", {})
+            if isinstance(source.get("config_sources"), Mapping)
+            else {}
+        ),
     )
     source_truncation = source.get("truncation", {})
     if isinstance(source_truncation, Mapping):
@@ -2514,12 +2711,16 @@ def capability_scopes(token: str) -> frozenset[str]:
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    effective_argv = list(sys.argv[1:] if argv is None else argv)
     parser = argparse.ArgumentParser(description="Run the fleet coordinator")
     parser.add_argument("--url", default=os.environ.get("ONBOARD_CENTRAL_URL", DEFAULT_URL))
     parser.add_argument("--token-path", default=os.environ.get("PURSERS_COORDINATOR_TOKEN_PATH") or os.environ.get("ONBOARD_TOKEN_FILE"))
     parser.add_argument("--home-board", default=os.environ.get("ONBOARD_BOARD_ID", "pursers"))
     parser.add_argument("--agent-name", default="coordinator-1")
     parser.add_argument("--mode", choices=("shadow", "active"), default="shadow")
+    parser.add_argument("--stale-seconds", type=int, default=Thresholds.stale_seconds)
+    parser.add_argument("--lease-warning-ratio", type=float, default=Thresholds.lease_warning_fraction)
+    parser.add_argument("--grace-seconds", type=int, default=Thresholds.lease_grace_seconds)
     parser.add_argument("--starved-seconds", type=int, default=Thresholds.starved_seconds)
     parser.add_argument(
         "--critical-starved-seconds",
@@ -2531,6 +2732,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         type=int,
         default=Thresholds.review_backlog_seconds,
     )
+    parser.add_argument("--abandoner-drops", type=int, default=Thresholds.repeat_abandon_count)
+    parser.add_argument("--abandoner-window-days", type=int, default=7)
     parser.add_argument("--poll-seconds", type=int, default=60)
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
@@ -2539,22 +2742,75 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     intake.add_argument("--disable-intake", dest="intake_enabled", action="store_false")
     parser.set_defaults(intake_enabled=False)
     parser.add_argument(
+        "--intake-auto-categories",
+        default=",".join(DEFAULT_AUTO_CATEGORIES),
+    )
+    parser.add_argument(
+        "--intake-always-ask-categories",
+        default=",".join(DEFAULT_ALWAYS_ASK_CATEGORIES),
+    )
+    work_policy = parser.add_mutually_exclusive_group()
+    work_policy.add_argument("--work-domain-always-ask", dest="work_domain_always_ask", action="store_true")
+    work_policy.add_argument("--allow-work-domain-auto", dest="work_domain_always_ask", action="store_false")
+    parser.set_defaults(work_domain_always_ask=True)
+    parser.add_argument("--intake-rate-per-hour", type=int, default=INTAKE_RATE_LIMIT)
+    parser.add_argument(
         "--integration-watch-since",
         help="Ignore closed-ticket integration checks before this ISO-8601 timestamp",
     )
-    args = parser.parse_args(argv)
+    args = parser.parse_args(effective_argv)
+    raw_argv = effective_argv
+    seen_flags = {item.split("=", 1)[0] for item in raw_argv if item.startswith("--")}
+    flag_names = {
+        "--stale-seconds": "stale_seconds",
+        "--lease-warning-ratio": "lease_warning_ratio",
+        "--grace-seconds": "grace_seconds",
+        "--starved-seconds": "starved_seconds",
+        "--critical-starved-seconds": "critical_starved_seconds",
+        "--review-backlog-seconds": "review_backlog_seconds",
+        "--abandoner-drops": "abandoner_drops",
+        "--abandoner-window-days": "abandoner_window_days",
+        "--integration-watch-since": "integration_watch_since",
+        "--enable-intake": "intake_enabled",
+        "--disable-intake": "intake_enabled",
+        "--intake-auto-categories": "intake_auto_categories",
+        "--intake-always-ask-categories": "intake_always_ask_categories",
+        "--work-domain-always-ask": "work_domain_always_ask",
+        "--allow-work-domain-auto": "work_domain_always_ask",
+        "--intake-rate-per-hour": "intake_rate_per_hour",
+    }
+    args._explicit_config_flags = frozenset(
+        name for flag, name in flag_names.items() if flag in seen_flags
+    )
     if not args.token_path:
         parser.error("--token-path or PURSERS_COORDINATOR_TOKEN_PATH is required")
     if args.poll_seconds < 1:
         parser.error("--poll-seconds must be positive")
     if args.integration_watch_since and parse_time(args.integration_watch_since) is None:
         parser.error("--integration-watch-since must be an ISO-8601 timestamp")
-    if (
-        args.starved_seconds < 1
-        or args.critical_starved_seconds < 1
-        or args.review_backlog_seconds < 1
+    if any(
+        not 10 <= value <= 86_400
+        for value in (
+            args.stale_seconds,
+            args.grace_seconds,
+            args.starved_seconds,
+            args.critical_starved_seconds,
+            args.review_backlog_seconds,
+        )
     ):
         parser.error("coordinator thresholds must be positive")
+    if not 0.1 <= args.lease_warning_ratio <= 1:
+        parser.error("--lease-warning-ratio must be between 0.1 and 1")
+    if not 1 <= args.abandoner_drops <= 20 or not 1 <= args.abandoner_window_days <= 365:
+        parser.error("abandoner policy is out of range")
+    if _csv_categories(args.intake_auto_categories) is None or _csv_categories(args.intake_always_ask_categories) is None:
+        parser.error("intake categories must be fixed known category names")
+    if set(_csv_categories(args.intake_auto_categories) or ()) | set(_csv_categories(args.intake_always_ask_categories) or ()) != set(INTAKE_CATEGORIES):
+        parser.error("intake category policy must cover every known category")
+    if set(_csv_categories(args.intake_auto_categories) or ()) & set(_csv_categories(args.intake_always_ask_categories) or ()):
+        parser.error("intake auto and always-ask categories must be disjoint")
+    if not 1 <= args.intake_rate_per_hour <= 20:
+        parser.error("--intake-rate-per-hour must be between 1 and 20")
     return args
 
 
@@ -2562,18 +2818,16 @@ async def run(args: argparse.Namespace) -> None:
     token = _read_token(args.token_path)
     intake_authorized = INTAKE_SCOPE in capability_scopes(token)
     terms_path = os.environ.get("PURSERS_PRIVACY_TERMS")
-    integration_watch_since = parse_time(args.integration_watch_since)
     runtime = RuntimeState.for_mode("shadow" if args.dry_run else args.mode)
     degraded_streaks: dict[str, int] = {}
-    thresholds = Thresholds(
-        starved_seconds=args.starved_seconds,
-        critical_starved_seconds=args.critical_starved_seconds,
-        review_backlog_seconds=args.review_backlog_seconds,
-    )
     while True:
         now = utc_now()
         async with RawReader(args.url, token) as reader:
             projects, snapshots, previous = await read_cycle(reader, args.home_board)
+        live_config = resolve_coordinator_config(
+            snapshots.get(args.home_board, {}).get("coordinator_config_state"), args
+        )
+        thresholds = live_config.thresholds
         terms = load_privacy_terms(terms_path, [project.work_dir for project in projects])
         states = analyze_cycle(
             projects,
@@ -2581,11 +2835,17 @@ async def run(args: argparse.Namespace) -> None:
             previous,
             terms,
             now,
-            integration_watch_since=integration_watch_since,
+            integration_watch_since=live_config.integration_watch_since,
             thresholds=thresholds,
             effective_mode=runtime.effective_mode,
             degraded_streaks=degraded_streaks,
         )
+        home_state = states.get(args.home_board)
+        if home_state is not None:
+            home_state["effective_config"] = live_config.effective
+            home_state["config_sources"] = live_config.sources
+        invalid_finding = config_invalid_finding(args.home_board, live_config)
+        config_findings = [invalid_finding] if invalid_finding else []
         actions = plan_actions(snapshots, states, previous, now, thresholds)
         action_findings, histories = await execute_actions(
             actions,
@@ -2598,7 +2858,7 @@ async def run(args: argparse.Namespace) -> None:
         )
         states = merge_action_results(
             states,
-            action_findings,
+            [*config_findings, *action_findings],
             histories,
             now,
             runtime.effective_mode,
@@ -2608,7 +2868,7 @@ async def run(args: argparse.Namespace) -> None:
             snapshots,
             now,
             runtime,
-            enabled=args.intake_enabled,
+            enabled=live_config.intake_enabled,
             dry_run=args.dry_run,
             create_ticket=lambda board_id, draft: create_intake_ticket(
                 args.url,
@@ -2618,6 +2878,10 @@ async def run(args: argparse.Namespace) -> None:
                 draft,
             ),
             intake_authorized=intake_authorized,
+            auto_categories=live_config.auto_categories,
+            always_ask_categories=live_config.always_ask_categories,
+            work_domain_always_ask=live_config.work_domain_always_ask,
+            rate_per_hour=live_config.rate_per_hour,
         )
         states = merge_action_results(
             states,

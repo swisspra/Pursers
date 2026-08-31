@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -24,7 +25,7 @@ from urllib.parse import unquote, urlsplit
 _CLIENT_SRC = Path(__file__).resolve().parents[2] / "packages" / "client" / "src"
 if (_CLIENT_SRC / "pursers_client").is_dir():
     sys.path.insert(0, str(_CLIENT_SRC))
-from pursers_client import BoardClient  # noqa: I001
+from pursers_client import BoardClient, BoardClientError  # noqa: I001
 
 
 DEFAULT_URL = "https://127.0.0.1:8766/mcp"
@@ -55,6 +56,21 @@ BOARD_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,80}$")
 ACTIVE_CLAIM_STATES = frozenset({"claimed", "in_progress", "creating_report"})
 SUBMITTED_STATES = frozenset({"submitted", "reviewing", "in_review"})
 TERMINAL_STATES = frozenset({"closed", "rejected", "canceled", "terminated"})
+CONFIG_STATE_KEY = "coordinator_config"
+FINDINGS_STATE_KEY = "coordinator_findings"
+CONFIG_CATEGORIES = (
+    "docs", "tests", "audit-analysis", "bug", "production-code",
+    "release-ci", "membership-roles", "board-registry",
+)
+CONFIG_THRESHOLD_FIELDS = (
+    "stale_seconds", "lease_warning_ratio", "grace_seconds", "starved_seconds",
+    "critical_starved_seconds", "review_backlog_seconds", "abandoner_drops",
+    "abandoner_window_days",
+)
+
+
+class ConfigConflictError(RuntimeError):
+    """The dashboard form was based on missing or superseded state."""
 
 
 class FleetClient(Protocol):
@@ -74,6 +90,65 @@ class FleetClient(Protocol):
         max_events: int | None = None,
         max_bytes: int | None = None,
     ) -> dict[str, Any]: ...
+
+
+def _state_value(raw: Any) -> tuple[dict[str, Any] | None, str | None]:
+    state = raw.get("state") if isinstance(raw, dict) else None
+    value = state.get("value") if isinstance(state, dict) else None
+    if not isinstance(value, str):
+        return None, None
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return None, value
+    return (dict(parsed), value) if isinstance(parsed, dict) else (None, value)
+
+
+def validate_coordinator_config(value: Any) -> dict[str, Any]:
+    """Validate the complete dashboard-owned value; no arbitrary state keys pass."""
+    if not isinstance(value, dict) or set(value) != {
+        "schema_version", "thresholds", "integration_watch_since", "intake"
+    }:
+        raise ValueError("config must contain only the coordinator schema fields")
+    if value.get("schema_version") != 1:
+        raise ValueError("schema_version must be 1")
+    thresholds = value.get("thresholds")
+    if not isinstance(thresholds, dict) or set(thresholds) != set(CONFIG_THRESHOLD_FIELDS):
+        raise ValueError("thresholds must contain every known threshold")
+    for name in (
+        "stale_seconds", "grace_seconds", "starved_seconds",
+        "critical_starved_seconds", "review_backlog_seconds",
+    ):
+        if type(thresholds[name]) is not int or not 10 <= thresholds[name] <= 86_400:
+            raise ValueError(f"{name} must be between 10 and 86400")
+    ratio = thresholds["lease_warning_ratio"]
+    if type(ratio) not in (int, float) or not 0.1 <= ratio <= 1:
+        raise ValueError("lease_warning_ratio must be between 0.1 and 1")
+    if type(thresholds["abandoner_drops"]) is not int or not 1 <= thresholds["abandoner_drops"] <= 20:
+        raise ValueError("abandoner_drops must be between 1 and 20")
+    if type(thresholds["abandoner_window_days"]) is not int or not 1 <= thresholds["abandoner_window_days"] <= 365:
+        raise ValueError("abandoner_window_days must be between 1 and 365")
+    watermark = value.get("integration_watch_since")
+    if watermark is not None and _parse_time(watermark) is None:
+        raise ValueError("integration_watch_since must be null or ISO-8601")
+    intake = value.get("intake")
+    if not isinstance(intake, dict) or set(intake) != {
+        "enabled", "auto_categories", "always_ask_categories",
+        "work_domain_always_ask", "rate_per_hour",
+    }:
+        raise ValueError("intake must contain every known intake field")
+    if type(intake["enabled"]) is not bool or type(intake["work_domain_always_ask"]) is not bool:
+        raise ValueError("intake switches must be booleans")
+    auto, always = intake["auto_categories"], intake["always_ask_categories"]
+    if not all(isinstance(rows, list) and all(type(item) is str for item in rows) for rows in (auto, always)):
+        raise ValueError("intake categories must be arrays")
+    if len(set(auto)) != len(auto) or len(set(always)) != len(always):
+        raise ValueError("intake categories must not contain duplicates")
+    if set(auto) & set(always) or set(auto) | set(always) != set(CONFIG_CATEGORIES):
+        raise ValueError("intake categories must be known, disjoint, and complete")
+    if type(intake["rate_per_hour"]) is not int or not 1 <= intake["rate_per_hour"] <= 20:
+        raise ValueError("rate_per_hour must be between 1 and 20")
+    return json.loads(json.dumps(value))
 
 
 @dataclass(frozen=True)
@@ -942,6 +1017,83 @@ class FleetFetcher:
             raise RuntimeError(str(row["error"]))
         return project_board_detail(row)
 
+    async def fetch_config(self) -> dict[str, Any]:
+        async with self._client(self.config.home_board) as client:
+            try:
+                raw_config = await client.board_state_get(key=CONFIG_STATE_KEY)
+            except BoardClientError as exc:
+                if "state key not found" not in str(exc):
+                    raise
+                raw_config = {}
+            try:
+                raw_findings = await client.board_state_get(key=FINDINGS_STATE_KEY)
+            except BoardClientError as exc:
+                if "state key not found" not in str(exc):
+                    raise
+                raw_findings = {}
+        stored, stored_text = _state_value(raw_config)
+        findings, _ = _state_value(raw_findings)
+        findings = findings or {}
+        return {
+            "config": stored,
+            "effective": findings.get("effective_config", {}),
+            "sources": findings.get("config_sources", {}),
+            "mode": findings.get("effective_mode", "unknown"),
+            "updated_at": stored.get("updated_at") if stored else None,
+            "updated_by": stored.get("updated_by") if stored else None,
+            "expected_sha256": (
+                hashlib.sha256(stored_text.encode("utf-8")).hexdigest()
+                if stored_text is not None else None
+            ),
+            "concurrency": "cas" if stored_text is not None else "lww",
+        }
+
+    async def save_config(
+        self, value: Any, expected_sha256: str | None
+    ) -> dict[str, Any]:
+        clean = validate_coordinator_config(value)
+        clean["updated_at"] = datetime.now(timezone.utc).isoformat()
+        clean["updated_by"] = self.config.agent_name
+        encoded = json.dumps(clean, sort_keys=True, separators=(",", ":"))
+        async with self._client(self.config.home_board) as client:
+            try:
+                current = await client.board_state_get(key=CONFIG_STATE_KEY)
+            except BoardClientError as exc:
+                if "state key not found" not in str(exc):
+                    raise
+                current_text = None
+            else:
+                _current_document, current_text = _state_value(current)
+                if current_text is None:
+                    raise ConfigConflictError("coordinator_config state is malformed")
+            current_digest = (
+                hashlib.sha256(current_text.encode("utf-8")).hexdigest()
+                if current_text is not None else None
+            )
+            if current_digest is None:
+                if expected_sha256 is not None:
+                    raise ConfigConflictError("coordinator_config does not exist")
+            elif expected_sha256 is None:
+                raise ConfigConflictError("expected_sha256 is required for an existing config")
+            elif expected_sha256 != current_digest:
+                raise ConfigConflictError("coordinator_config changed; reload before saving")
+            arguments = {
+                "agent_name": self.config.agent_name,
+                "key": CONFIG_STATE_KEY,
+                "value": encoded,
+            }
+            if expected_sha256 is not None:
+                if not re.fullmatch(r"[0-9a-f]{64}", expected_sha256):
+                    raise ValueError("expected_sha256 must be a lowercase SHA-256 digest")
+                arguments["expected_sha256"] = expected_sha256
+            await client._call("board_state_update", arguments)  # noqa: SLF001
+        return {
+            "ok": True,
+            "config": clean,
+            "expected_sha256": hashlib.sha256(encoded.encode("utf-8")).hexdigest(),
+            "concurrency": "cas" if expected_sha256 is not None else "lww",
+        }
+
 
 class TimedCache:
     def __init__(
@@ -991,6 +1143,12 @@ class DashboardCache:
                     self._details.pop(board_id, None)
             raise
 
+    def get_config(self) -> dict[str, Any]:
+        return asyncio.run(self.fetcher.fetch_config())
+
+    def save_config(self, value: Any, expected_sha256: str | None) -> dict[str, Any]:
+        return asyncio.run(self.fetcher.save_config(value, expected_sha256))
+
 
 HTML = r"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -1023,6 +1181,35 @@ async function refreshDetail(){const r=route();if(!r)return;try{const data=await
 function syncRoute(){const r=route();document.querySelector('#home-view').hidden=!!r;document.querySelector('#detail-view').hidden=!r;if(detailTimer){clearInterval(detailTimer);detailTimer=null}if(r){document.querySelector('#detail-view').innerHTML='<p class="empty">Loading board detail…</p>';refreshDetail();detailTimer=setInterval(refreshDetail,5000)}else if(fleetData)renderFleet(fleetData)}
 document.querySelector('#filter').addEventListener('input',e=>{filterNeedle=e.target.value.toLocaleLowerCase();if(route()&&detailData)renderDetail(detailData);else if(fleetData)renderFleet(fleetData)});document.addEventListener('keydown',e=>{if(e.key==='/'&&!['INPUT','TEXTAREA','SELECT'].includes(document.activeElement?.tagName)){e.preventDefault();document.querySelector('#filter').focus()}});window.addEventListener('hashchange',syncRoute);refreshFleet();refreshOverhead();setInterval(refreshFleet,5000);setInterval(refreshOverhead,5000);syncRoute();
 </script></body></html>"""
+
+# Keep the existing bounded fleet SPA intact; layer the one explicit write surface
+# as an isolated hash page and API client.
+HTML = HTML.replace(
+    "</style>",
+    ".config-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px}"
+    ".config-grid label{display:grid;gap:5px}.config-grid input,.config-grid select,.config-grid button{background:var(--panel2);border:1px solid var(--line);border-radius:8px;color:var(--text);padding:8px}"
+    ".source{font-size:11px;color:var(--muted)}</style>",
+).replace(
+    "Live boards and shared agent pool</p>",
+    'Live boards and shared agent pool · <a href="#/config">Coordinator config</a></p>',
+).replace(
+    '<section id="detail-view" hidden></section></main>',
+    '<section id="detail-view" hidden></section><section id="config-view" hidden></section></main>',
+).replace(
+    "</body>",
+    r"""<script>
+const CONFIG_CATEGORIES=['docs','tests','audit-analysis','bug','production-code','release-ci','membership-roles','board-registry'];
+const CONFIG_NUMBERS=[['stale_seconds','Stale seconds',10,86400],['lease_warning_ratio','Lease warning ratio',.1,1],['grace_seconds','Grace seconds',10,86400],['starved_seconds','Starved seconds',10,86400],['critical_starved_seconds','Critical starved seconds',10,86400],['review_backlog_seconds','Review backlog seconds',10,86400],['abandoner_drops','Abandoner drops',1,20],['abandoner_window_days','Abandoner window days',1,365]];
+let coordinatorConfig=null;
+const sourceFor=(d,path)=>d.sources?.[path]||'unknown';
+function configNumber(d,key,label,min,max){const v=d.effective.thresholds[key];return `<label>${esc(label)} <span class="source">source: ${esc(sourceFor(d,`thresholds.${key}`))}</span><input name="${esc(key)}" type="number" min="${min}" max="${max}" step="${key==='lease_warning_ratio'?'.01':'1'}" value="${esc(v)}" required></label>`}
+function renderConfig(d){coordinatorConfig=d;const e=d.effective||{};if(!e.thresholds||!e.intake){document.querySelector('#config-view').innerHTML='<a class="back" href="#/">← All boards</a><p class="warning">Run the coordinator once to publish effective values before editing.</p>';return}document.querySelector('#config-view').innerHTML=`<a class="back" href="#/">← All boards</a><div class="top"><div><h2>Coordinator config</h2><p class="muted">One live policy document on the home board</p></div><div><span class="status">mode: ${esc(d.mode)}</span><p class="warning">Mode changes require a restart.</p></div></div><form id="config-form" class="card pool"><div class="config-grid">${CONFIG_NUMBERS.map(x=>configNumber(d,...x)).join('')}<label>Integration watch since <span class="source">source: ${esc(sourceFor(d,'integration_watch_since'))}</span><input name="integration_watch_since" type="text" placeholder="ISO-8601 or blank" value="${esc(e.integration_watch_since||'')}"></label><label>Intake enabled <span class="source">source: ${esc(sourceFor(d,'intake.enabled'))}</span><input name="enabled" type="checkbox" ${e.intake.enabled?'checked':''}></label><label>Work domain always ask <span class="source">source: ${esc(sourceFor(d,'intake.work_domain_always_ask'))}</span><input name="work_domain_always_ask" type="checkbox" ${e.intake.work_domain_always_ask?'checked':''}></label><label>Intake rate per hour <span class="source">source: ${esc(sourceFor(d,'intake.rate_per_hour'))}</span><input name="rate_per_hour" type="number" min="1" max="20" value="${esc(e.intake.rate_per_hour)}" required></label>${CONFIG_CATEGORIES.map(c=>`<label>${esc(c)} policy <span class="source">source: ${esc(sourceFor(d,e.intake.auto_categories.includes(c)?'intake.auto_categories':'intake.always_ask_categories'))}</span><select name="category_${esc(c)}"><option value="auto"${e.intake.auto_categories.includes(c)?' selected':''}>auto</option><option value="ask"${e.intake.always_ask_categories.includes(c)?' selected':''}>always ask</option></select></label>`).join('')}</div><div class="toolbar"><button type="submit">Save config</button><span id="config-status" class="muted">${esc(d.concurrency.toUpperCase())} · updated ${esc(fmt(d.updated_at))} by ${esc(d.updated_by||'—')}</span></div></form>`;document.querySelector('#config-form').addEventListener('submit',saveConfig)}
+async function refreshConfig(){try{const r=await fetch('/api/config',{cache:'no-store'});if(!r.ok)throw new Error(`HTTP ${r.status}`);renderConfig(await r.json())}catch(e){document.querySelector('#config-view').innerHTML=`<a class="back" href="#/">← All boards</a><p class="error">Config unavailable: ${esc(e.message)}</p>`}}
+async function saveConfig(event){event.preventDefault();const f=new FormData(event.target),thresholds={};for(const [key] of CONFIG_NUMBERS)thresholds[key]=key==='lease_warning_ratio'?Number(f.get(key)):Number.parseInt(f.get(key),10);const auto=[],always=[];for(const c of CONFIG_CATEGORIES)(f.get(`category_${c}`)==='auto'?auto:always).push(c);const config={schema_version:1,thresholds,integration_watch_since:f.get('integration_watch_since').trim()||null,intake:{enabled:f.get('enabled')==='on',auto_categories:auto,always_ask_categories:always,work_domain_always_ask:f.get('work_domain_always_ask')==='on',rate_per_hour:Number.parseInt(f.get('rate_per_hour'),10)}};const status=document.querySelector('#config-status');status.textContent='Saving…';try{const r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({config,expected_sha256:coordinatorConfig.expected_sha256})});const body=await r.json();if(!r.ok)throw new Error(body.error||`HTTP ${r.status}`);status.textContent=`Saved with ${body.concurrency.toUpperCase()}; waiting for coordinator poll`;setTimeout(refreshConfig,1000)}catch(e){status.textContent=`Save failed: ${e.message}`;status.className='error'}}
+function syncConfigRoute(){const active=location.hash==='#/config';document.querySelector('#config-view').hidden=!active;if(active){document.querySelector('#home-view').hidden=true;document.querySelector('#detail-view').hidden=true;refreshConfig()}}
+window.addEventListener('hashchange',syncConfigRoute);syncConfigRoute();
+</script></body>""",
+)
 
 
 def make_handler(
@@ -1063,6 +1250,15 @@ def make_handler(
                 body = _json_bytes(read_overhead_stats(selected_stats_path))
                 self._send(200, "application/json; charset=utf-8", body)
                 return
+            if self.path == "/api/config":
+                try:
+                    body = _json_bytes(cache.get_config())
+                except Exception as exc:  # noqa: BLE001
+                    body = _json_bytes({"error": type(exc).__name__})
+                    self._send(503, "application/json; charset=utf-8", body)
+                    return
+                self._send(200, "application/json; charset=utf-8", body)
+                return
             board_id = board_id_from_api_path(self.path)
             if board_id is not None:
                 try:
@@ -1088,6 +1284,33 @@ def make_handler(
                 self._send(200, "application/json; charset=utf-8", body)
                 return
             self._send(404, "application/json; charset=utf-8", b'{"error":"not found"}')
+
+        def do_POST(self) -> None:
+            if self.path != "/api/config":
+                self._send(404, "application/json; charset=utf-8", b'{"error":"not found"}')
+                return
+            try:
+                length = int(self.headers.get("Content-Length", ""))
+            except ValueError:
+                length = -1
+            if not 1 <= length <= 20_000:
+                self._send(400, "application/json; charset=utf-8", b'{"error":"invalid body size"}')
+                return
+            try:
+                request = json.loads(self.rfile.read(length))
+                if not isinstance(request, dict) or set(request) != {"config", "expected_sha256"}:
+                    raise ValueError("request must contain only config and expected_sha256")
+                body = _json_bytes(cache.save_config(request["config"], request["expected_sha256"]))
+            except (ValueError, TypeError, json.JSONDecodeError) as exc:
+                self._send(400, "application/json; charset=utf-8", _json_bytes({"error": str(exc)}))
+                return
+            except ConfigConflictError as exc:
+                self._send(409, "application/json; charset=utf-8", _json_bytes({"error": str(exc)}))
+                return
+            except Exception as exc:  # noqa: BLE001 - stale CAS is a safe conflict.
+                self._send(409, "application/json; charset=utf-8", _json_bytes({"error": type(exc).__name__}))
+                return
+            self._send(200, "application/json; charset=utf-8", body)
 
         def log_message(self, _format: str, *_args: Any) -> None:
             return
