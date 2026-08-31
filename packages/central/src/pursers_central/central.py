@@ -34,6 +34,7 @@ from mcp_types import INTERNAL_ERROR, INVALID_REQUEST
 from pydantic import AnyHttpUrl
 
 from cursor import CursorStore
+from instance_lock import CentralDataLock
 from journal import (
     KINDS as CORE_JOURNAL_KINDS,
     MIN_COMPACTION_RETAIN_LAST,
@@ -5056,14 +5057,15 @@ def main() -> None:
             )
         )
         return
-    mcp, _ = build_server(args.host, args.port, args.data_root)
-    mcp.run(
-        transport="streamable-http",
-        host=args.host,
-        port=args.port,
-        streamable_http_path="/mcp",
-        stateless_http=True,
-    )
+    with CentralDataLock(args.data_root):
+        mcp, _ = build_server(args.host, args.port, args.data_root)
+        mcp.run(
+            transport="streamable-http",
+            host=args.host,
+            port=args.port,
+            streamable_http_path="/mcp",
+            stateless_http=True,
+        )
 
 
 if __name__ == "__main__":
