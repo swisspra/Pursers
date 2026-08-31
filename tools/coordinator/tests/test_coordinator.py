@@ -1240,3 +1240,294 @@ def test_truncated_rate_history_fails_closed_until_safety_window_expires() -> No
         previous,
         NOW + timedelta(seconds=2),
     )] == ["assign"]
+
+
+@pytest.mark.parametrize("category", coordinator.INTAKE_CATEGORIES)
+@pytest.mark.parametrize("domain", ["personal", "work"])
+def test_intake_approval_matrix_every_category_by_domain(
+    category: str, domain: str
+) -> None:
+    decision, _rule = coordinator.intake_matrix_decision(
+        category, domain, has_clear_reproduction=(category == "bug")
+    )
+    expected = (
+        "auto"
+        if domain == "personal"
+        and category in {"docs", "tests", "audit-analysis", "bug"}
+        else "ask"
+    )
+    assert decision == expected
+
+
+def test_personal_bug_requires_clear_reproduction() -> None:
+    assert coordinator.intake_matrix_decision("bug", "personal", False)[0] == "ask"
+    assert coordinator.intake_matrix_decision("bug", "personal", True)[0] == "auto"
+
+
+@pytest.mark.parametrize(
+    ("text", "category"),
+    [
+        ("Update the README guide", "docs"),
+        ("Add pytest coverage", "tests"),
+        ("Run a read-only audit", "audit-analysis"),
+        ("Fix bug; steps to reproduce are listed", "bug"),
+        ("Implement the new parser", "production-code"),
+        ("Publish the next release", "release-ci"),
+        ("Change the reviewer role", "membership-roles"),
+        ("Update project_registry routing", "board-registry"),
+    ],
+)
+def test_deterministic_intake_classifier(text: str, category: str) -> None:
+    assert coordinator.classify_intake(text)[0] == category
+
+
+def _intake_state(rows: list[dict[str, str]]) -> dict[str, Any]:
+    return {"state": {"value": json.dumps(rows)}}
+
+
+def _intake_project(domain: str = "personal") -> coordinator.Project:
+    return coordinator.Project(
+        "project-a", "board-a", Path("/tmp/project-a"), domain=domain
+    )
+
+
+def _intake_row(ask_id: str, text: str) -> dict[str, str]:
+    return {
+        "id": ask_id,
+        "text": text,
+        "requested_by": "operator",
+        "board_id": "board-a",
+    }
+
+
+def test_intake_retry_uses_one_deterministic_ticket_identity() -> None:
+    row = _intake_row("ask-crash", "Fix bug; steps to reproduce: run failing example")
+    snapshot = {
+        "board-a": {
+            "tickets": [],
+            "coordinator_intake_state": _intake_state([row]),
+        }
+    }
+    created: set[str] = set()
+    calls: list[str] = []
+
+    async def create(_board_id: str, draft: coordinator.IntakeDraft) -> str:
+        calls.append(draft.ticket_id)
+        created.add(draft.ticket_id)
+        return draft.ticket_id
+
+    runtime = coordinator.RuntimeState.for_mode("active")
+    first = asyncio.run(
+        coordinator.process_intakes(
+            [_intake_project()], snapshot, NOW, runtime,
+            enabled=True, dry_run=False, create_ticket=create,
+        )
+    )
+    # Simulate a crash after ticket creation but before applying the empty queue.
+    second = asyncio.run(
+        coordinator.process_intakes(
+            [_intake_project()], snapshot, NOW, runtime,
+            enabled=True, dry_run=False, create_ticket=create,
+        )
+    )
+
+    assert len(calls) == 2
+    assert len(created) == 1
+    assert first[1] == second[1] == {"board-a": frozenset({"ask-crash"})}
+    assert first[0][0]["op_key"] == second[0][0]["op_key"]
+
+
+def test_intake_rate_limit_converts_auto_to_bounded_pending_draft() -> None:
+    row = _intake_row("ask-docs", "Update the README documentation")
+    tickets = [
+        {
+            "ticket_id": f"TK-{index}",
+            "tags": ["coordinator-intake"],
+            "created_at": ago(index + 1),
+        }
+        for index in range(5)
+    ]
+
+    async def unexpected_create(*_args: Any) -> str:
+        raise AssertionError("rate-limited intake must not create")
+
+    findings, updates = asyncio.run(
+        coordinator.process_intakes(
+            [_intake_project()],
+            {"board-a": {"tickets": tickets, "coordinator_intake_state": _intake_state([row])}},
+            NOW,
+            coordinator.RuntimeState.for_mode("active"),
+            enabled=True,
+            dry_run=False,
+            create_ticket=unexpected_create,
+        )
+    )
+
+    assert findings[0]["kind"] == "intake-pending"
+    assert findings[0]["matrix_rule"] == "hourly-auto-create-limit"
+    assert len(findings[0]["evidence"]) <= coordinator.MAX_EVIDENCE_CHARS
+    assert updates == {"board-a": frozenset({"ask-docs"})}
+
+
+def test_intake_breaker_enters_draft_only_after_three_create_failures() -> None:
+    rows = [
+        _intake_row(f"ask-{index}", f"Update docs page {index}")
+        for index in range(4)
+    ]
+
+    async def fail_create(*_args: Any) -> str:
+        raise RuntimeError("simulated")
+
+    runtime = coordinator.RuntimeState.for_mode("active")
+    findings, updates = asyncio.run(
+        coordinator.process_intakes(
+            [_intake_project()],
+            {"board-a": {"tickets": [], "coordinator_intake_state": _intake_state(rows)}},
+            NOW,
+            runtime,
+            enabled=True,
+            dry_run=False,
+            create_ticket=fail_create,
+        )
+    )
+
+    assert "board-a" in runtime.intake_breakers
+    assert sum(item["kind"] == "intake-create-failed" for item in findings) == 3
+    assert any(item.get("matrix_rule") == "create-breaker-draft-only" for item in findings)
+    assert updates == {"board-a": frozenset({"ask-2", "ask-3"})}
+
+
+def test_intake_dry_run_shows_auto_and_ask_without_mutations() -> None:
+    rows = [
+        _intake_row("ask-auto", "Write documentation for the coordinator"),
+        _intake_row("ask-ask", "Deploy and publish a release"),
+    ]
+
+    async def unexpected_create(*_args: Any) -> str:
+        raise AssertionError("dry-run must not create")
+
+    findings, updates = asyncio.run(
+        coordinator.process_intakes(
+            [_intake_project()],
+            {"board-a": {"tickets": [], "coordinator_intake_state": _intake_state(rows)}},
+            NOW,
+            coordinator.RuntimeState.for_mode("shadow"),
+            enabled=True,
+            dry_run=True,
+            create_ticket=unexpected_create,
+        )
+    )
+
+    assert {item["kind"] for item in findings} == {
+        "intake-would-create",
+        "intake-pending",
+    }
+    assert updates == {}
+
+
+def test_bounded_state_reserves_intake_record_before_other_warnings() -> None:
+    ordinary = [
+        coordinator._finding(
+            "closed-but-unmerged",
+            "warn",
+            "board-a",
+            "x" * 300,
+            ticket_id=f"TK-{index}",
+            commit_hash="a" * 40,
+        )
+        for index in range(20)
+    ]
+    ask = coordinator.IntakeAsk("ask-reserved", "Update docs", "operator", "board-a")
+    draft = coordinator.deterministic_intake_draft(ask, _intake_project())
+    intake = coordinator.intake_finding(
+        "intake-would-create",
+        "info",
+        ask,
+        draft,
+        "auto",
+        "personal-docs-auto",
+    )
+    state = coordinator.bound_findings_state(
+        [*ordinary, intake], NOW, max_chars=1_200
+    )
+    assert any(item.get("ask_id") == "ask-reserved" for item in state["findings"])
+
+
+def test_intake_is_disabled_by_default(tmp_path: Path) -> None:
+    token = tmp_path / "token"
+    token.write_text("opaque", encoding="utf-8")
+    default = coordinator.parse_args(["--token-path", str(token), "--once"])
+    enabled = coordinator.parse_args(
+        ["--token-path", str(token), "--once", "--enable-intake"]
+    )
+    disabled = coordinator.parse_args(
+        ["--token-path", str(token), "--once", "--disable-intake"]
+    )
+    assert default.intake_enabled is False
+    assert enabled.intake_enabled is True
+    assert disabled.intake_enabled is False
+
+
+def test_intake_queue_is_drained_only_after_finding_publish(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import pursers_client
+
+    calls: list[tuple[str, str]] = []
+
+    class FakeBoardClient:
+        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+            pass
+
+        async def __aenter__(self) -> "FakeBoardClient":
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+        async def board_state_update(self, key: str, value: str) -> dict[str, bool]:
+            calls.append((key, value))
+            return {"ok": True}
+
+        async def board_state_get(self, key: str) -> dict[str, Any]:
+            assert key == coordinator.INTAKE_STATE_KEY
+            return _intake_state(
+                [
+                    _intake_row("ask-done", "Update docs"),
+                    _intake_row("ask-appended", "Add tests"),
+                ]
+            )
+
+        async def memory_write(self, *_args: Any, **_kwargs: Any) -> None:
+            raise AssertionError("digest markers should suppress memory writes")
+
+    monkeypatch.setattr(pursers_client, "BoardClient", FakeBoardClient)
+    state = coordinator.bound_findings_state([], NOW)
+    state["last_daily_digest"] = NOW.date().isoformat()
+    state["last_weekly_digest"] = (
+        f"{NOW.isocalendar().year}-W{NOW.isocalendar().week:02d}"
+    )
+    asyncio.run(
+        coordinator.write_reports(
+            "https://board.invalid/mcp",
+            "opaque",
+            "board-a",
+            "coordinator-test",
+            {"board-a": state},
+            {
+                "board-a": {
+                    "last_daily_digest": NOW.date().isoformat(),
+                    "last_weekly_digest": (
+                        f"{NOW.isocalendar().year}-W{NOW.isocalendar().week:02d}"
+                    ),
+                }
+            },
+            NOW,
+            {"board-a": frozenset({"ask-done"})},
+        )
+    )
+    assert [key for key, _value in calls] == [
+        coordinator.STATE_KEY,
+        coordinator.INTAKE_STATE_KEY,
+    ]
+    assert [item["id"] for item in json.loads(calls[1][1])] == ["ask-appended"]

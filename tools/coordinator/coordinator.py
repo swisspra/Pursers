@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fleet coordinator with shadow-default phase-2 dispatch and nudge policy."""
+"""Fleet coordinator with phase-2 dispatch and opt-in phase-3 intake."""
 
 from __future__ import annotations
 
@@ -15,10 +15,11 @@ from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Awaitable, Callable, Mapping, Protocol, Sequence
 
 
 STATE_KEY = "coordinator_findings"
+INTAKE_STATE_KEY = "coordinator_intake"
 SCHEMA_VERSION = 2
 DEFAULT_URL = "https://127.0.0.1:8766/mcp"
 MAX_SNAPSHOT_ITEMS = 1_000
@@ -37,6 +38,19 @@ ASSIGN_RATE_SECONDS = 600
 NUDGE_RATE_SECONDS = 3_600
 MAX_NUDGES_PER_SEAT = 3
 NUDGE_EXPIRY_SECONDS = 600
+INTAKE_RATE_LIMIT = 5
+INTAKE_RATE_WINDOW_SECONDS = 3_600
+INTAKE_BREAKER_FAILURES = 3
+INTAKE_CATEGORIES = (
+    "docs",
+    "tests",
+    "audit-analysis",
+    "bug",
+    "production-code",
+    "release-ci",
+    "membership-roles",
+    "board-registry",
+)
 
 
 @dataclass(frozen=True)
@@ -58,6 +72,7 @@ class Project:
     work_dir: Path
     integration_ref: str = "main"
     public: bool = False
+    domain: str = "personal"
 
 
 @dataclass(frozen=True)
@@ -79,10 +94,44 @@ class RuntimeState:
     requested_mode: str
     effective_mode: str
     consecutive_failures: int = 0
+    intake_failures: dict[str, int] | None = None
+    intake_breakers: set[str] | None = None
 
     @classmethod
     def for_mode(cls, mode: str) -> "RuntimeState":
-        return cls(requested_mode=mode, effective_mode=mode)
+        return cls(
+            requested_mode=mode,
+            effective_mode=mode,
+            intake_failures={},
+            intake_breakers=set(),
+        )
+
+
+@dataclass(frozen=True)
+class IntakeAsk:
+    ask_id: str
+    text: str
+    requested_by: str
+    board_id: str
+
+
+@dataclass(frozen=True)
+class IntakeDraft:
+    ticket_id: str
+    op_key: str
+    title: str
+    description: str
+    scope: str
+    target_url: str
+    required_fields: tuple[str, ...]
+    category: str
+    has_clear_reproduction: bool
+
+
+class IntakeDrafter(Protocol):
+    """Phase-3 drafting seam; deterministic until an approved LLM is supplied."""
+
+    def __call__(self, ask: IntakeAsk, project: Project) -> IntakeDraft: ...
 
 
 def utc_now() -> datetime:
@@ -128,8 +177,11 @@ def parse_registry(raw: Mapping[str, Any]) -> list[Project]:
             continue
         board_id, work_dir = row.get("board_id"), row.get("work_dir")
         integration_ref = row.get("integration_ref", "main")
+        domain = row.get("domain", "personal")
         if not all(isinstance(item, str) and item.strip() for item in (board_id, work_dir, integration_ref)):
             raise ValueError("active project routing is incomplete")
+        if domain not in {"personal", "work"}:
+            raise ValueError("active project domain must be personal or work")
         path = Path(work_dir)
         if not path.is_absolute():
             raise ValueError("active project work_dir must be absolute")
@@ -140,9 +192,217 @@ def parse_registry(raw: Mapping[str, Any]) -> list[Project]:
                 work_dir=path,
                 integration_ref=integration_ref,
                 public=row.get("public") is True,
+                domain=domain,
             )
         )
     return sorted(projects, key=lambda item: (item.board_id, item.name))
+
+
+def parse_intake(raw: Mapping[str, Any] | None, board_id: str) -> list[IntakeAsk]:
+    """Parse the intentionally small, human-written intake queue."""
+    if not raw:
+        return []
+    state = raw.get("state")
+    value = state.get("value") if isinstance(state, Mapping) else None
+    try:
+        rows = json.loads(value) if isinstance(value, str) else value
+    except json.JSONDecodeError as exc:
+        raise ValueError("coordinator_intake is malformed") from exc
+    if not isinstance(rows, list):
+        raise ValueError("coordinator_intake must be a list")
+    asks: list[IntakeAsk] = []
+    seen: set[str] = set()
+    for row in rows:
+        if not isinstance(row, Mapping):
+            raise ValueError("coordinator_intake entries must be objects")
+        values = {key: row.get(key) for key in ("id", "text", "requested_by", "board_id")}
+        if not all(isinstance(value, str) and value.strip() for value in values.values()):
+            raise ValueError("coordinator_intake entries require id, text, requested_by, and board_id")
+        ask_id = str(values["id"]).strip()
+        if len(ask_id) > 120 or len(str(values["text"])) > 2_000 or len(str(values["requested_by"])) > 120:
+            raise ValueError("coordinator_intake entry exceeds its size limit")
+        if ask_id in seen:
+            raise ValueError("coordinator_intake ids must be unique")
+        if values["board_id"].strip() != board_id:
+            raise ValueError("coordinator_intake entry board_id does not match its board")
+        seen.add(ask_id)
+        asks.append(
+            IntakeAsk(
+                ask_id=ask_id,
+                text=str(values["text"]).strip(),
+                requested_by=str(values["requested_by"]).strip(),
+                board_id=board_id,
+            )
+        )
+    return asks
+
+
+def classify_intake(text: str) -> tuple[str, bool]:
+    """Classify by ordered, reviewable rules; no probabilistic drafting."""
+    lowered = text.casefold()
+    has_reproduction = bool(
+        re.search(r"\b(repro(?:duce|duction)?|steps? to reproduce|failing example|traceback)\b", lowered)
+        or re.search(r"\bexpected\b.+\b(actual|got|observed)\b", lowered)
+    )
+    rules = (
+        ("release-ci", r"\b(release|publish|pypi|npm|deploy|deployment|ci|github actions?)\b"),
+        ("membership-roles", r"\b(member(?:ship)?|role|seat|invite|permission)\b"),
+        ("board-registry", r"\b(board|registry|project_registry)\b"),
+        ("docs", r"\b(doc(?:s|umentation)?|readme|guide|runbook)\b"),
+        ("tests", r"\b(test(?:s|ing)?|pytest|unittest|fixture|coverage)\b"),
+        ("audit-analysis", r"\b(read[- ]only|audit|analyse|analyze|analysis|inspect|report)\b"),
+        ("bug", r"\b(bug|fix|broken|crash|error|fails?|regression)\b"),
+    )
+    for category, pattern in rules:
+        if re.search(pattern, lowered):
+            return category, has_reproduction
+    return "production-code", has_reproduction
+
+
+def intake_matrix_decision(
+    category: str, domain: str, has_clear_reproduction: bool = False
+) -> tuple[str, str]:
+    if category not in INTAKE_CATEGORIES:
+        raise ValueError("unsupported intake category")
+    if domain not in {"personal", "work"}:
+        raise ValueError("unsupported board domain")
+    if domain == "work":
+        return "ask", "work-domain-always-ask"
+    if category in {"docs", "tests", "audit-analysis"}:
+        return "auto", f"personal-{category}-auto"
+    if category == "bug" and has_clear_reproduction:
+        return "auto", "personal-reproduced-bug-auto"
+    if category == "bug":
+        return "ask", "bug-requires-clear-reproduction"
+    return "ask", f"personal-{category}-always-ask"
+
+
+def _intake_identity(ask: IntakeAsk) -> tuple[str, str]:
+    digest = hashlib.sha256(
+        f"{ask.board_id}\0{ask.ask_id}".encode("utf-8")
+    ).hexdigest()
+    return f"TK-intake-{digest[:12]}", f"coord-intake-{digest[:24]}"
+
+
+def deterministic_intake_draft(ask: IntakeAsk, project: Project) -> IntakeDraft:
+    category, has_reproduction = classify_intake(ask.text)
+    ticket_id, op_key = _intake_identity(ask)
+    required = {
+        "docs": ("commit_hash", "test_output"),
+        "tests": ("commit_hash", "test_output"),
+        "audit-analysis": ("findings", "evidence", "next_action"),
+        "bug": ("reproduction", "commit_hash", "test_output"),
+        "production-code": ("commit_hash", "test_output"),
+        "release-ci": ("commit_hash", "test_output", "release_evidence"),
+        "membership-roles": ("change_summary", "approval_evidence"),
+        "board-registry": ("change_summary", "approval_evidence"),
+    }[category]
+    scope = "READ-ONLY" if category == "audit-analysis" else "interactive-no-send"
+    compact = " ".join(ask.text.split())
+    title = compact[:197] + ("..." if len(compact) > 197 else "")
+    description = "\n".join(
+        (
+            "Structured coordinator intake.",
+            f"Requested by: {ask.requested_by}",
+            f"Original ask: {compact}",
+            f"Category: {category}",
+            "Acceptance: complete the requested work and provide every required field.",
+            f"Intake op-key: {op_key}",
+        )
+    )
+    return IntakeDraft(
+        ticket_id=ticket_id,
+        op_key=op_key,
+        title=title,
+        description=description,
+        scope=scope,
+        target_url=f"{project.name}/",
+        required_fields=required,
+        category=category,
+        has_clear_reproduction=has_reproduction,
+    )
+
+
+def validate_intake_draft(ask: IntakeAsk, draft: IntakeDraft, project: Project) -> None:
+    values = (
+        ask.ask_id,
+        ask.text,
+        ask.requested_by,
+        ask.board_id,
+        draft.title,
+        draft.description,
+        draft.scope,
+        draft.target_url,
+        draft.ticket_id,
+        draft.op_key,
+    )
+    if not all(isinstance(value, str) and value.strip() for value in values):
+        raise ValueError("intake or drafted ticket has an empty required field")
+    if not draft.required_fields or any(not value for value in draft.required_fields):
+        raise ValueError("drafted ticket required_fields must be non-empty")
+    if ask.board_id != project.board_id:
+        raise ValueError("intake board is not registry-active")
+    intake_matrix_decision(draft.category, project.domain, draft.has_clear_reproduction)
+
+
+def _draft_evidence(
+    ask: IntakeAsk, draft: IntakeDraft, decision: str, rule: str
+) -> str:
+    payload = {
+        "ask_id": ask.ask_id,
+        "category": draft.category,
+        "decision": decision,
+        "matrix_rule": rule,
+        "draft": {
+            "ticket_id": draft.ticket_id,
+            "title": draft.title,
+            "description": draft.description,
+            "scope": draft.scope,
+            "target_url": draft.target_url,
+            "required_fields": list(draft.required_fields),
+        },
+    }
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))[
+        :MAX_EVIDENCE_CHARS
+    ]
+
+
+def intake_finding(
+    kind: str,
+    level: str,
+    ask: IntakeAsk,
+    draft: IntakeDraft,
+    decision: str,
+    rule: str,
+    *,
+    created_ticket_id: str | None = None,
+) -> dict[str, Any]:
+    messages = {
+        "intake-created": "Structured intake created a ticket.",
+        "intake-would-create": "Structured intake would create a ticket in active execution.",
+        "intake-pending": "Structured intake requires operator approval.",
+    }
+    return {
+        "kind": kind,
+        "level": level,
+        "board_id": ask.board_id,
+        "message": messages.get(kind, "Structured intake produced a finding."),
+        "evidence": _draft_evidence(ask, draft, decision, rule),
+        "next_action": (
+            f"Review and fire the drafted {draft.category} ticket for ask {ask.ask_id}."
+            if decision == "ask"
+            else (
+                f"Run with --enable-intake without --dry-run to create {draft.ticket_id}."
+                if kind == "intake-would-create"
+                else f"Review {created_ticket_id or draft.ticket_id} on {ask.board_id}."
+            )
+        ),
+        "ask_id": ask.ask_id,
+        "category": draft.category,
+        "matrix_rule": rule,
+        "op_key": draft.op_key,
+        "ticket_id": created_ticket_id or draft.ticket_id,
+    }
 
 
 def classify_agent(agent: Mapping[str, Any], now: datetime, thresholds: Thresholds) -> str:
@@ -1156,6 +1416,10 @@ def _bounded_finding(item: Mapping[str, Any]) -> dict[str, Any]:
         "evidence",
         "next_action",
     }
+    if result["kind"].startswith("intake-"):
+        protected.update(
+            {"ask_id", "category", "matrix_rule", "ticket_id", "op_key"}
+        )
     while len(json.dumps(result, sort_keys=True, separators=(",", ":"))) > MAX_FINDING_CHARS:
         removable = next(
             (key for key in reversed(result) if key not in protected), None
@@ -1254,7 +1518,18 @@ def bound_findings_state(
     if inherited_incomplete is not None and inherited_incomplete > generated_at:
         base["action_history_incomplete_until"] = inherited_incomplete.isoformat()
     critical = [item for item in normalized if item.get("level") == "critical"]
-    remaining = [item for item in normalized if item.get("level") != "critical"]
+    intake = [
+        item
+        for item in normalized
+        if item.get("level") != "critical"
+        and str(item.get("kind", "")).startswith("intake-")
+    ]
+    remaining = [
+        item
+        for item in normalized
+        if item.get("level") != "critical"
+        and not str(item.get("kind", "")).startswith("intake-")
+    ]
 
     def add_findings(rows: Sequence[dict[str, Any]]) -> None:
         for item in rows:
@@ -1269,7 +1544,10 @@ def bound_findings_state(
 
     # Critical alerts get first claim on the payload.  Delta evidence is then
     # reserved before warnings so reporting volume cannot erase history.
+    # Intake outcomes are also reserved: otherwise a consumed ask could lose
+    # its only operator-visible create/approval record under ordinary backlog.
     add_findings(critical)
+    add_findings(intake)
     for item in sorted(
         source_actions,
         key=lambda entry: str(entry.get("performed_at", "")),
@@ -1451,11 +1729,31 @@ async def read_cycle(reader: RawReader, home_board: str) -> tuple[list[Project],
                     if isinstance(row, Mapping)
                 ]
                 snapshots[board_id]["coordination_tickets_complete"] = True
+            try:
+                all_tickets = await reader.call(
+                    "ticket_list", board_id, include_closed=True, limit=500
+                )
+            except Exception:
+                all_tickets = {}
+            if all_tickets.get("count") == all_tickets.get("total_matching"):
+                snapshots[board_id]["intake_tickets"] = [
+                    row
+                    for row in all_tickets.get("tickets", [])
+                    if isinstance(row, Mapping)
+                ]
+                snapshots[board_id]["intake_tickets_complete"] = True
         try:
             prior = await reader.call("board_state_get", board_id, key=STATE_KEY)
         except Exception:  # Missing optional state or an unavailable board.
             prior = None
         previous[board_id] = _previous_payload(prior)
+        try:
+            intake = await reader.call(
+                "board_state_get", board_id, key=INTAKE_STATE_KEY
+            )
+        except Exception:  # An absent opt-in queue is the normal default.
+            intake = None
+        snapshots[board_id]["coordinator_intake_state"] = intake
     return projects, snapshots, previous
 
 
@@ -1721,6 +2019,233 @@ async def mutate_action(
         )
 
 
+def _serialize_intake(asks: Sequence[IntakeAsk]) -> str:
+    return json.dumps(
+        [
+            {
+                "id": ask.ask_id,
+                "text": ask.text,
+                "requested_by": ask.requested_by,
+                "board_id": ask.board_id,
+            }
+            for ask in asks
+        ],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
+def _recent_intake_creates(
+    snapshot: Mapping[str, Any], now: datetime
+) -> int | None:
+    if snapshot.get("intake_tickets_complete") is True:
+        ticket_rows = snapshot.get("intake_tickets", [])
+    else:
+        ticket_rows = snapshot.get("tickets", [])
+    omitted = snapshot.get("omitted_counts") or snapshot.get("truncation_counts")
+    omitted_tickets = omitted.get("tickets", 0) if isinstance(omitted, Mapping) else 0
+    if (
+        snapshot.get("intake_tickets_complete") is not True
+        and isinstance(omitted_tickets, int)
+        and omitted_tickets > 0
+    ):
+        return None
+    count = 0
+    for ticket in ticket_rows:
+        if not isinstance(ticket, Mapping):
+            continue
+        tags = ticket.get("tags", [])
+        created_age = age_seconds(ticket.get("created_at"), now)
+        if (
+            isinstance(tags, list)
+            and "coordinator-intake" in tags
+            and created_age is not None
+            and created_age <= INTAKE_RATE_WINDOW_SECONDS
+        ):
+            count += 1
+    return count
+
+
+async def create_intake_ticket(
+    url: str,
+    token: str,
+    agent_name: str,
+    board_id: str,
+    draft: IntakeDraft,
+) -> str:
+    """Create once using the ask-derived ticket id as the durable op-key."""
+    from pursers_client import BoardClient, BoardClientError
+
+    async with BoardClient(url, token, board_id, agent_name=agent_name) as client:
+        try:
+            result = await client.ticket_create(
+                draft.ticket_id,
+                draft.title,
+                description=draft.description,
+                scope=draft.scope,
+                required_fields=list(draft.required_fields),
+                tags=["coordinator-intake", f"op:{draft.op_key}"],
+                target_url=draft.target_url,
+                unassigned=True,
+            )
+        except BoardClientError as exc:
+            if "ticket already exists" not in str(exc):
+                raise
+            existing = (await client.ticket_get(draft.ticket_id)).get("ticket", {})
+            if (
+                existing.get("title") != draft.title
+                or existing.get("target_url") != draft.target_url
+                or f"op:{draft.op_key}" not in existing.get("tags", [])
+            ):
+                raise RuntimeError("intake idempotency collision") from exc
+            return draft.ticket_id
+        return str(result["ticket"]["ticket_id"])
+
+
+async def process_intakes(
+    projects: Sequence[Project],
+    snapshots: Mapping[str, Mapping[str, Any]],
+    now: datetime,
+    runtime: RuntimeState,
+    *,
+    enabled: bool,
+    dry_run: bool,
+    create_ticket: Callable[[str, IntakeDraft], Awaitable[str]],
+    drafter: IntakeDrafter = deterministic_intake_draft,
+) -> tuple[list[dict[str, Any]], dict[str, frozenset[str]]]:
+    """Classify, validate and consume queues; mutations remain injected/testable."""
+    if not enabled:
+        return [], {}
+    failures = runtime.intake_failures if runtime.intake_failures is not None else {}
+    breakers = runtime.intake_breakers if runtime.intake_breakers is not None else set()
+    runtime.intake_failures = failures
+    runtime.intake_breakers = breakers
+    findings: list[dict[str, Any]] = []
+    updates: dict[str, frozenset[str]] = {}
+    by_board: dict[str, list[Project]] = {}
+    for project in projects:
+        by_board.setdefault(project.board_id, []).append(project)
+    for board_id, board_projects in sorted(by_board.items()):
+        snapshot = snapshots.get(board_id, {})
+        raw_intake = snapshot.get("coordinator_intake_state")
+        try:
+            asks = parse_intake(raw_intake if isinstance(raw_intake, Mapping) else None, board_id)
+        except ValueError as exc:
+            findings.append(
+                _finding(
+                    "intake-invalid",
+                    "warn",
+                    board_id,
+                    "The structured intake queue is invalid and was left untouched.",
+                    error_class=type(exc).__name__,
+                )
+            )
+            continue
+        if not asks:
+            continue
+        domain = "work" if any(item.domain == "work" for item in board_projects) else "personal"
+        selected = sorted(board_projects, key=lambda item: item.name)[0]
+        project = Project(
+            selected.name,
+            selected.board_id,
+            selected.work_dir,
+            selected.integration_ref,
+            selected.public,
+            domain,
+        )
+        recent_creates = _recent_intake_creates(snapshot, now)
+        processed: set[str] = set()
+        for ask in asks:
+            draft = drafter(ask, project)
+            validate_intake_draft(ask, draft, project)
+            decision, rule = intake_matrix_decision(
+                draft.category, project.domain, draft.has_clear_reproduction
+            )
+            if decision == "auto" and board_id in breakers:
+                decision, rule = "ask", "create-breaker-draft-only"
+            if decision == "auto" and recent_creates is None:
+                decision, rule = "ask", "incomplete-rate-history-draft-only"
+            if (
+                decision == "auto"
+                and recent_creates is not None
+                and recent_creates >= INTAKE_RATE_LIMIT
+            ):
+                decision, rule = "ask", "hourly-auto-create-limit"
+            if decision == "ask":
+                findings.append(
+                    intake_finding("intake-pending", "warn", ask, draft, decision, rule)
+                )
+                if not dry_run:
+                    processed.add(ask.ask_id)
+                continue
+            if dry_run:
+                findings.append(
+                    intake_finding(
+                        "intake-would-create", "info", ask, draft, decision, rule
+                    )
+                )
+                continue
+            try:
+                ticket_id = await create_ticket(board_id, draft)
+            except Exception as exc:
+                failures[board_id] = failures.get(board_id, 0) + 1
+                findings.append(
+                    _finding(
+                        "intake-create-failed",
+                        "warn",
+                        board_id,
+                        "A structured intake ticket creation failed.",
+                        ask_id=ask.ask_id,
+                        error_class=type(exc).__name__,
+                        consecutive_failures=failures[board_id],
+                    )
+                )
+                if failures[board_id] >= INTAKE_BREAKER_FAILURES:
+                    breakers.add(board_id)
+                    findings.append(
+                        intake_finding(
+                            "intake-pending",
+                            "warn",
+                            ask,
+                            draft,
+                            "ask",
+                            "create-breaker-draft-only",
+                        )
+                    )
+                else:
+                    continue
+                processed.add(ask.ask_id)
+                continue
+            failures[board_id] = 0
+            if recent_creates is not None:
+                recent_creates += 1
+            findings.append(
+                intake_finding(
+                    "intake-created",
+                    "info",
+                    ask,
+                    draft,
+                    decision,
+                    rule,
+                    created_ticket_id=ticket_id,
+                )
+            )
+            processed.add(ask.ask_id)
+        if not dry_run and processed:
+            updates[board_id] = frozenset(processed)
+    return findings, updates
+
+
+async def drain_intake(
+    client: Any, board_id: str, processed_ids: frozenset[str]
+) -> None:
+    """Re-read immediately before drain so concurrent appends are preserved."""
+    raw = await client.board_state_get(INTAKE_STATE_KEY)
+    current = parse_intake(raw, board_id)
+    remaining = [ask for ask in current if ask.ask_id not in processed_ids]
+    await client.board_state_update(INTAKE_STATE_KEY, _serialize_intake(remaining))
+
+
 def home_audit_state(
     home_board: str,
     states: Mapping[str, Mapping[str, Any]],
@@ -1799,8 +2324,10 @@ async def write_reports(
     states: Mapping[str, Mapping[str, Any]],
     previous: Mapping[str, Mapping[str, Any]],
     now: datetime,
+    intake_updates: Mapping[str, frozenset[str]] | None = None,
 ) -> None:
     from pursers_client import BoardClient
+    intake_updates = intake_updates or {}
 
     # Publish non-home findings first. A board that cannot accept its report
     # must not prevent healthy boards or the home audit surface from updating.
@@ -1815,6 +2342,8 @@ async def write_reports(
                     STATE_KEY,
                     json.dumps(state, sort_keys=True, separators=(",", ":")),
                 )
+                if board_id in intake_updates:
+                    await drain_intake(client, board_id, intake_updates[board_id])
         except Exception:
             # The snapshot-side finding already carries a scrubbed error class.
             # Never retain transport exception text in coordinator state.
@@ -1849,6 +2378,10 @@ async def write_reports(
                 STATE_KEY,
                 json.dumps(home_state, sort_keys=True, separators=(",", ":")),
             )
+            if home_board in intake_updates:
+                await drain_intake(
+                    client, home_board, intake_updates[home_board]
+                )
 
 
 def _read_token(path_value: str) -> str:
@@ -1882,6 +2415,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--poll-seconds", type=int, default=60)
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
+    intake = parser.add_mutually_exclusive_group()
+    intake.add_argument("--enable-intake", dest="intake_enabled", action="store_true")
+    intake.add_argument("--disable-intake", dest="intake_enabled", action="store_false")
+    parser.set_defaults(intake_enabled=False)
     parser.add_argument(
         "--integration-watch-since",
         help="Ignore closed-ticket integration checks before this ISO-8601 timestamp",
@@ -1946,6 +2483,28 @@ async def run(args: argparse.Namespace) -> None:
             now,
             runtime.effective_mode,
         )
+        intake_findings, intake_updates = await process_intakes(
+            projects,
+            snapshots,
+            now,
+            runtime,
+            enabled=args.intake_enabled,
+            dry_run=args.dry_run,
+            create_ticket=lambda board_id, draft: create_intake_ticket(
+                args.url,
+                token,
+                args.agent_name,
+                board_id,
+                draft,
+            ),
+        )
+        states = merge_action_results(
+            states,
+            intake_findings,
+            histories,
+            now,
+            runtime.effective_mode,
+        )
         if args.dry_run:
             print(json.dumps(states, indent=2, sort_keys=True))
         else:
@@ -1954,7 +2513,16 @@ async def run(args: argparse.Namespace) -> None:
             if home is not None:
                 home["last_daily_digest"] = now.date().isoformat()
                 home["last_weekly_digest"] = f"{now.isocalendar().year}-W{now.isocalendar().week:02d}"
-            await write_reports(args.url, token, args.home_board, args.agent_name, states, previous, now)
+            await write_reports(
+                args.url,
+                token,
+                args.home_board,
+                args.agent_name,
+                states,
+                previous,
+                now,
+                intake_updates,
+            )
         if args.once:
             return
         await asyncio.sleep(args.poll_seconds)
