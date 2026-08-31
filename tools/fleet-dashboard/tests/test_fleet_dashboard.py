@@ -932,10 +932,18 @@ def test_findings_panel_projection_handles_absent_present_and_truncated_state() 
 
     findings = [
         {
-            "kind": f"finding-{index}",
+            "kind": (
+                "review-backlog"
+                if index == 0
+                else "board-degraded"
+                if index == 1
+                else f"finding-{index}"
+            ),
             "level": "critical" if index == 0 else "warn",
             "message": "x" * 700,
             "ticket_id": "TK-one",
+            "evidence": "observed=3600; threshold=1800",
+            "next_action": "Review the finding safely.",
         }
         for index in range(dashboard.MAX_FINDINGS + 3)
     ]
@@ -964,6 +972,10 @@ def test_findings_panel_projection_handles_absent_present_and_truncated_state() 
     assert len(present["items"]) == dashboard.MAX_FINDINGS
     assert present["truncated_count"] == 5
     assert present["items"][0]["level"] == "critical"
+    assert [item["kind"] for item in present["items"][:2]] == [
+        "review-backlog",
+        "board-degraded",
+    ]
     assert len(present["items"][0]["text"]) <= dashboard.MAX_FINDING_CHARS
     assert "Coordinator findings" in dashboard.HTML
     assert "/api/overhead" in dashboard.HTML

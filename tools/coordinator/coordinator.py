@@ -25,10 +25,13 @@ MAX_SNAPSHOT_ITEMS = 1_000
 MAX_SNAPSHOT_BYTES = 750_000
 MAX_FINDINGS = 50
 MAX_FINDING_CHARS = 500
+MAX_EVIDENCE_CHARS = 300
 MAX_STATE_CHARS = 5_000
 MAX_PRIVACY_COMMITS_PER_CYCLE = 1_000
 COMMIT_RE = re.compile(r"(?<![0-9a-fA-F])([0-9a-fA-F]{7,64})(?![0-9a-fA-F])")
 CLAIMED_STATES = frozenset({"claimed", "in_progress", "creating_report"})
+SUBMITTED_STATES = frozenset({"submitted"})
+BOARD_DEGRADED_POLLS = 3
 COORDINATOR_NAME = "coordinator-1"
 ASSIGN_RATE_SECONDS = 600
 NUDGE_RATE_SECONDS = 3_600
@@ -45,6 +48,7 @@ class Thresholds:
     critical_starved_seconds: int = 600
     repeat_abandon_count: int = 3
     repeat_abandon_window_seconds: int = 7 * 86_400
+    review_backlog_seconds: int = 1_800
 
 
 @dataclass(frozen=True)
@@ -254,9 +258,69 @@ def eligible_agents(
     )
 
 
-def _finding(kind: str, level: str, board_id: str, message: str, **evidence: Any) -> dict[str, Any]:
-    result = {"kind": kind, "level": level, "board_id": board_id, "message": message}
-    result.update({key: value for key, value in evidence.items() if value is not None})
+def _finding_evidence(board_id: str, values: Mapping[str, Any]) -> str:
+    parts = [f"board_id={board_id}"]
+    for key, value in values.items():
+        if value is None or key in {"error", "evidence", "next_action"}:
+            continue
+        rendered = (
+            json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            if isinstance(value, (Mapping, list, tuple))
+            else str(value)
+        )
+        candidate = "; ".join([*parts, f"{key}={rendered}"])
+        if len(candidate) > MAX_EVIDENCE_CHARS:
+            remaining = MAX_EVIDENCE_CHARS - len("; ".join(parts)) - len(key) - 4
+            if remaining > 0:
+                parts.append(f"{key}={rendered[:remaining]}…")
+            break
+        parts.append(f"{key}={rendered}")
+    return "; ".join(parts)[:MAX_EVIDENCE_CHARS]
+
+
+def _finding_next_action(
+    kind: str, board_id: str, values: Mapping[str, Any]
+) -> str:
+    ticket_id = str(values.get("ticket_id") or "the affected ticket")
+    actions = {
+        "starved": f"Review {ticket_id} on {board_id}; claim it or assign an eligible worker.",
+        "claim-health": f"Review {ticket_id} on {board_id}; renew or release the stale claim safely.",
+        "snapshot-truncated": f"Inspect the bounded snapshot for {board_id} before acting on incomplete counts.",
+        "repeat-abandoner": f"Review the named seat on {board_id} before assigning more work to it.",
+        "repeat-abandoner-history-incomplete": f"Wait for a complete observation window on {board_id} before penalizing a seat.",
+        "closed-but-unmerged": f"Review {ticket_id} and integrate its submitted commit into the configured ref.",
+        "unverifiable-commit": f"Fetch or restore the submitted commit for {ticket_id}, then rerun the integration check.",
+        "integration-check-unavailable": f"Restore the repository ref check for {board_id}, then rerun the coordinator.",
+        "privacy-scan-unavailable": f"Restore the local diff scan for {board_id} before publishing the affected commit.",
+        "privacy-leak-suspect": f"Review the flagged commit on {board_id} against the privacy policy before publishing.",
+        "privacy-scan-truncated": f"Run another bounded privacy scan cycle for {board_id} before declaring coverage complete.",
+        "review-backlog": f"Review {ticket_id} on {board_id} with an available reviewer seat.",
+        "board-degraded": f"Restore a complete snapshot read for {board_id}, then confirm one healthy poll.",
+        "would_nudge": f"Review the proposed nudge for {ticket_id} before enabling active mode.",
+        "would_assign": f"Review the proposed assignment for {ticket_id} before enabling active mode.",
+        "nudge": f"Verify the nudged seat acknowledges {ticket_id} on {board_id}.",
+        "assign": f"Verify the assigned seat claims {ticket_id} on {board_id}.",
+        "mutation_failed": f"Review the failed coordinator mutation for {ticket_id} before retrying.",
+        "coordinator_circuit_open": f"Resolve the coordinator mutation failures on {board_id} before restoring active mode.",
+    }
+    return actions.get(
+        kind,
+        f"Review the {kind.replace('_', ' ')} finding on {board_id} before taking action.",
+    )
+
+
+def _finding(
+    kind: str, level: str, board_id: str, message: str, **details: Any
+) -> dict[str, Any]:
+    result = {
+        "kind": kind,
+        "level": level,
+        "board_id": board_id,
+        "message": message,
+        "evidence": _finding_evidence(board_id, details),
+        "next_action": _finding_next_action(kind, board_id, details),
+    }
+    result.update({key: value for key, value in details.items() if value is not None})
     return result
 
 
@@ -273,11 +337,28 @@ def ticket_findings(
     if not isinstance(claim_ttl_s, int) or isinstance(claim_ttl_s, bool) or claim_ttl_s <= 0:
         claim_ttl_s = 900
     findings: list[dict[str, Any]] = []
+    reviewer_seats = sorted(
+        {
+            str(agent.get("agent_name"))
+            for agent in agents
+            if agent.get("agent_name")
+            and (
+                agent.get("role") == "reviewer"
+                or agent.get("membership_role") == "reviewer"
+            )
+        }
+    )[:10]
 
     for ticket in tickets:
         ticket_id = str(ticket.get("ticket_id", "unknown"))
         stage = starvation_stage(ticket, now, thresholds)
         if stage:
+            observed_age = int(age_seconds(ticket.get("created_at"), now) or 0)
+            threshold = (
+                thresholds.critical_starved_seconds
+                if ticket.get("priority") == "critical"
+                else thresholds.starved_seconds
+            )
             assignee = (
                 choose_assignee(
                     agents, tickets, now, thresholds, repeat_abandoners
@@ -293,10 +374,36 @@ def ticket_findings(
                     "An open ticket exceeded its claim-time threshold.",
                     ticket_id=ticket_id,
                     escalation_stage=stage,
+                    observed_age_seconds=observed_age,
+                    threshold_seconds=threshold,
                     would_assign_to_agent_id=assignee.get("agent_id") if assignee else None,
                     would_assign_to_agent_name=assignee.get("agent_name") if assignee else None,
                 )
-            )
+                )
+
+        if ticket.get("status") in SUBMITTED_STATES:
+            submitted_age = age_seconds(ticket.get("submitted_at"), now)
+            if (
+                submitted_age is not None
+                and submitted_age >= thresholds.review_backlog_seconds
+            ):
+                findings.append(
+                    _finding(
+                        "review-backlog",
+                        (
+                            "critical"
+                            if submitted_age >= 2 * thresholds.review_backlog_seconds
+                            else "warn"
+                        ),
+                        board_id,
+                        "A submitted ticket exceeded the review backlog threshold.",
+                        ticket_id=ticket_id,
+                        submitted_at=ticket.get("submitted_at"),
+                        observed_age_seconds=int(submitted_age),
+                        threshold_seconds=thresholds.review_backlog_seconds,
+                        reviewer_seats=reviewer_seats,
+                    )
+                )
 
         if ticket.get("status") in CLAIMED_STATES:
             lease_state = classify_lease(ticket, claim_ttl_s, now, thresholds)
@@ -331,6 +438,25 @@ def ticket_findings(
             )
         )
     return findings
+
+
+def board_degradation(
+    snapshot: Mapping[str, Any],
+) -> tuple[bool, str | None, str | None]:
+    error_class = snapshot.get("snapshot_error_class")
+    if isinstance(error_class, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.]{0,79}", error_class):
+        return True, "snapshot-failed", error_class
+    omitted = snapshot.get("omitted_counts") or snapshot.get("truncation_counts")
+    truncated = snapshot.get("truncated") is True or (
+        isinstance(omitted, Mapping)
+        and any(
+            isinstance(value, int)
+            and not isinstance(value, bool)
+            and value > 0
+            for value in omitted.values()
+        )
+    )
+    return (True, "snapshot-truncated", None) if truncated else (False, None, None)
 
 
 def update_drop_evidence(
@@ -1009,17 +1135,45 @@ def privacy_findings(
 
 def _bounded_finding(item: Mapping[str, Any]) -> dict[str, Any]:
     result = dict(item)
+    result["kind"] = str(result.get("kind", "finding"))[:80]
+    result["level"] = str(result.get("level", "info"))[:16]
+    result["board_id"] = str(result.get("board_id", "unknown"))[:80]
     message = str(result.get("message", ""))[:MAX_FINDING_CHARS]
     result["message"] = message
+    result["evidence"] = str(
+        result.get("evidence")
+        or _finding_evidence(result["board_id"], result)
+    )[:MAX_EVIDENCE_CHARS]
+    result["next_action"] = str(
+        result.get("next_action")
+        or _finding_next_action(result["kind"], result["board_id"], result)
+    )[:200]
+    protected = {
+        "kind",
+        "level",
+        "board_id",
+        "message",
+        "evidence",
+        "next_action",
+    }
     while len(json.dumps(result, sort_keys=True, separators=(",", ":"))) > MAX_FINDING_CHARS:
-        if message:
+        removable = next(
+            (key for key in reversed(result) if key not in protected), None
+        )
+        if removable is not None:
+            result.pop(removable)
+            continue
+        if len(message) > 40:
             message = message[:-1]
             result["message"] = message + ("…" if message else "")
             continue
-        removable = next((key for key in reversed(result) if key not in {"kind", "level", "board_id", "message"}), None)
-        if removable is None:
-            break
-        result.pop(removable)
+        if len(result["evidence"]) > 40:
+            result["evidence"] = result["evidence"][:-1]
+            continue
+        if len(result["next_action"]) > 40:
+            result["next_action"] = result["next_action"][:-1]
+            continue
+        break
     return result
 
 
@@ -1057,6 +1211,7 @@ def bound_findings_state(
     action_history: Sequence[Mapping[str, Any]] | None = None,
     action_history_incomplete_until: str | None = None,
     effective_mode: str = "shadow",
+    board_health: Mapping[str, Any] | None = None,
     max_findings: int = MAX_FINDINGS,
     max_chars: int = MAX_STATE_CHARS - 200,
 ) -> dict[str, Any]:
@@ -1079,6 +1234,7 @@ def bound_findings_state(
         ),
         "suppressed_pre_watermark": suppressed_pre_watermark,
         "effective_mode": effective_mode,
+        "board_health": dict(board_health or {}),
         "findings": selected,
         "truncation": {
             "findings": len(normalized),
@@ -1265,19 +1421,36 @@ async def read_cycle(reader: RawReader, home_board: str) -> tuple[list[Project],
     snapshots: dict[str, dict[str, Any]] = {}
     previous: dict[str, dict[str, Any]] = {}
     for board_id in sorted({project.board_id for project in projects}):
-        snapshots[board_id] = await reader.call(
-            "board_snapshot", board_id, limit=MAX_SNAPSHOT_ITEMS, max_bytes=MAX_SNAPSHOT_BYTES
-        )
-        active = await reader.call(
-            "ticket_list", board_id, include_closed=False, limit=500
-        )
-        if active.get("count") == active.get("total_matching"):
-            snapshots[board_id]["coordination_tickets"] = [
-                row
-                for row in active.get("tickets", [])
-                if isinstance(row, Mapping)
-            ]
-            snapshots[board_id]["coordination_tickets_complete"] = True
+        try:
+            snapshots[board_id] = await reader.call(
+                "board_snapshot",
+                board_id,
+                limit=MAX_SNAPSHOT_ITEMS,
+                max_bytes=MAX_SNAPSHOT_BYTES,
+            )
+        except Exception as exc:
+            snapshots[board_id] = {
+                "board": {"board_id": board_id},
+                "agents": [],
+                "tickets": [],
+                "snapshot_error_class": type(exc).__name__,
+                "truncated": True,
+                "omitted_counts": {"agents": 1, "tickets": 1},
+            }
+        else:
+            try:
+                active = await reader.call(
+                    "ticket_list", board_id, include_closed=False, limit=500
+                )
+            except Exception:
+                active = {}
+            if active.get("count") == active.get("total_matching"):
+                snapshots[board_id]["coordination_tickets"] = [
+                    row
+                    for row in active.get("tickets", [])
+                    if isinstance(row, Mapping)
+                ]
+                snapshots[board_id]["coordination_tickets_complete"] = True
         try:
             prior = await reader.call("board_state_get", board_id, key=STATE_KEY)
         except Exception:  # Missing optional state or an unavailable board.
@@ -1295,6 +1468,7 @@ def analyze_cycle(
     integration_watch_since: datetime | None = None,
     thresholds: Thresholds = Thresholds(),
     effective_mode: str = "shadow",
+    degraded_streaks: dict[str, int] | None = None,
 ) -> dict[str, dict[str, Any]]:
     findings_by_board: dict[str, list[dict[str, Any]]] = {}
     watermarks_by_board: dict[str, dict[str, str]] = {}
@@ -1302,6 +1476,7 @@ def analyze_cycle(
     drop_history_by_board: dict[str, list[dict[str, Any]]] = {}
     drop_uncertainty_by_board: dict[str, list[dict[str, Any]]] = {}
     suppressed_by_board: dict[str, int] = {}
+    board_health_by_board: dict[str, dict[str, Any]] = {}
     for board_id, snapshot in snapshots.items():
         coordination_snapshot = dict(snapshot)
         coordination_snapshot["tickets"] = snapshot.get(
@@ -1321,6 +1496,42 @@ def analyze_cycle(
             repeat_abandoner_ids(history, thresholds),
         )
         findings_by_board[board_id].extend(drop_findings)
+        degraded, reason, error_class = board_degradation(snapshot)
+        prior_health = previous.get(board_id, {}).get("board_health", {})
+        persisted_streak = (
+            prior_health.get("consecutive_degraded_polls", 0)
+            if isinstance(prior_health, Mapping)
+            else 0
+        )
+        if not isinstance(persisted_streak, int) or isinstance(persisted_streak, bool):
+            persisted_streak = 0
+        runtime_streak = (
+            degraded_streaks.get(board_id, 0)
+            if degraded_streaks is not None
+            else 0
+        )
+        streak = max(0, persisted_streak, runtime_streak) + 1 if degraded else 0
+        if degraded_streaks is not None:
+            degraded_streaks[board_id] = streak
+        board_health_by_board[board_id] = {
+            "status": "degraded" if degraded else "healthy",
+            "consecutive_degraded_polls": streak,
+            "reason": reason,
+            "error_class": error_class,
+        }
+        if streak >= BOARD_DEGRADED_POLLS:
+            findings_by_board[board_id].append(
+                _finding(
+                    "board-degraded",
+                    "critical",
+                    board_id,
+                    "A registry-active board failed to return a complete snapshot repeatedly.",
+                    degradation_reason=reason,
+                    error_class=error_class,
+                    observed_consecutive_polls=streak,
+                    threshold_polls=BOARD_DEGRADED_POLLS,
+                )
+            )
         drop_counters_by_board[board_id] = counters
         drop_history_by_board[board_id] = history
         drop_uncertainty_by_board[board_id] = uncertainty
@@ -1370,6 +1581,7 @@ def analyze_cycle(
                 previous.get(board_id, {}), now
             ),
             effective_mode=effective_mode,
+            board_health=board_health_by_board[board_id],
         )
         for board_id, findings in findings_by_board.items()
     }
@@ -1410,6 +1622,11 @@ def merge_action_results(
                 "action_history_incomplete_until"
             ),
             effective_mode=effective_mode,
+            board_health=(
+                state.get("board_health", {})
+                if isinstance(state.get("board_health"), Mapping)
+                else {}
+            ),
         )
     return merged
 
@@ -1440,6 +1657,7 @@ async def execute_actions(
                     "active",
                     attempted_action=action.kind,
                     error=str(exc)[:200],
+                    error_class=type(exc).__name__,
                     consecutive_failures=runtime.consecutive_failures,
                 )
             )
@@ -1575,6 +1793,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         type=int,
         default=Thresholds.critical_starved_seconds,
     )
+    parser.add_argument(
+        "--review-backlog-seconds",
+        type=int,
+        default=Thresholds.review_backlog_seconds,
+    )
     parser.add_argument("--poll-seconds", type=int, default=60)
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
@@ -1589,8 +1812,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         parser.error("--poll-seconds must be positive")
     if args.integration_watch_since and parse_time(args.integration_watch_since) is None:
         parser.error("--integration-watch-since must be an ISO-8601 timestamp")
-    if args.starved_seconds < 1 or args.critical_starved_seconds < 1:
-        parser.error("starvation thresholds must be positive")
+    if (
+        args.starved_seconds < 1
+        or args.critical_starved_seconds < 1
+        or args.review_backlog_seconds < 1
+    ):
+        parser.error("coordinator thresholds must be positive")
     return args
 
 
@@ -1599,9 +1826,11 @@ async def run(args: argparse.Namespace) -> None:
     terms_path = os.environ.get("PURSERS_PRIVACY_TERMS")
     integration_watch_since = parse_time(args.integration_watch_since)
     runtime = RuntimeState.for_mode("shadow" if args.dry_run else args.mode)
+    degraded_streaks: dict[str, int] = {}
     thresholds = Thresholds(
         starved_seconds=args.starved_seconds,
         critical_starved_seconds=args.critical_starved_seconds,
+        review_backlog_seconds=args.review_backlog_seconds,
     )
     while True:
         now = utc_now()
@@ -1617,6 +1846,7 @@ async def run(args: argparse.Namespace) -> None:
             integration_watch_since=integration_watch_since,
             thresholds=thresholds,
             effective_mode=runtime.effective_mode,
+            degraded_streaks=degraded_streaks,
         )
         actions = plan_actions(snapshots, states, previous, now, thresholds)
         action_findings, histories = await execute_actions(

@@ -65,6 +65,104 @@ def test_stage_two_names_least_loaded_live_assignee() -> None:
     assert finding["would_assign_to_agent_id"] == "AI-free"
 
 
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "starved",
+        "claim-health",
+        "snapshot-truncated",
+        "repeat-abandoner",
+        "repeat-abandoner-history-incomplete",
+        "closed-but-unmerged",
+        "unverifiable-commit",
+        "integration-check-unavailable",
+        "privacy-scan-unavailable",
+        "privacy-leak-suspect",
+        "privacy-scan-truncated",
+        "would_nudge",
+        "would_assign",
+        "nudge",
+        "assign",
+        "mutation_failed",
+        "coordinator_circuit_open",
+        "review-backlog",
+        "board-degraded",
+    ],
+)
+def test_every_finding_kind_has_bounded_evidence_and_safe_next_action(
+    kind: str,
+) -> None:
+    finding = coordinator._finding(
+        kind,
+        "warn",
+        "board-a",
+        "Deterministic finding.",
+        ticket_id="TK-example",
+        observed=4_000,
+        threshold=1_800,
+        seats=["reviewer-a", "reviewer-b"],
+        oversized="x" * 1_000,
+    )
+
+    assert 0 < len(finding["evidence"]) <= coordinator.MAX_EVIDENCE_CHARS
+    assert "TK-example" in finding["evidence"]
+    assert "observed=4000" in finding["evidence"]
+    assert "threshold=1800" in finding["evidence"]
+    assert "\n" not in finding["next_action"]
+    assert finding["next_action"].endswith(".")
+
+
+@pytest.mark.parametrize(
+    ("age", "level"),
+    [(1_799, None), (1_800, "warn"), (3_599, "warn"), (3_600, "critical")],
+)
+def test_review_backlog_threshold_and_two_x_escalation(
+    age: int, level: str | None
+) -> None:
+    snapshot = {
+        "board": {"claim_ttl_s": 900},
+        "agents": [
+            {
+                "agent_id": "AI-review-b",
+                "agent_name": "reviewer-b",
+                "role": "reviewer",
+            },
+            {
+                "agent_id": "AI-review-a",
+                "agent_name": "reviewer-a",
+                "membership_role": "reviewer",
+            },
+            {
+                "agent_id": "AI-worker",
+                "agent_name": "worker",
+                "role": "builder",
+            },
+        ],
+        "tickets": [
+            {
+                "ticket_id": "TK-review",
+                "status": "submitted",
+                "submitted_at": ago(age),
+            }
+        ],
+    }
+
+    findings = [
+        item
+        for item in coordinator.ticket_findings("board-a", snapshot, NOW)
+        if item["kind"] == "review-backlog"
+    ]
+
+    if level is None:
+        assert findings == []
+        return
+    assert findings[0]["level"] == level
+    assert findings[0]["observed_age_seconds"] == age
+    assert findings[0]["threshold_seconds"] == 1_800
+    assert findings[0]["reviewer_seats"] == ["reviewer-a", "reviewer-b"]
+    assert "reviewer_seats" in findings[0]["evidence"]
+
+
 def test_repeat_abandoner_counts_three_recent_drops_on_one_ticket() -> None:
     ticket = {
         "ticket_id": "TK-repeat",
@@ -101,6 +199,8 @@ def test_repeat_abandoner_counts_three_recent_drops_on_one_ticket() -> None:
             "level": "warn",
             "board_id": "board-a",
             "message": "A seat reached the repeated dropped-claim threshold within the proven reporting window.",
+            "evidence": "board_id=board-a; holder_agent_id=AI-repeat; dropped_claims=3; window_days=7",
+            "next_action": "Review the named seat on board-a before assigning more work to it.",
             "holder_agent_id": "AI-repeat",
             "dropped_claims": 3,
             "window_days": 7,
@@ -540,6 +640,8 @@ def test_findings_are_bounded_with_explicit_truncation() -> None:
     assert state["truncation"]["findings"] == 80 - len(state["findings"])
     assert len(rendered) <= 5_000
     assert all(len(json.dumps(item, sort_keys=True, separators=(",", ":"))) <= 500 for item in state["findings"])
+    assert all(0 < len(item["evidence"]) <= 300 for item in state["findings"])
+    assert all(item["next_action"] for item in state["findings"])
 
 
 def test_critical_privacy_finding_survives_warning_bound_and_digest() -> None:
@@ -603,6 +705,114 @@ def test_fairness_is_critical_then_oldest_across_boards() -> None:
         if item["kind"] == "starved"
     }
     assert ranks == {"TK-critical": 1, "TK-normal": 2}
+
+
+@pytest.mark.parametrize(
+    "degraded_snapshot",
+    [
+        {
+            "board": {"board_id": "board-a"},
+            "agents": [],
+            "tickets": [],
+            "snapshot_error_class": "TimeoutError",
+            "truncated": True,
+            "omitted_counts": {"agents": 1, "tickets": 1},
+        },
+        {
+            "board": {"board_id": "board-a"},
+            "agents": [],
+            "tickets": [],
+            "truncated": True,
+            "omitted_counts": {"tickets": 2},
+        },
+    ],
+)
+def test_board_degraded_after_three_polls_and_resets_on_success(
+    degraded_snapshot: dict[str, Any], tmp_path: Path
+) -> None:
+    project = coordinator.Project("sample", "board-a", tmp_path)
+    streaks: dict[str, int] = {}
+    state: dict[str, Any] = {}
+
+    for expected_streak in (1, 2, 3):
+        states = coordinator.analyze_cycle(
+            [project],
+            {"board-a": degraded_snapshot},
+            {"board-a": state},
+            (),
+            NOW,
+            degraded_streaks=streaks,
+        )
+        state = states["board-a"]
+        assert state["board_health"]["consecutive_degraded_polls"] == expected_streak
+        degraded = [
+            item for item in state["findings"] if item["kind"] == "board-degraded"
+        ]
+        assert bool(degraded) is (expected_streak == 3)
+
+    finding = next(
+        item for item in state["findings"] if item["kind"] == "board-degraded"
+    )
+    assert finding["level"] == "critical"
+    assert "observed_consecutive_polls=3" in finding["evidence"]
+    assert "threshold_polls=3" in finding["evidence"]
+    assert "TimeoutError" not in finding.get("message", "")
+    if "snapshot_error_class" in degraded_snapshot:
+        assert "error_class=TimeoutError" in finding["evidence"]
+
+    healthy = {"board": {"board_id": "board-a"}, "agents": [], "tickets": []}
+    reset = coordinator.analyze_cycle(
+        [project],
+        {"board-a": healthy},
+        {"board-a": state},
+        (),
+        NOW,
+        degraded_streaks=streaks,
+    )["board-a"]
+    assert reset["board_health"] == {
+        "status": "healthy",
+        "consecutive_degraded_polls": 0,
+        "reason": None,
+        "error_class": None,
+    }
+    assert all(item["kind"] != "board-degraded" for item in reset["findings"])
+
+
+def test_read_cycle_records_only_snapshot_error_class(tmp_path: Path) -> None:
+    sensitive_detail = "transport failed with sensitive-detail-value"
+
+    class Reader:
+        async def call(self, name: str, board_id: str, **arguments: Any) -> dict:
+            if name == "board_state_get" and arguments.get("key") == "project_registry":
+                return {
+                    "state": {
+                        "value": json.dumps(
+                            {
+                                "schema_version": 1,
+                                "projects": {
+                                    "sample": {
+                                        "board_id": "board-a",
+                                        "work_dir": str(tmp_path),
+                                        "status": "active",
+                                    }
+                                },
+                            }
+                        )
+                    }
+                }
+            if name == "board_snapshot":
+                raise RuntimeError(sensitive_detail)
+            if name == "board_state_get":
+                raise RuntimeError("optional state unavailable")
+            raise AssertionError(f"unexpected call: {name}")
+
+    _projects, snapshots, previous = asyncio.run(
+        coordinator.read_cycle(Reader(), "pursers")
+    )
+
+    assert snapshots["board-a"]["snapshot_error_class"] == "RuntimeError"
+    assert sensitive_detail not in json.dumps(snapshots)
+    assert previous == {"board-a": {}}
 
 
 def action(kind: str, index: int = 0) -> coordinator.Action:
@@ -846,6 +1056,25 @@ def test_restart_kill_switch_defaults_to_shadow(tmp_path: Path) -> None:
 
     assert default_args.mode == "shadow"
     assert active_args.mode == "active"
+    assert default_args.review_backlog_seconds == 1_800
+    tuned = coordinator.parse_args(
+        [
+            "--token-path",
+            str(token),
+            "--review-backlog-seconds",
+            "90",
+        ]
+    )
+    assert tuned.review_backlog_seconds == 90
+    with pytest.raises(SystemExit):
+        coordinator.parse_args(
+            [
+                "--token-path",
+                str(token),
+                "--review-backlog-seconds",
+                "0",
+            ]
+        )
 
 
 def test_coordination_uses_complete_active_list_but_fails_closed_on_missing_agents() -> None:
