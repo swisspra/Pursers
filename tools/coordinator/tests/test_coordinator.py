@@ -815,6 +815,102 @@ def test_read_cycle_records_only_snapshot_error_class(tmp_path: Path) -> None:
     assert previous == {"board-a": {}}
 
 
+def test_write_reports_isolates_failed_board_and_mirrors_degraded_finding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import pursers_client
+
+    sensitive_detail = "state write failed with sensitive-detail-value"
+    attempts: list[str] = []
+    published: dict[str, dict[str, Any]] = {}
+
+    class FakeBoardClient:
+        def __init__(
+            self, _url: str, _token: str, board_id: str, *, agent_name: str
+        ) -> None:
+            self.board_id = board_id
+
+        async def __aenter__(self) -> "FakeBoardClient":
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+        async def board_state_update(self, key: str, value: str) -> dict[str, bool]:
+            assert key == coordinator.STATE_KEY
+            attempts.append(self.board_id)
+            if self.board_id == "broken-board":
+                raise RuntimeError(sensitive_detail)
+            published[self.board_id] = json.loads(value)
+            return {"ok": True}
+
+        async def memory_write(self, *_args: Any, **_kwargs: Any) -> None:
+            raise AssertionError("digest markers should suppress memory writes")
+
+    monkeypatch.setattr(pursers_client, "BoardClient", FakeBoardClient)
+    degraded = coordinator._finding(
+        "board-degraded",
+        "critical",
+        "broken-board",
+        "The board snapshot has been unavailable or incomplete for 3 polls.",
+        error_class="TimeoutError",
+        observed_consecutive_polls=3,
+        threshold_polls=3,
+    )
+    states = {
+        "broken-board": coordinator.bound_findings_state(
+            [degraded],
+            NOW,
+            board_health={
+                "status": "degraded",
+                "consecutive_degraded_polls": 3,
+                "reason": "snapshot-error",
+                "error_class": "TimeoutError",
+            },
+        ),
+        "healthy-board": coordinator.bound_findings_state([], NOW),
+        "home-board": coordinator.bound_findings_state([], NOW),
+    }
+    states["home-board"]["last_daily_digest"] = NOW.date().isoformat()
+    states["home-board"]["last_weekly_digest"] = (
+        f"{NOW.isocalendar().year}-W{NOW.isocalendar().week:02d}"
+    )
+    previous = {
+        "home-board": {
+            "last_daily_digest": NOW.date().isoformat(),
+            "last_weekly_digest": (
+                f"{NOW.isocalendar().year}-W{NOW.isocalendar().week:02d}"
+            ),
+        }
+    }
+
+    asyncio.run(
+        coordinator.write_reports(
+            "https://board.invalid/mcp",
+            "not-a-real-token",
+            "home-board",
+            "coordinator-test",
+            states,
+            previous,
+            NOW,
+        )
+    )
+
+    assert attempts == ["broken-board", "healthy-board", "home-board"]
+    assert set(published) == {"healthy-board", "home-board"}
+    home_payload = published["home-board"]
+    mirrored = next(
+        item
+        for item in home_payload["findings"]
+        if item["kind"] == "board-degraded"
+        and item["board_id"] == "broken-board"
+    )
+    assert "error_class=TimeoutError" in mirrored["evidence"]
+    assert "observed_consecutive_polls=3" in mirrored["evidence"]
+    assert sensitive_detail not in json.dumps(home_payload)
+    assert len(json.dumps(home_payload, separators=(",", ":"))) <= coordinator.MAX_STATE_CHARS
+
+
 def action(kind: str, index: int = 0) -> coordinator.Action:
     return coordinator.Action(
         kind=kind,

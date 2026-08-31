@@ -1721,6 +1721,76 @@ async def mutate_action(
         )
 
 
+def home_audit_state(
+    home_board: str,
+    states: Mapping[str, Mapping[str, Any]],
+    now: datetime,
+) -> dict[str, Any] | None:
+    """Mirror fleet-critical board health onto the reachable home state."""
+    source = states.get(home_board)
+    if source is None:
+        return None
+
+    findings = [
+        dict(item)
+        for item in source.get("findings", [])
+        if isinstance(item, Mapping)
+    ]
+    seen = {
+        (
+            str(item.get("kind", "")),
+            str(item.get("board_id", "")),
+            str(item.get("evidence", "")),
+        )
+        for item in findings
+    }
+    for board_id in sorted(states):
+        if board_id == home_board:
+            continue
+        board_findings = states[board_id].get("findings", [])
+        for item in board_findings if isinstance(board_findings, list) else []:
+            if not isinstance(item, Mapping) or item.get("kind") != "board-degraded":
+                continue
+            mirrored = dict(item)
+            mirrored["board_id"] = str(item.get("board_id") or board_id)
+            key = (
+                "board-degraded",
+                mirrored["board_id"],
+                str(mirrored.get("evidence", "")),
+            )
+            if key not in seen:
+                findings.append(mirrored)
+                seen.add(key)
+
+    rebuilt = bound_findings_state(
+        findings,
+        now,
+        privacy_watermarks=source.get("privacy_watermarks", {}),
+        drop_counters=source.get("drop_counters", {}),
+        drop_history=source.get("drop_history", []),
+        drop_uncertainty=source.get("drop_uncertainty", []),
+        integration_watch_since=parse_time(source.get("integration_watch_since")),
+        suppressed_pre_watermark=int(source.get("suppressed_pre_watermark", 0) or 0),
+        action_history=source.get("action_history", []),
+        action_history_incomplete_until=source.get("action_history_incomplete_until"),
+        effective_mode=str(source.get("effective_mode", "shadow")),
+        board_health=(
+            source.get("board_health", {})
+            if isinstance(source.get("board_health"), Mapping)
+            else {}
+        ),
+    )
+    source_truncation = source.get("truncation", {})
+    if isinstance(source_truncation, Mapping):
+        rebuilt["truncation"]["findings"] += max(
+            0, int(source_truncation.get("findings", 0) or 0)
+        )
+    for marker in ("last_daily_digest", "last_weekly_digest"):
+        if marker in source:
+            rebuilt[marker] = source[marker]
+    return rebuilt
+
+
 async def write_reports(
     url: str,
     token: str,
@@ -1732,13 +1802,23 @@ async def write_reports(
 ) -> None:
     from pursers_client import BoardClient
 
-    # Publish non-home findings first.  The home state, which carries digest
-    # markers, is written only after its corresponding memories succeed.
+    # Publish non-home findings first. A board that cannot accept its report
+    # must not prevent healthy boards or the home audit surface from updating.
     for board_id, state in states.items():
         if board_id == home_board:
             continue
-        async with BoardClient(url, token, board_id, agent_name=agent_name) as client:
-            await client.board_state_update(STATE_KEY, json.dumps(state, sort_keys=True, separators=(",", ":")))
+        try:
+            async with BoardClient(
+                url, token, board_id, agent_name=agent_name
+            ) as client:
+                await client.board_state_update(
+                    STATE_KEY,
+                    json.dumps(state, sort_keys=True, separators=(",", ":")),
+                )
+        except Exception:
+            # The snapshot-side finding already carries a scrubbed error class.
+            # Never retain transport exception text in coordinator state.
+            continue
     previous_home = previous.get(home_board, {})
     today = now.date().isoformat()
     week = f"{now.isocalendar().year}-W{now.isocalendar().week:02d}"
@@ -1762,11 +1842,12 @@ async def write_reports(
                     memory_type="checkpoint",
                     tags=["coordinator", "digest", "weekly"],
                 )
-    if home_board in states:
+    home_state = home_audit_state(home_board, states, now)
+    if home_state is not None:
         async with BoardClient(url, token, home_board, agent_name=agent_name) as client:
             await client.board_state_update(
                 STATE_KEY,
-                json.dumps(states[home_board], sort_keys=True, separators=(",", ":")),
+                json.dumps(home_state, sort_keys=True, separators=(",", ":")),
             )
 
 
