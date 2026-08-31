@@ -189,6 +189,28 @@ class ResponseBoundsTests(unittest.IsolatedAsyncioTestCase):
             f"before={briefing_before_bytes} after={len(serialized)}"
         )
 
+    async def test_briefing_has_a_byte_stable_reusable_prefix(self) -> None:
+        first = await self.call("board_get_briefing", token_budget=4_000)
+        second = await self.call("board_get_briefing", token_budget=4_000)
+
+        self.assertFalse(first.is_error)
+        self.assertFalse(second.is_error)
+        first_payload = first.structured_content
+        second_payload = second.structured_content
+        first_bytes = json.dumps(first_payload, ensure_ascii=False)
+        second_bytes = json.dumps(second_payload, ensure_ascii=False)
+        self.assertEqual(first_bytes, second_bytes)
+        self.assertEqual(
+            list(first_payload)[:5],
+            ["ok", "board_id", "token_budget", "payload_bounds", "review_policy"],
+        )
+        rendered = first_payload["rendered"]
+        self.assertLess(rendered.index("# ON BOARD:"), rendered.index("Review policy:"))
+        self.assertLess(
+            rendered.index("Review policy:"),
+            rendered.index("Members:"),
+        )
+
     async def test_onboard_bounds_fat_snapshot_under_byte_ceiling(self) -> None:
         self.seed_fat_briefing()
 
@@ -361,6 +383,83 @@ class ResponseBoundsTests(unittest.IsolatedAsyncioTestCase):
             "fat-board bytes: "
             f"before={before_bytes} max_after={max(page_sizes)} "
             f"pages={pages} events={len(received)}"
+        )
+
+    async def test_catchup_has_a_byte_stable_prefix_before_dynamic_events(
+        self,
+    ) -> None:
+        cursor = self.service.journal.read_after("pursers", 0, 1)[
+            "latest_cursor"
+        ]
+        first_event = self.service.journal.append(
+            "pursers",
+            {
+                "kind": "ticket_created",
+                "actor": "AI-source",
+                "payload_ref": "board://pursers/ticket/TK-stable-1",
+                "ticket_id": "TK-stable-1",
+                "status_to": "open",
+                "recipient_identities": [self.agent_id],
+            },
+        )
+        first = await self.call(
+            "board_catchup",
+            agent_name="admin-agent",
+            cursor=cursor,
+            ack=False,
+        )
+        repeated = await self.call(
+            "board_catchup",
+            agent_name="admin-agent",
+            cursor=cursor,
+            ack=False,
+        )
+        self.assertFalse(first.is_error)
+        self.assertFalse(repeated.is_error)
+        first_bytes = json.dumps(first.structured_content, ensure_ascii=False)
+        repeated_bytes = json.dumps(repeated.structured_content, ensure_ascii=False)
+        self.assertEqual(first_bytes, repeated_bytes)
+        self.assertEqual(
+            list(first.structured_content)[:4],
+            ["ok", "board_id", "bounds", "events"],
+        )
+
+        self.service.journal.append(
+            "pursers",
+            {
+                "kind": "ticket_created",
+                "actor": "AI-source",
+                "payload_ref": "board://pursers/ticket/TK-stable-2",
+                "ticket_id": "TK-stable-2",
+                "status_to": "open",
+                "recipient_identities": [self.agent_id],
+            },
+        )
+        changed = await self.call(
+            "board_catchup",
+            agent_name="admin-agent",
+            cursor=cursor,
+            ack=False,
+        )
+        changed_bytes = json.dumps(changed.structured_content, ensure_ascii=False)
+        self.assertEqual(
+            first_bytes.partition('"events":')[0],
+            changed_bytes.partition('"events":')[0],
+        )
+        self.assertEqual(
+            list(first_event),
+            [
+                "id",
+                "seq",
+                "board_id",
+                "kind",
+                "actor",
+                "payload_ref",
+                "occurred_at",
+                "recipient_identities",
+                "status_to",
+                "ticket_id",
+            ],
         )
 
     async def test_catchup_rejects_invalid_event_and_byte_bounds(self) -> None:

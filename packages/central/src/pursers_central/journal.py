@@ -74,7 +74,13 @@ class Journal:
             raise ValueError(f"unsupported event kind: {kind}")
         actor = _require_text("actor", event.get("actor"))
         payload_ref = _require_text("payload_ref", event.get("payload_ref"))
-        semantic = {key: copy.deepcopy(event[key]) for key in SEMANTIC_FIELDS if key in event}
+        # A set is useful for schema membership, but its iteration order varies
+        # with the process hash seed. Keep emitted JSON fields deterministic.
+        semantic = {
+            key: copy.deepcopy(event[key])
+            for key in sorted(SEMANTIC_FIELDS)
+            if key in event
+        }
         assigned: dict[str, Any] = {}
 
         def mutate(document: dict[str, Any]) -> None:

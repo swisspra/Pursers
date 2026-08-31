@@ -217,14 +217,15 @@ class CentralJournal(Journal):
         board_id = _require_text("board_id", board_id)
         actor = _require_text("actor", event.get("actor"))
         payload_ref = _require_text("payload_ref", event.get("payload_ref"))
+        semantic_fields = (
+            CORE_JOURNAL_FIELDS
+            | ADMISSION_EVENT_FIELDS
+            | SCRUB_EVENT_FIELDS
+            | REVIEW_EVENT_FIELDS
+        )
         semantic = {
             key: copy.deepcopy(event[key])
-            for key in (
-                CORE_JOURNAL_FIELDS
-                | ADMISSION_EVENT_FIELDS
-                | SCRUB_EVENT_FIELDS
-                | REVIEW_EVENT_FIELDS
-            )
+            for key in sorted(semantic_fields)
             if key in event
         }
         assigned: dict[str, Any] = {}
@@ -272,14 +273,15 @@ class CentralJournal(Journal):
         board_id = _require_text("board_id", board_id)
         actor = _require_text("actor", event.get("actor"))
         payload_ref = _require_text("payload_ref", event.get("payload_ref"))
+        semantic_fields = (
+            CORE_JOURNAL_FIELDS
+            | ADMISSION_EVENT_FIELDS
+            | SCRUB_EVENT_FIELDS
+            | REVIEW_EVENT_FIELDS
+        )
         semantic = {
             key: copy.deepcopy(event[key])
-            for key in (
-                CORE_JOURNAL_FIELDS
-                | ADMISSION_EVENT_FIELDS
-                | SCRUB_EVENT_FIELDS
-                | REVIEW_EVENT_FIELDS
-            )
+            for key in sorted(semantic_fields)
             if key in event
         }
         for field in unique_fields:
@@ -2096,8 +2098,8 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         )
         lines = [
             f"# ON BOARD: {document['board_id']}",
-            f"Members: {len(document['members'])} | Open tickets: {len(tickets)} | Visible memories: {len(memories)}",
             f"Review policy: {review_policy_text}",
+            f"Members: {len(document['members'])} | Open tickets: {len(tickets)} | Visible memories: {len(memories)}",
         ]
         if focus:
             lines.extend(
@@ -2180,14 +2182,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             item["truncated"] for item in compact_pinned
         ) or bool(compact_handoff and compact_handoff["truncated"])
         return {
-            "rendered": rendered,
-            "estimated_tokens": max(1, (len(rendered) + 3) // 4),
             "token_budget": token_budget,
-            "truncated": truncated,
-            "latest_handoff": compact_handoff,
-            "pinned_digest": compact_pinned,
-            "open_tickets": compact_open_tickets,
-            "omitted_open_tickets": omitted_open_tickets,
             "payload_bounds": {
                 "open_tickets": BRIEFING_OPEN_TICKET_LIMIT,
                 "pinned_digest": BRIEFING_PINNED_DIGEST_LIMIT,
@@ -2195,6 +2190,14 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 "memory_list_items": BRIEFING_MEMORY_LIST_LIMIT,
                 "handoff_next_steps": BRIEFING_HANDOFF_NEXT_STEPS_LIMIT,
             },
+            "review_policy": current_review_policy,
+            "rendered": rendered,
+            "estimated_tokens": max(1, (len(rendered) + 3) // 4),
+            "truncated": truncated,
+            "latest_handoff": compact_handoff,
+            "pinned_digest": compact_pinned,
+            "open_tickets": compact_open_tickets,
+            "omitted_open_tickets": omitted_open_tickets,
             "payload_total_counts": {
                 "open_tickets": len(tickets),
                 "pinned_digest": len(pinned),
@@ -2215,8 +2218,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 or omitted_pinned_digest
                 or memory_payload_truncated
             ),
-            "review_policy": current_review_policy,
-            "review_label_counts": review_label_counts,
+            "review_label_counts": dict(sorted(review_label_counts.items())),
         }
 
     @tool()
@@ -4661,10 +4663,12 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         result = briefing_payload(
             document, principal, token_budget, ticket_id=ticket_id
         )
-        result.update(
-            {"ok": True, "board_id": board_id, "latest_seq": latest_seq(board_id)}
-        )
-        return result
+        return {
+            "ok": True,
+            "board_id": board_id,
+            **result,
+            "latest_seq": latest_seq(board_id),
+        }
 
     @tool()
     async def board_status(board_id: str) -> dict[str, Any]:
@@ -4954,22 +4958,28 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             )
             return {
                 "ok": True,
-                **page,
+                "board_id": page["board_id"],
+                "bounds": {
+                    "limit": limit,
+                    "max_events": max_events,
+                    "max_bytes": max_bytes,
+                },
+                # Dynamic journal data begins here. Keep all reusable request
+                # metadata ahead of it and preserve a fixed field order after it.
                 "events": events,
                 "next_cursor": effective_cursor,
-                "new_seq": effective_cursor,
+                "latest_cursor": latest_cursor,
                 "has_more": has_more,
+                "resync_required": page["resync_required"],
+                "compacted_through": page["compacted_through"],
+                "reset_cursor": page["reset_cursor"],
+                "new_seq": effective_cursor,
                 "scan_count": len(page["events"]),
                 "effective_scan_count": effective_scan_count,
                 "visible_count": len(events),
                 "acknowledged_cursor": effective_cursor if ack else start,
                 "release_events": release_events,
                 "implicitly_renewed": renewed,
-                "bounds": {
-                    "limit": limit,
-                    "max_events": max_events,
-                    "max_bytes": max_bytes,
-                },
                 "total_counts": {
                     "events": total_event_count,
                     "journal_events_after_cursor": total_event_count,
