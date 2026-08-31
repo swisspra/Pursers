@@ -220,9 +220,11 @@ class SeatAdminTests(unittest.TestCase):
                     "-c",
                     (
                         "from importlib.metadata import version; "
-                        "import registry_admin, seat_admin; "
-                        "assert version('pursers-client') == '0.1.0a12'; "
+                        "import registry_admin, registry_doctor, seat_admin; "
+                        "assert version('pursers-wait-bridge') == '0.1.0a4'; "
+                        "assert version('pursers-client') == '0.1.0a13'; "
                         "assert version('mcp') == '2.1.1'; "
+                        "assert hasattr(registry_doctor.LiveBackend, 'board_snapshot'); "
                         "assert hasattr(seat_admin.SeatBoardClient, 'board_member_add'); "
                         "print(seat_admin.__file__)"
                     ),
@@ -241,6 +243,14 @@ class SeatAdminTests(unittest.TestCase):
             )
             self.assertIn(str(environment), imported.stdout)
             self.assertIn("Provision and inspect", helped.stdout)
+            doctor_help = subprocess.run(
+                [str(python), "-I", "-m", "registry_doctor", "--help"],
+                check=True,
+                capture_output=True,
+                text=True,
+                cwd=temp,
+            )
+            self.assertIn("read-only health check", doctor_help.stdout)
 
     def test_invalid_identifiers_cause_zero_writes(self) -> None:
         cases = (
