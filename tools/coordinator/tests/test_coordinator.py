@@ -230,6 +230,53 @@ def test_baseline_uncertainty_expires_after_full_observation_window() -> None:
     assert uncertainty == []
 
 
+def test_old_latest_baseline_never_enters_seven_day_evidence() -> None:
+    ticket = {
+        "ticket_id": "TK-old-baseline",
+        "abandoned_count": 3,
+        "last_abandoned_by": "AI-old",
+        "last_abandoned_at": (NOW - timedelta(days=7, seconds=1)).isoformat(),
+    }
+    findings, counters, history, uncertainty = coordinator.update_drop_evidence(
+        "board-a", [ticket], {}, NOW
+    )
+    assert findings == []
+    assert counters == {"TK-old-baseline": 3}
+    assert history == []
+    assert uncertainty == []
+
+    findings2, _, history2, uncertainty2 = coordinator.update_drop_evidence(
+        "board-a",
+        [ticket],
+        {
+            "drop_counters": counters,
+            "drop_history": history,
+            "drop_uncertainty": uncertainty,
+        },
+        NOW + timedelta(seconds=60),
+    )
+    assert findings2 == []
+    assert history2 == []
+    assert uncertainty2 == []
+
+
+@pytest.mark.parametrize("timestamp", [None, "not-a-time"])
+def test_unknown_baseline_time_remains_conservative(timestamp: str | None) -> None:
+    ticket = {
+        "ticket_id": "TK-unknown-time",
+        "abandoned_count": 3,
+        "last_abandoned_at": timestamp,
+    }
+    findings, _, history, uncertainty = coordinator.update_drop_evidence(
+        "board-a", [ticket], {}, NOW
+    )
+    assert history == []
+    assert uncertainty[0]["count"] == 3
+    assert [item["kind"] for item in findings] == [
+        "repeat-abandoner-history-incomplete"
+    ]
+
+
 def test_three_baseline_one_tickets_repeat_same_seat() -> None:
     tickets = [
         {

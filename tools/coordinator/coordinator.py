@@ -370,7 +370,16 @@ def update_drop_evidence(
             drop_age is not None
             and drop_age <= thresholds.repeat_abandon_window_seconds
         )
-        delta = current if prior is None else max(0, current - prior)
+        latest_is_known_outside_window = (
+            drop_age is not None
+            and drop_age > thresholds.repeat_abandon_window_seconds
+        )
+        if prior is None and latest_is_known_outside_window:
+            # The latest cumulative drop is already outside the window, so all
+            # earlier drops are outside it too. Keep only the counter baseline.
+            delta = 0
+        else:
+            delta = current if prior is None else max(0, current - prior)
         if delta:
             proven_latest = bool(holder and is_recent)
             if proven_latest:
