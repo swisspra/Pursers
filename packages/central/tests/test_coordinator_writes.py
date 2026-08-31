@@ -47,6 +47,11 @@ class CoordinatorWriteTests(unittest.IsolatedAsyncioTestCase):
             "worker-canonical",
             frozenset({"board:read", "board:write"}),
         )
+        self.other_worker = central.Principal(
+            "PR-other-worker",
+            "other-worker-canonical",
+            frozenset({"board:read", "board:write"}),
+        )
         self.coordinator = central.Principal(
             "PR-coordinator",
             "coordinator-canonical",
@@ -56,7 +61,7 @@ class CoordinatorWriteTests(unittest.IsolatedAsyncioTestCase):
         self.original_current_principal = central.current_principal
         central.current_principal = lambda: self.principal
         await self.call("board_join", agent_name="admin-agent")
-        for principal in (self.worker, self.coordinator):
+        for principal in (self.worker, self.other_worker, self.coordinator):
             await self.call(
                 "board_member_add",
                 agent_name="admin-agent",
@@ -69,6 +74,12 @@ class CoordinatorWriteTests(unittest.IsolatedAsyncioTestCase):
         self.principal = self.coordinator
         joined = await self.call("board_join", agent_name="coordinator-1")
         self.coordinator_id = joined.structured_content["agent_id"]
+
+    async def join_other_worker(self) -> str:
+        self.principal = self.other_worker
+        joined = await self.call("board_join", agent_name="other-worker-agent")
+        self.assertFalse(joined.is_error)
+        return joined.structured_content["agent_id"]
 
     async def asyncTearDown(self) -> None:
         central.current_principal = self.original_current_principal
@@ -96,6 +107,10 @@ class CoordinatorWriteTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_assignment_is_atomic_targeted_and_idempotent(self) -> None:
         ticket_id = await self.create_ticket()
+        await self.join_other_worker()
+        before_seq = self.service.journal.read_after("pursers", 0, 1)[
+            "latest_cursor"
+        ]
         self.principal = self.coordinator
         payload = {
             "agent_name": "coordinator-1",
@@ -119,9 +134,30 @@ class CoordinatorWriteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ticket["assigned_to_agent_id"], self.worker_id)
         self.assertNotIn("claimed_by_agent_id", ticket)
         event = first.structured_content["event"]
+        self.assertEqual(event["kind"], "coordinator_assignment")
         self.assertEqual(event["recipient_identities"], [self.worker_id])
         self.assertEqual(event["status_from"], "open")
         self.assertEqual(event["status_to"], "open")
+
+        self.principal = self.worker
+        target_catchup = await self.call(
+            "board_catchup",
+            agent_name="worker-agent",
+            cursor=before_seq,
+            ack=False,
+        )
+        self.assertEqual(
+            [item["kind"] for item in target_catchup.structured_content["events"]],
+            ["coordinator_assignment"],
+        )
+        self.principal = self.other_worker
+        non_target_catchup = await self.call(
+            "board_catchup",
+            agent_name="other-worker-agent",
+            cursor=before_seq,
+            ack=False,
+        )
+        self.assertEqual(non_target_catchup.structured_content["events"], [])
 
     async def test_assignment_loses_claim_race_without_overwriting(self) -> None:
         ticket_id = await self.create_ticket("race target")
@@ -148,6 +184,7 @@ class CoordinatorWriteTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_nudge_is_targeted_and_deduplicated(self) -> None:
         ticket_id = await self.create_ticket("nudge target")
+        await self.join_other_worker()
         before_seq = self.service.journal.read_after("pursers", 0, 1)[
             "latest_cursor"
         ]
@@ -171,6 +208,9 @@ class CoordinatorWriteTests(unittest.IsolatedAsyncioTestCase):
             first.structured_content["event"]["recipient_identities"],
             [self.worker_id],
         )
+        self.assertEqual(
+            first.structured_content["event"]["kind"], "coordinator_nudge"
+        )
         self.principal = self.worker
         catchup = await self.call(
             "board_catchup",
@@ -181,6 +221,35 @@ class CoordinatorWriteTests(unittest.IsolatedAsyncioTestCase):
         events = catchup.structured_content["events"]
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]["coordinator_op_key"], "coord-op-nudge-1")
+        self.principal = self.other_worker
+        non_target = await self.call(
+            "board_catchup",
+            agent_name="other-worker-agent",
+            cursor=before_seq,
+            ack=False,
+        )
+        self.assertEqual(non_target.structured_content["events"], [])
+
+    async def test_open_ticket_backlog_remains_broadcast_to_late_worker(self) -> None:
+        ticket_id = await self.create_ticket("ordinary open backlog")
+        await self.join_other_worker()
+
+        self.principal = self.other_worker
+        catchup = await self.call(
+            "board_catchup",
+            agent_name="other-worker-agent",
+            cursor=0,
+            ack=False,
+        )
+
+        matching = [
+            event
+            for event in catchup.structured_content["events"]
+            if event.get("ticket_id") == ticket_id
+        ]
+        self.assertEqual(len(matching), 1)
+        self.assertEqual(matching[0]["kind"], "ticket_created")
+        self.assertEqual(matching[0]["status_to"], "open")
 
     async def test_coordinate_scope_is_narrow(self) -> None:
         ticket_id = await self.create_ticket("authority target")

@@ -40,6 +40,9 @@ including finding and digest writes.
 - Seats with three proven drops in seven days remain eligible but rank last.
 - Assignment is atomic only while the ticket is open, unclaimed, and at the
   expected assignee. A lost race is reported and never overwritten.
+- Central publishes `coordinator_nudge` and `coordinator_assignment` cues only
+  to the selected agent. Ordinary `ticket_created` and reopened-ticket events
+  remain visible to all admitted workers through open-backlog catch-up.
 - Operation keys are deterministic across restarts. Limits are one assignment
   per board per 10 minutes and three nudges per seat per hour.
 - Three consecutive mutation failures open the circuit breaker and change the

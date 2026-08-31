@@ -10,7 +10,15 @@ from typing import Any
 from locked_store import LockedJsonStore
 
 
-KINDS = frozenset({"ticket_status_changed", "ticket_created", "memory_written"})
+KINDS = frozenset(
+    {
+        "ticket_status_changed",
+        "ticket_created",
+        "memory_written",
+        "coordinator_assignment",
+        "coordinator_nudge",
+    }
+)
 MIN_COMPACTION_RETAIN_LAST = 500
 SEMANTIC_FIELDS = frozenset(
     {
@@ -20,6 +28,7 @@ SEMANTIC_FIELDS = frozenset(
         "coordinator_op_key",
         "coordination_reason",
         "target_agent_id",
+        "expires_at",
         "memory_id",
         "status_from",
         "status_to",

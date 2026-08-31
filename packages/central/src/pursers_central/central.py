@@ -3342,7 +3342,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         event, created = await append_once_and_publish(
             board_id,
             changed["actor"],
-            "ticket_status_changed",
+            "coordinator_assignment",
             uri,
             [assigned_to_agent_id],
             ctx,
@@ -3479,7 +3479,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         event, created = await append_once_and_publish(
             board_id,
             changed["actor"],
-            "ticket_status_changed",
+            "coordinator_nudge",
             uri,
             [target_agent_id],
             ctx,
@@ -5312,6 +5312,8 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             ticket_id = event.get("ticket_id")
             if (
                 not isinstance(ticket_id, str)
+                or event.get("kind")
+                not in {"ticket_created", "ticket_status_changed"}
                 or event.get("status_to") != "open"
             ):
                 return False
