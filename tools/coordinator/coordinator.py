@@ -443,7 +443,11 @@ def intake_finding(
                 f"Grant {INTAKE_SCOPE} alongside board:coordinate, then retry ask "
                 f"{ask.ask_id}; the queue remains intact."
                 if rule == "missing-board-intake-grant"
-                else f"Review and fire the drafted {draft.category} ticket for ask {ask.ask_id}."
+                else (
+                    f"Review ask {ask.ask_id}; after an explicit approve/create or "
+                    "decline decision, remove it from coordinator_intake. Until then "
+                    "the pending draft remains queued."
+                )
             )
             if decision == "ask"
             else (
@@ -2243,8 +2247,6 @@ async def process_intakes(
                 findings.append(
                     intake_finding("intake-pending", "warn", ask, draft, decision, rule)
                 )
-                if not dry_run and intake_authorized:
-                    processed.add(ask.ask_id)
                 continue
             if dry_run:
                 findings.append(
@@ -2282,7 +2284,6 @@ async def process_intakes(
                     )
                 else:
                     continue
-                processed.add(ask.ask_id)
                 continue
             failures[board_id] = 0
             if recent_creates is not None:

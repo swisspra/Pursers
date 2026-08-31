@@ -1518,7 +1518,8 @@ def test_intake_rate_limit_converts_auto_to_bounded_pending_draft() -> None:
     assert findings[0]["kind"] == "intake-pending"
     assert findings[0]["matrix_rule"] == "hourly-auto-create-limit"
     assert len(findings[0]["evidence"]) <= coordinator.MAX_INTAKE_EVIDENCE_CHARS
-    assert updates == {"board-a": frozenset({"ask-docs"})}
+    assert "remains queued" in findings[0]["next_action"]
+    assert updates == {}
 
 
 def test_intake_breaker_enters_draft_only_after_three_create_failures() -> None:
@@ -1546,7 +1547,12 @@ def test_intake_breaker_enters_draft_only_after_three_create_failures() -> None:
     assert "board-a" in runtime.intake_breakers
     assert sum(item["kind"] == "intake-create-failed" for item in findings) == 3
     assert any(item.get("matrix_rule") == "create-breaker-draft-only" for item in findings)
-    assert updates == {"board-a": frozenset({"ask-2", "ask-3"})}
+    assert all(
+        "remains queued" in item["next_action"]
+        for item in findings
+        if item["kind"] == "intake-pending"
+    )
+    assert updates == {}
 
 
 def test_intake_dry_run_shows_auto_and_ask_without_mutations() -> None:
@@ -1575,6 +1581,87 @@ def test_intake_dry_run_shows_auto_and_ask_without_mutations() -> None:
         "intake-pending",
     }
     assert updates == {}
+
+
+def test_active_ask_remains_queued_and_reported_across_two_cycles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    row = _intake_row("ask-release", "Publish the next release")
+    snapshot = {
+        "board-a": {
+            "tickets": [],
+            "coordinator_intake_state": _intake_state([row]),
+        }
+    }
+    published: list[dict[str, Any]] = []
+
+    class FakeBoardClient:
+        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+            pass
+
+        async def __aenter__(self) -> "FakeBoardClient":
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+        async def board_state_update(self, key: str, value: str) -> None:
+            assert key == coordinator.STATE_KEY
+            published.append(json.loads(value))
+
+        async def _call(self, *_args: Any, **_kwargs: Any) -> None:
+            raise AssertionError("pending ASK must not drain coordinator_intake")
+
+        async def memory_write(self, *_args: Any, **_kwargs: Any) -> None:
+            raise AssertionError("digest markers should suppress memory writes")
+
+    fake_module = type("FakePursersClient", (), {"BoardClient": FakeBoardClient})
+    monkeypatch.setitem(sys.modules, "pursers_client", fake_module)
+    previous = {
+        "board-a": {
+            "last_daily_digest": NOW.date().isoformat(),
+            "last_weekly_digest": (
+                f"{NOW.isocalendar().year}-W{NOW.isocalendar().week:02d}"
+            ),
+        }
+    }
+
+    async def unexpected_create(*_args: Any) -> str:
+        raise AssertionError("policy ASK must not create")
+
+    for _cycle in range(2):
+        findings, updates = asyncio.run(
+            coordinator.process_intakes(
+                [_intake_project()],
+                snapshot,
+                NOW,
+                coordinator.RuntimeState.for_mode("active"),
+                enabled=True,
+                dry_run=False,
+                create_ticket=unexpected_create,
+            )
+        )
+        assert updates == {}
+        state = coordinator.bound_findings_state(findings, NOW)
+        state.update(previous["board-a"])
+        asyncio.run(
+            coordinator.write_reports(
+                "https://board.invalid/mcp",
+                "opaque",
+                "board-a",
+                "coordinator-test",
+                {"board-a": state},
+                previous,
+                NOW,
+                updates,
+            )
+        )
+
+    assert len(published) == 2
+    assert all(
+        [item["kind"] for item in state["findings"]] == ["intake-pending"]
+        for state in published
+    )
 
 
 def test_bounded_state_reserves_intake_record_before_other_warnings() -> None:
