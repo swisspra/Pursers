@@ -281,8 +281,26 @@ def classify_intake(text: str) -> tuple[str, bool]:
     for category, pattern in pure_forms:
         if re.fullmatch(pattern, lowered):
             return category, has_reproduction
+    pure_bug_forms = (
+        r"(?:fix|repair|resolve|diagnose|investigate)\s+(?:the\s+)?"
+        r"(?:bug|crash|error|regression|broken\s+[a-z0-9_-]+)"
+        r"(?:\s+(?:in|when|on)\s+[a-z0-9_./-]+)?\s*[,;:-]\s*"
+        r"(?:steps?\s+to\s+reproduce|failing\s+example|traceback)"
+        r"(?:\s+(?:is|are)\s+(?:listed|included|attached|provided)"
+        r"|\s+(?:listed|included|attached|provided)"
+        r"|:\s*run\s+(?:the\s+)?failing\s+example)?[.!]?",
+        r"(?:bug|crash|error|regression|broken\s+[a-z0-9_-]+)\s+"
+        r"(?:with|has)\s+(?:traceback|failing\s+example|steps?\s+to\s+reproduce)"
+        r"(?:\s+(?:in|from|for)\s+[a-z0-9_./-]+)?[.!]?",
+    )
+    if has_reproduction and any(
+        re.fullmatch(pattern, lowered) for pattern in pure_bug_forms
+    ):
+        return "bug", True
     bug_marker = bool(re.search(r"\b(bug|broken|crash|error|fails?|regression)\b", lowered))
     if bug_marker or re.search(r"\bfix\b", lowered):
+        if has_reproduction:
+            return "production-code", False
         return "bug", has_reproduction and bug_marker
     return "production-code", has_reproduction
 

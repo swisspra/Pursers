@@ -1305,6 +1305,32 @@ def test_deterministic_intake_classifier(text: str, category: str) -> None:
         ("Port the frontend; README included", "production-code"),
         ("Secure the endpoint; test coverage included", "production-code"),
         ("Modernize the application; documentation included", "production-code"),
+        (
+            "Fix bug; steps to reproduce: run failing example; implement a new endpoint too",
+            "production-code",
+        ),
+        (
+            "Bug with traceback in parser; refactor the service and update docs",
+            "production-code",
+        ),
+        (
+            "Fix regression with failing example and delete the database schema",
+            "production-code",
+        ),
+        (
+            "Crash with traceback; add a new feature after fixing it",
+            "production-code",
+        ),
+        (
+            "Broken parser, steps to reproduce included; rewrite the backend",
+            "production-code",
+        ),
+        (
+            "Fix bug; steps to reproduce: run failing example and implement an endpoint",
+            "production-code",
+        ),
+        ("Bug with traceback in parser and rewrite service", "production-code"),
+        ("Fix bug in parser and delete schema; traceback", "production-code"),
         ("Fix bug in docs", "bug"),
     ],
 )
@@ -1327,6 +1353,14 @@ def test_mixed_production_intakes_are_draft_only_in_dry_run() -> None:
         "Port the frontend; README included",
         "Secure the endpoint; test coverage included",
         "Modernize the application; documentation included",
+        "Fix bug; steps to reproduce: run failing example; implement a new endpoint too",
+        "Bug with traceback in parser; refactor the service and update docs",
+        "Fix regression with failing example and delete the database schema",
+        "Crash with traceback; add a new feature after fixing it",
+        "Broken parser, steps to reproduce included; rewrite the backend",
+        "Fix bug; steps to reproduce: run failing example and implement an endpoint",
+        "Bug with traceback in parser and rewrite service",
+        "Fix bug in parser and delete schema; traceback",
     ]
     rows = [_intake_row(f"ask-mixed-{index}", text) for index, text in enumerate(texts)]
 
@@ -1360,6 +1394,13 @@ def test_pure_auto_intakes_remain_authorized_in_dry_run() -> None:
         _intake_row("ask-pure-docs", "Update the README guide"),
         _intake_row("ask-pure-tests", "Add pytest coverage"),
         _intake_row("ask-pure-audit", "Run a read-only audit"),
+        _intake_row(
+            "ask-pure-bug-1", "Fix bug; steps to reproduce: run failing example"
+        ),
+        _intake_row(
+            "ask-pure-bug-2", "Fix regression; failing example attached"
+        ),
+        _intake_row("ask-pure-bug-3", "Crash with traceback in parser"),
     ]
 
     async def unexpected_create(*_args: Any) -> str:
@@ -1387,6 +1428,7 @@ def test_pure_auto_intakes_remain_authorized_in_dry_run() -> None:
         "docs",
         "tests",
         "audit-analysis",
+        "bug",
     }
     assert updates == {}
 
