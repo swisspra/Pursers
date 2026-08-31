@@ -51,6 +51,8 @@ class StrictFakeBackend:
         omitted_tickets: int = 0,
     ) -> None:
         self.mismatch = mismatch
+        self.remove_failures: set[str] = set()
+        self.remove_mismatches: set[str] = set()
         self.omitted_agents = omitted_agents
         self.omitted_tickets = omitted_tickets
         self.calls: list[tuple[str, str, str]] = []
@@ -167,7 +169,9 @@ class StrictFakeBackend:
         self.calls.append(("remove", board_id, principal_id))
         if principal_id not in self.roles[board_id]:
             raise ValueError("principal is not a board member")
-        if self.mismatch:
+        if board_id in self.remove_failures:
+            raise RuntimeError("sensitive backend failure")
+        if self.mismatch or board_id in self.remove_mismatches:
             return
         del self.roles[board_id][principal_id]
         self.agents[board_id] = [
@@ -582,7 +586,7 @@ class SeatAdminTests(unittest.TestCase):
 
     def test_retire_read_back_mismatch_is_fatal(self) -> None:
         backend = StrictFakeBackend(mismatch=True)
-        with self.assertRaisesRegex(seat_admin.RegistryError, "membership remains"):
+        with self.assertRaisesRegex(seat_admin.RegistryError, "structured audit"):
             invoke(
                 backend,
                 "retire",
@@ -592,6 +596,86 @@ class SeatAdminTests(unittest.TestCase):
                 "board-one",
             )
         self.assertEqual(backend.calls, [("remove", "board-one", "PR-worker")])
+
+    def test_retire_reports_verified_partial_result_when_second_remove_fails(
+        self,
+    ) -> None:
+        backend = StrictFakeBackend()
+        backend.remove_failures.add("home")
+        backend.seats["seats"]["worker-a"] = {
+            "principal_id": "PR-worker",
+            "role": "worker",
+            "board_mode": ["board-one", "home"],
+        }
+        output = io.StringIO()
+
+        with redirect_stdout(output), self.assertRaisesRegex(
+            seat_admin.RegistryError, "structured audit"
+        ) as raised:
+            asyncio.run(
+                seat_admin.execute(
+                    parse(
+                        "retire",
+                        "--name",
+                        "worker-a",
+                        "--boards",
+                        "board-one,home",
+                    ),
+                    backend,
+                )
+            )
+
+        result = json.loads(output.getvalue())
+        self.assertEqual(result["status"], "partial-failure")
+        self.assertEqual(result["verified_read_back"][0]["board_id"], "board-one")
+        self.assertEqual(result["failed_board"], "home")
+        self.assertEqual(result["pending_boards"], [])
+        self.assertIs(result["seat_registry_preserved"], True)
+        self.assertNotIn("sensitive backend failure", output.getvalue())
+        self.assertNotIn("sensitive backend failure", str(raised.exception))
+        self.assertNotIn("PR-worker", backend.roles["board-one"])
+        self.assertIn("PR-worker", backend.roles["home"])
+        self.assertIn("worker-a", backend.seats["seats"])
+        self.assertFalse(any(call[0] == "state_write" for call in backend.calls))
+
+    def test_retire_reports_verified_partial_result_on_second_readback_mismatch(
+        self,
+    ) -> None:
+        backend = StrictFakeBackend()
+        backend.remove_mismatches.add("home")
+        backend.seats["seats"]["worker-a"] = {
+            "principal_id": "PR-worker",
+            "role": "worker",
+            "board_mode": ["board-one", "home"],
+        }
+        output = io.StringIO()
+
+        with redirect_stdout(output), self.assertRaisesRegex(
+            seat_admin.RegistryError, "structured audit"
+        ):
+            asyncio.run(
+                seat_admin.execute(
+                    parse(
+                        "retire",
+                        "--name",
+                        "worker-a",
+                        "--boards",
+                        "board-one,home",
+                    ),
+                    backend,
+                )
+            )
+
+        result = json.loads(output.getvalue())
+        self.assertEqual(result["status"], "partial-failure")
+        self.assertEqual(result["verified_read_back"][0]["board_id"], "board-one")
+        self.assertEqual(result["failed_board"], "home")
+        self.assertEqual(result["failed_board_state"], "unverified")
+        self.assertEqual(result["pending_boards"], [])
+        self.assertIs(result["seat_registry_preserved"], True)
+        self.assertIn("PR-worker", backend.roles["home"])
+        self.assertIn("worker-a", backend.seats["seats"])
+        self.assertFalse(any(call[0] == "state_write" for call in backend.calls))
 
     def test_retire_duplicate_name_requires_principal_disambiguation(self) -> None:
         backend = StrictFakeBackend()

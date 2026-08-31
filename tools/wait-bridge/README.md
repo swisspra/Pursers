@@ -212,6 +212,12 @@ printed plan, verifies every board read-back, and removes matching durable seat
 definitions. Run live cleanup only with an operator admin token and only after
 reviewing the dry-run plan.
 
+If a later board removal or read-back fails after earlier removals succeeded,
+the command exits non-zero after printing a structured partial-failure record.
+That record contains every completed verified read-back, the failed and pending
+boards, and confirmation that `seat_registry` was not changed; backend error
+details are not printed.
+
 ### Registry doctor CLI
 
 `registry_doctor.py` performs a read-only, registry-wide health check. It

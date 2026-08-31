@@ -399,6 +399,65 @@ async def _remove_and_verify(
     }
 
 
+def _print_mutation_failure(
+    *,
+    action: str,
+    verified: list[dict[str, Any]],
+    failed_board: str | None,
+    failed_principal_id: str | None,
+    pending_boards: list[str],
+    error: Exception,
+) -> None:
+    print(
+        json.dumps(
+            {
+                "action": action,
+                "status": "partial-failure" if verified else "failed",
+                "verified_read_back": verified,
+                "failed_board": failed_board,
+                "failed_principal_id": failed_principal_id,
+                "failed_board_state": "unverified",
+                "pending_boards": pending_boards,
+                "seat_registry_preserved": True,
+                "error_type": type(error).__name__,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
+async def _remove_many_and_verify(
+    backend: SeatBackend,
+    operations: list[tuple[str, str]],
+    *,
+    action: str,
+) -> list[dict[str, Any]]:
+    verified: list[dict[str, Any]] = []
+    for index, (board_id, principal_id) in enumerate(operations):
+        try:
+            verified.append(
+                await _remove_and_verify(backend, board_id, principal_id)
+            )
+        except Exception as exc:
+            _print_mutation_failure(
+                action=action,
+                verified=verified,
+                failed_board=board_id,
+                failed_principal_id=principal_id,
+                pending_boards=[
+                    pending_board
+                    for pending_board, _pending_principal in operations[index + 1 :]
+                ],
+                error=exc,
+            )
+            raise RegistryError(
+                f"{action} mutation failed on {board_id!r}; "
+                "see structured audit output"
+            ) from exc
+    return verified
+
+
 async def _remaining_memberships(
     backend: SeatBackend, boards: list[str], principals: set[str]
 ) -> list[dict[str, str]]:
@@ -648,10 +707,11 @@ async def _retire(
             f"{', '.join(sorted(recent))}; pass --force"
         )
 
-    verified = [
-        await _remove_and_verify(backend, board_id, principal)
-        for board_id in target_boards
-    ]
+    verified = await _remove_many_and_verify(
+        backend,
+        [(board_id, principal) for board_id in target_boards],
+        action="retire",
+    )
     updated_registry = json.loads(json.dumps(seat_registry))
     removed_definitions: list[str] = []
     for stored_name in sorted(principal_definitions):
@@ -849,26 +909,49 @@ async def _prune_stale(
         )
         raise RegistryError(f"active claims prevent prune commit: {listed}")
 
-    verified: list[dict[str, Any]] = []
-    for item in plan:
-        for board_id in item["boards"]:
-            verified.append(
-                await _remove_and_verify(
-                    backend, board_id, item["principal_id"]
-                )
-            )
-    remaining_memberships = await _remaining_memberships(
-        backend, boards, principals
+    operations = [
+        (board_id, item["principal_id"])
+        for item in plan
+        for board_id in item["boards"]
+    ]
+    verified = await _remove_many_and_verify(
+        backend, operations, action="prune-stale"
     )
+    try:
+        remaining_memberships = await _remaining_memberships(
+            backend, boards, principals
+        )
+    except Exception as exc:
+        _print_mutation_failure(
+            action="prune-stale",
+            verified=verified,
+            failed_board=None,
+            failed_principal_id=None,
+            pending_boards=[],
+            error=exc,
+        )
+        raise RegistryError(
+            "prune-stale final membership read-back failed; "
+            "see structured audit output"
+        ) from exc
     if remaining_memberships:
         listed = ", ".join(
             f"{item['board_id']}/{item['principal_id']}"
             for item in remaining_memberships
         )
-        raise RegistryError(
+        error = RegistryError(
             "membership read-back remains after prune; preserving seat_registry: "
             f"{listed}"
         )
+        _print_mutation_failure(
+            action="prune-stale",
+            verified=verified,
+            failed_board=remaining_memberships[0]["board_id"],
+            failed_principal_id=remaining_memberships[0]["principal_id"],
+            pending_boards=[],
+            error=error,
+        )
+        raise error
     updated_registry = json.loads(json.dumps(seat_registry))
     removed_definitions = sorted(
         name
