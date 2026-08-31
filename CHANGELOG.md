@@ -5,6 +5,24 @@ All notable changes to Pursers are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [5.0.0a13] - 2026-09-01
+
+This release includes `pursers-personal==5.0.0a13`, `pursers==5.0.0a13`, and
+`pursers-central==0.1.0a18`.
+
+### Added
+
+- Coordinator phase 3: structured intake — a deterministic classifier turns
+  one-line asks (`coordinator_intake` board state) into well-formed tickets
+  under the operator's approval matrix: auto-create only for docs/tests/
+  read-only/reproduced-bug categories on personal-domain boards, drafts with
+  next-action findings for everything else. Consume-once idempotency with
+  collision hardening, client and server rate limits, opt-in via
+  `--enable-intake`.
+- Central: narrow `board:intake` capability — ticket creation journaled with
+  intake origin plus state writes restricted to intake keys; every other
+  mutation stays denied for the coordinator principal.
+
 ## [5.0.0a12] - 2026-08-31
 
 This release includes `pursers-personal==5.0.0a12` and `pursers==5.0.0a12`.
