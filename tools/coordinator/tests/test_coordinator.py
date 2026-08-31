@@ -1298,6 +1298,13 @@ def test_deterministic_intake_classifier(text: str, category: str) -> None:
         ("Extend the handler with unit tests", "production-code"),
         ("Optimize the database and update the guide", "production-code"),
         ("Replace the runtime module and add coverage", "production-code"),
+        ("Patch the parser; documentation included", "production-code"),
+        ("Rework the backend, tests included", "production-code"),
+        ("Harden the service; pytest coverage included", "production-code"),
+        ("Instrument the handler; tests included", "production-code"),
+        ("Port the frontend; README included", "production-code"),
+        ("Secure the endpoint; test coverage included", "production-code"),
+        ("Modernize the application; documentation included", "production-code"),
         ("Fix bug in docs", "bug"),
     ],
 )
@@ -1313,6 +1320,13 @@ def test_mixed_production_intakes_are_draft_only_in_dry_run() -> None:
         "Add a new API endpoint with tests",
         "Rewrite the service and add pytest coverage",
         "Improve runtime behavior and update the README",
+        "Patch the parser; documentation included",
+        "Rework the backend, tests included",
+        "Harden the service; pytest coverage included",
+        "Instrument the handler; tests included",
+        "Port the frontend; README included",
+        "Secure the endpoint; test coverage included",
+        "Modernize the application; documentation included",
     ]
     rows = [_intake_row(f"ask-mixed-{index}", text) for index, text in enumerate(texts)]
 
@@ -1338,6 +1352,42 @@ def test_mixed_production_intakes_are_draft_only_in_dry_run() -> None:
 
     assert {item["kind"] for item in findings} == {"intake-pending"}
     assert {item["category"] for item in findings} == {"production-code"}
+    assert updates == {}
+
+
+def test_pure_auto_intakes_remain_authorized_in_dry_run() -> None:
+    rows = [
+        _intake_row("ask-pure-docs", "Update the README guide"),
+        _intake_row("ask-pure-tests", "Add pytest coverage"),
+        _intake_row("ask-pure-audit", "Run a read-only audit"),
+    ]
+
+    async def unexpected_create(*_args: Any) -> str:
+        raise AssertionError("dry-run must not create")
+
+    findings, updates = asyncio.run(
+        coordinator.process_intakes(
+            [_intake_project()],
+            {
+                "board-a": {
+                    "tickets": [],
+                    "coordinator_intake_state": _intake_state(rows),
+                }
+            },
+            NOW,
+            coordinator.RuntimeState.for_mode("active"),
+            enabled=True,
+            dry_run=True,
+            create_ticket=unexpected_create,
+        )
+    )
+
+    assert {item["kind"] for item in findings} == {"intake-would-create"}
+    assert {item["category"] for item in findings} == {
+        "docs",
+        "tests",
+        "audit-analysis",
+    }
     assert updates == {}
 
 

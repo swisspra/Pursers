@@ -242,46 +242,48 @@ def parse_intake(raw: Mapping[str, Any] | None, board_id: str) -> list[IntakeAsk
 
 
 def classify_intake(text: str) -> tuple[str, bool]:
-    """Classify by ordered, reviewable rules; no probabilistic drafting."""
+    """Authorize only complete, clearly pure AUTO forms; otherwise fail closed."""
     lowered = text.casefold()
     has_reproduction = bool(
         re.search(r"\b(repro(?:duce|duction)?|steps? to reproduce|failing example|traceback)\b", lowered)
         or re.search(r"\bexpected\b.+\b(actual|got|observed)\b", lowered)
     )
-    mutation_verb = (
-        r"change|modify|refactor|remove|delete|implement|update|add|create|build|"
-        r"develop|introduce|extend|rewrite|improve|replace|migrate|optimi[sz]e|"
-        r"enhance|adjust|alter|upgrade|overhaul|redesign"
-    )
-    production_object = (
-        r"production code|source code|api endpoint|endpoint|feature|parser|runtime|"
-        r"service|application|backend|frontend|database|schema|worker|handler|"
-        r"library|package|module|algorithm|business logic|runtime behavior"
-    )
-    supporting_change = r"doc(?:s|umentation)?|readme|guide|runbook|tests?|pytest|coverage"
-    mixed_connector = r"and|plus|with|along with|together with"
-    production_change = (
-        rf"\b(?:{mutation_verb})\b.{{0,120}}\b(?:{production_object})\b"
-        rf"|\b(?:{production_object})\b.{{0,120}}\b(?:{mutation_verb})\b"
-        rf"|\b(?:{production_object})\b.{{0,80}}\b(?:{mixed_connector})\b"
-        rf".{{0,80}}\b(?:{supporting_change})\b"
-        rf"|\b(?:{supporting_change})\b.{{0,80}}\b(?:{mixed_connector})\b"
-        rf".{{0,80}}\b(?:{production_object})\b"
-        r"|\bproduction code\b.{0,40}\b(change|implementation|modification)\b"
-    )
-    rules = (
+    always_ask_rules = (
         ("release-ci", r"\b(release|publish|pypi|npm|deploy|deployment|ci|github actions?)\b"),
         ("membership-roles", r"\b(member(?:ship)?|role|seat|invite|permission)\b"),
         ("board-registry", r"\b(board|registry|project_registry)\b"),
-        ("production-code", production_change),
-        ("bug", r"\b(bug|fix|broken|crash|error|fails?|regression)\b"),
-        ("docs", r"\b(doc(?:s|umentation)?|readme|guide|runbook)\b"),
-        ("tests", r"\b(test(?:s|ing)?|pytest|unittest|fixture|coverage)\b"),
-        ("audit-analysis", r"\b(read[- ]only|audit|analyse|analyze|analysis|inspect|report)\b"),
     )
-    for category, pattern in rules:
+    for category, pattern in always_ask_rules:
         if re.search(pattern, lowered):
             return category, has_reproduction
+    pure_forms = (
+        (
+            "docs",
+            r"(?:update|edit|write|document|clarify|correct|improve|refresh|revise|add|fix)"
+            r"\s+(?:the\s+)?(?:(?:setup|operator|user|developer|api|installation|usage)\s+)?"
+            r"(?:readme|docs?|documentation|guide|runbook)"
+            r"(?:\s+(?:guide|documentation|section|page|examples?|typos?)"
+            r"(?:\s+[a-z0-9_.-]+)?|\s+for\s+(?:the\s+)?[a-z0-9_.-]+)?[.!]?",
+        ),
+        (
+            "tests",
+            r"(?:add|write|update|improve|expand|run)\s+(?:the\s+)?"
+            r"(?:(?:unit|integration|regression|smoke|pytest|unittest|test)\s+)?"
+            r"(?:tests?|coverage|fixtures?)(?:\s+(?:suite|cases?))?[.!]?",
+        ),
+        (
+            "audit-analysis",
+            r"(?:(?:run|perform|conduct|analy[sz]e)\s+)?(?:a\s+)?read[- ]only\s+"
+            r"(?:audit|analysis|inspection|report)"
+            r"(?:\s+of\s+[a-z0-9_./ -]+)?[.!]?",
+        ),
+    )
+    for category, pattern in pure_forms:
+        if re.fullmatch(pattern, lowered):
+            return category, has_reproduction
+    bug_marker = bool(re.search(r"\b(bug|broken|crash|error|fails?|regression)\b", lowered))
+    if bug_marker or re.search(r"\bfix\b", lowered):
+        return "bug", has_reproduction and bug_marker
     return "production-code", has_reproduction
 
 
