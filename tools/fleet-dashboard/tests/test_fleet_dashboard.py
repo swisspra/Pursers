@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import json
+import subprocess
 import sys
 import tempfile
 import threading
@@ -496,6 +497,287 @@ def test_fetch_board_uses_bounded_snapshot_and_catchup() -> None:
             "max_bytes": 100_000,
         },
     ) in calls
+
+
+def test_timeline_groups_by_utc_day_and_ticket_newest_first() -> None:
+    events = [
+        {
+            "seq": 8,
+            "ticket_id": "TK-old",
+            "occurred_at": "2030-01-01T23:59:00+00:00",
+        },
+        {
+            "seq": 10,
+            "ticket_id": "TK-two",
+            "occurred_at": "2030-01-02T02:00:00+00:00",
+        },
+        {
+            "seq": 9,
+            "ticket_id": "TK-one",
+            "occurred_at": "2030-01-02T01:00:00+00:00",
+        },
+        {
+            "seq": 11,
+            "ticket_id": "TK-one",
+            "occurred_at": "2030-01-02T03:00:00+00:00",
+        },
+    ]
+
+    assert dashboard.group_timeline(events) == [
+        {
+            "day": "2030-01-02",
+            "tickets": [
+                {"ticket_id": "TK-one", "event_seqs": [11, 9]},
+                {"ticket_id": "TK-two", "event_seqs": [10]},
+            ],
+        },
+        {
+            "day": "2030-01-01",
+            "tickets": [{"ticket_id": "TK-old", "event_seqs": [8]}],
+        },
+    ]
+
+
+def test_changes_math_supports_seq_and_default_time_cutoffs() -> None:
+    events = [
+        {
+            "seq": 1,
+            "kind": "ticket_created",
+            "status_to": "open",
+            "occurred_at": "2030-01-01T10:00:00+00:00",
+        },
+        {
+            "seq": 2,
+            "kind": "ticket_status_changed",
+            "status_to": "claimed",
+            "occurred_at": "2030-01-02T11:00:00+00:00",
+        },
+        {
+            "seq": 3,
+            "kind": "ticket_status_changed",
+            "status_to": "submitted",
+            "occurred_at": "2030-01-02T11:10:00+00:00",
+        },
+        {
+            "seq": 4,
+            "kind": "ticket_status_changed",
+            "status_from": "submitted",
+            "status_to": "open",
+            "review_verdict": "reject",
+            "rejection_count": 1,
+            "occurred_at": "2030-01-02T11:20:00+00:00",
+        },
+        {
+            "seq": 5,
+            "kind": "ticket_status_changed",
+            "status_to": "closed",
+            "occurred_at": "2030-01-02T11:30:00+00:00",
+        },
+    ]
+
+    by_seq = dashboard.summarize_changes(events, since_seq=2)
+    assert by_seq == {
+        "counts": {
+            "created": 0,
+            "claimed": 0,
+            "submitted": 1,
+            "closed": 1,
+            "rejected": 1,
+        },
+        "event_count": 3,
+    }
+    by_time = dashboard.summarize_changes(
+        events, since_time=datetime(2030, 1, 2, 10, tzinfo=timezone.utc)
+    )
+    assert by_time["counts"] == {
+        "created": 0,
+        "claimed": 1,
+        "submitted": 1,
+        "closed": 1,
+        "rejected": 1,
+    }
+
+
+def test_ticket_flow_classifies_bounded_rows_and_closed_today() -> None:
+    now = datetime(2030, 1, 2, 12, tzinfo=timezone.utc)
+    rows = [
+        {"id": "TK-open", "status": "open"},
+        {"id": "TK-work", "status": "in_progress"},
+        {"id": "TK-review", "status": "reviewing"},
+        {
+            "id": "TK-closed-today",
+            "status": "closed",
+            "closed_at": "2030-01-02T01:00:00+00:00",
+        },
+        {
+            "id": "TK-closed-old",
+            "status": "closed",
+            "closed_at": "2030-01-01T23:59:00+00:00",
+        },
+    ]
+
+    assert dashboard.classify_ticket_flow(rows, now=now) == {
+        "open": ["TK-open"],
+        "claimed": ["TK-work"],
+        "submitted": ["TK-review"],
+        "closed_today": ["TK-closed-today"],
+    }
+
+
+def test_detail_views_include_filter_routes_mobile_containment_and_escape_calls() -> None:
+    assert "tickets|timeline|changes|flow" in dashboard.HTML
+    assert "e.key==='/'" in dashboard.HTML
+    assert "filterNeedle" in dashboard.HTML
+    assert "overflow-x:hidden" in dashboard.HTML
+    assert ".table-scroll" in dashboard.HTML
+    assert "Showing last ${esc(d.event_returned)} events" in dashboard.HTML
+    assert "${esc(t.title)}" in dashboard.HTML
+    assert "${esc(t.claimed_by||'Unassigned')}" in dashboard.HTML
+
+
+def test_filter_behavior_removes_unrelated_home_rows_and_change_counts() -> None:
+    script = dashboard.HTML.split("<script>", 1)[1].split("</script>", 1)[0]
+    lines = script.splitlines()
+
+    def source(prefix: str) -> str:
+        return next(line for line in lines if line.startswith(prefix))
+
+    fixtures = {
+        "fleet": {
+            "pool_summary": {"online": 0, "busy": 0, "available": 0, "stale": 0},
+            "boards": [
+                {
+                    "label": "Alpha project",
+                    "board_id": "board-one",
+                    "tickets": [
+                        {
+                            "id": "TK-alpha",
+                            "title": "Alpha work",
+                            "status": "open",
+                            "claimed_by": None,
+                        },
+                        {
+                            "id": "TK-beta",
+                            "title": "Beta work",
+                            "status": "submitted",
+                            "claimed_by": "worker-beta",
+                        },
+                    ],
+                    "counts": {"open": 1, "submitted": 1},
+                    "truncated": False,
+                    "error": None,
+                }
+            ],
+            "agents": [],
+            "generated_at": "2030-01-02T12:00:00Z",
+        },
+        "events": [
+            {
+                "seq": 1,
+                "ticket_id": "TK-alpha",
+                "kind": "ticket_created",
+                "status_to": "open",
+                "actor": "worker-alpha",
+                "occurred_at": "2030-01-02T11:00:00Z",
+            },
+            {
+                "seq": 2,
+                "ticket_id": "TK-beta",
+                "kind": "ticket_status_changed",
+                "status_to": "submitted",
+                "actor": "worker-beta",
+                "occurred_at": "2030-01-02T11:10:00Z",
+            },
+            {
+                "seq": 3,
+                "ticket_id": "TK-beta",
+                "kind": "ticket_status_changed",
+                "status_to": "closed",
+                "actor": "reviewer-beta",
+                "occurred_at": "2030-01-02T11:20:00Z",
+            },
+        ],
+    }
+    program = "\n".join(
+        [
+            source("const esc="),
+            source("const fmt="),
+            source("const ticketMatches="),
+            source("const filterHomeBoards="),
+            source("const eventMatches="),
+            source("const filterChangeEvents="),
+            source("function renderFleet("),
+            source("function changesFor("),
+            source("function changesView("),
+            f"const fixture={json.dumps(fixtures)};",
+            "const elements=Object.fromEntries(['#summary','#boards','#agents','#state'].map(key=>[key,{innerHTML:'',textContent:''}]));",
+            "const document={querySelector:key=>elements[key]};",
+            "let filterNeedle='alpha';",
+            "renderFleet(fixture.fleet);",
+            "const originalChangesFor=changesFor;let changeEvents=[],changeSummary=null;",
+            "changesFor=(events,since,generatedAt)=>{changeEvents=events;changeSummary=originalChangesFor(events,since,generatedAt);return changeSummary};",
+            "changesView({events:fixture.events,event_returned:fixture.events.length,generated_at:'2030-01-02T12:00:00Z'},{since:'0'});",
+            "console.log(JSON.stringify({home:elements['#boards'].innerHTML,changeEvents,changeSummary}));",
+        ]
+    )
+    completed = subprocess.run(
+        ["node", "-e", program],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    result = json.loads(completed.stdout)
+
+    assert "TK-alpha" in result["home"]
+    assert "TK-beta" not in result["home"]
+    assert [event["ticket_id"] for event in result["changeEvents"]] == ["TK-alpha"]
+    assert result["changeSummary"] == {
+        "counts": {
+            "created": 1,
+            "claimed": 0,
+            "submitted": 0,
+            "closed": 0,
+            "rejected": 0,
+        },
+        "event_count": 1,
+    }
+
+
+def test_hostile_script_rtl_and_zero_width_values_stay_data_for_client_escape() -> None:
+    hostile = "<script>alert(1)</script>\u202eRTL\u200b"
+    detail = dashboard.project_board_detail(
+        {
+            "label": hostile,
+            "board_id": "safe-board",
+            "snapshot": {
+                "tickets": [
+                    {
+                        "ticket_id": "TK-hostile",
+                        "title": hostile,
+                        "description": hostile,
+                        "claimed_by": hostile,
+                        "status": "open",
+                    }
+                ]
+            },
+            "events": [
+                {
+                    "seq": 1,
+                    "kind": hostile,
+                    "ticket_id": "TK-hostile",
+                    "occurred_at": "2030-01-02T01:00:00+00:00",
+                    "actor": hostile,
+                }
+            ],
+        },
+        now=datetime(2030, 1, 2, 12, tzinfo=timezone.utc),
+    )
+
+    assert detail["board"]["label"] == hostile
+    assert detail["tickets"][0]["title"] == hostile
+    assert detail["events"][0]["kind"] == hostile
+    assert "const esc=" in dashboard.HTML
+    assert hostile not in dashboard.HTML
 
 
 def test_non_loopback_host_is_refused() -> None:

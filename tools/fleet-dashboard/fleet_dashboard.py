@@ -403,6 +403,7 @@ def _detail_ticket(ticket: dict[str, Any]) -> dict[str, Any]:
         "status": _clip(ticket.get("status") or "unknown", 32),
         "priority": _clip(ticket.get("priority") or "medium", 16),
         "claimed_by": _clip(ticket.get("claimed_by"), MAX_LABEL_CHARS) or None,
+        "closed_at": _clip(ticket.get("closed_at"), 40) or None,
         "updated_at": _clip(ticket.get("updated_at"), 40) or None,
         "description": _clip(ticket.get("description"), MAX_DESCRIPTION_CHARS),
         "required_fields": [
@@ -420,8 +421,109 @@ def _detail_ticket(ticket: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def project_board_detail(raw: dict[str, Any]) -> dict[str, Any]:
+def group_timeline(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Group bounded events by UTC day then ticket, newest activity first."""
+    grouped: dict[str, dict[str, list[int]]] = {}
+    for event in events:
+        seq = event.get("seq")
+        occurred_at = _parse_time(event.get("occurred_at"))
+        if type(seq) is not int or occurred_at is None:
+            continue
+        day = occurred_at.date().isoformat()
+        ticket_id = str(event.get("ticket_id") or "Board activity")
+        grouped.setdefault(day, {}).setdefault(ticket_id, []).append(seq)
+    result = []
+    for day in sorted(grouped, reverse=True):
+        tickets = [
+            {"ticket_id": ticket_id, "event_seqs": sorted(seqs, reverse=True)}
+            for ticket_id, seqs in grouped[day].items()
+        ]
+        tickets.sort(key=lambda item: (-max(item["event_seqs"]), item["ticket_id"]))
+        result.append({"day": day, "tickets": tickets})
+    return result
+
+
+def summarize_changes(
+    events: list[dict[str, Any]],
+    *,
+    since_seq: int | None = None,
+    since_time: datetime | None = None,
+) -> dict[str, Any]:
+    """Count ticket lifecycle changes in a deterministic bounded event window."""
+    if since_seq is not None and (type(since_seq) is not int or since_seq < 0):
+        raise ValueError("since_seq must be a non-negative integer")
+    cutoff = since_time.astimezone(timezone.utc) if since_time is not None else None
+    counts = {
+        name: 0
+        for name in ("created", "claimed", "submitted", "closed", "rejected")
+    }
+    selected = 0
+    for event in events:
+        seq = event.get("seq")
+        occurred_at = _parse_time(event.get("occurred_at"))
+        if since_seq is not None:
+            if type(seq) is not int or seq <= since_seq:
+                continue
+        elif cutoff is not None and (occurred_at is None or occurred_at < cutoff):
+            continue
+        selected += 1
+        kind = event.get("kind")
+        status_from = event.get("status_from")
+        status_to = event.get("status_to")
+        if kind == "ticket_created":
+            counts["created"] += 1
+        if status_to == "claimed":
+            counts["claimed"] += 1
+        if status_to == "submitted":
+            counts["submitted"] += 1
+        if status_to == "closed":
+            counts["closed"] += 1
+        if event.get("review_verdict") == "reject" or (
+            status_from == "submitted"
+            and status_to in {"open", "claimed", "rejected"}
+            and _nonnegative_int(event.get("rejection_count")) > 0
+        ):
+            counts["rejected"] += 1
+    return {"counts": counts, "event_count": selected}
+
+
+def classify_ticket_flow(
+    tickets: list[dict[str, Any]], *, now: datetime
+) -> dict[str, list[str]]:
+    """Classify bounded ticket rows into the four dashboard flow columns."""
+    today = now.astimezone(timezone.utc).date()
+    flow = {name: [] for name in ("open", "claimed", "submitted", "closed_today")}
+    for ticket in tickets:
+        ticket_id = str(ticket.get("id") or "")
+        if not ticket_id:
+            continue
+        status = ticket.get("status")
+        if status == "open":
+            flow["open"].append(ticket_id)
+        elif status in ACTIVE_CLAIM_STATES:
+            flow["claimed"].append(ticket_id)
+        elif status in SUBMITTED_STATES:
+            flow["submitted"].append(ticket_id)
+        elif status == "closed":
+            closed_at = _parse_time(ticket.get("closed_at") or ticket.get("updated_at"))
+            if closed_at is not None and closed_at.date() == today:
+                flow["closed_today"].append(ticket_id)
+    return flow
+
+
+def _refresh_detail_views(result: dict[str, Any], now: datetime) -> None:
+    result["timeline"] = group_timeline(result["events"])
+    result["changes_24h"] = summarize_changes(
+        result["events"], since_time=now - timedelta(hours=24)
+    )
+    result["ticket_flow"] = classify_ticket_flow(result["tickets"], now=now)
+
+
+def project_board_detail(
+    raw: dict[str, Any], *, now: datetime | None = None
+) -> dict[str, Any]:
     """Project one bounded snapshot and catchup page for the browser."""
+    now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     snapshot = raw.get("snapshot") if isinstance(raw.get("snapshot"), dict) else {}
     source_tickets = (
         snapshot.get("tickets") if isinstance(snapshot.get("tickets"), list) else []
@@ -446,6 +548,11 @@ def project_board_detail(raw: dict[str, Any]) -> dict[str, Any]:
                 "kind": _clip(event.get("kind"), 48),
                 "ticket_id": _clip(event.get("ticket_id"), MAX_LABEL_CHARS) or None,
                 "occurred_at": _clip(event.get("occurred_at"), 40) or None,
+                "status_from": _clip(event.get("status_from"), 32) or None,
+                "status_to": _clip(event.get("status_to"), 32) or None,
+                "actor": _clip(event.get("actor"), MAX_LABEL_CHARS) or None,
+                "review_verdict": _clip(event.get("review_verdict"), 16) or None,
+                "rejection_count": _nonnegative_int(event.get("rejection_count")),
             }
         )
     events.sort(key=lambda item: item["seq"] if item["seq"] is not None else -1)
@@ -458,13 +565,14 @@ def project_board_detail(raw: dict[str, Any]) -> dict[str, Any]:
         else len(source_tickets)
     )
     result = {
-        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "generated_at": now.isoformat(),
         "board": {
             "board_id": _clip(raw.get("board_id"), MAX_LABEL_CHARS),
             "label": _clip(raw.get("label") or raw.get("board_id"), MAX_LABEL_CHARS),
         },
         "tickets": tickets[:MAX_DETAIL_TICKET_ROWS],
         "events": events,
+        "event_returned": len(events),
         "coordinator_findings": project_coordinator_findings(snapshot),
         "ticket_total": max(snapshot_ticket_total, len(source_tickets)),
         "ticket_returned": min(len(tickets), MAX_DETAIL_TICKET_ROWS),
@@ -482,6 +590,7 @@ def project_board_detail(raw: dict[str, Any]) -> dict[str, Any]:
     result["ticket_omitted"] = max(
         0, result["ticket_total"] - result["ticket_returned"]
     )
+    _refresh_detail_views(result, now)
     while len(_json_bytes(result)) > API_MAX_BYTES and result["tickets"]:
         result["tickets"].pop()
         result["ticket_returned"] = len(result["tickets"])
@@ -489,9 +598,12 @@ def project_board_detail(raw: dict[str, Any]) -> dict[str, Any]:
             0, result["ticket_total"] - result["ticket_returned"]
         )
         result["truncated"] = True
+        _refresh_detail_views(result, now)
     while len(_json_bytes(result)) > API_MAX_BYTES and result["events"]:
         result["events"].pop(0)
+        result["event_returned"] = len(result["events"])
         result["truncated"] = True
+        _refresh_detail_views(result, now)
     if len(_json_bytes(result)) > API_MAX_BYTES:
         raise ValueError("detail projection metadata exceeds API byte cap")
     return result
@@ -883,24 +995,33 @@ class DashboardCache:
 HTML = r"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Fleet Dashboard</title><style>
-:root{color-scheme:dark;--bg:#0b1020;--panel:#151b2d;--panel2:#202942;--line:#29324a;--text:#e7ecf7;--muted:#9aa6bf;--good:#46d39a;--warn:#f4bd55;--bad:#ef6f7d;--accent:#79a8ff}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 ui-sans-serif,system-ui,-apple-system,sans-serif}main{max-width:1500px;margin:auto;padding:24px}.top{display:flex;justify-content:space-between;gap:16px;align-items:end}h1,h2,h3,p{margin:0}h1{font-size:24px}h2{font-size:17px}a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}.muted,.meta{color:var(--muted)}.strip{display:grid;grid-template-columns:repeat(4,minmax(100px,1fr));gap:10px;margin:20px 0}.metric,.card{background:var(--panel);border:1px solid var(--line);border-radius:12px}.metric{padding:14px}.metric b{display:block;font-size:24px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(390px,1fr));gap:14px}.card{padding:16px;min-width:0}.board-link{display:block;color:inherit}.counts{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0}.pill{padding:4px 8px;border-radius:999px;background:var(--panel2)}table{width:100%;border-collapse:collapse}th,td{padding:8px 6px;text-align:left;border-top:1px solid var(--line);vertical-align:top}th{color:var(--muted);font-weight:500}.id{font-family:ui-monospace,SFMono-Regular,monospace;color:var(--accent);white-space:nowrap}.status{font-size:12px;border-radius:999px;padding:2px 6px;background:#26304a}.pool{margin-top:18px}.busy{color:var(--warn)}.available{color:var(--good)}.stale,.error,.finding-critical{color:var(--bad)}#state{font-size:12px}.empty{color:var(--muted);padding:10px 0}.agent{border-top:1px solid var(--line)}.agent summary{cursor:pointer;display:grid;grid-template-columns:2fr 1fr 2fr 2fr;gap:8px;padding:10px 6px}.agent-body{padding:0 6px 12px}.warning,.finding-warn{color:var(--warn)}.toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:18px 0}.toolbar select{background:var(--panel2);border:1px solid var(--line);border-radius:8px;color:var(--text);padding:7px}.ticket-detail summary{cursor:pointer;color:var(--text)}.ticket-copy{white-space:pre-wrap;max-width:80ch;margin:8px 0}.back{display:inline-block;margin-bottom:16px}.detail-grid{display:grid;grid-template-columns:minmax(0,2fr) minmax(300px,1fr);gap:14px}.detail-card{overflow-x:auto}.required{display:flex;flex-wrap:wrap;gap:5px;margin-top:8px}.activity td{font-size:13px}.finding-list{display:grid;gap:8px;margin-top:10px}.finding{border-left:3px solid var(--line);padding-left:10px}.overhead-tools{max-width:36ch}@media(max-width:800px){main{padding:14px}.strip{grid-template-columns:repeat(2,1fr)}.grid,.detail-grid{grid-template-columns:1fr}.hide-small{display:none}.agent summary{grid-template-columns:1fr 1fr}.agent summary span:nth-child(n+3){display:none}}
-</style></head><body><main><div class="top"><div><h1>Fleet Dashboard</h1><p class="muted">Live boards and shared agent pool</p></div><div id="state" class="muted">Loading…</div></div><section id="home-view"><section id="summary" class="strip"></section><section id="boards" class="grid"></section><section class="card pool"><h2>Agent pool</h2><div id="agents"></div></section><section class="card pool"><h2>Protocol overhead</h2><p class="muted">Estimated from request and response bytes; not provider billing.</p><div id="overhead"></div></section></section><section id="detail-view" hidden></section></main><script>
+:root{color-scheme:dark;--bg:#0b1020;--panel:#151b2d;--panel2:#202942;--line:#29324a;--text:#e7ecf7;--muted:#9aa6bf;--good:#46d39a;--warn:#f4bd55;--bad:#ef6f7d;--accent:#79a8ff}*{box-sizing:border-box}html,body{max-width:100%;overflow-x:hidden}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 ui-sans-serif,system-ui,-apple-system,sans-serif}main{width:100%;max-width:1500px;min-width:0;margin:auto;padding:24px}.top,.toolbar{display:flex;justify-content:space-between;flex-wrap:wrap;gap:12px}.top{align-items:end}h1,h2,h3,p{margin:0}h1{font-size:24px}h2{font-size:17px}a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}.muted,.meta{color:var(--muted)}.strip{display:grid;grid-template-columns:repeat(4,minmax(100px,1fr));gap:10px;margin:20px 0}.metric,.card{background:var(--panel);border:1px solid var(--line);border-radius:12px}.metric,.card{padding:14px}.metric b{display:block;font-size:24px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(390px,100%),1fr));gap:14px}.card{min-width:0}.board-link{display:block;color:inherit}.counts,.tabs,.required{display:flex;flex-wrap:wrap;gap:8px}.counts{margin:12px 0}.pill,.tab{padding:4px 8px;border-radius:999px;background:var(--panel2)}.tab.active{outline:2px solid var(--accent)}.table-scroll{width:100%;max-width:100%;overflow-x:auto}table{width:100%;border-collapse:collapse}th,td{padding:8px 6px;text-align:left;border-top:1px solid var(--line);vertical-align:top}th{color:var(--muted);font-weight:500}.id{font-family:ui-monospace,SFMono-Regular,monospace;color:var(--accent);white-space:nowrap}.status{font-size:12px;border-radius:999px;padding:2px 6px;background:#26304a}.pool{margin-top:18px}.warning{color:var(--warn)}.error{color:var(--bad)}#state{font-size:12px}.empty{color:var(--muted);padding:10px 0}.agent{border-top:1px solid var(--line)}.agent summary{cursor:pointer;display:grid;grid-template-columns:2fr 1fr 2fr 2fr;gap:8px;padding:10px 6px}.agent-body{padding:0 6px 12px}.toolbar{align-items:center;margin:18px 0}.toolbar select,.toolbar input,.toolbar button,#filter{background:var(--panel2);border:1px solid var(--line);border-radius:8px;color:var(--text);padding:8px}.search{min-width:min(300px,45vw)}.ticket-detail summary,.timeline summary{cursor:pointer}.ticket-copy{white-space:pre-wrap;overflow-wrap:anywhere;max-width:80ch;margin:8px 0}.back{display:inline-block;margin-bottom:16px}.required{margin-top:8px}.finding-list,.timeline,.flow{display:grid;gap:10px;margin-top:10px}.finding{border-left:3px solid var(--line);padding-left:10px}.timeline-ticket{margin:8px 0 0 14px}.flow{grid-template-columns:repeat(4,minmax(0,1fr))}.flow-column{background:var(--panel2);border-radius:10px;padding:10px;min-width:0}.flow-card{display:block;margin-top:8px;padding:9px;border:1px solid var(--line);border-radius:8px;color:var(--text);overflow-wrap:anywhere}.change-grid{grid-template-columns:repeat(5,minmax(100px,1fr))}.bounded-note{margin-top:10px}.overhead-tools{max-width:36ch}@media(max-width:800px){main{padding:14px}.strip,.change-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.grid,.flow{grid-template-columns:1fr}.hide-small{display:none}.agent summary{grid-template-columns:1fr 1fr}.agent summary span:nth-child(n+3){display:none}.search{min-width:0;width:100%}.top{align-items:start}}
+</style></head><body><main><div class="top"><div><h1>Fleet Dashboard</h1><p class="muted">Live boards and shared agent pool</p></div><div><input id="filter" class="search" type="search" placeholder="Filter tickets, boards, agents…" aria-label="Filter dashboard"><div id="state" class="muted">Loading…</div></div></div><section id="home-view"><section id="summary" class="strip"></section><section id="boards" class="grid"></section><section class="card pool"><h2>Agent pool</h2><div id="agents"></div></section><section class="card pool"><h2>Protocol overhead</h2><p class="muted">Estimated from request and response bytes; not provider billing.</p><div id="overhead"></div></section></section><section id="detail-view" hidden></section></main><script>
 const esc=v=>String(v??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
-const fmt=v=>v?new Date(v).toLocaleString():'—';
-const boardHref=id=>`#/board/${encodeURIComponent(id)}`;
-const ticketHref=(board,id)=>`${boardHref(board)}?ticket=${encodeURIComponent(id)}`;
-let fleetData=null,detailData=null,detailSort='newest',detailTimer=null;
-function route(){const m=location.hash.match(/^#\/board\/([^?]+)(?:\?(.*))?$/);if(!m)return null;try{const board=decodeURIComponent(m[1]);if(!/^[A-Za-z0-9._-]{1,80}$/.test(board))return null;return{board,ticket:new URLSearchParams(m[2]||'').get('ticket')}}catch{return null}}
-function renderFleet(d){const s=d.pool_summary;document.querySelector('#summary').innerHTML=['online','busy','available','stale'].map(k=>`<div class="metric"><span class="${k}">${esc(k)}</span><b>${esc(s[k])}</b></div>`).join('');document.querySelector('#boards').innerHTML=d.boards.map(b=>`<article class="card"><a class="board-link" href="${boardHref(b.board_id)}"><div class="top"><div><h2>${esc(b.label)}</h2><span class="meta">${esc(b.board_id)}</span></div>${b.truncated?'<span class="status">bounded view</span>':''}</div></a>${b.error?`<p class="error">Unavailable: ${esc(b.error)}</p>`:`<div class="counts">${Object.entries(b.counts).map(([k,v])=>`<span class="pill">${esc(k.replace('_',' '))}: <b>${esc(v)}</b></span>`).join('')}</div><table><thead><tr><th>Ticket</th><th>Title</th><th>Status</th><th class="hide-small">Claimed by</th></tr></thead><tbody>${b.tickets.length?b.tickets.map(t=>`<tr><td><a class="id" href="${ticketHref(b.board_id,t.id)}">${esc(t.id)}</a></td><td>${esc(t.title)}</td><td><span class="status">${esc(t.status)}</span></td><td class="hide-small">${esc(t.claimed_by||'—')}</td></tr>`).join(''):'<tr><td colspan="4" class="empty">No active tickets</td></tr>'}</tbody></table>`}</article>`).join('');document.querySelector('#agents').innerHTML=d.agents.length?d.agents.map(a=>`<details class="agent"><summary><b>${esc(a.agent_name)}${a.duplicate_name?' <span class="warning">duplicate name</span>':''}</b><span class="${esc(a.pool_status)}">${esc(a.pool_status)}</span><span>${esc(a.boards.join(', '))}</span><span>${esc(fmt(a.last_seen))}</span></summary><div class="agent-body"><table><thead><tr><th>Project</th><th>Role</th><th>Current claim</th><th>Last seen</th></tr></thead><tbody>${a.seats.map(seat=>`<tr><td><a href="${boardHref(seat.board_id)}">${esc(seat.project)}</a><div class="meta">${esc(seat.board_id)}</div></td><td>${esc(seat.role||'—')}</td><td>${seat.current_ticket_id?`<a class="id" href="${ticketHref(seat.board_id,seat.current_ticket_id)}">${esc(seat.current_ticket_id)}</a><div>${esc(seat.current_ticket_title)}</div>`:'—'}</td><td>${esc(fmt(seat.last_seen))}</td></tr>`).join('')}</tbody></table></div></details>`).join(''):'<p class="empty">No visible agents</p>';document.querySelector('#state').textContent=`Updated ${fmt(d.generated_at)}`}
-function renderOverhead(d){document.querySelector('#overhead').innerHTML=d.seats.length?`<table><thead><tr><th>Seat</th><th>Today</th><th>7-day</th><th>Top tools by bytes</th></tr></thead><tbody>${d.seats.map(s=>`<tr><td><b>${esc(s.agent_name)}</b><div class="meta">${esc(s.board_id)}</div></td><td>${esc(s.today_bytes)} B<div class="meta">≈ ${esc(s.today_estimated_tokens)} tokens · ${esc(s.today_calls)} calls</div></td><td>${esc(s.seven_day_bytes)} B<div class="meta">≈ ${esc(s.seven_day_estimated_tokens)} tokens · ${esc(s.seven_day_calls)} calls</div></td><td class="overhead-tools">${s.top_tools.map(t=>`${esc(t.tool)}: ${esc(t.bytes)} B`).join(' · ')||'—'}</td></tr>`).join('')}</tbody></table>${d.truncated_seats?`<p class="warning">${esc(d.truncated_seats)} seats omitted by the bounded view.</p>`:''}`:`<p class="empty">No bridge overhead stats yet (${esc(d.source_status)}).</p>`}
+const fmt=v=>v?new Date(v).toLocaleString():'—',boardHref=(id,view='tickets')=>`#/board/${encodeURIComponent(id)}/${view}`,ticketHref=(board,id)=>`${boardHref(board)}?ticket=${encodeURIComponent(id)}`,matches=(values,needle)=>!needle||values.map(v=>String(v??'').toLocaleLowerCase()).join(' ').includes(needle);
+const ticketMatches=(t,needle)=>matches([t.id,t.title,t.status,t.claimed_by,t.description],needle);
+const filterHomeBoards=(boards,needle)=>boards.map(b=>({...b,tickets:b.tickets.filter(t=>ticketMatches(t,needle))})).filter(b=>matches([b.label,b.board_id],needle)||b.tickets.length);
+const eventMatches=(e,ticketId,needle)=>matches([ticketId,e.kind,e.status_from,e.status_to,e.actor],needle);
+const filterChangeEvents=(events,needle)=>events.filter(e=>eventMatches(e,e.ticket_id,needle));
+let fleetData=null,detailData=null,detailSort='newest',detailTimer=null,filterNeedle='';
+function route(){const m=location.hash.match(/^#\/board\/([^/?]+)(?:\/(tickets|timeline|changes|flow))?(?:\?(.*))?$/);if(!m)return null;try{const board=decodeURIComponent(m[1]);if(!/^[A-Za-z0-9._-]{1,80}$/.test(board))return null;const q=new URLSearchParams(m[3]||'');return{board,view:m[2]||'tickets',ticket:q.get('ticket'),since:q.get('since')}}catch{return null}}
+function renderFleet(d){const s=d.pool_summary;document.querySelector('#summary').innerHTML=['online','busy','available','stale'].map(k=>`<div class="metric"><span>${esc(k)}</span><b>${esc(s[k])}</b></div>`).join('');const boards=filterHomeBoards(d.boards,filterNeedle);document.querySelector('#boards').innerHTML=boards.map(b=>`<article class="card"><a class="board-link" href="${boardHref(b.board_id)}"><div class="top"><div><h2>${esc(b.label)}</h2><span class="meta">${esc(b.board_id)}</span></div>${b.truncated?'<span class="status">bounded view</span>':''}</div></a>${b.error?`<p class="error">Unavailable: ${esc(b.error)}</p>`:`<div class="counts">${Object.entries(b.counts).map(([k,v])=>`<span class="pill">${esc(k.replace('_',' '))}: <b>${esc(v)}</b></span>`).join('')}</div><div class="table-scroll"><table><thead><tr><th>Ticket</th><th>Title</th><th>Status</th><th class="hide-small">Claimed by</th></tr></thead><tbody>${b.tickets.length?b.tickets.map(t=>`<tr><td><a class="id" href="${ticketHref(b.board_id,t.id)}">${esc(t.id)}</a></td><td>${esc(t.title)}</td><td><span class="status">${esc(t.status)}</span></td><td class="hide-small">${esc(t.claimed_by||'—')}</td></tr>`).join(''):'<tr><td colspan="4" class="empty">No matching tickets</td></tr>'}</tbody></table></div>`}</article>`).join('')||'<p class="empty">No boards match the filter.</p>';const agents=d.agents.filter(a=>matches([a.agent_name,a.pool_status,...a.boards],filterNeedle));document.querySelector('#agents').innerHTML=agents.length?agents.map(a=>`<details class="agent"><summary><b>${esc(a.agent_name)}${a.duplicate_name?' <span class="warning">duplicate name</span>':''}</b><span>${esc(a.pool_status)}</span><span>${esc(a.boards.join(', '))}</span><span>${esc(fmt(a.last_seen))}</span></summary><div class="agent-body table-scroll"><table><thead><tr><th>Project</th><th>Role</th><th>Current claim</th><th>Last seen</th></tr></thead><tbody>${a.seats.map(seat=>`<tr><td><a href="${boardHref(seat.board_id)}">${esc(seat.project)}</a><div class="meta">${esc(seat.board_id)}</div></td><td>${esc(seat.role||'—')}</td><td>${seat.current_ticket_id?`<a class="id" href="${ticketHref(seat.board_id,seat.current_ticket_id)}">${esc(seat.current_ticket_id)}</a><div>${esc(seat.current_ticket_title)}</div>`:'—'}</td><td>${esc(fmt(seat.last_seen))}</td></tr>`).join('')}</tbody></table></div></details>`).join(''):'<p class="empty">No agents match the filter.</p>';document.querySelector('#state').textContent=`Updated ${fmt(d.generated_at)}`}
+function renderOverhead(d){document.querySelector('#overhead').innerHTML=d.seats.length?`<div class="table-scroll"><table><thead><tr><th>Seat</th><th>Today</th><th>7-day</th><th>Top tools by bytes</th></tr></thead><tbody>${d.seats.map(s=>`<tr><td><b>${esc(s.agent_name)}</b><div class="meta">${esc(s.board_id)}</div></td><td>${esc(s.today_bytes)} B<div class="meta">≈ ${esc(s.today_estimated_tokens)} tokens · ${esc(s.today_calls)} calls</div></td><td>${esc(s.seven_day_bytes)} B<div class="meta">≈ ${esc(s.seven_day_estimated_tokens)} tokens · ${esc(s.seven_day_calls)} calls</div></td><td class="overhead-tools">${s.top_tools.map(t=>`${esc(t.tool)}: ${esc(t.bytes)} B`).join(' · ')||'—'}</td></tr>`).join('')}</tbody></table></div>`:`<p class="empty">No bridge overhead stats yet (${esc(d.source_status)}).</p>`}
 function sortedTickets(items){const rank=s=>['claimed','in_progress','creating_report'].includes(s)?0:['submitted','reviewing','in_review'].includes(s)?1:s==='open'?2:3;return [...items].sort((a,b)=>rank(a.status)-rank(b.status)||(detailSort==='oldest'?String(a.updated_at||'').localeCompare(String(b.updated_at||'')):String(b.updated_at||'').localeCompare(String(a.updated_at||''))))}
-function renderDetail(d){const r=route();if(!r||r.board!==d.board.board_id)return;const rows=sortedTickets(d.tickets),requestedVisible=!r.ticket||rows.some(t=>t.id===r.ticket);document.querySelector('#detail-view').innerHTML=`<a class="back" href="#/">← All boards</a><div class="top"><div><h2>${esc(d.board.label)}</h2><span class="meta">${esc(d.board.board_id)}</span></div>${d.truncated?`<span class="status">${esc(d.ticket_returned)} of ${esc(d.ticket_total)} tickets shown</span>`:''}</div>${requestedVisible?'':`<p class="warning">Requested ticket ${esc(r.ticket)} is outside this bounded response.</p>`}<div class="toolbar"><span>${esc(d.ticket_total)} bounded tickets</span><label>Updated <select id="ticket-sort"><option value="newest"${detailSort==='newest'?' selected':''}>newest first</option><option value="oldest"${detailSort==='oldest'?' selected':''}>oldest first</option></select></label></div>${d.coordinator_findings?`<section class="card"><h3>Coordinator findings</h3><div class="finding-list">${d.coordinator_findings.items.map(f=>`<div class="finding finding-${esc(f.level)}"><b>${esc(f.kind)}</b>${f.ticket_id?` <span class="id">${esc(f.ticket_id)}</span>`:''}<p>${esc(f.text)}</p></div>`).join('')||'<p class="empty">No current findings</p>'}</div>${d.coordinator_findings.truncated_count?`<p class="warning">${esc(d.coordinator_findings.truncated_count)} findings omitted by the bounded state.</p>`:''}</section><div class="toolbar"></div>`:''}<div class="detail-grid"><section class="card detail-card"><table><thead><tr><th>Ticket</th><th>Title and details</th><th>Status</th><th class="hide-small">Updated</th></tr></thead><tbody>${rows.length?rows.map(t=>`<tr><td><span class="id">${esc(t.id)}</span></td><td><details class="ticket-detail" data-ticket="${esc(t.id)}"${r.ticket===t.id?' open':''}><summary>${esc(t.title)}</summary><p class="ticket-copy">${esc(t.description||'No description')}</p>${t.required_fields.length?`<div class="required">${t.required_fields.map(x=>`<span class="pill">${esc(x)}</span>`).join('')}</div>`:''}${t.latest_submission_summary?`<p class="meta ticket-copy">Latest submission: ${esc(t.latest_submission_summary)}</p>`:''}${t.review_label?`<p class="meta">Review: ${esc(t.review_label)}</p>`:''}</details></td><td><span class="status">${esc(t.status)}</span><div class="meta">${esc(t.claimed_by||'')}</div></td><td class="meta hide-small">${esc(fmt(t.updated_at))}</td></tr>`).join(''):'<tr><td colspan="4" class="empty">No visible tickets</td></tr>'}</tbody></table></section><section class="card detail-card"><h3>Recent activity</h3><table class="activity"><tbody>${d.events.length?d.events.map(e=>`<tr><td class="id">${esc(e.seq??'—')}</td><td>${esc(e.kind)}</td><td>${e.ticket_id?`<a href="${ticketHref(d.board.board_id,e.ticket_id)}">${esc(e.ticket_id)}</a>`:''}<div class="meta">${esc(fmt(e.occurred_at))}</div></td></tr>`).join(''):'<tr><td class="empty">No recent visible activity</td></tr>'}</tbody></table></section></div>`;document.querySelector('#ticket-sort').addEventListener('change',e=>{detailSort=e.target.value;renderDetail(d)});document.querySelector('#state').textContent=`Updated ${fmt(d.generated_at)}`;if(r.ticket){const target=[...document.querySelectorAll('[data-ticket]')].find(x=>x.dataset.ticket===r.ticket);target?.scrollIntoView({block:'center'})}}
-async function fetchJson(url){const response=await fetch(url,{cache:'no-store'});if(!response.ok)throw new Error(`HTTP ${response.status}`);return response.json()}
-async function refreshFleet(){try{fleetData=await fetchJson('/api/fleet');if(!route())renderFleet(fleetData)}catch(e){document.querySelector('#state').textContent=`Fleet refresh failed: ${e.message}`}}
+function tabs(d,r){return `<nav class="tabs" aria-label="Board views">${[['tickets','Tickets'],['timeline','Timeline'],['changes','Changes'],['flow','Ticket Flow']].map(([v,label])=>`<a class="tab${r.view===v?' active':''}" href="${boardHref(d.board.board_id,v)}">${esc(label)}</a>`).join('')}</nav>`}
+function ticketView(d,r){const rows=sortedTickets(d.tickets).filter(t=>matches([t.id,t.title,t.status,t.claimed_by,t.description],filterNeedle));const visible=!r.ticket||rows.some(t=>t.id===r.ticket);return `${visible?'':`<p class="warning">Requested ticket ${esc(r.ticket)} is outside this bounded response or filter.</p>`}<div class="toolbar"><span>${esc(rows.length)} of ${esc(d.ticket_returned)} returned tickets</span><label>Updated <select id="ticket-sort"><option value="newest"${detailSort==='newest'?' selected':''}>newest first</option><option value="oldest"${detailSort==='oldest'?' selected':''}>oldest first</option></select></label></div><section class="card"><div class="table-scroll"><table><thead><tr><th>Ticket</th><th>Title and details</th><th>Status</th><th class="hide-small">Updated</th></tr></thead><tbody>${rows.length?rows.map(t=>`<tr><td><span class="id">${esc(t.id)}</span></td><td><details class="ticket-detail" data-ticket="${esc(t.id)}"${r.ticket===t.id?' open':''}><summary>${esc(t.title)}</summary><p class="ticket-copy">${esc(t.description||'No description')}</p>${t.required_fields.length?`<div class="required">${t.required_fields.map(x=>`<span class="pill">${esc(x)}</span>`).join('')}</div>`:''}${t.latest_submission_summary?`<p class="meta ticket-copy">Latest submission: ${esc(t.latest_submission_summary)}</p>`:''}${t.review_label?`<p class="meta">Review: ${esc(t.review_label)}</p>`:''}</details></td><td><span class="status">${esc(t.status)}</span><div class="meta">${esc(t.claimed_by||'')}</div></td><td class="meta hide-small">${esc(fmt(t.updated_at))}</td></tr>`).join(''):'<tr><td colspan="4" class="empty">No tickets match the filter.</td></tr>'}</tbody></table></div></section>`}
+function timelineView(d){const bySeq=new Map(d.events.map(e=>[e.seq,e]));const groups=d.timeline.map(day=>({...day,tickets:day.tickets.map(t=>({...t,events:t.event_seqs.map(seq=>bySeq.get(seq)).filter(Boolean).filter(e=>eventMatches(e,t.ticket_id,filterNeedle))})).filter(t=>t.events.length)})).filter(day=>day.tickets.length);return `<p class="muted bounded-note">Showing last ${esc(d.event_returned)} events from a read-only bounded catchup (ack=false).</p><section class="timeline">${groups.length?groups.map(day=>`<details class="card" open><summary><b>${esc(day.day)}</b></summary>${day.tickets.map(t=>`<details class="timeline-ticket"><summary><a class="id" href="${ticketHref(d.board.board_id,t.ticket_id)}">${esc(t.ticket_id)}</a> · ${esc(t.events.length)} event(s)</summary><div class="table-scroll"><table><tbody>${t.events.map(e=>`<tr><td class="id">${esc(e.seq)}</td><td>${esc(e.kind)}</td><td>${esc(e.status_from||'—')} → ${esc(e.status_to||'—')}</td><td class="meta">${esc(fmt(e.occurred_at))}</td></tr>`).join('')}</tbody></table></div></details>`).join('')}</details>`).join(''):'<p class="empty">No timeline events match the filter.</p>'}</section>`}
+function changesFor(events,since,generatedAt){const cutoff=since===null?new Date(generatedAt).getTime()-86400000:null,chosen=events.filter(e=>since!==null?Number.isInteger(e.seq)&&e.seq>since:new Date(e.occurred_at).getTime()>=cutoff),counts={created:0,claimed:0,submitted:0,closed:0,rejected:0};for(const e of chosen){if(e.kind==='ticket_created')counts.created++;if(e.status_to==='claimed')counts.claimed++;if(e.status_to==='submitted')counts.submitted++;if(e.status_to==='closed')counts.closed++;if(e.review_verdict==='reject'||(e.status_from==='submitted'&&['open','claimed','rejected'].includes(e.status_to)&&Number(e.rejection_count)>0))counts.rejected++}return{counts,event_count:chosen.length}}
+function changesView(d,r){const valid=r.since!==null&&/^\d+$/.test(r.since),since=valid?Number(r.since):null,events=filterChangeEvents(d.events,filterNeedle),summary=changesFor(events,since,d.generated_at);return `<div class="toolbar"><div><b>${since===null?'Last 24 hours':`After seq ${esc(since)}`}</b><p class="muted">Calculated only from the ${esc(d.event_returned)} returned events.</p></div><form id="changes-form"><label>Starting seq <input id="since-seq" inputmode="numeric" pattern="[0-9]*" value="${since===null?'':esc(since)}" placeholder="blank = 24h"></label> <button type="submit">Apply</button></form></div><section class="strip change-grid">${Object.entries(summary.counts).map(([name,count])=>`<div class="metric"><span>${esc(name)}</span><b>${esc(count)}</b></div>`).join('')}</section><p class="muted">${esc(summary.event_count)} bounded event(s) matched.</p>`}
+function flowView(d){const byId=new Map(d.tickets.map(t=>[t.id,t])),labels={open:'Open',claimed:'Claimed',submitted:'Submitted',closed_today:'Closed today'};return `<p class="muted bounded-note">Classified from ${esc(d.ticket_returned)} returned tickets; omitted snapshot rows are not inferred.</p><section class="flow">${Object.entries(labels).map(([key,label])=>{const tickets=d.ticket_flow[key].map(id=>byId.get(id)).filter(Boolean).filter(t=>matches([t.id,t.title,t.claimed_by,t.status],filterNeedle));return `<div class="flow-column"><h3>${esc(label)} · ${esc(tickets.length)}</h3>${tickets.map(t=>`<a class="flow-card" href="${ticketHref(d.board.board_id,t.id)}"><span class="id">${esc(t.id)}</span><div>${esc(t.title)}</div><span class="meta">${esc(t.claimed_by||'Unassigned')}</span></a>`).join('')||'<p class="empty">No matching tickets</p>'}</div>`}).join('')}</section>`}
+function findings(d){if(!d.coordinator_findings)return'';return `<section class="card"><h3>Coordinator findings</h3><div class="finding-list">${d.coordinator_findings.items.map(f=>`<div class="finding"><b>${esc(f.kind)}</b>${f.ticket_id?` <span class="id">${esc(f.ticket_id)}</span>`:''}<p>${esc(f.text)}</p></div>`).join('')||'<p class="empty">No current findings</p>'}</div>${d.coordinator_findings.truncated_count?`<p class="warning">${esc(d.coordinator_findings.truncated_count)} findings omitted by the bounded state.</p>`:''}</section>`}
+function renderDetail(d){const r=route();if(!r||r.board!==d.board.board_id)return;const views={tickets:ticketView,timeline:timelineView,changes:changesView,flow:flowView};document.querySelector('#detail-view').innerHTML=`<a class="back" href="#/">← All boards</a><div class="top"><div><h2>${esc(d.board.label)}</h2><span class="meta">${esc(d.board.board_id)}</span></div>${d.truncated?`<span class="status">${esc(d.ticket_returned)} of ${esc(d.ticket_total)} tickets shown</span>`:''}</div><div class="toolbar">${tabs(d,r)}<span class="muted">Read-only bounded view</span></div>${r.view==='tickets'?findings(d):''}${views[r.view](d,r)}`;document.querySelector('#ticket-sort')?.addEventListener('change',e=>{detailSort=e.target.value;renderDetail(d)});document.querySelector('#changes-form')?.addEventListener('submit',e=>{e.preventDefault();const value=document.querySelector('#since-seq').value.trim();location.hash=`/board/${encodeURIComponent(d.board.board_id)}/changes${value?`?since=${encodeURIComponent(value)}`:''}`});document.querySelector('#state').textContent=`Updated ${fmt(d.generated_at)}`;if(r.ticket){const target=[...document.querySelectorAll('[data-ticket]')].find(x=>x.dataset.ticket===r.ticket);target?.scrollIntoView({block:'center'})}}
+async function fetchJson(path){const response=await fetch(path,{cache:'no-store'});if(!response.ok)throw new Error(`HTTP ${response.status}`);return response.json()}
+async function refreshFleet(){try{fleetData=await fetchJson('/api/fleet');if(!route())renderFleet(fleetData)}catch(e){document.querySelector('#state').textContent=`Refresh failed: ${e.message}`}}
 async function refreshOverhead(){try{renderOverhead(await fetchJson('/api/overhead'))}catch(e){document.querySelector('#overhead').innerHTML=`<p class="error">Overhead unavailable: ${esc(e.message)}</p>`}}
 async function refreshDetail(){const r=route();if(!r)return;try{const data=await fetchJson(`/api/board/${encodeURIComponent(r.board)}`);if(route()?.board!==r.board)return;detailData=data;renderDetail(data)}catch(e){document.querySelector('#detail-view').innerHTML=`<a class="back" href="#/">← All boards</a><p class="error">Board detail unavailable: ${esc(e.message)}</p>`;document.querySelector('#state').textContent='Detail refresh failed'}}
-function syncRoute(){const r=route();document.querySelector('#home-view').hidden=!!r;document.querySelector('#detail-view').hidden=!r;if(detailTimer){clearInterval(detailTimer);detailTimer=null}if(r){document.querySelector('#detail-view').innerHTML='<p class="empty">Loading board detail…</p>';refreshDetail();detailTimer=setInterval(refreshDetail,5000)}else if(fleetData){renderFleet(fleetData)}}
-window.addEventListener('hashchange',syncRoute);refreshFleet();refreshOverhead();setInterval(refreshFleet,5000);setInterval(refreshOverhead,5000);syncRoute();
+function syncRoute(){const r=route();document.querySelector('#home-view').hidden=!!r;document.querySelector('#detail-view').hidden=!r;if(detailTimer){clearInterval(detailTimer);detailTimer=null}if(r){document.querySelector('#detail-view').innerHTML='<p class="empty">Loading board detail…</p>';refreshDetail();detailTimer=setInterval(refreshDetail,5000)}else if(fleetData)renderFleet(fleetData)}
+document.querySelector('#filter').addEventListener('input',e=>{filterNeedle=e.target.value.toLocaleLowerCase();if(route()&&detailData)renderDetail(detailData);else if(fleetData)renderFleet(fleetData)});document.addEventListener('keydown',e=>{if(e.key==='/'&&!['INPUT','TEXTAREA','SELECT'].includes(document.activeElement?.tagName)){e.preventDefault();document.querySelector('#filter').focus()}});window.addEventListener('hashchange',syncRoute);refreshFleet();refreshOverhead();setInterval(refreshFleet,5000);setInterval(refreshOverhead,5000);syncRoute();
 </script></body></html>"""
 
 
