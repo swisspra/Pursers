@@ -16,4 +16,4 @@ dependencies = [
 pursers-wait-bridge = "pursers_wait_server:main"
 
 [tool.setuptools]
-py-modules = ["pursers_wait_server", "agent_naming", "backlog", "registry_admin", "seat_admin"]
+py-modules = ["pursers_wait_server", "agent_naming", "backlog", "registry_admin", "registry_doctor", "seat_admin"]

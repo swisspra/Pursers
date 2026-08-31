@@ -184,6 +184,28 @@ python tools/wait-bridge/seat_admin.py new-board --board board-new
 `--force` is explicit. `new-board` discovers existing principals and roles
 from active registry boards; it contains no board or project allowlist.
 
+### Registry doctor CLI
+
+`registry_doctor.py` performs a read-only, registry-wide health check. It
+checks Central authentication, active project work directories and integration
+refs, bounded board snapshots, duplicate or stale seats, expired claims,
+review backlog, coordinator freshness, and the bridge stats file. The default
+human table and `--json` report contain only bounded details; exit codes are
+`0` for PASS, `1` for WARN, and `2` for FAIL.
+
+Pass a token file path rather than a token value. `PURSERS_DOCTOR_TOKEN_PATH`
+or `ONBOARD_TOKEN_FILE` can supply the path, and `PURSERS_BRIDGE_STATS` can
+override the default adjacent `bridge-stats.json` path.
+
+```sh
+python tools/wait-bridge/registry_doctor.py --token-path /PATH/TO/TOKEN
+python tools/wait-bridge/registry_doctor.py --token-path /PATH/TO/TOKEN --json
+```
+
+Registry entries default to integration ref `main`. A future-compatible
+`integration_ref` string can override it; `git_repo: false` explicitly marks a
+project work directory as intentionally non-git.
+
 After Central is deployed with board-state support for the board's scrub
 profile, seed and verify the initial registry with the bridge environment:
 
