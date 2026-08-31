@@ -5,6 +5,27 @@ All notable changes to Pursers are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [5.0.0a7] - 2026-08-31
+
+This release includes `pursers-personal==5.0.0a7`, `pursers==5.0.0a7`,
+`pursers-central==0.1.0a13`, and `pursers-client==0.1.0a11`.
+
+### Fixed
+
+- Personal no longer swallows central error detail: allowlisted central
+  validation messages (e.g. the generated-ID required-field contract) pass
+  through to the caller, while anything resembling auth, transport, hostname,
+  or credential detail stays blanket-masked (`069b1e6`).
+- `ticket_create` now documents the conditional contract: tickets created
+  without an explicit `ticket_id` require `description`, `target_url`,
+  `scope`, and `required_fields` (`e7357f0`).
+
+### Changed
+
+- `pursers-client` 0.1.0a11 exposes the bounded-response parameters:
+  `board_snapshot(limit=, max_bytes=)` and
+  `board_catchup(max_events=, max_bytes=)` (`101b3a9`).
+
 ## [5.0.0a6] - 2026-08-27
 
 This release includes `pursers-personal==5.0.0a6`, `pursers==5.0.0a6`, and

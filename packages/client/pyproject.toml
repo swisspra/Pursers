@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pursers-client"
-version = "0.1.0a10"
+version = "0.1.0a11"
 description = "Async client for the On Board central service"
 requires-python = ">=3.11"
 license = "Apache-2.0"

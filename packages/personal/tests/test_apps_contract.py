@@ -69,10 +69,10 @@ def test_exact_view_lock_and_embedded_external_attestation_boundary() -> None:
     lock_path = root / "src/pursers_personal/resources/component-lock.json"
     payload = view_path.read_bytes()
     lock = json.loads(lock_path.read_text(encoding="utf-8"))
-    expected = "386e75449cdffbd5d46e2b620a6517ff5ddc5918026c58dcfa19c5999885a631"
+    expected = "46e4eb01e18fa7e285c7ed4dc7600c81086d30fb83e168874d61abaafdc6c243"
     assert len(payload) == 396_499
     assert hashlib.sha256(payload).hexdigest() == expected
-    assert lock["product_version"] == PRODUCT_VERSION == "5.0.0a6"
+    assert lock["product_version"] == PRODUCT_VERSION == "5.0.0a7"
     assert lock["view"] == {
         "resource": "pursers_personal/resources/dashboard.html",
         "size_bytes": len(payload),
@@ -1498,7 +1498,7 @@ async def test_hung_model_client_exit_does_not_block_dashboard_stop() -> None:
 async def test_app_reads_leave_sqlite_domain_journal_and_cursor_unchanged(
     tmp_path: Path,
 ) -> None:
-    required = {"pursers-central": "0.1.0a12", "pursers-client": "0.1.0a10"}
+    required = {"pursers-central": "0.1.0a13", "pursers-client": "0.1.0a11"}
     for distribution, version in required.items():
         try:
             installed = importlib.metadata.version(distribution)
