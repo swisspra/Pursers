@@ -1,0 +1,105 @@
+name: ci
+
+on:
+  push:
+    branches:
+      - main
+      - nightly
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            packages/central/pyproject.toml
+            packages/client/pyproject.toml
+            packages/personal/pyproject.toml
+            packages/import/pyproject.toml
+            tools/wait-bridge/pyproject.toml
+
+      - name: Install pinned test and wheel-build dependencies
+        run: |
+          set -euo pipefail
+          mapfile -t build_toolchain < <(python - <<'PY'
+          from tools.regenerate_component_lock import BUILD_TOOLCHAIN
+
+          for name, version in BUILD_TOOLCHAIN:
+              print(f"{name}=={version}")
+          PY
+          )
+          python -m pip install --disable-pip-version-check --no-input \
+            "${build_toolchain[@]}" "pytest>=8"
+          python - <<'PY' >> "$GITHUB_ENV"
+          from tools.regenerate_component_lock import SOURCE_DATE_EPOCH
+
+          print(f"SOURCE_DATE_EPOCH={SOURCE_DATE_EPOCH}")
+          PY
+
+      - name: Build and install checkout artifacts
+        run: |
+          set -euo pipefail
+          mkdir -p .ci/wheels
+          python -m build --wheel --no-isolation \
+            --outdir .ci/wheels packages/central
+          python -m build --wheel --no-isolation \
+            --outdir .ci/wheels packages/client
+          python -m pip install --disable-pip-version-check --no-input \
+            .ci/wheels/pursers_central-*.whl \
+            .ci/wheels/pursers_client-*.whl
+          python -m pip install --disable-pip-version-check --no-input \
+            --no-deps \
+            --editable "packages/personal[test]" \
+            --editable packages/import
+          python - <<'PY'
+          import importlib.metadata as metadata
+
+          assert metadata.version("mcp") == "2.1.1"
+          print("mcp=2.1.1")
+          PY
+
+      - name: Check manifest and collect every suite
+        run: |
+          set -euo pipefail
+          python tools/ci_manifest.py check
+          python tools/ci_manifest.py collect --output .ci/collection-counts.json
+
+      - name: Run every required Python suite
+        run: python tools/ci_manifest.py run
+
+      - name: Verify every suite collected tests
+        if: ${{ always() }}
+        run: python tools/ci_manifest.py verify --input .ci/collection-counts.json
+
+  dashboard-ui-typecheck:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tools/dashboard-ui
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: tools/dashboard-ui/package-lock.json
+
+      - name: Install dashboard dependencies
+        run: NODE_ENV='' npm ci
+
+      - name: Typecheck dashboard UI
+        run: npm exec -- tsc --noEmit
