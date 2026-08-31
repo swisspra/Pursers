@@ -45,6 +45,12 @@ MAX_LABEL_CHARS = 96
 MAX_DESCRIPTION_CHARS = 800
 MAX_REQUIRED_FIELDS = 20
 MAX_SUBMISSION_CHARS = 500
+MAX_FINDINGS = 50
+MAX_FINDING_CHARS = 500
+MAX_OVERHEAD_FILE_BYTES = 2_000_000
+MAX_OVERHEAD_SEATS = 200
+MAX_OVERHEAD_TOOLS = 5
+OVERHEAD_DAYS = 7
 BOARD_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,80}$")
 ACTIVE_CLAIM_STATES = frozenset({"claimed", "in_progress", "creating_report"})
 SUBMITTED_STATES = frozenset({"submitted", "reviewing", "in_review"})
@@ -106,6 +112,184 @@ def _json_bytes(value: Any) -> bytes:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode(
         "utf-8"
     )
+
+
+def bridge_stats_path() -> Path:
+    configured = os.environ.get("PURSERS_BRIDGE_STATS", "").strip()
+    return (
+        Path(configured).expanduser().resolve()
+        if configured
+        else Path(__file__).resolve().parents[1]
+        / "wait-bridge"
+        / "bridge-stats.json"
+    )
+
+
+def _nonnegative_int(value: Any) -> int:
+    return value if type(value) is int and value >= 0 else 0
+
+
+def read_overhead_stats(
+    path: str | Path, *, now: datetime | None = None
+) -> dict[str, Any]:
+    """Return a bounded size/count-only projection; bad files become empty state."""
+    current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    today = current.date().isoformat()
+    empty = {
+        "generated_at": current.isoformat(),
+        "today": today,
+        "source_status": "missing",
+        "note": "protocol overhead (estimated), not provider billing",
+        "seats": [],
+        "bounds": {
+            "days": OVERHEAD_DAYS,
+            "seats": MAX_OVERHEAD_SEATS,
+            "top_tools": MAX_OVERHEAD_TOOLS,
+        },
+    }
+    source = Path(path).expanduser().resolve()
+    try:
+        if source.stat().st_size > MAX_OVERHEAD_FILE_BYTES:
+            return {**empty, "source_status": "malformed"}
+        document = json.loads(source.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return empty
+    except (OSError, json.JSONDecodeError):
+        return {**empty, "source_status": "malformed"}
+    if not isinstance(document, dict) or document.get("schema_version") != 1:
+        return {**empty, "source_status": "malformed"}
+    raw_days = document.get("days")
+    if not isinstance(raw_days, dict):
+        return {**empty, "source_status": "malformed"}
+    selected_days = sorted(
+        day for day, value in raw_days.items()
+        if isinstance(day, str) and day <= today and isinstance(value, dict)
+    )[-OVERHEAD_DAYS:]
+    aggregate: dict[tuple[str, str], dict[str, Any]] = {}
+    for day in selected_days:
+        seats = raw_days[day].get("seats")
+        if not isinstance(seats, dict):
+            continue
+        for raw in seats.values():
+            if not isinstance(raw, dict):
+                continue
+            board_id = raw.get("board_id")
+            agent_name = raw.get("agent_name")
+            if not all(isinstance(value, str) and value for value in (board_id, agent_name)):
+                continue
+            key = (board_id, agent_name)
+            row = aggregate.setdefault(
+                key,
+                {
+                    "board_id": _clip(board_id, MAX_LABEL_CHARS),
+                    "agent_name": _clip(agent_name, MAX_LABEL_CHARS),
+                    "today_bytes": 0,
+                    "seven_day_bytes": 0,
+                    "today_calls": 0,
+                    "seven_day_calls": 0,
+                    "tools": {},
+                },
+            )
+            request_bytes = _nonnegative_int(raw.get("request_bytes"))
+            response_bytes = _nonnegative_int(raw.get("response_bytes"))
+            total_bytes = request_bytes + response_bytes
+            row["seven_day_bytes"] += total_bytes
+            calls = raw.get("calls") if isinstance(raw.get("calls"), dict) else {}
+            day_calls = 0
+            for tool_name, tool_raw in calls.items():
+                if not isinstance(tool_name, str) or not isinstance(tool_raw, dict):
+                    continue
+                count = _nonnegative_int(tool_raw.get("count"))
+                tool_bytes = _nonnegative_int(tool_raw.get("request_bytes")) + _nonnegative_int(
+                    tool_raw.get("response_bytes")
+                )
+                day_calls += count
+                tool = row["tools"].setdefault(tool_name, {"calls": 0, "bytes": 0})
+                tool["calls"] += count
+                tool["bytes"] += tool_bytes
+            row["seven_day_calls"] += day_calls
+            if day == today:
+                row["today_bytes"] += total_bytes
+                row["today_calls"] += day_calls
+    rows = []
+    for row in aggregate.values():
+        tools = sorted(
+            (
+                {
+                    "tool": _clip(name, MAX_LABEL_CHARS),
+                    "bytes": values["bytes"],
+                    "estimated_tokens": (values["bytes"] + 3) // 4,
+                    "calls": values["calls"],
+                }
+                for name, values in row.pop("tools").items()
+            ),
+            key=lambda item: (-item["bytes"], item["tool"]),
+        )[:MAX_OVERHEAD_TOOLS]
+        row["today_estimated_tokens"] = (row["today_bytes"] + 3) // 4
+        row["seven_day_estimated_tokens"] = (row["seven_day_bytes"] + 3) // 4
+        row["top_tools"] = tools
+        rows.append(row)
+    rows.sort(key=lambda item: (-item["today_bytes"], item["board_id"], item["agent_name"]))
+    result = {
+        **empty,
+        "source_status": "ok",
+        "seats": rows[:MAX_OVERHEAD_SEATS],
+        "truncated_seats": max(0, len(rows) - MAX_OVERHEAD_SEATS),
+    }
+    while len(_json_bytes(result)) > API_MAX_BYTES and result["seats"]:
+        result["seats"].pop()
+        result["truncated_seats"] += 1
+    return result
+
+
+def project_coordinator_findings(snapshot: dict[str, Any]) -> dict[str, Any] | None:
+    state = snapshot.get("state")
+    if not isinstance(state, dict) or "coordinator_findings" not in state:
+        return None
+    entry = state["coordinator_findings"]
+    raw = entry.get("value") if isinstance(entry, dict) and "value" in entry else entry
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+    reported_truncated = 0
+    if isinstance(raw, list):
+        findings = raw
+    elif isinstance(raw, dict):
+        findings = raw.get("findings", raw.get("items", []))
+        for name in ("truncated_count", "omitted_count", "truncated"):
+            value = raw.get(name)
+            if type(value) is int and value > 0:
+                reported_truncated = value
+                break
+    else:
+        return None
+    if not isinstance(findings, list):
+        return None
+    items = []
+    for finding in findings[:MAX_FINDINGS]:
+        if not isinstance(finding, dict):
+            continue
+        level = str(finding.get("level") or "info").lower()
+        if level not in {"info", "warn", "critical"}:
+            level = "info"
+        kind = _clip(finding.get("kind") or "finding", MAX_LABEL_CHARS)
+        text = finding.get("message") or finding.get("summary") or finding.get("detail")
+        if not isinstance(text, str):
+            text = json.dumps(finding, ensure_ascii=False, sort_keys=True)
+        items.append(
+            {
+                "kind": kind,
+                "level": level,
+                "text": _clip(text, MAX_FINDING_CHARS),
+                "ticket_id": _clip(finding.get("ticket_id"), MAX_LABEL_CHARS) or None,
+            }
+        )
+    return {
+        "items": items,
+        "truncated_count": reported_truncated + max(0, len(findings) - MAX_FINDINGS),
+    }
 
 
 def board_id_from_api_path(path: str) -> str | None:
@@ -269,6 +453,7 @@ def project_board_detail(raw: dict[str, Any]) -> dict[str, Any]:
         },
         "tickets": tickets[:MAX_DETAIL_TICKET_ROWS],
         "events": events,
+        "coordinator_findings": project_coordinator_findings(snapshot),
         "ticket_total": max(snapshot_ticket_total, len(source_tickets)),
         "ticket_returned": min(len(tickets), MAX_DETAIL_TICKET_ROWS),
         "ticket_omitted": 0,
@@ -686,8 +871,8 @@ class DashboardCache:
 HTML = r"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Fleet Dashboard</title><style>
-:root{color-scheme:dark;--bg:#0b1020;--panel:#151b2d;--panel2:#202942;--line:#29324a;--text:#e7ecf7;--muted:#9aa6bf;--good:#46d39a;--warn:#f4bd55;--bad:#ef6f7d;--accent:#79a8ff}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 ui-sans-serif,system-ui,-apple-system,sans-serif}main{max-width:1500px;margin:auto;padding:24px}.top{display:flex;justify-content:space-between;gap:16px;align-items:end}h1,h2,h3,p{margin:0}h1{font-size:24px}h2{font-size:17px}a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}.muted,.meta{color:var(--muted)}.strip{display:grid;grid-template-columns:repeat(4,minmax(100px,1fr));gap:10px;margin:20px 0}.metric,.card{background:var(--panel);border:1px solid var(--line);border-radius:12px}.metric{padding:14px}.metric b{display:block;font-size:24px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(390px,1fr));gap:14px}.card{padding:16px;min-width:0}.board-link{display:block;color:inherit}.counts{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0}.pill{padding:4px 8px;border-radius:999px;background:var(--panel2)}table{width:100%;border-collapse:collapse}th,td{padding:8px 6px;text-align:left;border-top:1px solid var(--line);vertical-align:top}th{color:var(--muted);font-weight:500}.id{font-family:ui-monospace,SFMono-Regular,monospace;color:var(--accent);white-space:nowrap}.status{font-size:12px;border-radius:999px;padding:2px 6px;background:#26304a}.pool{margin-top:18px}.busy{color:var(--warn)}.available{color:var(--good)}.stale,.error{color:var(--bad)}#state{font-size:12px}.empty{color:var(--muted);padding:10px 0}.agent{border-top:1px solid var(--line)}.agent summary{cursor:pointer;display:grid;grid-template-columns:2fr 1fr 2fr 2fr;gap:8px;padding:10px 6px}.agent-body{padding:0 6px 12px}.warning{color:var(--warn)}.toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:18px 0}.toolbar select{background:var(--panel2);border:1px solid var(--line);border-radius:8px;color:var(--text);padding:7px}.ticket-detail summary{cursor:pointer;color:var(--text)}.ticket-copy{white-space:pre-wrap;max-width:80ch;margin:8px 0}.back{display:inline-block;margin-bottom:16px}.detail-grid{display:grid;grid-template-columns:minmax(0,2fr) minmax(300px,1fr);gap:14px}.detail-card{overflow-x:auto}.required{display:flex;flex-wrap:wrap;gap:5px;margin-top:8px}.activity td{font-size:13px}@media(max-width:800px){main{padding:14px}.strip{grid-template-columns:repeat(2,1fr)}.grid,.detail-grid{grid-template-columns:1fr}.hide-small{display:none}.agent summary{grid-template-columns:1fr 1fr}.agent summary span:nth-child(n+3){display:none}}
-</style></head><body><main><div class="top"><div><h1>Fleet Dashboard</h1><p class="muted">Live boards and shared agent pool</p></div><div id="state" class="muted">Loading…</div></div><section id="home-view"><section id="summary" class="strip"></section><section id="boards" class="grid"></section><section class="card pool"><h2>Agent pool</h2><div id="agents"></div></section></section><section id="detail-view" hidden></section></main><script>
+:root{color-scheme:dark;--bg:#0b1020;--panel:#151b2d;--panel2:#202942;--line:#29324a;--text:#e7ecf7;--muted:#9aa6bf;--good:#46d39a;--warn:#f4bd55;--bad:#ef6f7d;--accent:#79a8ff}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 ui-sans-serif,system-ui,-apple-system,sans-serif}main{max-width:1500px;margin:auto;padding:24px}.top{display:flex;justify-content:space-between;gap:16px;align-items:end}h1,h2,h3,p{margin:0}h1{font-size:24px}h2{font-size:17px}a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}.muted,.meta{color:var(--muted)}.strip{display:grid;grid-template-columns:repeat(4,minmax(100px,1fr));gap:10px;margin:20px 0}.metric,.card{background:var(--panel);border:1px solid var(--line);border-radius:12px}.metric{padding:14px}.metric b{display:block;font-size:24px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(390px,1fr));gap:14px}.card{padding:16px;min-width:0}.board-link{display:block;color:inherit}.counts{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0}.pill{padding:4px 8px;border-radius:999px;background:var(--panel2)}table{width:100%;border-collapse:collapse}th,td{padding:8px 6px;text-align:left;border-top:1px solid var(--line);vertical-align:top}th{color:var(--muted);font-weight:500}.id{font-family:ui-monospace,SFMono-Regular,monospace;color:var(--accent);white-space:nowrap}.status{font-size:12px;border-radius:999px;padding:2px 6px;background:#26304a}.pool{margin-top:18px}.busy{color:var(--warn)}.available{color:var(--good)}.stale,.error,.finding-critical{color:var(--bad)}#state{font-size:12px}.empty{color:var(--muted);padding:10px 0}.agent{border-top:1px solid var(--line)}.agent summary{cursor:pointer;display:grid;grid-template-columns:2fr 1fr 2fr 2fr;gap:8px;padding:10px 6px}.agent-body{padding:0 6px 12px}.warning,.finding-warn{color:var(--warn)}.toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:18px 0}.toolbar select{background:var(--panel2);border:1px solid var(--line);border-radius:8px;color:var(--text);padding:7px}.ticket-detail summary{cursor:pointer;color:var(--text)}.ticket-copy{white-space:pre-wrap;max-width:80ch;margin:8px 0}.back{display:inline-block;margin-bottom:16px}.detail-grid{display:grid;grid-template-columns:minmax(0,2fr) minmax(300px,1fr);gap:14px}.detail-card{overflow-x:auto}.required{display:flex;flex-wrap:wrap;gap:5px;margin-top:8px}.activity td{font-size:13px}.finding-list{display:grid;gap:8px;margin-top:10px}.finding{border-left:3px solid var(--line);padding-left:10px}.overhead-tools{max-width:36ch}@media(max-width:800px){main{padding:14px}.strip{grid-template-columns:repeat(2,1fr)}.grid,.detail-grid{grid-template-columns:1fr}.hide-small{display:none}.agent summary{grid-template-columns:1fr 1fr}.agent summary span:nth-child(n+3){display:none}}
+</style></head><body><main><div class="top"><div><h1>Fleet Dashboard</h1><p class="muted">Live boards and shared agent pool</p></div><div id="state" class="muted">Loading…</div></div><section id="home-view"><section id="summary" class="strip"></section><section id="boards" class="grid"></section><section class="card pool"><h2>Agent pool</h2><div id="agents"></div></section><section class="card pool"><h2>Protocol overhead</h2><p class="muted">Estimated from request and response bytes; not provider billing.</p><div id="overhead"></div></section></section><section id="detail-view" hidden></section></main><script>
 const esc=v=>String(v??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
 const fmt=v=>v?new Date(v).toLocaleString():'—';
 const boardHref=id=>`#/board/${encodeURIComponent(id)}`;
@@ -695,17 +880,25 @@ const ticketHref=(board,id)=>`${boardHref(board)}?ticket=${encodeURIComponent(id
 let fleetData=null,detailData=null,detailSort='newest',detailTimer=null;
 function route(){const m=location.hash.match(/^#\/board\/([^?]+)(?:\?(.*))?$/);if(!m)return null;try{const board=decodeURIComponent(m[1]);if(!/^[A-Za-z0-9._-]{1,80}$/.test(board))return null;return{board,ticket:new URLSearchParams(m[2]||'').get('ticket')}}catch{return null}}
 function renderFleet(d){const s=d.pool_summary;document.querySelector('#summary').innerHTML=['online','busy','available','stale'].map(k=>`<div class="metric"><span class="${k}">${esc(k)}</span><b>${esc(s[k])}</b></div>`).join('');document.querySelector('#boards').innerHTML=d.boards.map(b=>`<article class="card"><a class="board-link" href="${boardHref(b.board_id)}"><div class="top"><div><h2>${esc(b.label)}</h2><span class="meta">${esc(b.board_id)}</span></div>${b.truncated?'<span class="status">bounded view</span>':''}</div></a>${b.error?`<p class="error">Unavailable: ${esc(b.error)}</p>`:`<div class="counts">${Object.entries(b.counts).map(([k,v])=>`<span class="pill">${esc(k.replace('_',' '))}: <b>${esc(v)}</b></span>`).join('')}</div><table><thead><tr><th>Ticket</th><th>Title</th><th>Status</th><th class="hide-small">Claimed by</th></tr></thead><tbody>${b.tickets.length?b.tickets.map(t=>`<tr><td><a class="id" href="${ticketHref(b.board_id,t.id)}">${esc(t.id)}</a></td><td>${esc(t.title)}</td><td><span class="status">${esc(t.status)}</span></td><td class="hide-small">${esc(t.claimed_by||'—')}</td></tr>`).join(''):'<tr><td colspan="4" class="empty">No active tickets</td></tr>'}</tbody></table>`}</article>`).join('');document.querySelector('#agents').innerHTML=d.agents.length?d.agents.map(a=>`<details class="agent"><summary><b>${esc(a.agent_name)}${a.duplicate_name?' <span class="warning">duplicate name</span>':''}</b><span class="${esc(a.pool_status)}">${esc(a.pool_status)}</span><span>${esc(a.boards.join(', '))}</span><span>${esc(fmt(a.last_seen))}</span></summary><div class="agent-body"><table><thead><tr><th>Project</th><th>Role</th><th>Current claim</th><th>Last seen</th></tr></thead><tbody>${a.seats.map(seat=>`<tr><td><a href="${boardHref(seat.board_id)}">${esc(seat.project)}</a><div class="meta">${esc(seat.board_id)}</div></td><td>${esc(seat.role||'—')}</td><td>${seat.current_ticket_id?`<a class="id" href="${ticketHref(seat.board_id,seat.current_ticket_id)}">${esc(seat.current_ticket_id)}</a><div>${esc(seat.current_ticket_title)}</div>`:'—'}</td><td>${esc(fmt(seat.last_seen))}</td></tr>`).join('')}</tbody></table></div></details>`).join(''):'<p class="empty">No visible agents</p>';document.querySelector('#state').textContent=`Updated ${fmt(d.generated_at)}`}
+function renderOverhead(d){document.querySelector('#overhead').innerHTML=d.seats.length?`<table><thead><tr><th>Seat</th><th>Today</th><th>7-day</th><th>Top tools by bytes</th></tr></thead><tbody>${d.seats.map(s=>`<tr><td><b>${esc(s.agent_name)}</b><div class="meta">${esc(s.board_id)}</div></td><td>${esc(s.today_bytes)} B<div class="meta">≈ ${esc(s.today_estimated_tokens)} tokens · ${esc(s.today_calls)} calls</div></td><td>${esc(s.seven_day_bytes)} B<div class="meta">≈ ${esc(s.seven_day_estimated_tokens)} tokens · ${esc(s.seven_day_calls)} calls</div></td><td class="overhead-tools">${s.top_tools.map(t=>`${esc(t.tool)}: ${esc(t.bytes)} B`).join(' · ')||'—'}</td></tr>`).join('')}</tbody></table>${d.truncated_seats?`<p class="warning">${esc(d.truncated_seats)} seats omitted by the bounded view.</p>`:''}`:`<p class="empty">No bridge overhead stats yet (${esc(d.source_status)}).</p>`}
 function sortedTickets(items){const rank=s=>['claimed','in_progress','creating_report'].includes(s)?0:['submitted','reviewing','in_review'].includes(s)?1:s==='open'?2:3;return [...items].sort((a,b)=>rank(a.status)-rank(b.status)||(detailSort==='oldest'?String(a.updated_at||'').localeCompare(String(b.updated_at||'')):String(b.updated_at||'').localeCompare(String(a.updated_at||''))))}
-function renderDetail(d){const r=route();if(!r||r.board!==d.board.board_id)return;const rows=sortedTickets(d.tickets),requestedVisible=!r.ticket||rows.some(t=>t.id===r.ticket);document.querySelector('#detail-view').innerHTML=`<a class="back" href="#/">← All boards</a><div class="top"><div><h2>${esc(d.board.label)}</h2><span class="meta">${esc(d.board.board_id)}</span></div>${d.truncated?`<span class="status">${esc(d.ticket_returned)} of ${esc(d.ticket_total)} tickets shown</span>`:''}</div>${requestedVisible?'':`<p class="warning">Requested ticket ${esc(r.ticket)} is outside this bounded response.</p>`}<div class="toolbar"><span>${esc(d.ticket_total)} bounded tickets</span><label>Updated <select id="ticket-sort"><option value="newest"${detailSort==='newest'?' selected':''}>newest first</option><option value="oldest"${detailSort==='oldest'?' selected':''}>oldest first</option></select></label></div><div class="detail-grid"><section class="card detail-card"><table><thead><tr><th>Ticket</th><th>Title and details</th><th>Status</th><th class="hide-small">Updated</th></tr></thead><tbody>${rows.length?rows.map(t=>`<tr><td><span class="id">${esc(t.id)}</span></td><td><details class="ticket-detail" data-ticket="${esc(t.id)}"${r.ticket===t.id?' open':''}><summary>${esc(t.title)}</summary><p class="ticket-copy">${esc(t.description||'No description')}</p>${t.required_fields.length?`<div class="required">${t.required_fields.map(x=>`<span class="pill">${esc(x)}</span>`).join('')}</div>`:''}${t.latest_submission_summary?`<p class="meta ticket-copy">Latest submission: ${esc(t.latest_submission_summary)}</p>`:''}${t.review_label?`<p class="meta">Review: ${esc(t.review_label)}</p>`:''}</details></td><td><span class="status">${esc(t.status)}</span><div class="meta">${esc(t.claimed_by||'')}</div></td><td class="meta hide-small">${esc(fmt(t.updated_at))}</td></tr>`).join(''):'<tr><td colspan="4" class="empty">No visible tickets</td></tr>'}</tbody></table></section><section class="card detail-card"><h3>Recent activity</h3><table class="activity"><tbody>${d.events.length?d.events.map(e=>`<tr><td class="id">${esc(e.seq??'—')}</td><td>${esc(e.kind)}</td><td>${e.ticket_id?`<a href="${ticketHref(d.board.board_id,e.ticket_id)}">${esc(e.ticket_id)}</a>`:''}<div class="meta">${esc(fmt(e.occurred_at))}</div></td></tr>`).join(''):'<tr><td class="empty">No recent visible activity</td></tr>'}</tbody></table></section></div>`;document.querySelector('#ticket-sort').addEventListener('change',e=>{detailSort=e.target.value;renderDetail(d)});document.querySelector('#state').textContent=`Updated ${fmt(d.generated_at)}`;if(r.ticket){const target=[...document.querySelectorAll('[data-ticket]')].find(x=>x.dataset.ticket===r.ticket);target?.scrollIntoView({block:'center'})}}
+function renderDetail(d){const r=route();if(!r||r.board!==d.board.board_id)return;const rows=sortedTickets(d.tickets),requestedVisible=!r.ticket||rows.some(t=>t.id===r.ticket);document.querySelector('#detail-view').innerHTML=`<a class="back" href="#/">← All boards</a><div class="top"><div><h2>${esc(d.board.label)}</h2><span class="meta">${esc(d.board.board_id)}</span></div>${d.truncated?`<span class="status">${esc(d.ticket_returned)} of ${esc(d.ticket_total)} tickets shown</span>`:''}</div>${requestedVisible?'':`<p class="warning">Requested ticket ${esc(r.ticket)} is outside this bounded response.</p>`}<div class="toolbar"><span>${esc(d.ticket_total)} bounded tickets</span><label>Updated <select id="ticket-sort"><option value="newest"${detailSort==='newest'?' selected':''}>newest first</option><option value="oldest"${detailSort==='oldest'?' selected':''}>oldest first</option></select></label></div>${d.coordinator_findings?`<section class="card"><h3>Coordinator findings</h3><div class="finding-list">${d.coordinator_findings.items.map(f=>`<div class="finding finding-${esc(f.level)}"><b>${esc(f.kind)}</b>${f.ticket_id?` <span class="id">${esc(f.ticket_id)}</span>`:''}<p>${esc(f.text)}</p></div>`).join('')||'<p class="empty">No current findings</p>'}</div>${d.coordinator_findings.truncated_count?`<p class="warning">${esc(d.coordinator_findings.truncated_count)} findings omitted by the bounded state.</p>`:''}</section><div class="toolbar"></div>`:''}<div class="detail-grid"><section class="card detail-card"><table><thead><tr><th>Ticket</th><th>Title and details</th><th>Status</th><th class="hide-small">Updated</th></tr></thead><tbody>${rows.length?rows.map(t=>`<tr><td><span class="id">${esc(t.id)}</span></td><td><details class="ticket-detail" data-ticket="${esc(t.id)}"${r.ticket===t.id?' open':''}><summary>${esc(t.title)}</summary><p class="ticket-copy">${esc(t.description||'No description')}</p>${t.required_fields.length?`<div class="required">${t.required_fields.map(x=>`<span class="pill">${esc(x)}</span>`).join('')}</div>`:''}${t.latest_submission_summary?`<p class="meta ticket-copy">Latest submission: ${esc(t.latest_submission_summary)}</p>`:''}${t.review_label?`<p class="meta">Review: ${esc(t.review_label)}</p>`:''}</details></td><td><span class="status">${esc(t.status)}</span><div class="meta">${esc(t.claimed_by||'')}</div></td><td class="meta hide-small">${esc(fmt(t.updated_at))}</td></tr>`).join(''):'<tr><td colspan="4" class="empty">No visible tickets</td></tr>'}</tbody></table></section><section class="card detail-card"><h3>Recent activity</h3><table class="activity"><tbody>${d.events.length?d.events.map(e=>`<tr><td class="id">${esc(e.seq??'—')}</td><td>${esc(e.kind)}</td><td>${e.ticket_id?`<a href="${ticketHref(d.board.board_id,e.ticket_id)}">${esc(e.ticket_id)}</a>`:''}<div class="meta">${esc(fmt(e.occurred_at))}</div></td></tr>`).join(''):'<tr><td class="empty">No recent visible activity</td></tr>'}</tbody></table></section></div>`;document.querySelector('#ticket-sort').addEventListener('change',e=>{detailSort=e.target.value;renderDetail(d)});document.querySelector('#state').textContent=`Updated ${fmt(d.generated_at)}`;if(r.ticket){const target=[...document.querySelectorAll('[data-ticket]')].find(x=>x.dataset.ticket===r.ticket);target?.scrollIntoView({block:'center'})}}
 async function fetchJson(url){const response=await fetch(url,{cache:'no-store'});if(!response.ok)throw new Error(`HTTP ${response.status}`);return response.json()}
 async function refreshFleet(){try{fleetData=await fetchJson('/api/fleet');if(!route())renderFleet(fleetData)}catch(e){document.querySelector('#state').textContent=`Fleet refresh failed: ${e.message}`}}
+async function refreshOverhead(){try{renderOverhead(await fetchJson('/api/overhead'))}catch(e){document.querySelector('#overhead').innerHTML=`<p class="error">Overhead unavailable: ${esc(e.message)}</p>`}}
 async function refreshDetail(){const r=route();if(!r)return;try{const data=await fetchJson(`/api/board/${encodeURIComponent(r.board)}`);if(route()?.board!==r.board)return;detailData=data;renderDetail(data)}catch(e){document.querySelector('#detail-view').innerHTML=`<a class="back" href="#/">← All boards</a><p class="error">Board detail unavailable: ${esc(e.message)}</p>`;document.querySelector('#state').textContent='Detail refresh failed'}}
 function syncRoute(){const r=route();document.querySelector('#home-view').hidden=!!r;document.querySelector('#detail-view').hidden=!r;if(detailTimer){clearInterval(detailTimer);detailTimer=null}if(r){document.querySelector('#detail-view').innerHTML='<p class="empty">Loading board detail…</p>';refreshDetail();detailTimer=setInterval(refreshDetail,5000)}else if(fleetData){renderFleet(fleetData)}}
-window.addEventListener('hashchange',syncRoute);refreshFleet();setInterval(refreshFleet,5000);syncRoute();
+window.addEventListener('hashchange',syncRoute);refreshFleet();refreshOverhead();setInterval(refreshFleet,5000);setInterval(refreshOverhead,5000);syncRoute();
 </script></body></html>"""
 
 
-def make_handler(cache: DashboardCache) -> type[BaseHTTPRequestHandler]:
+def make_handler(
+    cache: DashboardCache, stats_path: str | Path | None = None
+) -> type[BaseHTTPRequestHandler]:
+    selected_stats_path = (
+        bridge_stats_path() if stats_path is None else Path(stats_path)
+    )
+
     class Handler(BaseHTTPRequestHandler):
         def _send(self, status: int, content_type: str, body: bytes) -> None:
             self.send_response(status)
@@ -731,6 +924,10 @@ def make_handler(cache: DashboardCache) -> type[BaseHTTPRequestHandler]:
                     body = json.dumps({"error": type(exc).__name__}).encode("utf-8")
                     self._send(503, "application/json; charset=utf-8", body)
                     return
+                self._send(200, "application/json; charset=utf-8", body)
+                return
+            if self.path == "/api/overhead":
+                body = _json_bytes(read_overhead_stats(selected_stats_path))
                 self._send(200, "application/json; charset=utf-8", body)
                 return
             board_id = board_id_from_api_path(self.path)
@@ -809,7 +1006,9 @@ def main(argv: list[str] | None = None) -> None:
     )
     fetcher = FleetFetcher(config)
     cache = DashboardCache(fetcher, config.cache_seconds)
-    server = ThreadingHTTPServer((args.host, args.port), make_handler(cache))
+    server = ThreadingHTTPServer(
+        (args.host, args.port), make_handler(cache, bridge_stats_path())
+    )
     print(f"Fleet Dashboard: http://{args.host}:{args.port}", flush=True)
     try:
         server.serve_forever()

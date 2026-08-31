@@ -41,13 +41,18 @@ RELEVANCE
 from __future__ import annotations
 
 import asyncio
+import fcntl
 import hashlib
 import json
 import os
 import sys
+import tempfile
 import time
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from functools import lru_cache
+from pathlib import Path
+from collections.abc import Awaitable, Callable
 from typing import Any, AsyncIterator
 
 from pursers_client import (
@@ -88,6 +93,235 @@ HANDOFF_REJOIN_MESSAGE = "call board_onboard or board_join before more work"
 PROJECT_REGISTRY_KEY = "project_registry"
 PROJECT_REGISTRY_SCHEMA_VERSION = 1
 PROJECT_STATUSES = frozenset({"active", "paused"})
+STATS_SCHEMA_VERSION = 1
+STATS_RETENTION_DAYS = 7
+
+
+def bridge_stats_path() -> Path:
+    configured = os.environ.get("PURSERS_BRIDGE_STATS", "").strip()
+    return (
+        Path(configured).expanduser().resolve()
+        if configured
+        else Path(__file__).resolve().with_name("bridge-stats.json")
+    )
+
+
+def _meter_bytes(value: Any) -> int:
+    return len(
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+    )
+
+
+class BridgeStats:
+    """Atomic seven-day size/count meter; payload contents are never stored."""
+
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
+        self.path = Path(path).expanduser().resolve()
+        self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self._lock = asyncio.Lock()
+
+    async def record(
+        self,
+        board_id: str,
+        agent_name: str,
+        tool_name: str,
+        request_bytes: int,
+        response_bytes: int,
+    ) -> None:
+        try:
+            async with self._lock:
+                self._record_sync(
+                    board_id,
+                    agent_name,
+                    tool_name,
+                    max(0, int(request_bytes)),
+                    max(0, int(response_bytes)),
+                )
+        except Exception as exc:  # noqa: BLE001 - metering never breaks work.
+            _log(f"stats write failed: {type(exc).__name__}")
+
+    def _record_sync(
+        self,
+        board_id: str,
+        agent_name: str,
+        tool_name: str,
+        request_bytes: int,
+        response_bytes: int,
+    ) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = self.path.with_suffix(self.path.suffix + ".lock")
+        descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            try:
+                document = json.loads(self.path.read_text(encoding="utf-8"))
+            except (FileNotFoundError, json.JSONDecodeError, OSError):
+                document = {}
+            if not isinstance(document, dict):
+                document = {}
+            days = document.get("days")
+            if not isinstance(days, dict):
+                days = {}
+            today = self.clock().astimezone(timezone.utc).date().isoformat()
+            retained = sorted(
+                {str(day) for day in days if str(day) <= today} | {today}
+            )[-STATS_RETENTION_DAYS:]
+            days = {
+                day: value
+                for day in retained
+                if isinstance((value := days.get(day, {})), dict)
+            }
+            current = days.setdefault(today, {"seats": {}})
+            seats = current.get("seats")
+            if not isinstance(seats, dict):
+                seats = {}
+                current["seats"] = seats
+            seat_key = json.dumps([board_id, agent_name], separators=(",", ":"))
+            seat = seats.setdefault(
+                seat_key,
+                {
+                    "board_id": board_id,
+                    "agent_name": agent_name,
+                    "request_bytes": 0,
+                    "response_bytes": 0,
+                    "calls": {},
+                },
+            )
+            seat["request_bytes"] = int(seat.get("request_bytes", 0)) + request_bytes
+            seat["response_bytes"] = int(seat.get("response_bytes", 0)) + response_bytes
+            calls = seat.get("calls")
+            if not isinstance(calls, dict):
+                calls = {}
+                seat["calls"] = calls
+            tool = calls.setdefault(
+                tool_name,
+                {"count": 0, "request_bytes": 0, "response_bytes": 0},
+            )
+            tool["count"] = int(tool.get("count", 0)) + 1
+            tool["request_bytes"] = int(tool.get("request_bytes", 0)) + request_bytes
+            tool["response_bytes"] = int(tool.get("response_bytes", 0)) + response_bytes
+            output = {
+                "schema_version": STATS_SCHEMA_VERSION,
+                "days": days,
+            }
+            temporary_name: str | None = None
+            try:
+                with tempfile.NamedTemporaryFile(
+                    "w",
+                    encoding="utf-8",
+                    dir=self.path.parent,
+                    prefix=f".{self.path.name}.",
+                    delete=False,
+                ) as stream:
+                    temporary_name = stream.name
+                    json.dump(
+                        output,
+                        stream,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    stream.write("\n")
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(temporary_name, self.path)
+                temporary_name = None
+            finally:
+                if temporary_name is not None:
+                    Path(temporary_name).unlink(missing_ok=True)
+        finally:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+            finally:
+                os.close(descriptor)
+
+
+class MeteredBoardClient(BoardClient):
+    def __init__(self, *args: Any, meter: BridgeStats, **kwargs: Any) -> None:
+        self.meter = meter
+        super().__init__(*args, **kwargs)
+
+    async def _measure(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        operation: Callable[[], Awaitable[dict[str, Any]]],
+        *,
+        board_id: str | None = None,
+    ) -> dict[str, Any]:
+        selected_board = board_id or self.board_id
+        selected_agent = str(arguments.get("agent_name") or self.agent_name)
+        request = {"name": name, "arguments": {"board_id": selected_board, **arguments}}
+        if self.generation_token is not None:
+            request["meta"] = {GENERATION_META_KEY: self.generation_token}
+        request_bytes = _meter_bytes(request)
+        try:
+            result = await operation()
+        except BaseException as exc:
+            await self.meter.record(
+                selected_board,
+                selected_agent,
+                name,
+                request_bytes,
+                _meter_bytes({"error": type(exc).__name__}),
+            )
+            raise
+        await self.meter.record(
+            selected_board,
+            selected_agent,
+            name,
+            request_bytes,
+            _meter_bytes(result),
+        )
+        return result
+
+    async def _call(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        return await self._measure(
+            name,
+            arguments,
+            lambda: super(MeteredBoardClient, self)._call(name, arguments),
+        )
+
+    async def _call_refresh(
+        self, name: str, arguments: dict[str, Any]
+    ) -> dict[str, Any]:
+        return await self._measure(
+            name,
+            arguments,
+            lambda: super(MeteredBoardClient, self)._call_refresh(name, arguments),
+        )
+
+    async def _call_refresh_uncached(
+        self, name: str, arguments: dict[str, Any]
+    ) -> dict[str, Any]:
+        return await self._measure(
+            name,
+            arguments,
+            lambda: super(MeteredBoardClient, self)._call_refresh_uncached(
+                name, arguments
+            ),
+        )
+
+    async def _call_unscoped(
+        self, name: str, arguments: dict[str, Any]
+    ) -> dict[str, Any]:
+        return await self._measure(
+            name,
+            arguments,
+            lambda: super(MeteredBoardClient, self)._call_unscoped(name, arguments),
+            board_id=str(arguments.get("board_id") or self.board_id),
+        )
 
 
 def clamp_timeout(timeout_s: Any) -> int:
@@ -130,6 +364,7 @@ class _BoardView:
         self.identity: JoinedIdentity | None = None
         self.generation_token: str | None = None
         self._client = raw_client
+        self.meter = getattr(parent, "meter", None)
 
     def _refresh_generation(self, result: dict[str, Any]) -> None:
         token = result.get("generation_token")
@@ -150,15 +385,37 @@ class _BoardView:
         self, name: str, arguments: dict[str, Any], *, refresh: bool = False
     ) -> dict[str, Any]:
         payload = {"board_id": self.board_id, **arguments}
-        if refresh or self.generation_token is None:
-            raw = await self._client.call_tool(name, payload)
-        else:
-            raw = await self._client.call_tool(
+        meta = None
+        if not refresh and self.generation_token is not None:
+            meta = {GENERATION_META_KEY: self.generation_token}
+        request = {"name": name, "arguments": payload}
+        if meta is not None:
+            request["meta"] = meta
+        request_bytes = _meter_bytes(request)
+        try:
+            if meta is None:
+                raw = await self._client.call_tool(name, payload)
+            else:
+                raw = await self._client.call_tool(name, payload, meta=meta)
+            result = BoardClient._decode(raw)
+        except BaseException as exc:
+            if self.meter is not None:
+                await self.meter.record(
+                    self.board_id,
+                    str(arguments.get("agent_name") or self.agent_name),
+                    name,
+                    request_bytes,
+                    _meter_bytes({"error": type(exc).__name__}),
+                )
+            raise
+        if self.meter is not None:
+            await self.meter.record(
+                self.board_id,
+                str(arguments.get("agent_name") or self.agent_name),
                 name,
-                payload,
-                meta={GENERATION_META_KEY: self.generation_token},
+                request_bytes,
+                _meter_bytes(result),
             )
-        result = BoardClient._decode(raw)
         if refresh:
             self._refresh_generation(result)
         return result
@@ -215,7 +472,14 @@ async def _lifespan(server: MCPServer) -> AsyncIterator[dict[str, Any]]:
     every per-request task is a descendant of, so the connection it opens
     here is safe to reuse from any later tool call.
     """
-    client = BoardClient(CENTRAL_URL, CENTRAL_TOKEN, BOARD_ID, agent_name=AGENT_NAME)
+    meter = BridgeStats(bridge_stats_path())
+    client = MeteredBoardClient(
+        CENTRAL_URL,
+        CENTRAL_TOKEN,
+        BOARD_ID,
+        agent_name=AGENT_NAME,
+        meter=meter,
+    )
     await client.__aenter__()
     _log(
         f"joined board={BOARD_ID!r} as agent={AGENT_NAME!r} "

@@ -4,6 +4,9 @@ import asyncio
 import importlib.util
 import json
 import sys
+import tempfile
+import threading
+import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Self
@@ -498,3 +501,145 @@ def test_fetch_board_uses_bounded_snapshot_and_catchup() -> None:
 def test_non_loopback_host_is_refused() -> None:
     with pytest.raises(SystemExit):
         dashboard.parse_args(["--host", "0.0.0.0"])
+
+
+@pytest.mark.parametrize(
+    ("contents", "expected_status"),
+    [(None, "missing"), ("not-json", "malformed")],
+)
+def test_overhead_endpoint_returns_empty_for_missing_or_malformed_stats(
+    contents: str | None, expected_status: str
+) -> None:
+    class Cache:
+        def get(self) -> dict:
+            return {}
+
+        def get_board(self, _board_id: str) -> dict:
+            return {}
+
+    with tempfile.TemporaryDirectory() as raw:
+        stats = Path(raw) / "stats.json"
+        if contents is not None:
+            stats.write_text(contents, encoding="utf-8")
+        server = dashboard.ThreadingHTTPServer(
+            ("127.0.0.1", 0), dashboard.make_handler(Cache(), stats)
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with urllib.request.urlopen(
+                f"http://127.0.0.1:{server.server_port}/api/overhead"
+            ) as response:
+                result = json.load(response)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
+
+    assert result["source_status"] == expected_status
+    assert result["seats"] == []
+    assert result["note"] == "protocol overhead (estimated), not provider billing"
+
+
+def test_overhead_projection_aggregates_today_and_seven_day_tools() -> None:
+    now = datetime(2030, 1, 7, 12, tzinfo=timezone.utc)
+    document = {
+        "schema_version": 1,
+        "days": {
+            "2030-01-01": {
+                "seats": {
+                    "old": {
+                        "board_id": "board",
+                        "agent_name": "worker",
+                        "request_bytes": 40,
+                        "response_bytes": 60,
+                        "calls": {
+                            "ticket_list": {
+                                "count": 1,
+                                "request_bytes": 40,
+                                "response_bytes": 60,
+                            }
+                        },
+                    }
+                }
+            },
+            "2030-01-07": {
+                "seats": {
+                    "today": {
+                        "board_id": "board",
+                        "agent_name": "worker",
+                        "request_bytes": 100,
+                        "response_bytes": 300,
+                        "calls": {
+                            "board_catchup": {
+                                "count": 2,
+                                "request_bytes": 100,
+                                "response_bytes": 300,
+                            }
+                        },
+                    }
+                }
+            },
+        },
+    }
+    with tempfile.TemporaryDirectory() as raw:
+        path = Path(raw) / "stats.json"
+        path.write_text(json.dumps(document), encoding="utf-8")
+        result = dashboard.read_overhead_stats(path, now=now)
+
+    seat = result["seats"][0]
+    assert seat["today_bytes"] == 400
+    assert seat["today_estimated_tokens"] == 100
+    assert seat["seven_day_bytes"] == 500
+    assert seat["seven_day_estimated_tokens"] == 125
+    assert seat["seven_day_calls"] == 3
+    assert [tool["tool"] for tool in seat["top_tools"]] == [
+        "board_catchup",
+        "ticket_list",
+    ]
+
+
+def test_findings_panel_projection_handles_absent_present_and_truncated_state() -> None:
+    absent = dashboard.project_board_detail(
+        {
+            "label": "Board",
+            "board_id": "board",
+            "snapshot": {"tickets": [], "state": {}},
+            "events": [],
+        }
+    )
+    assert absent["coordinator_findings"] is None
+
+    findings = [
+        {
+            "kind": f"finding-{index}",
+            "level": "critical" if index == 0 else "warn",
+            "message": "x" * 700,
+            "ticket_id": "TK-one",
+        }
+        for index in range(dashboard.MAX_FINDINGS + 3)
+    ]
+    present = dashboard.project_board_detail(
+        {
+            "label": "Board",
+            "board_id": "board",
+            "snapshot": {
+                "tickets": [],
+                "state": {
+                    "coordinator_findings": {
+                        "value": json.dumps(
+                            {"findings": findings, "truncated_count": 2}
+                        )
+                    }
+                },
+            },
+            "events": [],
+        }
+    )["coordinator_findings"]
+
+    assert len(present["items"]) == dashboard.MAX_FINDINGS
+    assert present["truncated_count"] == 5
+    assert present["items"][0]["level"] == "critical"
+    assert len(present["items"][0]["text"]) <= dashboard.MAX_FINDING_CHARS
+    assert "Coordinator findings" in dashboard.HTML
+    assert "/api/overhead" in dashboard.HTML
