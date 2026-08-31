@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import json
 import subprocess
@@ -54,8 +55,8 @@ def test_stage_two_names_least_loaded_live_assignee() -> None:
     snapshot = {
         "board": {"claim_ttl_s": 900},
         "agents": [
-            {"agent_id": "AI-busy", "agent_name": "worker-a", "last_activity_at": ago(10), "status": "working"},
-            {"agent_id": "AI-free", "agent_name": "worker-b", "last_activity_at": ago(20), "status": "active"},
+            {"agent_id": "AI-busy", "agent_name": "worker-a", "last_activity_at": ago(10), "status": "working", "membership_role": "member"},
+            {"agent_id": "AI-free", "agent_name": "worker-b", "last_activity_at": ago(20), "status": "active", "membership_role": "member"},
         ],
         "tickets": [{"ticket_id": "TK-old", "status": "open", "priority": "medium", "created_at": ago(3_601)}],
     }
@@ -602,3 +603,315 @@ def test_fairness_is_critical_then_oldest_across_boards() -> None:
         if item["kind"] == "starved"
     }
     assert ranks == {"TK-critical": 1, "TK-normal": 2}
+
+
+def action(kind: str, index: int = 0) -> coordinator.Action:
+    return coordinator.Action(
+        kind=kind,
+        board_id="board-a",
+        ticket_id=f"TK-{index}",
+        target_agent_id="AI-target",
+        target_agent_name="worker-target",
+        stage=1 if kind == "nudge" else 2,
+        threshold_seconds=1_800,
+        threshold_window=1 if kind == "nudge" else 2,
+        op_key=f"coord-op-{kind}-{index}",
+        reason="deterministic test decision",
+    )
+
+
+def test_shadow_mode_emits_would_findings_and_makes_zero_mutation_calls() -> None:
+    calls: list[coordinator.Action] = []
+
+    async def fake_mutate(item: coordinator.Action) -> dict[str, bool]:
+        calls.append(item)
+        return {"ok": True}
+
+    runtime = coordinator.RuntimeState.for_mode("shadow")
+    findings, histories = asyncio.run(
+        coordinator.execute_actions(
+            [action("nudge"), action("assign", 1)],
+            fake_mutate,
+            runtime,
+            NOW,
+            {},
+        )
+    )
+
+    assert calls == []
+    assert [item["kind"] for item in findings] == ["would_nudge", "would_assign"]
+    assert histories == {}
+
+
+def test_active_assignment_precondition_race_is_reported_without_retry() -> None:
+    calls: list[coordinator.Action] = []
+
+    async def fake_mutate(item: coordinator.Action) -> None:
+        calls.append(item)
+        raise RuntimeError("assignment state precondition failed")
+
+    runtime = coordinator.RuntimeState.for_mode("active")
+    findings, histories = asyncio.run(
+        coordinator.execute_actions(
+            [action("assign")], fake_mutate, runtime, NOW, {}
+        )
+    )
+
+    assert len(calls) == 1
+    assert findings[0]["kind"] == "mutation_failed"
+    assert "state precondition failed" in findings[0]["error"]
+    assert histories == {}
+
+
+def test_action_idempotency_key_is_stable_across_restart() -> None:
+    snapshot = {
+        "board-a": {
+            "board": {},
+            "agents": [
+                {
+                    "agent_id": "AI-free",
+                    "agent_name": "worker",
+                    "last_activity_at": ago(1),
+                    "status": "active",
+                    "membership_role": "member",
+                }
+            ],
+            "tickets": [
+                {
+                    "ticket_id": "TK-old",
+                    "status": "open",
+                    "priority": "medium",
+                    "created_at": ago(3_600),
+                }
+            ],
+        }
+    }
+    states = {"board-a": {"drop_history": []}}
+
+    first = coordinator.plan_actions(snapshot, states, {}, NOW)
+    second = coordinator.plan_actions(snapshot, states, {}, NOW)
+
+    assert len(first) == len(second) == 1
+    assert first[0].op_key == second[0].op_key
+    assert first[0].threshold_window == 2
+
+
+def test_rate_limits_assignment_and_nudges_across_restart() -> None:
+    agents = [
+        {
+            "agent_id": "AI-free",
+            "agent_name": "worker",
+            "last_activity_at": ago(1),
+            "status": "active",
+            "membership_role": "member",
+        }
+    ]
+    previous = {
+        "board-a": {
+            "action_history": [
+                {
+                    "kind": "nudge",
+                    "target_agent_id": "AI-free",
+                    "performed_at": ago(100 + index),
+                }
+                for index in range(3)
+            ]
+        }
+    }
+    stage_one = {
+        "board-a": {
+            "board": {},
+            "agents": agents,
+            "tickets": [
+                {
+                    "ticket_id": "TK-stage-one",
+                    "status": "open",
+                    "priority": "medium",
+                    "created_at": ago(1_800),
+                }
+            ],
+        }
+    }
+    assert coordinator.plan_actions(
+        stage_one, {"board-a": {"drop_history": []}}, previous, NOW
+    ) == []
+
+    previous["board-a"]["action_history"] = [
+        {"kind": "assign", "performed_at": ago(599)}
+    ]
+    stage_two = {
+        "board-a": {
+            "board": {},
+            "agents": agents,
+            "tickets": [
+                {
+                    "ticket_id": "TK-stage-two",
+                    "status": "open",
+                    "priority": "medium",
+                    "created_at": ago(3_600),
+                }
+            ],
+        }
+    }
+    assert coordinator.plan_actions(
+        stage_two, {"board-a": {"drop_history": []}}, previous, NOW
+    ) == []
+    previous["board-a"]["action_history"][0]["performed_at"] = ago(600)
+    assert [item.kind for item in coordinator.plan_actions(
+        stage_two, {"board-a": {"drop_history": []}}, previous, NOW
+    )] == ["assign"]
+
+
+def test_three_mutation_failures_open_circuit_and_remaining_actions_are_shadowed() -> None:
+    calls: list[coordinator.Action] = []
+
+    async def fail(item: coordinator.Action) -> None:
+        calls.append(item)
+        raise RuntimeError("write failed")
+
+    runtime = coordinator.RuntimeState.for_mode("active")
+    findings, _ = asyncio.run(
+        coordinator.execute_actions(
+            [action("nudge", index) for index in range(4)],
+            fail,
+            runtime,
+            NOW,
+            {},
+        )
+    )
+
+    assert len(calls) == 3
+    assert runtime.effective_mode == "shadow"
+    assert sum(item["kind"] == "mutation_failed" for item in findings) == 3
+    assert any(item["kind"] == "coordinator_circuit_open" for item in findings)
+    assert findings[-1]["kind"] == "would_nudge"
+
+
+def test_repeat_abandoner_is_deprioritized_using_live_pool_eligibility() -> None:
+    snapshot = {
+        "board-a": {
+            "board": {},
+            "agents": [
+                {
+                    "agent_id": "AI-repeat",
+                    "agent_name": "worker-repeat",
+                    "last_activity_at": ago(1),
+                    "status": "active",
+                    "membership_role": "member",
+                },
+                {
+                    "agent_id": "AI-clean",
+                    "agent_name": "worker-clean",
+                    "last_activity_at": ago(2),
+                    "status": "active",
+                    "membership_role": "member",
+                },
+            ],
+            "tickets": [
+                {
+                    "ticket_id": "TK-old",
+                    "status": "open",
+                    "priority": "medium",
+                    "created_at": ago(3_600),
+                }
+            ],
+        }
+    }
+    states = {
+        "board-a": {
+            "drop_history": [
+                {
+                    "holder_agent_id": "AI-repeat",
+                    "count": 3,
+                    "observed_at": ago(10),
+                }
+            ]
+        }
+    }
+
+    planned = coordinator.plan_actions(snapshot, states, {}, NOW)
+
+    assert len(planned) == 1
+    assert planned[0].target_agent_id == "AI-clean"
+
+
+def test_restart_kill_switch_defaults_to_shadow(tmp_path: Path) -> None:
+    token = tmp_path / "token"
+    token.write_text("opaque", encoding="utf-8")
+
+    default_args = coordinator.parse_args(["--token-path", str(token), "--once"])
+    active_args = coordinator.parse_args(
+        ["--token-path", str(token), "--once", "--mode", "active"]
+    )
+
+    assert default_args.mode == "shadow"
+    assert active_args.mode == "active"
+
+
+def test_coordination_uses_complete_active_list_but_fails_closed_on_missing_agents() -> None:
+    active_ticket = {
+        "ticket_id": "TK-complete-active",
+        "status": "open",
+        "priority": "medium",
+        "created_at": ago(3_600),
+    }
+    agent = {
+        "agent_id": "AI-live",
+        "agent_name": "worker-live",
+        "last_activity_at": ago(1),
+        "status": "active",
+        "membership_role": "member",
+    }
+    snapshot = {
+        "board-a": {
+            "agents": [agent],
+            "tickets": [],
+            "coordination_tickets": [active_ticket],
+            "coordination_tickets_complete": True,
+            "truncated": True,
+            "omitted_counts": {"tickets": 20, "agents": 0},
+        }
+    }
+    states = {"board-a": {"drop_history": []}}
+
+    assert [item.kind for item in coordinator.plan_actions(
+        snapshot, states, {}, NOW
+    )] == ["assign"]
+    snapshot["board-a"]["omitted_counts"]["agents"] = 1
+    assert coordinator.plan_actions(snapshot, states, {}, NOW) == []
+
+
+def test_truncated_rate_history_fails_closed_until_safety_window_expires() -> None:
+    snapshot = {
+        "board-a": {
+            "agents": [
+                {
+                    "agent_id": "AI-live",
+                    "agent_name": "worker-live",
+                    "last_activity_at": ago(1),
+                    "status": "active",
+                    "membership_role": "member",
+                }
+            ],
+            "tickets": [
+                {
+                    "ticket_id": "TK-rate-history",
+                    "status": "open",
+                    "priority": "medium",
+                    "created_at": ago(3_600),
+                }
+            ],
+        }
+    }
+    future = (NOW + timedelta(seconds=1)).isoformat()
+    previous = {"board-a": {"action_history_incomplete_until": future}}
+
+    assert coordinator.plan_actions(
+        snapshot, {"board-a": {"drop_history": []}}, previous, NOW
+    ) == []
+    assert [item.kind for item in coordinator.plan_actions(
+        snapshot,
+        {"board-a": {"drop_history": []}},
+        previous,
+        NOW + timedelta(seconds=2),
+    )] == ["assign"]

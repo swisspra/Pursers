@@ -1,15 +1,11 @@
 #!/usr/bin/env python3
-"""Phase-1 fleet coordinator: bounded observation and reporting only.
-
-The detector is deliberately separate from transport.  Its only live writes are
-``coordinator_findings`` board state and daily/weekly digest memories.  It never
-claims, assigns, reviews, merges, fetches, checks out, or changes project files.
-"""
+"""Fleet coordinator with shadow-default phase-2 dispatch and nudge policy."""
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -17,22 +13,27 @@ import subprocess
 from collections import Counter
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 
 STATE_KEY = "coordinator_findings"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 DEFAULT_URL = "https://127.0.0.1:8766/mcp"
 MAX_SNAPSHOT_ITEMS = 1_000
-MAX_SNAPSHOT_BYTES = 300_000
+MAX_SNAPSHOT_BYTES = 750_000
 MAX_FINDINGS = 50
 MAX_FINDING_CHARS = 500
 MAX_STATE_CHARS = 5_000
 MAX_PRIVACY_COMMITS_PER_CYCLE = 1_000
 COMMIT_RE = re.compile(r"(?<![0-9a-fA-F])([0-9a-fA-F]{7,64})(?![0-9a-fA-F])")
 CLAIMED_STATES = frozenset({"claimed", "in_progress", "creating_report"})
+COORDINATOR_NAME = "coordinator-1"
+ASSIGN_RATE_SECONDS = 600
+NUDGE_RATE_SECONDS = 3_600
+MAX_NUDGES_PER_SEAT = 3
+NUDGE_EXPIRY_SECONDS = 600
 
 
 @dataclass(frozen=True)
@@ -53,6 +54,31 @@ class Project:
     work_dir: Path
     integration_ref: str = "main"
     public: bool = False
+
+
+@dataclass(frozen=True)
+class Action:
+    kind: str
+    board_id: str
+    ticket_id: str
+    target_agent_id: str
+    target_agent_name: str
+    stage: int
+    threshold_seconds: int
+    threshold_window: int
+    op_key: str
+    reason: str
+
+
+@dataclass
+class RuntimeState:
+    requested_mode: str
+    effective_mode: str
+    consecutive_failures: int = 0
+
+    @classmethod
+    def for_mode(cls, mode: str) -> "RuntimeState":
+        return cls(requested_mode=mode, effective_mode=mode)
 
 
 def utc_now() -> datetime:
@@ -145,7 +171,12 @@ def classify_lease(
 
 
 def starvation_stage(ticket: Mapping[str, Any], now: datetime, thresholds: Thresholds) -> int:
-    if ticket.get("status") != "open" or ticket.get("claimed_by_agent_id"):
+    if (
+        ticket.get("status") != "open"
+        or ticket.get("claimed_by_agent_id")
+        or ticket.get("assigned_to_agent_id")
+        or ticket.get("assigned_to")
+    ):
         return 0
     age = age_seconds(ticket.get("created_at"), now)
     if age is None:
@@ -173,21 +204,49 @@ def choose_assignee(
     tickets: Sequence[Mapping[str, Any]],
     now: datetime,
     thresholds: Thresholds,
+    repeat_abandoners: frozenset[str] = frozenset(),
 ) -> Mapping[str, Any] | None:
     loads = _agent_loads(tickets)
     eligible = [
         agent
         for agent in agents
         if classify_agent(agent, now, thresholds) == "available"
-        and agent.get("agent_name") != "coordinator-1"
+        and agent.get("agent_name") != COORDINATOR_NAME
         and agent.get("agent_id")
-        and agent.get("membership_role") in {None, "member", "admin"}
+        and agent.get("membership_role") in {"member", "admin"}
     ]
     if not eligible:
         return None
     return min(
         eligible,
         key=lambda item: (
+            str(item["agent_id"]) in repeat_abandoners,
+            loads[str(item["agent_id"])],
+            str(item.get("last_activity_at", "")),
+            str(item["agent_id"]),
+        ),
+    )
+
+
+def eligible_agents(
+    agents: Sequence[Mapping[str, Any]],
+    tickets: Sequence[Mapping[str, Any]],
+    now: datetime,
+    thresholds: Thresholds,
+    repeat_abandoners: frozenset[str] = frozenset(),
+) -> list[Mapping[str, Any]]:
+    loads = _agent_loads(tickets)
+    return sorted(
+        (
+            agent
+            for agent in agents
+            if classify_agent(agent, now, thresholds) == "available"
+            and agent.get("agent_name") != COORDINATOR_NAME
+            and agent.get("agent_id")
+            and agent.get("membership_role") in {"member", "admin"}
+        ),
+        key=lambda item: (
+            str(item["agent_id"]) in repeat_abandoners,
             loads[str(item["agent_id"])],
             str(item.get("last_activity_at", "")),
             str(item["agent_id"]),
@@ -206,6 +265,7 @@ def ticket_findings(
     snapshot: Mapping[str, Any],
     now: datetime,
     thresholds: Thresholds = Thresholds(),
+    repeat_abandoners: frozenset[str] = frozenset(),
 ) -> list[dict[str, Any]]:
     agents = [row for row in snapshot.get("agents", []) if isinstance(row, Mapping)]
     tickets = [row for row in snapshot.get("tickets", []) if isinstance(row, Mapping)]
@@ -218,7 +278,13 @@ def ticket_findings(
         ticket_id = str(ticket.get("ticket_id", "unknown"))
         stage = starvation_stage(ticket, now, thresholds)
         if stage:
-            assignee = choose_assignee(agents, tickets, now, thresholds) if stage == 2 else None
+            assignee = (
+                choose_assignee(
+                    agents, tickets, now, thresholds, repeat_abandoners
+                )
+                if stage == 2
+                else None
+            )
             findings.append(
                 _finding(
                     "starved",
@@ -456,6 +522,219 @@ def update_drop_evidence(
             )
         )
     return findings, counters, history, uncertainty
+
+
+def repeat_abandoner_ids(
+    history: Sequence[Mapping[str, Any]], thresholds: Thresholds
+) -> frozenset[str]:
+    counts: Counter[str] = Counter()
+    for item in history:
+        holder = item.get("holder_agent_id")
+        count = item.get("count")
+        if holder and isinstance(count, int) and not isinstance(count, bool):
+            counts[str(holder)] += count
+    return frozenset(
+        holder
+        for holder, count in counts.items()
+        if count >= thresholds.repeat_abandon_count
+    )
+
+
+def _ticket_threshold(ticket: Mapping[str, Any], thresholds: Thresholds) -> int:
+    return (
+        thresholds.critical_starved_seconds
+        if ticket.get("priority") == "critical"
+        else thresholds.starved_seconds
+    )
+
+
+def action_op_key(
+    board_id: str,
+    ticket_id: str,
+    kind: str,
+    stage: int,
+    threshold_window: int,
+    target_agent_id: str,
+) -> str:
+    material = json.dumps(
+        [board_id, ticket_id, kind, stage, threshold_window, target_agent_id],
+        separators=(",", ":"),
+    )
+    return "coord-v1-" + hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def _recent_action_history(
+    previous: Mapping[str, Mapping[str, Any]], now: datetime
+) -> dict[str, list[dict[str, Any]]]:
+    result: dict[str, list[dict[str, Any]]] = {}
+    for board_id, state in previous.items():
+        rows = state.get("action_history", [])
+        kept: list[dict[str, Any]] = []
+        if isinstance(rows, list):
+            for row in rows:
+                if not isinstance(row, Mapping):
+                    continue
+                age = age_seconds(row.get("performed_at"), now)
+                if age is not None and age <= NUDGE_RATE_SECONDS:
+                    kept.append(dict(row))
+        result[board_id] = kept
+    return result
+
+
+def _history_incomplete_until(
+    state: Mapping[str, Any], now: datetime
+) -> str | None:
+    value = state.get("action_history_incomplete_until")
+    parsed = parse_time(value)
+    return str(value) if parsed is not None and parsed > now else None
+
+
+def plan_actions(
+    snapshots: Mapping[str, Mapping[str, Any]],
+    states: Mapping[str, Mapping[str, Any]],
+    previous: Mapping[str, Mapping[str, Any]],
+    now: datetime,
+    thresholds: Thresholds = Thresholds(),
+) -> list[Action]:
+    """Plan deterministic fleet-fair actions from current live projections."""
+    history = _recent_action_history(previous, now)
+    ranked: list[tuple[int, datetime, str, Mapping[str, Any]]] = []
+    eligible_by_board: dict[str, list[Mapping[str, Any]]] = {}
+    for board_id, snapshot in snapshots.items():
+        omitted = snapshot.get("omitted_counts") or snapshot.get("truncation_counts")
+        history_incomplete = _history_incomplete_until(
+            previous.get(board_id, {}), now
+        )
+        omitted_agents = omitted.get("agents", 0) if isinstance(omitted, Mapping) else 0
+        omitted_tickets = omitted.get("tickets", 0) if isinstance(omitted, Mapping) else 0
+        unsafe_snapshot = (
+            bool(omitted_agents)
+            or (
+                bool(omitted_tickets)
+                and snapshot.get("coordination_tickets_complete") is not True
+            )
+        )
+        if unsafe_snapshot or history_incomplete:
+            eligible_by_board[board_id] = []
+            continue
+        agents = [row for row in snapshot.get("agents", []) if isinstance(row, Mapping)]
+        tickets = [
+            row
+            for row in snapshot.get(
+                "coordination_tickets", snapshot.get("tickets", [])
+            )
+            if isinstance(row, Mapping)
+        ]
+        repeated = repeat_abandoner_ids(
+            [
+                row
+                for row in states.get(board_id, {}).get("drop_history", [])
+                if isinstance(row, Mapping)
+            ],
+            thresholds,
+        )
+        eligible_by_board[board_id] = eligible_agents(
+            agents, tickets, now, thresholds, repeated
+        )
+        for ticket in tickets:
+            if starvation_stage(ticket, now, thresholds):
+                ranked.append(
+                    (
+                        0 if ticket.get("priority") == "critical" else 1,
+                        parse_time(ticket.get("created_at")) or now,
+                        board_id,
+                        ticket,
+                    )
+                )
+
+    actions: list[Action] = []
+    assignment_planned: set[str] = set()
+    planned_nudges: Counter[str] = Counter()
+    for _priority, _created, board_id, ticket in sorted(
+        ranked, key=lambda row: (row[0], row[1], row[2], str(row[3].get("ticket_id", "")))
+    ):
+        stage = starvation_stage(ticket, now, thresholds)
+        threshold = _ticket_threshold(ticket, thresholds)
+        age = age_seconds(ticket.get("created_at"), now) or 0
+        window = max(1, int(age // threshold))
+        ticket_id = str(ticket.get("ticket_id"))
+        eligible = eligible_by_board.get(board_id, [])
+        if stage == 2:
+            recent_assign = any(
+                row.get("kind") == "assign"
+                and (age_seconds(row.get("performed_at"), now) or 0) < ASSIGN_RATE_SECONDS
+                for row in history.get(board_id, [])
+            )
+            if eligible and board_id not in assignment_planned and not recent_assign:
+                target = eligible[0]
+                target_id = str(target["agent_id"])
+                actions.append(
+                    Action(
+                        "assign",
+                        board_id,
+                        ticket_id,
+                        target_id,
+                        str(target.get("agent_name", target_id)),
+                        stage,
+                        threshold,
+                        window,
+                        action_op_key(
+                            board_id, ticket_id, "assign", stage, window, target_id
+                        ),
+                        "Oldest fleet-fair starved ticket reached twice its threshold.",
+                    )
+                )
+                assignment_planned.add(board_id)
+            continue
+        if stage != 1:
+            continue
+        for target in eligible:
+            target_id = str(target["agent_id"])
+            recent_count = sum(
+                1
+                for row in history.get(board_id, [])
+                if row.get("kind") == "nudge"
+                and row.get("target_agent_id") == target_id
+                and (age_seconds(row.get("performed_at"), now) or 0) < NUDGE_RATE_SECONDS
+            )
+            if recent_count + planned_nudges[f"{board_id}\x00{target_id}"] >= MAX_NUDGES_PER_SEAT:
+                continue
+            actions.append(
+                Action(
+                    "nudge",
+                    board_id,
+                    ticket_id,
+                    target_id,
+                    str(target.get("agent_name", target_id)),
+                    stage,
+                    threshold,
+                    window,
+                    action_op_key(
+                        board_id, ticket_id, "nudge", stage, window, target_id
+                    ),
+                    "Open ticket reached its starvation threshold; wake an idle eligible seat.",
+                )
+            )
+            planned_nudges[f"{board_id}\x00{target_id}"] += 1
+    return actions
+
+
+def action_finding(action: Action, kind: str, mode: str, **extra: Any) -> dict[str, Any]:
+    return _finding(
+        kind,
+        "info" if kind.startswith("would_") or kind in {"nudge", "assign"} else "warn",
+        action.board_id,
+        action.reason,
+        ticket_id=action.ticket_id,
+        target_agent_id=action.target_agent_id,
+        target_agent_name=action.target_agent_name,
+        escalation_stage=action.stage,
+        threshold_seconds=action.threshold_seconds,
+        threshold_window=action.threshold_window,
+        coordinator_op_key=action.op_key,
+        mode=mode,
+        **extra,
+    )
 
 
 def _git(
@@ -775,6 +1054,9 @@ def bound_findings_state(
     drop_uncertainty: Sequence[Mapping[str, Any]] | None = None,
     integration_watch_since: datetime | None = None,
     suppressed_pre_watermark: int = 0,
+    action_history: Sequence[Mapping[str, Any]] | None = None,
+    action_history_incomplete_until: str | None = None,
+    effective_mode: str = "shadow",
     max_findings: int = MAX_FINDINGS,
     max_chars: int = MAX_STATE_CHARS - 200,
 ) -> dict[str, Any]:
@@ -786,6 +1068,7 @@ def bound_findings_state(
     source_counters = dict(drop_counters or {})
     source_history = [dict(item) for item in (drop_history or [])]
     source_uncertainty = [dict(item) for item in (drop_uncertainty or [])]
+    source_actions = [dict(item) for item in (action_history or [])]
     base = {
         "schema_version": SCHEMA_VERSION,
         "generated_at": generated_at.isoformat(),
@@ -795,6 +1078,7 @@ def bound_findings_state(
             else None
         ),
         "suppressed_pre_watermark": suppressed_pre_watermark,
+        "effective_mode": effective_mode,
         "findings": selected,
         "truncation": {
             "findings": len(normalized),
@@ -802,12 +1086,17 @@ def bound_findings_state(
             "drop_counters": len(source_counters),
             "drop_history": len(source_history),
             "drop_uncertainty": len(source_uncertainty),
+            "action_history": len(source_actions),
         },
         "privacy_watermarks": {},
         "drop_counters": {},
         "drop_history": [],
         "drop_uncertainty": [],
+        "action_history": [],
     }
+    inherited_incomplete = parse_time(action_history_incomplete_until)
+    if inherited_incomplete is not None and inherited_incomplete > generated_at:
+        base["action_history_incomplete_until"] = inherited_incomplete.isoformat()
     critical = [item for item in normalized if item.get("level") == "critical"]
     remaining = [item for item in normalized if item.get("level") != "critical"]
 
@@ -825,6 +1114,22 @@ def bound_findings_state(
     # Critical alerts get first claim on the payload.  Delta evidence is then
     # reserved before warnings so reporting volume cannot erase history.
     add_findings(critical)
+    for item in sorted(
+        source_actions,
+        key=lambda entry: str(entry.get("performed_at", "")),
+        reverse=True,
+    ):
+        base["action_history"].append(item)
+        base["truncation"]["action_history"] = (
+            len(source_actions) - len(base["action_history"])
+        )
+        if len(json.dumps(base, sort_keys=True, separators=(",", ":"))) > max_chars:
+            base["action_history"].pop()
+            base["truncation"]["action_history"] += 1
+            base["action_history_incomplete_until"] = (
+                generated_at + timedelta(seconds=NUDGE_RATE_SECONDS)
+            ).isoformat()
+            break
     for item in sorted(
         source_history,
         key=lambda entry: (
@@ -907,7 +1212,7 @@ def format_digest(
 class RawReader:
     """Non-joining Central session restricted to bounded, pure read tools."""
 
-    ALLOWED = frozenset({"board_state_get", "board_snapshot"})
+    ALLOWED = frozenset({"board_state_get", "board_snapshot", "ticket_list"})
 
     def __init__(self, url: str, token: str):
         self.url = url
@@ -963,6 +1268,16 @@ async def read_cycle(reader: RawReader, home_board: str) -> tuple[list[Project],
         snapshots[board_id] = await reader.call(
             "board_snapshot", board_id, limit=MAX_SNAPSHOT_ITEMS, max_bytes=MAX_SNAPSHOT_BYTES
         )
+        active = await reader.call(
+            "ticket_list", board_id, include_closed=False, limit=500
+        )
+        if active.get("count") == active.get("total_matching"):
+            snapshots[board_id]["coordination_tickets"] = [
+                row
+                for row in active.get("tickets", [])
+                if isinstance(row, Mapping)
+            ]
+            snapshots[board_id]["coordination_tickets_complete"] = True
         try:
             prior = await reader.call("board_state_get", board_id, key=STATE_KEY)
         except Exception:  # Missing optional state or an unavailable board.
@@ -978,6 +1293,8 @@ def analyze_cycle(
     terms: Sequence[str],
     now: datetime,
     integration_watch_since: datetime | None = None,
+    thresholds: Thresholds = Thresholds(),
+    effective_mode: str = "shadow",
 ) -> dict[str, dict[str, Any]]:
     findings_by_board: dict[str, list[dict[str, Any]]] = {}
     watermarks_by_board: dict[str, dict[str, str]] = {}
@@ -986,12 +1303,22 @@ def analyze_cycle(
     drop_uncertainty_by_board: dict[str, list[dict[str, Any]]] = {}
     suppressed_by_board: dict[str, int] = {}
     for board_id, snapshot in snapshots.items():
-        findings_by_board[board_id] = ticket_findings(board_id, snapshot, now)
+        coordination_snapshot = dict(snapshot)
+        coordination_snapshot["tickets"] = snapshot.get(
+            "coordination_tickets", snapshot.get("tickets", [])
+        )
         tickets = [
             row for row in snapshot.get("tickets", []) if isinstance(row, Mapping)
         ]
         drop_findings, counters, history, uncertainty = update_drop_evidence(
-            board_id, tickets, previous.get(board_id, {}), now
+            board_id, tickets, previous.get(board_id, {}), now, thresholds
+        )
+        findings_by_board[board_id] = ticket_findings(
+            board_id,
+            coordination_snapshot,
+            now,
+            thresholds,
+            repeat_abandoner_ids(history, thresholds),
         )
         findings_by_board[board_id].extend(drop_findings)
         drop_counters_by_board[board_id] = counters
@@ -1016,8 +1343,10 @@ def analyze_cycle(
     # Fleet fairness order: critical first, then oldest-open-first across boards.
     ranks: list[tuple[int, datetime, str, str]] = []
     for board_id, snapshot in snapshots.items():
-        for ticket in snapshot.get("tickets", []):
-            if isinstance(ticket, Mapping) and starvation_stage(ticket, now, Thresholds()):
+        for ticket in snapshot.get(
+            "coordination_tickets", snapshot.get("tickets", [])
+        ):
+            if isinstance(ticket, Mapping) and starvation_stage(ticket, now, thresholds):
                 created = parse_time(ticket.get("created_at")) or now
                 ranks.append((0 if ticket.get("priority") == "critical" else 1, created, board_id, str(ticket.get("ticket_id"))))
     rank_map = {(board, ticket): index + 1 for index, (_, _, board, ticket) in enumerate(sorted(ranks))}
@@ -1036,9 +1365,142 @@ def analyze_cycle(
             drop_uncertainty=drop_uncertainty_by_board[board_id],
             integration_watch_since=integration_watch_since,
             suppressed_pre_watermark=suppressed_by_board[board_id],
+            action_history=_recent_action_history(previous, now).get(board_id, []),
+            action_history_incomplete_until=_history_incomplete_until(
+                previous.get(board_id, {}), now
+            ),
+            effective_mode=effective_mode,
         )
         for board_id, findings in findings_by_board.items()
     }
+
+
+def merge_action_results(
+    states: Mapping[str, Mapping[str, Any]],
+    findings: Sequence[Mapping[str, Any]],
+    histories: Mapping[str, Sequence[Mapping[str, Any]]],
+    now: datetime,
+    effective_mode: str,
+) -> dict[str, dict[str, Any]]:
+    additions: dict[str, list[Mapping[str, Any]]] = {}
+    for item in findings:
+        additions.setdefault(str(item.get("board_id", "")), []).append(item)
+    merged: dict[str, dict[str, Any]] = {}
+    for board_id, state in states.items():
+        merged[board_id] = bound_findings_state(
+            [
+                item
+                for item in state.get("findings", [])
+                if isinstance(item, Mapping)
+            ]
+            + additions.get(board_id, []),
+            now,
+            privacy_watermarks=state.get("privacy_watermarks", {}),
+            drop_counters=state.get("drop_counters", {}),
+            drop_history=state.get("drop_history", []),
+            drop_uncertainty=state.get("drop_uncertainty", []),
+            integration_watch_since=parse_time(
+                state.get("integration_watch_since")
+            ),
+            suppressed_pre_watermark=int(
+                state.get("suppressed_pre_watermark", 0) or 0
+            ),
+            action_history=histories.get(board_id, []),
+            action_history_incomplete_until=state.get(
+                "action_history_incomplete_until"
+            ),
+            effective_mode=effective_mode,
+        )
+    return merged
+
+
+async def execute_actions(
+    actions: Sequence[Action],
+    mutate: Callable[[Action], Any],
+    runtime: RuntimeState,
+    now: datetime,
+    previous: Mapping[str, Mapping[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, list[dict[str, Any]]]]:
+    findings: list[dict[str, Any]] = []
+    histories = _recent_action_history(previous, now)
+    for action in actions:
+        if runtime.effective_mode != "active":
+            findings.append(
+                action_finding(action, f"would_{action.kind}", "shadow")
+            )
+            continue
+        try:
+            await mutate(action)
+        except Exception as exc:
+            runtime.consecutive_failures += 1
+            findings.append(
+                action_finding(
+                    action,
+                    "mutation_failed",
+                    "active",
+                    attempted_action=action.kind,
+                    error=str(exc)[:200],
+                    consecutive_failures=runtime.consecutive_failures,
+                )
+            )
+            if runtime.consecutive_failures >= 3:
+                runtime.effective_mode = "shadow"
+                findings.append(
+                    _finding(
+                        "coordinator_circuit_open",
+                        "critical",
+                        action.board_id,
+                        "Three consecutive coordination mutations failed; effective mode dropped to shadow.",
+                        mode="shadow",
+                        requested_mode=runtime.requested_mode,
+                        consecutive_failures=runtime.consecutive_failures,
+                    )
+                )
+            continue
+        runtime.consecutive_failures = 0
+        findings.append(action_finding(action, action.kind, "active"))
+        histories.setdefault(action.board_id, []).append(
+            {
+                "kind": action.kind,
+                "target_agent_id": action.target_agent_id,
+                "performed_at": now.isoformat(),
+            }
+        )
+    return findings, histories
+
+
+async def mutate_action(
+    url: str, token: str, agent_name: str, action: Action, now: datetime
+) -> dict[str, Any]:
+    from pursers_client import BoardClient
+
+    async with BoardClient(
+        url, token, action.board_id, agent_name=agent_name
+    ) as client:
+        if action.kind == "assign":
+            return await client._call(  # noqa: SLF001 - phase-2 primitive wrapper.
+                "ticket_assign",
+                {
+                    "agent_name": agent_name,
+                    "ticket_id": action.ticket_id,
+                    "assigned_to_agent_id": action.target_agent_id,
+                    "expected_status": "open",
+                    "expected_assigned_to_agent_id": None,
+                    "coordinator_op_key": action.op_key,
+                    "reason": action.reason,
+                },
+            )
+        return await client._call(  # noqa: SLF001 - phase-2 primitive wrapper.
+            "agent_nudge",
+            {
+                "agent_name": agent_name,
+                "ticket_id": action.ticket_id,
+                "target_agent_id": action.target_agent_id,
+                "coordinator_op_key": action.op_key,
+                "reason": action.reason,
+                "expires_at": (now + timedelta(seconds=NUDGE_EXPIRY_SECONDS)).isoformat(),
+            },
+        )
 
 
 async def write_reports(
@@ -1101,11 +1563,18 @@ def _read_token(path_value: str) -> str:
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run the phase-1 fleet coordinator")
+    parser = argparse.ArgumentParser(description="Run the fleet coordinator")
     parser.add_argument("--url", default=os.environ.get("ONBOARD_CENTRAL_URL", DEFAULT_URL))
     parser.add_argument("--token-path", default=os.environ.get("PURSERS_COORDINATOR_TOKEN_PATH") or os.environ.get("ONBOARD_TOKEN_FILE"))
     parser.add_argument("--home-board", default=os.environ.get("ONBOARD_BOARD_ID", "pursers"))
     parser.add_argument("--agent-name", default="coordinator-1")
+    parser.add_argument("--mode", choices=("shadow", "active"), default="shadow")
+    parser.add_argument("--starved-seconds", type=int, default=Thresholds.starved_seconds)
+    parser.add_argument(
+        "--critical-starved-seconds",
+        type=int,
+        default=Thresholds.critical_starved_seconds,
+    )
     parser.add_argument("--poll-seconds", type=int, default=60)
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
@@ -1120,6 +1589,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         parser.error("--poll-seconds must be positive")
     if args.integration_watch_since and parse_time(args.integration_watch_since) is None:
         parser.error("--integration-watch-since must be an ISO-8601 timestamp")
+    if args.starved_seconds < 1 or args.critical_starved_seconds < 1:
+        parser.error("starvation thresholds must be positive")
     return args
 
 
@@ -1127,6 +1598,11 @@ async def run(args: argparse.Namespace) -> None:
     token = _read_token(args.token_path)
     terms_path = os.environ.get("PURSERS_PRIVACY_TERMS")
     integration_watch_since = parse_time(args.integration_watch_since)
+    runtime = RuntimeState.for_mode("shadow" if args.dry_run else args.mode)
+    thresholds = Thresholds(
+        starved_seconds=args.starved_seconds,
+        critical_starved_seconds=args.critical_starved_seconds,
+    )
     while True:
         now = utc_now()
         async with RawReader(args.url, token) as reader:
@@ -1138,7 +1614,26 @@ async def run(args: argparse.Namespace) -> None:
             previous,
             terms,
             now,
-            integration_watch_since,
+            integration_watch_since=integration_watch_since,
+            thresholds=thresholds,
+            effective_mode=runtime.effective_mode,
+        )
+        actions = plan_actions(snapshots, states, previous, now, thresholds)
+        action_findings, histories = await execute_actions(
+            actions,
+            lambda action, cycle_now=now: mutate_action(
+                args.url, token, args.agent_name, action, cycle_now
+            ),
+            runtime,
+            now,
+            previous,
+        )
+        states = merge_action_results(
+            states,
+            action_findings,
+            histories,
+            now,
+            runtime.effective_mode,
         )
         if args.dry_run:
             print(json.dumps(states, indent=2, sort_keys=True))

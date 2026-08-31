@@ -17,7 +17,7 @@ import secrets
 import time
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from functools import wraps
 from pathlib import Path
 from typing import Any, Mapping
@@ -128,6 +128,18 @@ REVIEW_EVENT_FIELDS = frozenset(
         "recipient_identities",
     }
 )
+COORDINATOR_SCOPE = "board:coordinate"
+COORDINATOR_EVENT_FIELDS = frozenset(
+    {
+        "ticket_id",
+        "target_agent_id",
+        "coordinator_op_key",
+        "coordination_reason",
+        "expires_at",
+        "fixture_provenance",
+        "recipient_identities",
+    }
+)
 GENERATION_META_KEY = "io.onboard/expected-generation"
 GENERATION_ARGUMENT = "expected_generation"
 GENERATION_TOKEN_MAX_CHARS = 256
@@ -172,6 +184,14 @@ def current_principal() -> Principal:
 def require_scope(principal: Principal, scope: str) -> None:
     if scope not in principal.scopes:
         raise PermissionError(f"authenticated principal lacks {scope} authorization")
+
+
+def require_board_write_or_coordinate(principal: Principal) -> bool:
+    """Authorize a board writer, or return True for the narrow coordinator path."""
+    if "board:write" in principal.scopes:
+        return False
+    require_scope(principal, COORDINATOR_SCOPE)
+    return True
 
 
 def require_id(field: str, value: str) -> str:
@@ -223,6 +243,7 @@ class CentralJournal(Journal):
             | ADMISSION_EVENT_FIELDS
             | SCRUB_EVENT_FIELDS
             | REVIEW_EVENT_FIELDS
+            | COORDINATOR_EVENT_FIELDS
         )
         semantic = {
             key: copy.deepcopy(event[key])
@@ -267,7 +288,12 @@ class CentralJournal(Journal):
     ) -> tuple[dict[str, Any], bool]:
         """Append one custom event, or return its existing durable equivalent."""
         kind = _require_text("kind", event.get("kind"))
-        if kind not in ADMISSION_EVENT_KINDS | SCRUB_EVENT_KINDS | REVIEW_EVENT_KINDS:
+        if kind not in (
+            CORE_JOURNAL_KINDS
+            | ADMISSION_EVENT_KINDS
+            | SCRUB_EVENT_KINDS
+            | REVIEW_EVENT_KINDS
+        ):
             raise ValueError(f"unsupported event kind: {kind}")
         if not unique_fields:
             raise ValueError("unique_fields must not be empty")
@@ -279,6 +305,7 @@ class CentralJournal(Journal):
             | ADMISSION_EVENT_FIELDS
             | SCRUB_EVENT_FIELDS
             | REVIEW_EVENT_FIELDS
+            | COORDINATOR_EVENT_FIELDS
         )
         semantic = {
             key: copy.deepcopy(event[key])
@@ -1130,6 +1157,45 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             pending.append((ctx, journal_uri))
         return event
 
+    async def append_once_and_publish(
+        board_id: str,
+        actor: dict[str, Any],
+        kind: str,
+        payload_ref: str,
+        recipients: list[str],
+        ctx: Context,
+        *,
+        unique_fields: tuple[str, ...],
+        **fields: Any,
+    ) -> tuple[dict[str, Any], bool]:
+        try:
+            event, created = service.journal.append_once(
+                board_id,
+                {
+                    "kind": kind,
+                    "actor": actor["agent_id"],
+                    "payload_ref": payload_ref,
+                    "recipient_identities": recipients,
+                    "fixture_provenance": "pursers-personal-runtime",
+                    **fields,
+                },
+                unique_fields=unique_fields,
+            )
+        except MCPError:
+            raise
+        except Exception as exc:
+            raise MCPError(INTERNAL_ERROR, "Internal server error") from exc
+        if created:
+            pending = service.pending_notifications.get()
+            journal_uri = f"board://{board_id}/journal"
+            if pending is None:
+                await ctx.notify_resource_updated(payload_ref)
+                await ctx.notify_resource_updated(journal_uri)
+            else:
+                pending.append((ctx, payload_ref))
+                pending.append((ctx, journal_uri))
+        return event, created
+
     async def publish_admission_event(
         board_id: str,
         actor: dict[str, Any],
@@ -1620,6 +1686,16 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         role = service.resolve_board_context(document, principal.principal_id)["role"]
         return role in {"admin", "reviewer"}
 
+    def coordinator_actor(
+        document: dict[str, Any], principal: Principal, agent_name: str
+    ) -> dict[str, Any]:
+        require_scope(principal, COORDINATOR_SCOPE)
+        service.resolve_board_context(document, principal.principal_id, {"member"})
+        actor = service.member(document, principal, agent_name)
+        if actor.get("lifecycle_status", "active") != "active":
+            raise PermissionError("coordinator seat is not active")
+        return actor
+
     def can_moderate_memory(
         document: dict[str, Any], target: dict[str, Any], principal: Principal
     ) -> bool:
@@ -1860,6 +1936,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         document: dict[str, Any], principal: Principal, agent_name: str,
         now: float, claim_ttl_s: int | None,
         agent_platform: str | None, task_focus: str | None,
+        *, allow_workflow_side_effects: bool = True,
     ) -> dict[str, Any]:
         membership = service.resolve_board_context(document, principal.principal_id)
         configured_ttl = claim_ttl(document)
@@ -1868,7 +1945,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 raise ValueError("claim_ttl_s is immutable after the first board member joins")
             document["config"]["claim_ttl_s"] = claim_ttl_s
             configured_ttl = claim_ttl_s
-        released = reap_expired(document, now)
+        released = reap_expired(document, now) if allow_workflow_side_effects else []
         identity_id = agent_id(document["board_id"], principal.principal_id, agent_name)
         role = "reviewer" if "board:review" in principal.scopes else "worker"
         existing = document["members"].get(identity_id)
@@ -1894,7 +1971,9 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             member["task_focus"] = task_focus
         document["members"][identity_id] = member
         renewed: list[str] = []
-        for ticket in document["tickets"].values():
+        for ticket in (
+            document["tickets"].values() if allow_workflow_side_effects else ()
+        ):
             if (
                 ticket.get("status") in PRE_SUBMISSION_STATES
                 and ticket.get("claimed_by_agent_id") == identity_id
@@ -2240,7 +2319,11 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 f"claim_ttl_s must be between {MIN_CLAIM_TTL_S} and {MAX_CLAIM_TTL_S}"
             )
         principal = current_principal()
-        require_scope(principal, "board:write")
+        coordinate_only = require_board_write_or_coordinate(principal)
+        if coordinate_only and claim_ttl_s is not None:
+            raise PermissionError(
+                "coordinator authorization cannot change board claim policy"
+            )
         safe_platform = clean_text("agent_platform", agent_platform, max_length=80)
         safe_focus = clean_text("task_focus", task_focus, max_length=500)
         if invite_token is not None and (
@@ -2253,12 +2336,23 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
 
         def join(document: dict[str, Any]) -> dict[str, Any]:
             now = time.time()
-            admission_change = ensure_join_admission(
-                document, principal, now, invite_token
-            )
+            if coordinate_only:
+                if invite_token is not None:
+                    raise PermissionError(
+                        "coordinator authorization cannot change board membership"
+                    )
+                service.resolve_board_context(
+                    document, principal.principal_id, {"member"}
+                )
+                admission_change = None
+            else:
+                admission_change = ensure_join_admission(
+                    document, principal, now, invite_token
+                )
             joined = join_member(
                 document, principal, agent_name, now, claim_ttl_s,
                 safe_platform, safe_focus,
+                allow_workflow_side_effects=not coordinate_only,
             )
             member = joined["actor"]
             return {
@@ -3139,6 +3233,274 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         }
 
     @tool()
+    async def ticket_assign(
+        board_id: str,
+        agent_name: str,
+        ticket_id: str,
+        assigned_to_agent_id: str,
+        expected_status: str,
+        coordinator_op_key: str,
+        reason: str,
+        ctx: Context,
+        expected_assigned_to_agent_id: str | None = None,
+        expected_generation: str | None = None,
+    ) -> dict[str, Any]:
+        """Atomically assign one still-open ticket under narrow coordination authority."""
+        board_id = require_id("board_id", board_id)
+        ticket_id = require_id("ticket_id", ticket_id)
+        assigned_to_agent_id = require_id(
+            "assigned_to_agent_id", assigned_to_agent_id
+        )
+        if expected_assigned_to_agent_id is not None:
+            expected_assigned_to_agent_id = require_id(
+                "expected_assigned_to_agent_id", expected_assigned_to_agent_id
+            )
+        if expected_status != "open":
+            raise ValueError("expected_status must be open")
+        principal = current_principal()
+        require_scope(principal, COORDINATOR_SCOPE)
+        now = time.time()
+
+        def assign(document: dict[str, Any]) -> dict[str, Any]:
+            actor = coordinator_actor(document, principal, agent_name)
+            profile = board_scrub_profile(document)
+            safe_key = clean_text(
+                "coordinator_op_key", coordinator_op_key,
+                required=True, max_length=256, scrub_profile=profile,
+            )
+            safe_reason = clean_text(
+                "reason", reason, required=True, max_length=500,
+                scrub_profile=profile,
+            )
+            assert safe_key is not None and safe_reason is not None
+            ticket = document["tickets"].get(ticket_id)
+            if ticket is None:
+                raise ValueError("ticket not found")
+            prior = ticket.get("coordinator_assignment")
+            if isinstance(prior, Mapping) and prior.get("op_key") == safe_key:
+                if prior.get("assigned_to_agent_id") != assigned_to_agent_id:
+                    raise ValueError("idempotency key conflicts with prior assignment")
+                return {
+                    "actor": copy.deepcopy(actor),
+                    "ticket": copy.deepcopy(ticket),
+                    "previous_assigned_to_agent_id": prior.get(
+                        "previous_assigned_to_agent_id"
+                    ),
+                    "op_key": safe_key,
+                    "reason": safe_reason,
+                    "replayed": True,
+                }
+            current_assignee = ticket.get("assigned_to_agent_id")
+            if (
+                ticket.get("status") != expected_status
+                or ticket.get("claimed_by_agent_id") is not None
+                or current_assignee != expected_assigned_to_agent_id
+            ):
+                raise ValueError(
+                    "assignment state precondition failed: ticket must remain open, "
+                    "unclaimed, and at the expected assignee"
+                )
+            target = document["members"].get(assigned_to_agent_id)
+            if (
+                target is None
+                or assigned_to_agent_id == actor["agent_id"]
+                or target.get("lifecycle_status", "active") != "active"
+                or target.get("membership_role") not in {"member", "admin"}
+            ):
+                raise ValueError("assignment target is not an active eligible seat")
+            ticket["assigned_to"] = assigned_to_agent_id
+            ticket["assigned_to_agent_id"] = assigned_to_agent_id
+            ticket["assigned_to_kind"] = "agent_id"
+            ticket["updated_at"] = iso_at(now)
+            ticket["coordinator_assignment"] = {
+                "op_key": safe_key,
+                "reason": safe_reason,
+                "assigned_to_agent_id": assigned_to_agent_id,
+                "previous_assigned_to_agent_id": current_assignee,
+                "assigned_at": iso_at(now),
+                "assigned_by_agent_id": actor["agent_id"],
+            }
+            return {
+                "actor": copy.deepcopy(actor),
+                "ticket": copy.deepcopy(ticket),
+                "previous_assigned_to_agent_id": current_assignee,
+                "op_key": safe_key,
+                "reason": safe_reason,
+                "replayed": False,
+            }
+
+        changed = service.mutate(board_id, assign)
+        if changed["replayed"]:
+            return {
+                "ok": True,
+                "ticket": changed["ticket"],
+                "event": None,
+                "event_created": False,
+                "idempotent_replay": True,
+            }
+        uri = resource_uri(board_id, "ticket", ticket_id)
+        event, created = await append_once_and_publish(
+            board_id,
+            changed["actor"],
+            "ticket_status_changed",
+            uri,
+            [assigned_to_agent_id],
+            ctx,
+            unique_fields=("coordinator_op_key",),
+            ticket_id=ticket_id,
+            status_from="open",
+            status_to="open",
+            assigned_to_agent_id=assigned_to_agent_id,
+            previous_assigned_to_agent_id=changed[
+                "previous_assigned_to_agent_id"
+            ],
+            coordinator_op_key=changed["op_key"],
+            coordination_reason=changed["reason"],
+        )
+        return {
+            "ok": True,
+            "ticket": changed["ticket"],
+            "event": event,
+            "event_created": created,
+            "idempotent_replay": changed["replayed"],
+        }
+
+    @tool()
+    async def agent_nudge(
+        board_id: str,
+        agent_name: str,
+        ticket_id: str,
+        target_agent_id: str,
+        coordinator_op_key: str,
+        reason: str,
+        expires_at: str,
+        ctx: Context,
+        expected_generation: str | None = None,
+    ) -> dict[str, Any]:
+        """Emit one deduplicated ticket wake cue to one exact eligible seat."""
+        board_id = require_id("board_id", board_id)
+        ticket_id = require_id("ticket_id", ticket_id)
+        target_agent_id = require_id("target_agent_id", target_agent_id)
+        try:
+            parsed_expiry = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+        except (AttributeError, ValueError) as exc:
+            raise ValueError("expires_at must be an ISO-8601 timestamp") from exc
+        if parsed_expiry.tzinfo is None:
+            raise ValueError("expires_at must include a timezone")
+        expiry_utc = parsed_expiry.astimezone(timezone.utc)
+        current_utc = datetime.now(timezone.utc)
+        if not current_utc < expiry_utc <= current_utc + timedelta(hours=1):
+            raise ValueError("expires_at must be within the next hour")
+        principal = current_principal()
+        require_scope(principal, COORDINATOR_SCOPE)
+
+        def nudge(document: dict[str, Any]) -> dict[str, Any]:
+            actor = coordinator_actor(document, principal, agent_name)
+            profile = board_scrub_profile(document)
+            safe_key = clean_text(
+                "coordinator_op_key", coordinator_op_key,
+                required=True, max_length=256, scrub_profile=profile,
+            )
+            safe_reason = clean_text(
+                "reason", reason, required=True, max_length=500,
+                scrub_profile=profile,
+            )
+            assert safe_key is not None and safe_reason is not None
+            ticket = document["tickets"].get(ticket_id)
+            if ticket is None:
+                raise ValueError("ticket not found")
+            raw_nudges = ticket.setdefault("coordinator_nudges", [])
+            if isinstance(raw_nudges, Mapping):
+                nudges = [
+                    dict(item)
+                    for item in raw_nudges.values()
+                    if isinstance(item, Mapping)
+                ]
+                ticket["coordinator_nudges"] = nudges
+            elif isinstance(raw_nudges, list):
+                nudges = raw_nudges
+            else:
+                raise ValueError("ticket coordinator nudge history is invalid")
+            prior = next(
+                (
+                    item
+                    for item in nudges
+                    if isinstance(item, Mapping) and item.get("op_key") == safe_key
+                ),
+                None,
+            )
+            if prior is not None:
+                if prior.get("target_agent_id") != target_agent_id:
+                    raise ValueError("idempotency key conflicts with prior nudge")
+                return {
+                    "actor": copy.deepcopy(actor),
+                    "ticket": copy.deepcopy(ticket),
+                    "op_key": safe_key,
+                    "reason": safe_reason,
+                    "replayed": True,
+                }
+            if ticket.get("status") != "open" or ticket.get("claimed_by_agent_id"):
+                raise ValueError(
+                    "nudge state precondition failed: ticket must remain open and unclaimed"
+                )
+            target = document["members"].get(target_agent_id)
+            if (
+                target is None
+                or target_agent_id == actor["agent_id"]
+                or target.get("lifecycle_status", "active") != "active"
+                or target.get("membership_role") not in {"member", "admin"}
+            ):
+                raise ValueError("nudge target is not an active eligible seat")
+            nudges.append({
+                "op_key": safe_key,
+                "reason": safe_reason,
+                "target_agent_id": target_agent_id,
+                "expires_at": expiry_utc.isoformat(),
+                "nudged_by_agent_id": actor["agent_id"],
+            })
+            return {
+                "actor": copy.deepcopy(actor),
+                "ticket": copy.deepcopy(ticket),
+                "op_key": safe_key,
+                "reason": safe_reason,
+                "replayed": False,
+            }
+
+        changed = service.mutate(board_id, nudge)
+        if changed["replayed"]:
+            return {
+                "ok": True,
+                "ticket": changed["ticket"],
+                "event": None,
+                "event_created": False,
+                "idempotent_replay": True,
+            }
+        uri = resource_uri(board_id, "ticket", ticket_id)
+        event, created = await append_once_and_publish(
+            board_id,
+            changed["actor"],
+            "ticket_status_changed",
+            uri,
+            [target_agent_id],
+            ctx,
+            unique_fields=("coordinator_op_key",),
+            ticket_id=ticket_id,
+            status_from="open",
+            status_to="open",
+            target_agent_id=target_agent_id,
+            coordinator_op_key=changed["op_key"],
+            coordination_reason=changed["reason"],
+            expires_at=expiry_utc.isoformat(),
+        )
+        return {
+            "ok": True,
+            "ticket": changed["ticket"],
+            "event": event,
+            "event_created": created,
+            "idempotent_replay": changed["replayed"],
+        }
+
+    @tool()
     async def ticket_claim(
         board_id: str,
         agent_name: str,
@@ -3973,7 +4335,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         board_id = require_id("board_id", board_id)
         agent_name = require_id("agent_name", agent_name)
         principal = current_principal()
-        require_scope(principal, "board:write")
+        coordinate_only = require_board_write_or_coordinate(principal)
         now = time.time()
         if scope not in {"private", "project"}:
             raise ValueError("scope must be private or project")
@@ -3985,6 +4347,25 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             raise ValueError("archived must be a boolean")
         if not archived and (archive_source_id is not None or archived_at is not None):
             raise ValueError("archive provenance requires archived=true")
+        if coordinate_only:
+            period = "daily" if title.startswith("Coordinator daily digest ") else (
+                "weekly" if title.startswith("Coordinator weekly rollup ") else None
+            )
+            if (
+                period is None
+                or scope != "project"
+                or memory_type != "checkpoint"
+                or set(tags or []) != {"coordinator", "digest", period}
+                or priority != 0
+                or pinned_summary is not None
+                or retracts is not None
+                or related_files
+                or related_tickets
+                or archived
+            ):
+                raise PermissionError(
+                    "coordinator authorization permits only coordinator digest memories"
+                )
 
         def write(document: dict[str, Any]) -> dict[str, Any]:
             profile = board_scrub_profile(document)
@@ -4058,7 +4439,16 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 safe_tags.append("archived")
             safe_files = cleaned_lists.get("related_files", [])
             safe_tickets = cleaned_lists.get("related_tickets", [])
-            actor, released, renewed = prepare_board_call(document, principal, agent_name, now)
+            if coordinate_only:
+                service.resolve_board_context(
+                    document, principal.principal_id, {"member"}
+                )
+                actor = service.member(document, principal, agent_name)
+                released, renewed = [], []
+            else:
+                actor, released, renewed = prepare_board_call(
+                    document, principal, agent_name, now
+                )
             memory_id = allocate_memory_id(document)
             entry = {
                 "schema_version": 2,
@@ -4750,7 +5140,11 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         board_id = require_id("board_id", board_id)
         key = require_id("key", key)
         principal = current_principal()
-        require_scope(principal, "board:write")
+        coordinate_only = require_board_write_or_coordinate(principal)
+        if coordinate_only and key != "coordinator_findings":
+            raise PermissionError(
+                "coordinator authorization permits only coordinator_findings state"
+            )
         now = time.time()
 
         def update(document: dict[str, Any]) -> dict[str, Any]:
@@ -4761,9 +5155,16 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 scrub_profile=board_scrub_profile(document),
             )
             assert safe_value is not None
-            actor, released, renewed = prepare_board_call(
-                document, principal, agent_name, now
-            )
+            if coordinate_only:
+                service.resolve_board_context(
+                    document, principal.principal_id, {"member"}
+                )
+                actor = service.member(document, principal, agent_name)
+                released, renewed = [], []
+            else:
+                actor, released, renewed = prepare_board_call(
+                    document, principal, agent_name, now
+                )
             entry = {
                 "value": safe_value,
                 "scope": "project",
@@ -4917,10 +5318,23 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             ticket = document["tickets"].get(ticket_id)
             return ticket is not None and ticket.get("status") == "open"
 
+        def event_is_unexpired(event: dict[str, Any]) -> bool:
+            value = event.get("expires_at")
+            if value is None:
+                return True
+            try:
+                parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            except ValueError:
+                return False
+            return parsed.tzinfo is not None and parsed.astimezone(
+                timezone.utc
+            ) > datetime.now(timezone.utc)
+
         visible = [
             event
             for event in page["events"]
             if event.get("actor") != actor["agent_id"]
+            and event_is_unexpired(event)
             and (
                 actor["agent_id"] in event.get("recipient_identities", [])
                 or is_currently_open_ticket_event(event)
