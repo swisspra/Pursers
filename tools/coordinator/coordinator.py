@@ -482,14 +482,31 @@ def commit_is_ancestor(
     *,
     runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
 ) -> bool | None:
+    status = commit_integration_status(
+        work_dir, commit, integration_ref, runner=runner
+    )
+    return True if status == "ancestor" else False if status == "not-ancestor" else None
+
+
+def commit_integration_status(
+    work_dir: Path,
+    commit: str,
+    integration_ref: str,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+) -> str:
     if not COMMIT_RE.fullmatch(commit) or not integration_ref.strip() or integration_ref.startswith("-"):
-        return None
-    if _git(work_dir, ["cat-file", "-e", f"{commit}^{{commit}}"], runner=runner).returncode:
-        return None
+        return "unavailable"
     if _git(work_dir, ["rev-parse", "--verify", f"{integration_ref}^{{commit}}"], runner=runner).returncode:
-        return None
+        return "unavailable"
+    if _git(work_dir, ["cat-file", "-e", f"{commit}^{{commit}}"], runner=runner).returncode:
+        return "missing-commit"
     result = _git(work_dir, ["merge-base", "--is-ancestor", commit, integration_ref], runner=runner)
-    return True if result.returncode == 0 else False if result.returncode == 1 else None
+    if result.returncode == 0:
+        return "ancestor"
+    if result.returncode == 1:
+        return "not-ancestor"
+    return "unavailable"
 
 
 def _review_has_no_merge_label(ticket: Mapping[str, Any]) -> bool:
@@ -533,8 +550,21 @@ def extract_commit_hash(ticket: Mapping[str, Any]) -> str | None:
     return unique[0] if len(unique) == 1 else None
 
 
-def integration_findings(project: Project, tickets: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+def _ticket_closed_at(ticket: Mapping[str, Any]) -> datetime | None:
+    for key in ("closed_at", "reviewed_at", "updated_at"):
+        parsed = parse_time(ticket.get(key))
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def evaluate_integration_watch(
+    project: Project,
+    tickets: Sequence[Mapping[str, Any]],
+    integration_watch_since: datetime | None = None,
+) -> tuple[list[dict[str, Any]], int]:
     findings: list[dict[str, Any]] = []
+    suppressed_pre_watermark = 0
     for ticket in tickets:
         if ticket.get("status") != "closed" or _review_has_no_merge_label(ticket):
             continue
@@ -544,8 +574,18 @@ def integration_findings(project: Project, tickets: Sequence[Mapping[str, Any]])
         commit = extract_commit_hash(ticket)
         if commit is None:
             continue
-        ancestor = commit_is_ancestor(project.work_dir, commit, project.integration_ref)
-        if ancestor is False:
+        closed_at = _ticket_closed_at(ticket)
+        if (
+            integration_watch_since is not None
+            and closed_at is not None
+            and closed_at < integration_watch_since
+        ):
+            suppressed_pre_watermark += 1
+            continue
+        status = commit_integration_status(
+            project.work_dir, commit, project.integration_ref
+        )
+        if status == "not-ancestor":
             findings.append(
                 _finding(
                     "closed-but-unmerged",
@@ -558,7 +598,20 @@ def integration_findings(project: Project, tickets: Sequence[Mapping[str, Any]])
                     project=project.name,
                 )
             )
-        elif ancestor is None:
+        elif status == "missing-commit":
+            findings.append(
+                _finding(
+                    "unverifiable-commit",
+                    "info",
+                    project.board_id,
+                    "A submitted commit object does not exist in the local repository.",
+                    ticket_id=ticket.get("ticket_id"),
+                    commit_hash=commit,
+                    integration_ref=project.integration_ref,
+                    project=project.name,
+                )
+            )
+        elif status == "unavailable":
             findings.append(
                 _finding(
                     "integration-check-unavailable",
@@ -571,6 +624,11 @@ def integration_findings(project: Project, tickets: Sequence[Mapping[str, Any]])
                     project=project.name,
                 )
             )
+    return findings, suppressed_pre_watermark
+
+
+def integration_findings(project: Project, tickets: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    findings, _ = evaluate_integration_watch(project, tickets)
     return findings
 
 
@@ -715,6 +773,8 @@ def bound_findings_state(
     drop_counters: Mapping[str, int] | None = None,
     drop_history: Sequence[Mapping[str, Any]] | None = None,
     drop_uncertainty: Sequence[Mapping[str, Any]] | None = None,
+    integration_watch_since: datetime | None = None,
+    suppressed_pre_watermark: int = 0,
     max_findings: int = MAX_FINDINGS,
     max_chars: int = MAX_STATE_CHARS - 200,
 ) -> dict[str, Any]:
@@ -729,6 +789,12 @@ def bound_findings_state(
     base = {
         "schema_version": SCHEMA_VERSION,
         "generated_at": generated_at.isoformat(),
+        "integration_watch_since": (
+            integration_watch_since.isoformat()
+            if integration_watch_since is not None
+            else None
+        ),
+        "suppressed_pre_watermark": suppressed_pre_watermark,
         "findings": selected,
         "truncation": {
             "findings": len(normalized),
@@ -911,12 +977,14 @@ def analyze_cycle(
     previous: Mapping[str, Mapping[str, Any]],
     terms: Sequence[str],
     now: datetime,
+    integration_watch_since: datetime | None = None,
 ) -> dict[str, dict[str, Any]]:
     findings_by_board: dict[str, list[dict[str, Any]]] = {}
     watermarks_by_board: dict[str, dict[str, str]] = {}
     drop_counters_by_board: dict[str, dict[str, int]] = {}
     drop_history_by_board: dict[str, list[dict[str, Any]]] = {}
     drop_uncertainty_by_board: dict[str, list[dict[str, Any]]] = {}
+    suppressed_by_board: dict[str, int] = {}
     for board_id, snapshot in snapshots.items():
         findings_by_board[board_id] = ticket_findings(board_id, snapshot, now)
         tickets = [
@@ -929,11 +997,16 @@ def analyze_cycle(
         drop_counters_by_board[board_id] = counters
         drop_history_by_board[board_id] = history
         drop_uncertainty_by_board[board_id] = uncertainty
+        suppressed_by_board[board_id] = 0
         prior_marks = previous.get(board_id, {}).get("privacy_watermarks", {})
         watermarks_by_board[board_id] = dict(prior_marks) if isinstance(prior_marks, Mapping) else {}
     for project in projects:
         tickets = [row for row in snapshots[project.board_id].get("tickets", []) if isinstance(row, Mapping)]
-        findings_by_board[project.board_id].extend(integration_findings(project, tickets))
+        integration, suppressed = evaluate_integration_watch(
+            project, tickets, integration_watch_since
+        )
+        findings_by_board[project.board_id].extend(integration)
+        suppressed_by_board[project.board_id] += suppressed
         prior = watermarks_by_board[project.board_id].get(project.name)
         privacy, watermark = privacy_findings(project, terms, prior)
         findings_by_board[project.board_id].extend(privacy)
@@ -961,6 +1034,8 @@ def analyze_cycle(
             drop_counters=drop_counters_by_board[board_id],
             drop_history=drop_history_by_board[board_id],
             drop_uncertainty=drop_uncertainty_by_board[board_id],
+            integration_watch_since=integration_watch_since,
+            suppressed_pre_watermark=suppressed_by_board[board_id],
         )
         for board_id, findings in findings_by_board.items()
     }
@@ -1034,23 +1109,37 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--poll-seconds", type=int, default=60)
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--integration-watch-since",
+        help="Ignore closed-ticket integration checks before this ISO-8601 timestamp",
+    )
     args = parser.parse_args(argv)
     if not args.token_path:
         parser.error("--token-path or PURSERS_COORDINATOR_TOKEN_PATH is required")
     if args.poll_seconds < 1:
         parser.error("--poll-seconds must be positive")
+    if args.integration_watch_since and parse_time(args.integration_watch_since) is None:
+        parser.error("--integration-watch-since must be an ISO-8601 timestamp")
     return args
 
 
 async def run(args: argparse.Namespace) -> None:
     token = _read_token(args.token_path)
     terms_path = os.environ.get("PURSERS_PRIVACY_TERMS")
+    integration_watch_since = parse_time(args.integration_watch_since)
     while True:
         now = utc_now()
         async with RawReader(args.url, token) as reader:
             projects, snapshots, previous = await read_cycle(reader, args.home_board)
         terms = load_privacy_terms(terms_path, [project.work_dir for project in projects])
-        states = analyze_cycle(projects, snapshots, previous, terms, now)
+        states = analyze_cycle(
+            projects,
+            snapshots,
+            previous,
+            terms,
+            now,
+            integration_watch_since,
+        )
         if args.dry_run:
             print(json.dumps(states, indent=2, sort_keys=True))
         else:

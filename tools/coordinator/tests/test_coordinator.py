@@ -6,6 +6,7 @@ import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -384,6 +385,120 @@ def test_no_merge_needed_review_label_skips_integration_check(tmp_path: Path) ->
         "review_history": [{"review_label": "no-merge-needed"}],
     }
     assert coordinator.integration_findings(project, [ticket]) == []
+
+
+def _non_ancestor_fixture(tmp_path: Path) -> tuple[Any, str]:
+    _git(tmp_path, "init", "-q")
+    _git(tmp_path, "config", "user.email", "test@example.invalid")
+    _git(tmp_path, "config", "user.name", "Test")
+    tracked = tmp_path / "tracked.txt"
+    tracked.write_text("one\n", encoding="utf-8")
+    _git(tmp_path, "add", "tracked.txt")
+    _git(tmp_path, "commit", "-qm", "first")
+    integration_ref = _git(tmp_path, "rev-parse", "HEAD")
+    tracked.write_text("two\n", encoding="utf-8")
+    _git(tmp_path, "commit", "-qam", "second")
+    submitted = _git(tmp_path, "rev-parse", "HEAD")
+    project = coordinator.Project("sample", "board-a", tmp_path, integration_ref)
+    return project, submitted
+
+
+def _closed_ticket(commit: str, closed_at: datetime) -> dict[str, object]:
+    return {
+        "ticket_id": "TK-integration",
+        "status": "closed",
+        "target_url": "sample/path",
+        "reviewed_at": closed_at.isoformat(),
+        "submission_history": [{"commit_hash": commit}],
+    }
+
+
+def test_pre_watermark_ticket_is_suppressed_and_counted(tmp_path: Path) -> None:
+    project, submitted = _non_ancestor_fixture(tmp_path)
+    ticket = _closed_ticket(submitted, NOW - timedelta(seconds=1))
+
+    findings, suppressed = coordinator.evaluate_integration_watch(
+        project, [ticket], NOW
+    )
+    state = coordinator.bound_findings_state(
+        findings,
+        NOW,
+        integration_watch_since=NOW,
+        suppressed_pre_watermark=suppressed,
+    )
+
+    assert findings == []
+    assert state["suppressed_pre_watermark"] == 1
+    assert state["integration_watch_since"] == NOW.isoformat()
+
+
+def test_unknown_commit_object_is_informational(tmp_path: Path) -> None:
+    _git(tmp_path, "init", "-q")
+    _git(tmp_path, "config", "user.email", "test@example.invalid")
+    _git(tmp_path, "config", "user.name", "Test")
+    (tmp_path / "tracked.txt").write_text("one\n", encoding="utf-8")
+    _git(tmp_path, "add", "tracked.txt")
+    _git(tmp_path, "commit", "-qm", "first")
+    project = coordinator.Project("sample", "board-a", tmp_path, "HEAD")
+    ticket = _closed_ticket("a" * 40, NOW + timedelta(seconds=1))
+
+    findings, suppressed = coordinator.evaluate_integration_watch(
+        project, [ticket], NOW
+    )
+
+    assert suppressed == 0
+    assert [(item["kind"], item["level"]) for item in findings] == [
+        ("unverifiable-commit", "info")
+    ]
+
+
+def test_post_watermark_non_ancestor_remains_warning(tmp_path: Path) -> None:
+    project, submitted = _non_ancestor_fixture(tmp_path)
+    ticket = _closed_ticket(submitted, NOW + timedelta(seconds=1))
+
+    findings, suppressed = coordinator.evaluate_integration_watch(
+        project, [ticket], NOW
+    )
+
+    assert suppressed == 0
+    assert [(item["kind"], item["level"]) for item in findings] == [
+        ("closed-but-unmerged", "warn")
+    ]
+
+
+def test_ticket_closed_exactly_at_watermark_is_not_suppressed(tmp_path: Path) -> None:
+    project, submitted = _non_ancestor_fixture(tmp_path)
+    ticket = _closed_ticket(submitted, NOW)
+
+    findings, suppressed = coordinator.evaluate_integration_watch(
+        project, [ticket], NOW
+    )
+
+    assert suppressed == 0
+    assert findings[0]["kind"] == "closed-but-unmerged"
+
+
+def test_integration_watch_cli_validates_iso_timestamp() -> None:
+    args = coordinator.parse_args(
+        [
+            "--token-path",
+            "/private/token",
+            "--integration-watch-since",
+            "2026-08-26T00:00:00Z",
+        ]
+    )
+    assert coordinator.parse_time(args.integration_watch_since) == datetime(
+        2026, 8, 26, tzinfo=timezone.utc
+    )
+    with pytest.raises(SystemExit):
+        coordinator.parse_args(
+            [
+                "--token-path",
+                "/private/token",
+                "--integration-watch-since",
+                "not-a-timestamp",
+            ]
+        )
 
 
 def test_privacy_gate_never_leaks_terms_into_findings(tmp_path: Path) -> None:
