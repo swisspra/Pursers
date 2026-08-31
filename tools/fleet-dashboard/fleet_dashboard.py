@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import sys
 import threading
 import time
@@ -18,7 +19,7 @@ from datetime import date, datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Protocol
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 # Prefer the sibling source checkout over any installed pursers-client wheel:
 # the dashboard depends on keyword arguments newer than the last published wheel.
@@ -53,6 +54,7 @@ MAX_OVERHEAD_SEATS = 200
 MAX_OVERHEAD_TOOLS = 5
 OVERHEAD_DAYS = 7
 BOARD_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,80}$")
+CENTRAL_LABEL_RE = re.compile(r"^[A-Za-z0-9._-]{1,80}$")
 ACTIVE_CLAIM_STATES = frozenset({"claimed", "in_progress", "creating_report"})
 SUBMITTED_STATES = frozenset({"submitted", "reviewing", "in_review"})
 TERMINAL_STATES = frozenset({"closed", "rejected", "canceled", "terminated"})
@@ -159,6 +161,7 @@ class Config:
     agent_name: str
     stale_seconds: int
     cache_seconds: float
+    label: str = "default"
 
 
 def _clip(value: Any, limit: int) -> str:
@@ -1086,7 +1089,7 @@ class FleetFetcher:
                 if not re.fullmatch(r"[0-9a-f]{64}", expected_sha256):
                     raise ValueError("expected_sha256 must be a lowercase SHA-256 digest")
                 arguments["expected_sha256"] = expected_sha256
-            await client._call("board_state_update", arguments)  # noqa: SLF001
+            await client._call("board_state_update", arguments)
         return {
             "ok": True,
             "config": clean,
@@ -1115,71 +1118,120 @@ class TimedCache:
 
 
 class DashboardCache:
-    def __init__(self, fetcher: FleetFetcher, ttl_seconds: float) -> None:
-        self.fetcher = fetcher
+    def __init__(
+        self, fetcher: FleetFetcher | list[FleetFetcher], ttl_seconds: float
+    ) -> None:
+        fetchers = fetcher if isinstance(fetcher, list) else [fetcher]
+        if not fetchers:
+            raise ValueError("at least one central is required")
+        self.fetchers: dict[str, FleetFetcher] = {}
+        for item in fetchers:
+            label = getattr(getattr(item, "config", None), "label", "default")
+            if label in self.fetchers:
+                raise ValueError(f"duplicate central label: {label}")
+            self.fetchers[label] = item
+        self.default_central = next(iter(self.fetchers))
+        # Preserve these public attributes for single-central callers/tests.
+        self.fetcher = self.fetchers[self.default_central]
         self.ttl_seconds = ttl_seconds
-        self.fleet = TimedCache(ttl_seconds, fetcher.fetch)
+        self.fleet = TimedCache(ttl_seconds, self.fetcher.fetch)
+        self._fleets = {
+            label: self.fleet if label == self.default_central else TimedCache(
+                ttl_seconds, item.fetch
+            )
+            for label, item in self.fetchers.items()
+        }
         self._detail_lock = threading.Lock()
-        self._details: dict[str, TimedCache] = {}
+        self._details: dict[tuple[str, str], TimedCache] = {}
 
-    def get(self) -> dict[str, Any]:
-        return self.fleet.get()
+    def labels(self) -> list[str]:
+        return list(self.fetchers)
 
-    def get_board(self, board_id: str) -> dict[str, Any]:
+    def resolve_central(self, central: str | None = None) -> str:
+        label = self.default_central if central is None else central
+        if label not in self.fetchers:
+            raise KeyError(label)
+        return label
+
+    @staticmethod
+    def _labeled(value: dict[str, Any], label: str) -> dict[str, Any]:
+        return {**value, "central": label}
+
+    def get(self, central: str | None = None) -> dict[str, Any]:
+        label = self.resolve_central(central)
+        return self._labeled(self._fleets[label].get(), label)
+
+    def get_board(
+        self, board_id: str, central: str | None = None
+    ) -> dict[str, Any]:
+        label = self.resolve_central(central)
+        key = (label, board_id)
         with self._detail_lock:
-            cache = self._details.get(board_id)
+            cache = self._details.get(key)
             if cache is None:
                 cache = TimedCache(
                     self.ttl_seconds,
-                    lambda: self.fetcher.fetch_board(board_id),
+                    lambda: self.fetchers[label].fetch_board(board_id),
                 )
-                self._details[board_id] = cache
+                self._details[key] = cache
         try:
-            return cache.get()
-        except Exception:  # noqa: BLE001 - discard failed cache entries.
+            return self._labeled(cache.get(), label)
+        except Exception:
             # Unknown or unavailable board IDs must not grow the cache forever.
             with self._detail_lock:
-                if self._details.get(board_id) is cache:
-                    self._details.pop(board_id, None)
+                if self._details.get(key) is cache:
+                    self._details.pop(key, None)
             raise
 
-    def get_config(self) -> dict[str, Any]:
-        return asyncio.run(self.fetcher.fetch_config())
+    def get_config(self, central: str | None = None) -> dict[str, Any]:
+        label = self.resolve_central(central)
+        return self._labeled(asyncio.run(self.fetchers[label].fetch_config()), label)
 
-    def save_config(self, value: Any, expected_sha256: str | None) -> dict[str, Any]:
-        return asyncio.run(self.fetcher.save_config(value, expected_sha256))
+    def save_config(
+        self,
+        value: Any,
+        expected_sha256: str | None,
+        central: str | None = None,
+    ) -> dict[str, Any]:
+        label = self.resolve_central(central)
+        return self._labeled(
+            asyncio.run(self.fetchers[label].save_config(value, expected_sha256)),
+            label,
+        )
 
 
 HTML = r"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Fleet Dashboard</title><style>
 :root{color-scheme:dark;--bg:#0b1020;--panel:#151b2d;--panel2:#202942;--line:#29324a;--text:#e7ecf7;--muted:#9aa6bf;--good:#46d39a;--warn:#f4bd55;--bad:#ef6f7d;--accent:#79a8ff}*{box-sizing:border-box}html,body{max-width:100%;overflow-x:hidden}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 ui-sans-serif,system-ui,-apple-system,sans-serif}main{width:100%;max-width:1500px;min-width:0;margin:auto;padding:24px}.top,.toolbar{display:flex;justify-content:space-between;flex-wrap:wrap;gap:12px}.top{align-items:end}h1,h2,h3,p{margin:0}h1{font-size:24px}h2{font-size:17px}a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}.muted,.meta{color:var(--muted)}.strip{display:grid;grid-template-columns:repeat(4,minmax(100px,1fr));gap:10px;margin:20px 0}.metric,.card{background:var(--panel);border:1px solid var(--line);border-radius:12px}.metric,.card{padding:14px}.metric b{display:block;font-size:24px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(390px,100%),1fr));gap:14px}.card{min-width:0}.board-link{display:block;color:inherit}.counts,.tabs,.required{display:flex;flex-wrap:wrap;gap:8px}.counts{margin:12px 0}.pill,.tab{padding:4px 8px;border-radius:999px;background:var(--panel2)}.tab.active{outline:2px solid var(--accent)}.table-scroll{width:100%;max-width:100%;overflow-x:auto}table{width:100%;border-collapse:collapse}th,td{padding:8px 6px;text-align:left;border-top:1px solid var(--line);vertical-align:top}th{color:var(--muted);font-weight:500}.id{font-family:ui-monospace,SFMono-Regular,monospace;color:var(--accent);white-space:nowrap}.status{font-size:12px;border-radius:999px;padding:2px 6px;background:#26304a}.pool{margin-top:18px}.warning{color:var(--warn)}.error{color:var(--bad)}#state{font-size:12px}.empty{color:var(--muted);padding:10px 0}.agent{border-top:1px solid var(--line)}.agent summary{cursor:pointer;display:grid;grid-template-columns:2fr 1fr 2fr 2fr;gap:8px;padding:10px 6px}.agent-body{padding:0 6px 12px}.toolbar{align-items:center;margin:18px 0}.toolbar select,.toolbar input,.toolbar button,#filter{background:var(--panel2);border:1px solid var(--line);border-radius:8px;color:var(--text);padding:8px}.search{min-width:min(300px,45vw)}.ticket-detail summary,.timeline summary{cursor:pointer}.ticket-copy{white-space:pre-wrap;overflow-wrap:anywhere;max-width:80ch;margin:8px 0}.back{display:inline-block;margin-bottom:16px}.required{margin-top:8px}.finding-list,.timeline,.flow{display:grid;gap:10px;margin-top:10px}.finding{border-left:3px solid var(--line);padding-left:10px}.timeline-ticket{margin:8px 0 0 14px}.flow{grid-template-columns:repeat(4,minmax(0,1fr))}.flow-column{background:var(--panel2);border-radius:10px;padding:10px;min-width:0}.flow-card{display:block;margin-top:8px;padding:9px;border:1px solid var(--line);border-radius:8px;color:var(--text);overflow-wrap:anywhere}.change-grid{grid-template-columns:repeat(5,minmax(100px,1fr))}.bounded-note{margin-top:10px}.overhead-tools{max-width:36ch}@media(max-width:800px){main{padding:14px}.strip,.change-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.grid,.flow{grid-template-columns:1fr}.hide-small{display:none}.agent summary{grid-template-columns:1fr 1fr}.agent summary span:nth-child(n+3){display:none}.search{min-width:0;width:100%}.top{align-items:start}}
-</style></head><body><main><div class="top"><div><h1>Fleet Dashboard</h1><p class="muted">Live boards and shared agent pool</p></div><div><input id="filter" class="search" type="search" placeholder="Filter tickets, boards, agents…" aria-label="Filter dashboard"><div id="state" class="muted">Loading…</div></div></div><section id="home-view"><section id="summary" class="strip"></section><section id="boards" class="grid"></section><section class="card pool"><h2>Agent pool</h2><div id="agents"></div></section><section class="card pool"><h2>Protocol overhead</h2><p class="muted">Estimated from request and response bytes; not provider billing.</p><div id="overhead"></div></section></section><section id="detail-view" hidden></section></main><script>
+</style></head><body><main><div class="top"><div><h1>Fleet Dashboard</h1><p class="muted">Live boards and shared agent pool</p></div><div><input id="filter" class="search" type="search" placeholder="Filter tickets, boards, agents…" aria-label="Filter dashboard"><div id="state" class="muted">Loading…</div></div></div><section id="home-view"><div id="central-sections"></div></section><section id="detail-view" hidden></section></main><script>
 const esc=v=>String(v??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
-const fmt=v=>v?new Date(v).toLocaleString():'—',boardHref=(id,view='tickets')=>`#/board/${encodeURIComponent(id)}/${view}`,ticketHref=(board,id)=>`${boardHref(board)}?ticket=${encodeURIComponent(id)}`,matches=(values,needle)=>!needle||values.map(v=>String(v??'').toLocaleLowerCase()).join(' ').includes(needle);
+const fmt=v=>v?new Date(v).toLocaleString():'—',centralHref=(central,view)=>`#/central/${encodeURIComponent(central)}/${view}`,boardHref=(central,id,view='tickets')=>`${centralHref(central,`board/${encodeURIComponent(id)}/${view}`)}`,ticketHref=(central,board,id)=>`${boardHref(central,board)}?ticket=${encodeURIComponent(id)}`,apiCentral=central=>`central=${encodeURIComponent(central)}`,matches=(values,needle)=>!needle||values.map(v=>String(v??'').toLocaleLowerCase()).join(' ').includes(needle);
 const ticketMatches=(t,needle)=>matches([t.id,t.title,t.status,t.claimed_by,t.description],needle);
 const filterHomeBoards=(boards,needle)=>boards.map(b=>({...b,tickets:b.tickets.filter(t=>ticketMatches(t,needle))})).filter(b=>matches([b.label,b.board_id],needle)||b.tickets.length);
 const eventMatches=(e,ticketId,needle)=>matches([ticketId,e.kind,e.status_from,e.status_to,e.actor],needle);
 const filterChangeEvents=(events,needle)=>events.filter(e=>eventMatches(e,e.ticket_id,needle));
-let fleetData=null,detailData=null,detailSort='newest',detailTimer=null,filterNeedle='';
-function route(){const m=location.hash.match(/^#\/board\/([^/?]+)(?:\/(tickets|timeline|changes|flow))?(?:\?(.*))?$/);if(!m)return null;try{const board=decodeURIComponent(m[1]);if(!/^[A-Za-z0-9._-]{1,80}$/.test(board))return null;const q=new URLSearchParams(m[3]||'');return{board,view:m[2]||'tickets',ticket:q.get('ticket'),since:q.get('since')}}catch{return null}}
-function renderFleet(d){const s=d.pool_summary;document.querySelector('#summary').innerHTML=['online','busy','available','stale'].map(k=>`<div class="metric"><span>${esc(k)}</span><b>${esc(s[k])}</b></div>`).join('');const boards=filterHomeBoards(d.boards,filterNeedle);document.querySelector('#boards').innerHTML=boards.map(b=>`<article class="card"><a class="board-link" href="${boardHref(b.board_id)}"><div class="top"><div><h2>${esc(b.label)}</h2><span class="meta">${esc(b.board_id)}</span></div>${b.truncated?'<span class="status">bounded view</span>':''}</div></a>${b.error?`<p class="error">Unavailable: ${esc(b.error)}</p>`:`<div class="counts">${Object.entries(b.counts).map(([k,v])=>`<span class="pill">${esc(k.replace('_',' '))}: <b>${esc(v)}</b></span>`).join('')}</div><div class="table-scroll"><table><thead><tr><th>Ticket</th><th>Title</th><th>Status</th><th class="hide-small">Claimed by</th></tr></thead><tbody>${b.tickets.length?b.tickets.map(t=>`<tr><td><a class="id" href="${ticketHref(b.board_id,t.id)}">${esc(t.id)}</a></td><td>${esc(t.title)}</td><td><span class="status">${esc(t.status)}</span></td><td class="hide-small">${esc(t.claimed_by||'—')}</td></tr>`).join(''):'<tr><td colspan="4" class="empty">No matching tickets</td></tr>'}</tbody></table></div>`}</article>`).join('')||'<p class="empty">No boards match the filter.</p>';const agents=d.agents.filter(a=>matches([a.agent_name,a.pool_status,...a.boards],filterNeedle));document.querySelector('#agents').innerHTML=agents.length?agents.map(a=>`<details class="agent"><summary><b>${esc(a.agent_name)}${a.duplicate_name?' <span class="warning">duplicate name</span>':''}</b><span>${esc(a.pool_status)}</span><span>${esc(a.boards.join(', '))}</span><span>${esc(fmt(a.last_seen))}</span></summary><div class="agent-body table-scroll"><table><thead><tr><th>Project</th><th>Role</th><th>Current claim</th><th>Last seen</th></tr></thead><tbody>${a.seats.map(seat=>`<tr><td><a href="${boardHref(seat.board_id)}">${esc(seat.project)}</a><div class="meta">${esc(seat.board_id)}</div></td><td>${esc(seat.role||'—')}</td><td>${seat.current_ticket_id?`<a class="id" href="${ticketHref(seat.board_id,seat.current_ticket_id)}">${esc(seat.current_ticket_id)}</a><div>${esc(seat.current_ticket_title)}</div>`:'—'}</td><td>${esc(fmt(seat.last_seen))}</td></tr>`).join('')}</tbody></table></div></details>`).join(''):'<p class="empty">No agents match the filter.</p>';document.querySelector('#state').textContent=`Updated ${fmt(d.generated_at)}`}
-function renderOverhead(d){document.querySelector('#overhead').innerHTML=d.seats.length?`<div class="table-scroll"><table><thead><tr><th>Seat</th><th>Today</th><th>7-day</th><th>Top tools by bytes</th></tr></thead><tbody>${d.seats.map(s=>`<tr><td><b>${esc(s.agent_name)}</b><div class="meta">${esc(s.board_id)}</div></td><td>${esc(s.today_bytes)} B<div class="meta">≈ ${esc(s.today_estimated_tokens)} tokens · ${esc(s.today_calls)} calls</div></td><td>${esc(s.seven_day_bytes)} B<div class="meta">≈ ${esc(s.seven_day_estimated_tokens)} tokens · ${esc(s.seven_day_calls)} calls</div></td><td class="overhead-tools">${s.top_tools.map(t=>`${esc(t.tool)}: ${esc(t.bytes)} B`).join(' · ')||'—'}</td></tr>`).join('')}</tbody></table></div>`:`<p class="empty">No bridge overhead stats yet (${esc(d.source_status)}).</p>`}
+let fleetData={},fleetErrors={},centralLabels=[],defaultCentral='default',detailData=null,detailSort='newest',detailTimer=null,filterNeedle='';
+function route(){let m=location.hash.match(/^#\/central\/([^/?]+)\/(board\/([^/?]+)(?:\/(tickets|timeline|changes|flow))?|overhead|config)(?:\?(.*))?$/);try{if(m){const central=decodeURIComponent(m[1]);if(!/^[A-Za-z0-9._-]{1,80}$/.test(central))return null;if(m[2]==='overhead'||m[2]==='config')return{central,kind:m[2]};const board=decodeURIComponent(m[3]);if(!/^[A-Za-z0-9._-]{1,80}$/.test(board))return null;const q=new URLSearchParams(m[5]||'');return{central,kind:'board',board,view:m[4]||'tickets',ticket:q.get('ticket'),since:q.get('since')}}m=location.hash.match(/^#\/board\/([^/?]+)(?:\/(tickets|timeline|changes|flow))?(?:\?(.*))?$/);if(m){const board=decodeURIComponent(m[1]),q=new URLSearchParams(m[3]||'');return/^[A-Za-z0-9._-]{1,80}$/.test(board)?{central:defaultCentral,kind:'board',board,view:m[2]||'tickets',ticket:q.get('ticket'),since:q.get('since')}:null}if(location.hash==='#/config')return{central:defaultCentral,kind:'config'};return null}catch{return null}}
+function renderCentral(d){const central=d.central,s=d.pool_summary,boards=filterHomeBoards(d.boards,filterNeedle),agents=d.agents.filter(a=>matches([a.agent_name,a.pool_status,...a.boards],filterNeedle));return `<section class="central-group" data-central="${esc(central)}"><div class="top central-heading"><div><h2>${esc(central)}</h2><p class="muted">Independent central trust domain</p></div><nav class="tabs"><a class="tab" href="${centralHref(central,'overhead')}">Overhead</a><a class="tab" href="${centralHref(central,'config')}">Config</a></nav></div><section class="strip">${['online','busy','available','stale'].map(k=>`<div class="metric"><span>${esc(k)}</span><b>${esc(s[k])}</b></div>`).join('')}</section><section class="grid">${boards.map(b=>`<article class="card"><a class="board-link" href="${boardHref(central,b.board_id)}"><div class="top"><div><h2>${esc(b.label)}</h2><span class="meta">${esc(b.board_id)}</span></div>${b.truncated?'<span class="status">bounded view</span>':''}</div></a>${b.error?`<p class="error">Unavailable: ${esc(b.error)}</p>`:`<div class="counts">${Object.entries(b.counts).map(([k,v])=>`<span class="pill">${esc(k.replace('_',' '))}: <b>${esc(v)}</b></span>`).join('')}</div><div class="table-scroll"><table><thead><tr><th>Ticket</th><th>Title</th><th>Status</th><th class="hide-small">Claimed by</th></tr></thead><tbody>${b.tickets.length?b.tickets.map(t=>`<tr><td><a class="id" href="${ticketHref(central,b.board_id,t.id)}">${esc(t.id)}</a></td><td>${esc(t.title)}</td><td><span class="status">${esc(t.status)}</span></td><td class="hide-small">${esc(t.claimed_by||'—')}</td></tr>`).join(''):'<tr><td colspan="4" class="empty">No matching tickets</td></tr>'}</tbody></table></div>`}</article>`).join('')||'<p class="empty">No boards match the filter.</p>'}</section><section class="card pool"><h2>Agent pool · ${esc(central)}</h2>${agents.length?agents.map(a=>`<details class="agent"><summary><b>${esc(a.agent_name)}${a.duplicate_name?' <span class="warning">duplicate name</span>':''}</b><span>${esc(a.pool_status)}</span><span>${esc(a.boards.join(', '))}</span><span>${esc(fmt(a.last_seen))}</span></summary><div class="agent-body table-scroll"><table><thead><tr><th>Project</th><th>Role</th><th>Current claim</th><th>Last seen</th></tr></thead><tbody>${a.seats.map(seat=>`<tr><td><a href="${boardHref(central,seat.board_id)}">${esc(seat.project)}</a><div class="meta">${esc(seat.board_id)}</div></td><td>${esc(seat.role||'—')}</td><td>${seat.current_ticket_id?`<a class="id" href="${ticketHref(central,seat.board_id,seat.current_ticket_id)}">${esc(seat.current_ticket_id)}</a><div>${esc(seat.current_ticket_title)}</div>`:'—'}</td><td>${esc(fmt(seat.last_seen))}</td></tr>`).join('')}</tbody></table></div></details>`).join(''):'<p class="empty">No agents match the filter.</p>'}</section></section>`}
+function renderFleet(){document.querySelector('#central-sections').innerHTML=centralLabels.map(label=>fleetData[label]?renderCentral(fleetData[label]):`<section class="central-group unavailable" data-central="${esc(label)}"><div class="top central-heading"><div><h2>${esc(label)}</h2><p class="error">Unavailable: ${esc(fleetErrors[label]||'loading')}</p></div><nav class="tabs"><a class="tab" href="${centralHref(label,'overhead')}">Overhead</a><a class="tab" href="${centralHref(label,'config')}">Config</a></nav></div></section>`).join('');const newest=Object.values(fleetData).map(d=>d.generated_at).sort().at(-1);document.querySelector('#state').textContent=newest?`Updated ${fmt(newest)}`:'No central available'}
+function renderOverhead(d){document.querySelector('#detail-view').innerHTML=`<a class="back" href="#/">← All centrals</a><div class="top"><div><h2>Protocol overhead · ${esc(d.central)}</h2><p class="muted">Estimated from request and response bytes; not provider billing.</p></div></div><section class="card pool">${d.seats.length?`<div class="table-scroll"><table><thead><tr><th>Seat</th><th>Today</th><th>7-day</th><th>Top tools by bytes</th></tr></thead><tbody>${d.seats.map(s=>`<tr><td><b>${esc(s.agent_name)}</b><div class="meta">${esc(s.board_id)}</div></td><td>${esc(s.today_bytes)} B<div class="meta">≈ ${esc(s.today_estimated_tokens)} tokens · ${esc(s.today_calls)} calls</div></td><td>${esc(s.seven_day_bytes)} B<div class="meta">≈ ${esc(s.seven_day_estimated_tokens)} tokens · ${esc(s.seven_day_calls)} calls</div></td><td class="overhead-tools">${s.top_tools.map(t=>`${esc(t.tool)}: ${esc(t.bytes)} B`).join(' · ')||'—'}</td></tr>`).join('')}</tbody></table></div>`:`<p class="empty">No bridge overhead stats yet (${esc(d.source_status)}).</p>`}</section>`}
 function sortedTickets(items){const rank=s=>['claimed','in_progress','creating_report'].includes(s)?0:['submitted','reviewing','in_review'].includes(s)?1:s==='open'?2:3;return [...items].sort((a,b)=>rank(a.status)-rank(b.status)||(detailSort==='oldest'?String(a.updated_at||'').localeCompare(String(b.updated_at||'')):String(b.updated_at||'').localeCompare(String(a.updated_at||''))))}
-function tabs(d,r){return `<nav class="tabs" aria-label="Board views">${[['tickets','Tickets'],['timeline','Timeline'],['changes','Changes'],['flow','Ticket Flow']].map(([v,label])=>`<a class="tab${r.view===v?' active':''}" href="${boardHref(d.board.board_id,v)}">${esc(label)}</a>`).join('')}</nav>`}
+function tabs(d,r){return `<nav class="tabs" aria-label="Board views">${[['tickets','Tickets'],['timeline','Timeline'],['changes','Changes'],['flow','Ticket Flow']].map(([v,label])=>`<a class="tab${r.view===v?' active':''}" href="${boardHref(r.central,d.board.board_id,v)}">${esc(label)}</a>`).join('')}</nav>`}
 function ticketView(d,r){const rows=sortedTickets(d.tickets).filter(t=>matches([t.id,t.title,t.status,t.claimed_by,t.description],filterNeedle));const visible=!r.ticket||rows.some(t=>t.id===r.ticket);return `${visible?'':`<p class="warning">Requested ticket ${esc(r.ticket)} is outside this bounded response or filter.</p>`}<div class="toolbar"><span>${esc(rows.length)} of ${esc(d.ticket_returned)} returned tickets</span><label>Updated <select id="ticket-sort"><option value="newest"${detailSort==='newest'?' selected':''}>newest first</option><option value="oldest"${detailSort==='oldest'?' selected':''}>oldest first</option></select></label></div><section class="card"><div class="table-scroll"><table><thead><tr><th>Ticket</th><th>Title and details</th><th>Status</th><th class="hide-small">Updated</th></tr></thead><tbody>${rows.length?rows.map(t=>`<tr><td><span class="id">${esc(t.id)}</span></td><td><details class="ticket-detail" data-ticket="${esc(t.id)}"${r.ticket===t.id?' open':''}><summary>${esc(t.title)}</summary><p class="ticket-copy">${esc(t.description||'No description')}</p>${t.required_fields.length?`<div class="required">${t.required_fields.map(x=>`<span class="pill">${esc(x)}</span>`).join('')}</div>`:''}${t.latest_submission_summary?`<p class="meta ticket-copy">Latest submission: ${esc(t.latest_submission_summary)}</p>`:''}${t.review_label?`<p class="meta">Review: ${esc(t.review_label)}</p>`:''}</details></td><td><span class="status">${esc(t.status)}</span><div class="meta">${esc(t.claimed_by||'')}</div></td><td class="meta hide-small">${esc(fmt(t.updated_at))}</td></tr>`).join(''):'<tr><td colspan="4" class="empty">No tickets match the filter.</td></tr>'}</tbody></table></div></section>`}
-function timelineView(d){const bySeq=new Map(d.events.map(e=>[e.seq,e]));const groups=d.timeline.map(day=>({...day,tickets:day.tickets.map(t=>({...t,events:t.event_seqs.map(seq=>bySeq.get(seq)).filter(Boolean).filter(e=>eventMatches(e,t.ticket_id,filterNeedle))})).filter(t=>t.events.length)})).filter(day=>day.tickets.length);return `<p class="muted bounded-note">Showing last ${esc(d.event_returned)} events from a read-only bounded catchup (ack=false).</p><section class="timeline">${groups.length?groups.map(day=>`<details class="card" open><summary><b>${esc(day.day)}</b></summary>${day.tickets.map(t=>`<details class="timeline-ticket"><summary><a class="id" href="${ticketHref(d.board.board_id,t.ticket_id)}">${esc(t.ticket_id)}</a> · ${esc(t.events.length)} event(s)</summary><div class="table-scroll"><table><tbody>${t.events.map(e=>`<tr><td class="id">${esc(e.seq)}</td><td>${esc(e.kind)}</td><td>${esc(e.status_from||'—')} → ${esc(e.status_to||'—')}</td><td class="meta">${esc(fmt(e.occurred_at))}</td></tr>`).join('')}</tbody></table></div></details>`).join('')}</details>`).join(''):'<p class="empty">No timeline events match the filter.</p>'}</section>`}
+function timelineView(d,r){const bySeq=new Map(d.events.map(e=>[e.seq,e]));const groups=d.timeline.map(day=>({...day,tickets:day.tickets.map(t=>({...t,events:t.event_seqs.map(seq=>bySeq.get(seq)).filter(Boolean).filter(e=>eventMatches(e,t.ticket_id,filterNeedle))})).filter(t=>t.events.length)})).filter(day=>day.tickets.length);return `<p class="muted bounded-note">Showing last ${esc(d.event_returned)} events from a read-only bounded catchup (ack=false).</p><section class="timeline">${groups.length?groups.map(day=>`<details class="card" open><summary><b>${esc(day.day)}</b></summary>${day.tickets.map(t=>`<details class="timeline-ticket"><summary><a class="id" href="${ticketHref(r.central,d.board.board_id,t.ticket_id)}">${esc(t.ticket_id)}</a> · ${esc(t.events.length)} event(s)</summary><div class="table-scroll"><table><tbody>${t.events.map(e=>`<tr><td class="id">${esc(e.seq)}</td><td>${esc(e.kind)}</td><td>${esc(e.status_from||'—')} → ${esc(e.status_to||'—')}</td><td class="meta">${esc(fmt(e.occurred_at))}</td></tr>`).join('')}</tbody></table></div></details>`).join('')}</details>`).join(''):'<p class="empty">No timeline events match the filter.</p>'}</section>`}
 function changesFor(events,since,generatedAt){const cutoff=since===null?new Date(generatedAt).getTime()-86400000:null,chosen=events.filter(e=>since!==null?Number.isInteger(e.seq)&&e.seq>since:new Date(e.occurred_at).getTime()>=cutoff),counts={created:0,claimed:0,submitted:0,closed:0,rejected:0};for(const e of chosen){if(e.kind==='ticket_created')counts.created++;if(e.status_to==='claimed')counts.claimed++;if(e.status_to==='submitted')counts.submitted++;if(e.status_to==='closed')counts.closed++;if(e.review_verdict==='reject'||(e.status_from==='submitted'&&['open','claimed','rejected'].includes(e.status_to)&&Number(e.rejection_count)>0))counts.rejected++}return{counts,event_count:chosen.length}}
 function changesView(d,r){const valid=r.since!==null&&/^\d+$/.test(r.since),since=valid?Number(r.since):null,events=filterChangeEvents(d.events,filterNeedle),summary=changesFor(events,since,d.generated_at);return `<div class="toolbar"><div><b>${since===null?'Last 24 hours':`After seq ${esc(since)}`}</b><p class="muted">Calculated only from the ${esc(d.event_returned)} returned events.</p></div><form id="changes-form"><label>Starting seq <input id="since-seq" inputmode="numeric" pattern="[0-9]*" value="${since===null?'':esc(since)}" placeholder="blank = 24h"></label> <button type="submit">Apply</button></form></div><section class="strip change-grid">${Object.entries(summary.counts).map(([name,count])=>`<div class="metric"><span>${esc(name)}</span><b>${esc(count)}</b></div>`).join('')}</section><p class="muted">${esc(summary.event_count)} bounded event(s) matched.</p>`}
-function flowView(d){const byId=new Map(d.tickets.map(t=>[t.id,t])),labels={open:'Open',claimed:'Claimed',submitted:'Submitted',closed_today:'Closed today'};return `<p class="muted bounded-note">Classified from ${esc(d.ticket_returned)} returned tickets; omitted snapshot rows are not inferred.</p><section class="flow">${Object.entries(labels).map(([key,label])=>{const tickets=d.ticket_flow[key].map(id=>byId.get(id)).filter(Boolean).filter(t=>matches([t.id,t.title,t.claimed_by,t.status],filterNeedle));return `<div class="flow-column"><h3>${esc(label)} · ${esc(tickets.length)}</h3>${tickets.map(t=>`<a class="flow-card" href="${ticketHref(d.board.board_id,t.id)}"><span class="id">${esc(t.id)}</span><div>${esc(t.title)}</div><span class="meta">${esc(t.claimed_by||'Unassigned')}</span></a>`).join('')||'<p class="empty">No matching tickets</p>'}</div>`}).join('')}</section>`}
+function flowView(d,r){const byId=new Map(d.tickets.map(t=>[t.id,t])),labels={open:'Open',claimed:'Claimed',submitted:'Submitted',closed_today:'Closed today'};return `<p class="muted bounded-note">Classified from ${esc(d.ticket_returned)} returned tickets; omitted snapshot rows are not inferred.</p><section class="flow">${Object.entries(labels).map(([key,label])=>{const tickets=d.ticket_flow[key].map(id=>byId.get(id)).filter(Boolean).filter(t=>matches([t.id,t.title,t.claimed_by,t.status],filterNeedle));return `<div class="flow-column"><h3>${esc(label)} · ${esc(tickets.length)}</h3>${tickets.map(t=>`<a class="flow-card" href="${ticketHref(r.central,d.board.board_id,t.id)}"><span class="id">${esc(t.id)}</span><div>${esc(t.title)}</div><span class="meta">${esc(t.claimed_by||'Unassigned')}</span></a>`).join('')||'<p class="empty">No matching tickets</p>'}</div>`}).join('')}</section>`}
 function findings(d){if(!d.coordinator_findings)return'';return `<section class="card"><h3>Coordinator findings</h3><div class="finding-list">${d.coordinator_findings.items.map(f=>`<div class="finding"><b>${esc(f.kind)}</b>${f.ticket_id?` <span class="id">${esc(f.ticket_id)}</span>`:''}<p>${esc(f.text)}</p></div>`).join('')||'<p class="empty">No current findings</p>'}</div>${d.coordinator_findings.truncated_count?`<p class="warning">${esc(d.coordinator_findings.truncated_count)} findings omitted by the bounded state.</p>`:''}</section>`}
-function renderDetail(d){const r=route();if(!r||r.board!==d.board.board_id)return;const views={tickets:ticketView,timeline:timelineView,changes:changesView,flow:flowView};document.querySelector('#detail-view').innerHTML=`<a class="back" href="#/">← All boards</a><div class="top"><div><h2>${esc(d.board.label)}</h2><span class="meta">${esc(d.board.board_id)}</span></div>${d.truncated?`<span class="status">${esc(d.ticket_returned)} of ${esc(d.ticket_total)} tickets shown</span>`:''}</div><div class="toolbar">${tabs(d,r)}<span class="muted">Read-only bounded view</span></div>${r.view==='tickets'?findings(d):''}${views[r.view](d,r)}`;document.querySelector('#ticket-sort')?.addEventListener('change',e=>{detailSort=e.target.value;renderDetail(d)});document.querySelector('#changes-form')?.addEventListener('submit',e=>{e.preventDefault();const value=document.querySelector('#since-seq').value.trim();location.hash=`/board/${encodeURIComponent(d.board.board_id)}/changes${value?`?since=${encodeURIComponent(value)}`:''}`});document.querySelector('#state').textContent=`Updated ${fmt(d.generated_at)}`;if(r.ticket){const target=[...document.querySelectorAll('[data-ticket]')].find(x=>x.dataset.ticket===r.ticket);target?.scrollIntoView({block:'center'})}}
+function renderDetail(d){const r=route();if(!r||r.kind!=='board'||r.central!==d.central||r.board!==d.board.board_id)return;const views={tickets:ticketView,timeline:timelineView,changes:changesView,flow:flowView};document.querySelector('#detail-view').innerHTML=`<a class="back" href="#/">← All centrals</a><div class="top"><div><h2>${esc(d.board.label)} · ${esc(d.central)}</h2><span class="meta">${esc(d.board.board_id)}</span></div>${d.truncated?`<span class="status">${esc(d.ticket_returned)} of ${esc(d.ticket_total)} tickets shown</span>`:''}</div><div class="toolbar">${tabs(d,r)}<span class="muted">Read-only bounded view · ${esc(d.central)}</span></div>${r.view==='tickets'?findings(d):''}${views[r.view](d,r)}`;document.querySelector('#ticket-sort')?.addEventListener('change',e=>{detailSort=e.target.value;renderDetail(d)});document.querySelector('#changes-form')?.addEventListener('submit',e=>{e.preventDefault();const value=document.querySelector('#since-seq').value.trim();location.hash=`/central/${encodeURIComponent(r.central)}/board/${encodeURIComponent(d.board.board_id)}/changes${value?`?since=${encodeURIComponent(value)}`:''}`});document.querySelector('#state').textContent=`Updated ${fmt(d.generated_at)} · ${esc(d.central)}`;if(r.ticket){const target=[...document.querySelectorAll('[data-ticket]')].find(x=>x.dataset.ticket===r.ticket);target?.scrollIntoView({block:'center'})}}
 async function fetchJson(path){const response=await fetch(path,{cache:'no-store'});if(!response.ok)throw new Error(`HTTP ${response.status}`);return response.json()}
-async function refreshFleet(){try{fleetData=await fetchJson('/api/fleet');if(!route())renderFleet(fleetData)}catch(e){document.querySelector('#state').textContent=`Refresh failed: ${e.message}`}}
-async function refreshOverhead(){try{renderOverhead(await fetchJson('/api/overhead'))}catch(e){document.querySelector('#overhead').innerHTML=`<p class="error">Overhead unavailable: ${esc(e.message)}</p>`}}
-async function refreshDetail(){const r=route();if(!r)return;try{const data=await fetchJson(`/api/board/${encodeURIComponent(r.board)}`);if(route()?.board!==r.board)return;detailData=data;renderDetail(data)}catch(e){document.querySelector('#detail-view').innerHTML=`<a class="back" href="#/">← All boards</a><p class="error">Board detail unavailable: ${esc(e.message)}</p>`;document.querySelector('#state').textContent='Detail refresh failed'}}
-function syncRoute(){const r=route();document.querySelector('#home-view').hidden=!!r;document.querySelector('#detail-view').hidden=!r;if(detailTimer){clearInterval(detailTimer);detailTimer=null}if(r){document.querySelector('#detail-view').innerHTML='<p class="empty">Loading board detail…</p>';refreshDetail();detailTimer=setInterval(refreshDetail,5000)}else if(fleetData)renderFleet(fleetData)}
-document.querySelector('#filter').addEventListener('input',e=>{filterNeedle=e.target.value.toLocaleLowerCase();if(route()&&detailData)renderDetail(detailData);else if(fleetData)renderFleet(fleetData)});document.addEventListener('keydown',e=>{if(e.key==='/'&&!['INPUT','TEXTAREA','SELECT'].includes(document.activeElement?.tagName)){e.preventDefault();document.querySelector('#filter').focus()}});window.addEventListener('hashchange',syncRoute);refreshFleet();refreshOverhead();setInterval(refreshFleet,5000);setInterval(refreshOverhead,5000);syncRoute();
+async function loadCentrals(){const d=await fetchJson('/api/centrals');centralLabels=d.centrals;defaultCentral=d.default}
+async function refreshFleet(){if(!centralLabels.length)await loadCentrals();await Promise.all(centralLabels.map(async label=>{try{fleetData[label]=await fetchJson(`/api/fleet?${apiCentral(label)}`);delete fleetErrors[label]}catch(e){delete fleetData[label];fleetErrors[label]=e.message}}));if(!route())renderFleet()}
+async function refreshOverhead(){const r=route();if(!r||r.kind!=='overhead')return;try{const data=await fetchJson(`/api/overhead?${apiCentral(r.central)}`);if(route()?.central!==r.central)return;renderOverhead(data)}catch(e){document.querySelector('#detail-view').innerHTML=`<a class="back" href="#/">← All centrals</a><p class="error">Overhead unavailable for ${esc(r.central)}: ${esc(e.message)}</p>`}}
+async function refreshDetail(){const r=route();if(!r||r.kind!=='board')return;try{const data=await fetchJson(`/api/board/${encodeURIComponent(r.board)}?${apiCentral(r.central)}`);const current=route();if(current?.central!==r.central||current?.board!==r.board)return;detailData=data;renderDetail(data)}catch(e){document.querySelector('#detail-view').innerHTML=`<a class="back" href="#/">← All centrals</a><p class="error">Board detail unavailable for ${esc(r.central)}: ${esc(e.message)}</p>`;document.querySelector('#state').textContent='Detail refresh failed'}}
+function syncRoute(){const r=route();document.querySelector('#home-view').hidden=!!r;document.querySelector('#detail-view').hidden=!r||r.kind==='config';if(detailTimer){clearInterval(detailTimer);detailTimer=null}if(r?.kind==='board'){document.querySelector('#detail-view').innerHTML='<p class="empty">Loading board detail…</p>';refreshDetail();detailTimer=setInterval(refreshDetail,5000)}else if(r?.kind==='overhead'){document.querySelector('#detail-view').innerHTML='<p class="empty">Loading overhead…</p>';refreshOverhead();detailTimer=setInterval(refreshOverhead,5000)}else if(!r)renderFleet()}
+document.querySelector('#filter').addEventListener('input',e=>{filterNeedle=e.target.value.toLocaleLowerCase();const r=route();if(r?.kind==='board'&&detailData)renderDetail(detailData);else if(!r)renderFleet()});document.addEventListener('keydown',e=>{if(e.key==='/'&&!['INPUT','TEXTAREA','SELECT'].includes(document.activeElement?.tagName)){e.preventDefault();document.querySelector('#filter').focus()}});window.addEventListener('hashchange',syncRoute);loadCentrals().then(()=>{refreshFleet();syncRoute();if(typeof syncConfigRoute==='function')syncConfigRoute()}).catch(e=>{document.querySelector('#state').textContent=`Startup failed: ${e.message}`});setInterval(refreshFleet,5000);
 </script></body></html>"""
 
 # Keep the existing bounded fleet SPA intact; layer the one explicit write surface
@@ -1188,10 +1240,10 @@ HTML = HTML.replace(
     "</style>",
     ".config-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px}"
     ".config-grid label{display:grid;gap:5px}.config-grid input,.config-grid select,.config-grid button{background:var(--panel2);border:1px solid var(--line);border-radius:8px;color:var(--text);padding:8px}"
-    ".source{font-size:11px;color:var(--muted)}</style>",
+    ".source{font-size:11px;color:var(--muted)}.central-group{margin-top:28px;padding-top:20px;border-top:2px solid var(--line)}.central-heading{align-items:center}.central-group.unavailable{border:1px solid var(--bad);border-radius:12px;padding:16px}</style>",
 ).replace(
     "Live boards and shared agent pool</p>",
-    'Live boards and shared agent pool · <a href="#/config">Coordinator config</a></p>',
+    'Live boards and per-central agent pools · <a href="#/config">Coordinator config</a></p>',
 ).replace(
     '<section id="detail-view" hidden></section></main>',
     '<section id="detail-view" hidden></section><section id="config-view" hidden></section></main>',
@@ -1203,10 +1255,10 @@ const CONFIG_NUMBERS=[['stale_seconds','Stale seconds',10,86400],['lease_warning
 let coordinatorConfig=null;
 const sourceFor=(d,path)=>d.sources?.[path]||'unknown';
 function configNumber(d,key,label,min,max){const v=d.effective.thresholds[key];return `<label>${esc(label)} <span class="source">source: ${esc(sourceFor(d,`thresholds.${key}`))}</span><input name="${esc(key)}" type="number" min="${min}" max="${max}" step="${key==='lease_warning_ratio'?'.01':'1'}" value="${esc(v)}" required></label>`}
-function renderConfig(d){coordinatorConfig=d;const e=d.effective||{};if(!e.thresholds||!e.intake){document.querySelector('#config-view').innerHTML='<a class="back" href="#/">← All boards</a><p class="warning">Run the coordinator once to publish effective values before editing.</p>';return}document.querySelector('#config-view').innerHTML=`<a class="back" href="#/">← All boards</a><div class="top"><div><h2>Coordinator config</h2><p class="muted">One live policy document on the home board</p></div><div><span class="status">mode: ${esc(d.mode)}</span><p class="warning">Mode changes require a restart.</p></div></div><form id="config-form" class="card pool"><div class="config-grid">${CONFIG_NUMBERS.map(x=>configNumber(d,...x)).join('')}<label>Integration watch since <span class="source">source: ${esc(sourceFor(d,'integration_watch_since'))}</span><input name="integration_watch_since" type="text" placeholder="ISO-8601 or blank" value="${esc(e.integration_watch_since||'')}"></label><label>Intake enabled <span class="source">source: ${esc(sourceFor(d,'intake.enabled'))}</span><input name="enabled" type="checkbox" ${e.intake.enabled?'checked':''}></label><label>Work domain always ask <span class="source">source: ${esc(sourceFor(d,'intake.work_domain_always_ask'))}</span><input name="work_domain_always_ask" type="checkbox" ${e.intake.work_domain_always_ask?'checked':''}></label><label>Intake rate per hour <span class="source">source: ${esc(sourceFor(d,'intake.rate_per_hour'))}</span><input name="rate_per_hour" type="number" min="1" max="20" value="${esc(e.intake.rate_per_hour)}" required></label>${CONFIG_CATEGORIES.map(c=>`<label>${esc(c)} policy <span class="source">source: ${esc(sourceFor(d,e.intake.auto_categories.includes(c)?'intake.auto_categories':'intake.always_ask_categories'))}</span><select name="category_${esc(c)}"><option value="auto"${e.intake.auto_categories.includes(c)?' selected':''}>auto</option><option value="ask"${e.intake.always_ask_categories.includes(c)?' selected':''}>always ask</option></select></label>`).join('')}</div><div class="toolbar"><button type="submit">Save config</button><span id="config-status" class="muted">${esc(d.concurrency.toUpperCase())} · updated ${esc(fmt(d.updated_at))} by ${esc(d.updated_by||'—')}</span></div></form>`;document.querySelector('#config-form').addEventListener('submit',saveConfig)}
-async function refreshConfig(){try{const r=await fetch('/api/config',{cache:'no-store'});if(!r.ok)throw new Error(`HTTP ${r.status}`);renderConfig(await r.json())}catch(e){document.querySelector('#config-view').innerHTML=`<a class="back" href="#/">← All boards</a><p class="error">Config unavailable: ${esc(e.message)}</p>`}}
-async function saveConfig(event){event.preventDefault();const f=new FormData(event.target),thresholds={};for(const [key] of CONFIG_NUMBERS)thresholds[key]=key==='lease_warning_ratio'?Number(f.get(key)):Number.parseInt(f.get(key),10);const auto=[],always=[];for(const c of CONFIG_CATEGORIES)(f.get(`category_${c}`)==='auto'?auto:always).push(c);const config={schema_version:1,thresholds,integration_watch_since:f.get('integration_watch_since').trim()||null,intake:{enabled:f.get('enabled')==='on',auto_categories:auto,always_ask_categories:always,work_domain_always_ask:f.get('work_domain_always_ask')==='on',rate_per_hour:Number.parseInt(f.get('rate_per_hour'),10)}};const status=document.querySelector('#config-status');status.textContent='Saving…';try{const r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({config,expected_sha256:coordinatorConfig.expected_sha256})});const body=await r.json();if(!r.ok)throw new Error(body.error||`HTTP ${r.status}`);status.textContent=`Saved with ${body.concurrency.toUpperCase()}; waiting for coordinator poll`;setTimeout(refreshConfig,1000)}catch(e){status.textContent=`Save failed: ${e.message}`;status.className='error'}}
-function syncConfigRoute(){const active=location.hash==='#/config';document.querySelector('#config-view').hidden=!active;if(active){document.querySelector('#home-view').hidden=true;document.querySelector('#detail-view').hidden=true;refreshConfig()}}
+function renderConfig(d){coordinatorConfig=d;const e=d.effective||{};if(!e.thresholds||!e.intake){document.querySelector('#config-view').innerHTML=`<a class="back" href="#/">← All centrals</a><h2>Coordinator config · ${esc(d.central)}</h2><p class="warning">Run the coordinator once to publish effective values before editing.</p>`;return}document.querySelector('#config-view').innerHTML=`<a class="back" href="#/">← All centrals</a><div class="top"><div><h2>Coordinator config · ${esc(d.central)}</h2><p class="muted">Live policy document on the ${esc(d.central)} home board</p></div><div><span class="status">mode: ${esc(d.mode)}</span><p class="warning">Mode changes require a restart.</p></div></div><form id="config-form" class="card pool"><div class="config-grid">${CONFIG_NUMBERS.map(x=>configNumber(d,...x)).join('')}<label>Integration watch since <span class="source">source: ${esc(sourceFor(d,'integration_watch_since'))}</span><input name="integration_watch_since" type="text" placeholder="ISO-8601 or blank" value="${esc(e.integration_watch_since||'')}"></label><label>Intake enabled <span class="source">source: ${esc(sourceFor(d,'intake.enabled'))}</span><input name="enabled" type="checkbox" ${e.intake.enabled?'checked':''}></label><label>Work domain always ask <span class="source">source: ${esc(sourceFor(d,'intake.work_domain_always_ask'))}</span><input name="work_domain_always_ask" type="checkbox" ${e.intake.work_domain_always_ask?'checked':''}></label><label>Intake rate per hour <span class="source">source: ${esc(sourceFor(d,'intake.rate_per_hour'))}</span><input name="rate_per_hour" type="number" min="1" max="20" value="${esc(e.intake.rate_per_hour)}" required></label>${CONFIG_CATEGORIES.map(c=>`<label>${esc(c)} policy <span class="source">source: ${esc(sourceFor(d,e.intake.auto_categories.includes(c)?'intake.auto_categories':'intake.always_ask_categories'))}</span><select name="category_${esc(c)}"><option value="auto"${e.intake.auto_categories.includes(c)?' selected':''}>auto</option><option value="ask"${e.intake.always_ask_categories.includes(c)?' selected':''}>always ask</option></select></label>`).join('')}</div><div class="toolbar"><button type="submit">Save config</button><span id="config-status" class="muted">${esc(d.concurrency.toUpperCase())} · updated ${esc(fmt(d.updated_at))} by ${esc(d.updated_by||'—')}</span></div></form>`;document.querySelector('#config-form').addEventListener('submit',saveConfig)}
+async function refreshConfig(){const r=route();if(!r||r.kind!=='config')return;try{const response=await fetch(`/api/config?${apiCentral(r.central)}`,{cache:'no-store'});if(!response.ok)throw new Error(`HTTP ${response.status}`);const data=await response.json();if(route()?.central===r.central)renderConfig(data)}catch(e){document.querySelector('#config-view').innerHTML=`<a class="back" href="#/">← All centrals</a><p class="error">Config unavailable for ${esc(r.central)}: ${esc(e.message)}</p>`}}
+async function saveConfig(event){event.preventDefault();const f=new FormData(event.target),thresholds={};for(const [key] of CONFIG_NUMBERS)thresholds[key]=key==='lease_warning_ratio'?Number(f.get(key)):Number.parseInt(f.get(key),10);const auto=[],always=[];for(const c of CONFIG_CATEGORIES)(f.get(`category_${c}`)==='auto'?auto:always).push(c);const config={schema_version:1,thresholds,integration_watch_since:f.get('integration_watch_since').trim()||null,intake:{enabled:f.get('enabled')==='on',auto_categories:auto,always_ask_categories:always,work_domain_always_ask:f.get('work_domain_always_ask')==='on',rate_per_hour:Number.parseInt(f.get('rate_per_hour'),10)}};const status=document.querySelector('#config-status'),central=coordinatorConfig.central;status.textContent=`Saving ${central}…`;try{const r=await fetch(`/api/config?${apiCentral(central)}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({config,expected_sha256:coordinatorConfig.expected_sha256})});const body=await r.json();if(!r.ok)throw new Error(body.error||`HTTP ${r.status}`);status.textContent=`Saved ${body.central} with ${body.concurrency.toUpperCase()}; waiting for coordinator poll`;setTimeout(refreshConfig,1000)}catch(e){status.textContent=`Save failed for ${central}: ${e.message}`;status.className='error'}}
+function syncConfigRoute(){const r=route(),active=r?.kind==='config';document.querySelector('#config-view').hidden=!active;if(active){document.querySelector('#home-view').hidden=true;document.querySelector('#detail-view').hidden=true;if(centralLabels.length)refreshConfig()}}
 window.addEventListener('hashchange',syncConfigRoute);syncConfigRoute();
 </script></body>""",
 )
@@ -1218,6 +1270,24 @@ def make_handler(
     selected_stats_path = (
         bridge_stats_path() if stats_path is None else Path(stats_path)
     )
+
+    def requested_central(path: str) -> str | None:
+        values = parse_qs(urlsplit(path).query, keep_blank_values=True).get("central")
+        if values is None:
+            return None
+        if len(values) != 1 or not CENTRAL_LABEL_RE.fullmatch(values[0]):
+            raise ValueError("invalid central")
+        return values[0]
+
+    def central_label(value: str | None) -> str:
+        resolver = getattr(cache, "resolve_central", None)
+        if callable(resolver):
+            return resolver(value)
+        return value or "default"
+
+    def cache_call(name: str, *args: Any, central: str | None) -> dict[str, Any]:
+        method = getattr(cache, name)
+        return method(*args) if central is None else method(*args, central)
 
     class Handler(BaseHTTPRequestHandler):
         def _send(self, status: int, content_type: str, body: bytes) -> None:
@@ -1234,27 +1304,52 @@ def make_handler(
             self.wfile.write(body)
 
         def do_GET(self) -> None:
-            if self.path == "/":
+            route = urlsplit(self.path).path
+            if route == "/":
                 self._send(200, "text/html; charset=utf-8", HTML.encode("utf-8"))
                 return
-            if self.path == "/api/fleet":
+            if route == "/api/centrals":
+                labels_method = getattr(cache, "labels", None)
+                labels = labels_method() if callable(labels_method) else ["default"]
+                body = _json_bytes({"centrals": labels, "default": labels[0]})
+                self._send(200, "application/json; charset=utf-8", body)
+                return
+            try:
+                central = requested_central(self.path)
+                label = central_label(central)
+            except (KeyError, ValueError):
+                self._send(
+                    404,
+                    "application/json; charset=utf-8",
+                    b'{"error":"central not found"}',
+                )
+                return
+            if route == "/api/fleet":
                 try:
-                    body = _json_bytes(cache.get())
+                    body = _json_bytes(cache_call("get", central=central))
                 except Exception as exc:  # noqa: BLE001 - return bounded HTTP error.
-                    body = json.dumps({"error": type(exc).__name__}).encode("utf-8")
+                    body = _json_bytes(
+                        {"error": type(exc).__name__, "central": label}
+                    )
                     self._send(503, "application/json; charset=utf-8", body)
                     return
                 self._send(200, "application/json; charset=utf-8", body)
                 return
-            if self.path == "/api/overhead":
-                body = _json_bytes(read_overhead_stats(selected_stats_path))
+            if route == "/api/overhead":
+                body = _json_bytes(
+                    {**read_overhead_stats(selected_stats_path), "central": label}
+                )
                 self._send(200, "application/json; charset=utf-8", body)
                 return
-            if self.path == "/api/config":
+            if route == "/api/config":
                 try:
-                    body = _json_bytes(cache.get_config())
+                    body = _json_bytes(
+                        cache_call("get_config", central=central)
+                    )
                 except Exception as exc:  # noqa: BLE001
-                    body = _json_bytes({"error": type(exc).__name__})
+                    body = _json_bytes(
+                        {"error": type(exc).__name__, "central": label}
+                    )
                     self._send(503, "application/json; charset=utf-8", body)
                     return
                 self._send(200, "application/json; charset=utf-8", body)
@@ -1262,23 +1357,34 @@ def make_handler(
             board_id = board_id_from_api_path(self.path)
             if board_id is not None:
                 try:
-                    body = _json_bytes(cache.get_board(board_id))
+                    body = _json_bytes(
+                        cache_call("get_board", board_id, central=central)
+                    )
                 except KeyError:
                     self._send(
                         404,
                         "application/json; charset=utf-8",
-                        b'{"error":"board not found"}',
+                        _json_bytes(
+                            {"error": "board not found", "central": label}
+                        ),
                     )
                     return
                 except Exception as exc:  # noqa: BLE001 - bounded type only.
-                    body = json.dumps({"error": type(exc).__name__}).encode("utf-8")
+                    body = _json_bytes(
+                        {"error": type(exc).__name__, "central": label}
+                    )
                     self._send(503, "application/json; charset=utf-8", body)
                     return
                 if len(body) > API_MAX_BYTES:
                     self._send(
                         503,
                         "application/json; charset=utf-8",
-                        b'{"error":"detail response exceeds byte cap"}',
+                        _json_bytes(
+                            {
+                                "error": "detail response exceeds byte cap",
+                                "central": label,
+                            }
+                        ),
                     )
                     return
                 self._send(200, "application/json; charset=utf-8", body)
@@ -1286,29 +1392,62 @@ def make_handler(
             self._send(404, "application/json; charset=utf-8", b'{"error":"not found"}')
 
         def do_POST(self) -> None:
-            if self.path != "/api/config":
+            if urlsplit(self.path).path != "/api/config":
                 self._send(404, "application/json; charset=utf-8", b'{"error":"not found"}')
+                return
+            try:
+                central = requested_central(self.path)
+                label = central_label(central)
+            except (KeyError, ValueError):
+                self._send(
+                    404,
+                    "application/json; charset=utf-8",
+                    b'{"error":"central not found"}',
+                )
                 return
             try:
                 length = int(self.headers.get("Content-Length", ""))
             except ValueError:
                 length = -1
             if not 1 <= length <= 20_000:
-                self._send(400, "application/json; charset=utf-8", b'{"error":"invalid body size"}')
+                self._send(
+                    400,
+                    "application/json; charset=utf-8",
+                    _json_bytes({"error": "invalid body size", "central": label}),
+                )
                 return
             try:
                 request = json.loads(self.rfile.read(length))
                 if not isinstance(request, dict) or set(request) != {"config", "expected_sha256"}:
                     raise ValueError("request must contain only config and expected_sha256")
-                body = _json_bytes(cache.save_config(request["config"], request["expected_sha256"]))
+                body = _json_bytes(
+                    cache_call(
+                        "save_config",
+                        request["config"],
+                        request["expected_sha256"],
+                        central=central,
+                    )
+                )
             except (ValueError, TypeError, json.JSONDecodeError) as exc:
-                self._send(400, "application/json; charset=utf-8", _json_bytes({"error": str(exc)}))
+                self._send(
+                    400,
+                    "application/json; charset=utf-8",
+                    _json_bytes({"error": str(exc), "central": label}),
+                )
                 return
             except ConfigConflictError as exc:
-                self._send(409, "application/json; charset=utf-8", _json_bytes({"error": str(exc)}))
+                self._send(
+                    409,
+                    "application/json; charset=utf-8",
+                    _json_bytes({"error": str(exc), "central": label}),
+                )
                 return
             except Exception as exc:  # noqa: BLE001 - stale CAS is a safe conflict.
-                self._send(409, "application/json; charset=utf-8", _json_bytes({"error": type(exc).__name__}))
+                self._send(
+                    409,
+                    "application/json; charset=utf-8",
+                    _json_bytes({"error": type(exc).__name__, "central": label}),
+                )
                 return
             self._send(200, "application/json; charset=utf-8", body)
 
@@ -1328,6 +1467,88 @@ def _token_from_args(token_file: str | None) -> str:
     return token
 
 
+def _read_mode_0600(path: Path, description: str) -> str:
+    try:
+        info = path.stat()
+    except OSError as exc:
+        raise SystemExit(f"cannot read {description}: {path}") from exc
+    if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600:
+        raise SystemExit(f"{description} must be a regular 0600 file: {path}")
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise SystemExit(f"cannot read {description}: {path}") from exc
+
+
+def load_central_configs(args: argparse.Namespace) -> list[Config]:
+    """Load ordered multi-central config without exposing token material."""
+    if not args.centrals:
+        return [
+            Config(
+                url=args.url,
+                token=_token_from_args(args.token_file),
+                home_board=args.home_board,
+                agent_name=args.agent_name,
+                stale_seconds=args.stale_seconds,
+                cache_seconds=args.cache_seconds,
+            )
+        ]
+    source = Path(args.centrals).expanduser().resolve()
+    raw = _read_mode_0600(source, "centrals config")
+    try:
+        entries = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise SystemExit("centrals config is not valid JSON") from exc
+    if not isinstance(entries, list) or not entries:
+        raise SystemExit("centrals config must be a non-empty JSON list")
+    configs: list[Config] = []
+    seen: set[str] = set()
+    for index, entry in enumerate(entries):
+        if not isinstance(entry, dict) or set(entry) != {
+            "label", "url", "token_path", "home_board"
+        }:
+            raise SystemExit(
+                f"centrals entry {index} must contain only label, url, "
+                "token_path, and home_board"
+            )
+        label, url, token_path, home_board = (
+            entry.get("label"),
+            entry.get("url"),
+            entry.get("token_path"),
+            entry.get("home_board"),
+        )
+        if not isinstance(label, str) or not CENTRAL_LABEL_RE.fullmatch(label):
+            raise SystemExit(f"centrals entry {index} has an invalid label")
+        if label in seen:
+            raise SystemExit(f"duplicate central label: {label}")
+        if not isinstance(url, str) or not url.strip():
+            raise SystemExit(f"centrals entry {index} has an invalid url")
+        if not isinstance(home_board, str) or not BOARD_ID_RE.fullmatch(home_board):
+            raise SystemExit(f"centrals entry {index} has an invalid home_board")
+        if not isinstance(token_path, str) or not token_path:
+            raise SystemExit(f"centrals entry {index} has an invalid token_path")
+        token_file = Path(token_path).expanduser()
+        if not token_file.is_absolute():
+            token_file = source.parent / token_file
+        token_file = token_file.resolve()
+        token = _read_mode_0600(token_file, f"token file for central {label}").strip()
+        if not token:
+            raise SystemExit(f"token file for central {label} is empty")
+        configs.append(
+            Config(
+                url=url.strip(),
+                token=token,
+                home_board=home_board,
+                agent_name=args.agent_name,
+                stale_seconds=args.stale_seconds,
+                cache_seconds=args.cache_seconds,
+                label=label,
+            )
+        )
+        seen.add(label)
+    return configs
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the loopback fleet dashboard")
     parser.add_argument("--host", default="127.0.0.1", help=argparse.SUPPRESS)
@@ -1336,6 +1557,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--url", default=os.environ.get("ONBOARD_CENTRAL_URL", DEFAULT_URL)
     )
     parser.add_argument("--token-file")
+    parser.add_argument(
+        "--centrals",
+        help="0600 JSON list of {label,url,token_path,home_board} entries",
+    )
     parser.add_argument("--home-board", default=DEFAULT_HOME_BOARD)
     parser.add_argument("--agent-name", default="fleet-dashboard-viewer")
     parser.add_argument("--stale-seconds", type=int, default=300)
@@ -1352,16 +1577,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
-    config = Config(
-        url=args.url,
-        token=_token_from_args(args.token_file),
-        home_board=args.home_board,
-        agent_name=args.agent_name,
-        stale_seconds=args.stale_seconds,
-        cache_seconds=args.cache_seconds,
+    configs = load_central_configs(args)
+    cache = DashboardCache(
+        [FleetFetcher(config) for config in configs], args.cache_seconds
     )
-    fetcher = FleetFetcher(config)
-    cache = DashboardCache(fetcher, config.cache_seconds)
     server = ThreadingHTTPServer(
         (args.host, args.port), make_handler(cache, bridge_stats_path())
     )

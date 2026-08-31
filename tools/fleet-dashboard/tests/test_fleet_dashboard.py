@@ -4,6 +4,8 @@ import asyncio
 import hashlib
 import importlib.util
 import json
+import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -12,6 +14,7 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Self
 
 import pytest
@@ -637,6 +640,84 @@ def test_detail_views_include_filter_routes_mobile_containment_and_escape_calls(
     assert "${esc(t.claimed_by||'Unassigned')}" in dashboard.HTML
 
 
+def test_multi_central_routes_and_complete_javascript_are_valid() -> None:
+    scripts = re.findall(r"<script>(.*?)</script>", dashboard.HTML, flags=re.DOTALL)
+    completed = subprocess.run(
+        ["node", "--check", "-"],
+        input="\n".join(scripts),
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert "#/central/" in dashboard.HTML
+    assert "central=${encodeURIComponent(central)}" in dashboard.HTML
+    assert "Independent central trust domain" in dashboard.HTML
+    assert "Saved ${body.central}" in dashboard.HTML
+
+
+def test_two_central_dom_groups_are_rendered_without_pool_merge() -> None:
+    script = dashboard.HTML.split("<script>", 1)[1].split("</script>", 1)[0]
+    lines = script.splitlines()
+
+    def source(prefix: str) -> str:
+        return next(line for line in lines if line.startswith(prefix))
+
+    def fleet(label: str, agent: str) -> dict:
+        return {
+            "central": label,
+            "generated_at": "2030-01-01T00:00:00Z",
+            "pool_summary": {
+                "online": 1,
+                "busy": 0,
+                "available": 1,
+                "stale": 0,
+            },
+            "boards": [],
+            "agents": [
+                {
+                    "agent_name": agent,
+                    "pool_status": "available",
+                    "boards": [],
+                    "seats": [],
+                    "duplicate_name": False,
+                    "last_seen": "2030-01-01T00:00:00Z",
+                }
+            ],
+        }
+
+    program = "\n".join(
+        [
+            source("const esc="),
+            source("const fmt="),
+            source("const ticketMatches="),
+            source("const filterHomeBoards="),
+            source("function renderCentral("),
+            source("function renderFleet("),
+            "const elements={'#central-sections':{innerHTML:''},'#state':{textContent:''}};",
+            "const document={querySelector:key=>elements[key]};",
+            "let filterNeedle='',centralLabels=['personal','work'],fleetErrors={};",
+            f"let fleetData={{personal:{json.dumps(fleet('personal', 'personal-seat'))},work:{json.dumps(fleet('work', 'work-seat'))}}};",
+            "renderFleet();",
+            "console.log(elements['#central-sections'].innerHTML);",
+        ]
+    )
+    completed = subprocess.run(
+        ["node", "-e", program],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    output = completed.stdout
+    assert output.count('class="central-group"') == 2
+    assert 'data-central="personal"' in output
+    assert 'data-central="work"' in output
+    personal_group, work_group = output.split('data-central="work"', 1)
+    assert "personal-seat" in personal_group
+    assert "work-seat" not in personal_group
+    assert "work-seat" in work_group
+
+
 def test_filter_behavior_removes_unrelated_home_rows_and_change_counts() -> None:
     script = dashboard.HTML.split("<script>", 1)[1].split("</script>", 1)[0]
     lines = script.splitlines()
@@ -646,6 +727,7 @@ def test_filter_behavior_removes_unrelated_home_rows_and_change_counts() -> None
 
     fixtures = {
         "fleet": {
+            "central": "personal",
             "pool_summary": {"online": 0, "busy": 0, "available": 0, "stale": 0},
             "boards": [
                 {
@@ -708,18 +790,19 @@ def test_filter_behavior_removes_unrelated_home_rows_and_change_counts() -> None
             source("const filterHomeBoards="),
             source("const eventMatches="),
             source("const filterChangeEvents="),
+            source("function renderCentral("),
             source("function renderFleet("),
             source("function changesFor("),
             source("function changesView("),
             f"const fixture={json.dumps(fixtures)};",
-            "const elements=Object.fromEntries(['#summary','#boards','#agents','#state'].map(key=>[key,{innerHTML:'',textContent:''}]));",
+            "const elements=Object.fromEntries(['#central-sections','#state'].map(key=>[key,{innerHTML:'',textContent:''}]));",
             "const document={querySelector:key=>elements[key]};",
-            "let filterNeedle='alpha';",
-            "renderFleet(fixture.fleet);",
+            "let filterNeedle='alpha',centralLabels=['personal'],fleetData={personal:fixture.fleet},fleetErrors={};",
+            "renderFleet();",
             "const originalChangesFor=changesFor;let changeEvents=[],changeSummary=null;",
             "changesFor=(events,since,generatedAt)=>{changeEvents=events;changeSummary=originalChangesFor(events,since,generatedAt);return changeSummary};",
             "changesView({events:fixture.events,event_returned:fixture.events.length,generated_at:'2030-01-02T12:00:00Z'},{since:'0'});",
-            "console.log(JSON.stringify({home:elements['#boards'].innerHTML,changeEvents,changeSummary}));",
+            "console.log(JSON.stringify({home:elements['#central-sections'].innerHTML,changeEvents,changeSummary}));",
         ]
     )
     completed = subprocess.run(
@@ -1069,6 +1152,218 @@ def valid_coordinator_config() -> dict:
             "rate_per_hour": 5,
         },
     }
+
+
+class FakeCentralFetcher:
+    def __init__(self, label: str, *, fail: bool = False) -> None:
+        self.config = dashboard.Config(
+            url=f"https://{label}.example/mcp",
+            token=f"secret-{label}",
+            home_board=f"{label}-home",
+            agent_name="viewer",
+            stale_seconds=300,
+            cache_seconds=5,
+            label=label,
+        )
+        self.fail = fail
+        self.saved: list[tuple[dict, str | None]] = []
+
+    async def fetch(self) -> dict:
+        if self.fail:
+            raise RuntimeError("central unavailable")
+        return {
+            "generated_at": "2030-01-01T00:00:00+00:00",
+            "pool_summary": {
+                "online": 1,
+                "busy": 0,
+                "available": 1,
+                "stale": 0,
+            },
+            "boards": [{"board_id": self.config.home_board}],
+            "agents": [],
+        }
+
+    async def fetch_board(self, board_id: str) -> dict:
+        if board_id != self.config.home_board:
+            raise KeyError(board_id)
+        return {"board": {"board_id": board_id}, "tickets": []}
+
+    async def fetch_config(self) -> dict:
+        return {"config": {"owner": self.config.label}}
+
+    async def save_config(self, value: dict, expected: str | None) -> dict:
+        self.saved.append((value, expected))
+        return {"ok": True, "concurrency": "cas"}
+
+
+def _serve_cache(cache: object) -> tuple[object, threading.Thread]:
+    server = dashboard.ThreadingHTTPServer(
+        ("127.0.0.1", 0), dashboard.make_handler(cache)
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server, thread
+
+
+def test_two_fake_central_aggregation_and_failure_isolation() -> None:
+    personal = FakeCentralFetcher("personal")
+    work = FakeCentralFetcher("work")
+    cache = dashboard.DashboardCache([personal, work], 60)
+    server, thread = _serve_cache(cache)
+    root = f"http://127.0.0.1:{server.server_port}"
+    try:
+        with urllib.request.urlopen(f"{root}/api/centrals") as response:
+            index = json.load(response)
+        with urllib.request.urlopen(f"{root}/api/fleet?central=personal") as response:
+            personal_result = json.load(response)
+        with urllib.request.urlopen(f"{root}/api/fleet?central=work") as response:
+            work_result = json.load(response)
+        work.fail = True
+        cache._fleets["work"]._expires_at = 0
+        with pytest.raises(urllib.error.HTTPError) as captured:
+            urllib.request.urlopen(f"{root}/api/fleet?central=work")
+        assert captured.value.code == 503
+        assert json.load(captured.value)["central"] == "work"
+        with urllib.request.urlopen(f"{root}/api/fleet?central=personal") as response:
+            isolated = json.load(response)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+    assert index == {"centrals": ["personal", "work"], "default": "personal"}
+    assert personal_result["central"] == "personal"
+    assert personal_result["boards"][0]["board_id"] == "personal-home"
+    assert work_result["central"] == "work"
+    assert work_result["boards"][0]["board_id"] == "work-home"
+    assert isolated["central"] == "personal"
+    assert "secret-personal" not in json.dumps(index)
+    assert "secret-work" not in json.dumps([personal_result, work_result])
+    assert "personal.example" not in json.dumps(index)
+
+
+def test_multi_central_param_routing_and_config_save_target() -> None:
+    personal = FakeCentralFetcher("personal")
+    work = FakeCentralFetcher("work")
+    cache = dashboard.DashboardCache([personal, work], 60)
+    server, thread = _serve_cache(cache)
+    root = f"http://127.0.0.1:{server.server_port}"
+    try:
+        with urllib.request.urlopen(f"{root}/api/fleet") as response:
+            default_result = json.load(response)
+        with urllib.request.urlopen(
+            f"{root}/api/board/work-home?central=work"
+        ) as response:
+            detail = json.load(response)
+        with urllib.request.urlopen(f"{root}/api/config?central=work") as response:
+            config = json.load(response)
+        request = urllib.request.Request(
+            f"{root}/api/config?central=work",
+            data=json.dumps(
+                {
+                    "config": valid_coordinator_config(),
+                    "expected_sha256": "a" * 64,
+                }
+            ).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(request) as response:
+            saved = json.load(response)
+        with pytest.raises(urllib.error.HTTPError) as captured:
+            urllib.request.urlopen(f"{root}/api/fleet?central=missing")
+        assert captured.value.code == 404
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+    assert default_result["central"] == "personal"
+    assert detail["central"] == "work"
+    assert detail["board"]["board_id"] == "work-home"
+    assert config == {"config": {"owner": "work"}, "central": "work"}
+    assert saved["central"] == "work"
+    assert personal.saved == []
+    assert work.saved == [(valid_coordinator_config(), "a" * 64)]
+
+
+def test_single_central_flags_and_response_shape_remain_compatible() -> None:
+    args = dashboard.parse_args(["--port", "8899"])
+    args.token_file = None
+    old = os.environ.get("ONBOARD_CENTRAL_TOKEN")
+    os.environ["ONBOARD_CENTRAL_TOKEN"] = "single-secret"
+    try:
+        configs = dashboard.load_central_configs(args)
+    finally:
+        if old is None:
+            os.environ.pop("ONBOARD_CENTRAL_TOKEN", None)
+        else:
+            os.environ["ONBOARD_CENTRAL_TOKEN"] = old
+    assert len(configs) == 1
+    assert configs[0].label == "default"
+    assert configs[0].url == dashboard.DEFAULT_URL
+    assert configs[0].home_board == dashboard.DEFAULT_HOME_BOARD
+
+    result = dashboard.DashboardCache(FakeCentralFetcher("only"), 60).get()
+    assert result["central"] == "only"
+    assert result["pool_summary"]["online"] == 1
+    assert "boards" in result and "agents" in result
+
+
+def test_centrals_file_and_tokens_require_0600(tmp_path: Path) -> None:
+    personal_token = tmp_path / "personal.token"
+    work_token = tmp_path / "work.token"
+    personal_token.write_text("personal-secret", encoding="utf-8")
+    work_token.write_text("work-secret", encoding="utf-8")
+    personal_token.chmod(0o600)
+    work_token.chmod(0o600)
+    central_file = tmp_path / "centrals.json"
+    central_file.write_text(
+        json.dumps(
+            [
+                {
+                    "label": "personal",
+                    "url": "https://personal.example/mcp",
+                    "token_path": "personal.token",
+                    "home_board": "personal-home",
+                },
+                {
+                    "label": "work",
+                    "url": "https://work.example/mcp",
+                    "token_path": "work.token",
+                    "home_board": "work-home",
+                },
+            ]
+        ),
+        encoding="utf-8",
+    )
+    central_file.chmod(0o600)
+    args = SimpleNamespace(
+        centrals=str(central_file),
+        url="ignored",
+        token_file=None,
+        home_board="ignored",
+        agent_name="viewer",
+        stale_seconds=300,
+        cache_seconds=5,
+    )
+
+    configs = dashboard.load_central_configs(args)
+    assert [(item.label, item.token) for item in configs] == [
+        ("personal", "personal-secret"),
+        ("work", "work-secret"),
+    ]
+
+    central_file.chmod(0o644)
+    with pytest.raises(SystemExit, match="centrals config must be a regular 0600 file"):
+        dashboard.load_central_configs(args)
+
+    central_file.chmod(0o600)
+    work_token.chmod(0o644)
+    with pytest.raises(
+        SystemExit, match="token file for central work must be a regular 0600 file"
+    ):
+        dashboard.load_central_configs(args)
 
 
 @pytest.mark.parametrize(
