@@ -273,13 +273,19 @@ def update_drop_evidence(
     previous: Mapping[str, Any],
     now: datetime,
     thresholds: Thresholds = Thresholds(),
-) -> tuple[list[dict[str, Any]], dict[str, int], list[dict[str, Any]]]:
+) -> tuple[
+    list[dict[str, Any]],
+    dict[str, int],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+]:
     """Build a bounded seven-day delta history from durable abandon counters.
 
     A first observation is only a baseline: a cumulative counter plus one latest
     timestamp cannot prove when or by whom every older drop happened.  Later
-    increases are recorded as observed deltas, which lets repeated drops of one
-    ticket reach the exact threshold without inventing history.
+    single-step increases are exact observations. Unknown baselines and
+    multi-step increases remain explicit uncertainty for a full seven-day
+    coverage window; they are never attributed to the latest holder.
     """
 
     raw_counters = previous.get("drop_counters", {})
@@ -320,6 +326,29 @@ def update_drop_evidence(
                     }
                 )
 
+    raw_uncertainty = previous.get("drop_uncertainty", [])
+    uncertainty: list[dict[str, Any]] = []
+    if isinstance(raw_uncertainty, list):
+        for entry in raw_uncertainty:
+            if not isinstance(entry, Mapping):
+                continue
+            entry_age = age_seconds(entry.get("observed_at"), now)
+            count = entry.get("count")
+            if (
+                entry_age is not None
+                and entry_age <= thresholds.repeat_abandon_window_seconds
+                and isinstance(count, int)
+                and not isinstance(count, bool)
+                and count > 0
+            ):
+                uncertainty.append(
+                    {
+                        "ticket_id": str(entry.get("ticket_id", "unknown")),
+                        "observed_at": str(entry["observed_at"]),
+                        "count": count,
+                    }
+                )
+
     findings: list[dict[str, Any]] = []
     counters: dict[str, int] = {}
     for ticket in tickets:
@@ -341,25 +370,32 @@ def update_drop_evidence(
             drop_age is not None
             and drop_age <= thresholds.repeat_abandon_window_seconds
         )
-        if prior is not None and current > prior and holder and is_recent:
-            history.append(
+        if prior is not None and current > prior and is_recent:
+            delta = current - prior
+            if delta == 1 and holder:
+                history.append(
+                    {
+                        "ticket_id": ticket_id,
+                        "holder_agent_id": str(holder),
+                        "observed_at": str(drop_at),
+                        "count": 1,
+                    }
+                )
+            else:
+                uncertainty.append(
+                    {
+                        "ticket_id": ticket_id,
+                        "observed_at": now.isoformat(),
+                        "count": delta,
+                    }
+                )
+        elif prior is None and current > 0:
+            uncertainty.append(
                 {
                     "ticket_id": ticket_id,
-                    "holder_agent_id": str(holder),
-                    "observed_at": str(drop_at),
-                    "count": current - prior,
+                    "observed_at": now.isoformat(),
+                    "count": current,
                 }
-            )
-        elif prior is None and current >= thresholds.repeat_abandon_count and is_recent:
-            findings.append(
-                _finding(
-                    "repeat-abandoner-history-incomplete",
-                    "warn",
-                    board_id,
-                    "A cumulative drop count reached the threshold, but the seven-day window cannot be proven from the first snapshot.",
-                    ticket_id=ticket_id,
-                    cumulative_dropped_claims=current,
-                )
             )
 
     # Deduplicate stable observations across cycles, then classify exact counts.
@@ -375,6 +411,13 @@ def update_drop_evidence(
     history = sorted(
         unique.values(),
         key=lambda item: (item["observed_at"], item["ticket_id"], item["holder_agent_id"]),
+    )
+    uncertainty = sorted(
+        {
+            (item["ticket_id"], item["observed_at"], item["count"]): item
+            for item in uncertainty
+        }.values(),
+        key=lambda item: (item["observed_at"], item["ticket_id"]),
     )
     counts = Counter()
     for entry in history:
@@ -392,7 +435,28 @@ def update_drop_evidence(
                     window_days=7,
                 )
             )
-    return findings, counters, history
+
+    exact_by_ticket = Counter()
+    for entry in history:
+        exact_by_ticket[entry["ticket_id"]] += entry["count"]
+    uncertain_by_ticket = Counter()
+    for entry in uncertainty:
+        uncertain_by_ticket[entry["ticket_id"]] += entry["count"]
+    for ticket_id, unknown_count in sorted(uncertain_by_ticket.items()):
+        possible = unknown_count + exact_by_ticket[ticket_id]
+        if possible >= thresholds.repeat_abandon_count:
+            findings.append(
+                _finding(
+                    "repeat-abandoner-history-incomplete",
+                    "warn",
+                    board_id,
+                    "Unknown drop timing or attribution could reach the repeat threshold; keep the limitation until seven-day coverage is complete.",
+                    ticket_id=ticket_id,
+                    possible_dropped_claims=possible,
+                    observation_window_days=7,
+                )
+            )
+    return findings, counters, history, uncertainty
 
 
 def _git(
@@ -651,6 +715,7 @@ def bound_findings_state(
     privacy_watermarks: Mapping[str, str] | None = None,
     drop_counters: Mapping[str, int] | None = None,
     drop_history: Sequence[Mapping[str, Any]] | None = None,
+    drop_uncertainty: Sequence[Mapping[str, Any]] | None = None,
     max_findings: int = MAX_FINDINGS,
     max_chars: int = MAX_STATE_CHARS - 200,
 ) -> dict[str, Any]:
@@ -661,6 +726,7 @@ def bound_findings_state(
     source_watermarks = dict(privacy_watermarks or {})
     source_counters = dict(drop_counters or {})
     source_history = [dict(item) for item in (drop_history or [])]
+    source_uncertainty = [dict(item) for item in (drop_uncertainty or [])]
     base = {
         "schema_version": SCHEMA_VERSION,
         "generated_at": generated_at.isoformat(),
@@ -670,10 +736,12 @@ def bound_findings_state(
             "privacy_watermarks": len(source_watermarks),
             "drop_counters": len(source_counters),
             "drop_history": len(source_history),
+            "drop_uncertainty": len(source_uncertainty),
         },
         "privacy_watermarks": {},
         "drop_counters": {},
         "drop_history": [],
+        "drop_uncertainty": [],
     }
     critical = [item for item in normalized if item.get("level") == "critical"]
     remaining = [item for item in normalized if item.get("level") != "critical"]
@@ -707,6 +775,22 @@ def bound_findings_state(
         if len(json.dumps(base, sort_keys=True, separators=(",", ":"))) > max_chars:
             base["drop_history"].pop()
             base["truncation"]["drop_history"] += 1
+            break
+    for item in sorted(
+        source_uncertainty,
+        key=lambda entry: (
+            str(entry.get("observed_at", "")),
+            str(entry.get("ticket_id", "")),
+        ),
+        reverse=True,
+    ):
+        base["drop_uncertainty"].append(item)
+        base["truncation"]["drop_uncertainty"] = (
+            len(source_uncertainty) - len(base["drop_uncertainty"])
+        )
+        if len(json.dumps(base, sort_keys=True, separators=(",", ":"))) > max_chars:
+            base["drop_uncertainty"].pop()
+            base["truncation"]["drop_uncertainty"] += 1
             break
     for key in sorted(source_counters):
         base["drop_counters"][key] = source_counters[key]
@@ -833,17 +917,19 @@ def analyze_cycle(
     watermarks_by_board: dict[str, dict[str, str]] = {}
     drop_counters_by_board: dict[str, dict[str, int]] = {}
     drop_history_by_board: dict[str, list[dict[str, Any]]] = {}
+    drop_uncertainty_by_board: dict[str, list[dict[str, Any]]] = {}
     for board_id, snapshot in snapshots.items():
         findings_by_board[board_id] = ticket_findings(board_id, snapshot, now)
         tickets = [
             row for row in snapshot.get("tickets", []) if isinstance(row, Mapping)
         ]
-        drop_findings, counters, history = update_drop_evidence(
+        drop_findings, counters, history, uncertainty = update_drop_evidence(
             board_id, tickets, previous.get(board_id, {}), now
         )
         findings_by_board[board_id].extend(drop_findings)
         drop_counters_by_board[board_id] = counters
         drop_history_by_board[board_id] = history
+        drop_uncertainty_by_board[board_id] = uncertainty
         prior_marks = previous.get(board_id, {}).get("privacy_watermarks", {})
         watermarks_by_board[board_id] = dict(prior_marks) if isinstance(prior_marks, Mapping) else {}
     for project in projects:
@@ -875,6 +961,7 @@ def analyze_cycle(
             privacy_watermarks=watermarks_by_board[board_id],
             drop_counters=drop_counters_by_board[board_id],
             drop_history=drop_history_by_board[board_id],
+            drop_uncertainty=drop_uncertainty_by_board[board_id],
         )
         for board_id, findings in findings_by_board.items()
     }

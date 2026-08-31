@@ -72,8 +72,25 @@ def test_repeat_abandoner_counts_three_recent_drops_on_one_ticket() -> None:
         "last_abandoned_by": "AI-repeat",
         "last_abandoned_at": ago(10),
     }
-    findings, counters, history = coordinator.update_drop_evidence(
-        "board-a", [ticket], {"drop_counters": {"TK-repeat": 0}}, NOW
+    previous = {
+        "drop_counters": {"TK-repeat": 2},
+        "drop_history": [
+            {
+                "ticket_id": "TK-repeat",
+                "holder_agent_id": "AI-repeat",
+                "observed_at": ago(30),
+                "count": 1,
+            },
+            {
+                "ticket_id": "TK-repeat",
+                "holder_agent_id": "AI-repeat",
+                "observed_at": ago(20),
+                "count": 1,
+            },
+        ],
+    }
+    findings, counters, history, uncertainty = coordinator.update_drop_evidence(
+        "board-a", [ticket], previous, NOW
     )
     repeats = [item for item in findings if item["kind"] == "repeat-abandoner"]
     assert repeats == [
@@ -88,14 +105,9 @@ def test_repeat_abandoner_counts_three_recent_drops_on_one_ticket() -> None:
         }
     ]
     assert counters == {"TK-repeat": 3}
-    assert history == [
-        {
-            "ticket_id": "TK-repeat",
-            "holder_agent_id": "AI-repeat",
-            "observed_at": ago(10),
-            "count": 3,
-        }
-    ]
+    assert len(history) == 3
+    assert all(item["count"] == 1 for item in history)
+    assert uncertainty == []
 
 
 def test_repeat_abandoner_first_snapshot_reports_unproven_window() -> None:
@@ -105,13 +117,103 @@ def test_repeat_abandoner_first_snapshot_reports_unproven_window() -> None:
         "last_abandoned_by": "AI-unknown-history",
         "last_abandoned_at": ago(10),
     }
-    findings, _, history = coordinator.update_drop_evidence(
+    findings, counters, history, uncertainty = coordinator.update_drop_evidence(
         "board-a", [ticket], {}, NOW
     )
     assert history == []
+    assert uncertainty == [
+        {
+            "ticket_id": "TK-baseline",
+            "observed_at": NOW.isoformat(),
+            "count": 3,
+        }
+    ]
     assert [item["kind"] for item in findings] == [
         "repeat-abandoner-history-incomplete"
     ]
+
+    # The limitation remains active on an unchanged second cycle.
+    previous = {
+        "drop_counters": counters,
+        "drop_history": history,
+        "drop_uncertainty": uncertainty,
+    }
+    findings2, _, _, uncertainty2 = coordinator.update_drop_evidence(
+        "board-a", [ticket], previous, NOW + timedelta(seconds=60)
+    )
+    assert [item["kind"] for item in findings2] == [
+        "repeat-abandoner-history-incomplete"
+    ]
+    assert uncertainty2 == uncertainty
+
+
+def test_baseline_two_then_three_keeps_incomplete_history() -> None:
+    ticket = {
+        "ticket_id": "TK-two-cycle",
+        "abandoned_count": 2,
+        "last_abandoned_by": "AI-latest",
+        "last_abandoned_at": ago(20),
+    }
+    _, counters, history, uncertainty = coordinator.update_drop_evidence(
+        "board-a", [ticket], {}, NOW
+    )
+    ticket["abandoned_count"] = 3
+    ticket["last_abandoned_at"] = ago(10)
+    findings, _, history2, uncertainty2 = coordinator.update_drop_evidence(
+        "board-a",
+        [ticket],
+        {
+            "drop_counters": counters,
+            "drop_history": history,
+            "drop_uncertainty": uncertainty,
+        },
+        NOW + timedelta(seconds=60),
+    )
+    assert [item["kind"] for item in findings] == [
+        "repeat-abandoner-history-incomplete"
+    ]
+    assert len(history2) == 1 and history2[0]["count"] == 1
+    assert uncertainty2[0]["count"] == 2
+
+
+def test_multi_count_delta_is_not_attributed_to_latest_holder() -> None:
+    ticket = {
+        "ticket_id": "TK-multi",
+        "abandoned_count": 3,
+        "last_abandoned_by": "AI-latest-only",
+        "last_abandoned_at": ago(10),
+    }
+    findings, _, history, uncertainty = coordinator.update_drop_evidence(
+        "board-a", [ticket], {"drop_counters": {"TK-multi": 0}}, NOW
+    )
+    assert history == []
+    assert uncertainty[0]["count"] == 3
+    assert [item["kind"] for item in findings] == [
+        "repeat-abandoner-history-incomplete"
+    ]
+
+
+def test_baseline_uncertainty_expires_after_full_observation_window() -> None:
+    ticket = {"ticket_id": "TK-covered", "abandoned_count": 3}
+    previous = {
+        "drop_counters": {"TK-covered": 3},
+        "drop_uncertainty": [
+            {
+                "ticket_id": "TK-covered",
+                "observed_at": NOW.isoformat(),
+                "count": 3,
+            }
+        ],
+    }
+    findings, _, history, uncertainty = coordinator.update_drop_evidence(
+        "board-a",
+        [ticket],
+        previous,
+        NOW + timedelta(days=7, seconds=1),
+    )
+    assert findings == []
+    assert history == []
+    assert uncertainty == []
 
 
 def _git(path: Path, *args: str) -> str:
