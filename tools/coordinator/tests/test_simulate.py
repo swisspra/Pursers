@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import json
 import sys
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -79,6 +81,20 @@ def history(events: list[dict[str, object]]) -> dict[str, object]:
 
 
 class SimulationTests(unittest.TestCase):
+    def test_live_capture_requires_exact_read_only_scope(self) -> None:
+        def token(scope: str) -> str:
+            payload = base64.urlsafe_b64encode(
+                json.dumps({"scope": scope}).encode()
+            ).decode().rstrip("=")
+            return f"header.{payload}.signature"
+
+        self.assertEqual(
+            simulate._capability_scopes(token("board:read")),
+            frozenset({"board:read"}),
+        )
+        with self.assertRaises(simulate.SimulationError):
+            simulate._capability_scopes(token("board:read board:write"))
+
     def test_durable_canceled_projection_closes_phantom_open_ticket(self) -> None:
         board = {
             "board_id": "alpha",
@@ -198,11 +214,103 @@ class SimulationTests(unittest.TestCase):
                     event(2, "TK-one", 120, "AI-a", "claimed"),
                 ]
             ),
-            starvation_seconds=60,
+            normal_starvation_seconds=60,
+            critical_starvation_seconds=60,
         )
         self.assertEqual(len(result["starvation_events"]), 1)
         self.assertEqual(result["starvation_events"][0]["ticket_id"], "TK-one")
         self.assertEqual(result["starvation_events"][0]["lead_seconds"], 60)
+
+    def test_starvation_waits_for_worker_join_after_threshold(self) -> None:
+        value = history(
+            [
+                event(1, "TK-one", 0, "AI-maker", "open"),
+                event(2, "TK-one", 120, "AI-a", "claimed"),
+            ]
+        )
+        value["boards"][0]["agents"] = [worker("worker-a", "AI-a")]
+        value["boards"][0]["agents"][0]["joined_at"] = at(100)
+
+        result = simulate.replay(
+            value,
+            normal_starvation_seconds=60,
+            critical_starvation_seconds=60,
+        )
+
+        finding = result["starvation_events"][0]
+        self.assertEqual(finding["detected_at"], BASE.timestamp() + 100)
+        self.assertEqual(finding["lead_seconds"], 20)
+
+    def test_starvation_waits_for_worker_release_after_threshold(self) -> None:
+        value = history(
+            [
+                event(1, "TK-busy", 0, "AI-maker", "open"),
+                event(2, "TK-busy", 1, "AI-a", "claimed"),
+                event(3, "TK-one", 2, "AI-maker", "open"),
+                event(
+                    4,
+                    "TK-busy",
+                    100,
+                    "AI-reviewer",
+                    "closed",
+                    submitted_by_agent_id="AI-a",
+                ),
+                event(5, "TK-one", 120, "AI-a", "claimed"),
+            ]
+        )
+        value["boards"][0]["agents"] = [worker("worker-a", "AI-a")]
+
+        result = simulate.replay(
+            value,
+            normal_starvation_seconds=60,
+            critical_starvation_seconds=60,
+        )
+
+        finding = next(
+            item
+            for item in result["starvation_events"]
+            if item["ticket_id"] == "TK-one"
+        )
+        self.assertEqual(finding["detected_at"], BASE.timestamp() + 100)
+        self.assertEqual(finding["lead_seconds"], 20)
+
+    def test_default_starvation_thresholds_are_priority_specific(self) -> None:
+        critical_value = history(
+            [
+                event(1, "TK-one", 0, "AI-maker", "open"),
+                event(2, "TK-one", 700, "AI-a", "claimed"),
+            ]
+        )
+        critical_value["boards"][0]["tickets"][0]["priority"] = "critical"
+        normal_value = history(
+            [
+                event(1, "TK-one", 0, "AI-maker", "open"),
+                event(2, "TK-one", 700, "AI-a", "claimed"),
+            ]
+        )
+
+        critical = simulate.replay(critical_value)
+        normal = simulate.replay(normal_value)
+
+        self.assertEqual(
+            critical["starvation_events"][0]["threshold_seconds"], 600
+        )
+        self.assertEqual(normal["starvation_events"], [])
+
+    def test_frozen_history_is_minimal_and_replays_identically(self) -> None:
+        value = history(
+            [
+                event(1, "TK-one", 0, "AI-maker", "open"),
+                event(2, "TK-one", 10, "AI-a", "claimed"),
+            ]
+        )
+        value["boards"][0]["tickets"][0]["description"] = "not replay input"
+
+        frozen = simulate.freeze_history(value)
+
+        self.assertEqual(frozen["schema_version"], 1)
+        self.assertNotIn("description", frozen["boards"][0]["tickets"][0])
+        self.assertEqual(simulate.replay(value), simulate.replay(frozen))
 
     def test_repeat_abandoner_is_deprioritized(self) -> None:
         result = simulate.replay(
@@ -294,8 +402,16 @@ class SimulationTests(unittest.TestCase):
                 ]
             )
         )
-        first = simulate.render_markdown(value, starvation_seconds=300)
-        second = simulate.render_markdown(value, starvation_seconds=300)
+        first = simulate.render_markdown(
+            value,
+            normal_starvation_seconds=1_800,
+            critical_starvation_seconds=600,
+        )
+        second = simulate.render_markdown(
+            value,
+            normal_starvation_seconds=1_800,
+            critical_starvation_seconds=600,
+        )
         self.assertEqual(first, second)
         self.assertIn("Agreement rate: **100.0%**", first)
 

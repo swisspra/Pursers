@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import json
 import os
 import sys
@@ -37,6 +38,72 @@ MAX_SNAPSHOT_ITEMS = 1_000
 MAX_RESPONSE_BYTES = 750_000
 MAX_CATCHUP_EVENTS = 1_000
 MAX_CATCHUP_PAGES = 100
+MAX_TICKET_RESOLUTIONS = 1_000
+NORMAL_STARVATION_SECONDS = 1_800
+CRITICAL_STARVATION_SECONDS = 600
+HISTORY_SCHEMA_VERSION = 1
+
+AGENT_REPLAY_FIELDS = (
+    "principal_id",
+    "agent_name",
+    "agent_id",
+    "joined_at",
+    "handed_off_at",
+    "dispatch_role",
+)
+TICKET_REPLAY_FIELDS = (
+    "ticket_id",
+    "status",
+    "priority",
+    "created_at",
+    "created_by_agent_id",
+    "created_by",
+    "claimed_at",
+    "claimed_by_agent_id",
+    "claimed_by",
+    "last_abandoned_at",
+    "last_abandoned_by_agent_id",
+    "last_abandoned_by",
+    "abandoned_count",
+    "submitted_at",
+    "submitted_by_agent_id",
+    "submitted_by",
+    "reviewed_at",
+    "reviewed_by_agent_id",
+    "reviewed_by",
+    "updated_at",
+    "canceled_at",
+    "canceled_by_agent_id",
+    "canceled_by",
+    "terminated_at",
+    "terminated_by_agent_id",
+    "terminated_by",
+)
+SUBMISSION_REPLAY_FIELDS = (
+    "submitted_at",
+    "submitted_by_agent_id",
+    "submitted_by",
+)
+REVIEW_REPLAY_FIELDS = (
+    "status_to",
+    "reviewed_at",
+    "reviewed_by_agent_id",
+    "reviewed_by",
+    "submitted_by_agent_id",
+    "submitted_by",
+)
+EVENT_REPLAY_FIELDS = (
+    "seq",
+    "ticket_id",
+    "payload_ref",
+    "kind",
+    "occurred_at",
+    "actor",
+    "status_to",
+    "last_abandoned_by",
+    "abandoned_count",
+    "submitted_by_agent_id",
+)
 
 
 class SimulationError(RuntimeError):
@@ -112,6 +179,30 @@ def _active_boards(registry: dict[str, Any], home_board: str) -> list[str]:
     return boards
 
 
+def _capability_scopes(token: str) -> frozenset[str]:
+    """Read the JWT scope claim; Central still performs signature verification."""
+    parts = token.split(".")
+    if len(parts) != 3:
+        raise SimulationError("live capture capability is not a JWT")
+    try:
+        payload = parts[1] + "=" * (-len(parts[1]) % 4)
+        claims = json.loads(base64.urlsafe_b64decode(payload).decode("utf-8"))
+    except (ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise SimulationError("live capture capability has an invalid payload") from exc
+    scope = claims.get("scope") if isinstance(claims, dict) else None
+    if isinstance(scope, str):
+        scopes = frozenset(scope.split())
+    elif isinstance(scope, list) and all(isinstance(item, str) for item in scope):
+        scopes = frozenset(scope)
+    else:
+        raise SimulationError("live capture capability has no valid scope claim")
+    if scopes != frozenset({"board:read"}):
+        raise SimulationError(
+            "live capture capability must be scoped exactly to board:read"
+        )
+    return scopes
+
+
 def _worker_seats(document: dict[str, Any]) -> dict[tuple[str, str], Any]:
     if document.get("schema_version") != 1:
         raise SimulationError("seat_registry schema_version must be 1")
@@ -136,6 +227,70 @@ def _worker_seats(document: dict[str, Any]) -> dict[tuple[str, str], Any]:
     return workers
 
 
+def _selected(value: Any, fields: Iterable[str]) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    return {field: value[field] for field in fields if field in value}
+
+
+def freeze_history(history: dict[str, Any]) -> dict[str, Any]:
+    """Strip live projections to the deterministic, credential-free replay input."""
+    boards: list[dict[str, Any]] = []
+    for board in history.get("boards", []):
+        if not isinstance(board, dict):
+            continue
+        tickets: list[dict[str, Any]] = []
+        for raw_ticket in board.get("tickets", []):
+            ticket = _selected(raw_ticket, TICKET_REPLAY_FIELDS)
+            if not ticket:
+                continue
+            if isinstance(raw_ticket.get("submission_history"), list):
+                ticket["submission_history"] = [
+                    _selected(item, SUBMISSION_REPLAY_FIELDS)
+                    for item in raw_ticket["submission_history"]
+                    if isinstance(item, dict)
+                ]
+            if isinstance(raw_ticket.get("review_history"), list):
+                ticket["review_history"] = [
+                    _selected(item, REVIEW_REPLAY_FIELDS)
+                    for item in raw_ticket["review_history"]
+                    if isinstance(item, dict)
+                ]
+            tickets.append(ticket)
+        boards.append(
+            {
+                "board_id": board.get("board_id"),
+                "agents": [
+                    _selected(item, AGENT_REPLAY_FIELDS)
+                    for item in board.get("agents", [])
+                    if isinstance(item, dict)
+                ],
+                "tickets": tickets,
+                "events": [
+                    _selected(item, EVENT_REPLAY_FIELDS)
+                    for item in board.get("events", [])
+                    if isinstance(item, dict)
+                ],
+                "coverage": dict(board.get("coverage", {})),
+                "warnings": [str(item) for item in board.get("warnings", [])],
+            }
+        )
+    return {
+        "schema_version": HISTORY_SCHEMA_VERSION,
+        "home_board": history.get("home_board"),
+        "boards": boards,
+        "worker_seats": [
+            _selected(
+                item,
+                ("principal_id", "agent_name", "board_mode"),
+            )
+            for item in history.get("worker_seats", [])
+            if isinstance(item, dict)
+        ],
+        "warnings": [str(item) for item in history.get("warnings", [])],
+    }
+
+
 class RawHistoryReader:
     """Non-joining transport that calls only Central read tools.
 
@@ -151,27 +306,24 @@ class RawHistoryReader:
         module = sys.modules.get(BoardClient.__module__)
         if module is None:
             raise SimulationError("pursers-client module is unavailable")
-        self._httpx2 = module.httpx2
         self._client_class = module.Client
         self._transport = module.streamable_http_client
         self._decode = BoardClient._decode
-        self.central_url = central_url
-        self.token = token
         self.board_id = board_id
         self.agent_name = agent_name
+        self._verified_client = BoardClient(
+            central_url,
+            token,
+            board_id,
+            agent_name=agent_name,
+        )
         self._stack: AsyncExitStack | None = None
         self._client: Any | None = None
 
     async def __aenter__(self) -> "RawHistoryReader":
         self._stack = AsyncExitStack()
-        http = await self._stack.enter_async_context(
-            self._httpx2.AsyncClient(
-                headers={"Authorization": f"Bearer {self.token}"},
-                timeout=self._httpx2.Timeout(10.0, read=None),
-                trust_env=False,
-            )
-        )
-        transport = self._transport(self.central_url, http_client=http)
+        http = await self._stack.enter_async_context(self._verified_client._http())
+        transport = self._transport(self._verified_client.url, http_client=http)
         self._client = await self._stack.enter_async_context(
             self._client_class(transport, mode="2026-07-28", cache=None)
         )
@@ -191,6 +343,7 @@ class RawHistoryReader:
             "board_snapshot",
             "board_state_get",
             "board_status",
+            "ticket_get",
         }
         if name not in allowed:
             raise SimulationError("history reader rejected a non-read tool")
@@ -207,6 +360,13 @@ class RawHistoryReader:
             "board_snapshot",
             {"limit": MAX_SNAPSHOT_ITEMS, "max_bytes": MAX_RESPONSE_BYTES},
         )
+
+    async def ticket(self, ticket_id: str) -> dict[str, Any]:
+        result = await self._call("ticket_get", {"ticket_id": ticket_id})
+        ticket = result.get("ticket")
+        if not isinstance(ticket, dict):
+            raise SimulationError("ticket_get returned no ticket projection")
+        return ticket
 
     async def catchup(self) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         cursor = 0
@@ -269,12 +429,12 @@ async def collect_live_history(
     home_board: str,
     agent_name: str,
 ) -> dict[str, Any]:
+    _capability_scopes(token)
     warnings: list[str] = [
         "Journal visibility is per agent; invisible and self-authored events "
         "are not replayed.",
-        "ack=false preserves the durable cursor, but a write-scoped capability "
-        "may still update compatibility activity; strict audit runs require a "
-        "board:read-only capability.",
+        "Live capture used a capability scoped exactly to board:read; "
+        "board_catchup ran with ack=false.",
     ]
     async with RawHistoryReader(
         central_url, token, home_board, agent_name
@@ -307,20 +467,41 @@ async def collect_live_history(
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                events = []
-                coverage = {
-                    "pages": 0,
-                    "scanned_events": 0,
-                    "visible_events": 0,
-                    "latest_cursor": int(snapshot.get("latest_seq", 0)),
-                    "compacted_through": 0,
-                    "resync_required": False,
-                    "ack": False,
-                }
-                board_warnings.append(
-                    f"catchup unavailable ({type(exc).__name__}); replay uses "
-                    "durable ticket projections only."
+                raise SimulationError(
+                    f"{board_id}: board_catchup unavailable "
+                    f"({type(exc).__name__})"
+                ) from exc
+            tickets = [
+                item
+                for item in snapshot.get("tickets", [])
+                if isinstance(item, dict)
+            ]
+            projected_ids = {
+                str(item["ticket_id"])
+                for item in tickets
+                if isinstance(item.get("ticket_id"), str)
+            }
+            referenced_ids = {
+                ticket_id
+                for event in events
+                if (ticket_id := _ticket_id(event)) is not None
+            }
+            missing_ids = sorted(referenced_ids - projected_ids)
+            if len(missing_ids) > MAX_TICKET_RESOLUTIONS:
+                raise SimulationError(
+                    f"{board_id}: referenced ticket resolution exceeds bound"
                 )
+            for ticket_id in missing_ids:
+                try:
+                    tickets.append(await reader.ticket(ticket_id))
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    raise SimulationError(
+                        f"{board_id}: ticket projection unavailable "
+                        f"({type(exc).__name__})"
+                    ) from exc
+            coverage["resolved_ticket_projections"] = len(missing_ids)
         omitted = snapshot.get("omitted_counts", {})
         if snapshot.get("truncated"):
             board_warnings.append(
@@ -335,7 +516,7 @@ async def collect_live_history(
             {
                 "board_id": board_id,
                 "agents": snapshot.get("agents", []),
-                "tickets": snapshot.get("tickets", []),
+                "tickets": tickets,
                 "events": events,
                 "coverage": coverage,
                 "warnings": board_warnings,
@@ -597,9 +778,14 @@ def _ticket_rank(item: dict[str, Any]) -> tuple[Any, ...]:
     )
 
 
-def replay(history: dict[str, Any], *, starvation_seconds: int = 300) -> dict[str, Any]:
-    if starvation_seconds < 0:
-        raise SimulationError("starvation_seconds must be non-negative")
+def replay(
+    history: dict[str, Any],
+    *,
+    normal_starvation_seconds: int = NORMAL_STARVATION_SECONDS,
+    critical_starvation_seconds: int = CRITICAL_STARVATION_SECONDS,
+) -> dict[str, Any]:
+    if normal_starvation_seconds < 0 or critical_starvation_seconds < 0:
+        raise SimulationError("starvation thresholds must be non-negative")
     boards = history.get("boards")
     if not isinstance(boards, list) or not boards:
         raise SimulationError("history must contain at least one board")
@@ -710,6 +896,10 @@ def replay(history: dict[str, Any], *, starvation_seconds: int = 300) -> dict[st
             ),
         )
 
+    def eligible_since(worker: Worker, board_id: str) -> float:
+        seat = worker.seats[board_id]
+        return max(worker.available_since, seat.joined_at, worker.known_worker_at)
+
     for event in all_events:
         when = _epoch(event.get("occurred_at"))
         board_id = str(event["board_id"])
@@ -741,11 +931,27 @@ def replay(history: dict[str, Any], *, starvation_seconds: int = 300) -> dict[st
                 continue
             age = when - float(opened["opened_at"])
             eligible = candidates(str(opened["board_id"]), when)
-            if age >= starvation_seconds and eligible:
-                detected_at = float(opened["opened_at"]) + starvation_seconds
+            threshold = (
+                critical_starvation_seconds
+                if opened.get("priority") == "critical"
+                else normal_starvation_seconds
+            )
+            if age >= threshold and eligible:
+                first_eligible_at = min(
+                    eligible_since(worker, str(opened["board_id"]))
+                    for worker in eligible
+                )
+                detected_at = max(
+                    float(opened["opened_at"]) + threshold,
+                    first_eligible_at,
+                )
+                if detected_at > when:
+                    continue
                 starvation[open_key] = {
                     "board_id": opened["board_id"],
                     "ticket_id": opened["ticket_id"],
+                    "priority": opened.get("priority", "medium"),
+                    "threshold_seconds": threshold,
                     "detected_at": detected_at,
                     "observed_at": when,
                     "idle_worker": eligible[0].label,
@@ -815,6 +1021,12 @@ def replay(history: dict[str, Any], *, starvation_seconds: int = 300) -> dict[st
                 actual.known_worker_at = min(actual.known_worker_at, when)
                 actual.observed_claimer = True
                 actual.busy_ticket = key
+            finding = starvation.get(key)
+            if finding is not None:
+                finding["claimed_at"] = when
+                finding["lead_seconds"] = max(
+                    0.0, when - float(finding["detected_at"])
+                )
             open_tickets.pop(key, None)
         elif status_to in RELEASE_STATES:
             # Submitted work leaves the open queue but still occupies its seat
@@ -872,7 +1084,12 @@ def replay(history: dict[str, Any], *, starvation_seconds: int = 300) -> dict[st
     }
 
 
-def render_markdown(result: dict[str, Any], *, starvation_seconds: int) -> str:
+def render_markdown(
+    result: dict[str, Any],
+    *,
+    normal_starvation_seconds: int,
+    critical_starvation_seconds: int,
+) -> str:
     rate = result.get("agreement_rate")
     rate_text = "N/A" if rate is None else f"{100 * float(rate):.1f}%"
     delta = result.get("mean_start_delta_seconds")
@@ -886,18 +1103,23 @@ def render_markdown(result: dict[str, Any], *, starvation_seconds: int) -> str:
         f"({result['agreement_count']}/{result['evaluable_claim_count']} evaluable claims)",
         f"- Visible claim events: **{result['claim_count']}**",
         f"- Mean earliest-start delta: **{delta_text}**",
-        f"- Starvation findings at {starvation_seconds}s: **{len(result['starvation_events'])}**",
+        "- Starvation findings at "
+        f"{critical_starvation_seconds}s critical / "
+        f"{normal_starvation_seconds}s normal: "
+        f"**{len(result['starvation_events'])}**",
         f"- Active boards replayed: **{len(result['boards'])}**",
         "",
         "## Coverage",
         "",
-        "| Board | Pages | Scanned | Visible | Latest cursor | Compacted through | Resync gap |",
-        "| --- | ---: | ---: | ---: | ---: | ---: | --- |",
+        "| Board | Pages | Scanned | Visible | Resolved tickets | Latest cursor "
+        "| Compacted through | Resync gap |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
     ]
     for row in result["coverage"]:
         lines.append(
             f"| {row['board_id']} | {row.get('pages', 0)} | "
             f"{row.get('scanned_events', 0)} | {row.get('visible_events', 0)} | "
+            f"{row.get('resolved_ticket_projections', 0)} | "
             f"{row.get('latest_cursor', 0)} | {row.get('compacted_through', 0)} | "
             f"{'yes' if row.get('resync_required') else 'no'} |"
         )
@@ -943,13 +1165,15 @@ def render_markdown(result: dict[str, Any], *, starvation_seconds: int) -> str:
     else:
         lines.extend(
             [
-                "| Ticket | Detectable at | First observed at | Idle worker | Lead |",
-                "| --- | --- | --- | --- | ---: |",
+                "| Ticket | Threshold | Detectable at | First observed at | "
+                "Idle worker | Lead |",
+                "| --- | ---: | --- | --- | --- | ---: |",
             ]
         )
         for item in result["starvation_events"]:
             lines.append(
                 f"| {item['board_id']}/{item['ticket_id']} | "
+                f"{item['threshold_seconds']}s | "
                 f"{_iso(item['detected_at'])} | {_iso(item['observed_at'])} | "
                 f"{item['idle_worker']} | {float(item['lead_seconds']):.1f}s |"
             )
@@ -995,22 +1219,64 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--token-env",
         default="ONBOARD_CENTRAL_TOKEN",
-        help="environment variable containing the capability; its value is never printed",
+        help=(
+            "environment variable containing the capability; required for a "
+            "live capture and never printed"
+        ),
     )
     parser.add_argument("--output", type=Path)
-    parser.add_argument("--starvation-seconds", type=int, default=300)
+    parser.add_argument("--history-input", type=Path)
+    parser.add_argument("--history-output", type=Path)
+    parser.add_argument(
+        "--normal-starvation-seconds",
+        type=int,
+        default=NORMAL_STARVATION_SECONDS,
+    )
+    parser.add_argument(
+        "--critical-starvation-seconds",
+        type=int,
+        default=CRITICAL_STARVATION_SECONDS,
+    )
     return parser
 
 
 async def _execute(args: argparse.Namespace) -> str:
-    token = os.environ.get(args.token_env, "")
-    if not token:
-        raise SimulationError(f"capability environment variable {args.token_env!r} is empty")
-    history = await collect_live_history(
-        args.central_url, token, args.home_board, args.agent_name
+    if args.history_input is not None:
+        try:
+            loaded = json.loads(args.history_input.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise SimulationError("history input is not valid JSON") from exc
+        if not isinstance(loaded, dict):
+            raise SimulationError("history input must be a JSON object")
+        history = freeze_history(loaded)
+    else:
+        token = os.environ.get(args.token_env, "")
+        if not token:
+            raise SimulationError(
+                f"capability environment variable {args.token_env!r} is empty"
+            )
+        history = freeze_history(
+            await collect_live_history(
+                args.central_url, token, args.home_board, args.agent_name
+            )
+        )
+    result = replay(
+        history,
+        normal_starvation_seconds=args.normal_starvation_seconds,
+        critical_starvation_seconds=args.critical_starvation_seconds,
     )
-    result = replay(history, starvation_seconds=args.starvation_seconds)
-    return render_markdown(result, starvation_seconds=args.starvation_seconds)
+    if args.history_output is not None:
+        if args.history_output == args.output:
+            raise SimulationError("history and report output paths must differ")
+        args.history_output.write_text(
+            json.dumps(history, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+    return render_markdown(
+        result,
+        normal_starvation_seconds=args.normal_starvation_seconds,
+        critical_starvation_seconds=args.critical_starvation_seconds,
+    )
 
 
 def main(argv: Iterable[str] | None = None) -> int:
