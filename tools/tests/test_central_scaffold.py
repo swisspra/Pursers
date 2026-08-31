@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import plistlib
 import shlex
 import socket
 import stat
+import subprocess
 from pathlib import Path
 
 from tools import central_scaffold
@@ -73,8 +75,10 @@ def test_init_creates_secret_free_layout_permissions_and_runbook(
 
     assert "RUNBOOK" in output
     for required in (
+        "generating JWKS/keys",
         "Generate JWKS/keys",
         "Mint principal tokens",
+        "python <OPERATOR_PRIVATE_DIR>/jwt_provision.py",
         "Fill profile.env",
         "fresh venv",
         "launchctl bootstrap",
@@ -83,6 +87,8 @@ def test_init_creates_secret_free_layout_permissions_and_runbook(
         "board_move.py import",
     ):
         assert required in output
+    assert "<JWT_PROVISION_TOOL> init" not in output
+    assert "<JWT_PROVISION_TOOL> mint" not in output
     assert "/" + "Users/" not in output
 
 
@@ -154,6 +160,57 @@ def test_init_refuses_existing_root_without_touching_it(
     assert "refusing to initialize an existing root" in capsys.readouterr().err
 
 
+def test_init_refuses_dangling_symlink_without_creating_target(
+    tmp_path: Path, capsys
+) -> None:
+    target = tmp_path / "missing-target"
+    root = tmp_path / "dangling-root"
+    root.symlink_to(target, target_is_directory=True)
+
+    assert central_scaffold.main(
+        [
+            "init",
+            "--root",
+            str(root),
+            "--name",
+            "com.pursers.dangling",
+            "--port",
+            str(_free_port()),
+        ]
+    ) == 2
+
+    assert root.is_symlink()
+    assert not target.exists()
+    assert "must not be symlinks" in capsys.readouterr().err
+
+
+def test_init_refuses_symlinked_parent_without_creating_redirected_root(
+    tmp_path: Path, capsys
+) -> None:
+    target_parent = tmp_path / "real-parent"
+    target_parent.mkdir()
+    linked_parent = tmp_path / "linked-parent"
+    linked_parent.symlink_to(target_parent, target_is_directory=True)
+    root = linked_parent / "new-central"
+
+    assert central_scaffold.main(
+        [
+            "init",
+            "--root",
+            str(root),
+            "--name",
+            "com.pursers.redirected",
+            "--port",
+            str(_free_port()),
+        ]
+    ) == 2
+
+    assert linked_parent.is_symlink()
+    assert not root.exists()
+    assert not (target_parent / "new-central").exists()
+    assert "must not be symlinks" in capsys.readouterr().err
+
+
 def test_init_refuses_nested_instance_root(tmp_path: Path, capsys) -> None:
     parent = _init(tmp_path, capsys)
     nested = parent / "data" / "another-central"
@@ -216,3 +273,74 @@ def test_root_with_spaces_produces_a_sourceable_profile(
     assert values["CENTRAL_JWKS_PATH"] == str(root / "jwt" / "jwks.json")
     launcher = (root / "launch-central.sh").read_text()
     assert shlex.quote(str(root / "profile.env")) in launcher
+
+
+def test_generated_install_command_resolves_current_central_and_client_wheels(
+    tmp_path: Path, capsys
+) -> None:
+    checkout = Path(__file__).resolve().parents[2]
+    wheels = tmp_path / "wheels"
+    wheels.mkdir()
+    for package in ("central", "client"):
+        subprocess.run(
+            [
+                "uv",
+                "build",
+                "--wheel",
+                "--out-dir",
+                str(wheels),
+                str(checkout / "packages" / package),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    central_wheel = next(wheels.glob("pursers_central-*.whl"))
+    client_wheel = next(wheels.glob("pursers_client-*.whl"))
+    root = _init(tmp_path, capsys, label="com.pursers.install")
+    profile = root / "profile.env"
+    replacements = {
+        "PURSERS_CENTRAL_WHEEL=FILL-ME": (
+            f"PURSERS_CENTRAL_WHEEL={shlex.quote(str(central_wheel))}"
+        ),
+        "PURSERS_CENTRAL_WHEEL_SHA256=FILL-ME": (
+            "PURSERS_CENTRAL_WHEEL_SHA256="
+            + hashlib.sha256(central_wheel.read_bytes()).hexdigest()
+        ),
+        "PURSERS_CLIENT_WHEEL=FILL-ME": (
+            f"PURSERS_CLIENT_WHEEL={shlex.quote(str(client_wheel))}"
+        ),
+        "PURSERS_CLIENT_WHEEL_SHA256=FILL-ME": (
+            "PURSERS_CLIENT_WHEEL_SHA256="
+            + hashlib.sha256(client_wheel.read_bytes()).hexdigest()
+        ),
+    }
+    content = profile.read_text()
+    for old, new in replacements.items():
+        content = content.replace(old, new)
+    profile.write_text(content)
+
+    command = central_scaffold.runtime_install_command(str(root))
+    subprocess.run(
+        ["/bin/sh", "-c", command], check=True, capture_output=True, text=True
+    )
+    verify = subprocess.run(
+        [
+            str(root / ".venv" / "bin" / "python"),
+            "-c",
+            "import pursers_central, pursers_client",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert verify.returncode == 0
+
+
+def test_jwt_runbook_matches_established_no_argument_template_interface() -> None:
+    commands = central_scaffold.runbook("com.pursers.jwt")
+    jwt_text = "\n".join(commands[:2])
+    assert "ISSUER, AUDIENCE, ROOT, and SEATS" in jwt_text
+    assert "python <OPERATOR_PRIVATE_DIR>/jwt_provision.py" in jwt_text
+    assert " init " not in jwt_text
+    assert " mint " not in jwt_text

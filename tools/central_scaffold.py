@@ -29,8 +29,6 @@ PLACEHOLDER = "FILL-ME"
 WHEEL_COMPONENTS = (
     "PURSERS_CENTRAL",
     "PURSERS_CLIENT",
-    "PURSERS_PERSONAL",
-    "PURSERS_WAIT_BRIDGE",
 )
 
 
@@ -72,7 +70,11 @@ def _absolute_root(value: str | Path) -> Path:
     raw = Path(value).expanduser()
     if not raw.is_absolute():
         raise ScaffoldError("root must be an absolute path")
-    return raw.resolve(strict=False)
+    root = Path(os.path.abspath(os.fspath(raw)))
+    for candidate in (root, *root.parents):
+        if os.path.lexists(candidate) and candidate.is_symlink():
+            raise ScaffoldError("root and its existing parents must not be symlinks")
+    return root
 
 
 def _instance_ancestor(path: Path) -> Path | None:
@@ -136,10 +138,12 @@ def _jwt_readme() -> bytes:
         "This directory intentionally contains no key or token material after init.\n"
         "The operator must create an RSA issuer key and a public JWKS here. Keep the\n"
         "private key mode 0600, keep tokens outside this scaffold, and never commit\n"
-        "either. The established instance used the tool filename `jwt_provision.py`\n"
-        "and the output filenames `issuer_key.pem` and `jwks.json`, plus individual\n"
-        "`.jwt` files under `tokens/`; those names are historical guidance only. No\n"
-        "instance path or file is read or copied by this scaffold.\n"
+        "either. The established `jwt_provision.py` is a no-argument template: copy\n"
+        "it into an operator-private directory, edit its ISSUER, AUDIENCE, ROOT, and\n"
+        "SEATS constants, then run that private copy once. That one run creates the\n"
+        "output filenames `issuer_key.pem` and `jwks.json`, plus individual `.jwt`\n"
+        "files under `tokens/`, without printing token values. No instance path or\n"
+        "file is read or copied by this scaffold.\n"
     ).encode("utf-8")
 
 
@@ -172,29 +176,44 @@ def _plist(root: Path, label: str) -> bytes:
     return plistlib.dumps(document, fmt=plistlib.FMT_XML, sort_keys=True)
 
 
+def runtime_install_command(root: str = "<INSTANCE_ROOT>") -> str:
+    profile = f"{root}/{PROFILE}"
+    python = f"{root}/.venv/bin/python"
+    central_digest = '$(shasum -a 256 "$PURSERS_CENTRAL_WHEEL" | cut -d\' \' -f1)'
+    client_digest = '$(shasum -a 256 "$PURSERS_CLIENT_WHEEL" | cut -d\' \' -f1)'
+    return (
+        f"set -a; . {shlex.quote(profile)}; set +a; "
+        f'test "{central_digest}" = "$PURSERS_CENTRAL_WHEEL_SHA256" && '
+        f'test "{client_digest}" = "$PURSERS_CLIENT_WHEEL_SHA256" && '
+        f"python3 -m venv {shlex.quote(f'{root}/.venv')} && "
+        f"{shlex.quote(python)} -m pip install "
+        '"$PURSERS_CENTRAL_WHEEL" "$PURSERS_CLIENT_WHEEL"'
+    )
+
+
 def runbook(label: str) -> list[str]:
     generic_root = "<INSTANCE_ROOT>"
     plist = f"{generic_root}/{label}.plist"
     return [
-        "Generate JWKS/keys: python <JWT_PROVISION_TOOL> init "
-        f"--issuer-key {generic_root}/jwt/issuer_key.pem "
-        f"--jwks {generic_root}/jwt/jwks.json",
-        "Mint principal tokens: python <JWT_PROVISION_TOOL> mint "
-        f"--issuer-key {generic_root}/jwt/issuer_key.pem "
-        "--principal <PRINCIPAL_ID> --output <TOKEN_FILE>",
+        "Prepare the no-argument JWT template before generating JWKS/keys: cp "
+        "<TOOLS_DIR>/jwt_provision.py <OPERATOR_PRIVATE_DIR>/jwt_provision.py && "
+        "<EDITOR> <OPERATOR_PRIVATE_DIR>/jwt_provision.py # set ISSUER, AUDIENCE, "
+        "ROOT, and SEATS",
+        "Generate JWKS/keys and Mint principal tokens in the supported single "
+        "no-argument run: python <OPERATOR_PRIVATE_DIR>/jwt_provision.py",
         f"Fill profile.env: <EDITOR> {generic_root}/{PROFILE}",
-        "Install verified wheels into a fresh venv: python3 -m venv "
-        f"{generic_root}/.venv && shasum -a 256 -c <SHA256SUMS_FILE> && "
-        f"{generic_root}/.venv/bin/python -m pip install <WHEEL_FILES>",
+        "Install the dependency-compatible Central/client wheels into a fresh "
+        f"venv: {runtime_install_command()}",
         "Load the launchd plist: cp "
         f"{plist} ~/Library/LaunchAgents/{label}.plist && launchctl bootstrap "
         f"gui/$(id -u) ~/Library/LaunchAgents/{label}.plist",
         "Provision seats with seat_admin: ONBOARD_CENTRAL_URL=<CENTRAL_URL> "
-        'ONBOARD_CENTRAL_TOKEN="$(< <ADMIN_TOKEN_FILE>)" python '
+        'ONBOARD_CENTRAL_TOKEN="$(cat <ADMIN_TOKEN_FILE>)" '
+        f"{generic_root}/.venv/bin/python "
         "<TOOLS_DIR>/wait-bridge/seat_admin.py add --name <SEAT_NAME> "
         "--principal <PRINCIPAL_ID> --role <ROLE> --boards registry "
         "--token-path <SEAT_TOKEN_FILE>",
-        "Import a board with board_move: python "
+        f"Import a board with board_move: {generic_root}/.venv/bin/python "
         "<TOOLS_DIR>/board_move/board_move.py import "
         f"--data-dir {generic_root}/data --archive <BOARD_ARCHIVE> "
         "--principal-map <OLD_PRINCIPAL>=<NEW_PRINCIPAL> --require-full-map --commit",
@@ -216,7 +235,7 @@ def init_instance(root_value: str | Path, name: str, port_value: int) -> Path:
         raise ScaffoldError(
             "refusing to initialize inside an existing instance root"
         )
-    if root.exists() or root.is_symlink():
+    if os.path.lexists(root):
         raise ScaffoldError("refusing to initialize an existing root")
     if not _real_directory(root.parent):
         raise ScaffoldError("root parent must be an existing real directory")
