@@ -64,4 +64,9 @@ approve/reject verdict. Tests run in a write-denied project on macOS or a
 disposable project copy elsewhere. Self-authored or provenance-free
 submissions, invalid verdicts, and rate-limited reviews emit `FINDING
 reviewer-runtime` on stderr and are never approved. A light reviewer skips
-standard and heavy tickets.
+standard and heavy tickets. Every verdict is bound to the bounded latest
+submission's `submitted_at`, author principal, and deterministic payload digest;
+if a worker resubmits while the model is reviewing, that verdict is discarded
+and the new revision remains eligible for a fresh pass. The mode-`0600` JSONL
+log emits matching `review_started` and `review_finished` lifecycle records with
+`board_id`, `ticket_id`, and the revision digest for bounded local dashboards.

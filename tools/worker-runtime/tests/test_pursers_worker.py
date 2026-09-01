@@ -1018,6 +1018,92 @@ def test_fake_llm_reviewer_approve_reject_and_garbage(
         }
 
 
+def test_reviewer_refuses_verdict_when_submission_changes_during_review() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        board = FakeBoard()
+        board.tickets["TK-race"] = {
+            "ticket_id": "TK-race",
+            "status": "submitted",
+            "tags": ["tier:light"],
+            "submitted_at": "submission-1",
+            "submitted_by_principal_id": "PR-worker",
+            "submission_history": [
+                {
+                    "summary": "revision one",
+                    "notes": "test_output: first",
+                    "submitted_at": "submission-1",
+                    "submitted_by_principal_id": "PR-worker",
+                }
+            ],
+        }
+
+        class ResubmittingLLM:
+            async def complete(
+                self, _messages: list[dict[str, Any]], _tools: list[dict[str, Any]]
+            ) -> dict[str, Any]:
+                await board.submit(
+                    "board-one",
+                    "TK-race",
+                    {"summary": "revision two", "notes": "test_output: second"},
+                )
+                return tool_call(
+                    "approve-stale",
+                    "submit_review",
+                    {
+                        "verdict": "approve",
+                        "review_notes": "Verified revision one.",
+                    },
+                )
+
+        class ApprovingLLM:
+            async def complete(
+                self, _messages: list[dict[str, Any]], _tools: list[dict[str, Any]]
+            ) -> dict[str, Any]:
+                return tool_call(
+                    "approve-current",
+                    "submit_review",
+                    {
+                        "verdict": "approve",
+                        "review_notes": "Verified revision two.",
+                    },
+                )
+
+        selected = config(root, "http://unused", role="reviewer")
+        reviewer = worker_module.Reviewer(
+            selected,
+            board,
+            ResubmittingLLM(),
+            worker_module.SessionLog(selected.log_file),
+            directive="STATIC REVIEWER",
+        )
+        first = asyncio.run(
+            reviewer.run_review("board-one", board.tickets["TK-race"], root)
+        )
+
+        assert first == "skipped"
+        assert board.reviews == []
+        assert board.tickets["TK-race"]["status"] == "submitted"
+        assert board.tickets["TK-race"]["summary"] == "revision two"
+        assert "submission_revision_changed" in selected.log_file.read_text()
+
+        reviewer.llm = ApprovingLLM()
+        second = asyncio.run(
+            reviewer.run_review("board-one", board.tickets["TK-race"], root)
+        )
+        assert second == "approve"
+        assert board.tickets["TK-race"]["status"] == "closed"
+        assert [review["review_notes"] for review in board.reviews] == [
+            "Verified revision two."
+        ]
+        log_events = [
+            json.loads(line)["event"]
+            for line in selected.log_file.read_text().splitlines()
+        ]
+        assert log_events.count("review_started") == 2
+        assert log_events.count("review_finished") == 2
+
+
 def test_reviewer_self_review_probe_skips_before_calling_llm() -> None:
     class NoCallLLM:
         async def complete(self, *_args: Any) -> dict[str, Any]:

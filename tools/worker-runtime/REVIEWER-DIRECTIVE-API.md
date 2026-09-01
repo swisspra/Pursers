@@ -13,6 +13,10 @@ Rules:
 - Apply the configured tier ceiling. Do not review a ticket above it.
 - Never review work authored by your authenticated principal. The runtime also
   enforces this before the model runs and again immediately before the API call.
+- Your verdict applies only to the exact latest submission included in the
+  ticket context. The runtime re-fetches and compares its timestamp, author,
+  and bounded payload digest before review; a concurrent resubmission makes the
+  verdict stale and it is skipped rather than applied to the new revision.
 - End with exactly one `submit_review` tool call. Use `approve` only when the
   evidence satisfies the ticket and every required field. Include concrete
   `review_notes` for both verdicts. A `reject` verdict must include actionable

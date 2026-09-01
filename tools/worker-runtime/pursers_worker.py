@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 import shlex
@@ -787,6 +788,24 @@ def review_context(ticket: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def submission_revision(ticket: dict[str, Any]) -> tuple[str, str, str] | None:
+    """Return the stable identity of the exact bounded submission being reviewed."""
+    latest = review_context(ticket)["latest_submission"]
+    submitted_at = latest["submitted_at"]
+    principal_id = latest["submitted_by_principal_id"]
+    if not submitted_at or not principal_id:
+        return None
+    digest = hashlib.sha256(
+        json.dumps(
+            latest,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    return submitted_at, principal_id, digest
+
+
 def _readonly_command(command: str) -> tuple[list[str], bool]:
     """Return argv and whether it must run in a disposable project copy."""
     try:
@@ -1311,11 +1330,41 @@ class Reviewer:
         self, board_id: str, ticket: dict[str, Any], work_dir: Path
     ) -> str:
         ticket_id = str(ticket["ticket_id"])
+        reviewed_revision = submission_revision(ticket)
+        if reviewed_revision is None:
+            self._finding(
+                "submission_revision_missing",
+                board_id,
+                ticket_id,
+                "latest submission lacks stable submitted_at or principal provenance",
+            )
+            return "skipped"
+        submitted_at, submitted_by_principal_id, revision_digest = reviewed_revision
+        self.log.write(
+            "review_started",
+            board_id=board_id,
+            ticket_id=ticket_id,
+            submitted_at=submitted_at,
+            submitted_by_principal_id=submitted_by_principal_id,
+            submission_digest=revision_digest,
+        )
+
+        def finished(outcome: str) -> str:
+            self.log.write(
+                "review_finished",
+                board_id=board_id,
+                ticket_id=ticket_id,
+                submitted_at=submitted_at,
+                submission_digest=revision_digest,
+                outcome=outcome,
+            )
+            return outcome
+
         messages = self.messages(board_id, ticket, work_dir)
         try:
             for _ in range(self.config.max_iterations):
                 if self.stop.is_set():
-                    return "stopped"
+                    return finished("stopped")
                 message = await self.llm.complete(messages, REVIEWER_TOOLS)
                 messages.append({"role": "assistant", **message})
                 calls = message.get("tool_calls") or []
@@ -1327,7 +1376,7 @@ class Reviewer:
                             ticket_id,
                             "model returned text instead of a structured tool call",
                         )
-                        return "skipped"
+                        return finished("skipped")
                     continue
                 for call in calls:
                     function = call.get("function", {})
@@ -1346,7 +1395,7 @@ class Reviewer:
                                 ticket_id,
                                 str(exc),
                             )
-                            return "skipped"
+                            return finished("skipped")
                     messages.append(
                         {
                             "role": "tool",
@@ -1358,10 +1407,21 @@ class Reviewer:
                         continue
                     current = await self.board.ticket(board_id, ticket_id)
                     principal_id = await self.board.principal_id(board_id)
-                    submitted_by = _submission_principal(current)
+                    current_revision = submission_revision(current)
+                    if current_revision != reviewed_revision:
+                        self._finding(
+                            "submission_revision_changed",
+                            board_id,
+                            ticket_id,
+                            (
+                                "latest submission no longer matches the exact "
+                                "revision supplied to the reviewer"
+                            ),
+                        )
+                        return finished("skipped")
+                    submitted_by = current_revision[1]
                     if (
                         current.get("status") != "submitted"
-                        or submitted_by is None
                         or submitted_by == principal_id
                     ):
                         self._finding(
@@ -1373,7 +1433,7 @@ class Reviewer:
                                 "reviewer principal"
                             ),
                         )
-                        return "skipped"
+                        return finished("skipped")
                     await self.board.review(
                         board_id,
                         ticket_id,
@@ -1387,19 +1447,19 @@ class Reviewer:
                         ticket_id=ticket_id,
                         verdict=verdict.verdict,
                     )
-                    return verdict.verdict
+                    return finished(verdict.verdict)
             self._finding(
                 "review_max_iterations",
                 board_id,
                 ticket_id,
                 "model did not produce a valid structured verdict",
             )
-            return "skipped"
+            return finished("skipped")
         except Exception as exc:
             self._finding(
                 "review_hard_failure", board_id, ticket_id, type(exc).__name__
             )
-            return "skipped"
+            return finished("skipped")
 
     async def _wait_or_stop(
         self, cursors: dict[str, int]
