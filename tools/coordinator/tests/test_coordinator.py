@@ -130,6 +130,7 @@ def test_absent_ticket_tier_defaults_standard_for_coordinator() -> None:
         "starved",
         "claim-health",
         "snapshot-truncated",
+        "board-large",
         "repeat-abandoner",
         "repeat-abandoner-history-incomplete",
         "closed-but-unmerged",
@@ -766,29 +767,17 @@ def test_fairness_is_critical_then_oldest_across_boards() -> None:
     assert ranks == {"TK-critical": 1, "TK-normal": 2}
 
 
-@pytest.mark.parametrize(
-    "degraded_snapshot",
-    [
-        {
-            "board": {"board_id": "board-a"},
-            "agents": [],
-            "tickets": [],
-            "snapshot_error_class": "TimeoutError",
-            "truncated": True,
-            "omitted_counts": {"agents": 1, "tickets": 1},
-        },
-        {
-            "board": {"board_id": "board-a"},
-            "agents": [],
-            "tickets": [],
-            "truncated": True,
-            "omitted_counts": {"tickets": 2},
-        },
-    ],
-)
 def test_board_degraded_after_three_polls_and_resets_on_success(
-    degraded_snapshot: dict[str, Any], tmp_path: Path
+    tmp_path: Path,
 ) -> None:
+    degraded_snapshot = {
+        "board": {"board_id": "board-a"},
+        "agents": [],
+        "tickets": [],
+        "snapshot_error_class": "TimeoutError",
+        "truncated": True,
+        "omitted_counts": {"agents": 1, "tickets": 1},
+    }
     project = coordinator.Project("sample", "board-a", tmp_path)
     streaks: dict[str, int] = {}
     state: dict[str, Any] = {}
@@ -816,8 +805,7 @@ def test_board_degraded_after_three_polls_and_resets_on_success(
     assert "observed_consecutive_polls=3" in finding["evidence"]
     assert "threshold_polls=3" in finding["evidence"]
     assert "TimeoutError" not in finding.get("message", "")
-    if "snapshot_error_class" in degraded_snapshot:
-        assert "error_class=TimeoutError" in finding["evidence"]
+    assert "error_class=TimeoutError" in finding["evidence"]
 
     healthy = {"board": {"board_id": "board-a"}, "agents": [], "tickets": []}
     reset = coordinator.analyze_cycle(
@@ -835,6 +823,149 @@ def test_board_degraded_after_three_polls_and_resets_on_success(
         "error_class": None,
     }
     assert all(item["kind"] != "board-degraded" for item in reset["findings"])
+
+
+def test_truncation_only_is_board_large_info_and_refreshes_daily(
+    tmp_path: Path,
+) -> None:
+    project = coordinator.Project("sample", "board-a", tmp_path)
+    snapshot = {
+        "board": {"board_id": "board-a"},
+        "agents": [],
+        "tickets": [],
+        "truncated": True,
+        "returned_counts": {"tickets": 44, "agents": 8},
+        "omitted_counts": {"tickets": 74, "agents": 0},
+        "total_counts": {"tickets": 118, "agents": 8},
+    }
+    streaks: dict[str, int] = {}
+    first = coordinator.analyze_cycle(
+        [project], {"board-a": snapshot}, {}, (), NOW, degraded_streaks=streaks
+    )["board-a"]
+    first_large = [item for item in first["findings"] if item["kind"] == "board-large"]
+
+    assert len(first_large) == 1
+    assert first_large[0]["level"] == "info"
+    assert first_large[0]["returned_counts"] == {"tickets": 44}
+    assert first_large[0]["total_counts"] == {"tickets": 118}
+    assert "returned_counts={\"tickets\":44}" in first_large[0]["evidence"]
+    assert "total_counts={\"tickets\":118}" in first_large[0]["evidence"]
+    assert "journal compaction" in first_large[0]["next_action"]
+    assert all(item["kind"] != "board-degraded" for item in first["findings"])
+    assert first["board_health"]["status"] == "healthy"
+    assert first["board_health"]["consecutive_degraded_polls"] == 0
+
+    same_day = coordinator.analyze_cycle(
+        [project],
+        {"board-a": snapshot},
+        {"board-a": first},
+        (),
+        NOW + timedelta(hours=23),
+        degraded_streaks=streaks,
+    )["board-a"]
+    same_day_large = next(
+        item for item in same_day["findings"] if item["kind"] == "board-large"
+    )
+    assert same_day_large["refreshed_at"] == first_large[0]["refreshed_at"]
+
+    next_day = coordinator.analyze_cycle(
+        [project],
+        {"board-a": snapshot},
+        {"board-a": same_day},
+        (),
+        NOW + timedelta(days=1, seconds=1),
+        degraded_streaks=streaks,
+    )["board-a"]
+    next_day_large = next(
+        item for item in next_day["findings"] if item["kind"] == "board-large"
+    )
+    assert next_day_large["refreshed_at"] != first_large[0]["refreshed_at"]
+
+
+def test_mixed_truncation_and_call_failures_do_not_share_streak(
+    tmp_path: Path,
+) -> None:
+    project = coordinator.Project("sample", "board-a", tmp_path)
+    truncated = {
+        "board": {"board_id": "board-a"},
+        "agents": [],
+        "tickets": [],
+        "truncated": True,
+        "returned_counts": {"tickets": 44},
+        "omitted_counts": {"tickets": 74},
+        "total_counts": {"tickets": 118},
+    }
+    failed = {
+        "board": {"board_id": "board-a"},
+        "agents": [],
+        "tickets": [],
+        "state_error_classes": {coordinator.STATE_KEY: "TimeoutError"},
+    }
+    streaks: dict[str, int] = {}
+    prior: dict[str, Any] = {}
+    for snapshot, expected in ((truncated, 0), (failed, 1), (truncated, 0)):
+        prior = coordinator.analyze_cycle(
+            [project],
+            {"board-a": snapshot},
+            {"board-a": prior},
+            (),
+            NOW,
+            degraded_streaks=streaks,
+        )["board-a"]
+        assert prior["board_health"]["consecutive_degraded_polls"] == expected
+        assert all(item["kind"] != "board-degraded" for item in prior["findings"])
+
+
+def test_state_call_failure_streak_becomes_degraded(tmp_path: Path) -> None:
+    project = coordinator.Project("sample", "board-a", tmp_path)
+    failed = {
+        "board": {"board_id": "board-a"},
+        "agents": [],
+        "tickets": [],
+        "state_error_classes": {coordinator.STATE_KEY: "TimeoutError"},
+    }
+    streaks: dict[str, int] = {}
+    prior: dict[str, Any] = {}
+    for expected_streak in (1, 2, 3):
+        prior = coordinator.analyze_cycle(
+            [project],
+            {"board-a": failed},
+            {"board-a": prior},
+            (),
+            NOW,
+            degraded_streaks=streaks,
+        )["board-a"]
+        assert prior["board_health"]["consecutive_degraded_polls"] == expected_streak
+
+    finding = next(
+        item for item in prior["findings"] if item["kind"] == "board-degraded"
+    )
+    assert finding["degradation_reason"] == "state-failed"
+    assert finding["error_class"] == "TimeoutError"
+
+
+def test_board_level_finding_dedupe_keeps_latest() -> None:
+    old = coordinator._finding(
+        "board-large", "info", "board-a", "old", refreshed_at=ago(60)
+    )
+    latest = coordinator._finding(
+        "board-large", "info", "board-a", "latest", refreshed_at=ago(30)
+    )
+    distinct_ticket = [
+        coordinator._finding(
+            "starved", "warn", "board-a", "one", ticket_id="TK-1"
+        ),
+        coordinator._finding(
+            "starved", "warn", "board-a", "two", ticket_id="TK-2"
+        ),
+    ]
+
+    state = coordinator.bound_findings_state([old, *distinct_ticket, latest], NOW)
+
+    board_large = [item for item in state["findings"] if item["kind"] == "board-large"]
+    assert len(board_large) == 1
+    assert board_large[0]["message"] == "latest"
+    assert sum(item["kind"] == "starved" for item in state["findings"]) == 2
 
 
 def test_read_cycle_records_only_snapshot_error_class(tmp_path: Path) -> None:
@@ -870,6 +1001,9 @@ def test_read_cycle_records_only_snapshot_error_class(tmp_path: Path) -> None:
     )
 
     assert snapshots["board-a"]["snapshot_error_class"] == "RuntimeError"
+    assert snapshots["board-a"]["state_error_classes"] == {
+        coordinator.STATE_KEY: "RuntimeError",
+    }
     assert sensitive_detail not in json.dumps(snapshots)
     assert previous == {"board-a": {}}
 

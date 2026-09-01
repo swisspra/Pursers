@@ -38,6 +38,7 @@ COMMIT_RE = re.compile(r"(?<![0-9a-fA-F])([0-9a-fA-F]{7,64})(?![0-9a-fA-F])")
 CLAIMED_STATES = frozenset({"claimed", "in_progress", "creating_report"})
 SUBMITTED_STATES = frozenset({"submitted"})
 BOARD_DEGRADED_POLLS = 3
+BOARD_LARGE_REFRESH = timedelta(days=1)
 COORDINATOR_NAME = "coordinator-1"
 ASSIGN_RATE_SECONDS = 600
 NUDGE_RATE_SECONDS = 3_600
@@ -787,6 +788,7 @@ def _finding_next_action(
         "starved": f"Review {ticket_id} on {board_id}; claim it or assign an eligible worker.",
         "claim-health": f"Review {ticket_id} on {board_id}; renew or release the stale claim safely.",
         "snapshot-truncated": f"Inspect the bounded snapshot for {board_id} before acting on incomplete counts.",
+        "board-large": f"Run guarded journal compaction on {board_id} and/or archive old closed tickets.",
         "repeat-abandoner": f"Review the named seat on {board_id} before assigning more work to it.",
         "repeat-abandoner-history-incomplete": f"Wait for a complete observation window on {board_id} before penalizing a seat.",
         "closed-but-unmerged": f"Review {ticket_id} and integrate its submitted commit into the configured ref.",
@@ -796,7 +798,7 @@ def _finding_next_action(
         "privacy-leak-suspect": f"Review the flagged commit on {board_id} against the privacy policy before publishing.",
         "privacy-scan-truncated": f"Run another bounded privacy scan cycle for {board_id} before declaring coverage complete.",
         "review-backlog": f"Review {ticket_id} on {board_id} with an available reviewer seat.",
-        "board-degraded": f"Restore a complete snapshot read for {board_id}, then confirm one healthy poll.",
+        "board-degraded": f"Restore snapshot and state reads for {board_id}, then confirm one healthy poll.",
         "would_nudge": f"Review the proposed nudge for {ticket_id} before enabling active mode.",
         "would_assign": f"Review the proposed assignment for {ticket_id} before enabling active mode.",
         "nudge": f"Verify the nudged seat acknowledges {ticket_id} on {board_id}.",
@@ -927,28 +929,12 @@ def ticket_findings(
                     )
                 )
 
-    omitted = snapshot.get("omitted_counts") or snapshot.get("truncation_counts")
-    if isinstance(omitted, Mapping) and any(isinstance(value, int) and value > 0 for value in omitted.values()):
-        findings.append(
-            _finding(
-                "snapshot-truncated",
-                "warn",
-                board_id,
-                "The bounded snapshot omitted records; findings are a lower bound.",
-                omitted={key: value for key, value in omitted.items() if isinstance(value, int) and value > 0},
-            )
-        )
     return findings
 
 
-def board_degradation(
-    snapshot: Mapping[str, Any],
-) -> tuple[bool, str | None, str | None]:
-    error_class = snapshot.get("snapshot_error_class")
-    if isinstance(error_class, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.]{0,79}", error_class):
-        return True, "snapshot-failed", error_class
+def snapshot_is_truncated(snapshot: Mapping[str, Any]) -> bool:
     omitted = snapshot.get("omitted_counts") or snapshot.get("truncation_counts")
-    truncated = snapshot.get("truncated") is True or (
+    return snapshot.get("truncated") is True or (
         isinstance(omitted, Mapping)
         and any(
             isinstance(value, int)
@@ -957,7 +943,107 @@ def board_degradation(
             for value in omitted.values()
         )
     )
-    return (True, "snapshot-truncated", None) if truncated else (False, None, None)
+
+
+def snapshot_size_counts(
+    snapshot: Mapping[str, Any],
+) -> tuple[dict[str, int], dict[str, int]]:
+    """Return comparable returned/total counts for truncated dimensions."""
+    omitted_raw = snapshot.get("omitted_counts") or snapshot.get("truncation_counts")
+    returned_raw = snapshot.get("returned_counts")
+    total_raw = snapshot.get("total_counts")
+    omitted = omitted_raw if isinstance(omitted_raw, Mapping) else {}
+    returned = returned_raw if isinstance(returned_raw, Mapping) else {}
+    totals = total_raw if isinstance(total_raw, Mapping) else {}
+    returned_counts: dict[str, int] = {}
+    total_counts: dict[str, int] = {}
+    for key in sorted(omitted):
+        omitted_count = omitted.get(key)
+        if (
+            not isinstance(omitted_count, int)
+            or isinstance(omitted_count, bool)
+            or omitted_count <= 0
+        ):
+            continue
+        returned_count = returned.get(key)
+        total_count = totals.get(key)
+        if not isinstance(returned_count, int) or isinstance(returned_count, bool):
+            returned_count = None
+        if not isinstance(total_count, int) or isinstance(total_count, bool):
+            total_count = None
+        if returned_count is None and total_count is not None:
+            returned_count = max(0, total_count - omitted_count)
+        if total_count is None and returned_count is not None:
+            total_count = returned_count + omitted_count
+        if returned_count is None:
+            returned_count = 0
+        if total_count is None:
+            total_count = returned_count + omitted_count
+        returned_counts[str(key)] = max(0, returned_count)
+        total_counts[str(key)] = max(returned_counts[str(key)], total_count)
+    return returned_counts, total_counts
+
+
+def board_degradation(
+    snapshot: Mapping[str, Any],
+) -> tuple[bool, str | None, str | None]:
+    error_class = snapshot.get("snapshot_error_class")
+    if isinstance(error_class, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.]{0,79}", error_class):
+        return True, "snapshot-failed", error_class
+    state_errors = snapshot.get("state_error_classes")
+    if isinstance(state_errors, Mapping):
+        for key in sorted(state_errors):
+            error_class = state_errors.get(key)
+            if isinstance(error_class, str) and re.fullmatch(
+                r"[A-Za-z_][A-Za-z0-9_.]{0,79}", error_class
+            ):
+                return True, "state-failed", error_class
+    return False, None, None
+
+
+def board_large_finding(
+    board_id: str,
+    snapshot: Mapping[str, Any],
+    previous: Mapping[str, Any],
+    now: datetime,
+) -> tuple[dict[str, Any] | None, datetime | None]:
+    """Keep one board-large finding visible and refresh it at most daily."""
+    if not snapshot_is_truncated(snapshot):
+        return None, None
+    prior_health = previous.get("board_health", {})
+    prior_health = prior_health if isinstance(prior_health, Mapping) else {}
+    last_refreshed = parse_time(prior_health.get("board_large_last_refreshed_at"))
+    was_large = prior_health.get("large") is True
+    should_refresh = (
+        not was_large
+        or last_refreshed is None
+        or now - last_refreshed >= BOARD_LARGE_REFRESH
+    )
+    if not should_refresh:
+        prior_findings = previous.get("findings", [])
+        if isinstance(prior_findings, list):
+            for item in reversed(prior_findings):
+                if (
+                    isinstance(item, Mapping)
+                    and item.get("kind") == "board-large"
+                    and item.get("board_id") == board_id
+                ):
+                    return dict(item), last_refreshed
+
+    refreshed_at = now if should_refresh or last_refreshed is None else last_refreshed
+    returned_counts, total_counts = snapshot_size_counts(snapshot)
+    return (
+        _finding(
+            "board-large",
+            "info",
+            board_id,
+            "A healthy board exceeds the bounded snapshot response size.",
+            returned_counts=returned_counts,
+            total_counts=total_counts,
+            refreshed_at=refreshed_at.isoformat(),
+        ),
+        refreshed_at,
+    )
 
 
 def update_drop_evidence(
@@ -1712,6 +1798,39 @@ def _finding_sort_key(item: Mapping[str, Any]) -> tuple[Any, ...]:
     )
 
 
+def _finding_identity(item: Mapping[str, Any]) -> tuple[Any, ...]:
+    """Identify one finding without merging distinct ticket/project findings."""
+    discriminators = tuple(
+        (key, str(item[key]))
+        for key in ("ticket_id", "commit_hash", "ask_id", "op_key", "project")
+        if item.get(key) is not None
+    )
+    return (
+        str(item.get("kind", "")),
+        str(item.get("board_id", "")),
+        discriminators,
+    )
+
+
+def dedupe_findings(
+    findings: Sequence[Mapping[str, Any]],
+) -> list[Mapping[str, Any]]:
+    """Keep the latest board-health finding without merging ticket findings."""
+    result: list[Mapping[str, Any]] = []
+    positions: dict[tuple[Any, ...], int] = {}
+    for item in findings:
+        if item.get("kind") not in {"board-large", "board-degraded"}:
+            result.append(item)
+            continue
+        identity = _finding_identity(item)
+        if identity in positions:
+            result[positions[identity]] = item
+        else:
+            positions[identity] = len(result)
+            result.append(item)
+    return result
+
+
 def bound_findings_state(
     findings: Sequence[Mapping[str, Any]],
     generated_at: datetime,
@@ -1732,7 +1851,8 @@ def bound_findings_state(
     max_chars: int = MAX_STATE_CHARS - 200,
 ) -> dict[str, Any]:
     normalized = sorted(
-        (_bounded_finding(item) for item in findings), key=_finding_sort_key
+        (_bounded_finding(item) for item in dedupe_findings(findings)),
+        key=_finding_sort_key,
     )
     selected: list[dict[str, Any]] = []
     source_watermarks = dict(privacy_watermarks or {})
@@ -1778,11 +1898,18 @@ def bound_findings_state(
         if item.get("level") != "critical"
         and str(item.get("kind", "")).startswith("intake-")
     ]
+    board_health_findings = [
+        item
+        for item in normalized
+        if item.get("level") != "critical"
+        and item.get("kind") in {"board-large", "board-degraded"}
+    ]
     remaining = [
         item
         for item in normalized
         if item.get("level") != "critical"
         and not str(item.get("kind", "")).startswith("intake-")
+        and item.get("kind") not in {"board-large", "board-degraded"}
     ]
 
     def add_findings(rows: Sequence[dict[str, Any]]) -> None:
@@ -1796,11 +1923,11 @@ def bound_findings_state(
                 base["truncation"]["findings"] = len(normalized) - len(selected)
                 break
 
-    # Critical alerts get first claim on the payload.  Delta evidence is then
-    # reserved before warnings so reporting volume cannot erase history.
-    # Intake outcomes are also reserved: otherwise a consumed ask could lose
-    # its only operator-visible create/approval record under ordinary backlog.
+    # Critical alerts get first claim on the payload. Board health and intake
+    # outcomes are then reserved so ordinary backlog cannot hide them. Delta
+    # evidence is reserved before the remaining warnings.
     add_findings(critical)
+    add_findings(board_health_findings)
     add_findings(intake)
     for item in sorted(
         source_actions,
@@ -1998,8 +2125,11 @@ async def read_cycle(reader: RawReader, home_board: str) -> tuple[list[Project],
                 snapshots[board_id]["intake_tickets_complete"] = True
         try:
             prior = await reader.call("board_state_get", board_id, key=STATE_KEY)
-        except Exception:  # Missing optional state or an unavailable board.
+        except Exception as exc:  # Missing optional state or an unavailable board.
             prior = None
+            snapshots[board_id].setdefault("state_error_classes", {})[
+                STATE_KEY
+            ] = type(exc).__name__
         previous[board_id] = _previous_payload(prior)
         try:
             intake = await reader.call(
@@ -2010,8 +2140,12 @@ async def read_cycle(reader: RawReader, home_board: str) -> tuple[list[Project],
         snapshots[board_id]["coordinator_intake_state"] = intake
     try:
         config = await reader.call("board_state_get", home_board, key=CONFIG_STATE_KEY)
-    except Exception:  # An absent config uses flags then built-ins.
+    except Exception as exc:  # An absent config uses flags then built-ins.
         config = None
+        if home_board in snapshots:
+            snapshots[home_board].setdefault("state_error_classes", {})[
+                CONFIG_STATE_KEY
+            ] = type(exc).__name__
     if home_board in snapshots:
         snapshots[home_board]["coordinator_config_state"] = config
     return projects, snapshots, previous
@@ -2071,19 +2205,30 @@ def analyze_cycle(
         streak = max(0, persisted_streak, runtime_streak) + 1 if degraded else 0
         if degraded_streaks is not None:
             degraded_streaks[board_id] = streak
-        board_health_by_board[board_id] = {
+        board_health: dict[str, Any] = {
             "status": "degraded" if degraded else "healthy",
             "consecutive_degraded_polls": streak,
             "reason": reason,
             "error_class": error_class,
         }
+        if not degraded and snapshot_is_truncated(snapshot):
+            large_finding, refreshed_at = board_large_finding(
+                board_id, snapshot, previous.get(board_id, {}), now
+            )
+            if large_finding is not None:
+                findings_by_board[board_id].append(large_finding)
+            board_health["large"] = True
+            board_health["board_large_last_refreshed_at"] = (
+                refreshed_at.isoformat() if refreshed_at is not None else None
+            )
+        board_health_by_board[board_id] = board_health
         if streak >= BOARD_DEGRADED_POLLS:
             findings_by_board[board_id].append(
                 _finding(
                     "board-degraded",
                     "critical",
                     board_id,
-                    "A registry-active board failed to return a complete snapshot repeatedly.",
+                    "A registry-active board had repeated snapshot or state call failures.",
                     degradation_reason=reason,
                     error_class=error_class,
                     observed_consecutive_polls=streak,
