@@ -358,8 +358,16 @@ class SessionLog:
             stream.write(json.dumps(safe, sort_keys=True, separators=(",", ":")) + "\n")
         if event == "review_started":
             self._write_review_state(safe)
-        elif event == "review_finished":
+        elif event in {"review_finished", "runtime_session_started"}:
             self.review_state_path.unlink(missing_ok=True)
+
+    def begin_session(self, role: str) -> None:
+        """Fence review state left by an uncleanly terminated runtime."""
+        self.write(
+            "runtime_session_started",
+            role=role,
+            session_id=f"{os.getpid()}-{time.time_ns()}",
+        )
 
 
 class BoardAPI(Protocol):
@@ -1606,6 +1614,7 @@ async def async_main(config_path: Path) -> None:
     token = read_secret(config, "token")
     api_key = read_secret(config, "API key")
     log = SessionLog(config.log_file, secrets=(token, api_key))
+    log.begin_session(config.role)
     async with PursersBoardAPI(config, token) as board:
         runtime: Worker | Reviewer
         if config.role == "reviewer":

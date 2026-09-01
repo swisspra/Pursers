@@ -761,6 +761,27 @@ class WorkerManager:
             _json_bytes({"schema": 1, **active}),
         )
 
+    def _fence_active_review(self, name: str, reason: str) -> None:
+        """Append a bounded local lifecycle fence before clearing review state."""
+        path = self._log_path(name)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags, 0o600)
+        try:
+            with os.fdopen(descriptor, "ab") as stream:
+                stream.write(
+                    _json_bytes(
+                        {
+                            "event": "review_session_reset",
+                            "reason": _clip(reason, 80),
+                        }
+                    )
+                    + b"\n"
+                )
+            os.chmod(path, 0o600)
+        finally:
+            self._store_active_review(name, None)
+
     def restart(self, name: str, *, seat_exists: bool) -> dict[str, Any]:
         self.stop(name)
         return self.start(name, seat_exists=seat_exists)
@@ -782,6 +803,7 @@ class WorkerManager:
                 )
             if not self._token_path(name).is_file():
                 raise ValueError("seat token file is missing")
+            self._fence_active_review(name, "managed_start")
             child = self.process_factory(
                 [sys.executable, str(self.worker_script), str(config_path)],
                 stdin=subprocess.DEVNULL,
@@ -804,6 +826,7 @@ class WorkerManager:
         with self._lock:
             current = self.status(name)
             if not current["running"]:
+                self._fence_active_review(name, "managed_stopped")
                 return {"ok": True, "name": name, "running": False}
             child = self._children.get(name)
             if child is not None:
@@ -825,6 +848,7 @@ class WorkerManager:
                 else:
                     raise RuntimeError("adopted worker did not stop after SIGTERM")
             self._pid_path(name).unlink(missing_ok=True)
+            self._fence_active_review(name, "managed_stop")
             return {"ok": True, "name": name, "running": False}
 
     def test_provider(self, name: str) -> dict[str, Any]:
@@ -1274,13 +1298,18 @@ def _review_state_after_log(
             event = json.loads(line)
         except (json.JSONDecodeError, TypeError):
             continue
+        event_name = event.get("event") if isinstance(event, dict) else None
+        if event_name in {"runtime_session_started", "review_session_reset"}:
+            active = None
+            saw_lifecycle = True
+            continue
         key = _review_identity(event)
         if key is None:
             continue
-        if event.get("event") == "review_started":
+        if event_name == "review_started":
             active = key
             saw_lifecycle = True
-        elif event.get("event") == "review_finished" and active == key:
+        elif event_name == "review_finished" and active == key:
             active = None
             saw_lifecycle = True
     return saw_lifecycle, active
@@ -2863,6 +2892,9 @@ def make_handler(
             ][:8]
             row["pressure"] = pressure.get(row["name"])
             row["log_tail"] = workers.log_tail(row["name"])
+            if not row["running"]:
+                workers._store_active_review(row["name"], None)
+                continue
             active_review = workers.active_review(row["name"])
             if active_review is not None and not row["current_work"]:
                 row["current_work"] = [

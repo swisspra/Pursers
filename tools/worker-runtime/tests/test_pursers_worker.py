@@ -1023,7 +1023,9 @@ def test_fake_llm_reviewer_approve_reject_and_garbage(
 def test_session_log_persists_and_clears_bounded_review_state(
     tmp_path: Path,
 ) -> None:
-    log = worker_module.SessionLog(tmp_path / "reviewer.log")
+    path = tmp_path / "reviewer.log"
+    log = worker_module.SessionLog(path)
+    log.begin_session("reviewer")
 
     log.write(
         "review_started",
@@ -1046,13 +1048,31 @@ def test_session_log_persists_and_clears_bounded_review_state(
         log.write("review_run_shell", command=f"check-{index}")
     assert json.loads(log.review_state_path.read_text()) == state
 
-    log.write(
+    replacement = worker_module.SessionLog(path)
+    replacement.begin_session("reviewer")
+    assert not replacement.review_state_path.exists()
+    assert json.loads(path.read_text().splitlines()[-1])["event"] == (
+        "runtime_session_started"
+    )
+
+    replacement.write(
+        "review_started",
+        board_id="board-one",
+        ticket_id="TK-replacement",
+    )
+    for index in range(25):
+        replacement.write("review_run_shell", command=f"replacement-{index}")
+    assert json.loads(replacement.review_state_path.read_text())["ticket_id"] == (
+        "TK-replacement"
+    )
+
+    replacement.write(
         "review_finished",
         board_id="board-one",
-        ticket_id="TK-active",
+        ticket_id="TK-replacement",
         outcome="approve",
     )
-    assert not log.review_state_path.exists()
+    assert not replacement.review_state_path.exists()
 
 
 def test_reviewer_refuses_verdict_when_submission_changes_during_review() -> None:

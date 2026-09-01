@@ -2547,9 +2547,30 @@ def test_worker_manager_keychain_config_lifecycle_and_adoption(tmp_path: Path) -
     pid_path = tmp_path / "workers" / "worker-one.pid"
     assert started["running"] is True
     assert stat.S_IMODE(pid_path.stat().st_mode) == 0o600
+    runtime_log_path = manager._log_path("worker-one")
+    runtime_log_path.write_text(
+        json.dumps(
+            {
+                "event": "review_started",
+                "board_id": "pursers",
+                "ticket_id": "TK-interrupted",
+            }
+        )
+        + "\n"
+    )
+    manager._store_active_review(
+        "worker-one", {"board_id": "pursers", "ticket_id": "TK-interrupted"}
+    )
+    review_state_path = manager._review_state_path("worker-one")
+    assert review_state_path.exists()
     assert manager.stop("worker-one")["running"] is False
     assert processes[0].terminated is True
     assert not pid_path.exists()
+    assert not review_state_path.exists()
+    assert json.loads(runtime_log_path.read_text().splitlines()[-1]) == {
+        "event": "review_session_reset",
+        "reason": "managed_stop",
+    }
 
     manager._write_private(  # exercise safe adoption of a matching pidfile
         pid_path, dashboard._json_bytes({"pid": 9876, "name": "worker-one"})
@@ -2587,6 +2608,14 @@ def test_active_review_requires_explicit_unfinished_lifecycle() -> None:
         "ticket_id": "TK-review",
     }
     assert dashboard._active_review_from_log([started, finished]) is None
+    session_fence = json.dumps(
+        {
+            "event": "runtime_session_started",
+            "role": "reviewer",
+            "session_id": "replacement",
+        }
+    )
+    assert dashboard._active_review_from_log([started, session_fence]) is None
     unrelated_finish = json.dumps(
         {
             "event": "review_finished",
@@ -2660,7 +2689,12 @@ def test_worker_api_is_local_and_board_write_surface_is_unchanged(
         return SimpleNamespace(stdout="")
 
     manager = dashboard.WorkerManager(
-        tmp_path / "workers", platform="darwin", command_runner=command_runner
+        tmp_path / "workers",
+        platform="darwin",
+        command_runner=command_runner,
+        process_matches=lambda pid, path: (
+            pid == 24680 and path.name == "endpoint-worker.toml"
+        ),
     )
 
     class Cache:
@@ -2698,23 +2732,44 @@ def test_worker_api_is_local_and_board_write_surface_is_unchanged(
         with urllib.request.urlopen(request) as response:
             saved_body = response.read().decode()
         log_path = tmp_path / "workers" / "endpoint-worker.session.log"
-        long_review = [
-            {
-                "event": "review_started",
-                "board_id": "pursers",
-                "ticket_id": "TK-active-review",
-            },
-            *[
-                {
-                    "event": "review_run_shell",
-                    "command": f"verification-{index}",
-                }
-                for index in range(24)
-            ],
-        ]
-        log_path.write_text(
-            "\n".join(json.dumps(event) for event in long_review) + "\n"
+        pid_path = tmp_path / "workers" / "endpoint-worker.pid"
+        manager._write_private(
+            pid_path,
+            dashboard._json_bytes({"pid": 24680, "name": "endpoint-worker"}),
         )
+        events: list[dict[str, str]] = []
+
+        def append_event(event: str, **fields: str) -> None:
+            record = {"event": event, **fields}
+            events.append(record)
+            with log_path.open("a", encoding="utf-8") as stream:
+                stream.write(json.dumps(record) + "\n")
+
+        append_event("runtime_session_started", role="reviewer", session_id="A")
+        append_event(
+            "review_started", board_id="pursers", ticket_id="TK-stale-review"
+        )
+        manager._store_active_review(
+            "endpoint-worker",
+            {"board_id": "pursers", "ticket_id": "TK-stale-review"},
+        )
+        for index in range(25):
+            append_event("review_run_shell", command=f"stale-{index}")
+        append_event("runtime_session_started", role="reviewer", session_id="B")
+        manager._store_active_review("endpoint-worker", None)
+        with urllib.request.urlopen(base + "/api/workers") as response:
+            restarted_body = response.read().decode()
+        assert json.loads(restarted_body)["workers"][0]["current_work"] == []
+
+        append_event(
+            "review_started", board_id="pursers", ticket_id="TK-active-review"
+        )
+        manager._store_active_review(
+            "endpoint-worker",
+            {"board_id": "pursers", "ticket_id": "TK-active-review"},
+        )
+        for index in range(25):
+            append_event("review_run_shell", command=f"verification-{index}")
         with urllib.request.urlopen(base + "/api/workers") as response:
             listed_body = response.read().decode()
         review_state_path = manager._review_state_path("endpoint-worker")
@@ -2724,18 +2779,30 @@ def test_worker_api_is_local_and_board_write_surface_is_unchanged(
             "ticket_id": "TK-active-review",
         }
         assert stat.S_IMODE(review_state_path.stat().st_mode) == 0o600
-        log_path.write_text(
-            log_path.read_text()
-            + json.dumps(
-                {
-                    "event": "review_finished",
-                    "board_id": "pursers",
-                    "ticket_id": "TK-active-review",
-                    "outcome": "reject",
-                }
-            )
-            + "\n"
+        dashboard_restart = dashboard.WorkerManager(
+            tmp_path / "workers",
+            platform="darwin",
+            command_runner=command_runner,
+            process_matches=lambda pid, path: (
+                pid == 24680 and path.name == "endpoint-worker.toml"
+            ),
         )
+        assert dashboard_restart.active_review("endpoint-worker") == {
+            "board_id": "pursers",
+            "ticket_id": "TK-active-review",
+        }
+        pid_path.unlink()
+        with urllib.request.urlopen(base + "/api/workers") as response:
+            stopped_body = response.read().decode()
+        assert json.loads(stopped_body)["workers"][0]["current_work"] == []
+        assert not review_state_path.exists()
+        append_event(
+            "review_finished",
+            board_id="pursers",
+            ticket_id="TK-active-review",
+            outcome="reject",
+        )
+        manager._store_active_review("endpoint-worker", None)
         with urllib.request.urlopen(base + "/api/workers") as response:
             finished_body = response.read().decode()
         board_write = urllib.request.Request(
