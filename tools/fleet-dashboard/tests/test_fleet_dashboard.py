@@ -2565,6 +2565,40 @@ def test_worker_manager_keychain_config_lifecycle_and_adoption(tmp_path: Path) -
     assert manager.log_tail("worker-one") == [f"line-{index}" for index in range(5, 25)]
 
 
+def test_active_review_requires_explicit_unfinished_lifecycle() -> None:
+    started = json.dumps(
+        {
+            "event": "review_started",
+            "board_id": "board-one",
+            "ticket_id": "TK-review",
+        }
+    )
+    finished = json.dumps(
+        {
+            "event": "review_finished",
+            "board_id": "board-one",
+            "ticket_id": "TK-review",
+            "outcome": "approve",
+        }
+    )
+
+    assert dashboard._active_review_from_log(["not json", started]) == {
+        "board_id": "board-one",
+        "ticket_id": "TK-review",
+    }
+    assert dashboard._active_review_from_log([started, finished]) is None
+    unrelated_finish = json.dumps(
+        {
+            "event": "review_finished",
+            "board_id": "other",
+            "ticket_id": "TK-review",
+        }
+    )
+    assert dashboard._active_review_from_log(
+        [started, unrelated_finish]
+    ) == {"board_id": "board-one", "ticket_id": "TK-review"}
+
+
 def test_worker_provider_test_uses_keychain_without_echoing_secret(
     tmp_path: Path,
 ) -> None:
@@ -2663,8 +2697,33 @@ def test_worker_api_is_local_and_board_write_surface_is_unchanged(
         )
         with urllib.request.urlopen(request) as response:
             saved_body = response.read().decode()
+        log_path = tmp_path / "workers" / "endpoint-worker.session.log"
+        log_path.write_text(
+            json.dumps(
+                {
+                    "event": "review_started",
+                    "board_id": "pursers",
+                    "ticket_id": "TK-active-review",
+                }
+            )
+            + "\n"
+        )
         with urllib.request.urlopen(base + "/api/workers") as response:
             listed_body = response.read().decode()
+        log_path.write_text(
+            log_path.read_text()
+            + json.dumps(
+                {
+                    "event": "review_finished",
+                    "board_id": "pursers",
+                    "ticket_id": "TK-active-review",
+                    "outcome": "reject",
+                }
+            )
+            + "\n"
+        )
+        with urllib.request.urlopen(base + "/api/workers") as response:
+            finished_body = response.read().decode()
         board_write = urllib.request.Request(
             base + "/api/board/pursers",
             data=b"{}",
@@ -2681,7 +2740,17 @@ def test_worker_api_is_local_and_board_write_surface_is_unchanged(
     assert captured.value.code == 404
     assert secret not in saved_body
     assert secret not in listed_body
-    assert json.loads(listed_body)["workers"][0]["seat_exists"] is True
+    listed_worker = json.loads(listed_body)["workers"][0]
+    assert listed_worker["seat_exists"] is True
+    assert listed_worker["current_work"] == [
+        {
+            "board_id": "pursers",
+            "role": "reviewer",
+            "ticket_id": "TK-active-review",
+            "ticket_title": "TK-active-review",
+        }
+    ]
+    assert json.loads(finished_body)["workers"][0]["current_work"] == []
 
 
 def test_workers_tab_renders_presets_actions_and_keychain_copy() -> None:
@@ -2715,6 +2784,7 @@ def test_dashboard_v2_ia_agents_and_responsive_contract() -> None:
     assert "Worker-only until reviewer runtime is installed." in html
     assert "Log tail · last 20 lines" in html
     assert 'data-hub-agent-action="restart"' in html
+    assert "if(hubKinds.has(r?.kind)){syncHub();return}" in html
     assert "max_tier" in html
     assert "@media(max-width:800px)" in html
     assert "overflow-x:hidden" in html
