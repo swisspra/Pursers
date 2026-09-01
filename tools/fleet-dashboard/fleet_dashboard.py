@@ -64,6 +64,8 @@ MAX_OVERHEAD_SEATS = 200
 MAX_OVERHEAD_TOOLS = 5
 OVERHEAD_DAYS = 7
 WORKER_API_MAX_BYTES = 20_000
+MAX_REVIEW_STATE_BYTES = 4_096
+REVIEW_STATE_SUFFIX = ".review-state.json"
 WORKER_NAME_RE = re.compile(r"^[a-z0-9-]{2,32}$")
 WORKER_KEYCHAIN_SERVICE = "pursers-worker"
 WORKER_SECURITY_CLI = Path("/usr/bin/security")
@@ -485,6 +487,10 @@ class WorkerManager:
     def _log_path(self, name: str) -> Path:
         return self.root / f"{name}.session.log"
 
+    def _review_state_path(self, name: str) -> Path:
+        log_path = self._log_path(name)
+        return log_path.with_name(log_path.name + REVIEW_STATE_SUFFIX)
+
     def _read_definition(self, path: Path) -> dict[str, Any]:
         raw = path.read_bytes()
         document = tomllib.loads(raw.decode("utf-8"))
@@ -711,10 +717,49 @@ class WorkerManager:
                 raw = stream.read(32_768)
         except OSError:
             return []
+        lines = raw.decode("utf-8", errors="replace").splitlines()
+        saw_lifecycle, active = _review_state_after_log(
+            lines, initial=self.active_review(name)
+        )
+        if saw_lifecycle:
+            self._store_active_review(name, active)
         return [
             line[:500]
-            for line in raw.decode("utf-8", errors="replace").splitlines()[-max_lines:]
+            for line in lines[-max_lines:]
         ]
+
+    def active_review(self, name: str) -> dict[str, str] | None:
+        """Read one bounded durable reviewer lifecycle marker."""
+        if not WORKER_NAME_RE.fullmatch(name):
+            raise ValueError("worker name is invalid")
+        path = self._review_state_path(name)
+        try:
+            details = path.stat()
+            if (
+                path.is_symlink()
+                or not stat.S_ISREG(details.st_mode)
+                or stat.S_IMODE(details.st_mode) != 0o600
+                or details.st_size > MAX_REVIEW_STATE_BYTES
+            ):
+                return None
+            document = json.loads(path.read_bytes())
+        except (OSError, ValueError, json.JSONDecodeError):
+            return None
+        if not isinstance(document, dict) or document.get("schema") != 1:
+            return None
+        return _review_identity(document)
+
+    def _store_active_review(
+        self, name: str, active: dict[str, str] | None
+    ) -> None:
+        path = self._review_state_path(name)
+        if active is None:
+            path.unlink(missing_ok=True)
+            return
+        self._write_private(
+            path,
+            _json_bytes({"schema": 1, **active}),
+        )
 
     def restart(self, name: str, *, seat_exists: bool) -> dict[str, Any]:
         self.stop(name)
@@ -1200,31 +1245,50 @@ def _current_tickets_by_agent(
     return selected
 
 
-def _active_review_from_log(lines: list[str]) -> dict[str, str] | None:
-    """Return the latest explicitly-started review not followed by its finish."""
-    active: dict[str, str] | None = None
+def _review_identity(event: Any) -> dict[str, str] | None:
+    if not isinstance(event, dict):
+        return None
+    board_id = event.get("board_id")
+    ticket_id = event.get("ticket_id")
+    if not (
+        isinstance(board_id, str)
+        and BOARD_ID_RE.fullmatch(board_id)
+        and isinstance(ticket_id, str)
+        and ticket_id
+    ):
+        return None
+    return {
+        "board_id": board_id,
+        "ticket_id": _clip(ticket_id, MAX_LABEL_CHARS),
+    }
+
+
+def _review_state_after_log(
+    lines: list[str], *, initial: dict[str, str] | None = None
+) -> tuple[bool, dict[str, str] | None]:
+    """Apply bounded lifecycle lines to an optional durable active review."""
+    active = initial
+    saw_lifecycle = False
     for line in lines:
         try:
             event = json.loads(line)
         except (json.JSONDecodeError, TypeError):
             continue
-        if not isinstance(event, dict):
+        key = _review_identity(event)
+        if key is None:
             continue
-        board_id = event.get("board_id")
-        ticket_id = event.get("ticket_id")
-        if not (
-            isinstance(board_id, str)
-            and BOARD_ID_RE.fullmatch(board_id)
-            and isinstance(ticket_id, str)
-            and ticket_id
-        ):
-            continue
-        key = {"board_id": board_id, "ticket_id": _clip(ticket_id, MAX_LABEL_CHARS)}
         if event.get("event") == "review_started":
             active = key
+            saw_lifecycle = True
         elif event.get("event") == "review_finished" and active == key:
             active = None
-    return active
+            saw_lifecycle = True
+    return saw_lifecycle, active
+
+
+def _active_review_from_log(lines: list[str]) -> dict[str, str] | None:
+    """Return the latest explicitly-started review not followed by its finish."""
+    return _review_state_after_log(lines)[1]
 
 
 def _detail_ticket(ticket: dict[str, Any]) -> dict[str, Any]:
@@ -2799,7 +2863,7 @@ def make_handler(
             ][:8]
             row["pressure"] = pressure.get(row["name"])
             row["log_tail"] = workers.log_tail(row["name"])
-            active_review = _active_review_from_log(row["log_tail"])
+            active_review = workers.active_review(row["name"])
             if active_review is not None and not row["current_work"]:
                 row["current_work"] = [
                     {

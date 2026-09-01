@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import json
+import stat
 import sys
 import tempfile
 import threading
@@ -1016,6 +1017,42 @@ def test_fake_llm_reviewer_approve_reject_and_garbage(
             "role": "system",
             "content": "STATIC REVIEWER",
         }
+        assert not reviewer.log.review_state_path.exists()
+
+
+def test_session_log_persists_and_clears_bounded_review_state(
+    tmp_path: Path,
+) -> None:
+    log = worker_module.SessionLog(tmp_path / "reviewer.log")
+
+    log.write(
+        "review_started",
+        board_id="board-one",
+        ticket_id="TK-active",
+        submitted_at="submission-1",
+        submission_digest="abc123",
+    )
+    state = json.loads(log.review_state_path.read_text())
+    assert state == {
+        "schema": 1,
+        "board_id": "board-one",
+        "ticket_id": "TK-active",
+        "submitted_at": "submission-1",
+        "submission_digest": "abc123",
+    }
+    assert stat.S_IMODE(log.review_state_path.stat().st_mode) == 0o600
+
+    for index in range(25):
+        log.write("review_run_shell", command=f"check-{index}")
+    assert json.loads(log.review_state_path.read_text()) == state
+
+    log.write(
+        "review_finished",
+        board_id="board-one",
+        ticket_id="TK-active",
+        outcome="approve",
+    )
+    assert not log.review_state_path.exists()
 
 
 def test_reviewer_refuses_verdict_when_submission_changes_during_review() -> None:
@@ -1042,6 +1079,9 @@ def test_reviewer_refuses_verdict_when_submission_changes_during_review() -> Non
             async def complete(
                 self, _messages: list[dict[str, Any]], _tools: list[dict[str, Any]]
             ) -> dict[str, Any]:
+                state = json.loads(reviewer.log.review_state_path.read_text())
+                assert state["board_id"] == "board-one"
+                assert state["ticket_id"] == "TK-race"
                 await board.submit(
                     "board-one",
                     "TK-race",
@@ -1086,6 +1126,7 @@ def test_reviewer_refuses_verdict_when_submission_changes_during_review() -> Non
         assert board.tickets["TK-race"]["status"] == "submitted"
         assert board.tickets["TK-race"]["summary"] == "revision two"
         assert "submission_revision_changed" in selected.log_file.read_text()
+        assert not reviewer.log.review_state_path.exists()
 
         reviewer.llm = ApprovingLLM()
         second = asyncio.run(
@@ -1102,6 +1143,7 @@ def test_reviewer_refuses_verdict_when_submission_changes_during_review() -> Non
         ]
         assert log_events.count("review_started") == 2
         assert log_events.count("review_finished") == 2
+        assert not reviewer.log.review_state_path.exists()
 
 
 def test_reviewer_self_review_probe_skips_before_calling_llm() -> None:

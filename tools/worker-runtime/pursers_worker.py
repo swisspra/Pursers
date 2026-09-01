@@ -46,6 +46,7 @@ MAX_FILE_READ = 100_000
 MAX_REVIEW_DESCRIPTION = 12_000
 MAX_REVIEW_FIELD = 5_000
 MAX_SEEN_SUBMISSIONS = 2_048
+REVIEW_STATE_SUFFIX = ".review-state.json"
 LEASE_INTERVAL_S = 20.0
 TIER_ORDER = {"light": 0, "standard": 1, "heavy": 2}
 SHELL_ENV_ALLOWLIST = (
@@ -296,6 +297,47 @@ class SessionLog:
         os.close(descriptor)
         os.chmod(path, 0o600)
 
+    @property
+    def review_state_path(self) -> Path:
+        return self.path.with_name(self.path.name + REVIEW_STATE_SUFFIX)
+
+    def _write_review_state(self, fields: dict[str, Any]) -> None:
+        board_id = fields.get("board_id")
+        ticket_id = fields.get("ticket_id")
+        if not (
+            isinstance(board_id, str)
+            and 0 < len(board_id) <= 256
+            and isinstance(ticket_id, str)
+            and 0 < len(ticket_id) <= 512
+        ):
+            return
+        state = {
+            "schema": 1,
+            "board_id": board_id,
+            "ticket_id": ticket_id,
+        }
+        for name in ("submitted_at", "submission_digest"):
+            value = fields.get(name)
+            if isinstance(value, str) and 0 < len(value) <= 256:
+                state[name] = value
+        payload = json.dumps(
+            state, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+        path = self.review_state_path
+        temporary = path.with_name(
+            f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp"
+        )
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(payload)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.chmod(temporary, 0o600)
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
+
     def redact(self, value: str) -> str:
         for secret in self.secrets:
             value = value.replace(secret, "[REDACTED]")
@@ -314,6 +356,10 @@ class SessionLog:
         safe = self.scrub({"event": event, **fields})
         with self.path.open("a", encoding="utf-8") as stream:
             stream.write(json.dumps(safe, sort_keys=True, separators=(",", ":")) + "\n")
+        if event == "review_started":
+            self._write_review_state(safe)
+        elif event == "review_finished":
+            self.review_state_path.unlink(missing_ok=True)
 
 
 class BoardAPI(Protocol):

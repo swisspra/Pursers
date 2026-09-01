@@ -2698,18 +2698,32 @@ def test_worker_api_is_local_and_board_write_surface_is_unchanged(
         with urllib.request.urlopen(request) as response:
             saved_body = response.read().decode()
         log_path = tmp_path / "workers" / "endpoint-worker.session.log"
-        log_path.write_text(
-            json.dumps(
+        long_review = [
+            {
+                "event": "review_started",
+                "board_id": "pursers",
+                "ticket_id": "TK-active-review",
+            },
+            *[
                 {
-                    "event": "review_started",
-                    "board_id": "pursers",
-                    "ticket_id": "TK-active-review",
+                    "event": "review_run_shell",
+                    "command": f"verification-{index}",
                 }
-            )
-            + "\n"
+                for index in range(24)
+            ],
+        ]
+        log_path.write_text(
+            "\n".join(json.dumps(event) for event in long_review) + "\n"
         )
         with urllib.request.urlopen(base + "/api/workers") as response:
             listed_body = response.read().decode()
+        review_state_path = manager._review_state_path("endpoint-worker")
+        assert json.loads(review_state_path.read_text()) == {
+            "schema": 1,
+            "board_id": "pursers",
+            "ticket_id": "TK-active-review",
+        }
+        assert stat.S_IMODE(review_state_path.stat().st_mode) == 0o600
         log_path.write_text(
             log_path.read_text()
             + json.dumps(
@@ -2742,6 +2756,8 @@ def test_worker_api_is_local_and_board_write_surface_is_unchanged(
     assert secret not in listed_body
     listed_worker = json.loads(listed_body)["workers"][0]
     assert listed_worker["seat_exists"] is True
+    assert len(listed_worker["log_tail"]) == 20
+    assert all("review_started" not in line for line in listed_worker["log_tail"])
     assert listed_worker["current_work"] == [
         {
             "board_id": "pursers",
@@ -2751,6 +2767,7 @@ def test_worker_api_is_local_and_board_write_surface_is_unchanged(
         }
     ]
     assert json.loads(finished_body)["workers"][0]["current_work"] == []
+    assert not review_state_path.exists()
 
 
 def test_workers_tab_renders_presets_actions_and_keychain_copy() -> None:
