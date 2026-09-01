@@ -5,6 +5,28 @@ All notable changes to Pursers are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [5.0.0a15] - 2026-09-01
+
+This release includes `pursers-personal==5.0.0a15`, `pursers==5.0.0a15`, and
+`pursers-wait-bridge==0.1.0a5`.
+
+### Fixed
+
+- `setup` field bugs from terminal-host usage: the quit-Claude-Desktop gate now
+  applies only when the target really is Desktop's config; unknown host ids no
+  longer dead-end; a no-`--apply` run is a true plan that writes nothing; apply
+  failures no longer leak orphan profiles, and `profiles list` / `profiles
+  prune --orphaned` clean up existing ones; `--version` now reports package
+  metadata.
+- More central validation messages pass through the Personal facade allowlist
+  (scope enum and the bounded max_bytes family).
+- Wait-bridge completes the MCP initialize handshake unconditionally: board
+  join is deferred, and auth/connectivity problems surface as classified
+  per-call tool errors instead of a silent process exit.
+- Coordinator: `board-degraded` now means real call failures only; persistent
+  snapshot truncation became a daily `board-large` info finding pointing at
+  journal compaction, and identical findings no longer stack.
+
 ## [5.0.0a14] - 2026-09-01
 
 This release includes `pursers-personal==5.0.0a14`, `pursers==5.0.0a14`, and
