@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import json
-import os
 import sys
 import tempfile
 import threading
@@ -16,7 +15,6 @@ from typing import Any
 from unittest.mock import patch
 
 import pytest
-
 
 MODULE_PATH = Path(__file__).parents[1] / "pursers_worker.py"
 SPEC = importlib.util.spec_from_file_location("pursers_worker", MODULE_PATH)
@@ -38,6 +36,8 @@ class FakeBoard:
         self.events = [{"board_id": "board-one", "ticket_id": "TK-scratch"}]
         self.tickets: dict[str, dict[str, Any]] = {}
         self.identity = "AI-worker-one"
+        self.principal = "PR-reviewer"
+        self.reviews: list[dict[str, Any]] = []
 
     async def wait(self, _cursors: dict[str, int]) -> dict[str, Any]:
         self.waited = True
@@ -74,6 +74,17 @@ class FakeBoard:
         self.submissions.append(
             {"board_id": board_id, "ticket_id": ticket_id, **arguments}
         )
+        if ticket_id in self.tickets:
+            ticket = self.tickets[ticket_id]
+            submission = {
+                **arguments,
+                "submitted_at": f"submission-{len(self.submissions)}",
+                "submitted_by_agent_id": self.identity,
+                "submitted_by_principal_id": "PR-worker",
+            }
+            ticket.setdefault("submission_history", []).append(submission)
+            ticket.update(submission)
+            ticket["status"] = "submitted"
         if self.on_submit is not None:
             self.on_submit()
 
@@ -82,6 +93,39 @@ class FakeBoard:
 
     async def renew(self, _board_id: str, _ticket_id: str) -> None:
         self.renewals += 1
+
+    async def submitted(self) -> list[tuple[str, dict[str, Any]]]:
+        return [
+            ("board-one", ticket)
+            for ticket in self.tickets.values()
+            if ticket.get("status") == "submitted"
+        ]
+
+    async def principal_id(self, _board_id: str) -> str:
+        return self.principal
+
+    async def review(
+        self,
+        board_id: str,
+        ticket_id: str,
+        verdict: str,
+        *,
+        review_notes: str,
+        fix_instructions: str | None,
+    ) -> None:
+        self.reviews.append(
+            {
+                "board_id": board_id,
+                "ticket_id": ticket_id,
+                "verdict": verdict,
+                "review_notes": review_notes,
+                "fix_instructions": fix_instructions,
+            }
+        )
+        ticket = self.tickets[ticket_id]
+        ticket["status"] = "closed" if verdict == "approve" else "open"
+        if fix_instructions is not None:
+            ticket["fix_instructions"] = fix_instructions
 
 
 class BlockingBoard(FakeBoard):
@@ -124,7 +168,7 @@ class FakeLLMServer:
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
 
-    def __enter__(self) -> "FakeLLMServer":
+    def __enter__(self) -> FakeLLMServer:
         self.thread.start()
         return self
 
@@ -158,6 +202,8 @@ def config(
     max_iterations: int = 4,
     max_tier: str = "heavy",
     require_assigned_only: bool = False,
+    role: str = "worker",
+    max_reviews_per_hour: int = 12,
 ) -> Any:
     return worker_module.Config(
         agent_name="worker-one",
@@ -175,6 +221,8 @@ def config(
         log_file=root / "session.log",
         max_tier=max_tier,
         require_assigned_only=require_assigned_only,
+        role=role,
+        max_reviews_per_hour=max_reviews_per_hour,
     )
 
 
@@ -187,7 +235,9 @@ def test_fake_server_happy_path_claim_edit_submit_and_secret_free_log() -> None:
         board.work = work
         with FakeLLMServer(
             [
-                tool_call("one", "write_file", {"path": "result.txt", "content": "done"}),
+                tool_call(
+                    "one", "write_file", {"path": "result.txt", "content": "done"}
+                ),
                 tool_call(
                     "two",
                     "submit_work",
@@ -244,7 +294,9 @@ def test_tier_filter_matrix(
     with tempfile.TemporaryDirectory() as raw:
         selected = config(Path(raw), "http://unused", max_tier=max_tier)
         ticket = {"status": "open", "tags": [f"tier:{ticket_tier}"]}
-        assert worker_module.claim_priority(selected, ticket, "AI-worker-one") == expected
+        assert (
+            worker_module.claim_priority(selected, ticket, "AI-worker-one") == expected
+        )
 
 
 def test_absent_tier_defaults_to_standard_and_assigned_only_is_enforced() -> None:
@@ -310,7 +362,9 @@ def test_max_tier_light_skips_heavy_and_claims_light() -> None:
         assert '"ticket_tier":"heavy"' in transcript
 
 
-def test_fresh_light_api_advertises_before_idle_wait_and_blocks_heavy_dispatch() -> None:
+def test_fresh_light_api_advertises_before_idle_wait_and_blocks_heavy_dispatch() -> (
+    None
+):
     class Result:
         is_error = False
         content: list[Any] = []
@@ -404,11 +458,11 @@ def test_fresh_light_api_advertises_before_idle_wait_and_blocks_heavy_dispatch()
     assert was_pending is True
     assert set(transport.profiles) == {"alpha", "beta"}
     assert all(
-        profile["task_focus"] == "worker-runtime max_tier=light"
+        profile["task_focus"] == "worker-runtime role=worker max_tier=light"
         for profile in transport.profiles.values()
     )
     assert all(
-        call["task_focus"] == "worker-runtime max_tier=light"
+        call["task_focus"] == "worker-runtime role=worker max_tier=light"
         for _board_id, call in transport.join_calls
     )
     assert [board_id for board_id, _call in transport.join_calls] == [
@@ -418,9 +472,7 @@ def test_fresh_light_api_advertises_before_idle_wait_and_blocks_heavy_dispatch()
         "beta",
     ]
 
-    coordinator_path = (
-        Path(__file__).parents[2] / "coordinator" / "coordinator.py"
-    )
+    coordinator_path = Path(__file__).parents[2] / "coordinator" / "coordinator.py"
     coordinator_spec = importlib.util.spec_from_file_location(
         "worker_tier_coordinator", coordinator_path
     )
@@ -443,9 +495,10 @@ def test_fresh_light_api_advertises_before_idle_wait_and_blocks_heavy_dispatch()
             ],
         }
     }
-    assert coordinator.plan_actions(
-        snapshot, {"alpha": {"drop_history": []}}, {}, now
-    ) == []
+    assert (
+        coordinator.plan_actions(snapshot, {"alpha": {"drop_history": []}}, {}, now)
+        == []
+    )
 
 
 def test_assigned_ticket_is_claimed_before_earlier_unassigned_ticket() -> None:
@@ -487,6 +540,7 @@ def test_assigned_ticket_is_claimed_before_earlier_unassigned_ticket() -> None:
             asyncio.run(worker.run())
 
         assert board.claims == [("board-one", "TK-assigned")]
+
 
 def test_stop_interrupts_blocked_board_wait() -> None:
     with tempfile.TemporaryDirectory() as raw:
@@ -533,9 +587,7 @@ def test_path_escape_rejected_then_give_up_releases_claim() -> None:
                 worker_module.SessionLog(selected.log_file),
                 directive="STATIC",
             )
-            asyncio.run(
-                worker.run_ticket("board-one", {"ticket_id": "TK-one"}, work)
-            )
+            asyncio.run(worker.run_ticket("board-one", {"ticket_id": "TK-one"}, work))
 
         assert not (root / "escape").exists()
         assert board.releases == ["path rejected"]
@@ -570,9 +622,7 @@ def test_shell_cannot_inherit_configured_api_key(
                 worker_module.SessionLog(selected.log_file),
                 directive="STATIC",
             )
-            asyncio.run(
-                worker.run_ticket("board-one", {"ticket_id": "TK-one"}, work)
-            )
+            asyncio.run(worker.run_ticket("board-one", {"ticket_id": "TK-one"}, work))
 
         tool_output = server.requests[1]["messages"][-1]["content"]
         assert secret not in tool_output
@@ -599,7 +649,7 @@ def test_shell_cannot_return_or_log_seat_token(
                 tool_call(
                     "one",
                     "run_shell",
-                    {"command": "cat \"$HOME/seat.jwt\""},
+                    {"command": 'cat "$HOME/seat.jwt"'},
                 ),
                 tool_call(
                     "two",
@@ -619,15 +669,16 @@ def test_shell_cannot_return_or_log_seat_token(
                 worker_module.SessionLog(selected.log_file, secrets=(secret,)),
                 directive="STATIC",
             )
-            asyncio.run(
-                worker.run_ticket("board-one", {"ticket_id": "TK-one"}, work)
-            )
+            asyncio.run(worker.run_ticket("board-one", {"ticket_id": "TK-one"}, work))
 
         inherited_home_output = server.requests[1]["messages"][-1]["content"]
         direct_path_output = server.requests[2]["messages"][-1]["content"]
         assert secret not in inherited_home_output
         assert secret not in direct_path_output
-        if worker_module.sys.platform == "darwin" and worker_module.SANDBOX_EXEC.is_file():
+        if (
+            worker_module.sys.platform == "darwin"
+            and worker_module.SANDBOX_EXEC.is_file()
+        ):
             assert "[REDACTED]" not in direct_path_output
         assert secret not in selected.log_file.read_text()
         assert worker.log.redact(secret) == "[REDACTED]"
@@ -721,6 +772,8 @@ def test_config_requires_mode_0600_and_never_accepts_inline_keys() -> None:
         assert loaded.api_key_file is None
         assert loaded.max_tier == "heavy"
         assert loaded.require_assigned_only is False
+        assert loaded.role == "worker"
+        assert loaded.max_reviews_per_hour == 12
 
         document = json.loads(path.read_text())
         document["claim"] = {
@@ -732,6 +785,22 @@ def test_config_requires_mode_0600_and_never_accepts_inline_keys() -> None:
         loaded = worker_module.load_config(path)
         assert loaded.max_tier == "light"
         assert loaded.require_assigned_only is True
+
+        document["seat"]["role"] = "reviewer"
+        document["review"] = {"max_reviews_per_hour": 7}
+        path.write_text(json.dumps(document))
+        path.chmod(0o600)
+        loaded = worker_module.load_config(path)
+        assert loaded.role == "reviewer"
+        assert loaded.max_reviews_per_hour == 7
+
+        document["seat"]["role"] = "invalid"
+        path.write_text(json.dumps(document))
+        path.chmod(0o600)
+        with pytest.raises(ValueError, match="seat.role"):
+            worker_module.load_config(path)
+
+        document["seat"]["role"] = "worker"
 
         document["llm"]["api_key"] = "INLINE_FORBIDDEN"
         path.write_text(json.dumps(document))
@@ -789,10 +858,17 @@ def test_keychain_config_uses_exact_security_argv_and_never_exposes_secret(
     monkeypatch.setattr(worker_module.subprocess, "run", fake_run)
 
     assert worker_module.read_secret(loaded, "api") == "KEYCHAIN_SECRET"
-    assert calls == [[
-        "/usr/bin/security", "find-generic-password", "-s", "pursers-worker",
-        "-a", "keychain-worker", "-w",
-    ]]
+    assert calls == [
+        [
+            "/usr/bin/security",
+            "find-generic-password",
+            "-s",
+            "pursers-worker",
+            "-a",
+            "keychain-worker",
+            "-w",
+        ]
+    ]
     assert "KEYCHAIN_SECRET" not in config_path.read_text()
 
 
@@ -826,3 +902,395 @@ def test_keyless_loopback_is_allowed_but_remote_requires_a_key_source(
         assert server.authorizations == [None]
     with pytest.raises(ValueError, match="exactly one"):
         worker_module.load_config(write_config("https://provider.invalid/v1"))
+
+
+@pytest.mark.parametrize(
+    ("arguments", "expected"),
+    [
+        (
+            {"verdict": "approve", "review_notes": "All required evidence verified."},
+            ("approve", None),
+        ),
+        (
+            {
+                "verdict": "reject",
+                "review_notes": "Focused test fails.",
+                "fix_instructions": "Fix the failing boundary case and rerun tests.",
+            },
+            ("reject", "Fix the failing boundary case and rerun tests."),
+        ),
+    ],
+)
+def test_parse_review_verdict_accepts_only_complete_structured_results(
+    arguments: dict[str, Any], expected: tuple[str, str | None]
+) -> None:
+    parsed = worker_module.parse_review_verdict(arguments)
+    assert (parsed.verdict, parsed.fix_instructions) == expected
+
+
+@pytest.mark.parametrize(
+    "garbage",
+    [
+        "approve",
+        {},
+        {"verdict": "maybe", "review_notes": "unclear"},
+        {"verdict": "reject", "review_notes": "bad"},
+        {
+            "verdict": "approve",
+            "review_notes": "looks fine",
+            "fix_instructions": "but change this",
+        },
+        {"verdict": "approve", "review_notes": "fine", "extra": True},
+    ],
+)
+def test_parse_review_verdict_rejects_garbage(garbage: Any) -> None:
+    with pytest.raises(ValueError):
+        worker_module.parse_review_verdict(garbage)
+
+
+@pytest.mark.parametrize(
+    ("arguments", "expected_result", "expected_reviews"),
+    [
+        (
+            {"verdict": "approve", "review_notes": "Verified commit and tests."},
+            "approve",
+            1,
+        ),
+        (
+            {
+                "verdict": "reject",
+                "review_notes": "Regression reproduced.",
+                "fix_instructions": "Correct the regression and add a test.",
+            },
+            "reject",
+            1,
+        ),
+        (
+            {"verdict": "reject", "review_notes": "Missing fix instructions."},
+            "skipped",
+            0,
+        ),
+    ],
+)
+def test_fake_llm_reviewer_approve_reject_and_garbage(
+    arguments: dict[str, Any], expected_result: str, expected_reviews: int
+) -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        board = FakeBoard()
+        board.tickets["TK-review"] = {
+            "ticket_id": "TK-review",
+            "status": "submitted",
+            "tags": ["tier:light"],
+            "required_fields": ["test_output"],
+            "submitted_by_principal_id": "PR-worker",
+            "submission_history": [
+                {
+                    "summary": "candidate",
+                    "notes": "test_output: passed",
+                    "submitted_at": "submission-1",
+                    "submitted_by_principal_id": "PR-worker",
+                }
+            ],
+        }
+        with FakeLLMServer(
+            [tool_call("verdict", "submit_review", arguments)]
+        ) as server:
+            selected = config(root, server.url, role="reviewer")
+            reviewer = worker_module.Reviewer(
+                selected,
+                board,
+                worker_module.OpenAICompatible(selected, "key"),
+                worker_module.SessionLog(selected.log_file),
+                directive="STATIC REVIEWER",
+            )
+            result = asyncio.run(
+                reviewer.run_review("board-one", board.tickets["TK-review"], root)
+            )
+
+        assert result == expected_result
+        assert len(board.reviews) == expected_reviews
+        assert board.claims == []
+        assert board.submissions == []
+        assert server.requests[0]["messages"][0] == {
+            "role": "system",
+            "content": "STATIC REVIEWER",
+        }
+
+
+def test_reviewer_self_review_probe_skips_before_calling_llm() -> None:
+    class NoCallLLM:
+        async def complete(self, *_args: Any) -> dict[str, Any]:
+            raise AssertionError("self-authored submission must not reach the LLM")
+
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        board = FakeBoard()
+        board.tickets["TK-self"] = {
+            "ticket_id": "TK-self",
+            "status": "submitted",
+            "submitted_at": "submission-1",
+            "submitted_by_principal_id": board.principal,
+            "submission_history": [
+                {
+                    "submitted_at": "submission-1",
+                    "submitted_by_principal_id": board.principal,
+                }
+            ],
+        }
+        selected = config(root, "http://unused", role="reviewer")
+        reviewer = worker_module.Reviewer(
+            selected,
+            board,
+            NoCallLLM(),
+            worker_module.SessionLog(selected.log_file),
+            directive="STATIC REVIEWER",
+        )
+
+        async def exercise() -> None:
+            running = asyncio.create_task(reviewer.run())
+            for _ in range(100):
+                if "self_review_refused" in selected.log_file.read_text():
+                    break
+                await asyncio.sleep(0)
+            reviewer.stop.set()
+            await asyncio.wait_for(running, timeout=1)
+
+        asyncio.run(exercise())
+        assert board.reviews == []
+        assert "self_review_refused" in selected.log_file.read_text()
+
+
+def test_reviewer_write_tool_attempt_is_blocked() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        selected = config(root, "http://unused", role="reviewer")
+        reviewer = worker_module.Reviewer(
+            selected,
+            FakeBoard(),
+            object(),
+            worker_module.SessionLog(selected.log_file),
+            directive="STATIC REVIEWER",
+        )
+        with pytest.raises(PermissionError, match="unavailable in reviewer mode"):
+            asyncio.run(
+                reviewer._tool(
+                    "write_file", {"path": "forbidden", "content": "no"}, root
+                )
+            )
+        assert not (root / "forbidden").exists()
+        with pytest.raises(PermissionError, match="read-only allowlist"):
+            worker_module._readonly_command("touch forbidden")
+        with pytest.raises(PermissionError, match="write-capable option"):
+            worker_module._readonly_command(
+                "git diff --no-index /etc/hosts /etc/passwd"
+            )
+
+
+def test_reviewer_test_command_cannot_mutate_project() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        work = root / "work"
+        work.mkdir()
+        (work / "test_mutation.py").write_text(
+            "import pathlib\n"
+            "import unittest\n"
+            "class MutationTest(unittest.TestCase):\n"
+            "    def test_write(self):\n"
+            "        pathlib.Path('sentinel.txt').write_text('forbidden')\n"
+        )
+        selected = config(root, "http://unused", role="reviewer")
+        reviewer = worker_module.Reviewer(
+            selected,
+            FakeBoard(),
+            object(),
+            worker_module.SessionLog(selected.log_file),
+            directive="STATIC REVIEWER",
+        )
+        asyncio.run(
+            reviewer._run_readonly_shell(
+                f"'{sys.executable}' -m unittest test_mutation.py", work
+            )
+        )
+        assert not (work / "sentinel.txt").exists()
+
+
+def test_review_rate_limiter_uses_rolling_hour() -> None:
+    now = [100.0]
+    limiter = worker_module.ReviewRateLimiter(2, clock=lambda: now[0])
+    assert limiter.acquire() is True
+    assert limiter.acquire() is True
+    assert limiter.acquire() is False
+    assert limiter.retry_after() == 3_600
+    now[0] += 3_600
+    assert limiter.acquire() is True
+
+
+def test_submitted_ticket_discovery_spans_all_configured_boards() -> None:
+    class View:
+        def __init__(self, ticket_id: str) -> None:
+            self.ticket_id = ticket_id
+            self.calls: list[dict[str, Any]] = []
+
+        async def ticket_list(self, **arguments: Any) -> dict[str, Any]:
+            self.calls.append(arguments)
+            return {
+                "tickets": [
+                    {"ticket_id": self.ticket_id, "status": "submitted"},
+                    {"ticket_id": "TK-open", "status": "open"},
+                ]
+            }
+
+    with tempfile.TemporaryDirectory() as raw:
+        selected = replace(
+            config(Path(raw), "http://unused", role="reviewer"),
+            boards=("alpha", "beta"),
+        )
+        api = worker_module.PursersBoardAPI(selected, "TOKEN_PLACEHOLDER")
+        alpha = View("TK-alpha")
+        beta = View("TK-beta")
+        api.views = {"alpha": alpha, "beta": beta}
+        discovered = asyncio.run(api.submitted())
+
+        assert [(board, ticket["ticket_id"]) for board, ticket in discovered] == [
+            ("alpha", "TK-alpha"),
+            ("beta", "TK-beta"),
+        ]
+        assert (
+            alpha.calls
+            == beta.calls
+            == [{"status": "submitted", "include_closed": False, "limit": 100}]
+        )
+
+
+def test_scratch_board_worker_reject_resubmit_approve_e2e() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        work = root / "work"
+        work.mkdir()
+        board = FakeBoard()
+        board.work = work
+        board.tickets["TK-e2e"] = {
+            "ticket_id": "TK-e2e",
+            "status": "claimed",
+            "tags": ["tier:light"],
+            "required_fields": ["test_output"],
+        }
+        transcript: list[str] = []
+
+        with FakeLLMServer(
+            [
+                tool_call(
+                    "submit-1",
+                    "submit_work",
+                    {"summary": "first pass", "notes": "test_output: failing"},
+                )
+            ]
+        ) as server:
+            worker_config = config(root, server.url)
+            worker = worker_module.Worker(
+                worker_config,
+                board,
+                worker_module.OpenAICompatible(worker_config, "key"),
+                worker_module.SessionLog(worker_config.log_file),
+                directive="STATIC WORKER",
+            )
+            assert (
+                asyncio.run(
+                    worker.run_ticket("board-one", board.tickets["TK-e2e"], work)
+                )
+                == "submitted"
+            )
+        transcript.append("worker submits -> submitted")
+
+        with FakeLLMServer(
+            [
+                tool_call(
+                    "reject",
+                    "submit_review",
+                    {
+                        "verdict": "reject",
+                        "review_notes": "Required test evidence is failing.",
+                        "fix_instructions": "Fix the test and resubmit passing output.",
+                    },
+                )
+            ]
+        ) as server:
+            reviewer_config = config(root, server.url, role="reviewer")
+            reviewer = worker_module.Reviewer(
+                reviewer_config,
+                board,
+                worker_module.OpenAICompatible(reviewer_config, "key"),
+                worker_module.SessionLog(root / "reviewer.log"),
+                directive="STATIC REVIEWER",
+            )
+            assert (
+                asyncio.run(
+                    reviewer.run_review("board-one", board.tickets["TK-e2e"], work)
+                )
+                == "reject"
+            )
+        transcript.append("API reviewer rejects -> open with fix_instructions")
+        assert board.tickets["TK-e2e"]["status"] == "open"
+        assert board.tickets["TK-e2e"]["fix_instructions"]
+
+        with FakeLLMServer(
+            [
+                tool_call(
+                    "submit-2",
+                    "submit_work",
+                    {"summary": "fixed pass", "notes": "test_output: passing"},
+                )
+            ]
+        ) as server:
+            worker_config = config(root, server.url)
+            worker = worker_module.Worker(
+                worker_config,
+                board,
+                worker_module.OpenAICompatible(worker_config, "key"),
+                worker_module.SessionLog(worker_config.log_file),
+                directive="STATIC WORKER",
+            )
+            assert (
+                asyncio.run(
+                    worker.run_ticket("board-one", board.tickets["TK-e2e"], work)
+                )
+                == "submitted"
+            )
+        transcript.append("worker resubmits -> submitted")
+
+        with FakeLLMServer(
+            [
+                tool_call(
+                    "approve",
+                    "submit_review",
+                    {
+                        "verdict": "approve",
+                        "review_notes": "Passing evidence verified.",
+                    },
+                )
+            ]
+        ) as server:
+            reviewer_config = config(root, server.url, role="reviewer")
+            reviewer = worker_module.Reviewer(
+                reviewer_config,
+                board,
+                worker_module.OpenAICompatible(reviewer_config, "key"),
+                worker_module.SessionLog(root / "reviewer.log"),
+                directive="STATIC REVIEWER",
+            )
+            assert (
+                asyncio.run(
+                    reviewer.run_review("board-one", board.tickets["TK-e2e"], work)
+                )
+                == "approve"
+            )
+        transcript.append("API reviewer approves -> closed")
+
+        assert board.tickets["TK-e2e"]["status"] == "closed"
+        assert transcript == [
+            "worker submits -> submitted",
+            "API reviewer rejects -> open with fix_instructions",
+            "worker resubmits -> submitted",
+            "API reviewer approves -> closed",
+        ]

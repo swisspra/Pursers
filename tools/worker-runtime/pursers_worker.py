@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Headless Pursers worker for OpenAI-compatible chat-completions APIs."""
+"""Headless Pursers worker/reviewer for OpenAI-compatible chat APIs."""
 
 from __future__ import annotations
 
@@ -7,18 +7,24 @@ import argparse
 import asyncio
 import json
 import os
+import shlex
+import shutil
 import signal
 import stat
 import subprocess
 import sys
-import tomllib
+import tempfile
+import time
 import urllib.error
 import urllib.request
+from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import urlsplit
 
+import tomllib
 
 ROOT = Path(__file__).resolve().parents[2]
 CLIENT_SRC = ROOT / "packages" / "client" / "src"
@@ -27,13 +33,18 @@ for import_root in (CLIENT_SRC, WAIT_ROOT):
     if str(import_root) not in sys.path:
         sys.path.insert(0, str(import_root))
 
-from pursers_client import BoardClient  # noqa: E402
 import pursers_wait_server as wait_bridge  # noqa: E402
-
+from pursers_client import BoardClient  # noqa: E402
 
 DIRECTIVE_PATH = WAIT_ROOT / "WORKER-DIRECTIVE.md"
+REVIEWER_DIRECTIVE_PATH = (
+    Path(__file__).resolve().with_name("REVIEWER-DIRECTIVE-API.md")
+)
 MAX_TOOL_OUTPUT = 20_000
 MAX_FILE_READ = 100_000
+MAX_REVIEW_DESCRIPTION = 12_000
+MAX_REVIEW_FIELD = 5_000
+MAX_SEEN_SUBMISSIONS = 2_048
 LEASE_INTERVAL_S = 20.0
 TIER_ORDER = {"light": 0, "standard": 1, "heavy": 2}
 SHELL_ENV_ALLOWLIST = (
@@ -69,6 +80,8 @@ class Config:
     log_file: Path
     max_tier: str
     require_assigned_only: bool
+    role: str = "worker"
+    max_reviews_per_hour: int = 12
 
 
 def _private_file(path: Path, label: str) -> Path:
@@ -103,6 +116,9 @@ def load_config(path: str | Path) -> Config:
         raise ValueError("config requires seat and llm objects")
     if "token" in seat or "api_key" in llm:
         raise ValueError("inline tokens and API keys are forbidden")
+    role = seat.get("role", "worker")
+    if role not in {"worker", "reviewer"}:
+        raise ValueError("seat.role must be worker or reviewer")
     claim = document.get("claim", {})
     if not isinstance(claim, dict):
         raise ValueError("claim must be an object")
@@ -112,11 +128,19 @@ def load_config(path: str | Path) -> Config:
     require_assigned_only = claim.get("require_assigned_only", False)
     if type(require_assigned_only) is not bool:
         raise ValueError("claim.require_assigned_only must be a boolean")
+    review = document.get("review", {})
+    if not isinstance(review, dict):
+        raise ValueError("review must be an object")
+    max_reviews_per_hour = review.get("max_reviews_per_hour", 12)
+    if type(max_reviews_per_hour) is not int or max_reviews_per_hour < 1:
+        raise ValueError("review.max_reviews_per_hour must be a positive integer")
     boards_raw = document.get("boards", "registry")
     if boards_raw == "registry":
         boards: str | tuple[str, ...] = "registry"
-    elif isinstance(boards_raw, list) and boards_raw and all(
-        isinstance(item, str) and item.strip() for item in boards_raw
+    elif (
+        isinstance(boards_raw, list)
+        and boards_raw
+        and all(isinstance(item, str) and item.strip() for item in boards_raw)
     ):
         boards = tuple(dict.fromkeys(item.strip() for item in boards_raw))
     else:
@@ -172,6 +196,8 @@ def load_config(path: str | Path) -> Config:
         log_file=log_file,
         max_tier=max_tier,
         require_assigned_only=require_assigned_only,
+        role=role,
+        max_reviews_per_hour=max_reviews_per_hour,
     )
 
 
@@ -206,6 +232,7 @@ def claim_priority(config: Config, ticket: dict[str, Any], agent_id: str) -> int
     else:
         return None if config.require_assigned_only else 1
     return 0 if assigned_to_me else None
+
 
 def read_keychain_secret(account: str) -> str:
     if sys.platform != "darwin":
@@ -299,6 +326,17 @@ class BoardAPI(Protocol):
         self, board_id: str, ticket_id: str, arguments: dict[str, Any]
     ) -> None: ...
     async def release(self, board_id: str, ticket_id: str, reason: str) -> None: ...
+    async def submitted(self) -> list[tuple[str, dict[str, Any]]]: ...
+    async def principal_id(self, board_id: str) -> str: ...
+    async def review(
+        self,
+        board_id: str,
+        ticket_id: str,
+        verdict: str,
+        *,
+        review_notes: str,
+        fix_instructions: str | None,
+    ) -> None: ...
 
 
 class PursersBoardAPI:
@@ -313,7 +351,7 @@ class PursersBoardAPI:
         self.registry: dict[str, Any] | None = None
         self.views: dict[str, Any] = {}
 
-    async def __aenter__(self) -> "PursersBoardAPI":
+    async def __aenter__(self) -> PursersBoardAPI:
         await self.client.__aenter__()
         return self
 
@@ -332,8 +370,17 @@ class PursersBoardAPI:
             view = wait_bridge._BoardView(self.client, board_id)
             await view.board_join(
                 agent_name=self.config.agent_name,
-                task_focus=f"worker-runtime max_tier={self.config.max_tier}",
+                task_focus=(
+                    f"worker-runtime role={self.config.role} "
+                    f"max_tier={self.config.max_tier}"
+                ),
             )
+            if self.config.role == "reviewer" and (
+                view.identity is None or view.identity.role != "reviewer"
+            ):
+                raise PermissionError(
+                    "reviewer mode requires a dedicated board reviewer principal/token"
+                )
             self.views[board_id] = view
         return view
 
@@ -345,7 +392,10 @@ class PursersBoardAPI:
             timeout_s=180,
             only_mine=False,
             agent_name=self.config.agent_name,
-            task_focus=f"worker-runtime max_tier={self.config.max_tier}",
+            task_focus=(
+                f"worker-runtime role={self.config.role} "
+                f"max_tier={self.config.max_tier}"
+            ),
         )
 
     async def claim(self, board_id: str, ticket_id: str) -> dict[str, Any]:
@@ -368,6 +418,12 @@ class PursersBoardAPI:
         if view.identity is None:  # pragma: no cover - _view always joins.
             raise RuntimeError("board identity is unavailable")
         return str(view.identity.agent_id)
+
+    async def principal_id(self, board_id: str) -> str:
+        view = await self._view(board_id)
+        if view.identity is None:  # pragma: no cover - _view always joins.
+            raise RuntimeError("board identity is unavailable")
+        return str(view.identity.principal_id)
 
     async def work_dir(self, board_id: str) -> Path:
         self.registry = self.registry or await wait_bridge._read_project_registry(
@@ -408,6 +464,47 @@ class PursersBoardAPI:
         if result.get("error"):
             raise RuntimeError(str(result["error"]))
 
+    async def submitted(self) -> list[tuple[str, dict[str, Any]]]:
+        submitted: list[tuple[str, dict[str, Any]]] = []
+        for board_id in await self._boards():
+            result = await (await self._view(board_id)).ticket_list(
+                status="submitted", include_closed=False, limit=100
+            )
+            if result.get("error"):
+                raise RuntimeError(str(result["error"]))
+            submitted.extend(
+                (board_id, ticket)
+                for ticket in result.get("tickets", [])
+                if isinstance(ticket, dict) and ticket.get("status") == "submitted"
+            )
+        return submitted
+
+    async def review(
+        self,
+        board_id: str,
+        ticket_id: str,
+        verdict: str,
+        *,
+        review_notes: str,
+        fix_instructions: str | None,
+    ) -> None:
+        result = await (await self._view(board_id))._call(
+            "ticket_review",
+            {
+                "agent_name": self.config.agent_name,
+                "ticket_id": ticket_id,
+                "verdict": verdict,
+                "review_notes": review_notes,
+                **(
+                    {"fix_instructions": fix_instructions}
+                    if fix_instructions is not None
+                    else {}
+                ),
+            },
+        )
+        if result.get("error"):
+            raise RuntimeError(str(result["error"]))
+
 
 class OpenAICompatible:
     def __init__(self, config: Config, api_key: str) -> None:
@@ -440,7 +537,9 @@ class OpenAICompatible:
                 headers=headers,
                 method="POST",
             )
-            with urllib.request.urlopen(raw, timeout=self.config.command_timeout_s) as response:
+            with urllib.request.urlopen(
+                raw, timeout=self.config.command_timeout_s
+            ) as response:
                 result = json.load(response)
             return result["choices"][0]["message"]
 
@@ -448,12 +547,302 @@ class OpenAICompatible:
 
 
 TOOLS: list[dict[str, Any]] = [
-    {"type": "function", "function": {"name": "run_shell", "description": "Run a timeboxed shell command in the assigned work directory.", "parameters": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}}},
-    {"type": "function", "function": {"name": "read_file", "description": "Read a bounded UTF-8 file inside the assigned work directory.", "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}}},
-    {"type": "function", "function": {"name": "write_file", "description": "Write UTF-8 text inside the assigned work directory.", "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}}},
-    {"type": "function", "function": {"name": "submit_work", "description": "Submit completed ticket work for independent review.", "parameters": {"type": "object", "properties": {"summary": {"type": "string"}, "files_changed": {"type": "array", "items": {"type": "string"}}, "notes": {"type": "string"}}, "required": ["summary", "notes"]}}},
-    {"type": "function", "function": {"name": "give_up", "description": "Release the claim with a local reason so another worker can retry.", "parameters": {"type": "object", "properties": {"reason": {"type": "string"}}, "required": ["reason"]}}},
+    {
+        "type": "function",
+        "function": {
+            "name": "run_shell",
+            "description": (
+                "Run a timeboxed shell command in the assigned work directory."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {"command": {"type": "string"}},
+                "required": ["command"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_file",
+            "description": (
+                "Read a bounded UTF-8 file inside the assigned work directory."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "write_file",
+            "description": "Write UTF-8 text inside the assigned work directory.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "content": {"type": "string"},
+                },
+                "required": ["path", "content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "submit_work",
+            "description": "Submit completed ticket work for independent review.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "summary": {"type": "string"},
+                    "files_changed": {"type": "array", "items": {"type": "string"}},
+                    "notes": {"type": "string"},
+                },
+                "required": ["summary", "notes"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "give_up",
+            "description": (
+                "Release the claim with a local reason so another worker can retry."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {"reason": {"type": "string"}},
+                "required": ["reason"],
+            },
+        },
+    },
 ]
+
+REVIEWER_TOOLS: list[dict[str, Any]] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "run_shell",
+            "description": "Run an allowlisted read-only inspection or test command.",
+            "parameters": {
+                "type": "object",
+                "properties": {"command": {"type": "string"}},
+                "required": ["command"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_file",
+            "description": (
+                "Read a bounded UTF-8 file inside the project work directory."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "submit_review",
+            "description": "Return the final structured independent-review verdict.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "verdict": {"type": "string", "enum": ["approve", "reject"]},
+                    "review_notes": {"type": "string"},
+                    "fix_instructions": {"type": "string"},
+                },
+                "required": ["verdict", "review_notes"],
+                "additionalProperties": False,
+            },
+        },
+    },
+]
+
+
+@dataclass(frozen=True)
+class ReviewVerdict:
+    verdict: str
+    review_notes: str
+    fix_instructions: str | None
+
+
+def parse_review_verdict(arguments: Any) -> ReviewVerdict:
+    """Parse the terminal tool arguments without coercion or inferred defaults."""
+    if not isinstance(arguments, dict):
+        raise ValueError("review verdict must be an object")
+    if set(arguments) - {"verdict", "review_notes", "fix_instructions"}:
+        raise ValueError("review verdict contains unexpected fields")
+    verdict = arguments.get("verdict")
+    if verdict not in {"approve", "reject"}:
+        raise ValueError("verdict must be approve or reject")
+    review_notes = _text(arguments.get("review_notes"), "review_notes")
+    if len(review_notes) > MAX_REVIEW_FIELD:
+        raise ValueError("review_notes exceeds the bounded review field limit")
+    raw_fix = arguments.get("fix_instructions")
+    if raw_fix is not None and not isinstance(raw_fix, str):
+        raise ValueError("fix_instructions must be a string")
+    fix_instructions = raw_fix.strip() if isinstance(raw_fix, str) else None
+    if fix_instructions is not None and len(fix_instructions) > MAX_REVIEW_FIELD:
+        raise ValueError("fix_instructions exceeds the bounded review field limit")
+    if verdict == "reject" and not fix_instructions:
+        raise ValueError("reject requires fix_instructions")
+    if verdict == "approve" and fix_instructions:
+        raise ValueError("approve must not contain fix_instructions")
+    return ReviewVerdict(verdict, review_notes, fix_instructions or None)
+
+
+class ReviewRateLimiter:
+    def __init__(
+        self, limit: int, *, clock: Callable[[], float] = time.monotonic
+    ) -> None:
+        self.limit = limit
+        self.clock = clock
+        self.timestamps: deque[float] = deque()
+
+    def _prune(self, now: float) -> None:
+        while self.timestamps and now - self.timestamps[0] >= 3_600:
+            self.timestamps.popleft()
+
+    def acquire(self) -> bool:
+        now = self.clock()
+        self._prune(now)
+        if len(self.timestamps) >= self.limit:
+            return False
+        self.timestamps.append(now)
+        return True
+
+    def retry_after(self) -> float:
+        now = self.clock()
+        self._prune(now)
+        if len(self.timestamps) < self.limit:
+            return 0.0
+        return max(0.0, 3_600 - (now - self.timestamps[0]))
+
+
+def _clip(value: Any, limit: int) -> str:
+    text = value if isinstance(value, str) else ""
+    return text[:limit]
+
+
+def _latest_submission(ticket: dict[str, Any]) -> dict[str, Any]:
+    history = ticket.get("submission_history")
+    if isinstance(history, list) and history and isinstance(history[-1], dict):
+        return history[-1]
+    return ticket
+
+
+def _submission_principal(ticket: dict[str, Any]) -> str | None:
+    latest = _latest_submission(ticket)
+    value = latest.get("submitted_by_principal_id") or ticket.get(
+        "submitted_by_principal_id"
+    )
+    return str(value) if value else None
+
+
+def review_context(ticket: dict[str, Any]) -> dict[str, Any]:
+    latest = _latest_submission(ticket)
+    required = ticket.get("required_fields")
+    files = latest.get("files_changed")
+    return {
+        "ticket_id": str(ticket.get("ticket_id", "")),
+        "title": _clip(ticket.get("title"), MAX_REVIEW_FIELD),
+        "description": _clip(ticket.get("description"), MAX_REVIEW_DESCRIPTION),
+        "required_fields": [
+            _clip(item, 200)
+            for item in (required if isinstance(required, list) else [])[:100]
+        ],
+        "tags": [
+            _clip(item, 200)
+            for item in (
+                ticket.get("tags") if isinstance(ticket.get("tags"), list) else []
+            )[:100]
+        ],
+        "latest_submission": {
+            "summary": _clip(latest.get("summary"), MAX_REVIEW_FIELD),
+            "notes": _clip(latest.get("notes"), MAX_REVIEW_FIELD),
+            "files_changed": [
+                _clip(item, 500)
+                for item in (files if isinstance(files, list) else [])[:200]
+            ],
+            "submitted_at": _clip(latest.get("submitted_at"), 100),
+            "submitted_by_agent_id": _clip(latest.get("submitted_by_agent_id"), 200),
+            "submitted_by_principal_id": _clip(
+                latest.get("submitted_by_principal_id")
+                or ticket.get("submitted_by_principal_id"),
+                200,
+            ),
+        },
+    }
+
+
+def _readonly_command(command: str) -> tuple[list[str], bool]:
+    """Return argv and whether it must run in a disposable project copy."""
+    try:
+        argv = shlex.split(command)
+    except ValueError as exc:
+        raise PermissionError("invalid read-only command") from exc
+    if not argv or any("\n" in part or "\r" in part for part in argv):
+        raise PermissionError("invalid read-only command")
+    executable = Path(argv[0]).name
+    if executable == "git":
+        if len(argv) < 2 or argv[1] not in {
+            "status",
+            "diff",
+            "show",
+            "log",
+            "rev-parse",
+            "merge-base",
+            "cat-file",
+            "ls-files",
+            "blame",
+            "grep",
+        }:
+            raise PermissionError("git command is not in the read-only allowlist")
+        forbidden = (
+            "--output",
+            "--exec",
+            "--upload-pack",
+            "--receive-pack",
+            "--ext-diff",
+            "--textconv",
+            "--no-index",
+            "--filters",
+            "--open-files-in-pager",
+        )
+        if any(part == "-o" or part.startswith(forbidden) for part in argv[2:]):
+            raise PermissionError("git write-capable option is forbidden")
+        return argv, True
+    if executable in {"pytest", "py.test"}:
+        return argv, True
+    if (
+        executable in {"python", "python3"}
+        and len(argv) >= 3
+        and argv[1:3] in (["-m", "pytest"], ["-m", "unittest"])
+    ):
+        return argv, True
+    if executable == "ruff" and len(argv) >= 2 and argv[1] in {"check", "format"}:
+        if argv[1] == "format" and "--check" not in argv:
+            raise PermissionError("ruff format requires --check in reviewer mode")
+        return argv, True
+    if executable in {"npm", "pnpm", "yarn"} and any(
+        item in argv[1:3] for item in ("test", "check")
+    ):
+        return argv, True
+    if executable in {"cargo", "go"} and len(argv) >= 2 and argv[1] == "test":
+        return argv, True
+    raise PermissionError("command is not in the reviewer read-only allowlist")
 
 
 def _jailed(work_dir: Path, raw_path: str) -> Path:
@@ -487,12 +876,20 @@ class Worker:
         context = {
             "board_id": board_id,
             "work_dir": str(work_dir),
-            "review": "independent reviewer required; never review or merge your own work",
+            "review": (
+                "independent reviewer required; never review or merge your own work"
+            ),
         }
         return [
             {"role": "system", "content": self.directive},
-            {"role": "system", "content": "BOARD CONTEXT\n" + json.dumps(context, sort_keys=True)},
-            {"role": "user", "content": "DYNAMIC TICKET\n" + json.dumps(ticket, sort_keys=True)},
+            {
+                "role": "system",
+                "content": "BOARD CONTEXT\n" + json.dumps(context, sort_keys=True),
+            },
+            {
+                "role": "user",
+                "content": "DYNAMIC TICKET\n" + json.dumps(ticket, sort_keys=True),
+            },
         ]
 
     def _shell_argv(self, command: str) -> list[str] | None:
@@ -502,8 +899,7 @@ class Worker:
         if self.config.api_key_file is not None:
             protected.append(self.config.api_key_file)
         denies = "\n".join(
-            f"(deny file-read* (literal {json.dumps(str(path))}))"
-            for path in protected
+            f"(deny file-read* (literal {json.dumps(str(path))}))" for path in protected
         )
         profile = f"(version 1)\n(allow default)\n{denies}"
         return [str(SANDBOX_EXEC), "-p", profile, "/bin/sh", "-lc", command]
@@ -548,6 +944,7 @@ class Worker:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
             )
+
             async def bounded_output() -> bytes:
                 assert process.stdout is not None
                 output = bytearray()
@@ -658,7 +1055,9 @@ class Worker:
             self.log.write("max_iterations", ticket_id=ticket_id)
             return "released"
         except Exception as exc:
-            self.log.write("hard_failure", ticket_id=ticket_id, error=type(exc).__name__)
+            self.log.write(
+                "hard_failure", ticket_id=ticket_id, error=type(exc).__name__
+            )
             await self._release(board_id, ticket_id, "LLM or runtime hard failure")
             return "released"
         finally:
@@ -743,23 +1142,382 @@ class Worker:
                 await asyncio.sleep(1)
 
 
+class Reviewer:
+    def __init__(
+        self,
+        config: Config,
+        board: BoardAPI,
+        llm: Any,
+        log: SessionLog,
+        *,
+        directive: str | None = None,
+        limiter: ReviewRateLimiter | None = None,
+    ) -> None:
+        self.config = config
+        self.board = board
+        self.llm = llm
+        self.log = log
+        self.directive = directive or REVIEWER_DIRECTIVE_PATH.read_text(
+            encoding="utf-8"
+        )
+        self.limiter = limiter or ReviewRateLimiter(config.max_reviews_per_hour)
+        self.stop = asyncio.Event()
+        self.seen_submissions: set[tuple[str, str, str]] = set()
+        self.seen_submission_order: deque[tuple[str, str, str]] = deque()
+
+    def _remember_submission(self, key: tuple[str, str, str]) -> None:
+        if key in self.seen_submissions:
+            return
+        self.seen_submissions.add(key)
+        self.seen_submission_order.append(key)
+        while len(self.seen_submission_order) > MAX_SEEN_SUBMISSIONS:
+            self.seen_submissions.discard(self.seen_submission_order.popleft())
+
+    def messages(
+        self, board_id: str, ticket: dict[str, Any], work_dir: Path
+    ) -> list[dict[str, Any]]:
+        context = {
+            "board_id": board_id,
+            "work_dir": str(work_dir),
+            "access": "read-only independent review; never claim, edit, or submit work",
+        }
+        return [
+            {"role": "system", "content": self.directive},
+            {
+                "role": "system",
+                "content": "BOARD CONTEXT\n" + json.dumps(context, sort_keys=True),
+            },
+            {
+                "role": "user",
+                "content": "DYNAMIC REVIEW TICKET\n"
+                + json.dumps(review_context(ticket), sort_keys=True),
+            },
+        ]
+
+    def _finding(self, kind: str, board_id: str, ticket_id: str, detail: str) -> None:
+        finding = {
+            "kind": kind,
+            "board_id": board_id,
+            "ticket_id": ticket_id,
+            "detail": detail,
+        }
+        self.log.write("review_finding", **finding)
+        print(
+            "FINDING reviewer-runtime "
+            + json.dumps(self.log.scrub(finding), sort_keys=True),
+            file=sys.stderr,
+            flush=True,
+        )
+
+    def _sandbox_argv(self, argv: list[str], work_dir: Path) -> list[str]:
+        if sys.platform != "darwin" or not SANDBOX_EXEC.is_file():
+            return argv
+        protected = [self.config.token_file]
+        if self.config.api_key_file is not None:
+            protected.append(self.config.api_key_file)
+        denies = [
+            f"(deny file-read* (literal {json.dumps(str(path))}))" for path in protected
+        ]
+        denies.append(
+            f"(deny file-write* (subpath {json.dumps(str(work_dir.resolve()))}))"
+        )
+        profile = "(version 1)\n(allow default)\n" + "\n".join(denies)
+        return [str(SANDBOX_EXEC), "-p", profile, *argv]
+
+    async def _run_readonly_shell(self, command: str, work_dir: Path) -> str:
+        argv, needs_copy = _readonly_command(command)
+        self.log.write("review_run_shell", command=command)
+        scratch: tempfile.TemporaryDirectory[str] | None = None
+        command_dir = work_dir
+        try:
+            if needs_copy and (sys.platform != "darwin" or not SANDBOX_EXEC.is_file()):
+                scratch = tempfile.TemporaryDirectory(prefix="pursers-review-")
+                command_dir = Path(scratch.name) / "project"
+                await asyncio.to_thread(
+                    shutil.copytree,
+                    work_dir,
+                    command_dir,
+                    ignore=shutil.ignore_patterns(
+                        ".pytest_cache", ".ruff_cache", "__pycache__"
+                    ),
+                )
+            shell_env = {
+                key: value
+                for key in SHELL_ENV_ALLOWLIST
+                if key != self.config.api_key_env
+                and (value := os.environ.get(key)) is not None
+            }
+            shell_env.update(
+                {
+                    "HOME": tempfile.gettempdir(),
+                    "TMPDIR": tempfile.gettempdir(),
+                    "GIT_PAGER": "cat",
+                    "PAGER": "cat",
+                    "PYTHONDONTWRITEBYTECODE": "1",
+                }
+            )
+            process = await asyncio.create_subprocess_exec(
+                *self._sandbox_argv(argv, work_dir),
+                cwd=command_dir,
+                env=shell_env,
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+
+            async def bounded_output() -> bytes:
+                assert process.stdout is not None
+                output = bytearray()
+                while True:
+                    chunk = await process.stdout.read(4_096)
+                    if not chunk:
+                        await process.wait()
+                        return bytes(output)
+                    remaining = MAX_TOOL_OUTPUT - len(output)
+                    output.extend(chunk[:remaining])
+                    if len(chunk) > remaining:
+                        process.kill()
+                        await process.wait()
+                        return bytes(output) + b"\n[output truncated]"
+
+            try:
+                output = await asyncio.wait_for(
+                    bounded_output(), timeout=self.config.command_timeout_s
+                )
+            except TimeoutError:
+                process.kill()
+                await process.wait()
+                return "command timed out"
+            return output.decode("utf-8", errors="replace")
+        finally:
+            if scratch is not None:
+                await asyncio.to_thread(scratch.cleanup)
+
+    async def _tool(
+        self, name: str, args: dict[str, Any], work_dir: Path
+    ) -> tuple[str, ReviewVerdict | None]:
+        if name == "read_file":
+            path = _jailed(work_dir, _text(args.get("path"), "path"))
+            data = await asyncio.to_thread(path.read_bytes)
+            return data[:MAX_FILE_READ].decode("utf-8", errors="replace"), None
+        if name == "run_shell":
+            command = _text(args.get("command"), "command")
+            return await self._run_readonly_shell(command, work_dir), None
+        if name == "submit_review":
+            return "structured verdict accepted", parse_review_verdict(args)
+        raise PermissionError(f"tool {name!r} is unavailable in reviewer mode")
+
+    async def run_review(
+        self, board_id: str, ticket: dict[str, Any], work_dir: Path
+    ) -> str:
+        ticket_id = str(ticket["ticket_id"])
+        messages = self.messages(board_id, ticket, work_dir)
+        try:
+            for _ in range(self.config.max_iterations):
+                if self.stop.is_set():
+                    return "stopped"
+                message = await self.llm.complete(messages, REVIEWER_TOOLS)
+                messages.append({"role": "assistant", **message})
+                calls = message.get("tool_calls") or []
+                if not calls:
+                    if message.get("content"):
+                        self._finding(
+                            "unstructured_verdict",
+                            board_id,
+                            ticket_id,
+                            "model returned text instead of a structured tool call",
+                        )
+                        return "skipped"
+                    continue
+                for call in calls:
+                    function = call.get("function", {})
+                    try:
+                        arguments = json.loads(function.get("arguments") or "{}")
+                        output, verdict = await self._tool(
+                            str(function.get("name")), arguments, work_dir
+                        )
+                    except Exception as exc:
+                        output = f"error: {type(exc).__name__}: {exc}"
+                        verdict = None
+                        if str(function.get("name")) == "submit_review":
+                            self._finding(
+                                "invalid_verdict",
+                                board_id,
+                                ticket_id,
+                                str(exc),
+                            )
+                            return "skipped"
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": call.get("id"),
+                            "content": self.log.redact(output)[:MAX_TOOL_OUTPUT],
+                        }
+                    )
+                    if verdict is None:
+                        continue
+                    current = await self.board.ticket(board_id, ticket_id)
+                    principal_id = await self.board.principal_id(board_id)
+                    submitted_by = _submission_principal(current)
+                    if (
+                        current.get("status") != "submitted"
+                        or submitted_by is None
+                        or submitted_by == principal_id
+                    ):
+                        self._finding(
+                            "self_or_stale_review_refused",
+                            board_id,
+                            ticket_id,
+                            (
+                                "submission changed, lacks provenance, or matches "
+                                "reviewer principal"
+                            ),
+                        )
+                        return "skipped"
+                    await self.board.review(
+                        board_id,
+                        ticket_id,
+                        verdict.verdict,
+                        review_notes=verdict.review_notes,
+                        fix_instructions=verdict.fix_instructions,
+                    )
+                    self.log.write(
+                        "review_submitted",
+                        board_id=board_id,
+                        ticket_id=ticket_id,
+                        verdict=verdict.verdict,
+                    )
+                    return verdict.verdict
+            self._finding(
+                "review_max_iterations",
+                board_id,
+                ticket_id,
+                "model did not produce a valid structured verdict",
+            )
+            return "skipped"
+        except Exception as exc:
+            self._finding(
+                "review_hard_failure", board_id, ticket_id, type(exc).__name__
+            )
+            return "skipped"
+
+    async def _wait_or_stop(
+        self, cursors: dict[str, int]
+    ) -> tuple[dict[str, int], bool]:
+        board_wait = asyncio.create_task(self.board.wait(cursors))
+        shutdown = asyncio.create_task(self.stop.wait())
+        try:
+            done, _ = await asyncio.wait(
+                (board_wait, shutdown), return_when=asyncio.FIRST_COMPLETED
+            )
+            if shutdown in done:
+                return cursors, True
+            waited = board_wait.result()
+            return dict(waited.get("new_seq", cursors)), False
+        finally:
+            for task in (board_wait, shutdown):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(board_wait, shutdown, return_exceptions=True)
+
+    async def run(self) -> None:
+        cursors: dict[str, int] = {}
+        while not self.stop.is_set():
+            try:
+                candidates = await self.board.submitted()
+            except Exception as exc:
+                self.log.write("submitted_discovery_failed", error=type(exc).__name__)
+                cursors, stopped = await self._wait_or_stop(cursors)
+                if stopped:
+                    break
+                continue
+            selected = False
+            for board_id, listed_ticket in candidates:
+                ticket_id = str(listed_ticket.get("ticket_id", ""))
+                latest = _latest_submission(listed_ticket)
+                submission_key = (
+                    board_id,
+                    ticket_id,
+                    str(latest.get("submitted_at") or latest.get("summary") or ""),
+                )
+                if not ticket_id or submission_key in self.seen_submissions:
+                    continue
+                ticket = await self.board.ticket(board_id, ticket_id)
+                principal_id = await self.board.principal_id(board_id)
+                submitted_by = _submission_principal(ticket)
+                if submitted_by is None or submitted_by == principal_id:
+                    self._finding(
+                        "self_review_refused",
+                        board_id,
+                        ticket_id,
+                        (
+                            "submission principal is missing"
+                            if submitted_by is None
+                            else "reviewer principal authored latest submission"
+                        ),
+                    )
+                    self._remember_submission(submission_key)
+                    continue
+                if TIER_ORDER[ticket_tier(ticket)] > TIER_ORDER[self.config.max_tier]:
+                    self.log.write(
+                        "review_tier_skipped",
+                        board_id=board_id,
+                        ticket_id=ticket_id,
+                        ticket_tier=ticket_tier(ticket),
+                        max_tier=self.config.max_tier,
+                    )
+                    self._remember_submission(submission_key)
+                    continue
+                if not self.limiter.acquire():
+                    self._finding(
+                        "review_rate_limited",
+                        board_id,
+                        ticket_id,
+                        f"max {self.config.max_reviews_per_hour} reviews per hour",
+                    )
+                    try:
+                        await asyncio.wait_for(
+                            self.stop.wait(),
+                            timeout=max(0.1, min(60.0, self.limiter.retry_after())),
+                        )
+                    except TimeoutError:
+                        pass
+                    selected = True
+                    break
+                work_dir = await self.board.work_dir(board_id)
+                await self.run_review(board_id, ticket, work_dir)
+                self._remember_submission(submission_key)
+                selected = True
+                break
+            if not selected:
+                cursors, stopped = await self._wait_or_stop(cursors)
+                if stopped:
+                    break
+
+
 async def async_main(config_path: Path) -> None:
     config = load_config(config_path)
     token = read_secret(config, "token")
     api_key = read_secret(config, "API key")
     log = SessionLog(config.log_file, secrets=(token, api_key))
     async with PursersBoardAPI(config, token) as board:
-        worker = Worker(config, board, OpenAICompatible(config, api_key), log)
+        runtime: Worker | Reviewer
+        if config.role == "reviewer":
+            runtime = Reviewer(config, board, OpenAICompatible(config, api_key), log)
+        else:
+            runtime = Worker(config, board, OpenAICompatible(config, api_key), log)
         loop = asyncio.get_running_loop()
         for name in ("SIGTERM", "SIGINT"):
             signum = getattr(signal, name, None)
             if signum is not None:
-                loop.add_signal_handler(signum, worker.stop.set)
-        await worker.run()
+                loop.add_signal_handler(signum, runtime.stop.set)
+        await runtime.run()
 
 
 def main(argv: list[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(description="Run a headless Pursers worker")
+    parser = argparse.ArgumentParser(
+        description="Run a headless Pursers worker or reviewer"
+    )
     parser.add_argument("config", type=Path)
     args = parser.parse_args(argv)
     asyncio.run(async_main(args.config))

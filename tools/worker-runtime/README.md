@@ -1,4 +1,4 @@
-# Headless worker runtime
+# Headless worker and reviewer runtime
 
 `pursers-worker` runs one continuously re-arming board seat against an
 OpenAI-compatible chat-completions endpoint. It uses the same JWT seat,
@@ -13,12 +13,16 @@ boards = "registry"
 
 [seat]
 agent_name = "worker-api-1"
+role = "worker" # worker | reviewer; default worker
 central_url = "https://127.0.0.1:8766/mcp"
 token_file = "/private/path/seat.jwt"
 
 [claim]
 max_tier = "standard" # light | standard | heavy; default heavy
 require_assigned_only = false
+
+[review]
+max_reviews_per_hour = 12 # reviewer safety limit; default 12
 
 [llm]
 base_url = "https://proxy.example/v1"
@@ -48,3 +52,16 @@ the assigned work directory. Configured token/key values are redacted from
 model-visible output and logs; on macOS, the subprocess is additionally denied
 read access to the configured secret files. The runtime never reviews or merges
 its own work.
+
+For API review, provision a dedicated board reviewer seat with a different
+principal/token from every worker, then set `seat.role = "reviewer"`. The
+reviewer discovers submitted tickets across all configured boards and never
+claims, renews, edits, releases, or submits ticket work. Its static
+`REVIEWER-DIRECTIVE-API.md` message is sent before board and ticket context for
+cache-friendly prompts. The model may only read jailed files, run allowlisted
+read-only inspection/test commands, and return a strictly parsed structured
+approve/reject verdict. Tests run in a write-denied project on macOS or a
+disposable project copy elsewhere. Self-authored or provenance-free
+submissions, invalid verdicts, and rate-limited reviews emit `FINDING
+reviewer-runtime` on stderr and are never approved. A light reviewer skips
+standard and heavy tickets.
