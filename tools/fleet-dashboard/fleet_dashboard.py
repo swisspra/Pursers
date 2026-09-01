@@ -103,12 +103,23 @@ INTAKE_RATE_LIMIT = 10
 INTAKE_RATE_WINDOW_SECONDS = 3_600
 MAX_INTAKE_ROWS = 1_000
 CONFIG_CATEGORIES = (
-    "docs", "tests", "audit-analysis", "bug", "production-code",
-    "release-ci", "membership-roles", "board-registry",
+    "docs",
+    "tests",
+    "audit-analysis",
+    "bug",
+    "production-code",
+    "release-ci",
+    "membership-roles",
+    "board-registry",
 )
 CONFIG_THRESHOLD_FIELDS = (
-    "stale_seconds", "lease_warning_ratio", "grace_seconds", "starved_seconds",
-    "critical_starved_seconds", "review_backlog_seconds", "abandoner_drops",
+    "stale_seconds",
+    "lease_warning_ratio",
+    "grace_seconds",
+    "starved_seconds",
+    "critical_starved_seconds",
+    "review_backlog_seconds",
+    "abandoner_drops",
     "abandoner_window_days",
 )
 CONFIG_PRESSURE_FIELDS = (
@@ -209,8 +220,12 @@ def _intake_state_value(
     for row in rows:
         if not isinstance(row, dict):
             raise ConfigConflictError("coordinator_intake state is malformed")
-        required = {name: row.get(name) for name in ("id", "text", "requested_by", "board_id")}
-        if not all(isinstance(item, str) and item.strip() for item in required.values()):
+        required = {
+            name: row.get(name) for name in ("id", "text", "requested_by", "board_id")
+        }
+        if not all(
+            isinstance(item, str) and item.strip() for item in required.values()
+        ):
             raise ConfigConflictError("coordinator_intake state is malformed")
         ask_id = required["id"].strip()
         if ask_id in seen or required["board_id"].strip() != board_id:
@@ -223,7 +238,10 @@ def _intake_state_value(
 def validate_coordinator_config(value: Any) -> dict[str, Any]:
     """Validate the complete dashboard-owned value; no arbitrary state keys pass."""
     if not isinstance(value, dict) or set(value) != {
-        "schema_version", "thresholds", "integration_watch_since", "intake"
+        "schema_version",
+        "thresholds",
+        "integration_watch_since",
+        "intake",
     }:
         raise ValueError("config must contain only the coordinator schema fields")
     if value.get("schema_version") != 1:
@@ -239,17 +257,26 @@ def validate_coordinator_config(value: Any) -> dict[str, Any]:
     ):
         raise ValueError("thresholds must contain every required known threshold")
     for name in (
-        "stale_seconds", "grace_seconds", "starved_seconds",
-        "critical_starved_seconds", "review_backlog_seconds",
+        "stale_seconds",
+        "grace_seconds",
+        "starved_seconds",
+        "critical_starved_seconds",
+        "review_backlog_seconds",
     ):
         if type(thresholds[name]) is not int or not 10 <= thresholds[name] <= 86_400:
             raise ValueError(f"{name} must be between 10 and 86400")
     ratio = thresholds["lease_warning_ratio"]
     if type(ratio) not in (int, float) or not 0.1 <= ratio <= 1:
         raise ValueError("lease_warning_ratio must be between 0.1 and 1")
-    if type(thresholds["abandoner_drops"]) is not int or not 1 <= thresholds["abandoner_drops"] <= 20:
+    if (
+        type(thresholds["abandoner_drops"]) is not int
+        or not 1 <= thresholds["abandoner_drops"] <= 20
+    ):
         raise ValueError("abandoner_drops must be between 1 and 20")
-    if type(thresholds["abandoner_window_days"]) is not int or not 1 <= thresholds["abandoner_window_days"] <= 365:
+    if (
+        type(thresholds["abandoner_window_days"]) is not int
+        or not 1 <= thresholds["abandoner_window_days"] <= 365
+    ):
         raise ValueError("abandoner_window_days must be between 1 and 365")
     pressure = context_pressure_thresholds(thresholds)
     for name in CONFIG_PRESSURE_FIELDS:
@@ -265,20 +292,32 @@ def validate_coordinator_config(value: Any) -> dict[str, Any]:
         raise ValueError("integration_watch_since must be null or ISO-8601")
     intake = value.get("intake")
     if not isinstance(intake, dict) or set(intake) != {
-        "enabled", "auto_categories", "always_ask_categories",
-        "work_domain_always_ask", "rate_per_hour",
+        "enabled",
+        "auto_categories",
+        "always_ask_categories",
+        "work_domain_always_ask",
+        "rate_per_hour",
     }:
         raise ValueError("intake must contain every known intake field")
-    if type(intake["enabled"]) is not bool or type(intake["work_domain_always_ask"]) is not bool:
+    if (
+        type(intake["enabled"]) is not bool
+        or type(intake["work_domain_always_ask"]) is not bool
+    ):
         raise ValueError("intake switches must be booleans")
     auto, always = intake["auto_categories"], intake["always_ask_categories"]
-    if not all(isinstance(rows, list) and all(type(item) is str for item in rows) for rows in (auto, always)):
+    if not all(
+        isinstance(rows, list) and all(type(item) is str for item in rows)
+        for rows in (auto, always)
+    ):
         raise ValueError("intake categories must be arrays")
     if len(set(auto)) != len(auto) or len(set(always)) != len(always):
         raise ValueError("intake categories must not contain duplicates")
     if set(auto) & set(always) or set(auto) | set(always) != set(CONFIG_CATEGORIES):
         raise ValueError("intake categories must be known, disjoint, and complete")
-    if type(intake["rate_per_hour"]) is not int or not 1 <= intake["rate_per_hour"] <= 20:
+    if (
+        type(intake["rate_per_hour"]) is not int
+        or not 1 <= intake["rate_per_hour"] <= 20
+    ):
         raise ValueError("rate_per_hour must be between 1 and 20")
     return json.loads(json.dumps(value))
 
@@ -355,6 +394,8 @@ def _worker_config_bytes(
     provider: str,
     base_url: str,
     model: str,
+    role: str,
+    max_tier: str,
     central_url: str,
     token_path: Path,
     log_path: Path,
@@ -368,8 +409,11 @@ def _worker_config_bytes(
         f"log_file = {_toml_string(str(log_path))}\n\n"
         "[seat]\n"
         f"agent_name = {_toml_string(name)}\n"
+        f"role = {_toml_string(role)}\n"
         f"central_url = {_toml_string(central_url)}\n"
         f"token_file = {_toml_string(str(token_path))}\n\n"
+        "[claim]\n"
+        f"max_tier = {_toml_string(max_tier)}\n\n"
         "[llm]\n"
         f"provider_label = {_toml_string(PROVIDER_PRESETS[provider][0])}\n"
         f"base_url = {_toml_string(base_url)}\n"
@@ -409,6 +453,22 @@ class WorkerManager:
     def enabled(self) -> bool:
         return self.platform == "darwin"
 
+    @property
+    def roles(self) -> tuple[str, ...]:
+        """Expose reviewer only when the installed runtime advertises it."""
+        try:
+            raw = self.worker_script.read_bytes()
+        except OSError:
+            return ("worker",)
+        if len(raw) > 1_000_000:
+            return ("worker",)
+        text = raw.decode("utf-8", errors="ignore")
+        reviewer_literal = '"reviewer"' in text or "'reviewer'" in text
+        seat_role_read = 'seat.get("role"' in text or "seat.get('role'" in text
+        if reviewer_literal and seat_role_read:
+            return ("worker", "reviewer")
+        return ("worker",)
+
     def _require_macos(self) -> None:
         if not self.enabled:
             raise RuntimeError("API worker management is available only on macOS")
@@ -445,15 +505,19 @@ class WorkerManager:
             "base_url": base_url,
             "base_url_host": urlsplit(base_url).hostname or "",
             "model": _worker_text(llm.get("model"), "llm.model", limit=200),
+            "role": _worker_text(seat.get("role", "worker"), "seat.role", limit=16),
+            "max_tier": _worker_text(
+                document.get("claim", {}).get("max_tier", "heavy"),
+                "claim.max_tier",
+                limit=16,
+            ),
             "api_key_keychain": llm.get("api_key_keychain"),
             "token_path": str(self._token_path(name)),
         }
 
     def _write_private(self, path: Path, payload: bytes) -> None:
         temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-        descriptor = os.open(
-            temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600
-        )
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         try:
             with os.fdopen(descriptor, "wb") as stream:
                 stream.write(payload)
@@ -510,8 +574,13 @@ class WorkerManager:
 
     def save(self, value: Any, central_url: str) -> dict[str, Any]:
         self._require_macos()
-        allowed = {"name", "provider", "base_url", "model", "api_key"}
-        if not isinstance(value, dict) or set(value) != allowed:
+        required = {"name", "provider", "base_url", "model", "api_key"}
+        allowed = required | {"role", "max_tier"}
+        if (
+            not isinstance(value, dict)
+            or not required.issubset(value)
+            or not set(value).issubset(allowed)
+        ):
             raise ValueError("worker request contains unexpected fields")
         name = _worker_text(value.get("name"), "name", limit=32)
         if not WORKER_NAME_RE.fullmatch(name):
@@ -524,6 +593,12 @@ class WorkerManager:
         if provider not in {"custom", "azure"} and base_url != preset_url:
             raise ValueError("base_url does not match the selected provider preset")
         model = _worker_text(value.get("model"), "model", limit=200)
+        role = _worker_text(value.get("role", "worker"), "role", limit=16)
+        if role not in self.roles:
+            raise ValueError("role is unavailable in the installed worker runtime")
+        max_tier = _worker_text(value.get("max_tier", "heavy"), "max_tier", limit=16)
+        if max_tier not in {"light", "standard", "heavy"}:
+            raise ValueError("max_tier must be light, standard, or heavy")
         key_required = PROVIDER_PRESETS[provider][2]
         raw_key = value.get("api_key")
         if not isinstance(raw_key, str) or len(raw_key) > 8_192:
@@ -543,6 +618,8 @@ class WorkerManager:
                 provider=provider,
                 base_url=base_url,
                 model=model,
+                role=role,
+                max_tier=max_tier,
                 central_url=central_url,
                 token_path=self._token_path(name),
                 log_path=self._log_path(name),
@@ -611,13 +688,37 @@ class WorkerManager:
                         "seat_exists": name in seats,
                         "seat_admin_command": (
                             "python <TOOLS_DIR>/wait-bridge/seat_admin.py add "
-                            f"--name {name} --role worker --boards registry "
+                            f"--name {name} --role {definition['role']} --boards registry "
                             "--principal <PRINCIPAL_ID> "
                             f"--token-path ~/.pursers/seats/{name}.jwt"
                         ),
                     }
                 )
         return rows
+
+    def log_tail(self, name: str, *, max_lines: int = 20) -> list[str]:
+        """Read only a bounded tail from a managed worker's local log."""
+        if not WORKER_NAME_RE.fullmatch(name):
+            raise ValueError("worker name is invalid")
+        path = self._log_path(name)
+        try:
+            if path.is_symlink() or not path.is_file():
+                return []
+            with path.open("rb") as stream:
+                stream.seek(0, os.SEEK_END)
+                size = stream.tell()
+                stream.seek(max(0, size - 32_768))
+                raw = stream.read(32_768)
+        except OSError:
+            return []
+        return [
+            line[:500]
+            for line in raw.decode("utf-8", errors="replace").splitlines()[-max_lines:]
+        ]
+
+    def restart(self, name: str, *, seat_exists: bool) -> dict[str, Any]:
+        self.stop(name)
+        return self.start(name, seat_exists=seat_exists)
 
     def start(self, name: str, *, seat_exists: bool) -> dict[str, Any]:
         self._require_macos()
@@ -631,7 +732,9 @@ class WorkerManager:
             if current["running"]:
                 return {"ok": True, "name": name, **current}
             if not seat_exists:
-                raise ValueError("seat missing — run the shown seat_admin command first")
+                raise ValueError(
+                    "seat missing — run the shown seat_admin command first"
+                )
             if not self._token_path(name).is_file():
                 raise ValueError("seat token file is missing")
             child = self.process_factory(
@@ -687,9 +790,7 @@ class WorkerManager:
         headers = {"Accept": "application/json"}
         if definition["api_key_keychain"]:
             api_key = self._keychain_read(name)
-            headers["Authorization"] = (
-                "".join(WORKER_AUTH_SCHEME_PARTS) + " " + api_key
-            )
+            headers["Authorization"] = "".join(WORKER_AUTH_SCHEME_PARTS) + " " + api_key
         request = urllib.request.Request(
             definition["base_url"] + "/models", headers=headers
         )
@@ -726,9 +827,7 @@ def _time_sort_value(value: Any) -> float:
 
 
 def _json_bytes(value: Any) -> bytes:
-    return json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode(
-        "utf-8"
-    )
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
 
 def bridge_stats_path() -> Path:
@@ -736,9 +835,7 @@ def bridge_stats_path() -> Path:
     return (
         Path(configured).expanduser().resolve()
         if configured
-        else Path(__file__).resolve().parents[1]
-        / "wait-bridge"
-        / "bridge-stats.json"
+        else Path(__file__).resolve().parents[1] / "wait-bridge" / "bridge-stats.json"
     )
 
 
@@ -808,7 +905,9 @@ def read_overhead_stats(
                 continue
             board_id = raw.get("board_id")
             agent_name = raw.get("agent_name")
-            if not all(isinstance(value, str) and value for value in (board_id, agent_name)):
+            if not all(
+                isinstance(value, str) and value for value in (board_id, agent_name)
+            ):
                 continue
             key = (board_id, agent_name)
             row = aggregate.setdefault(
@@ -833,9 +932,9 @@ def read_overhead_stats(
                 if not isinstance(tool_name, str) or not isinstance(tool_raw, dict):
                     continue
                 count = _nonnegative_int(tool_raw.get("count"))
-                tool_bytes = _nonnegative_int(tool_raw.get("request_bytes")) + _nonnegative_int(
-                    tool_raw.get("response_bytes")
-                )
+                tool_bytes = _nonnegative_int(
+                    tool_raw.get("request_bytes")
+                ) + _nonnegative_int(tool_raw.get("response_bytes"))
                 day_calls += count
                 tool = row["tools"].setdefault(tool_name, {"calls": 0, "bytes": 0})
                 tool["calls"] += count
@@ -862,7 +961,9 @@ def read_overhead_stats(
         row["seven_day_estimated_tokens"] = (row["seven_day_bytes"] + 3) // 4
         row["top_tools"] = tools
         rows.append(row)
-    rows.sort(key=lambda item: (-item["today_bytes"], item["board_id"], item["agent_name"]))
+    rows.sort(
+        key=lambda item: (-item["today_bytes"], item["board_id"], item["agent_name"])
+    )
 
     sessions = []
     raw_cycles = document.get("poll_cycles")
@@ -907,15 +1008,11 @@ def read_overhead_stats(
             else "↓"
         )
         compact = (
-            latest_tokens
-            > pressure_thresholds["context_compact_tokens_per_poll"]
+            latest_tokens > pressure_thresholds["context_compact_tokens_per_poll"]
             or trend_ratio is not None
             and trend_ratio >= pressure_thresholds["context_trend_compact_ratio"]
         )
-        watch = (
-            latest_tokens
-            >= pressure_thresholds["context_watch_tokens_per_poll"]
-        )
+        watch = latest_tokens >= pressure_thresholds["context_watch_tokens_per_poll"]
         pressure = "compact" if compact else "watch" if watch else "ok"
         sessions.append(
             {
@@ -926,7 +1023,9 @@ def read_overhead_stats(
                 "latest_estimated_tokens": latest_tokens,
                 "sample_count": len(sample_bytes),
                 "median_estimated_tokens": median_tokens,
-                "trend_ratio": round(trend_ratio, 3) if trend_ratio is not None else None,
+                "trend_ratio": round(trend_ratio, 3)
+                if trend_ratio is not None
+                else None,
                 "trend": trend,
                 "pressure": pressure,
                 "pressure_rank": {"ok": 0, "watch": 1, "compact": 2}[pressure],
@@ -1106,7 +1205,9 @@ def _detail_ticket(ticket: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(required, list):
         required = []
     submissions = ticket.get("submission_history")
-    latest_submission = submissions[-1] if isinstance(submissions, list) and submissions else {}
+    latest_submission = (
+        submissions[-1] if isinstance(submissions, list) and submissions else {}
+    )
     if not isinstance(latest_submission, dict):
         latest_submission = {}
     return {
@@ -1128,8 +1229,7 @@ def _detail_ticket(ticket: dict[str, Any]) -> dict[str, Any]:
             MAX_SUBMISSION_CHARS,
         )
         or None,
-        "review_label": _clip(ticket.get("review_label"), MAX_LABEL_CHARS)
-        or None,
+        "review_label": _clip(ticket.get("review_label"), MAX_LABEL_CHARS) or None,
     }
 
 
@@ -1166,8 +1266,7 @@ def summarize_changes(
         raise ValueError("since_seq must be a non-negative integer")
     cutoff = since_time.astimezone(timezone.utc) if since_time is not None else None
     counts = {
-        name: 0
-        for name in ("created", "claimed", "submitted", "closed", "rejected")
+        name: 0 for name in ("created", "claimed", "submitted", "closed", "rejected")
     }
     selected = 0
     for event in events:
@@ -1306,9 +1405,7 @@ def assemble_provenance(
         reviews = ticket.get("review_history")
         latest_review = (
             reviews[-1]
-            if isinstance(reviews, list)
-            and reviews
-            and isinstance(reviews[-1], dict)
+            if isinstance(reviews, list) and reviews and isinstance(reviews[-1], dict)
             else {}
         )
         rows[ticket_id] = {
@@ -1496,9 +1593,9 @@ def assemble_provenance(
                 "executed": executed,
                 "reviewed": len(seat["reviewed"]),
                 "rework_received": len(seat["reworked"]),
-                "rework_received_rate": round(
-                    100 * len(seat["reworked"]) / executed, 1
-                ) if executed else 0.0,
+                "rework_received_rate": round(100 * len(seat["reworked"]) / executed, 1)
+                if executed
+                else 0.0,
             }
         )
     seats.sort(
@@ -1565,7 +1662,9 @@ def project_board_detail(
     source_tickets = (
         snapshot.get("tickets") if isinstance(snapshot.get("tickets"), list) else []
     )
-    tickets = [_detail_ticket(item) for item in source_tickets if isinstance(item, dict)]
+    tickets = [
+        _detail_ticket(item) for item in source_tickets if isinstance(item, dict)
+    ]
     status_rank = {
         **{status: 0 for status in ACTIVE_CLAIM_STATES},
         **{status: 1 for status in SUBMITTED_STATES},
@@ -1621,7 +1720,9 @@ def project_board_detail(
         "ticket_total": max(snapshot_ticket_total, len(source_tickets)),
         "ticket_returned": min(len(tickets), MAX_DETAIL_TICKET_ROWS),
         "ticket_omitted": 0,
-        "truncated": bool(snapshot.get("truncated") or len(tickets) > MAX_DETAIL_TICKET_ROWS),
+        "truncated": bool(
+            snapshot.get("truncated") or len(tickets) > MAX_DETAIL_TICKET_ROWS
+        ),
         "bounds": {
             "snapshot_items_per_collection": SNAPSHOT_LIMIT,
             "snapshot_bytes": SNAPSHOT_MAX_BYTES,
@@ -1656,8 +1757,7 @@ def project_board_detail(
         result["routes"]["row_returned"] = len(result["routes"]["rows"])
         result["routes"]["row_omitted"] = max(
             0,
-            result["routes"]["row_total"]
-            - result["routes"]["row_returned"],
+            result["routes"]["row_total"] - result["routes"]["row_returned"],
         )
         result["routes"]["truncated"] = True
         result["truncated"] = True
@@ -1714,6 +1814,7 @@ def aggregate_fleet(
         )
         current_by_agent = _current_tickets_by_agent(tickets)
         agent_keys: dict[str, tuple[str, str]] = {}
+        coordinator_seen_at: datetime | None = None
 
         for agent in agents:
             if not isinstance(agent, dict):
@@ -1731,6 +1832,12 @@ def aggregate_fleet(
             seen_at = _parse_time(
                 agent.get("last_activity_at") or agent.get("joined_at")
             )
+            if (
+                "coordinator" in agent_name.lower()
+                and seen_at is not None
+                and (coordinator_seen_at is None or seen_at > coordinator_seen_at)
+            ):
+                coordinator_seen_at = seen_at
             group = groups.setdefault(
                 key,
                 {
@@ -1750,9 +1857,7 @@ def aggregate_fleet(
             group["seats"][board_id] = {
                 "board_id": board_id,
                 "project": label,
-                "role": _clip(
-                    agent.get("membership_role") or agent.get("role"), 32
-                )
+                "role": _clip(agent.get("membership_role") or agent.get("role"), 32)
                 or None,
                 "current_ticket_id": (
                     _clip(current.get("ticket_id"), MAX_LABEL_CHARS)
@@ -1847,6 +1952,10 @@ def aggregate_fleet(
                 "counts": rendered_counts,
                 "tickets": ticket_rows[:MAX_TICKET_ROWS],
                 "events": events,
+                "coordinator_heartbeat": (
+                    coordinator_seen_at.isoformat() if coordinator_seen_at else None
+                ),
+                "coordinator_findings": project_coordinator_findings(snapshot),
                 "truncated": bool(
                     snapshot.get("truncated") or len(ticket_rows) > MAX_TICKET_ROWS
                 ),
@@ -1876,9 +1985,7 @@ def aggregate_fleet(
                     group["seats"].values(),
                     key=lambda item: (item["project"], item["board_id"]),
                 ),
-                "duplicate_name": len(
-                    names_to_groups.get(group["agent_name"], set())
-                )
+                "duplicate_name": len(names_to_groups.get(group["agent_name"], set()))
                 > 1
                 or any(
                     len(agent_ids) > 1
@@ -2028,7 +2135,9 @@ class FleetFetcher:
         findings, _ = _state_value(raw_findings)
         findings = findings or {}
         effective = findings.get("effective_config", {})
-        effective = json.loads(json.dumps(effective)) if isinstance(effective, dict) else {}
+        effective = (
+            json.loads(json.dumps(effective)) if isinstance(effective, dict) else {}
+        )
         sources = findings.get("config_sources", {})
         sources = dict(sources) if isinstance(sources, dict) else {}
         stored_thresholds = stored.get("thresholds") if stored else None
@@ -2052,7 +2161,8 @@ class FleetFetcher:
             "updated_by": stored.get("updated_by") if stored else None,
             "expected_sha256": (
                 hashlib.sha256(stored_text.encode("utf-8")).hexdigest()
-                if stored_text is not None else None
+                if stored_text is not None
+                else None
             ),
             "concurrency": "cas" if stored_text is not None else "lww",
         }
@@ -2121,7 +2231,10 @@ class FleetFetcher:
                     if created > cutoff
                 ]
                 self._intake_submissions[board_id] = history
-                if len(recent_queue | {ask_id for ask_id, _created in history}) >= INTAKE_RATE_LIMIT:
+                if (
+                    len(recent_queue | {ask_id for ask_id, _created in history})
+                    >= INTAKE_RATE_LIMIT
+                ):
                     raise IntakeRateLimitError("intake rate limit exceeded")
 
                 created_at = now.isoformat()
@@ -2138,14 +2251,14 @@ class FleetFetcher:
                     "board_id": board_id,
                     "created_at": created_at,
                 }
-                encoded = json.dumps([*rows, ask], sort_keys=True, separators=(",", ":"))
+                encoded = json.dumps(
+                    [*rows, ask], sort_keys=True, separators=(",", ":")
+                )
                 if len(rows) >= MAX_INTAKE_ROWS:
                     raise IntakeRateLimitError("intake queue is full")
                 expected = None
                 if current_text is not None:
-                    expected = hashlib.sha256(
-                        current_text.encode("utf-8")
-                    ).hexdigest()
+                    expected = hashlib.sha256(current_text.encode("utf-8")).hexdigest()
                 arguments = _dashboard_state_update_arguments(
                     agent_name=self.config.agent_name,
                     key=INTAKE_STATE_KEY,
@@ -2187,19 +2300,26 @@ class FleetFetcher:
                     raise ConfigConflictError("coordinator_config state is malformed")
             current_digest = (
                 hashlib.sha256(current_text.encode("utf-8")).hexdigest()
-                if current_text is not None else None
+                if current_text is not None
+                else None
             )
             if current_digest is None:
                 if expected_sha256 is not None:
                     raise ConfigConflictError("coordinator_config does not exist")
             elif expected_sha256 is None:
-                raise ConfigConflictError("expected_sha256 is required for an existing config")
+                raise ConfigConflictError(
+                    "expected_sha256 is required for an existing config"
+                )
             elif expected_sha256 != current_digest:
-                raise ConfigConflictError("coordinator_config changed; reload before saving")
+                raise ConfigConflictError(
+                    "coordinator_config changed; reload before saving"
+                )
             expected = None
             if expected_sha256 is not None:
                 if not re.fullmatch(r"[0-9a-f]{64}", expected_sha256):
-                    raise ValueError("expected_sha256 must be a lowercase SHA-256 digest")
+                    raise ValueError(
+                        "expected_sha256 must be a lowercase SHA-256 digest"
+                    )
                 expected = expected_sha256
             arguments = _dashboard_state_update_arguments(
                 agent_name=self.config.agent_name,
@@ -2254,9 +2374,9 @@ class DashboardCache:
         self.ttl_seconds = ttl_seconds
         self.fleet = TimedCache(ttl_seconds, self.fetcher.fetch)
         self._fleets = {
-            label: self.fleet if label == self.default_central else TimedCache(
-                ttl_seconds, item.fetch
-            )
+            label: self.fleet
+            if label == self.default_central
+            else TimedCache(ttl_seconds, item.fetch)
             for label, item in self.fetchers.items()
         }
         self._detail_lock = threading.Lock()
@@ -2271,9 +2391,7 @@ class DashboardCache:
             raise KeyError(label)
         return label
 
-    def overhead_path(
-        self, central: str | None, single_central_fallback: Path
-    ) -> Path:
+    def overhead_path(self, central: str | None, single_central_fallback: Path) -> Path:
         label = self.resolve_central(central)
         configured = self.fetchers[label].config.overhead_path
         if configured is not None:
@@ -2294,9 +2412,7 @@ class DashboardCache:
         label = self.resolve_central(central)
         return self._labeled(self._fleets[label].get(), label)
 
-    def get_board(
-        self, board_id: str, central: str | None = None
-    ) -> dict[str, Any]:
+    def get_board(self, board_id: str, central: str | None = None) -> dict[str, Any]:
         label = self.resolve_central(central)
         key = (label, board_id)
         with self._detail_lock:
@@ -2328,9 +2444,7 @@ class DashboardCache:
         thresholds = config.get("thresholds") if isinstance(config, dict) else None
         return context_pressure_thresholds(thresholds)
 
-    def get_intake(
-        self, board_id: str, central: str | None = None
-    ) -> dict[str, Any]:
+    def get_intake(self, board_id: str, central: str | None = None) -> dict[str, Any]:
         label = self.resolve_central(central)
         return self._labeled(
             asyncio.run(self.fetchers[label].fetch_intake(board_id)), label
@@ -2407,36 +2521,44 @@ function syncRoute(){const r=route();document.querySelector('#home-view').hidden
 document.querySelector('#filter').addEventListener('input',e=>{filterNeedle=e.target.value.toLocaleLowerCase();searchSelection=0;const r=route();if(r?.kind==='board'&&detailData)renderDetail(detailData);else if(!r)renderFleet();else renderSearchResults()});document.querySelector('#search-results').addEventListener('click',e=>{const target=e.target.closest('[data-search-index]');if(target){e.preventDefault();jumpSearchResult(Number(target.dataset.searchIndex))}});document.querySelector('#theme-toggle').addEventListener('click',()=>{theme=theme==='dark'?'light':'dark';applyPreferences()});document.querySelector('#density-toggle').addEventListener('click',()=>{density=density==='comfortable'?'compact':'comfortable';applyPreferences()});document.querySelector('#help-toggle').addEventListener('click',()=>document.querySelector('#help-overlay').showModal());document.querySelector('#help-close').addEventListener('click',()=>document.querySelector('#help-overlay').close());document.addEventListener('keydown',e=>{const editing=['INPUT','TEXTAREA','SELECT'].includes(document.activeElement?.tagName);if(e.key==='Escape'){document.querySelector('#search-results').hidden=true;document.querySelector('#help-overlay').close();return}if(e.key==='?'&&!editing){e.preventDefault();document.querySelector('#help-overlay').showModal();return}if(e.key==='/'&&!editing){e.preventDefault();document.querySelector('#filter').focus();return}if(document.activeElement===document.querySelector('#filter')&&['ArrowDown','ArrowUp'].includes(e.key)){e.preventDefault();searchSelection=Math.max(0,Math.min(searchItems.length-1,searchSelection+(e.key==='ArrowDown'?1:-1)));renderSearchResults();return}if(document.activeElement===document.querySelector('#filter')&&e.key==='Enter'){e.preventDefault();jumpSearchResult(searchSelection);return}if(editing)return;if(goPrefix){clearTimeout(goTimer);goPrefix=false;if(e.key==='f')location.hash='#/';if(e.key==='o')location.hash=centralHref(defaultCentral,'overhead');if(e.key==='c')location.hash=centralHref(defaultCentral,'config');return}if(e.key==='g'){goPrefix=true;goTimer=setTimeout(()=>{goPrefix=false},800)}});window.addEventListener('hashchange',syncRoute);applyPreferences();loadCentrals().then(()=>{refreshFleet();syncRoute();if(typeof syncConfigRoute==='function')syncConfigRoute()}).catch(e=>{document.querySelector('#state').textContent='Startup failed';markConnectionFailure('startup')});setInterval(refreshFleet,5000);
 </script></body></html>"""
 
-HTML = HTML.replace(
-    "</style>",
-    ".route-load{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;margin:12px 0 18px}"
-    ".route-seat{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:10px}"
-    ".route-seat .counts{margin:8px 0 0}.route-stage{min-width:150px}.route-stage .meta{display:block;white-space:nowrap}</style>",
-).replace(
-    "<dt>g then f</dt><dd>Fleet overview</dd><dt>g then o</dt>",
-    "<dt>g then f</dt><dd>Fleet overview</dd><dt>g then r</dt><dd>Routes for the current board</dd><dt>g then o</dt>",
-).replace(
-    "if(e.key==='f')location.hash='#/';if(e.key==='o')",
-    "if(e.key==='f')location.hash='#/';if(e.key==='r'){const current=route();if(current?.kind==='board')location.hash=boardHref(current.central,current.board,'routes')}if(e.key==='o')",
+HTML = (
+    HTML.replace(
+        "</style>",
+        ".route-load{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;margin:12px 0 18px}"
+        ".route-seat{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:10px}"
+        ".route-seat .counts{margin:8px 0 0}.route-stage{min-width:150px}.route-stage .meta{display:block;white-space:nowrap}</style>",
+    )
+    .replace(
+        "<dt>g then f</dt><dd>Fleet overview</dd><dt>g then o</dt>",
+        "<dt>g then f</dt><dd>Fleet overview</dd><dt>g then r</dt><dd>Routes for the current board</dd><dt>g then o</dt>",
+    )
+    .replace(
+        "if(e.key==='f')location.hash='#/';if(e.key==='o')",
+        "if(e.key==='f')location.hash='#/';if(e.key==='r'){const current=route();if(current?.kind==='board')location.hash=boardHref(current.central,current.board,'routes')}if(e.key==='o')",
+    )
 )
 
 # Keep the existing bounded fleet SPA intact; layer the one explicit write surface
 # as an isolated hash page and API client.
-HTML = HTML.replace(
-    "</style>",
-    ".config-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px}"
-    ".config-grid label{display:grid;gap:5px}.config-grid input,.config-grid select,.config-grid button{background:var(--panel2);border:1px solid var(--line);border-radius:8px;color:var(--text);padding:8px}"
-    ".source{font-size:11px;color:var(--muted)}.central-group{margin-top:28px;padding-top:20px;border-top:2px solid var(--line)}.central-heading{align-items:center}.central-group.unavailable{border:1px solid var(--bad);border-radius:12px;padding:16px}"
-    ".intake-layout{display:grid;grid-template-columns:minmax(260px,1fr) minmax(300px,2fr);gap:14px}.intake-form{display:grid;gap:8px}.intake-form textarea{min-height:82px;resize:vertical;background:var(--panel2);border:1px solid var(--line);border-radius:8px;color:var(--text);padding:8px}.intake-row{padding:8px 0;border-top:1px solid var(--line)}@media(max-width:800px){.intake-layout{grid-template-columns:1fr}}</style>",
-).replace(
-    "Live boards and shared agent pool</p>",
-    'Live boards and per-central agent pools · <a href="#/config">Coordinator config</a></p>',
-).replace(
-    '<section id="detail-view" hidden></section></main>',
-    '<section id="detail-view" hidden></section><section id="config-view" hidden></section></main>',
-).replace(
-    "</body>",
-    r"""<script>
+HTML = (
+    HTML.replace(
+        "</style>",
+        ".config-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px}"
+        ".config-grid label{display:grid;gap:5px}.config-grid input,.config-grid select,.config-grid button{background:var(--panel2);border:1px solid var(--line);border-radius:8px;color:var(--text);padding:8px}"
+        ".source{font-size:11px;color:var(--muted)}.central-group{margin-top:28px;padding-top:20px;border-top:2px solid var(--line)}.central-heading{align-items:center}.central-group.unavailable{border:1px solid var(--bad);border-radius:12px;padding:16px}"
+        ".intake-layout{display:grid;grid-template-columns:minmax(260px,1fr) minmax(300px,2fr);gap:14px}.intake-form{display:grid;gap:8px}.intake-form textarea{min-height:82px;resize:vertical;background:var(--panel2);border:1px solid var(--line);border-radius:8px;color:var(--text);padding:8px}.intake-row{padding:8px 0;border-top:1px solid var(--line)}@media(max-width:800px){.intake-layout{grid-template-columns:1fr}}</style>",
+    )
+    .replace(
+        "Live boards and shared agent pool</p>",
+        'Live boards and per-central agent pools · <a href="#/config">Coordinator config</a></p>',
+    )
+    .replace(
+        '<section id="detail-view" hidden></section></main>',
+        '<section id="detail-view" hidden></section><section id="config-view" hidden></section></main>',
+    )
+    .replace(
+        "</body>",
+        r"""<script>
 const CONFIG_CATEGORIES=['docs','tests','audit-analysis','bug','production-code','release-ci','membership-roles','board-registry'];
 const intakeQueues=new Map(),recentIntake=new Map();
 const intakeKey=r=>`${r.central}/${r.board}`;
@@ -2453,35 +2575,46 @@ async function saveConfig(event){event.preventDefault();const f=new FormData(eve
 function syncConfigRoute(){const r=route(),active=r?.kind==='config';document.querySelector('#config-view').hidden=!active;if(active){document.querySelector('#home-view').hidden=true;document.querySelector('#detail-view').hidden=true;if(centralLabels.length)refreshConfig()}}
 window.addEventListener('hashchange',syncConfigRoute);syncConfigRoute();
 </script></body>""",
+    )
 )
 
-HTML = HTML.replace(
-    "|overhead|config)(?:\\?(.*))?$/)",
-    "|overhead|config|workers)(?:\\?(.*))?$/)",
-).replace(
-    "if(m[2]==='overhead'||m[2]==='config')",
-    "if(m[2]==='overhead'||m[2]==='config'||m[2]==='workers')",
-).replace(
-    "document.querySelector('#detail-view').hidden=!r||r.kind==='config'",
-    "document.querySelector('#detail-view').hidden=!r||r.kind==='config'||r.kind==='workers'",
-).replace(
-    "<section id=\"config-view\" hidden></section>",
-    "<section id=\"config-view\" hidden></section><section id=\"workers-view\" hidden></section>",
-).replace(
-    '<dt>g then c</dt><dd>Coordinator config</dd>',
-    '<dt>g then c</dt><dd>Coordinator config</dd><dt>g then w</dt><dd>API workers</dd>',
-).replace(
-    "if(e.key==='c')location.hash=centralHref(defaultCentral,'config')",
-    "if(e.key==='c')location.hash=centralHref(defaultCentral,'config');if(e.key==='w')location.hash=centralHref(defaultCentral,'workers')",
-).replace(
-    "if(typeof syncConfigRoute==='function')syncConfigRoute()",
-    "if(typeof syncConfigRoute==='function')syncConfigRoute();if(typeof syncWorkersRoute==='function')syncWorkersRoute()",
-).replace(
-    '<a class="tab" href="${centralHref(central,\'overhead\')}">Overhead</a><a class="tab" href="${centralHref(central,\'config\')}">Config</a>',
-    '<a class="tab" href="${centralHref(central,\'workers\')}">Workers</a><a class="tab" href="${centralHref(central,\'overhead\')}">Overhead</a><a class="tab" href="${centralHref(central,\'config\')}">Config</a>',
-).replace(
-    '<a class="tab" href="${centralHref(label,\'overhead\')}">Overhead</a><a class="tab" href="${centralHref(label,\'config\')}">Config</a>',
-    '<a class="tab" href="${centralHref(label,\'workers\')}">Workers</a><a class="tab" href="${centralHref(label,\'overhead\')}">Overhead</a><a class="tab" href="${centralHref(label,\'config\')}">Config</a>',
+HTML = (
+    HTML.replace(
+        "|overhead|config)(?:\\?(.*))?$/)",
+        "|overhead|config|workers)(?:\\?(.*))?$/)",
+    )
+    .replace(
+        "if(m[2]==='overhead'||m[2]==='config')",
+        "if(m[2]==='overhead'||m[2]==='config'||m[2]==='workers')",
+    )
+    .replace(
+        "document.querySelector('#detail-view').hidden=!r||r.kind==='config'",
+        "document.querySelector('#detail-view').hidden=!r||r.kind==='config'||r.kind==='workers'",
+    )
+    .replace(
+        '<section id="config-view" hidden></section>',
+        '<section id="config-view" hidden></section><section id="workers-view" hidden></section>',
+    )
+    .replace(
+        "<dt>g then c</dt><dd>Coordinator config</dd>",
+        "<dt>g then c</dt><dd>Coordinator config</dd><dt>g then w</dt><dd>API workers</dd>",
+    )
+    .replace(
+        "if(e.key==='c')location.hash=centralHref(defaultCentral,'config')",
+        "if(e.key==='c')location.hash=centralHref(defaultCentral,'config');if(e.key==='w')location.hash=centralHref(defaultCentral,'workers')",
+    )
+    .replace(
+        "if(typeof syncConfigRoute==='function')syncConfigRoute()",
+        "if(typeof syncConfigRoute==='function')syncConfigRoute();if(typeof syncWorkersRoute==='function')syncWorkersRoute()",
+    )
+    .replace(
+        '<a class="tab" href="${centralHref(central,\'overhead\')}">Overhead</a><a class="tab" href="${centralHref(central,\'config\')}">Config</a>',
+        '<a class="tab" href="${centralHref(central,\'workers\')}">Workers</a><a class="tab" href="${centralHref(central,\'overhead\')}">Overhead</a><a class="tab" href="${centralHref(central,\'config\')}">Config</a>',
+    )
+    .replace(
+        '<a class="tab" href="${centralHref(label,\'overhead\')}">Overhead</a><a class="tab" href="${centralHref(label,\'config\')}">Config</a>',
+        '<a class="tab" href="${centralHref(label,\'workers\')}">Workers</a><a class="tab" href="${centralHref(label,\'overhead\')}">Overhead</a><a class="tab" href="${centralHref(label,\'config\')}">Config</a>',
+    )
 )
 HTML = HTML.replace(
     "</style>",
@@ -2500,6 +2633,58 @@ async function saveWorker(event){event.preventDefault();const form=event.target,
 async function workerClick(event){const copy=event.target.closest('[data-copy-command]');if(copy){await navigator.clipboard.writeText(copy.dataset.copyCommand);workerActionMessage='Seat command copied.';workerActionError=false;const status=document.querySelector('#worker-action-status');status.textContent=workerActionMessage;status.className='muted';return}const button=event.target.closest('[data-worker-action]');if(!button)return;const central=route().central,status=document.querySelector('#worker-action-status'),label=button.textContent,action=button.dataset.workerAction;button.disabled=true;workerActionMessage=`${label} ${button.dataset.name}…`;workerActionError=false;status.textContent=workerActionMessage;status.className='muted';try{await workerRequest(`/api/workers/${encodeURIComponent(button.dataset.name)}/${action}`,central);workerActionMessage=`${label} succeeded.`;if(action!=='test')await refreshWorkers(true);const current=document.querySelector('#worker-action-status');current.textContent=workerActionMessage;current.className='muted';if(action==='test')button.disabled=false}catch(e){workerActionMessage=`${label} failed: ${e.message}`;workerActionError=true;status.textContent=workerActionMessage;status.className='error';button.disabled=false}}
 function syncWorkersRoute(){const r=route(),active=r?.kind==='workers';document.querySelector('#workers-view').hidden=!active;if(active){document.querySelector('#home-view').hidden=true;document.querySelector('#detail-view').hidden=true;document.querySelector('#config-view').hidden=true;if(centralLabels.length)refreshWorkers()}}
 window.addEventListener('hashchange',syncWorkersRoute);syncWorkersRoute();setInterval(refreshWorkers,5000);
+</script></body>""",
+)
+
+# v2 information architecture: one shell, four primary destinations, and
+# progressive detail. Existing board/config/worker routes stay addressable.
+HTML = HTML.replace(
+    "</style>",
+    r"""
+:root{--space-1:4px;--space-2:8px;--space-3:12px;--space-4:16px;--space-5:24px;--space-6:32px;--radius-sm:8px;--radius-md:14px;--radius-lg:20px;--shadow:0 16px 40px #0002;--sidebar:224px;--surface:var(--panel);--surface-raised:var(--panel2);--focus:0 0 0 3px color-mix(in srgb,var(--accent) 28%,transparent)}
+body{background:radial-gradient(circle at 90% -10%,color-mix(in srgb,var(--accent) 10%,transparent),transparent 34rem),var(--bg)}.app-shell{display:grid;grid-template-columns:var(--sidebar) minmax(0,1fr);min-height:100vh}.sidebar{position:sticky;top:0;height:100vh;padding:var(--space-5) var(--space-3);background:color-mix(in srgb,var(--panel) 92%,transparent);border-right:1px solid var(--line);display:flex;flex-direction:column;gap:var(--space-5);z-index:12}.brand{display:flex;align-items:center;gap:10px;padding:0 8px;color:var(--text);font-weight:750;font-size:16px}.brand-mark{display:grid;place-items:center;width:34px;height:34px;border-radius:11px;background:linear-gradient(145deg,var(--accent),color-mix(in srgb,var(--accent) 50%,var(--good)));color:#fff;box-shadow:var(--shadow)}.primary-nav{display:grid;gap:5px}.primary-nav a{display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:var(--radius-sm);color:var(--muted);font-weight:650;letter-spacing:.02em}.primary-nav a:hover,.primary-nav a.active{background:var(--panel2);color:var(--text);text-decoration:none}.primary-nav a.active{box-shadow:inset 3px 0 var(--accent)}.nav-icon{width:20px;text-align:center}.sidebar-foot{margin-top:auto;padding:10px;color:var(--muted);font-size:12px}.app-shell>main{max-width:1480px;margin:0;padding:var(--space-5) clamp(16px,3vw,42px)}.app-shell>main>.top{padding-bottom:var(--space-5);border-bottom:1px solid var(--line);align-items:start}.app-shell h1{font-size:clamp(24px,3vw,34px);letter-spacing:-.035em}.page-head{display:flex;align-items:end;justify-content:space-between;gap:var(--space-4);margin:var(--space-6) 0 var(--space-4)}.page-head h2{font-size:clamp(22px,2.4vw,30px);letter-spacing:-.025em}.eyebrow{color:var(--accent);font-size:11px;font-weight:800;letter-spacing:.14em;text-transform:uppercase}.health-grid,.attention-grid,.agent-grid,.ops-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(280px,100%),1fr));gap:var(--space-4)}.health-card,.attention-card,.agent-card,.ops-card,.board-card{background:linear-gradient(145deg,color-mix(in srgb,var(--panel) 96%,var(--accent) 4%),var(--panel));border:1px solid var(--line);border-radius:var(--radius-md);padding:var(--space-4);box-shadow:0 1px 0 #fff1;min-width:0}.health-card .signal{display:flex;align-items:center;gap:7px}.signal-dot{width:8px;height:8px;border-radius:50%;background:var(--good);box-shadow:0 0 0 4px color-mix(in srgb,var(--good) 15%,transparent)}.signal-dot.bad{background:var(--bad);box-shadow:0 0 0 4px color-mix(in srgb,var(--bad) 15%,transparent)}.health-metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:14px}.health-metrics span{padding:9px;border-radius:9px;background:var(--panel2);color:var(--muted);font-size:11px}.health-metrics b{display:block;color:var(--text);font-size:18px}.section-title{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:var(--space-6) 0 var(--space-3)}.section-title h3{font-size:17px}.finding-row,.work-row{display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:10px;align-items:start;padding:10px 0;border-top:1px solid var(--line)}.finding-row:first-child,.work-row:first-child{border-top:0}.severity{width:8px;height:8px;border-radius:50%;margin-top:6px;background:var(--warn)}.severity.critical{background:var(--bad)}.boards-list{display:grid;gap:var(--space-3)}.board-card{display:grid;grid-template-columns:minmax(190px,1fr) minmax(220px,1.4fr) auto;align-items:center;gap:var(--space-4)}.board-card .counts{margin:0}.card-actions{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:7px}.button,button{cursor:pointer}.button,.card-actions a,.agent-actions button,.primary-action{display:inline-flex;align-items:center;justify-content:center;border:1px solid var(--line);border-radius:9px;background:var(--panel2);color:var(--text);padding:8px 11px;font:inherit;text-decoration:none}.button:hover,.card-actions a:hover,.agent-actions button:hover{border-color:var(--accent);text-decoration:none}.primary-action{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:700}.agent-card{display:grid;gap:12px}.agent-card-head{display:flex;justify-content:space-between;gap:10px}.agent-role{font-size:11px;text-transform:uppercase;letter-spacing:.1em;color:var(--accent)}.agent-actions{display:flex;flex-wrap:wrap;gap:7px}.agent-actions button{padding:7px 9px}.log-tail{margin:0;max-height:180px;overflow:auto;padding:10px;border-radius:8px;background:#070b15;color:#c7d2eb;font:11px/1.5 ui-monospace,SFMono-Regular,monospace;white-space:pre-wrap;overflow-wrap:anywhere}.pressure-line{display:flex;align-items:center;gap:8px}.agent-dialog{width:min(680px,calc(100vw - 28px));padding:0;border-radius:var(--radius-lg);box-shadow:var(--shadow)}.dialog-head{display:flex;justify-content:space-between;gap:12px;padding:20px 22px;border-bottom:1px solid var(--line)}.dialog-body{padding:20px 22px}.dialog-close{border:0;background:transparent;color:var(--muted);font-size:22px}.agent-form{display:grid;grid-template-columns:1fr 1fr;gap:13px}.agent-form label{display:grid;gap:5px}.agent-form input,.agent-form select{width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:9px;color:var(--text);padding:10px}.agent-form .wide{grid-column:1/-1}.guide{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:16px}.guide-step{padding:12px;border:1px solid var(--line);border-radius:10px;background:var(--panel2)}.guide-step b{display:block;margin-bottom:6px}.guide-step code{display:block;overflow-wrap:anywhere;white-space:pre-wrap;font-size:11px}.route-links{display:flex;flex-wrap:wrap;gap:7px;margin-top:12px}.route-links a{font-size:12px}.skeleton{min-height:82px;border-radius:12px;background:linear-gradient(90deg,var(--panel),var(--panel2),var(--panel));background-size:220% 100%;animation:shimmer 1.4s infinite}@keyframes shimmer{to{background-position:-220% 0}}:focus-visible{outline:none;box-shadow:var(--focus)}
+@media(max-width:800px){.app-shell{display:block}.sidebar{position:sticky;height:auto;padding:8px 10px;gap:8px;border-right:0;border-bottom:1px solid var(--line)}.brand{display:none}.primary-nav{display:grid;grid-template-columns:repeat(4,1fr)}.primary-nav a{justify-content:center;padding:9px 4px;font-size:11px}.primary-nav a.active{box-shadow:inset 0 -3px var(--accent)}.nav-icon{display:none}.sidebar-foot{display:none}.app-shell>main{padding:14px}.app-shell>main>.top{gap:14px}.app-shell>main>.top>div:last-child{width:100%}.view-controls{justify-content:flex-end}.search-wrap,.search{width:100%}.board-card{grid-template-columns:1fr}.card-actions{justify-content:flex-start}.health-grid,.attention-grid,.agent-grid,.ops-grid{grid-template-columns:1fr}.agent-form,.guide{grid-template-columns:1fr}.agent-form .wide{grid-column:auto}.page-head{align-items:start}.finding-row,.work-row{grid-template-columns:auto minmax(0,1fr)}.finding-row>:last-child,.work-row>:last-child{grid-column:2}.dialog-body{padding:16px}.flow{overflow:visible}.table-scroll{max-width:calc(100vw - 28px)}}
+@media print{.sidebar{display:none}.app-shell{display:block}.app-shell>main{padding:0}.app-shell>main>.top{border:0}}
+</style>""",
+)
+HTML = HTML.replace(
+    "<body><main>",
+    r"""<body><div class="app-shell"><aside class="sidebar" aria-label="Primary navigation"><a class="brand" href="#/"><span class="brand-mark">P</span><span>Pursers Fleet</span></a><nav class="primary-nav"><a data-nav="overview" href="#/"><span class="nav-icon">⌂</span>Overview</a><a data-nav="boards" href="#/boards"><span class="nav-icon">▦</span>Boards</a><a data-nav="agents" href="#/agents"><span class="nav-icon">◎</span>Agents</a><a data-nav="operations" href="#/operations"><span class="nav-icon">⚙</span>Operations</a></nav><div class="sidebar-foot">Loopback control plane<br>bounded reads · guarded writes</div></aside><main>""",
+    1,
+).replace("</dialog></main><script>", "</dialog></main></div><script>", 1)
+
+HTML = HTML.replace(
+    "</script></body>",
+    r"""
+</script><script>
+const legacyRouteV1=route,legacyRefreshCentralV1=refreshCentral;
+const hubKinds=new Set(['boards','agents','operations']);
+let hubWorkers={},hubOverhead={},hubGuide=null,hubExtrasBusy=false;
+route=function(){const special=location.hash.match(/^#\/(boards|agents|operations)$/);return special?{kind:special[1]}:legacyRouteV1()};
+function navKind(){const r=route();if(!r)return'overview';if(hubKinds.has(r.kind))return r.kind;if(r.kind==='board')return'boards';if(r.kind==='workers')return'agents';return'operations'}
+function syncNav(){const kind=navKind();for(const link of document.querySelectorAll('[data-nav]')){const active=link.dataset.nav===kind;link.classList.toggle('active',active);if(active)link.setAttribute('aria-current','page');else link.removeAttribute('aria-current')}}
+function pageHead(kicker,title,copy,action=''){return `<header class="page-head"><div><p class="eyebrow">${esc(kicker)}</p><h2>${esc(title)}</h2><p class="muted">${esc(copy)}</p></div>${action}</header>`}
+function numberCount(value){const parsed=Number(String(value??0).replace('>=',''));return Number.isFinite(parsed)?parsed:0}
+function renderOverview(){const centrals=centralLabels.map(label=>{const d=fleetData[label],error=fleetErrors[label];if(!d)return `<article class="health-card"><div class="signal"><span class="signal-dot bad"></span><b>${esc(label)}</b></div><p class="error">${esc(error||'Connecting…')}</p></article>`;const s=d.pool_summary||{},heartbeat=(d.boards||[]).map(b=>b.coordinator_heartbeat).filter(Boolean).sort().at(-1);return `<article class="health-card"><div class="signal"><span class="signal-dot"></span><b>${esc(label)}</b><span class="status">central up</span></div><p class="meta">Coordinator heartbeat ${esc(heartbeat?fmt(heartbeat):'not observed')}</p><div class="health-metrics"><span>Busy<b>${esc(s.busy||0)}</b></span><span>Ready<b>${esc(s.available||0)}</b></span><span>Stale<b>${esc(s.stale||0)}</b></span></div></article>`}).join('');const findings=[],starved=[],pressure=[];for(const [central,d] of Object.entries(fleetData)){for(const b of d.boards||[]){for(const f of b.coordinator_findings?.items||[])findings.push({...f,central,board:b});for(const t of b.tickets||[]){const age=Date.now()-new Date(t.updated_at||Date.now()).getTime();if(t.status==='open'&&age>1800000)starved.push({...t,central,board:b,age})}}for(const p of hubOverhead[central]?.sessions||[])if(p.pressure!=='ok')pressure.push({...p,central})}findings.sort((a,b)=>(b.level==='critical')-(a.level==='critical'));starved.sort((a,b)=>b.age-a.age);pressure.sort((a,b)=>(b.pressure_rank||0)-(a.pressure_rank||0));const attention=[...findings.slice(0,5).map(f=>`<div class="finding-row"><span class="severity ${esc(f.level)}"></span><div><b>${esc(f.kind)}</b><p>${esc(f.text)}</p><span class="meta">${esc(f.central)} · ${esc(f.board.label)}</span></div>${f.ticket_id?`<a class="id" href="${ticketHref(f.central,f.board.board_id,f.ticket_id)}">${esc(f.ticket_id)}</a>`:''}</div>`),...pressure.slice(0,4).map(p=>`<div class="finding-row"><span class="severity ${p.pressure==='compact'?'critical':''}"></span><div><b>Context ${esc(p.pressure)}</b><p>${esc(p.agent_name)} · ${esc(p.latest_estimated_tokens)} tokens / poll</p></div><a href="${centralHref(p.central,'overhead')}">Inspect</a></div>`),...starved.slice(0,5).map(t=>`<div class="finding-row"><span class="severity"></span><div><b>Starved ticket</b><p>${esc(t.title)}</p><span class="meta">${esc(t.central)} · ${esc(t.board.label)}</span></div><a class="id" href="${ticketHref(t.central,t.board.board_id,t.id)}">${esc(t.id)}</a></div>`)].slice(0,10);return `${pageHead('Home','Fleet overview','Health and attention across every central.')}<section class="health-grid">${centrals||'<div class="skeleton"></div>'}</section><div class="section-title"><h3>Needs attention</h3><span class="status">${attention.length} surfaced</span></div><section class="attention-card">${attention.join('')||'<p class="empty">Nothing needs attention. The fleet is calm.</p>'}</section>`}
+function renderBoardsHub(){const cards=[];for(const [central,d] of Object.entries(fleetData))for(const b of d.boards||[]){const total=Object.values(b.counts||{}).reduce((sum,v)=>sum+numberCount(v),0);cards.push(`<article class="board-card"><div><p class="eyebrow">${esc(central)}</p><h3>${esc(b.label)}</h3><span class="meta">${esc(b.board_id)} · ${esc(total)} visible tickets</span></div><div class="counts">${Object.entries(b.counts||{}).map(([k,v])=>`<span class="pill">${esc(k.replace('_',' '))} <b>${esc(v)}</b></span>`).join('')}</div><div class="card-actions"><a class="primary-action" href="${boardHref(central,b.board_id)}">Workspace</a><a href="${boardHref(central,b.board_id,'flow')}">Flow</a><a href="${boardHref(central,b.board_id,'timeline')}">Timeline</a><a href="${boardHref(central,b.board_id,'changes')}">Changes</a><a href="${boardHref(central,b.board_id,'routes')}">Routes</a></div></article>`)}return `${pageHead('Boards','Board workspaces','Open one board, then move through tickets, findings, intake, flow, timeline, changes, and routes.')}<section class="boards-list">${cards.join('')||'<div class="skeleton"></div>'}</section>`}
+function workerByName(central,name){return (hubWorkers[central]?.workers||[]).find(w=>w.name===name)}
+function liveAgentCard(central,a){const managed=workerByName(central,a.agent_name),work=(a.seats||[]).filter(s=>s.current_ticket_id);return `<article class="agent-card"><div class="agent-card-head"><div><span class="agent-role">${esc((a.seats||[]).map(s=>s.role).filter(Boolean).join(' · ')||managed?.role||'worker')}</span><h3>${esc(a.agent_name)}</h3><span class="meta">${esc(central)} · ${esc((a.boards||[]).join(', '))}</span></div><span class="status">${esc(a.pool_status)}</span></div>${work.length?work.map(s=>`<div class="work-row"><span class="severity"></span><div><b>${esc(s.current_ticket_title)}</b><span class="meta">${esc(s.project)}</span></div><a class="id" href="${ticketHref(central,s.board_id,s.current_ticket_id)}">${esc(s.current_ticket_id)}</a></div>`).join(''):'<p class="empty">No current claim or review.</p>'}${managed?managedControls(central,managed):'<span class="meta">Live pool seat · not locally managed</span>'}</article>`}
+function managedControls(central,w){const p=w.pressure,work=w.current_work||[],logs=w.log_tail||[];return `<div class="pressure-line">${p?pressureBadge(p):'<span class="status">pressure unavailable</span>'}<span class="meta">${p?`${esc(p.latest_estimated_tokens)} tokens / poll`:'No local sample'}</span></div>${work.map(x=>`<div class="work-row"><span class="severity"></span><div><b>${esc(x.ticket_title||x.ticket_id)}</b><span class="meta">${esc(x.role||w.role)} · ${esc(x.board_id)}</span></div><span class="id">${esc(x.ticket_id)}</span></div>`).join('')}<div class="agent-actions"><button data-hub-agent-action="test" data-central="${esc(central)}" data-name="${esc(w.name)}">Test</button><button data-hub-agent-action="start" data-central="${esc(central)}" data-name="${esc(w.name)}" ${w.running?'disabled':''}>Start</button><button data-hub-agent-action="stop" data-central="${esc(central)}" data-name="${esc(w.name)}" ${w.running?'':'disabled'}>Stop</button><button data-hub-agent-action="restart" data-central="${esc(central)}" data-name="${esc(w.name)}" ${w.running?'':'disabled'}>Restart</button>${w.seat_exists?'':`<button data-hub-copy="${esc(w.seat_admin_command)}">Copy seat command</button>`}</div><details><summary>Log tail · last 20 lines</summary><pre class="log-tail">${esc(logs.join('\n')||'No log output yet.')}</pre></details>`}
+function renderGuide(){if(!hubGuide)return'';return `<section class="card pool"><div class="section-title"><h3>Finish ${esc(hubGuide.name)}</h3><span class="status">2 steps</span></div><div class="guide"><div class="guide-step"><b>1 · Provision seat</b><p class="muted">Run once, copy it, then Refresh to auto-detect.</p><code>${esc(hubGuide.seat_admin_command||'Seat already detected.')}</code>${hubGuide.seat_exists?'':'<button type="button" class="button" data-hub-copy="'+esc(hubGuide.seat_admin_command)+'">Copy command</button>'}</div><div class="guide-step"><b>2 · Start agent</b><p class="muted">Start unlocks after the seat and token are detected.</p><button type="button" class="primary-action" data-hub-agent-action="start" data-central="${esc(hubGuide.central)}" data-name="${esc(hubGuide.name)}" ${hubGuide.seat_exists?'':'disabled'}>Start</button></div></div></section>`}
+function renderAgentsHub(){const cards=[],seen=new Set();for(const [central,d] of Object.entries(fleetData)){for(const a of d.agents||[]){cards.push(liveAgentCard(central,a));seen.add(`${central}/${a.agent_name}`)}for(const w of hubWorkers[central]?.workers||[])if(!seen.has(`${central}/${w.name}`))cards.push(`<article class="agent-card"><div class="agent-card-head"><div><span class="agent-role">${esc(w.role)}</span><h3>${esc(w.name)}</h3><span class="meta">${esc(central)} · ${esc(w.provider_label)} · ${esc(w.max_tier)}</span></div><span class="status">${w.running?'running':'stopped'}</span></div>${managedControls(central,w)}</article>`)}const action='<button id="new-agent" class="primary-action" type="button">+ New agent</button>';return `${pageHead('Agents','Unified agent pool','Live workers, reviewers, local API agents, claims, pressure, controls, and bounded logs.',action)}${renderGuide()}<p id="hub-agent-status" class="muted"></p><section class="agent-grid">${cards.join('')||'<div class="skeleton"></div>'}</section>`}
+function renderOperationsHub(){const cards=centralLabels.map(central=>{const d=fleetData[central],routes=(d?.boards||[]).map(b=>`<a href="${boardHref(central,b.board_id,'routes')}">${esc(b.label)} routes</a>`).join('');return `<article class="ops-card"><p class="eyebrow">${esc(central)}</p><h3>Control plane</h3><p class="muted">Policy, protocol pressure, and provenance routes.</p><div class="card-actions"><a class="primary-action" href="${centralHref(central,'config')}">Config</a><a href="${centralHref(central,'overhead')}">Overhead</a></div><div class="route-links">${routes||'<span class="empty">Boards loading…</span>'}</div></article>`}).join('');return `${pageHead('Operations','Operations','Coordinator policy, overhead details, and routes—without expanding the board write surface.')}<section class="ops-grid">${cards||'<div class="skeleton"></div>'}</section><section class="card pool"><h3>Guardrails</h3><p class="muted">Board writes remain exactly <code>coordinator_config</code> and <code>coordinator_intake</code>. Agent actions stay local under <code>/api/workers</code>.</p></section>`}
+function renderHub(){const host=document.querySelector('#central-sections'),kind=navKind();if(!['overview','boards','agents','operations'].includes(kind))return;host.innerHTML=kind==='boards'?renderBoardsHub():kind==='agents'?renderAgentsHub():kind==='operations'?renderOperationsHub():renderOverview();const newest=Object.values(fleetData).map(d=>d.generated_at).sort().at(-1);document.querySelector('#state').textContent=newest?`Updated ${fmt(newest)}`:'Connecting to centrals…';bindInteractive(host);bindHub();renderSearchResults();syncNav()}
+renderFleet=renderHub;
+refreshCentral=async function(...args){await legacyRefreshCentralV1(...args);if(hubKinds.has(route()?.kind))renderHub()};
+async function refreshHubExtras(){if(hubExtrasBusy||!centralLabels.length)return;hubExtrasBusy=true;try{await Promise.allSettled(centralLabels.flatMap(central=>[fetchJson(`/api/workers?${apiCentral(central)}`).then(d=>hubWorkers[central]=d),fetchJson(`/api/overhead?${apiCentral(central)}`).then(d=>hubOverhead[central]=d)]));if(hubGuide){const detected=workerByName(hubGuide.central,hubGuide.name);if(detected)hubGuide={...detected,central:hubGuide.central}}if(['overview','agents'].includes(navKind()))renderHub()}finally{hubExtrasBusy=false}}
+function bindHub(){document.querySelector('#new-agent')?.addEventListener('click',openAgentDialog);const host=document.querySelector('#central-sections');host.onclick=hubClick}
+function openAgentDialog(){let dialog=document.querySelector('#agent-dialog');if(!dialog){document.body.insertAdjacentHTML('beforeend',`<dialog id="agent-dialog" class="agent-dialog"><div class="dialog-head"><div><p class="eyebrow">Local agent</p><h2>New API agent</h2></div><button class="dialog-close" type="button" aria-label="Close">×</button></div><div class="dialog-body"><form id="agent-dialog-form" class="agent-form"><label>Central<select name="central">${centralLabels.map(c=>`<option>${esc(c)}</option>`).join('')}</select></label><label>Name<input name="name" pattern="[a-z0-9-]{2,32}" maxlength="32" placeholder="api-agent-1" required></label><label>Role<select name="role"></select><span id="role-note" class="meta"></span></label><label>Tier<select name="max_tier"><option value="light">Light</option><option value="standard">Standard</option><option value="heavy" selected>Heavy</option></select></label><label>Provider<select name="provider"></select></label><label>Model<input name="model" maxlength="200" placeholder="model-id" required></label><label class="wide">Base URL<input name="base_url" type="url" required></label><label class="wide">API key · stored in Keychain<input name="api_key" type="password" maxlength="8192" autocomplete="new-password"></label><button class="primary-action wide" type="submit">Save and continue</button><p id="agent-dialog-status" class="muted wide"></p></form></div></dialog>`);dialog=document.querySelector('#agent-dialog');dialog.querySelector('.dialog-close').onclick=()=>dialog.close();dialog.querySelector('#agent-dialog-form').onsubmit=saveHubAgent;const centralSelect=dialog.querySelector('[name=central]');centralSelect.onchange=syncAgentDialog;dialog.querySelector('[name=provider]').onchange=syncAgentPreset}syncAgentDialog();dialog.showModal()}
+function syncAgentDialog(){const form=document.querySelector('#agent-dialog-form');if(!form)return;const data=hubWorkers[form.elements.central.value]||{},roles=data.roles||['worker'];form.elements.role.innerHTML=roles.map(r=>`<option value="${esc(r)}">${esc(r)}</option>`).join('');document.querySelector('#role-note').textContent=roles.includes('reviewer')?'Reviewer runtime available.':'Worker-only until reviewer runtime is installed.';form.elements.provider.innerHTML=workerPresetOptions(data.presets||{});syncAgentPreset()}
+function syncAgentPreset(){const form=document.querySelector('#agent-dialog-form');if(!form)return;const option=form.elements.provider.selectedOptions[0];form.elements.base_url.value=option?.dataset.url||'';form.elements.base_url.readOnly=!['custom','azure'].includes(form.elements.provider.value);form.elements.api_key.required=option?.dataset.key==='true';form.elements.api_key.disabled=option?.dataset.key!=='true';if(form.elements.api_key.disabled)form.elements.api_key.value=''}
+async function saveHubAgent(event){event.preventDefault();const form=event.target,f=new FormData(form),central=f.get('central'),status=document.querySelector('#agent-dialog-status'),payload={name:f.get('name'),role:f.get('role'),provider:f.get('provider'),base_url:f.get('base_url'),model:f.get('model'),api_key:f.get('api_key')||'',max_tier:f.get('max_tier')};status.textContent='Saving to Keychain and local config…';try{await workerRequest('/api/workers',central,payload);form.elements.api_key.value='';hubWorkers[central]=await fetchJson(`/api/workers?${apiCentral(central)}`);const worker=workerByName(central,payload.name);hubGuide={...worker,central};document.querySelector('#agent-dialog').close();renderHub()}catch(e){form.elements.api_key.value='';status.className='error wide';status.textContent=`Save failed: ${e.message}`}}
+async function hubClick(event){const copy=event.target.closest('[data-hub-copy]');if(copy){await navigator.clipboard.writeText(copy.dataset.hubCopy);const status=document.querySelector('#hub-agent-status');if(status)status.textContent='Seat command copied.';return}const button=event.target.closest('[data-hub-agent-action]');if(!button)return;const status=document.querySelector('#hub-agent-status');button.disabled=true;if(status)status.textContent=`${button.textContent} ${button.dataset.name}…`;try{await workerRequest(`/api/workers/${encodeURIComponent(button.dataset.name)}/${button.dataset.hubAgentAction}`,button.dataset.central);hubWorkers[button.dataset.central]=await fetchJson(`/api/workers?${apiCentral(button.dataset.central)}`);if(hubGuide?.name===button.dataset.name)hubGuide={...workerByName(button.dataset.central,button.dataset.name),central:button.dataset.central};renderHub()}catch(e){button.disabled=false;if(status){status.className='error';status.textContent=`Action failed: ${e.message}`}}}
+function syncHub(){const r=route(),active=!r||hubKinds.has(r.kind);if(active){document.querySelector('#home-view').hidden=false;document.querySelector('#detail-view').hidden=true;document.querySelector('#config-view').hidden=true;document.querySelector('#workers-view').hidden=true;renderHub();refreshHubExtras()}syncNav()}
+window.addEventListener('hashchange',syncHub);syncHub();setInterval(refreshHubExtras,5000);
 </script></body>""",
 )
 
@@ -2546,6 +2731,47 @@ def make_handler(
             if isinstance(row, dict) and isinstance(row.get("agent_name"), str)
         }
 
+    def worker_rows(central: str | None) -> list[dict[str, Any]]:
+        fleet = cache_call("get", central=central)
+        agents = {
+            row["agent_name"]: row
+            for row in fleet.get("agents", [])
+            if isinstance(row, dict) and isinstance(row.get("agent_name"), str)
+        }
+        rows = workers.list(set(agents))
+        pressure: dict[str, dict[str, Any]] = {}
+        try:
+            resolver = getattr(cache, "overhead_path", None)
+            path = (
+                resolver(central, selected_stats_path)
+                if callable(resolver)
+                else selected_stats_path
+            )
+            pressure = {
+                item["agent_name"]: item
+                for item in read_overhead_stats(path).get("sessions", [])
+                if isinstance(item, dict) and isinstance(item.get("agent_name"), str)
+            }
+        except Exception:  # noqa: BLE001 - local telemetry is optional.
+            pressure = {}
+        for row in rows:
+            live = agents.get(row["name"], {})
+            seats = live.get("seats", []) if isinstance(live, dict) else []
+            row["pool_status"] = live.get("pool_status") if live else None
+            row["current_work"] = [
+                {
+                    "board_id": seat.get("board_id"),
+                    "role": seat.get("role"),
+                    "ticket_id": seat.get("current_ticket_id"),
+                    "ticket_title": seat.get("current_ticket_title"),
+                }
+                for seat in seats
+                if isinstance(seat, dict) and seat.get("current_ticket_id")
+            ][:8]
+            row["pressure"] = pressure.get(row["name"])
+            row["log_tail"] = workers.log_tail(row["name"])
+        return rows
+
     def selected_central_url(central: str | None) -> str:
         resolver = getattr(cache, "central_url", None)
         if not callable(resolver):
@@ -2591,9 +2817,7 @@ def make_handler(
                 try:
                     body = _json_bytes(cache_call("get", central=central))
                 except Exception as exc:  # noqa: BLE001 - return bounded HTTP error.
-                    body = _json_bytes(
-                        {"error": type(exc).__name__, "central": label}
-                    )
+                    body = _json_bytes({"error": type(exc).__name__, "central": label})
                     self._send(503, "application/json; charset=utf-8", body)
                     return
                 self._send(200, "application/json; charset=utf-8", body)
@@ -2606,9 +2830,7 @@ def make_handler(
                         if callable(resolver)
                         else selected_stats_path
                     )
-                    threshold_resolver = getattr(
-                        cache, "get_overhead_thresholds", None
-                    )
+                    threshold_resolver = getattr(cache, "get_overhead_thresholds", None)
                     try:
                         pressure_thresholds = (
                             threshold_resolver(central=central)
@@ -2630,22 +2852,16 @@ def make_handler(
                     self._send(503, "application/json; charset=utf-8", body)
                     return
                 except Exception as exc:  # noqa: BLE001 - bounded HTTP error.
-                    body = _json_bytes(
-                        {"error": type(exc).__name__, "central": label}
-                    )
+                    body = _json_bytes({"error": type(exc).__name__, "central": label})
                     self._send(503, "application/json; charset=utf-8", body)
                     return
                 self._send(200, "application/json; charset=utf-8", body)
                 return
             if route == "/api/config":
                 try:
-                    body = _json_bytes(
-                        cache_call("get_config", central=central)
-                    )
+                    body = _json_bytes(cache_call("get_config", central=central))
                 except Exception as exc:  # noqa: BLE001
-                    body = _json_bytes(
-                        {"error": type(exc).__name__, "central": label}
-                    )
+                    body = _json_bytes({"error": type(exc).__name__, "central": label})
                     self._send(503, "application/json; charset=utf-8", body)
                     return
                 self._send(200, "application/json; charset=utf-8", body)
@@ -2678,7 +2894,8 @@ def make_handler(
                         {
                             "central": label,
                             "enabled": workers.enabled,
-                            "workers": workers.list(fleet_seats(central)),
+                            "workers": worker_rows(central),
+                            "roles": list(workers.roles),
                             "presets": {
                                 key: {
                                     "label": value[0],
@@ -2715,15 +2932,11 @@ def make_handler(
                     self._send(
                         404,
                         "application/json; charset=utf-8",
-                        _json_bytes(
-                            {"error": "board not found", "central": label}
-                        ),
+                        _json_bytes({"error": "board not found", "central": label}),
                     )
                     return
                 except Exception as exc:  # noqa: BLE001 - bounded type only.
-                    body = _json_bytes(
-                        {"error": type(exc).__name__, "central": label}
-                    )
+                    body = _json_bytes({"error": type(exc).__name__, "central": label})
                     self._send(503, "application/json; charset=utf-8", body)
                     return
                 if len(body) > API_MAX_BYTES:
@@ -2745,13 +2958,15 @@ def make_handler(
         def do_POST(self) -> None:
             route = urlsplit(self.path).path
             worker_action = re.fullmatch(
-                r"/api/workers/([a-z0-9-]{2,32})/(test|start|stop)", route
+                r"/api/workers/([a-z0-9-]{2,32})/(test|start|stop|restart)", route
             )
             if (
                 route not in {"/api/config", "/api/intake", "/api/workers"}
                 and worker_action is None
             ):
-                self._send(404, "application/json; charset=utf-8", b'{"error":"not found"}')
+                self._send(
+                    404, "application/json; charset=utf-8", b'{"error":"not found"}'
+                )
                 return
             try:
                 central = requested_central(self.path)
@@ -2793,12 +3008,17 @@ def make_handler(
                         result = workers.start(
                             name, seat_exists=name in fleet_seats(central)
                         )
+                    elif action == "restart":
+                        result = workers.restart(
+                            name, seat_exists=name in fleet_seats(central)
+                        )
                     else:
                         result = workers.stop(name)
                     body = _json_bytes({**result, "central": label})
                 elif route == "/api/config":
                     if not isinstance(request, dict) or set(request) != {
-                        "config", "expected_sha256"
+                        "config",
+                        "expected_sha256",
                     }:
                         raise ValueError(
                             "request must contain only config and expected_sha256"
@@ -2813,7 +3033,8 @@ def make_handler(
                     )
                 else:
                     if not isinstance(request, dict) or set(request) != {
-                        "board_id", "text"
+                        "board_id",
+                        "text",
                     }:
                         raise ValueError("request must contain only board_id and text")
                     body = _json_bytes(
@@ -3007,8 +3228,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--centrals",
         help=(
-            "0600 JSON list of "
-            "{label,url,token_path,home_board[,stats_path]} entries"
+            "0600 JSON list of {label,url,token_path,home_board[,stats_path]} entries"
         ),
     )
     parser.add_argument("--home-board", default=DEFAULT_HOME_BOARD)
@@ -3035,9 +3255,7 @@ def main(argv: list[str] | None = None) -> None:
     cache = DashboardCache(
         [FleetFetcher(config) for config in configs], args.cache_seconds
     )
-    worker_manager = WorkerManager(
-        args.workers_dir, worker_script=args.worker_script
-    )
+    worker_manager = WorkerManager(args.workers_dir, worker_script=args.worker_script)
     server = ThreadingHTTPServer(
         (args.host, args.port),
         make_handler(cache, bridge_stats_path(), worker_manager),

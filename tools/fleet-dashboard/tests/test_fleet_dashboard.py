@@ -385,9 +385,7 @@ def test_detail_projection_is_byte_bounded_and_drops_unbounded_history() -> None
             "status": "closed" if index % 2 else "claimed",
             "required_fields": ["field-" + "r" * 200 for _ in range(40)],
             "updated_at": f"2030-01-01T00:{index % 60:02d}:00+00:00",
-            "submission_history": [
-                {"summary": "s" * 20_000, "notes": "n" * 100_000}
-            ],
+            "submission_history": [{"summary": "s" * 20_000, "notes": "n" * 100_000}],
             "review_label": "independent-review",
         }
         for index in range(dashboard.SNAPSHOT_LIMIT)
@@ -858,7 +856,9 @@ def test_routes_view_escapes_hostile_identity_and_ticket_strings() -> None:
     assert 'id="routes-view"' in completed.stdout
 
 
-def test_detail_views_include_filter_routes_mobile_containment_and_escape_calls() -> None:
+def test_detail_views_include_filter_routes_mobile_containment_and_escape_calls() -> (
+    None
+):
     assert "tickets|timeline|changes|flow|routes" in dashboard.HTML
     assert "g then r" in dashboard.HTML
     assert "boardHref(current.central,current.board,'routes')" in dashboard.HTML
@@ -949,13 +949,17 @@ def test_global_search_groups_escaped_results_and_enter_jumps_to_item() -> None:
     assert result["counts"] == {"Boards": 1, "Tickets": 1, "Agents": 1}
     assert hostile not in result["html"]
     assert "&lt;img src=x onerror=&quot;alert(1)&quot;&gt; needle" in result["html"]
-    assert result["hash"] == "#/central/personal/board/board-one/tickets?ticket=TK-needle"
+    assert (
+        result["hash"] == "#/central/personal/board/board-one/tickets?ticket=TK-needle"
+    )
 
 
 def test_collapsed_state_survives_rebinding_without_local_storage() -> None:
     script = dashboard.HTML.split("<script>", 1)[1].split("</script>", 1)[0]
     line = next(
-        item for item in script.splitlines() if item.startswith("function bindInteractive(")
+        item
+        for item in script.splitlines()
+        if item.startswith("function bindInteractive(")
     )
     program = "\n".join(  # noqa: FLY002 - extracted JS stays line-addressable
         [
@@ -1030,7 +1034,7 @@ def test_help_theme_density_and_keyboard_controls_render() -> None:
     assert 'id="theme-toggle"' in dashboard.HTML
     assert 'id="density-toggle"' in dashboard.HTML
     assert ':root[data-theme="light"]' in dashboard.HTML
-    assert '@media print' in dashboard.HTML
+    assert "@media print" in dashboard.HTML
     assert "e.key==='g'" in dashboard.HTML
 
 
@@ -1421,9 +1425,7 @@ def test_overhead_uses_inclusive_seven_utc_calendar_days() -> None:
 
 
 def test_session_pressure_thresholds_trend_and_worst_first_sorting() -> None:
-    def cycle(
-        board: str, agent: str, latest_bytes: int, samples: list[int]
-    ) -> dict:
+    def cycle(board: str, agent: str, latest_bytes: int, samples: list[int]) -> dict:
         return {
             "board_id": board,
             "agent_name": agent,
@@ -1443,12 +1445,8 @@ def test_session_pressure_thresholds_trend_and_worst_first_sorting() -> None:
         "days": {},
         "poll_cycles": {
             "ok": cycle("board-ok", "ok-seat", 100_000, [100_000] * 24),
-            "watch": cycle(
-                "board-watch", "watch-seat", 320_000, [320_000] * 24
-            ),
-            "size": cycle(
-                "board-size", "size-seat", 400_004, [400_004] * 24
-            ),
+            "watch": cycle("board-watch", "watch-seat", 320_000, [320_000] * 24),
+            "size": cycle("board-size", "size-seat", 400_004, [400_004] * 24),
             "trend": cycle(
                 "board-trend",
                 "trend-seat",
@@ -1656,6 +1654,8 @@ def test_overhead_endpoint_treats_integer_digit_limit_as_malformed() -> None:
 
     assert result["source_status"] == "malformed"
     assert result["seats"] == []
+
+
 def valid_coordinator_config() -> dict:
     return {
         "schema_version": 1,
@@ -1673,7 +1673,12 @@ def valid_coordinator_config() -> dict:
         "intake": {
             "enabled": False,
             "auto_categories": ["docs", "tests", "audit-analysis", "bug"],
-            "always_ask_categories": ["production-code", "release-ci", "membership-roles", "board-registry"],
+            "always_ask_categories": [
+                "production-code",
+                "release-ci",
+                "membership-roles",
+                "board-registry",
+            ],
             "work_domain_always_ask": True,
             "rate_per_hour": 5,
         },
@@ -1808,7 +1813,9 @@ def test_multi_central_overhead_is_scoped_even_with_identical_board_ids(
     server, thread = _serve_cache(cache)
     root = f"http://127.0.0.1:{server.server_port}"
     try:
-        with urllib.request.urlopen(f"{root}/api/overhead?central=personal") as response:
+        with urllib.request.urlopen(
+            f"{root}/api/overhead?central=personal"
+        ) as response:
             personal = json.load(response)
         with urllib.request.urlopen(f"{root}/api/overhead?central=work") as response:
             work = json.load(response)
@@ -2073,8 +2080,12 @@ def test_config_save_writes_only_coordinator_config_with_cas() -> None:
             return {"ok": True}
 
     config = dashboard.Config(
-        url="https://127.0.0.1:8766/mcp", token="token", home_board="pursers",
-        agent_name="dashboard-seat", stale_seconds=300, cache_seconds=5,
+        url="https://127.0.0.1:8766/mcp",
+        token="token",
+        home_board="pursers",
+        agent_name="dashboard-seat",
+        stale_seconds=300,
+        cache_seconds=5,
     )
     fetcher = dashboard.FleetFetcher(config, client_factory=lambda *_a, **_k: Client())
     digest = hashlib.sha256(Client.value.encode()).hexdigest()
@@ -2114,8 +2125,12 @@ def test_config_endpoint_enforces_create_then_cas() -> None:
 
     client = Client()
     config = dashboard.Config(
-        url="https://127.0.0.1:8766/mcp", token="token", home_board="pursers",
-        agent_name="dashboard-seat", stale_seconds=300, cache_seconds=5,
+        url="https://127.0.0.1:8766/mcp",
+        token="token",
+        home_board="pursers",
+        agent_name="dashboard-seat",
+        stale_seconds=300,
+        cache_seconds=5,
     )
     fetcher = dashboard.FleetFetcher(config, client_factory=lambda *_a, **_k: client)
     cache = dashboard.DashboardCache(fetcher, 5)
@@ -2230,9 +2245,10 @@ class FakeIntakeCentral:
                     raise dashboard.BoardClientError("state precondition failed")
                 current = owner.values.get((board_id, arguments["key"]))
                 expected = arguments.get("expected_sha256")
-                if current is not None and expected != hashlib.sha256(
-                    current.encode()
-                ).hexdigest():
+                if (
+                    current is not None
+                    and expected != hashlib.sha256(current.encode()).hexdigest()
+                ):
                     raise dashboard.BoardClientError("state precondition failed")
                 owner.values[(board_id, arguments["key"])] = arguments["value"]
                 return {"ok": True}
@@ -2273,9 +2289,7 @@ def intake_fetcher(
         ("pursers", "x" * 501, "between 5 and 500"),
     ],
 )
-def test_intake_validation_matrix(
-    board_id: object, text: object, message: str
-) -> None:
+def test_intake_validation_matrix(board_id: object, text: object, message: str) -> None:
     fetcher = intake_fetcher(FakeIntakeCentral())
     with pytest.raises(ValueError, match=message):
         asyncio.run(fetcher.save_intake(board_id, text))
@@ -2312,9 +2326,9 @@ def test_intake_append_uses_create_then_cas_and_coordinator_shape() -> None:
     parsed = coordinator.parse_intake(
         {"state": {"value": json.dumps([ask])}}, "pursers"
     )
-    assert [(item.ask_id, item.text, item.requested_by, item.board_id) for item in parsed] == [
-        (ask["id"], ask["text"], "dashboard-seat", "pursers")
-    ]
+    assert [
+        (item.ask_id, item.text, item.requested_by, item.board_id) for item in parsed
+    ] == [(ask["id"], ask["text"], "dashboard-seat", "pursers")]
 
 
 def test_intake_uuid_is_deterministic_for_content_and_time() -> None:
@@ -2421,8 +2435,10 @@ def test_dashboard_write_whitelist_is_exact_across_both_writes() -> None:
     asyncio.run(fetcher.save_intake("pursers", "Update the dashboard guide"))
 
     written = {arguments["key"] for _board, _name, arguments in central.calls}
-    assert dashboard.DASHBOARD_WRITE_KEYS == frozenset(written) == frozenset(
-        {"coordinator_config", "coordinator_intake"}
+    assert (
+        dashboard.DASHBOARD_WRITE_KEYS
+        == frozenset(written)
+        == frozenset({"coordinator_config", "coordinator_intake"})
     )
     with pytest.raises(ValueError, match="not writable"):
         dashboard._dashboard_state_update_arguments(
@@ -2486,7 +2502,9 @@ def test_worker_manager_keychain_config_lifecycle_and_adoption(tmp_path: Path) -
         platform="darwin",
         command_runner=command_runner,
         process_factory=process_factory,
-        process_matches=lambda pid, path: pid == 9876 and path.name == "worker-one.toml",
+        process_matches=lambda pid, path: (
+            pid == 9876 and path.name == "worker-one.toml"
+        ),
     )
     result = manager.save(
         {
@@ -2503,11 +2521,20 @@ def test_worker_manager_keychain_config_lifecycle_and_adoption(tmp_path: Path) -
     assert result == {"ok": True, "name": "worker-one", "key_stored": True}
     assert stat.S_IMODE(config_path.stat().st_mode) == 0o600
     assert document["boards"] == "registry"
+    assert document["seat"]["role"] == "worker"
+    assert document["claim"]["max_tier"] == "heavy"
     assert document["llm"]["api_key_keychain"] == "worker-one"
     assert secret not in config_path.read_text()
     assert commands[0] == [
-        "/usr/bin/security", "add-generic-password", "-s", "pursers-worker",
-        "-a", "worker-one", "-U", "-w", secret,
+        "/usr/bin/security",
+        "add-generic-password",
+        "-s",
+        "pursers-worker",
+        "-a",
+        "worker-one",
+        "-U",
+        "-w",
+        secret,
     ]
 
     token_path = tmp_path / "seats" / "worker-one.jwt"
@@ -2533,8 +2560,14 @@ def test_worker_manager_keychain_config_lifecycle_and_adoption(tmp_path: Path) -
     assert adopted["seat_exists"] is True
     assert secret not in json.dumps(adopted)
 
+    log_path = tmp_path / "workers" / "worker-one.session.log"
+    log_path.write_text("\n".join(f"line-{index}" for index in range(25)))
+    assert manager.log_tail("worker-one") == [f"line-{index}" for index in range(5, 25)]
 
-def test_worker_provider_test_uses_keychain_without_echoing_secret(tmp_path: Path) -> None:
+
+def test_worker_provider_test_uses_keychain_without_echoing_secret(
+    tmp_path: Path,
+) -> None:
     secret = "PROVIDER_TEST_SECRET"
     authorization: list[str | None] = []
 
@@ -2579,14 +2612,14 @@ def test_worker_provider_test_uses_keychain_without_echoing_secret(tmp_path: Pat
         server.server_close()
         thread.join()
 
-    assert result == {
-        "ok": True, "name": "provider-test", "provider_reachable": True
-    }
+    assert result == {"ok": True, "name": "provider-test", "provider_reachable": True}
     assert authorization == ["".join(("Bea", "rer")) + " " + secret]
     assert secret not in json.dumps(result)
 
 
-def test_worker_api_is_local_and_board_write_surface_is_unchanged(tmp_path: Path) -> None:
+def test_worker_api_is_local_and_board_write_surface_is_unchanged(
+    tmp_path: Path,
+) -> None:
     secret = "API_ENDPOINT_SECRET"
 
     def command_runner(argv: list[str], **_kwargs: object) -> object:
@@ -2663,3 +2696,61 @@ def test_workers_tab_renders_presets_actions_and_keychain_copy() -> None:
     assert ".onclick=workerClick" in dashboard.HTML
     assert "workerActionMessage" in dashboard.HTML
     assert "board_state_update" not in dashboard.HTML
+
+
+def test_dashboard_v2_ia_agents_and_responsive_contract() -> None:
+    html = dashboard.HTML
+
+    assert 'class="app-shell"' in html
+    assert 'aria-label="Primary navigation"' in html
+    assert 'href="#/boards"' in html
+    assert 'href="#/agents"' in html
+    assert 'href="#/operations"' in html
+    assert "Fleet overview" in html
+    assert "Board workspaces" in html
+    assert "Unified agent pool" in html
+    assert "Needs attention" in html
+    assert "Coordinator heartbeat" in html
+    assert "New API agent" in html
+    assert "Worker-only until reviewer runtime is installed." in html
+    assert "Log tail · last 20 lines" in html
+    assert 'data-hub-agent-action="restart"' in html
+    assert "max_tier" in html
+    assert "@media(max-width:800px)" in html
+    assert "overflow-x:hidden" in html
+    assert "https://cdn" not in html
+    assert "http://cdn" not in html
+
+
+def test_worker_manager_accepts_v2_role_and_tier_only_when_supported(
+    tmp_path: Path,
+) -> None:
+    worker_script = tmp_path / "reviewer-runtime.py"
+    worker_script.write_text(
+        'role = seat.get("role", "worker")\nif role == "reviewer": pass\n'
+    )
+    manager = dashboard.WorkerManager(
+        tmp_path / "workers",
+        worker_script=worker_script,
+        platform="darwin",
+        command_runner=lambda *_args, **_kwargs: SimpleNamespace(stdout=""),
+    )
+
+    manager.save(
+        {
+            "name": "reviewer-one",
+            "role": "reviewer",
+            "provider": "ollama",
+            "base_url": "http://127.0.0.1:11434/v1",
+            "model": "local-model",
+            "api_key": "",
+            "max_tier": "standard",
+        },
+        "https://127.0.0.1:8766/mcp",
+    )
+
+    definition = manager.list()[0]
+    assert manager.roles == ("worker", "reviewer")
+    assert definition["role"] == "reviewer"
+    assert definition["max_tier"] == "standard"
+    assert "--role reviewer" in definition["seat_admin_command"]
