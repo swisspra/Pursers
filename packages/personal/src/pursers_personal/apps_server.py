@@ -1066,7 +1066,7 @@ class LiveDashboard:
                             finally:
                                 if future.done():
                                     active_future = None
-                except asyncio.CancelledError as exc:
+                except asyncio.CancelledError:
                     self._connected = False
                     message = (
                         "dashboard stopped"

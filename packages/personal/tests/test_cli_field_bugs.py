@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import plistlib
 from importlib.metadata import version
 from pathlib import Path
 from types import SimpleNamespace
@@ -185,7 +186,7 @@ def test_setup_plan_mode_writes_nothing(
     assert result["integration"]["host_entry_action"] == "create-config-and-add-entry"
 
 
-def test_apply_failure_removes_only_profile_created_by_this_run(
+def test_apply_failure_retains_profile_from_concurrent_creator(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     args = _setup_args(tmp_path, apply=True, host_id="claude-code")
@@ -193,8 +194,9 @@ def test_apply_failure_removes_only_profile_created_by_this_run(
     api = _api_for(args.profiles_root, profile_path)
 
     def ensure(_project: Path, **_kwargs):
+        # Simulate another creator winning after command_setup computes coordinates.
         profile_path.parent.mkdir(parents=True)
-        profile_path.write_text("{}\n", encoding="utf-8")
+        profile_path.write_text('{"concurrent": true}\n', encoding="utf-8")
         return SimpleNamespace(profile_path=profile_path)
 
     def identity(**_kwargs):
@@ -206,9 +208,13 @@ def test_apply_failure_removes_only_profile_created_by_this_run(
     monkeypatch.setattr(cli, "_profile_api", lambda: api)
     monkeypatch.setattr(cli, "_setup_port", lambda _api, _args: 54321)
 
-    with pytest.raises(IntegrationError, match="missing or invalid"):
+    with pytest.raises(IntegrationError) as caught:
         cli.command_setup(args)
-    assert not profile_path.parent.exists()
+    assert profile_path.read_text(encoding="utf-8") == '{"concurrent": true}\n'
+    assert str(profile_path.parent) in str(caught.value)
+    assert "profiles list" in str(caught.value)
+    assert "profiles prune --orphaned --dry-run" in str(caught.value)
+    assert "profiles prune --orphaned --commit" in str(caught.value)
 
 
 def test_apply_failure_preserves_preexisting_profile(
@@ -230,7 +236,7 @@ def test_apply_failure_preserves_preexisting_profile(
     monkeypatch.setattr(cli, "_profile_api", lambda: api)
     monkeypatch.setattr(cli, "_setup_port", lambda _api, _args: 54321)
 
-    with pytest.raises(IntegrationError, match="missing or invalid"):
+    with pytest.raises(IntegrationError, match="no profile was deleted"):
         cli.command_setup(args)
     assert profile_path.read_bytes() == original
 
@@ -274,11 +280,19 @@ def test_profiles_list_and_prune_protect_referenced_profiles(
     )
     launch_agents = tmp_path / "LaunchAgents"
     launch_agents.mkdir()
-    launch_agent = (
-        launch_agents
-        / f"com.onboard.personal.{profiles[str(profile_paths[2])].profile_id}.plist"
+    launch_agent = launch_agents / "custom-active-worker.plist"
+    launch_agent.write_bytes(
+        plistlib.dumps(
+            {
+                "Label": "custom.active.worker",
+                "ProgramArguments": [
+                    "pursers-personal",
+                    "--profile",
+                    str(profile_paths[2]),
+                ],
+            }
+        )
     )
-    launch_agent.write_text("plist placeholder\n", encoding="utf-8")
     args = argparse.Namespace(
         profiles_root=root,
         host_config=[host_config],
@@ -322,6 +336,72 @@ def test_profiles_list_and_prune_protect_referenced_profiles(
     assert not profile_paths[0].parent.exists()
     assert profile_paths[1].exists()
     assert profile_paths[2].exists()
+
+
+@pytest.mark.parametrize("unsafe_kind", ["malformed", "symlink"])
+def test_profiles_prune_fails_closed_for_unverifiable_launch_agent(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, unsafe_kind: str
+) -> None:
+    root = tmp_path / "profiles"
+    profile_path = root / ("project-" + "8" * 24) / "profile.json"
+    profile_path.parent.mkdir(parents=True)
+    profile_path.write_text("{}\n", encoding="utf-8")
+
+    class API:
+        PersonalProfileError = PersonalProfileError
+        ProfileSecurityError = ProfileSecurityError
+
+        @staticmethod
+        def default_profiles_root() -> Path:
+            return root
+
+        @staticmethod
+        def load_personal_profile(path: Path):
+            return SimpleNamespace(
+                profile_path=path,
+                project_root=tmp_path / "workspace",
+                profile_id="8" * 32,
+                board_id="board-unsafe-agent",
+            )
+
+    launch_agents = tmp_path / "LaunchAgents"
+    launch_agents.mkdir()
+    candidate = launch_agents / "custom-worker.plist"
+    if unsafe_kind == "malformed":
+        candidate.write_text("not a plist\n", encoding="utf-8")
+    else:
+        target = tmp_path / "outside.plist"
+        target.write_bytes(plistlib.dumps({"Label": "outside"}))
+        candidate.symlink_to(target)
+    args = argparse.Namespace(
+        profiles_root=root,
+        host_config=[],
+        launch_agents_dir=[launch_agents],
+        commit=True,
+        dry_run=False,
+        orphaned=True,
+    )
+    monkeypatch.setattr(cli, "_profile_api", lambda: API)
+    monkeypatch.setattr(
+        cli,
+        "integration_status",
+        lambda _path: {"state": "not-installed", "targets": []},
+    )
+    monkeypatch.setattr(
+        cli, "_default_claude_config", lambda: tmp_path / "absent-desktop.json"
+    )
+    monkeypatch.setattr(
+        cli, "_default_claude_code_config", lambda: tmp_path / "absent-code.json"
+    )
+    monkeypatch.setattr(
+        cli, "_default_launch_agents", lambda: tmp_path / "absent-agents"
+    )
+
+    result = cli.command_profiles_prune(args)
+
+    assert result["candidates"] == []
+    assert result["removed"] == []
+    assert profile_path.exists()
 
 
 def test_cli_version_matches_package_metadata(

@@ -17,7 +17,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
-
 ENTRY_NAME = "pursers-personal"
 LAUNCHCTL_PATH = "/bin/launchctl"
 RECEIPT_NAME = "integration-receipt.json"
