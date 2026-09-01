@@ -1317,6 +1317,7 @@ def test_overhead_endpoint_returns_empty_for_missing_or_malformed_stats(
             thread.join()
 
     assert result["source_status"] == expected_status
+    assert result["sessions"] == []
     assert result["seats"] == []
     assert result["note"] == "protocol overhead (estimated), not provider billing"
 
@@ -1415,6 +1416,116 @@ def test_overhead_uses_inclusive_seven_utc_calendar_days() -> None:
         )
 
     assert result["seats"][0]["seven_day_bytes"] == 400
+
+
+def test_session_pressure_thresholds_trend_and_worst_first_sorting() -> None:
+    def cycle(
+        board: str, agent: str, latest_bytes: int, samples: list[int]
+    ) -> dict:
+        return {
+            "board_id": board,
+            "agent_name": agent,
+            "latest_at": "2030-01-10T12:00:00+00:00",
+            "latest_response_bytes": latest_bytes,
+            "samples": [
+                {
+                    "at": f"2030-01-10T11:{index:02d}:00+00:00",
+                    "response_bytes": value,
+                }
+                for index, value in enumerate(samples)
+            ],
+        }
+
+    document = {
+        "schema_version": 2,
+        "days": {},
+        "poll_cycles": {
+            "ok": cycle("board-ok", "ok-seat", 100_000, [100_000] * 24),
+            "watch": cycle(
+                "board-watch", "watch-seat", 320_000, [320_000] * 24
+            ),
+            "size": cycle(
+                "board-size", "size-seat", 400_004, [400_004] * 24
+            ),
+            "trend": cycle(
+                "board-trend",
+                "trend-seat",
+                200_000,
+                [100_000] * 23 + [200_000],
+            ),
+        },
+    }
+    with tempfile.TemporaryDirectory() as raw:
+        path = Path(raw) / "stats.json"
+        path.write_text(json.dumps(document), encoding="utf-8")
+        result = dashboard.read_overhead_stats(
+            path, now=datetime(2030, 1, 10, 12, tzinfo=timezone.utc)
+        )
+
+    assert [row["agent_name"] for row in result["sessions"]] == [
+        "size-seat",
+        "trend-seat",
+        "watch-seat",
+        "ok-seat",
+    ]
+    by_name = {row["agent_name"]: row for row in result["sessions"]}
+    assert by_name["ok-seat"]["pressure"] == "ok"
+    assert by_name["watch-seat"]["pressure"] == "watch"
+    assert by_name["watch-seat"]["latest_estimated_tokens"] == 80_000
+    assert by_name["size-seat"]["pressure"] == "compact"
+    assert by_name["trend-seat"]["pressure"] == "compact"
+    assert by_name["trend-seat"]["trend"] == "↑"
+    assert by_name["trend-seat"]["trend_ratio"] == 2.0
+    assert "journal compaction" in by_name["trend-seat"]["next_action"]
+
+
+def test_session_pressure_coordinator_override_and_calm_empty_state(
+    tmp_path: Path,
+) -> None:
+    missing = dashboard.read_overhead_stats(tmp_path / "missing.json")
+    assert missing["sessions"] == []
+    assert "context pressure is calm" in dashboard.HTML
+
+    path = tmp_path / "stats.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "days": {},
+                "poll_cycles": {
+                    "seat": {
+                        "board_id": "board",
+                        "agent_name": "worker",
+                        "latest_at": "2030-01-10T12:00:00+00:00",
+                        "latest_response_bytes": 80_000,
+                        "samples": [
+                            {
+                                "at": "2030-01-10T11:00:00+00:00",
+                                "response_bytes": 80_000,
+                            }
+                        ],
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    result = dashboard.read_overhead_stats(
+        path,
+        now=datetime(2030, 1, 10, 12, tzinfo=timezone.utc),
+        thresholds={
+            "context_watch_tokens_per_poll": 10_000,
+            "context_compact_tokens_per_poll": 25_000,
+            "context_trend_compact_ratio": 3.0,
+        },
+    )
+
+    assert result["sessions"][0]["pressure"] == "watch"
+    assert result["pressure_thresholds"] == {
+        "context_watch_tokens_per_poll": 10_000,
+        "context_compact_tokens_per_poll": 25_000,
+        "context_trend_compact_ratio": 3.0,
+    }
 
 
 def test_findings_panel_projection_handles_absent_present_and_truncated_state() -> None:
@@ -1897,6 +2008,9 @@ def test_centrals_file_and_tokens_require_0600(tmp_path: Path) -> None:
         ("thresholds", "review_backlog_seconds", 9),
         ("thresholds", "abandoner_drops", 0),
         ("thresholds", "abandoner_window_days", 366),
+        ("thresholds", "context_watch_tokens_per_poll", 999),
+        ("thresholds", "context_compact_tokens_per_poll", 1_000),
+        ("thresholds", "context_trend_compact_ratio", 1.0),
         ("intake", "rate_per_hour", 21),
     ],
 )
@@ -2042,9 +2156,32 @@ def test_config_hash_page_renders_all_knobs_and_sources() -> None:
     assert 'href="#/config"' in dashboard.HTML
     assert 'id="config-view"' in dashboard.HTML
     assert "Mode changes require a restart." in dashboard.HTML
-    for field in (*dashboard.CONFIG_THRESHOLD_FIELDS, "integration_watch_since", "rate_per_hour"):
+    for field in (
+        *dashboard.CONFIG_THRESHOLD_FIELDS,
+        *dashboard.CONFIG_PRESSURE_FIELDS,
+        "integration_watch_since",
+        "rate_per_hour",
+    ):
         assert field in dashboard.HTML
     assert "source:" in dashboard.HTML
+
+
+def test_config_accepts_optional_context_pressure_thresholds() -> None:
+    config = valid_coordinator_config()
+    config["thresholds"].update(
+        {
+            "context_watch_tokens_per_poll": 20_000,
+            "context_compact_tokens_per_poll": 60_000,
+            "context_trend_compact_ratio": 1.75,
+        }
+    )
+
+    assert dashboard.validate_coordinator_config(config) == config
+
+    invalid = valid_coordinator_config()
+    invalid["thresholds"]["context_watch_tokens_per_poll"] = 90_000
+    with pytest.raises(ValueError, match="context_watch_tokens_per_poll is invalid"):
+        dashboard.validate_coordinator_config(invalid)
 
 
 class FakeIntakeCentral:

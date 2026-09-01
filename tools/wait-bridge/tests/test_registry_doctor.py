@@ -313,6 +313,24 @@ class RegistryDoctorTests(unittest.TestCase):
                 check = rows(self.report(backend, stats_path=path))["bridge-stats"]
                 self.assertEqual(check["status"], "WARN")
 
+    def test_bridge_stats_v2_is_healthy(self) -> None:
+        backend = self.backend()
+        path = self.root / "v2-stats.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 2,
+                    "days": {"2030-01-08": {"seats": {}}},
+                    "poll_cycles": {},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        check = rows(self.report(backend, stats_path=path))["bridge-stats"]
+
+        self.assertEqual(check["status"], "PASS")
+
     def test_exit_code_aggregates_worst_status(self) -> None:
         checks = [
             doctor.Check("PASS", "a", "ok"),

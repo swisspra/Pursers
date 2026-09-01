@@ -106,10 +106,50 @@ class BridgeStatsTests(unittest.TestCase):
         self.record("board_catchup", 100, 300)
 
         document = json.loads(self.path.read_text(encoding="utf-8"))
-        self.assertEqual(document["schema_version"], 1)
+        self.assertEqual(document["schema_version"], 2)
         seat = next(iter(document["days"]["2030-01-01"]["seats"].values()))
         self.assertEqual(seat["request_bytes"], 100)
         self.assertEqual(seat["response_bytes"], 300)
+
+    def test_poll_cycle_records_context_responses_only_and_caps_ring(self) -> None:
+        async def cycle(index: int) -> None:
+            async with self.stats.poll_cycle():
+                await self.stats.record(
+                    "board-one",
+                    "worker-one",
+                    "board_catchup",
+                    10,
+                    100 + index,
+                )
+                await self.stats.record(
+                    "board-one",
+                    "worker-one",
+                    "board_snapshot",
+                    20,
+                    200 + index,
+                )
+                await self.stats.record(
+                    "board-one",
+                    "worker-one",
+                    "ticket_list",
+                    30,
+                    9_999,
+                )
+
+        for index in range(25):
+            self.now = datetime(2030, 1, 1, 12, tzinfo=timezone.utc) + timedelta(
+                seconds=index
+            )
+            asyncio.run(cycle(index))
+
+        document = json.loads(self.path.read_text(encoding="utf-8"))
+        self.assertEqual(document["schema_version"], 2)
+        seat = next(iter(document["poll_cycles"].values()))
+        self.assertEqual(seat["latest_response_bytes"], 348)
+        self.assertEqual(len(seat["samples"]), wait_server.POLL_SAMPLE_LIMIT)
+        self.assertEqual(seat["samples"][0]["response_bytes"], 302)
+        self.assertEqual(seat["samples"][-1]["response_bytes"], 348)
+        self.assertNotIn("9999", json.dumps(seat))
 
 
 if __name__ == "__main__":

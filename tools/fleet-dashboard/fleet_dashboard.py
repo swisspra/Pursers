@@ -10,6 +10,7 @@ import json
 import os
 import re
 import stat
+import statistics
 import sys
 import threading
 import time
@@ -80,6 +81,16 @@ CONFIG_THRESHOLD_FIELDS = (
     "critical_starved_seconds", "review_backlog_seconds", "abandoner_drops",
     "abandoner_window_days",
 )
+CONFIG_PRESSURE_FIELDS = (
+    "context_watch_tokens_per_poll",
+    "context_compact_tokens_per_poll",
+    "context_trend_compact_ratio",
+)
+DEFAULT_CONTEXT_PRESSURE = {
+    "context_watch_tokens_per_poll": 30_000,
+    "context_compact_tokens_per_poll": 80_000,
+    "context_trend_compact_ratio": 1.5,
+}
 
 
 class ConfigConflictError(RuntimeError):
@@ -188,8 +199,15 @@ def validate_coordinator_config(value: Any) -> dict[str, Any]:
     if value.get("schema_version") != 1:
         raise ValueError("schema_version must be 1")
     thresholds = value.get("thresholds")
-    if not isinstance(thresholds, dict) or set(thresholds) != set(CONFIG_THRESHOLD_FIELDS):
-        raise ValueError("thresholds must contain every known threshold")
+    threshold_keys = set(thresholds) if isinstance(thresholds, dict) else set()
+    required_thresholds = set(CONFIG_THRESHOLD_FIELDS)
+    allowed_thresholds = required_thresholds | set(CONFIG_PRESSURE_FIELDS)
+    if (
+        not isinstance(thresholds, dict)
+        or not required_thresholds.issubset(threshold_keys)
+        or not threshold_keys.issubset(allowed_thresholds)
+    ):
+        raise ValueError("thresholds must contain every required known threshold")
     for name in (
         "stale_seconds", "grace_seconds", "starved_seconds",
         "critical_starved_seconds", "review_backlog_seconds",
@@ -203,6 +221,15 @@ def validate_coordinator_config(value: Any) -> dict[str, Any]:
         raise ValueError("abandoner_drops must be between 1 and 20")
     if type(thresholds["abandoner_window_days"]) is not int or not 1 <= thresholds["abandoner_window_days"] <= 365:
         raise ValueError("abandoner_window_days must be between 1 and 365")
+    pressure = context_pressure_thresholds(thresholds)
+    for name in CONFIG_PRESSURE_FIELDS:
+        if name in thresholds and thresholds[name] != pressure[name]:
+            raise ValueError(f"{name} is invalid")
+    if set(CONFIG_PRESSURE_FIELDS) & threshold_keys and (
+        pressure["context_compact_tokens_per_poll"]
+        <= pressure["context_watch_tokens_per_poll"]
+    ):
+        raise ValueError("context compact threshold must exceed watch threshold")
     watermark = value.get("integration_watch_since")
     if watermark is not None and _parse_time(watermark) is None:
         raise ValueError("integration_watch_since must be null or ISO-8601")
@@ -224,6 +251,27 @@ def validate_coordinator_config(value: Any) -> dict[str, Any]:
     if type(intake["rate_per_hour"]) is not int or not 1 <= intake["rate_per_hour"] <= 20:
         raise ValueError("rate_per_hour must be between 1 and 20")
     return json.loads(json.dumps(value))
+
+
+def context_pressure_thresholds(value: Any) -> dict[str, int | float]:
+    """Resolve optional coordinator_config pressure keys independently."""
+    raw = value if isinstance(value, dict) else {}
+    watch = raw.get("context_watch_tokens_per_poll")
+    compact = raw.get("context_compact_tokens_per_poll")
+    ratio = raw.get("context_trend_compact_ratio")
+    resolved: dict[str, int | float] = dict(DEFAULT_CONTEXT_PRESSURE)
+    if type(watch) is int and 1_000 <= watch <= 10_000_000:
+        resolved["context_watch_tokens_per_poll"] = watch
+    if type(compact) is int and 1_001 <= compact <= 20_000_000:
+        resolved["context_compact_tokens_per_poll"] = compact
+    if type(ratio) in (int, float) and 1.01 <= ratio <= 10:
+        resolved["context_trend_compact_ratio"] = float(ratio)
+    if (
+        resolved["context_compact_tokens_per_poll"]
+        <= resolved["context_watch_tokens_per_poll"]
+    ):
+        return dict(DEFAULT_CONTEXT_PRESSURE)
+    return resolved
 
 
 @dataclass(frozen=True)
@@ -282,16 +330,23 @@ def _nonnegative_int(value: Any) -> int:
 
 
 def read_overhead_stats(
-    path: str | Path, *, now: datetime | None = None
+    path: str | Path,
+    *,
+    now: datetime | None = None,
+    thresholds: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return a bounded size/count-only projection; bad files become empty state."""
     current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     today = current.date().isoformat()
+    pressure_thresholds = context_pressure_thresholds(thresholds)
     empty = {
         "generated_at": current.isoformat(),
         "today": today,
         "source_status": "missing",
         "note": "protocol overhead (estimated), not provider billing",
+        "question": "Is this session's board context bloating; should we compact?",
+        "pressure_thresholds": pressure_thresholds,
+        "sessions": [],
         "seats": [],
         "bounds": {
             "days": OVERHEAD_DAYS,
@@ -308,7 +363,7 @@ def read_overhead_stats(
         return empty
     except (OSError, UnicodeError, ValueError):
         return {**empty, "source_status": "malformed"}
-    if not isinstance(document, dict) or document.get("schema_version") != 1:
+    if not isinstance(document, dict) or document.get("schema_version") not in {1, 2}:
         return {**empty, "source_status": "malformed"}
     raw_days = document.get("days")
     if not isinstance(raw_days, dict):
@@ -391,15 +446,103 @@ def read_overhead_stats(
         row["top_tools"] = tools
         rows.append(row)
     rows.sort(key=lambda item: (-item["today_bytes"], item["board_id"], item["agent_name"]))
+
+    sessions = []
+    raw_cycles = document.get("poll_cycles")
+    raw_cycles = raw_cycles if isinstance(raw_cycles, dict) else {}
+    for raw in raw_cycles.values():
+        if not isinstance(raw, dict):
+            continue
+        board_id = raw.get("board_id")
+        agent_name = raw.get("agent_name")
+        latest_bytes = raw.get("latest_response_bytes")
+        latest_at = raw.get("latest_at")
+        if (
+            not isinstance(board_id, str)
+            or not board_id
+            or not isinstance(agent_name, str)
+            or not agent_name
+            or type(latest_bytes) is not int
+            or latest_bytes < 0
+            or _parse_time(latest_at) is None
+        ):
+            continue
+        samples = raw.get("samples")
+        sample_bytes = [
+            sample["response_bytes"]
+            for sample in (samples[-24:] if isinstance(samples, list) else [])
+            if isinstance(sample, dict)
+            and type(sample.get("response_bytes")) is int
+            and sample["response_bytes"] >= 0
+            and _parse_time(sample.get("at")) is not None
+        ]
+        if not sample_bytes:
+            sample_bytes = [latest_bytes]
+        median_bytes = float(statistics.median(sample_bytes))
+        trend_ratio = latest_bytes / median_bytes if median_bytes else None
+        latest_tokens = (latest_bytes + 3) // 4
+        median_tokens = round(median_bytes / 4, 1)
+        trend = (
+            "→"
+            if median_bytes == latest_bytes
+            else "↑"
+            if latest_bytes > median_bytes
+            else "↓"
+        )
+        compact = (
+            latest_tokens
+            > pressure_thresholds["context_compact_tokens_per_poll"]
+            or trend_ratio is not None
+            and trend_ratio >= pressure_thresholds["context_trend_compact_ratio"]
+        )
+        watch = (
+            latest_tokens
+            >= pressure_thresholds["context_watch_tokens_per_poll"]
+        )
+        pressure = "compact" if compact else "watch" if watch else "ok"
+        sessions.append(
+            {
+                "board_id": _clip(board_id, MAX_LABEL_CHARS),
+                "agent_name": _clip(agent_name, MAX_LABEL_CHARS),
+                "latest_at": latest_at,
+                "latest_response_bytes": latest_bytes,
+                "latest_estimated_tokens": latest_tokens,
+                "sample_count": len(sample_bytes),
+                "median_estimated_tokens": median_tokens,
+                "trend_ratio": round(trend_ratio, 3) if trend_ratio is not None else None,
+                "trend": trend,
+                "pressure": pressure,
+                "pressure_rank": {"ok": 0, "watch": 1, "compact": 2}[pressure],
+                "next_action": (
+                    "Run guarded journal compaction on this board and/or archive old memories."
+                    if pressure == "compact"
+                    else "No compaction action is currently indicated."
+                ),
+            }
+        )
+    sessions.sort(
+        key=lambda item: (
+            -item["pressure_rank"],
+            -item["latest_estimated_tokens"],
+            -(item["trend_ratio"] or 0),
+            item["board_id"],
+            item["agent_name"],
+        )
+    )
     result = {
         **empty,
         "source_status": "ok",
+        "sessions": sessions[:MAX_OVERHEAD_SEATS],
         "seats": rows[:MAX_OVERHEAD_SEATS],
+        "truncated_sessions": max(0, len(sessions) - MAX_OVERHEAD_SEATS),
         "truncated_seats": max(0, len(rows) - MAX_OVERHEAD_SEATS),
     }
     while len(_json_bytes(result)) > API_MAX_BYTES and result["seats"]:
         result["seats"].pop()
         result["truncated_seats"] += 1
+    while len(_json_bytes(result)) > API_MAX_BYTES and result["sessions"]:
+        result["sessions"].pop()
+        result["truncated_sessions"] += 1
     return result
 
 
@@ -1467,10 +1610,26 @@ class FleetFetcher:
         stored, stored_text = _state_value(raw_config)
         findings, _ = _state_value(raw_findings)
         findings = findings or {}
+        effective = findings.get("effective_config", {})
+        effective = json.loads(json.dumps(effective)) if isinstance(effective, dict) else {}
+        sources = findings.get("config_sources", {})
+        sources = dict(sources) if isinstance(sources, dict) else {}
+        stored_thresholds = stored.get("thresholds") if stored else None
+        pressure = context_pressure_thresholds(stored_thresholds)
+        effective_thresholds = effective.get("thresholds")
+        if isinstance(effective_thresholds, dict):
+            effective_thresholds.update(pressure)
+            for name in CONFIG_PRESSURE_FIELDS:
+                sources.setdefault(
+                    f"thresholds.{name}",
+                    "config"
+                    if isinstance(stored_thresholds, dict) and name in stored_thresholds
+                    else "default",
+                )
         return {
             "config": stored,
-            "effective": findings.get("effective_config", {}),
-            "sources": findings.get("config_sources", {}),
+            "effective": effective,
+            "sources": sources,
             "mode": findings.get("effective_mode", "unknown"),
             "updated_at": stored.get("updated_at") if stored else None,
             "updated_by": stored.get("updated_by") if stored else None,
@@ -1740,6 +1899,14 @@ class DashboardCache:
         label = self.resolve_central(central)
         return self._labeled(asyncio.run(self.fetchers[label].fetch_config()), label)
 
+    def get_overhead_thresholds(
+        self, central: str | None = None
+    ) -> dict[str, int | float]:
+        payload = self.get_config(central)
+        config = payload.get("config")
+        thresholds = config.get("thresholds") if isinstance(config, dict) else None
+        return context_pressure_thresholds(thresholds)
+
     def get_intake(
         self, board_id: str, central: str | None = None
     ) -> dict[str, Any]:
@@ -1772,7 +1939,7 @@ class DashboardCache:
 HTML = r"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Fleet Dashboard</title><style>
-:root{color-scheme:dark;--bg:#0b1020;--panel:#151b2d;--panel2:#202942;--line:#29324a;--text:#e7ecf7;--muted:#9aa6bf;--good:#46d39a;--warn:#f4bd55;--bad:#ef6f7d;--accent:#79a8ff;--cell-y:8px;--card-pad:14px;--main-pad:24px}:root[data-theme="light"]{color-scheme:light;--bg:#f5f7fb;--panel:#fff;--panel2:#e9eef7;--line:#ccd4e2;--text:#182033;--muted:#5f6c82;--good:#167a55;--warn:#8b5b00;--bad:#b42332;--accent:#245fcc}:root[data-density="compact"]{--cell-y:4px;--card-pad:10px;--main-pad:16px}*{box-sizing:border-box}html,body{max-width:100%;overflow-x:hidden}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 ui-sans-serif,system-ui,-apple-system,sans-serif}main{width:100%;max-width:1500px;min-width:0;margin:auto;padding:var(--main-pad)}.top,.toolbar{display:flex;justify-content:space-between;flex-wrap:wrap;gap:12px}.top{align-items:end}h1,h2,h3,p{margin:0}h1{font-size:24px}h2{font-size:17px}a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}.muted,.meta{color:var(--muted)}.strip{display:grid;grid-template-columns:repeat(4,minmax(100px,1fr));gap:10px;margin:20px 0}.metric,.card{background:var(--panel);border:1px solid var(--line);border-radius:12px}.metric,.card{padding:var(--card-pad)}.metric b{display:block;font-size:24px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(390px,100%),1fr));gap:14px}.card{min-width:0}.board-link{display:block;color:inherit}.counts,.tabs,.required,.view-controls{display:flex;flex-wrap:wrap;gap:8px}.counts{margin:12px 0}.pill,.tab{padding:4px 8px;border-radius:999px;background:var(--panel2)}.tab.active{outline:2px solid var(--accent)}.table-scroll{width:100%;max-width:100%;overflow-x:auto}table{width:100%;border-collapse:collapse}th,td{padding:var(--cell-y) 6px;text-align:left;border-top:1px solid var(--line);vertical-align:top}tbody tr:focus{outline:2px solid var(--accent);outline-offset:-2px}th{color:var(--muted);font-weight:500}.id{font-family:ui-monospace,SFMono-Regular,monospace;color:var(--accent);white-space:nowrap}.status{font-size:12px;border-radius:999px;padding:2px 6px;background:var(--panel2)}.pool{margin-top:18px}.warning{color:var(--warn)}.error{color:var(--bad)}#state{font-size:12px}.empty{color:var(--muted);padding:10px 0}.agent{border-top:1px solid var(--line)}.agent summary{cursor:pointer;display:grid;grid-template-columns:2fr 1fr 2fr 2fr;gap:8px;padding:10px 6px}.agent-body{padding:0 6px 12px}.toolbar{align-items:center;margin:18px 0}.toolbar select,.toolbar input,.toolbar button,#filter,.view-controls button{background:var(--panel2);border:1px solid var(--line);border-radius:8px;color:var(--text);padding:8px}.search-wrap{position:relative}.search{min-width:min(340px,48vw)}.search-results{position:absolute;z-index:20;right:0;width:min(560px,90vw);max-height:60vh;overflow:auto;background:var(--panel);border:1px solid var(--line);border-radius:10px;box-shadow:0 12px 30px #0006;padding:8px}.search-results h3{padding:7px 8px;color:var(--muted);font-size:12px;text-transform:uppercase}.search-result{display:block;padding:8px;border-radius:7px;color:var(--text)}.search-result[aria-selected="true"],.search-result:hover{background:var(--panel2);text-decoration:none}.search-result .meta{display:block}.connection-banner{position:sticky;top:0;z-index:15;margin:0 0 12px;padding:7px 10px;border:1px solid var(--warn);border-radius:8px;background:var(--panel)}.ticket-detail summary,.timeline summary{cursor:pointer}.ticket-copy{white-space:pre-wrap;overflow-wrap:anywhere;max-width:80ch;margin:8px 0}.back{display:inline-block;margin-bottom:16px}.required{margin-top:8px}.finding-list,.timeline,.flow{display:grid;gap:10px;margin-top:10px}.finding{border-left:3px solid var(--line);padding-left:10px}.timeline-ticket{margin:8px 0 0 14px}.flow{grid-template-columns:repeat(4,minmax(0,1fr))}.flow-column{background:var(--panel2);border-radius:10px;padding:10px;min-width:0}.flow-card{display:block;margin-top:8px;padding:9px;border:1px solid var(--line);border-radius:8px;color:var(--text);overflow-wrap:anywhere}.change-grid{grid-template-columns:repeat(5,minmax(100px,1fr))}.bounded-note{margin-top:10px}.overhead-tools{max-width:36ch}dialog{max-width:min(560px,90vw);background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:12px}dialog::backdrop{background:#0009}.shortcut-grid{display:grid;grid-template-columns:auto 1fr;gap:8px 16px;margin:16px 0}.shortcut-grid dt{font-family:ui-monospace,SFMono-Regular,monospace}@media(max-width:800px){main{padding:14px}.strip,.change-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.grid,.flow{grid-template-columns:1fr}.hide-small{display:none}.agent summary{grid-template-columns:1fr 1fr}.agent summary span:nth-child(n+3){display:none}.search{min-width:0;width:100%}.top{align-items:start}}@media print{:root,:root[data-theme]{color-scheme:light;--bg:#fff;--panel:#fff;--panel2:#eee;--line:#bbb;--text:#111;--muted:#555;--accent:#174ea6}.view-controls,.search-wrap,.connection-banner,dialog{display:none!important}}
+:root{color-scheme:dark;--bg:#0b1020;--panel:#151b2d;--panel2:#202942;--line:#29324a;--text:#e7ecf7;--muted:#9aa6bf;--good:#46d39a;--warn:#f4bd55;--bad:#ef6f7d;--accent:#79a8ff;--cell-y:8px;--card-pad:14px;--main-pad:24px}:root[data-theme="light"]{color-scheme:light;--bg:#f5f7fb;--panel:#fff;--panel2:#e9eef7;--line:#ccd4e2;--text:#182033;--muted:#5f6c82;--good:#167a55;--warn:#8b5b00;--bad:#b42332;--accent:#245fcc}:root[data-density="compact"]{--cell-y:4px;--card-pad:10px;--main-pad:16px}*{box-sizing:border-box}html,body{max-width:100%;overflow-x:hidden}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 ui-sans-serif,system-ui,-apple-system,sans-serif}main{width:100%;max-width:1500px;min-width:0;margin:auto;padding:var(--main-pad)}.top,.toolbar{display:flex;justify-content:space-between;flex-wrap:wrap;gap:12px}.top{align-items:end}h1,h2,h3,p{margin:0}h1{font-size:24px}h2{font-size:17px}a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}.muted,.meta{color:var(--muted)}.strip{display:grid;grid-template-columns:repeat(4,minmax(100px,1fr));gap:10px;margin:20px 0}.metric,.card{background:var(--panel);border:1px solid var(--line);border-radius:12px}.metric,.card{padding:var(--card-pad)}.metric b{display:block;font-size:24px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(390px,100%),1fr));gap:14px}.card{min-width:0}.board-link{display:block;color:inherit}.counts,.tabs,.required,.view-controls{display:flex;flex-wrap:wrap;gap:8px}.counts{margin:12px 0}.pill,.tab{padding:4px 8px;border-radius:999px;background:var(--panel2)}.tab.active{outline:2px solid var(--accent)}.table-scroll{width:100%;max-width:100%;overflow-x:auto}table{width:100%;border-collapse:collapse}th,td{padding:var(--cell-y) 6px;text-align:left;border-top:1px solid var(--line);vertical-align:top}tbody tr:focus{outline:2px solid var(--accent);outline-offset:-2px}th{color:var(--muted);font-weight:500}.id{font-family:ui-monospace,SFMono-Regular,monospace;color:var(--accent);white-space:nowrap}.status{font-size:12px;border-radius:999px;padding:2px 6px;background:var(--panel2)}.pool{margin-top:18px}.warning,.pressure-watch{color:var(--warn)}.error,.pressure-compact{color:var(--bad)}.pressure-ok{color:var(--good)}#state{font-size:12px}.empty{color:var(--muted);padding:10px 0}.agent{border-top:1px solid var(--line)}.agent summary{cursor:pointer;display:grid;grid-template-columns:2fr 1fr 2fr 2fr;gap:8px;padding:10px 6px}.agent-body{padding:0 6px 12px}.toolbar{align-items:center;margin:18px 0}.toolbar select,.toolbar input,.toolbar button,#filter,.view-controls button{background:var(--panel2);border:1px solid var(--line);border-radius:8px;color:var(--text);padding:8px}.search-wrap{position:relative}.search{min-width:min(340px,48vw)}.search-results{position:absolute;z-index:20;right:0;width:min(560px,90vw);max-height:60vh;overflow:auto;background:var(--panel);border:1px solid var(--line);border-radius:10px;box-shadow:0 12px 30px #0006;padding:8px}.search-results h3{padding:7px 8px;color:var(--muted);font-size:12px;text-transform:uppercase}.search-result{display:block;padding:8px;border-radius:7px;color:var(--text)}.search-result[aria-selected="true"],.search-result:hover{background:var(--panel2);text-decoration:none}.search-result .meta{display:block}.connection-banner{position:sticky;top:0;z-index:15;margin:0 0 12px;padding:7px 10px;border:1px solid var(--warn);border-radius:8px;background:var(--panel)}.ticket-detail summary,.timeline summary{cursor:pointer}.ticket-copy{white-space:pre-wrap;overflow-wrap:anywhere;max-width:80ch;margin:8px 0}.back{display:inline-block;margin-bottom:16px}.required{margin-top:8px}.finding-list,.timeline,.flow{display:grid;gap:10px;margin-top:10px}.finding{border-left:3px solid var(--line);padding-left:10px}.timeline-ticket{margin:8px 0 0 14px}.flow{grid-template-columns:repeat(4,minmax(0,1fr))}.flow-column{background:var(--panel2);border-radius:10px;padding:10px;min-width:0}.flow-card{display:block;margin-top:8px;padding:9px;border:1px solid var(--line);border-radius:8px;color:var(--text);overflow-wrap:anywhere}.change-grid{grid-template-columns:repeat(5,minmax(100px,1fr))}.bounded-note{margin-top:10px}.overhead-tools{max-width:36ch}dialog{max-width:min(560px,90vw);background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:12px}dialog::backdrop{background:#0009}.shortcut-grid{display:grid;grid-template-columns:auto 1fr;gap:8px 16px;margin:16px 0}.shortcut-grid dt{font-family:ui-monospace,SFMono-Regular,monospace}@media(max-width:800px){main{padding:14px}.strip,.change-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.grid,.flow{grid-template-columns:1fr}.hide-small{display:none}.agent summary{grid-template-columns:1fr 1fr}.agent summary span:nth-child(n+3){display:none}.search{min-width:0;width:100%}.top{align-items:start}}@media print{:root,:root[data-theme]{color-scheme:light;--bg:#fff;--panel:#fff;--panel2:#eee;--line:#bbb;--text:#111;--muted:#555;--accent:#174ea6}.view-controls,.search-wrap,.connection-banner,dialog{display:none!important}}
 </style></head><body><main><div id="connection-banner" class="connection-banner" role="status" hidden></div><div class="top"><div><h1>Fleet Dashboard</h1><p class="muted">Live boards and shared agent pool</p></div><div><div class="view-controls"><button id="theme-toggle" type="button">Light theme</button><button id="density-toggle" type="button">Compact density</button><button id="help-toggle" type="button" aria-label="Keyboard help">?</button></div><div class="search-wrap"><input id="filter" class="search" type="search" placeholder="Search boards, tickets, agents…" aria-label="Global dashboard search" autocomplete="off" aria-controls="search-results" aria-expanded="false"><div id="search-results" class="search-results" role="listbox" hidden></div></div><div id="state" class="muted">Loading…</div></div></div><section id="home-view"><div id="central-sections"></div></section><section id="detail-view" hidden></section><section id="config-view" hidden></section><dialog id="help-overlay"><h2>Keyboard shortcuts</h2><dl class="shortcut-grid"><dt>/</dt><dd>Focus global search</dd><dt>g then f</dt><dd>Fleet overview</dd><dt>g then o</dt><dd>Protocol overhead</dd><dt>g then c</dt><dd>Coordinator config</dd><dt>↑ / ↓</dt><dd>Move within tables or search results</dd><dt>Enter</dt><dd>Open the selected search result</dd><dt>?</dt><dd>Toggle this help</dd><dt>Esc</dt><dd>Close search or help</dd></dl><button id="help-close" type="button">Close</button></dialog></main><script>
 const esc=v=>String(v??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
 const fmt=v=>v?new Date(v).toLocaleString():'—',centralHref=(central,view)=>`#/central/${encodeURIComponent(central)}/${view}`,boardHref=(central,id,view='tickets')=>`${centralHref(central,`board/${encodeURIComponent(id)}/${view}`)}`,ticketHref=(central,board,id)=>`${boardHref(central,board)}?ticket=${encodeURIComponent(id)}`,apiCentral=central=>`central=${encodeURIComponent(central)}`,matches=(values,needle)=>!needle||values.map(v=>String(v??'').toLocaleLowerCase()).join(' ').includes(needle);
@@ -1794,7 +1961,8 @@ function applyPreferences(){document.documentElement.dataset.theme=theme;documen
 function route(){let m=location.hash.match(/^#\/central\/([^/?]+)\/(board\/([^/?]+)(?:\/(tickets|timeline|changes|flow|routes))?|overhead|config)(?:\?(.*))?$/);try{if(m){const central=decodeURIComponent(m[1]);if(!/^[A-Za-z0-9._-]{1,80}$/.test(central))return null;if(m[2]==='overhead'||m[2]==='config')return{central,kind:m[2]};const board=decodeURIComponent(m[3]);if(!/^[A-Za-z0-9._-]{1,80}$/.test(board))return null;const q=new URLSearchParams(m[5]||'');return{central,kind:'board',board,view:m[4]||'tickets',ticket:q.get('ticket'),since:q.get('since')}}m=location.hash.match(/^#\/board\/([^/?]+)(?:\/(tickets|timeline|changes|flow|routes))?(?:\?(.*))?$/);if(m){const board=decodeURIComponent(m[1]),q=new URLSearchParams(m[3]||'');return/^[A-Za-z0-9._-]{1,80}$/.test(board)?{central:defaultCentral,kind:'board',board,view:m[2]||'tickets',ticket:q.get('ticket'),since:q.get('since')}:null}if(location.hash==='#/config')return{central:defaultCentral,kind:'config'};return null}catch{return null}}
 function renderCentral(d){const central=d.central,s=d.pool_summary,boards=filterHomeBoards(d.boards,filterNeedle),agents=d.agents.filter(a=>matches([a.agent_name,a.pool_status,...a.boards],filterNeedle));return `<section class="central-group" data-central="${esc(central)}"><div class="top central-heading"><div><h2>${esc(central)}</h2><p class="muted">Independent central trust domain</p></div><nav class="tabs"><a class="tab" href="${centralHref(central,'overhead')}">Overhead</a><a class="tab" href="${centralHref(central,'config')}">Config</a></nav></div><section class="strip">${['online','busy','available','stale'].map(k=>`<div class="metric"><span>${esc(k)}</span><b>${esc(s[k])}</b></div>`).join('')}</section><section class="grid">${boards.map(b=>`<article class="card"><a class="board-link" href="${boardHref(central,b.board_id)}"><div class="top"><div><h2>${esc(b.label)}</h2><span class="meta">${esc(b.board_id)}</span></div>${b.truncated?'<span class="status">bounded view</span>':''}</div></a>${b.error?`<p class="error">Unavailable: ${esc(b.error)}</p>`:`<div class="counts">${Object.entries(b.counts).map(([k,v])=>`<span class="pill">${esc(k.replace('_',' '))}: <b>${esc(v)}</b></span>`).join('')}</div><div class="table-scroll"><table><thead><tr><th>Ticket</th><th>Title</th><th>Status</th><th class="hide-small">Claimed by</th></tr></thead><tbody>${b.tickets.length?b.tickets.map(t=>`<tr><td><a class="id" href="${ticketHref(central,b.board_id,t.id)}">${esc(t.id)}</a></td><td>${esc(t.title)}</td><td><span class="status">${esc(t.status)}</span></td><td class="hide-small">${esc(t.claimed_by||'—')}</td></tr>`).join(''):'<tr><td colspan="4" class="empty">No matching tickets</td></tr>'}</tbody></table></div>`}</article>`).join('')||'<p class="empty">No boards match the filter.</p>'}</section><section class="card pool"><h2>Agent pool · ${esc(central)}</h2>${agents.length?agents.map(a=>`<details class="agent" data-state-key="${esc(`agent:${central}:${a.agent_name}`)}"><summary><b>${esc(a.agent_name)}${a.duplicate_name?' <span class="warning">duplicate name</span>':''}</b><span>${esc(a.pool_status)}</span><span>${esc(a.boards.join(', '))}</span><span>${esc(fmt(a.last_seen))}</span></summary><div class="agent-body table-scroll"><table><thead><tr><th>Project</th><th>Role</th><th>Current claim</th><th>Last seen</th></tr></thead><tbody>${a.seats.map(seat=>`<tr><td><a href="${boardHref(central,seat.board_id)}">${esc(seat.project)}</a><div class="meta">${esc(seat.board_id)}</div></td><td>${esc(seat.role||'—')}</td><td>${seat.current_ticket_id?`<a class="id" href="${ticketHref(central,seat.board_id,seat.current_ticket_id)}">${esc(seat.current_ticket_id)}</a><div>${esc(seat.current_ticket_title)}</div>`:'—'}</td><td>${esc(fmt(seat.last_seen))}</td></tr>`).join('')}</tbody></table></div></details>`).join(''):'<p class="empty">No agents match the filter.</p>'}</section></section>`}
 function renderFleet(){document.querySelector('#central-sections').innerHTML=centralLabels.map(label=>fleetData[label]?renderCentral(fleetData[label]):`<section class="central-group unavailable" data-central="${esc(label)}"><div class="top central-heading"><div><h2>${esc(label)}</h2><p class="error">Unavailable: ${esc(fleetErrors[label]||'loading')}</p></div><nav class="tabs"><a class="tab" href="${centralHref(label,'overhead')}">Overhead</a><a class="tab" href="${centralHref(label,'config')}">Config</a></nav></div></section>`).join('');const newest=Object.values(fleetData).map(d=>d.generated_at).sort().at(-1);document.querySelector('#state').textContent=newest?`Updated ${fmt(newest)}`:'No central available';if(typeof bindInteractive==='function')bindInteractive(document.querySelector('#central-sections'));if(typeof renderSearchResults==='function')renderSearchResults()}
-function renderOverhead(d){document.querySelector('#detail-view').innerHTML=`<a class="back" href="#/">← All centrals</a><div class="top"><div><h2>Protocol overhead · ${esc(d.central)}</h2><p class="muted">Estimated from request and response bytes; not provider billing.</p></div></div><section class="card pool">${d.seats.length?`<div class="table-scroll"><table><thead><tr><th>Seat</th><th>Today</th><th>7-day</th><th>Top tools by bytes</th></tr></thead><tbody>${d.seats.map(s=>`<tr><td><b>${esc(s.agent_name)}</b><div class="meta">${esc(s.board_id)}</div></td><td>${esc(s.today_bytes)} B<div class="meta">≈ ${esc(s.today_estimated_tokens)} tokens · ${esc(s.today_calls)} calls</div></td><td>${esc(s.seven_day_bytes)} B<div class="meta">≈ ${esc(s.seven_day_estimated_tokens)} tokens · ${esc(s.seven_day_calls)} calls</div></td><td class="overhead-tools">${s.top_tools.map(t=>`${esc(t.tool)}: ${esc(t.bytes)} B`).join(' · ')||'—'}</td></tr>`).join('')}</tbody></table></div>`:`<p class="empty">No bridge overhead stats yet (${esc(d.source_status)}).</p>`}</section>`}
+function pressureBadge(s){const label=s.pressure==='compact'?'COMPACT':s.pressure;return `<span class="status pressure-${esc(s.pressure)}" title="${esc(s.next_action)}">${esc(label)}</span>`}
+function renderOverhead(d){const sessions=d.sessions||[],cumulative=d.seats||[];document.querySelector('#detail-view').innerHTML=`<a class="back" href="#/">← All centrals</a><div class="top"><div><h2>Session context pressure · ${esc(d.central)}</h2><p class="muted">One question: is this session's board context bloating; should we compact?</p></div></div><section class="card pool">${sessions.length?`<div class="table-scroll"><table aria-label="Session context pressure"><thead><tr><th>Seat</th><th>Board</th><th>Est. tokens / poll</th><th>Trend vs median</th><th>Pressure</th></tr></thead><tbody>${sessions.map(s=>`<tr><td><b>${esc(s.agent_name)}</b><div class="meta">sampled ${esc(fmt(s.latest_at))}</div></td><td>${esc(s.board_id)}</td><td>${esc(s.latest_estimated_tokens)}</td><td>${esc(s.trend)} ${s.trend_ratio===null?'—':`${esc(s.trend_ratio)}×`}<div class="meta">24-sample median ≈ ${esc(s.median_estimated_tokens)} tokens · ${esc(s.sample_count)} samples</div></td><td>${pressureBadge(s)}<div class="meta">${esc(s.next_action)}</div></td></tr>`).join('')}</tbody></table></div>`:`<p class="empty">No session pressure samples yet — context pressure is calm (${esc(d.source_status)}).</p>`}</section><details class="card pool" data-state-key="overhead-details:${esc(d.central)}"><summary>Cumulative protocol details</summary>${cumulative.length?`<div class="table-scroll"><table><thead><tr><th>Seat</th><th>Today</th><th>7-day</th><th>Top tools by bytes</th></tr></thead><tbody>${cumulative.map(s=>`<tr><td><b>${esc(s.agent_name)}</b><div class="meta">${esc(s.board_id)}</div></td><td>${esc(s.today_bytes)} B<div class="meta">≈ ${esc(s.today_estimated_tokens)} tokens · ${esc(s.today_calls)} calls</div></td><td>${esc(s.seven_day_bytes)} B<div class="meta">≈ ${esc(s.seven_day_estimated_tokens)} tokens · ${esc(s.seven_day_calls)} calls</div></td><td class="overhead-tools">${s.top_tools.map(t=>`${esc(t.tool)}: ${esc(t.bytes)} B`).join(' · ')||'—'}</td></tr>`).join('')}</tbody></table></div>`:`<p class="empty">No cumulative debug stats.</p>`}</details>`;bindInteractive(document.querySelector('#detail-view'))}
 function sortedTickets(items){const rank=s=>['claimed','in_progress','creating_report'].includes(s)?0:['submitted','reviewing','in_review'].includes(s)?1:s==='open'?2:3;return [...items].sort((a,b)=>rank(a.status)-rank(b.status)||(detailSort==='oldest'?String(a.updated_at||'').localeCompare(String(b.updated_at||'')):String(b.updated_at||'').localeCompare(String(a.updated_at||''))))}
 function tabs(d,r){return `<nav class="tabs" aria-label="Board views">${[['tickets','Tickets'],['timeline','Timeline'],['changes','Changes'],['flow','Ticket Flow'],['routes','Routes']].map(([v,label])=>`<a class="tab${r.view===v?' active':''}" href="${boardHref(r.central,d.board.board_id,v)}">${esc(label)}</a>`).join('')}</nav>`}
 function ticketView(d,r){const rows=sortedTickets(d.tickets).filter(t=>matches([t.id,t.title,t.status,t.claimed_by,t.description],filterNeedle));const visible=!r.ticket||rows.some(t=>t.id===r.ticket);return `${visible?'':`<p class="warning">Requested ticket ${esc(r.ticket)} is outside this bounded response or filter.</p>`}<div class="toolbar"><span>${esc(rows.length)} of ${esc(d.ticket_returned)} returned tickets</span><label>Updated <select id="ticket-sort"><option value="newest"${detailSort==='newest'?' selected':''}>newest first</option><option value="oldest"${detailSort==='oldest'?' selected':''}>oldest first</option></select></label></div><section class="card"><div class="table-scroll"><table><thead><tr><th>Ticket</th><th>Title and details</th><th>Status</th><th class="hide-small">Updated</th></tr></thead><tbody>${rows.length?rows.map(t=>`<tr><td><span class="id">${esc(t.id)}</span></td><td><details class="ticket-detail" data-ticket="${esc(t.id)}" data-state-key="${esc(`ticket:${r.central}:${d.board.board_id}:${t.id}`)}"${r.ticket===t.id?' open':''}><summary>${esc(t.title)}</summary><p class="ticket-copy">${esc(t.description||'No description')}</p>${t.required_fields.length?`<div class="required">${t.required_fields.map(x=>`<span class="pill">${esc(x)}</span>`).join('')}</div>`:''}${t.latest_submission_summary?`<p class="meta ticket-copy">Latest submission: ${esc(t.latest_submission_summary)}</p>`:''}${t.review_label?`<p class="meta">Review: ${esc(t.review_label)}</p>`:''}</details></td><td><span class="status">${esc(t.status)}</span><div class="meta">${esc(t.claimed_by||'')}</div></td><td class="meta hide-small">${esc(fmt(t.updated_at))}</td></tr>`).join(''):'<tr><td colspan="4" class="empty">No tickets match the filter.</td></tr>'}</tbody></table></div></section>`}
@@ -1854,13 +2022,13 @@ const intakeKey=r=>`${r.central}/${r.board}`;
 function intakePanel(d,r){const key=intakeKey(r),state=intakeQueues.get(key),waiting=state?.waiting||[],waitingIds=new Set(waiting.map(x=>x.id)),recent=recentIntake.get(key)||[],rows=waiting.slice(-25).map(x=>({...x,intake_status:'waiting'}));for(const ask of recent)if(!waitingIds.has(ask.id))rows.push({...ask,intake_status:'consumed (gone)'});rows.sort((a,b)=>String(b.created_at||'').localeCompare(String(a.created_at||'')));return `<section class="card pool intake-layout"><form id="intake-form" class="intake-form"><div><h3>สั่งงาน / new ask</h3><p class="muted">5–500 characters · maximum 10 asks/hour</p></div><textarea name="text" minlength="5" maxlength="500" required placeholder="Describe one concrete ask for ${esc(d.board.label)}"></textarea><button type="submit">Submit ask</button><span id="intake-status" class="muted">${state?.error?esc(state.error):'Ready'}</span></form><div><h3>Pending asks</h3><p class="muted">Intake is processed by the coordinator per the /config matrix and may produce a DRAFT that needs approval.</p><div>${rows.length?rows.map(x=>`<div class="intake-row"><span class="status">${esc(x.intake_status)}</span> <span class="id">${esc(x.id)}</span><p>${esc(x.text)}</p><span class="meta">${esc(fmt(x.created_at))} · ${esc(x.requested_by)}</span></div>`).join(''):'<p class="empty">No asks are waiting.</p>'}</div></div></section>`}
 async function refreshIntake(r,rerender=false){const key=intakeKey(r);try{const data=await fetchJson(`/api/intake?${apiCentral(r.central)}&board_id=${encodeURIComponent(r.board)}`);intakeQueues.set(key,data)}catch(e){intakeQueues.set(key,{waiting:[],error:`Intake unavailable: ${e.message}`})}const current=route();if(rerender&&detailData&&current?.kind==='board'&&current.central===r.central&&current.board===r.board)renderDetail(detailData)}
 async function submitIntake(event){event.preventDefault();const r=route();if(!r||r.kind!=='board')return;const form=event.target,status=form.querySelector('#intake-status'),button=form.querySelector('button'),text=new FormData(form).get('text');button.disabled=true;status.className='muted';status.textContent='Submitting…';try{const response=await fetch(`/api/intake?${apiCentral(r.central)}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({board_id:r.board,text})});let body={};try{body=await response.json()}catch(_e){}if(!response.ok)throw new Error(body.error||`HTTP ${response.status}`);const key=intakeKey(r),recent=recentIntake.get(key)||[];recentIntake.set(key,[body.ask,...recent.filter(x=>x.id!==body.ask.id)].slice(0,25));form.reset();status.textContent=`Queued ${body.ask.id}`;await refreshIntake(r,true)}catch(e){status.className='error';status.textContent=`Submit failed: ${e.message}`}finally{button.disabled=false}}
-const CONFIG_NUMBERS=[['stale_seconds','Stale seconds',10,86400],['lease_warning_ratio','Lease warning ratio',.1,1],['grace_seconds','Grace seconds',10,86400],['starved_seconds','Starved seconds',10,86400],['critical_starved_seconds','Critical starved seconds',10,86400],['review_backlog_seconds','Review backlog seconds',10,86400],['abandoner_drops','Abandoner drops',1,20],['abandoner_window_days','Abandoner window days',1,365]];
+const CONFIG_NUMBERS=[['stale_seconds','Stale seconds',10,86400],['lease_warning_ratio','Lease warning ratio',.1,1],['grace_seconds','Grace seconds',10,86400],['starved_seconds','Starved seconds',10,86400],['critical_starved_seconds','Critical starved seconds',10,86400],['review_backlog_seconds','Review backlog seconds',10,86400],['abandoner_drops','Abandoner drops',1,20],['abandoner_window_days','Abandoner window days',1,365],['context_watch_tokens_per_poll','Context watch tokens / poll',1000,10000000],['context_compact_tokens_per_poll','Context compact tokens / poll',1001,20000000],['context_trend_compact_ratio','Context trend compact ratio',1.01,10]];
 let coordinatorConfig=null;
 const sourceFor=(d,path)=>d.sources?.[path]||'unknown';
-function configNumber(d,key,label,min,max){const v=d.effective.thresholds[key];return `<label>${esc(label)} <span class="source">source: ${esc(sourceFor(d,`thresholds.${key}`))}</span><input name="${esc(key)}" type="number" min="${min}" max="${max}" step="${key==='lease_warning_ratio'?'.01':'1'}" value="${esc(v)}" required></label>`}
+function configNumber(d,key,label,min,max){const v=d.effective.thresholds[key];return `<label>${esc(label)} <span class="source">source: ${esc(sourceFor(d,`thresholds.${key}`))}</span><input name="${esc(key)}" type="number" min="${min}" max="${max}" step="${key.endsWith('_ratio')?'.01':'1'}" value="${esc(v)}" required></label>`}
 function renderConfig(d){coordinatorConfig=d;const e=d.effective||{};if(!e.thresholds||!e.intake){document.querySelector('#config-view').innerHTML=`<a class="back" href="#/">← All centrals</a><h2>Coordinator config · ${esc(d.central)}</h2><p class="warning">Run the coordinator once to publish effective values before editing.</p>`;return}document.querySelector('#config-view').innerHTML=`<a class="back" href="#/">← All centrals</a><div class="top"><div><h2>Coordinator config · ${esc(d.central)}</h2><p class="muted">Live policy document on the ${esc(d.central)} home board</p></div><div><span class="status">mode: ${esc(d.mode)}</span><p class="warning">Mode changes require a restart.</p></div></div><form id="config-form" class="card pool"><div class="config-grid">${CONFIG_NUMBERS.map(x=>configNumber(d,...x)).join('')}<label>Integration watch since <span class="source">source: ${esc(sourceFor(d,'integration_watch_since'))}</span><input name="integration_watch_since" type="text" placeholder="ISO-8601 or blank" value="${esc(e.integration_watch_since||'')}"></label><label>Intake enabled <span class="source">source: ${esc(sourceFor(d,'intake.enabled'))}</span><input name="enabled" type="checkbox" ${e.intake.enabled?'checked':''}></label><label>Work domain always ask <span class="source">source: ${esc(sourceFor(d,'intake.work_domain_always_ask'))}</span><input name="work_domain_always_ask" type="checkbox" ${e.intake.work_domain_always_ask?'checked':''}></label><label>Intake rate per hour <span class="source">source: ${esc(sourceFor(d,'intake.rate_per_hour'))}</span><input name="rate_per_hour" type="number" min="1" max="20" value="${esc(e.intake.rate_per_hour)}" required></label>${CONFIG_CATEGORIES.map(c=>`<label>${esc(c)} policy <span class="source">source: ${esc(sourceFor(d,e.intake.auto_categories.includes(c)?'intake.auto_categories':'intake.always_ask_categories'))}</span><select name="category_${esc(c)}"><option value="auto"${e.intake.auto_categories.includes(c)?' selected':''}>auto</option><option value="ask"${e.intake.always_ask_categories.includes(c)?' selected':''}>always ask</option></select></label>`).join('')}</div><div class="toolbar"><button type="submit">Save config</button><span id="config-status" class="muted">${esc(d.concurrency.toUpperCase())} · updated ${esc(fmt(d.updated_at))} by ${esc(d.updated_by||'—')}</span></div></form>`;document.querySelector('#config-form').addEventListener('submit',saveConfig)}
 async function refreshConfig(){const r=route();if(!r||r.kind!=='config')return;const key=`config:${r.central}`;try{const response=await fetch(`/api/config?${apiCentral(r.central)}`,{cache:'no-store'});if(!response.ok)throw new Error(`HTTP ${response.status}`);const data=await response.json();if(route()?.central===r.central){renderConfig(data);markConnectionSuccess(key)}}catch(e){markConnectionFailure(key);if(!coordinatorConfig||coordinatorConfig.central!==r.central)document.querySelector('#config-view').innerHTML=`<a class="back" href="#/">← All centrals</a><p class="error">Config unavailable for ${esc(r.central)}.</p>`}}
-async function saveConfig(event){event.preventDefault();const f=new FormData(event.target),thresholds={};for(const [key] of CONFIG_NUMBERS)thresholds[key]=key==='lease_warning_ratio'?Number(f.get(key)):Number.parseInt(f.get(key),10);const auto=[],always=[];for(const c of CONFIG_CATEGORIES)(f.get(`category_${c}`)==='auto'?auto:always).push(c);const config={schema_version:1,thresholds,integration_watch_since:f.get('integration_watch_since').trim()||null,intake:{enabled:f.get('enabled')==='on',auto_categories:auto,always_ask_categories:always,work_domain_always_ask:f.get('work_domain_always_ask')==='on',rate_per_hour:Number.parseInt(f.get('rate_per_hour'),10)}};const status=document.querySelector('#config-status'),central=coordinatorConfig.central;status.textContent=`Saving ${central}…`;try{const r=await fetch(`/api/config?${apiCentral(central)}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({config,expected_sha256:coordinatorConfig.expected_sha256})});const body=await r.json();if(!r.ok)throw new Error(body.error||`HTTP ${r.status}`);status.textContent=`Saved ${body.central} with ${body.concurrency.toUpperCase()}; waiting for coordinator poll`;setTimeout(refreshConfig,1000)}catch(e){status.textContent=`Save failed for ${central}: ${e.message}`;status.className='error'}}
+async function saveConfig(event){event.preventDefault();const f=new FormData(event.target),thresholds={};for(const [key] of CONFIG_NUMBERS)thresholds[key]=key.endsWith('_ratio')?Number(f.get(key)):Number.parseInt(f.get(key),10);const auto=[],always=[];for(const c of CONFIG_CATEGORIES)(f.get(`category_${c}`)==='auto'?auto:always).push(c);const config={schema_version:1,thresholds,integration_watch_since:f.get('integration_watch_since').trim()||null,intake:{enabled:f.get('enabled')==='on',auto_categories:auto,always_ask_categories:always,work_domain_always_ask:f.get('work_domain_always_ask')==='on',rate_per_hour:Number.parseInt(f.get('rate_per_hour'),10)}};const status=document.querySelector('#config-status'),central=coordinatorConfig.central;status.textContent=`Saving ${central}…`;try{const r=await fetch(`/api/config?${apiCentral(central)}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({config,expected_sha256:coordinatorConfig.expected_sha256})});const body=await r.json();if(!r.ok)throw new Error(body.error||`HTTP ${r.status}`);status.textContent=`Saved ${body.central} with ${body.concurrency.toUpperCase()}; waiting for coordinator poll`;setTimeout(refreshConfig,1000)}catch(e){status.textContent=`Save failed for ${central}: ${e.message}`;status.className='error'}}
 function syncConfigRoute(){const r=route(),active=r?.kind==='config';document.querySelector('#config-view').hidden=!active;if(active){document.querySelector('#home-view').hidden=true;document.querySelector('#detail-view').hidden=true;if(centralLabels.length)refreshConfig()}}
 window.addEventListener('hashchange',syncConfigRoute);syncConfigRoute();
 </script></body>""",
@@ -1952,8 +2120,24 @@ def make_handler(
                         if callable(resolver)
                         else selected_stats_path
                     )
+                    threshold_resolver = getattr(
+                        cache, "get_overhead_thresholds", None
+                    )
+                    try:
+                        pressure_thresholds = (
+                            threshold_resolver(central=central)
+                            if callable(threshold_resolver)
+                            else None
+                        )
+                    except Exception:  # Defaults keep local stats available.
+                        pressure_thresholds = None
                     body = _json_bytes(
-                        {**read_overhead_stats(overhead_path), "central": label}
+                        {
+                            **read_overhead_stats(
+                                overhead_path, thresholds=pressure_thresholds
+                            ),
+                            "central": label,
+                        }
                     )
                 except RuntimeError as exc:
                     body = _json_bytes({"error": str(exc), "central": label})

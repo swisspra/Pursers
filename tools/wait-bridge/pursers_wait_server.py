@@ -49,6 +49,7 @@ import sys
 import tempfile
 import time
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from datetime import date, datetime, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
@@ -93,8 +94,12 @@ HANDOFF_REJOIN_MESSAGE = "call board_onboard or board_join before more work"
 PROJECT_REGISTRY_KEY = "project_registry"
 PROJECT_REGISTRY_SCHEMA_VERSION = 1
 PROJECT_STATUSES = frozenset({"active", "paused"})
-STATS_SCHEMA_VERSION = 1
+STATS_SCHEMA_VERSION = 2
 STATS_RETENTION_DAYS = 7
+POLL_SAMPLE_LIMIT = 24
+CONTEXT_READ_TOOLS = frozenset(
+    {"board_get_briefing", "board_onboard", "board_snapshot", "board_catchup"}
+)
 
 
 def bridge_stats_path() -> Path:
@@ -130,6 +135,27 @@ class BridgeStats:
         self.path = Path(path).expanduser().resolve()
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self._lock = asyncio.Lock()
+        self._poll_cycle: ContextVar[dict[tuple[str, str], int] | None] = (
+            ContextVar(f"bridge_poll_cycle_{id(self)}", default=None)
+        )
+
+    @asynccontextmanager
+    async def poll_cycle(self) -> AsyncIterator[None]:
+        """Collect one bounded context-response sample per touched seat."""
+        token = self._poll_cycle.set({})
+        try:
+            yield
+        finally:
+            samples = self._poll_cycle.get() or {}
+            self._poll_cycle.reset(token)
+            for (board_id, agent_name), response_bytes in samples.items():
+                try:
+                    async with self._lock:
+                        self._append_poll_sample_sync(
+                            board_id, agent_name, response_bytes
+                        )
+                except Exception as exc:  # noqa: BLE001 - metering never breaks work.
+                    _log(f"stats sample write failed: {type(exc).__name__}")
 
     async def record(
         self,
@@ -148,6 +174,10 @@ class BridgeStats:
                     max(0, int(request_bytes)),
                     max(0, int(response_bytes)),
                 )
+                cycle = self._poll_cycle.get()
+                if cycle is not None and tool_name in CONTEXT_READ_TOOLS:
+                    key = (board_id, agent_name)
+                    cycle[key] = cycle.get(key, 0) + max(0, int(response_bytes))
         except Exception as exc:  # noqa: BLE001 - metering never breaks work.
             _log(f"stats write failed: {type(exc).__name__}")
 
@@ -225,6 +255,91 @@ class BridgeStats:
             output = {
                 "schema_version": STATS_SCHEMA_VERSION,
                 "days": days,
+                "poll_cycles": (
+                    document.get("poll_cycles")
+                    if isinstance(document.get("poll_cycles"), dict)
+                    else {}
+                ),
+            }
+            temporary_name: str | None = None
+            try:
+                with tempfile.NamedTemporaryFile(
+                    "w",
+                    encoding="utf-8",
+                    dir=self.path.parent,
+                    prefix=f".{self.path.name}.",
+                    delete=False,
+                ) as stream:
+                    temporary_name = stream.name
+                    json.dump(
+                        output,
+                        stream,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    stream.write("\n")
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(temporary_name, self.path)
+                temporary_name = None
+            finally:
+                if temporary_name is not None:
+                    Path(temporary_name).unlink(missing_ok=True)
+        finally:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+            finally:
+                os.close(descriptor)
+
+    def _append_poll_sample_sync(
+        self, board_id: str, agent_name: str, response_bytes: int
+    ) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = self.path.with_suffix(self.path.suffix + ".lock")
+        descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            try:
+                document = json.loads(self.path.read_text(encoding="utf-8"))
+            except (FileNotFoundError, UnicodeError, ValueError, OSError):
+                document = {}
+            if not isinstance(document, dict):
+                document = {}
+            poll_cycles = document.get("poll_cycles")
+            if not isinstance(poll_cycles, dict):
+                poll_cycles = {}
+            seat_key = json.dumps([board_id, agent_name], separators=(",", ":"))
+            raw_seat = poll_cycles.get(seat_key)
+            samples = raw_seat.get("samples") if isinstance(raw_seat, dict) else []
+            samples = samples if isinstance(samples, list) else []
+            at = self.clock().astimezone(timezone.utc).isoformat()
+            bounded_samples = [
+                sample
+                for sample in samples[-(POLL_SAMPLE_LIMIT - 1) :]
+                if isinstance(sample, dict)
+                and isinstance(sample.get("at"), str)
+                and type(sample.get("response_bytes")) is int
+                and sample["response_bytes"] >= 0
+            ]
+            bounded_samples.append(
+                {"at": at, "response_bytes": max(0, int(response_bytes))}
+            )
+            poll_cycles[seat_key] = {
+                "board_id": board_id,
+                "agent_name": agent_name,
+                "latest_at": at,
+                "latest_response_bytes": max(0, int(response_bytes)),
+                "samples": bounded_samples[-POLL_SAMPLE_LIMIT:],
+            }
+            output = {
+                "schema_version": STATS_SCHEMA_VERSION,
+                "days": (
+                    document.get("days")
+                    if isinstance(document.get("days"), dict)
+                    else {}
+                ),
+                "poll_cycles": poll_cycles,
             }
             temporary_name: str | None = None
             try:
@@ -739,9 +854,8 @@ async def _heartbeat(
             _log(f"heartbeat: lease_renew {ticket_id} failed: {exc}")
 
 
-@mcp.tool()
-async def a2a_wait(
-    ctx: Context,
+async def _a2a_wait_impl(
+    client: BoardClient,
     since_seq: int | dict[str, int] = 0,
     timeout_s: int = 180,
     only_mine: bool = True,
@@ -788,7 +902,6 @@ async def a2a_wait(
     a2a_wait calls -- during long work you must renew your own claim (lease_renew)
     or the reaper can reclaim it. See WORKER-DIRECTIVE.md step DO.
     """
-    client: BoardClient = ctx.request_context.lifespan_context["client"]
     if boards == "registry":
         try:
             registry = await _read_project_registry(client)
@@ -838,6 +951,41 @@ async def a2a_wait(
         project=project,
         agent_name=agent_name,
     )
+
+
+@mcp.tool()
+async def a2a_wait(
+    ctx: Context,
+    since_seq: int | dict[str, int] = 0,
+    timeout_s: int = 180,
+    only_mine: bool = True,
+    project: str | None = None,
+    agent_name: str | None = None,
+    boards: list[str] | str | None = None,
+) -> dict[str, Any]:
+    """Wait for work and record one context-pressure sample per touched seat."""
+    client: BoardClient = ctx.request_context.lifespan_context["client"]
+    meter = getattr(client, "meter", None)
+    if meter is None:
+        return await _a2a_wait_impl(
+            client,
+            since_seq,
+            timeout_s,
+            only_mine,
+            project,
+            agent_name,
+            boards,
+        )
+    async with meter.poll_cycle():
+        return await _a2a_wait_impl(
+            client,
+            since_seq,
+            timeout_s,
+            only_mine,
+            project,
+            agent_name,
+            boards,
+        )
 
 
 def _normalize_boards(boards: list[str]) -> list[str]:

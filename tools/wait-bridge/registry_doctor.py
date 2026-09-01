@@ -470,7 +470,10 @@ def _bridge_stats_check(
         if path.stat().st_size > MAX_STATS_BYTES:
             raise DoctorError("stats file exceeds the read bound")
         document = json.loads(path.read_text(encoding="utf-8"))
-        if not isinstance(document, dict) or document.get("schema_version") != 1:
+        if not isinstance(document, dict) or document.get("schema_version") not in {
+            1,
+            2,
+        }:
             raise DoctorError("stats schema is invalid")
         days = document.get("days")
         if not isinstance(days, dict):
