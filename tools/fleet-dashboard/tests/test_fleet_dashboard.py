@@ -12,6 +12,7 @@ import tempfile
 import threading
 import urllib.error
 import urllib.request
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -1931,6 +1932,9 @@ def test_config_endpoint_rejects_every_out_of_range_field(
 
 
 def test_config_save_writes_only_coordinator_config_with_cas() -> None:
+    assert dashboard.DASHBOARD_WRITE_KEYS == frozenset(
+        {"coordinator_config", "coordinator_intake"}
+    )
     calls: list[tuple[str, dict]] = []
 
     class Client:
@@ -2041,3 +2045,247 @@ def test_config_hash_page_renders_all_knobs_and_sources() -> None:
     for field in (*dashboard.CONFIG_THRESHOLD_FIELDS, "integration_watch_since", "rate_per_hour"):
         assert field in dashboard.HTML
     assert "source:" in dashboard.HTML
+
+
+class FakeIntakeCentral:
+    def __init__(self) -> None:
+        self.values: dict[tuple[str, str], str] = {}
+        self.calls: list[tuple[str, str, dict]] = []
+        self.force_conflict = False
+
+    def client(self, board_id: str) -> object:
+        owner = self
+
+        class Client:
+            async def __aenter__(self) -> Self:
+                return self
+
+            async def __aexit__(self, *_args: object) -> None:
+                return None
+
+            async def board_state_get(self, *, key: str) -> dict:
+                if key == "project_registry":
+                    return registry(
+                        {
+                            "Pursers": {
+                                "board_id": "pursers",
+                                "status": "active",
+                                "work_dir": "/tmp/pursers",
+                            },
+                            "Paused": {
+                                "board_id": "paused",
+                                "status": "paused",
+                                "work_dir": "/tmp/paused",
+                            },
+                        }
+                    )
+                value = owner.values.get((board_id, key))
+                if value is None:
+                    raise dashboard.BoardClientError("state key not found")
+                return {"state": {"value": value}}
+
+            async def _call(self, name: str, arguments: dict) -> dict:
+                assert name == "board_state_update"
+                owner.calls.append((board_id, name, dict(arguments)))
+                if owner.force_conflict:
+                    raise dashboard.BoardClientError("state precondition failed")
+                current = owner.values.get((board_id, arguments["key"]))
+                expected = arguments.get("expected_sha256")
+                if current is not None and expected != hashlib.sha256(
+                    current.encode()
+                ).hexdigest():
+                    raise dashboard.BoardClientError("state precondition failed")
+                owner.values[(board_id, arguments["key"])] = arguments["value"]
+                return {"ok": True}
+
+        return Client()
+
+
+def intake_fetcher(
+    central: FakeIntakeCentral,
+    *,
+    now: datetime = datetime(2030, 1, 1, 12, tzinfo=timezone.utc),
+) -> dashboard.FleetFetcher:
+    config = dashboard.Config(
+        url="https://127.0.0.1:8766/mcp",
+        token="token",
+        home_board="pursers",
+        agent_name="dashboard-seat",
+        stale_seconds=300,
+        cache_seconds=5,
+    )
+    return dashboard.FleetFetcher(
+        config,
+        client_factory=lambda _url, _token, board_id, **_kwargs: central.client(
+            board_id
+        ),
+        now_factory=lambda: now,
+    )
+
+
+@pytest.mark.parametrize(
+    ("board_id", "text", "message"),
+    [
+        (None, "Valid intake ask", "invalid board_id"),
+        ("bad/board", "Valid intake ask", "invalid board_id"),
+        ("paused", "Valid intake ask", "not registry-active"),
+        ("pursers", None, "text must be a string"),
+        ("pursers", "four", "between 5 and 500"),
+        ("pursers", "x" * 501, "between 5 and 500"),
+    ],
+)
+def test_intake_validation_matrix(
+    board_id: object, text: object, message: str
+) -> None:
+    fetcher = intake_fetcher(FakeIntakeCentral())
+    with pytest.raises(ValueError, match=message):
+        asyncio.run(fetcher.save_intake(board_id, text))
+
+
+def test_intake_append_uses_create_then_cas_and_coordinator_shape() -> None:
+    central = FakeIntakeCentral()
+    fetcher = intake_fetcher(central)
+
+    first = asyncio.run(fetcher.save_intake("pursers", "Update the operator guide"))
+    second = asyncio.run(fetcher.save_intake("pursers", "Add regression tests"))
+
+    assert first["concurrency"] == "lww"
+    assert second["concurrency"] == "cas"
+    assert "expected_sha256" not in central.calls[0][2]
+    assert re.fullmatch(r"[0-9a-f]{64}", central.calls[1][2]["expected_sha256"])
+    assert {call[2]["key"] for call in central.calls} == {"coordinator_intake"}
+    ask = first["ask"]
+    assert uuid.UUID(ask["id"]).version == 5
+    assert ask == {
+        "id": ask["id"],
+        "text": "Update the operator guide",
+        "requested_by": "dashboard-seat",
+        "board_id": "pursers",
+        "created_at": "2030-01-01T12:00:00+00:00",
+    }
+
+    coordinator_path = Path(__file__).parents[2] / "coordinator" / "coordinator.py"
+    spec = importlib.util.spec_from_file_location("coordinator_shape", coordinator_path)
+    assert spec and spec.loader
+    coordinator = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = coordinator
+    spec.loader.exec_module(coordinator)
+    parsed = coordinator.parse_intake(
+        {"state": {"value": json.dumps([ask])}}, "pursers"
+    )
+    assert [(item.ask_id, item.text, item.requested_by, item.board_id) for item in parsed] == [
+        (ask["id"], ask["text"], "dashboard-seat", "pursers")
+    ]
+
+
+def test_intake_uuid_is_deterministic_for_content_and_time() -> None:
+    first = asyncio.run(
+        intake_fetcher(FakeIntakeCentral()).save_intake("pursers", "Update docs")
+    )
+    second = asyncio.run(
+        intake_fetcher(FakeIntakeCentral()).save_intake("pursers", "Update docs")
+    )
+    assert first["ask"]["id"] == second["ask"]["id"]
+
+
+def test_intake_endpoint_returns_409_on_cas_conflict() -> None:
+    central = FakeIntakeCentral()
+    central.values[("pursers", "coordinator_intake")] = "[]"
+    central.force_conflict = True
+    cache = dashboard.DashboardCache(intake_fetcher(central), 5)
+    server, thread = _serve_cache(cache)
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{server.server_port}/api/intake",
+        data=json.dumps(
+            {"board_id": "pursers", "text": "Update the operator guide"}
+        ).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with pytest.raises(urllib.error.HTTPError) as captured:
+            urllib.request.urlopen(request)
+        assert captured.value.code == 409
+        assert "changed" in json.load(captured.value)["error"]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+def test_intake_endpoint_enforces_ten_asks_per_hour() -> None:
+    central = FakeIntakeCentral()
+    cache = dashboard.DashboardCache(intake_fetcher(central), 5)
+    server, thread = _serve_cache(cache)
+    root = f"http://127.0.0.1:{server.server_port}/api/intake"
+
+    def post(index: int) -> int:
+        request = urllib.request.Request(
+            root,
+            data=json.dumps(
+                {"board_id": "pursers", "text": f"Update guide item {index}"}
+            ).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request) as response:
+                return response.status
+        except urllib.error.HTTPError as exc:
+            return exc.code
+
+    try:
+        assert [post(index) for index in range(10)] == [200] * 10
+        assert post(10) == 429
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+def test_intake_get_endpoint_and_ui_render_waiting_and_consumed_states() -> None:
+    central = FakeIntakeCentral()
+    fetcher = intake_fetcher(central)
+    created = asyncio.run(fetcher.save_intake("pursers", "Update the dashboard guide"))
+    cache = dashboard.DashboardCache(fetcher, 5)
+    server, thread = _serve_cache(cache)
+    try:
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{server.server_port}/api/intake?board_id=pursers"
+        ) as response:
+            body = json.load(response)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+    assert body["waiting"] == [created["ask"]]
+    assert body["rate_limit"] == {"asks": 10, "window_seconds": 3600}
+    assert "สั่งงาน / new ask" in dashboard.HTML
+    assert "Pending asks" in dashboard.HTML
+    assert "consumed (gone)" in dashboard.HTML
+    assert "may produce a DRAFT that needs approval" in dashboard.HTML
+
+
+def test_dashboard_write_whitelist_is_exact_across_both_writes() -> None:
+    central = FakeIntakeCentral()
+    fetcher = intake_fetcher(central)
+    config_text = json.dumps(
+        valid_coordinator_config(), sort_keys=True, separators=(",", ":")
+    )
+    central.values[("pursers", "coordinator_config")] = config_text
+    asyncio.run(
+        fetcher.save_config(
+            valid_coordinator_config(), hashlib.sha256(config_text.encode()).hexdigest()
+        )
+    )
+    asyncio.run(fetcher.save_intake("pursers", "Update the dashboard guide"))
+
+    written = {arguments["key"] for _board, _name, arguments in central.calls}
+    assert dashboard.DASHBOARD_WRITE_KEYS == frozenset(written) == frozenset(
+        {"coordinator_config", "coordinator_intake"}
+    )
+    with pytest.raises(ValueError, match="not writable"):
+        dashboard._dashboard_state_update_arguments(
+            agent_name="dashboard-seat", key="other_state", value="{}"
+        )

@@ -13,6 +13,7 @@ import stat
 import sys
 import threading
 import time
+import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -62,7 +63,14 @@ ACTIVE_CLAIM_STATES = frozenset({"claimed", "in_progress", "creating_report"})
 SUBMITTED_STATES = frozenset({"submitted", "reviewing", "in_review"})
 TERMINAL_STATES = frozenset({"closed", "rejected", "canceled", "terminated"})
 CONFIG_STATE_KEY = "coordinator_config"
+INTAKE_STATE_KEY = "coordinator_intake"
 FINDINGS_STATE_KEY = "coordinator_findings"
+DASHBOARD_WRITE_KEYS = frozenset({CONFIG_STATE_KEY, INTAKE_STATE_KEY})
+INTAKE_TEXT_MIN_CHARS = 5
+INTAKE_TEXT_MAX_CHARS = 500
+INTAKE_RATE_LIMIT = 10
+INTAKE_RATE_WINDOW_SECONDS = 3_600
+MAX_INTAKE_ROWS = 1_000
 CONFIG_CATEGORIES = (
     "docs", "tests", "audit-analysis", "bug", "production-code",
     "release-ci", "membership-roles", "board-registry",
@@ -76,6 +84,10 @@ CONFIG_THRESHOLD_FIELDS = (
 
 class ConfigConflictError(RuntimeError):
     """The dashboard form was based on missing or superseded state."""
+
+
+class IntakeRateLimitError(RuntimeError):
+    """The dashboard intake write rate exceeded its bounded hourly window."""
 
 
 class FleetClient(Protocol):
@@ -107,6 +119,64 @@ def _state_value(raw: Any) -> tuple[dict[str, Any] | None, str | None]:
     except json.JSONDecodeError:
         return None, value
     return (dict(parsed), value) if isinstance(parsed, dict) else (None, value)
+
+
+def validate_intake_text(value: Any) -> str:
+    """Return one bounded non-blank ask without changing its authored text."""
+    if not isinstance(value, str):
+        raise ValueError("text must be a string")
+    text = value.strip()
+    if not INTAKE_TEXT_MIN_CHARS <= len(text) <= INTAKE_TEXT_MAX_CHARS:
+        raise ValueError("text must be between 5 and 500 characters")
+    return text
+
+
+def _dashboard_state_update_arguments(
+    *,
+    agent_name: str,
+    key: str,
+    value: str,
+    expected_sha256: str | None = None,
+) -> dict[str, str]:
+    """Build the dashboard's only state mutation, guarded by an exact key set."""
+    if key not in DASHBOARD_WRITE_KEYS:
+        raise ValueError("dashboard state key is not writable")
+    arguments = {"agent_name": agent_name, "key": key, "value": value}
+    if expected_sha256 is not None:
+        arguments["expected_sha256"] = expected_sha256
+    return arguments
+
+
+def _intake_state_value(
+    raw: Any, board_id: str
+) -> tuple[list[dict[str, Any]], str | None]:
+    """Parse and preserve the coordinator-compatible intake queue."""
+    state = raw.get("state") if isinstance(raw, dict) else None
+    value = state.get("value") if isinstance(state, dict) else None
+    if value is None:
+        return [], None
+    if not isinstance(value, str):
+        raise ConfigConflictError("coordinator_intake state is malformed")
+    try:
+        rows = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise ConfigConflictError("coordinator_intake state is malformed") from exc
+    if not isinstance(rows, list) or len(rows) > MAX_INTAKE_ROWS:
+        raise ConfigConflictError("coordinator_intake state is malformed")
+    clean: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            raise ConfigConflictError("coordinator_intake state is malformed")
+        required = {name: row.get(name) for name in ("id", "text", "requested_by", "board_id")}
+        if not all(isinstance(item, str) and item.strip() for item in required.values()):
+            raise ConfigConflictError("coordinator_intake state is malformed")
+        ask_id = required["id"].strip()
+        if ask_id in seen or required["board_id"].strip() != board_id:
+            raise ConfigConflictError("coordinator_intake state is malformed")
+        seen.add(ask_id)
+        clean.append(json.loads(json.dumps(row)))
+    return clean, value
 
 
 def validate_coordinator_config(value: Any) -> dict[str, Any]:
@@ -1291,9 +1361,13 @@ class FleetFetcher:
         self,
         config: Config,
         client_factory: Callable[..., Any] = BoardClient,
+        now_factory: Callable[[], datetime] | None = None,
     ) -> None:
         self.config = config
         self.client_factory = client_factory
+        self.now_factory = now_factory or (lambda: datetime.now(timezone.utc))
+        self._intake_write_lock = threading.Lock()
+        self._intake_submissions: dict[str, list[tuple[str, datetime]]] = {}
 
     def _client(self, board_id: str) -> Any:
         return self.client_factory(
@@ -1407,6 +1481,116 @@ class FleetFetcher:
             "concurrency": "cas" if stored_text is not None else "lww",
         }
 
+    async def fetch_intake(self, board_id: str) -> dict[str, Any]:
+        if not BOARD_ID_RE.fullmatch(board_id):
+            raise ValueError("invalid board_id")
+        active = {active_board for _label, active_board in await self._boards()}
+        if board_id not in active:
+            raise ValueError("board_id is not registry-active")
+        async with self._client(board_id) as client:
+            try:
+                raw = await client.board_state_get(key=INTAKE_STATE_KEY)
+            except BoardClientError as exc:
+                if "state key not found" not in str(exc):
+                    raise
+                raw = {}
+        rows, current_text = _intake_state_value(raw, board_id)
+        return {
+            "board_id": board_id,
+            "waiting": rows,
+            "expected_sha256": (
+                hashlib.sha256(current_text.encode("utf-8")).hexdigest()
+                if current_text is not None
+                else None
+            ),
+            "rate_limit": {
+                "asks": INTAKE_RATE_LIMIT,
+                "window_seconds": INTAKE_RATE_WINDOW_SECONDS,
+            },
+        }
+
+    async def save_intake(self, board_id: Any, text: Any) -> dict[str, Any]:
+        if not isinstance(board_id, str) or not BOARD_ID_RE.fullmatch(board_id):
+            raise ValueError("invalid board_id")
+        clean_text = validate_intake_text(text)
+        active = {active_board for _label, active_board in await self._boards()}
+        if board_id not in active:
+            raise ValueError("board_id is not registry-active")
+        now = self.now_factory()
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+        now = now.astimezone(timezone.utc)
+        cutoff = now - timedelta(seconds=INTAKE_RATE_WINDOW_SECONDS)
+
+        # One process-side critical section makes concurrent dashboard requests
+        # deterministic. Central's expected_sha256 remains the cross-process gate.
+        with self._intake_write_lock:
+            async with self._client(board_id) as client:
+                try:
+                    raw = await client.board_state_get(key=INTAKE_STATE_KEY)
+                except BoardClientError as exc:
+                    if "state key not found" not in str(exc):
+                        raise
+                    raw = {}
+                rows, current_text = _intake_state_value(raw, board_id)
+                recent_queue = {
+                    row["id"]
+                    for row in rows
+                    if (created := _parse_time(row.get("created_at"))) is not None
+                    and created > cutoff
+                }
+                history = [
+                    (ask_id, created)
+                    for ask_id, created in self._intake_submissions.get(board_id, [])
+                    if created > cutoff
+                ]
+                self._intake_submissions[board_id] = history
+                if len(recent_queue | {ask_id for ask_id, _created in history}) >= INTAKE_RATE_LIMIT:
+                    raise IntakeRateLimitError("intake rate limit exceeded")
+
+                created_at = now.isoformat()
+                ask_id = str(
+                    uuid.uuid5(
+                        uuid.NAMESPACE_URL,
+                        f"pursers-dashboard-intake\0{board_id}\0{clean_text}\0{created_at}",
+                    )
+                )
+                ask = {
+                    "id": ask_id,
+                    "text": clean_text,
+                    "requested_by": self.config.agent_name,
+                    "board_id": board_id,
+                    "created_at": created_at,
+                }
+                encoded = json.dumps([*rows, ask], sort_keys=True, separators=(",", ":"))
+                if len(rows) >= MAX_INTAKE_ROWS:
+                    raise IntakeRateLimitError("intake queue is full")
+                expected = None
+                if current_text is not None:
+                    expected = hashlib.sha256(
+                        current_text.encode("utf-8")
+                    ).hexdigest()
+                arguments = _dashboard_state_update_arguments(
+                    agent_name=self.config.agent_name,
+                    key=INTAKE_STATE_KEY,
+                    value=encoded,
+                    expected_sha256=expected,
+                )
+                try:
+                    await client._call("board_state_update", arguments)
+                except BoardClientError as exc:
+                    raise ConfigConflictError(
+                        "coordinator_intake changed; retry the ask"
+                    ) from exc
+                history.append((ask_id, now))
+                self._intake_submissions[board_id] = history
+        return {
+            "ok": True,
+            "ask": ask,
+            "expected_sha256": hashlib.sha256(encoded.encode("utf-8")).hexdigest(),
+            "concurrency": "cas" if current_text is not None else "lww",
+        }
+
     async def save_config(
         self, value: Any, expected_sha256: str | None
     ) -> dict[str, Any]:
@@ -1436,15 +1620,17 @@ class FleetFetcher:
                 raise ConfigConflictError("expected_sha256 is required for an existing config")
             elif expected_sha256 != current_digest:
                 raise ConfigConflictError("coordinator_config changed; reload before saving")
-            arguments = {
-                "agent_name": self.config.agent_name,
-                "key": CONFIG_STATE_KEY,
-                "value": encoded,
-            }
+            expected = None
             if expected_sha256 is not None:
                 if not re.fullmatch(r"[0-9a-f]{64}", expected_sha256):
                     raise ValueError("expected_sha256 must be a lowercase SHA-256 digest")
-                arguments["expected_sha256"] = expected_sha256
+                expected = expected_sha256
+            arguments = _dashboard_state_update_arguments(
+                agent_name=self.config.agent_name,
+                key=CONFIG_STATE_KEY,
+                value=encoded,
+                expected_sha256=expected,
+            )
             await client._call("board_state_update", arguments)
         return {
             "ok": True,
@@ -1554,6 +1740,14 @@ class DashboardCache:
         label = self.resolve_central(central)
         return self._labeled(asyncio.run(self.fetchers[label].fetch_config()), label)
 
+    def get_intake(
+        self, board_id: str, central: str | None = None
+    ) -> dict[str, Any]:
+        label = self.resolve_central(central)
+        return self._labeled(
+            asyncio.run(self.fetchers[label].fetch_intake(board_id)), label
+        )
+
     def save_config(
         self,
         value: Any,
@@ -1564,6 +1758,14 @@ class DashboardCache:
         return self._labeled(
             asyncio.run(self.fetchers[label].save_config(value, expected_sha256)),
             label,
+        )
+
+    def save_intake(
+        self, board_id: Any, text: Any, central: str | None = None
+    ) -> dict[str, Any]:
+        label = self.resolve_central(central)
+        return self._labeled(
+            asyncio.run(self.fetchers[label].save_intake(board_id, text)), label
         )
 
 
@@ -1603,7 +1805,7 @@ function flowView(d,r){const byId=new Map(d.tickets.map(t=>[t.id,t])),labels={op
 const routeStage=stage=>stage?`<b>${esc(stage.label)}</b><span class="meta">${esc(fmt(stage.at))}</span>`:'<span class="muted">—</span>';
 function routesView(d,r){const routeData=d.routes||{rows:[],seats:[],row_returned:0,row_total:0,truncated:true,truncation_note:'Routes source unavailable.'},rows=routeData.rows.filter(t=>matches([t.id,t.title,t.status,t.created?.label,t.executed?.label,t.submitted?.label,t.reviewed?.label,t.rework_count],filterNeedle)),seats=routeData.seats.filter(s=>matches([s.label,s.created,s.executed,s.reviewed,s.rework_received_rate],filterNeedle));return `<section id="routes-view"><p class="${routeData.truncated?'warning':'muted'} bounded-note">${esc(routeData.truncation_note)}</p><h3 class="pool">Seat load in the window</h3><section class="route-load" aria-label="Per-seat route totals">${seats.length?seats.map(s=>`<article class="route-seat" data-route-seat="${esc(s.label)}"><b>${esc(s.label)}</b><div class="counts"><span class="pill">created ${esc(s.created)}</span><span class="pill">executed ${esc(s.executed)}</span><span class="pill">reviewed ${esc(s.reviewed)}</span><span class="pill">rework received ${esc(s.rework_received_rate)}% (${esc(s.rework_received)})</span></div></article>`).join(''):'<p class="empty">No seats match the filter.</p>'}</section><p class="muted">Showing ${esc(rows.length)} matching route(s) from ${esc(routeData.row_returned)} returned; ${esc(routeData.row_total)} assembled before row bounds.</p><section class="card pool"><div class="table-scroll"><table aria-label="Ticket provenance routes"><thead><tr><th>Ticket</th><th>Created by</th><th>Executed by</th><th>Submitted by</th><th>Reviewed / closed by</th><th>Rework</th><th>Updated</th></tr></thead><tbody>${rows.length?rows.map(t=>`<tr data-route-ticket="${esc(t.id)}"><td><a class="id" href="${ticketHref(r.central,d.board.board_id,t.id)}">${esc(t.id)}</a><div>${esc(t.title)}</div><span class="status">${esc(t.status)}</span></td><td class="route-stage">${routeStage(t.created)}</td><td class="route-stage">${routeStage(t.executed)}</td><td class="route-stage">${routeStage(t.submitted)}</td><td class="route-stage">${routeStage(t.reviewed)}</td><td>${esc(t.rework_count)}</td><td class="meta">${esc(fmt(t.updated_at))}</td></tr>`).join(''):'<tr><td colspan="7" class="empty">No routes match the filter.</td></tr>'}</tbody></table></div></section></section>`}
 function findings(d){if(!d.coordinator_findings)return'';return `<section class="card"><h3>Coordinator findings</h3><div class="finding-list">${d.coordinator_findings.items.map(f=>`<div class="finding"><b>${esc(f.kind)}</b>${f.ticket_id?` <span class="id">${esc(f.ticket_id)}</span>`:''}<p>${esc(f.text)}</p></div>`).join('')||'<p class="empty">No current findings</p>'}</div>${d.coordinator_findings.truncated_count?`<p class="warning">${esc(d.coordinator_findings.truncated_count)} findings omitted by the bounded state.</p>`:''}</section>`}
-function renderDetail(d){const r=route();if(!r||r.kind!=='board'||r.central!==d.central||r.board!==d.board.board_id)return;const views={tickets:ticketView,timeline:timelineView,changes:changesView,flow:flowView,routes:routesView};document.querySelector('#detail-view').innerHTML=`<a class="back" href="#/">← All centrals</a><div class="top"><div><h2>${esc(d.board.label)} · ${esc(d.central)}</h2><span class="meta">${esc(d.board.board_id)}</span></div>${d.truncated?`<span class="status">${esc(d.ticket_returned)} of ${esc(d.ticket_total)} tickets shown</span>`:''}</div><div class="toolbar">${tabs(d,r)}<span class="muted">Read-only bounded view · ${esc(d.central)}</span></div>${r.view==='tickets'?findings(d):''}${views[r.view](d,r)}`;document.querySelector('#ticket-sort')?.addEventListener('change',e=>{detailSort=e.target.value;renderDetail(d)});document.querySelector('#changes-form')?.addEventListener('submit',e=>{e.preventDefault();const value=document.querySelector('#since-seq').value.trim();location.hash=`/central/${encodeURIComponent(r.central)}/board/${encodeURIComponent(d.board.board_id)}/changes${value?`?since=${encodeURIComponent(value)}`:''}`});document.querySelector('#state').textContent=`Updated ${fmt(d.generated_at)} · ${esc(d.central)}`;bindInteractive(document.querySelector('#detail-view'));renderSearchResults();if(r.ticket){const target=[...document.querySelectorAll('[data-ticket]')].find(x=>x.dataset.ticket===r.ticket);if(target){target.open=true;sectionStates.set(target.dataset.stateKey,true);target.scrollIntoView({block:'center'})}}}
+function renderDetail(d){const r=route();if(!r||r.kind!=='board'||r.central!==d.central||r.board!==d.board.board_id)return;const views={tickets:ticketView,timeline:timelineView,changes:changesView,flow:flowView,routes:routesView};document.querySelector('#detail-view').innerHTML=`<a class="back" href="#/">← All centrals</a><div class="top"><div><h2>${esc(d.board.label)} · ${esc(d.central)}</h2><span class="meta">${esc(d.board.board_id)}</span></div>${d.truncated?`<span class="status">${esc(d.ticket_returned)} of ${esc(d.ticket_total)} tickets shown</span>`:''}</div><div class="toolbar">${tabs(d,r)}<span class="muted">Two guarded writes only: config and intake · ${esc(d.central)}</span></div>${intakePanel(d,r)}${r.view==='tickets'?findings(d):''}${views[r.view](d,r)}`;document.querySelector('#intake-form')?.addEventListener('submit',submitIntake);document.querySelector('#ticket-sort')?.addEventListener('change',e=>{detailSort=e.target.value;renderDetail(d)});document.querySelector('#changes-form')?.addEventListener('submit',e=>{e.preventDefault();const value=document.querySelector('#since-seq').value.trim();location.hash=`/central/${encodeURIComponent(r.central)}/board/${encodeURIComponent(d.board.board_id)}/changes${value?`?since=${encodeURIComponent(value)}`:''}`});document.querySelector('#state').textContent=`Updated ${fmt(d.generated_at)} · ${esc(d.central)}`;bindInteractive(document.querySelector('#detail-view'));renderSearchResults();if(r.ticket){const target=[...document.querySelectorAll('[data-ticket]')].find(x=>x.dataset.ticket===r.ticket);if(target){target.open=true;sectionStates.set(target.dataset.stateKey,true);target.scrollIntoView({block:'center'})}}}
 const CENTRAL_REQUEST_TIMEOUT_MS=4000;
 async function fetchJson(path,options={}){const response=await fetch(path,{cache:'no-store',...options});if(!response.ok)throw new Error(`HTTP ${response.status}`);return response.json()}
 async function fetchWithTimeout(path,timeoutMs=CENTRAL_REQUEST_TIMEOUT_MS){const controller=new AbortController();let timer;const timeout=new Promise((_,reject)=>{timer=setTimeout(()=>{controller.abort();reject(new Error('central request timed out'))},timeoutMs)});try{return await Promise.race([fetchJson(path,{signal:controller.signal}),timeout])}finally{clearTimeout(timer)}}
@@ -1611,7 +1813,7 @@ async function loadCentrals(){const d=await fetchJson('/api/centrals');centralLa
 async function refreshCentral(label,timeoutMs=CENTRAL_REQUEST_TIMEOUT_MS){const key=`fleet:${label}`;try{fleetData[label]=await fetchWithTimeout(`/api/fleet?${apiCentral(label)}`,timeoutMs);delete fleetErrors[label];if(typeof markConnectionSuccess==='function')markConnectionSuccess(key)}catch(e){fleetErrors[label]=e.message;if(typeof markConnectionFailure==='function')markConnectionFailure(key)}finally{if(!route())renderFleet()}}
 async function refreshFleet(timeoutMs=CENTRAL_REQUEST_TIMEOUT_MS){if(!centralLabels.length)await loadCentrals();await Promise.allSettled(centralLabels.map(label=>refreshCentral(label,timeoutMs)))}
 async function refreshOverhead(){const r=route();if(!r||r.kind!=='overhead')return;const key=`overhead:${r.central}`;try{const data=await fetchJson(`/api/overhead?${apiCentral(r.central)}`);if(route()?.central!==r.central)return;renderOverhead(data);markConnectionSuccess(key)}catch(e){markConnectionFailure(key);if(!document.querySelector('#detail-view').children.length)document.querySelector('#detail-view').innerHTML=`<a class="back" href="#/">← All centrals</a><p class="error">Overhead unavailable for ${esc(r.central)}.</p>`}}
-async function refreshDetail(){const r=route();if(!r||r.kind!=='board')return;const key=`detail:${r.central}:${r.board}`;try{const data=await fetchJson(`/api/board/${encodeURIComponent(r.board)}?${apiCentral(r.central)}`);const current=route();if(current?.central!==r.central||current?.board!==r.board)return;detailData=data;renderDetail(data);markConnectionSuccess(key)}catch(e){markConnectionFailure(key);if(!detailData||detailData.central!==r.central||detailData.board?.board_id!==r.board)document.querySelector('#detail-view').innerHTML=`<a class="back" href="#/">← All centrals</a><p class="error">Board detail unavailable for ${esc(r.central)}.</p>`}}
+async function refreshDetail(){const r=route();if(!r||r.kind!=='board')return;const key=`detail:${r.central}:${r.board}`;try{const data=await fetchJson(`/api/board/${encodeURIComponent(r.board)}?${apiCentral(r.central)}`);const current=route();if(current?.central!==r.central||current?.board!==r.board)return;detailData=data;renderDetail(data);refreshIntake(current,true);markConnectionSuccess(key)}catch(e){markConnectionFailure(key);if(!detailData||detailData.central!==r.central||detailData.board?.board_id!==r.board)document.querySelector('#detail-view').innerHTML=`<a class="back" href="#/">← All centrals</a><p class="error">Board detail unavailable for ${esc(r.central)}.</p>`}}
 function syncRoute(){const r=route();document.querySelector('#home-view').hidden=!!r;document.querySelector('#detail-view').hidden=!r||r.kind==='config';if(detailTimer){clearInterval(detailTimer);detailTimer=null}for(const key of [...connectionFailures])if(key.startsWith('detail:')||key.startsWith('overhead:'))connectionFailures.delete(key);updateConnectionState();if(r?.kind==='board'){if(detailData?.central===r.central&&detailData?.board?.board_id===r.board)renderDetail(detailData);else document.querySelector('#detail-view').innerHTML='<p class="empty">Loading board detail…</p>';refreshDetail();detailTimer=setInterval(refreshDetail,5000)}else if(r?.kind==='overhead'){document.querySelector('#detail-view').innerHTML='<p class="empty">Loading overhead…</p>';refreshOverhead();detailTimer=setInterval(refreshOverhead,5000)}else if(!r)renderFleet()}
 document.querySelector('#filter').addEventListener('input',e=>{filterNeedle=e.target.value.toLocaleLowerCase();searchSelection=0;const r=route();if(r?.kind==='board'&&detailData)renderDetail(detailData);else if(!r)renderFleet();else renderSearchResults()});document.querySelector('#search-results').addEventListener('click',e=>{const target=e.target.closest('[data-search-index]');if(target){e.preventDefault();jumpSearchResult(Number(target.dataset.searchIndex))}});document.querySelector('#theme-toggle').addEventListener('click',()=>{theme=theme==='dark'?'light':'dark';applyPreferences()});document.querySelector('#density-toggle').addEventListener('click',()=>{density=density==='comfortable'?'compact':'comfortable';applyPreferences()});document.querySelector('#help-toggle').addEventListener('click',()=>document.querySelector('#help-overlay').showModal());document.querySelector('#help-close').addEventListener('click',()=>document.querySelector('#help-overlay').close());document.addEventListener('keydown',e=>{const editing=['INPUT','TEXTAREA','SELECT'].includes(document.activeElement?.tagName);if(e.key==='Escape'){document.querySelector('#search-results').hidden=true;document.querySelector('#help-overlay').close();return}if(e.key==='?'&&!editing){e.preventDefault();document.querySelector('#help-overlay').showModal();return}if(e.key==='/'&&!editing){e.preventDefault();document.querySelector('#filter').focus();return}if(document.activeElement===document.querySelector('#filter')&&['ArrowDown','ArrowUp'].includes(e.key)){e.preventDefault();searchSelection=Math.max(0,Math.min(searchItems.length-1,searchSelection+(e.key==='ArrowDown'?1:-1)));renderSearchResults();return}if(document.activeElement===document.querySelector('#filter')&&e.key==='Enter'){e.preventDefault();jumpSearchResult(searchSelection);return}if(editing)return;if(goPrefix){clearTimeout(goTimer);goPrefix=false;if(e.key==='f')location.hash='#/';if(e.key==='o')location.hash=centralHref(defaultCentral,'overhead');if(e.key==='c')location.hash=centralHref(defaultCentral,'config');return}if(e.key==='g'){goPrefix=true;goTimer=setTimeout(()=>{goPrefix=false},800)}});window.addEventListener('hashchange',syncRoute);applyPreferences();loadCentrals().then(()=>{refreshFleet();syncRoute();if(typeof syncConfigRoute==='function')syncConfigRoute()}).catch(e=>{document.querySelector('#state').textContent='Startup failed';markConnectionFailure('startup')});setInterval(refreshFleet,5000);
 </script></body></html>"""
@@ -1635,7 +1837,8 @@ HTML = HTML.replace(
     "</style>",
     ".config-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px}"
     ".config-grid label{display:grid;gap:5px}.config-grid input,.config-grid select,.config-grid button{background:var(--panel2);border:1px solid var(--line);border-radius:8px;color:var(--text);padding:8px}"
-    ".source{font-size:11px;color:var(--muted)}.central-group{margin-top:28px;padding-top:20px;border-top:2px solid var(--line)}.central-heading{align-items:center}.central-group.unavailable{border:1px solid var(--bad);border-radius:12px;padding:16px}</style>",
+    ".source{font-size:11px;color:var(--muted)}.central-group{margin-top:28px;padding-top:20px;border-top:2px solid var(--line)}.central-heading{align-items:center}.central-group.unavailable{border:1px solid var(--bad);border-radius:12px;padding:16px}"
+    ".intake-layout{display:grid;grid-template-columns:minmax(260px,1fr) minmax(300px,2fr);gap:14px}.intake-form{display:grid;gap:8px}.intake-form textarea{min-height:82px;resize:vertical;background:var(--panel2);border:1px solid var(--line);border-radius:8px;color:var(--text);padding:8px}.intake-row{padding:8px 0;border-top:1px solid var(--line)}@media(max-width:800px){.intake-layout{grid-template-columns:1fr}}</style>",
 ).replace(
     "Live boards and shared agent pool</p>",
     'Live boards and per-central agent pools · <a href="#/config">Coordinator config</a></p>',
@@ -1646,6 +1849,11 @@ HTML = HTML.replace(
     "</body>",
     r"""<script>
 const CONFIG_CATEGORIES=['docs','tests','audit-analysis','bug','production-code','release-ci','membership-roles','board-registry'];
+const intakeQueues=new Map(),recentIntake=new Map();
+const intakeKey=r=>`${r.central}/${r.board}`;
+function intakePanel(d,r){const key=intakeKey(r),state=intakeQueues.get(key),waiting=state?.waiting||[],waitingIds=new Set(waiting.map(x=>x.id)),recent=recentIntake.get(key)||[],rows=waiting.slice(-25).map(x=>({...x,intake_status:'waiting'}));for(const ask of recent)if(!waitingIds.has(ask.id))rows.push({...ask,intake_status:'consumed (gone)'});rows.sort((a,b)=>String(b.created_at||'').localeCompare(String(a.created_at||'')));return `<section class="card pool intake-layout"><form id="intake-form" class="intake-form"><div><h3>สั่งงาน / new ask</h3><p class="muted">5–500 characters · maximum 10 asks/hour</p></div><textarea name="text" minlength="5" maxlength="500" required placeholder="Describe one concrete ask for ${esc(d.board.label)}"></textarea><button type="submit">Submit ask</button><span id="intake-status" class="muted">${state?.error?esc(state.error):'Ready'}</span></form><div><h3>Pending asks</h3><p class="muted">Intake is processed by the coordinator per the /config matrix and may produce a DRAFT that needs approval.</p><div>${rows.length?rows.map(x=>`<div class="intake-row"><span class="status">${esc(x.intake_status)}</span> <span class="id">${esc(x.id)}</span><p>${esc(x.text)}</p><span class="meta">${esc(fmt(x.created_at))} · ${esc(x.requested_by)}</span></div>`).join(''):'<p class="empty">No asks are waiting.</p>'}</div></div></section>`}
+async function refreshIntake(r,rerender=false){const key=intakeKey(r);try{const data=await fetchJson(`/api/intake?${apiCentral(r.central)}&board_id=${encodeURIComponent(r.board)}`);intakeQueues.set(key,data)}catch(e){intakeQueues.set(key,{waiting:[],error:`Intake unavailable: ${e.message}`})}const current=route();if(rerender&&detailData&&current?.kind==='board'&&current.central===r.central&&current.board===r.board)renderDetail(detailData)}
+async function submitIntake(event){event.preventDefault();const r=route();if(!r||r.kind!=='board')return;const form=event.target,status=form.querySelector('#intake-status'),button=form.querySelector('button'),text=new FormData(form).get('text');button.disabled=true;status.className='muted';status.textContent='Submitting…';try{const response=await fetch(`/api/intake?${apiCentral(r.central)}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({board_id:r.board,text})});let body={};try{body=await response.json()}catch(_e){}if(!response.ok)throw new Error(body.error||`HTTP ${response.status}`);const key=intakeKey(r),recent=recentIntake.get(key)||[];recentIntake.set(key,[body.ask,...recent.filter(x=>x.id!==body.ask.id)].slice(0,25));form.reset();status.textContent=`Queued ${body.ask.id}`;await refreshIntake(r,true)}catch(e){status.className='error';status.textContent=`Submit failed: ${e.message}`}finally{button.disabled=false}}
 const CONFIG_NUMBERS=[['stale_seconds','Stale seconds',10,86400],['lease_warning_ratio','Lease warning ratio',.1,1],['grace_seconds','Grace seconds',10,86400],['starved_seconds','Starved seconds',10,86400],['critical_starved_seconds','Critical starved seconds',10,86400],['review_backlog_seconds','Review backlog seconds',10,86400],['abandoner_drops','Abandoner drops',1,20],['abandoner_window_days','Abandoner window days',1,365]];
 let coordinatorConfig=null;
 const sourceFor=(d,path)=>d.sources?.[path]||'unknown';
@@ -1672,6 +1880,12 @@ def make_handler(
             return None
         if len(values) != 1 or not CENTRAL_LABEL_RE.fullmatch(values[0]):
             raise ValueError("invalid central")
+        return values[0]
+
+    def requested_board(path: str) -> str:
+        values = parse_qs(urlsplit(path).query, keep_blank_values=True).get("board_id")
+        if values is None or len(values) != 1 or not BOARD_ID_RE.fullmatch(values[0]):
+            raise ValueError("invalid board_id")
         return values[0]
 
     def central_label(value: str | None) -> str:
@@ -1766,6 +1980,28 @@ def make_handler(
                     return
                 self._send(200, "application/json; charset=utf-8", body)
                 return
+            if route == "/api/intake":
+                try:
+                    board_id = requested_board(self.path)
+                    body = _json_bytes(
+                        cache_call("get_intake", board_id, central=central)
+                    )
+                except ValueError as exc:
+                    self._send(
+                        400,
+                        "application/json; charset=utf-8",
+                        _json_bytes({"error": str(exc), "central": label}),
+                    )
+                    return
+                except Exception as exc:  # noqa: BLE001
+                    self._send(
+                        503,
+                        "application/json; charset=utf-8",
+                        _json_bytes({"error": type(exc).__name__, "central": label}),
+                    )
+                    return
+                self._send(200, "application/json; charset=utf-8", body)
+                return
             board_id = board_id_from_api_path(self.path)
             if board_id is not None:
                 try:
@@ -1804,7 +2040,8 @@ def make_handler(
             self._send(404, "application/json; charset=utf-8", b'{"error":"not found"}')
 
         def do_POST(self) -> None:
-            if urlsplit(self.path).path != "/api/config":
+            route = urlsplit(self.path).path
+            if route not in {"/api/config", "/api/intake"}:
                 self._send(404, "application/json; charset=utf-8", b'{"error":"not found"}')
                 return
             try:
@@ -1830,16 +2067,25 @@ def make_handler(
                 return
             try:
                 request = json.loads(self.rfile.read(length))
-                if not isinstance(request, dict) or set(request) != {"config", "expected_sha256"}:
-                    raise ValueError("request must contain only config and expected_sha256")
-                body = _json_bytes(
-                    cache_call(
-                        "save_config",
-                        request["config"],
-                        request["expected_sha256"],
+                if route == "/api/config":
+                    if not isinstance(request, dict) or set(request) != {
+                        "config", "expected_sha256"
+                    }:
+                        raise ValueError(
+                            "request must contain only config and expected_sha256"
+                        )
+                    result = cache_call(
+                        "save_config", request["config"], request["expected_sha256"],
                         central=central,
                     )
-                )
+                else:
+                    if not isinstance(request, dict) or set(request) != {"board_id", "text"}:
+                        raise ValueError("request must contain only board_id and text")
+                    result = cache_call(
+                        "save_intake", request["board_id"], request["text"],
+                        central=central,
+                    )
+                body = _json_bytes(result)
             except (ValueError, TypeError, json.JSONDecodeError) as exc:
                 self._send(
                     400,
@@ -1850,6 +2096,13 @@ def make_handler(
             except ConfigConflictError as exc:
                 self._send(
                     409,
+                    "application/json; charset=utf-8",
+                    _json_bytes({"error": str(exc), "central": label}),
+                )
+                return
+            except IntakeRateLimitError as exc:
+                self._send(
+                    429,
                     "application/json; charset=utf-8",
                     _json_bytes({"error": str(exc), "central": label}),
                 )
