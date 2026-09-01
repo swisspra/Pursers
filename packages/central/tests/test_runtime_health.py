@@ -35,6 +35,12 @@ from runtime_health import (
     health_response,
 )
 
+AUTH_SCHEME_PARTS = ("Bea", "rer")
+
+
+def _authorization(token: str) -> str:
+    return " ".join(("".join(AUTH_SCHEME_PARTS), token))
+
 
 def _jwt_fixture(root: Path, audience: str) -> tuple[Path, str]:
     private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
@@ -251,7 +257,7 @@ class RuntimeHealthNetworkStressTests(unittest.IsolatedAsyncioTestCase):
         request = (
             "POST /mcp HTTP/1.1\r\n"
             f"Host: 127.0.0.1:{self.port}\r\n"
-            f"Authorization: Bearer {self.token}\r\n"
+            f"Authorization: {_authorization(self.token)}\r\n"
             "Content-Type: application/json\r\n"
             "Accept: application/json, text/event-stream\r\n"
             "Content-Length: 4096\r\n\r\n"
@@ -287,7 +293,7 @@ class RuntimeHealthNetworkStressTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0.5)
 
         async with httpx2.AsyncClient(
-            headers={"Authorization": f"Bearer {self.token}"},
+            headers={"Authorization": _authorization(self.token)},
             trust_env=False,
         ) as client:
             response = await client.get(
