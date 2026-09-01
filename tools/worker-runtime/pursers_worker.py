@@ -9,6 +9,7 @@ import json
 import os
 import signal
 import stat
+import subprocess
 import sys
 import tomllib
 import urllib.error
@@ -16,6 +17,7 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
+from urllib.parse import urlsplit
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -45,6 +47,8 @@ SHELL_ENV_ALLOWLIST = (
 )
 AUTH_SCHEME_PARTS = ("Bea", "rer")
 SANDBOX_EXEC = Path("/usr/bin/sandbox-exec")
+SECURITY_CLI = Path("/usr/bin/security")
+KEYCHAIN_SERVICE = "pursers-worker"
 
 
 @dataclass(frozen=True)
@@ -56,6 +60,7 @@ class Config:
     base_url: str
     api_key_env: str | None
     api_key_file: Path | None
+    api_key_keychain: str | None
     model: str
     max_tokens: int
     max_iterations: int
@@ -107,10 +112,18 @@ def load_config(path: str | Path) -> Config:
     token_file = _private_file(
         Path(_text(seat.get("token_file"), "seat.token_file")), "token file"
     )
+    base_url = _text(llm.get("base_url"), "llm.base_url").rstrip("/")
     key_env = llm.get("api_key_env")
     key_file_raw = llm.get("api_key_file")
-    if bool(key_env) == bool(key_file_raw):
-        raise ValueError("llm requires exactly one of api_key_env or api_key_file")
+    keychain_raw = llm.get("api_key_keychain")
+    key_sources = sum(bool(value) for value in (key_env, key_file_raw, keychain_raw))
+    hostname = (urlsplit(base_url).hostname or "").lower()
+    keyless_loopback = hostname in {"127.0.0.1", "localhost", "::1"}
+    if key_sources != 1 and not (key_sources == 0 and keyless_loopback):
+        raise ValueError(
+            "llm requires exactly one of api_key_env, api_key_file, or "
+            "api_key_keychain (loopback providers may omit all three)"
+        )
     key_file = (
         _private_file(Path(_text(key_file_raw, "llm.api_key_file")), "API key file")
         if key_file_raw
@@ -134,15 +147,44 @@ def load_config(path: str | Path) -> Config:
         central_url=_text(seat.get("central_url"), "seat.central_url"),
         token_file=token_file,
         boards=boards,
-        base_url=_text(llm.get("base_url"), "llm.base_url").rstrip("/"),
+        base_url=base_url,
         api_key_env=_text(key_env, "llm.api_key_env") if key_env else None,
         api_key_file=key_file,
+        api_key_keychain=(
+            _text(keychain_raw, "llm.api_key_keychain") if keychain_raw else None
+        ),
         model=_text(llm.get("model"), "llm.model"),
         max_tokens=positive("max_tokens", 4_096),
         max_iterations=positive("max_iterations", 40),
         command_timeout_s=positive("command_timeout_s", 120),
         log_file=log_file,
     )
+
+
+def read_keychain_secret(account: str) -> str:
+    if sys.platform != "darwin":
+        raise RuntimeError("macOS Keychain API keys require macOS")
+    try:
+        result = subprocess.run(
+            [
+                str(SECURITY_CLI),
+                "find-generic-password",
+                "-s",
+                KEYCHAIN_SERVICE,
+                "-a",
+                account,
+                "-w",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise ValueError("API key is unavailable in macOS Keychain") from exc
+    value = result.stdout.strip()
+    if not value:
+        raise ValueError("API key is empty in macOS Keychain")
+    return value
 
 
 def read_secret(config: Config, kind: str) -> str:
@@ -152,9 +194,19 @@ def read_secret(config: Config, kind: str) -> str:
         value = os.environ.get(config.api_key_env, "").strip()
     elif config.api_key_file is not None:
         value = config.api_key_file.read_text(encoding="utf-8").strip()
+    elif config.api_key_keychain is not None:
+        value = read_keychain_secret(config.api_key_keychain)
     else:  # pragma: no cover - Config prevents this.
         value = ""
-    if not value:
+    configured_api_source = any(
+        source is not None
+        for source in (
+            config.api_key_env,
+            config.api_key_file,
+            config.api_key_keychain,
+        )
+    )
+    if not value and (kind == "token" or configured_api_source):
         raise ValueError(f"{kind} is empty")
     return value
 
@@ -320,13 +372,15 @@ class OpenAICompatible:
         ).encode("utf-8")
 
         def request() -> dict[str, Any]:
+            headers = {"Content-Type": "application/json"}
+            if self.api_key:
+                headers["Authorization"] = (
+                    "".join(AUTH_SCHEME_PARTS) + " " + self.api_key
+                )
             raw = urllib.request.Request(
                 self.config.base_url + "/chat/completions",
                 data=body,
-                headers={
-                    "Authorization": "".join(AUTH_SCHEME_PARTS) + " " + self.api_key,
-                    "Content-Type": "application/json",
-                },
+                headers=headers,
                 method="POST",
             )
             with urllib.request.urlopen(raw, timeout=self.config.command_timeout_s) as response:

@@ -6,10 +6,12 @@ import importlib.util
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import tempfile
 import threading
+import tomllib
 import urllib.error
 import urllib.request
 import uuid
@@ -2426,3 +2428,238 @@ def test_dashboard_write_whitelist_is_exact_across_both_writes() -> None:
         dashboard._dashboard_state_update_arguments(
             agent_name="dashboard-seat", key="other_state", value="{}"
         )
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "ftp://provider.invalid/v1",
+        "http://provider.invalid/v1",
+        "https://user:pass@provider.invalid/v1",
+        "https://provider.invalid/v1?token=x",
+        "https://provider.invalid/v1#fragment",
+    ],
+)
+def test_worker_url_validation_rejects_unsafe_urls(value: str) -> None:
+    with pytest.raises(ValueError):
+        dashboard.validate_worker_url(value)
+
+
+def test_worker_manager_keychain_config_lifecycle_and_adoption(tmp_path: Path) -> None:
+    secret = "SYNTHETIC_KEYCHAIN_SECRET"
+    commands: list[list[str]] = []
+    processes: list[object] = []
+
+    def command_runner(argv: list[str], **_kwargs: object) -> object:
+        commands.append(argv)
+        stdout = secret + "\n" if argv[1] == "find-generic-password" else ""
+        return SimpleNamespace(stdout=stdout)
+
+    class Process:
+        pid = 43210
+
+        def __init__(self) -> None:
+            self.alive = True
+            self.terminated = False
+
+        def poll(self) -> int | None:
+            return None if self.alive else 0
+
+        def terminate(self) -> None:
+            self.terminated = True
+            self.alive = False
+
+        def wait(self, timeout: int) -> int:
+            assert timeout == 10
+            return 0
+
+    def process_factory(argv: list[str], **kwargs: object) -> Process:
+        assert argv[1].endswith("pursers_worker.py")
+        assert argv[2].endswith("worker-one.toml")
+        assert kwargs["start_new_session"] is True
+        process = Process()
+        processes.append(process)
+        return process
+
+    manager = dashboard.WorkerManager(
+        tmp_path / "workers",
+        platform="darwin",
+        command_runner=command_runner,
+        process_factory=process_factory,
+        process_matches=lambda pid, path: pid == 9876 and path.name == "worker-one.toml",
+    )
+    result = manager.save(
+        {
+            "name": "worker-one",
+            "provider": "custom",
+            "base_url": "https://provider.invalid/v1",
+            "model": "model-one",
+            "api_key": secret,
+        },
+        "https://127.0.0.1:8766/mcp",
+    )
+    config_path = tmp_path / "workers" / "worker-one.toml"
+    document = tomllib.loads(config_path.read_text())
+    assert result == {"ok": True, "name": "worker-one", "key_stored": True}
+    assert stat.S_IMODE(config_path.stat().st_mode) == 0o600
+    assert document["boards"] == "registry"
+    assert document["llm"]["api_key_keychain"] == "worker-one"
+    assert secret not in config_path.read_text()
+    assert commands[0] == [
+        "/usr/bin/security", "add-generic-password", "-s", "pursers-worker",
+        "-a", "worker-one", "-U", "-w", secret,
+    ]
+
+    token_path = tmp_path / "seats" / "worker-one.jwt"
+    token_path.parent.mkdir()
+    token_path.write_text("SEAT_TOKEN")
+    token_path.chmod(0o600)
+    with pytest.raises(ValueError, match="seat missing"):
+        manager.start("worker-one", seat_exists=False)
+    started = manager.start("worker-one", seat_exists=True)
+    pid_path = tmp_path / "workers" / "worker-one.pid"
+    assert started["running"] is True
+    assert stat.S_IMODE(pid_path.stat().st_mode) == 0o600
+    assert manager.stop("worker-one")["running"] is False
+    assert processes[0].terminated is True
+    assert not pid_path.exists()
+
+    manager._write_private(  # exercise safe adoption of a matching pidfile
+        pid_path, dashboard._json_bytes({"pid": 9876, "name": "worker-one"})
+    )
+    adopted = manager.list({"worker-one"})[0]
+    assert adopted["running"] is True
+    assert adopted["adopted"] is True
+    assert adopted["seat_exists"] is True
+    assert secret not in json.dumps(adopted)
+
+
+def test_worker_provider_test_uses_keychain_without_echoing_secret(tmp_path: Path) -> None:
+    secret = "PROVIDER_TEST_SECRET"
+    authorization: list[str | None] = []
+
+    class Handler(dashboard.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            authorization.append(self.headers.get("Authorization"))
+            body = b'{"data":[]}'
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args: object) -> None:
+            return
+
+    server = dashboard.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    def command_runner(argv: list[str], **_kwargs: object) -> object:
+        return SimpleNamespace(
+            stdout=(secret + "\n") if argv[1] == "find-generic-password" else ""
+        )
+
+    manager = dashboard.WorkerManager(
+        tmp_path / "workers", platform="darwin", command_runner=command_runner
+    )
+    try:
+        manager.save(
+            {
+                "name": "provider-test",
+                "provider": "custom",
+                "base_url": f"http://127.0.0.1:{server.server_port}/v1",
+                "model": "model-one",
+                "api_key": secret,
+            },
+            "https://127.0.0.1:8766/mcp",
+        )
+        result = manager.test_provider("provider-test")
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+    assert result == {
+        "ok": True, "name": "provider-test", "provider_reachable": True
+    }
+    assert authorization == ["Bearer " + secret]
+    assert secret not in json.dumps(result)
+
+
+def test_worker_api_is_local_and_board_write_surface_is_unchanged(tmp_path: Path) -> None:
+    secret = "API_ENDPOINT_SECRET"
+
+    def command_runner(argv: list[str], **_kwargs: object) -> object:
+        return SimpleNamespace(stdout="")
+
+    manager = dashboard.WorkerManager(
+        tmp_path / "workers", platform="darwin", command_runner=command_runner
+    )
+
+    class Cache:
+        def resolve_central(self, value: str | None) -> str:
+            if value not in {None, "default"}:
+                raise KeyError(value)
+            return "default"
+
+        def central_url(self, _value: str | None) -> str:
+            return "https://127.0.0.1:8766/mcp"
+
+        def get(self) -> dict:
+            return {"agents": [{"agent_name": "endpoint-worker"}]}
+
+    server = dashboard.ThreadingHTTPServer(
+        ("127.0.0.1", 0), dashboard.make_handler(Cache(), worker_manager=manager)
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    try:
+        payload = {
+            "name": "endpoint-worker",
+            "provider": "custom",
+            "base_url": "https://provider.invalid/v1",
+            "model": "model-one",
+            "api_key": secret,
+        }
+        request = urllib.request.Request(
+            base + "/api/workers",
+            data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(request) as response:
+            saved_body = response.read().decode()
+        with urllib.request.urlopen(base + "/api/workers") as response:
+            listed_body = response.read().decode()
+        board_write = urllib.request.Request(
+            base + "/api/board/pursers",
+            data=b"{}",
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with pytest.raises(urllib.error.HTTPError) as captured:
+            urllib.request.urlopen(board_write)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+    assert captured.value.code == 404
+    assert secret not in saved_body
+    assert secret not in listed_body
+    assert json.loads(listed_body)["workers"][0]["seat_exists"] is True
+
+
+def test_workers_tab_renders_presets_actions_and_keychain_copy() -> None:
+    assert "API workers ·" in dashboard.HTML
+    assert "DeepSeek" not in dashboard.HTML  # presets arrive from the local API
+    assert 'data-worker-action="test"' in dashboard.HTML
+    assert 'data-worker-action="start"' in dashboard.HTML
+    assert 'data-worker-action="stop"' in dashboard.HTML
+    assert "Copy seat command" in dashboard.HTML
+    assert "macOS Keychain" in dashboard.HTML
+    assert "workerFormDirty&&!force" in dashboard.HTML
+    assert ".onclick=workerClick" in dashboard.HTML
+    assert "workerActionMessage" in dashboard.HTML
+    assert "board_state_update" not in dashboard.HTML
