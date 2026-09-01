@@ -63,6 +63,7 @@ from pursers_client import (
     JoinedIdentity,
 )
 from mcp.server.mcpserver import Context, MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 from agent_naming import resolve_agent_name
 from backlog import backlog_events, ticket_is_relevant
 
@@ -590,42 +591,218 @@ async def _join_for_call(
     return await client.board_join()
 
 
+class BoardJoinFailure(ToolError):
+    """Stable, non-sensitive classification for deferred startup failures."""
+
+    def __init__(self, cause_class: str, detail: str) -> None:
+        self.cause_class = cause_class
+        super().__init__(f"board join failed ({cause_class}): {detail}")
+
+
+def _nested_exceptions(exc: BaseException) -> list[BaseException]:
+    pending = [exc]
+    nested: list[BaseException] = []
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        nested.append(current)
+        if isinstance(current, BaseExceptionGroup):
+            pending.extend(current.exceptions)
+        if current.__cause__ is not None:
+            pending.append(current.__cause__)
+        elif current.__context__ is not None:
+            pending.append(current.__context__)
+    return nested
+
+
+def _classify_board_join_failure(exc: BaseException) -> BoardJoinFailure:
+    nested = _nested_exceptions(exc)
+    names = {type(item).__name__ for item in nested}
+    text = " ".join(str(item) for item in nested).casefold()
+    unreachable_names = {
+        "ConnectError",
+        "ConnectTimeout",
+        "NetworkError",
+        "ReadError",
+        "ReadTimeout",
+        "RemoteProtocolError",
+        "TimeoutError",
+    }
+    if names & unreachable_names or any(
+        marker in text
+        for marker in (
+            "all connection attempts failed",
+            "connection refused",
+            "name or service not known",
+            "nodename nor servname provided",
+        )
+    ):
+        return BoardJoinFailure("unreachable", "Central is unreachable")
+    if any(
+        marker in text
+        for marker in (
+            "401",
+            "403",
+            "authentication",
+            "forbidden",
+            "invalid token",
+            "unauthorized",
+        )
+    ) or (
+        "MCPError" in names and "server returned an error response" in text
+    ):
+        return BoardJoinFailure(
+            "auth", "Central rejected ONBOARD_CENTRAL_TOKEN"
+        )
+    return BoardJoinFailure("board", "Central rejected board join")
+
+
+class DeferredBoardConnection:
+    """Own a persistent BoardClient without touching Central before initialize."""
+
+    JOIN_TIMEOUT_S = 10.0
+    CLOSE_TIMEOUT_S = 5.0
+
+    def __init__(self, meter: BridgeStats) -> None:
+        self.meter = meter
+        self._client: MeteredBoardClient | None = None
+        self._task: asyncio.Task[None] | None = None
+        self._ready: asyncio.Future[
+            tuple[MeteredBoardClient | None, BoardJoinFailure | None]
+        ] | None = None
+        self._stop: asyncio.Event | None = None
+        self._lock = asyncio.Lock()
+        self._failure_logged = False
+
+    def _report_failure(self, failure: BoardJoinFailure) -> None:
+        if self._failure_logged:
+            return
+        self._failure_logged = True
+        _log(f"board join deferred/failed: {failure.cause_class}")
+
+    async def _run(
+        self,
+        ready: asyncio.Future[
+            tuple[MeteredBoardClient | None, BoardJoinFailure | None]
+        ],
+        stop: asyncio.Event,
+    ) -> None:
+        client = MeteredBoardClient(
+            CENTRAL_URL,
+            CENTRAL_TOKEN,
+            BOARD_ID,
+            agent_name=AGENT_NAME,
+            meter=self.meter,
+        )
+        entered = False
+        try:
+            try:
+                async with asyncio.timeout(self.JOIN_TIMEOUT_S):
+                    await client.__aenter__()
+                entered = True
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                failure = _classify_board_join_failure(exc)
+                self._report_failure(failure)
+                if not ready.done():
+                    ready.set_result((None, failure))
+                return
+            self._client = client
+            if not ready.done():
+                ready.set_result((client, None))
+            _log(
+                f"joined board={BOARD_ID!r} as agent={AGENT_NAME!r} "
+                f"agent_id={client.identity.agent_id if client.identity else '?'}"
+            )
+            await stop.wait()
+        finally:
+            if not ready.done():
+                ready.set_result(
+                    (
+                        None,
+                        BoardJoinFailure(
+                            "board", "board join was cancelled before completion"
+                        ),
+                    )
+                )
+            if entered:
+                await client.__aexit__(None, None, None)
+            if self._client is client:
+                self._client = None
+
+    async def client(self) -> MeteredBoardClient:
+        if not CENTRAL_TOKEN:
+            failure = BoardJoinFailure(
+                "configuration", "ONBOARD_CENTRAL_TOKEN is not set"
+            )
+            self._report_failure(failure)
+            raise failure
+        async with self._lock:
+            if self._client is not None:
+                return self._client
+            if self._task is None or self._task.done():
+                loop = asyncio.get_running_loop()
+                self._ready = loop.create_future()
+                self._stop = asyncio.Event()
+                self._task = asyncio.create_task(
+                    self._run(self._ready, self._stop),
+                    name="pursers-deferred-board-join",
+                )
+            ready = self._ready
+        if ready is None:  # pragma: no cover - guarded by the lock above.
+            raise RuntimeError("deferred board join has no readiness signal")
+        client, failure = await asyncio.shield(ready)
+        if failure is not None:
+            raise failure
+        if client is None:  # pragma: no cover - readiness tuple is exhaustive.
+            raise RuntimeError("deferred board join returned no client")
+        return client
+
+    async def close(self) -> None:
+        async with self._lock:
+            task = self._task
+            stop = self._stop
+        if task is None:
+            return
+        if stop is not None:
+            stop.set()
+        try:
+            await asyncio.wait_for(
+                asyncio.shield(task), timeout=self.CLOSE_TIMEOUT_S
+            )
+        except TimeoutError:
+            task.cancel()
+            try:
+                await task
+            except BaseException:
+                pass
+
+
 @asynccontextmanager
 async def _lifespan(server: MCPServer) -> AsyncIterator[dict[str, Any]]:
-    """Join the board once, under the server's top-level task.
-
-    This matters structurally, not just for efficiency: BoardClient's
-    __aenter__ opens an httpx2 client and a streamable-http transport, each
-    of which creates its own anyio task group / cancel scope. anyio requires
-    those to be entered and exited from a consistent place in the task tree.
-    Opening the connection inside a per-request tool-call task (a sibling of
-    every other request's task, not an ancestor of them) and then reusing it
-    from later requests violates that nesting and crashes the dispatcher with
-    "Attempted to exit a cancel scope that isn't the current task's current
-    cancel scope." The lifespan runs in the server's top-level task, which
-    every per-request task is a descendant of, so the connection it opens
-    here is safe to reuse from any later tool call.
-    """
+    """Create only local state before initialize; join lazily on first tool."""
     meter = BridgeStats(bridge_stats_path())
-    client = MeteredBoardClient(
-        CENTRAL_URL,
-        CENTRAL_TOKEN,
-        BOARD_ID,
-        agent_name=AGENT_NAME,
-        meter=meter,
-    )
-    await client.__aenter__()
-    _log(
-        f"joined board={BOARD_ID!r} as agent={AGENT_NAME!r} "
-        f"agent_id={client.identity.agent_id if client.identity else '?'}"
-    )
+    connection = DeferredBoardConnection(meter)
     try:
-        yield {"client": client}
+        yield {"connection": connection}
     finally:
-        await client.__aexit__(None, None, None)
+        await connection.close()
 
 
 mcp = MCPServer("Pursers Wait Bridge", version="0.1.0", lifespan=_lifespan)
+
+
+async def _client_for_tool(ctx: Context) -> BoardClient:
+    lifespan = ctx.request_context.lifespan_context
+    client = lifespan.get("client")
+    if client is not None:
+        return client
+    connection: DeferredBoardConnection = lifespan["connection"]
+    return await connection.client()
 
 
 def _parse_project_registry(result: dict[str, Any]) -> dict[str, Any]:
@@ -718,7 +895,7 @@ def _home_cursor(since_seq: int | dict[str, int]) -> int:
 @mcp.tool()
 async def project_registry_get(ctx: Context) -> dict[str, Any]:
     """Return the parsed project registry stored on the home board."""
-    client: BoardClient = ctx.request_context.lifespan_context["client"]
+    client = await _client_for_tool(ctx)
     return await _read_project_registry(client)
 
 
@@ -972,7 +1149,7 @@ async def a2a_wait(
     boards: list[str] | str | None = None,
 ) -> dict[str, Any]:
     """Wait for work and record one context-pressure sample per touched seat."""
-    client: BoardClient = ctx.request_context.lifespan_context["client"]
+    client = await _client_for_tool(ctx)
     meter = getattr(client, "meter", None)
     if meter is None:
         return await _a2a_wait_impl(
@@ -1474,7 +1651,6 @@ def main() -> None:
         return
     if not CENTRAL_TOKEN:
         print("FATAL: ONBOARD_CENTRAL_TOKEN is not set", file=sys.stderr)
-        raise SystemExit(1)
     mcp.run(transport="stdio")
 
 
