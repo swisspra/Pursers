@@ -211,10 +211,34 @@ def test_apply_failure_retains_profile_from_concurrent_creator(
     with pytest.raises(IntegrationError) as caught:
         cli.command_setup(args)
     assert profile_path.read_text(encoding="utf-8") == '{"concurrent": true}\n'
+    assert "Personal profile identity resolution failed" in str(caught.value)
     assert str(profile_path.parent) in str(caught.value)
     assert "profiles list" in str(caught.value)
     assert "profiles prune --orphaned --dry-run" in str(caught.value)
     assert "profiles prune --orphaned --commit" in str(caught.value)
+
+
+def test_apply_failure_before_profile_creation_preserves_original_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    args = _setup_args(tmp_path, apply=True, host_id="claude-code")
+    profile_path = args.profiles_root / ("project-" + "9" * 24) / "profile.json"
+    api = _api_for(args.profiles_root, profile_path)
+    original = IntegrationError("synthetic setup port failure")
+    monkeypatch.setattr(cli, "safe_component_summary", dict)
+    monkeypatch.setattr(cli, "_profile_api", lambda: api)
+    monkeypatch.setattr(
+        cli,
+        "_setup_port",
+        lambda _api, _args: (_ for _ in ()).throw(original),
+    )
+
+    with pytest.raises(IntegrationError) as caught:
+        cli.command_setup(args)
+
+    assert caught.value is original
+    assert str(caught.value) == "synthetic setup port failure"
+    assert not profile_path.parent.exists()
 
 
 def test_apply_failure_preserves_preexisting_profile(

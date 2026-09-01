@@ -320,7 +320,9 @@ def _authenticated_status(
             async with AsyncExitStack() as stack:
                 http = await stack.enter_async_context(
                     client_module.httpx2.AsyncClient(
-                        headers={"Authorization": f"Bearer {context.capability_token}"},
+                        headers={
+                            "Authorization": f"Bearer {context.capability_token}"
+                        },
                         timeout=client_module.httpx2.Timeout(10.0),
                         trust_env=False,
                     )
@@ -675,8 +677,11 @@ def command_setup(args: argparse.Namespace) -> dict[str, Any]:
         )
         return _setup_integration(args, profile, identity)
     except (IntegrationError, OSError, ValueError) as exc:
+        if not profile_path.parent.exists():
+            raise
         raise IntegrationError(
-            "setup failed; no profile was deleted. Inspect the expected profile path at "
+            f"setup failed: {exc}; no profile was deleted. "
+            "Inspect the expected profile path at "
             f"{profile_path.parent} with `profiles list`; remove it only after it is "
             "reported orphaned by `profiles prune --orphaned --dry-run`, then use "
             "`profiles prune --orphaned --commit`"
