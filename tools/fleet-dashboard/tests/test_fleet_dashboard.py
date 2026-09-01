@@ -629,8 +629,236 @@ def test_ticket_flow_classifies_bounded_rows_and_closed_today() -> None:
     }
 
 
+def test_routes_assemble_event_provenance_rework_and_principal_collisions() -> None:
+    now = datetime(2030, 1, 8, 12, tzinfo=timezone.utc)
+    agents = [
+        {
+            "agent_id": "AI-create",
+            "agent_name": "shared-name",
+            "principal_id": "PR-creator-111111",
+        },
+        {
+            "agent_id": "AI-worker",
+            "agent_name": "worker",
+            "principal_id": "PR-worker-aaaaaa",
+        },
+        {
+            "agent_id": "AI-review",
+            "agent_name": "shared-name",
+            "principal_id": "PR-reviewer-222222",
+        },
+    ]
+    events = [
+        {
+            "seq": 1,
+            "kind": "ticket_created",
+            "ticket_id": "TK-route",
+            "actor": "AI-create",
+            "status_from": "missing",
+            "status_to": "open",
+            "occurred_at": "2030-01-02T12:00:00+00:00",
+        },
+        {
+            "seq": 2,
+            "kind": "ticket_status_changed",
+            "ticket_id": "TK-route",
+            "actor": "AI-worker",
+            "status_from": "open",
+            "status_to": "claimed",
+            "occurred_at": "2030-01-03T12:00:00+00:00",
+        },
+        {
+            "seq": 3,
+            "kind": "ticket_status_changed",
+            "ticket_id": "TK-route",
+            "actor": "AI-worker",
+            "status_from": "claimed",
+            "status_to": "submitted",
+            "occurred_at": "2030-01-04T12:00:00+00:00",
+        },
+        {
+            "seq": 4,
+            "kind": "ticket_status_changed",
+            "ticket_id": "TK-route",
+            "actor": "AI-review",
+            "status_from": "submitted",
+            "status_to": "open",
+            "occurred_at": "2030-01-05T12:00:00+00:00",
+            "review_verdict": "reject",
+            "submitted_by_agent_id": "AI-worker",
+            "submitted_by_agent_name": "worker",
+            "submitted_by_principal_id": "PR-worker-aaaaaa",
+            "reviewed_by_agent_id": "AI-review",
+            "reviewed_by_agent_name": "shared-name",
+            "reviewed_by_principal_id": "PR-reviewer-222222",
+        },
+        {
+            "seq": 5,
+            "kind": "ticket_status_changed",
+            "ticket_id": "TK-route",
+            "actor": "AI-worker",
+            "status_from": "open",
+            "status_to": "claimed",
+            "occurred_at": "2030-01-06T12:00:00+00:00",
+        },
+        {
+            "seq": 6,
+            "kind": "ticket_status_changed",
+            "ticket_id": "TK-route",
+            "actor": "AI-worker",
+            "status_from": "claimed",
+            "status_to": "submitted",
+            "occurred_at": "2030-01-07T11:00:00+00:00",
+        },
+        {
+            "seq": 7,
+            "kind": "ticket_status_changed",
+            "ticket_id": "TK-route",
+            "actor": "AI-review",
+            "status_from": "submitted",
+            "status_to": "closed",
+            "occurred_at": "2030-01-07T12:00:00+00:00",
+            "review_verdict": "approve",
+            "submitted_by_agent_id": "AI-worker",
+            "submitted_by_agent_name": "worker",
+            "submitted_by_principal_id": "PR-worker-aaaaaa",
+            "reviewed_by_agent_id": "AI-review",
+            "reviewed_by_agent_name": "shared-name",
+            "reviewed_by_principal_id": "PR-reviewer-222222",
+        },
+    ]
+
+    result = dashboard.assemble_provenance(
+        {
+            "agents": agents,
+            "tickets": [
+                {
+                    "ticket_id": "TK-route",
+                    "title": "A routed ticket",
+                    "status": "closed",
+                    "updated_at": "2030-01-07T12:00:00+00:00",
+                }
+            ],
+            "total_counts": {"tickets": 1},
+            "omitted_counts": {"tickets": 0},
+        },
+        events,
+        now=now,
+    )
+
+    route = result["rows"][0]
+    assert route["created"]["label"] == "shared-name · …111111"
+    assert route["executed"]["label"] == "worker"
+    assert route["submitted"]["label"] == "worker"
+    assert route["reviewed"]["label"] == "shared-name · …222222"
+    assert route["rework_count"] == 1
+    assert route["status"] == "closed"
+    worker = next(seat for seat in result["seats"] if seat["label"] == "worker")
+    assert worker == {
+        "label": "worker",
+        "created": 0,
+        "executed": 1,
+        "reviewed": 0,
+        "rework_received": 1,
+        "rework_received_rate": 100.0,
+    }
+
+
+def test_routes_window_and_truncation_note_are_explicit() -> None:
+    now = datetime(2030, 1, 8, 12, tzinfo=timezone.utc)
+    result = dashboard.assemble_provenance(
+        {
+            "agents": [],
+            "tickets": [
+                {
+                    "ticket_id": "TK-recent",
+                    "updated_at": "2030-01-08T11:00:00+00:00",
+                },
+                {
+                    "ticket_id": "TK-old",
+                    "updated_at": "2029-12-01T00:00:00+00:00",
+                },
+            ],
+            "total_counts": {"tickets": 5},
+            "omitted_counts": {"tickets": 3},
+            "truncated": True,
+        },
+        [],
+        now=now,
+        event_window_truncated=True,
+    )
+
+    assert [row["id"] for row in result["rows"]] == ["TK-recent"]
+    assert result["window_start"] == "2030-01-01T12:00:00+00:00"
+    assert result["truncated"] is True
+    assert "Default window: last 7 days by updated_at." in result["truncation_note"]
+    assert "2 of 5 snapshot tickets (3 omitted)" in result["truncation_note"]
+    assert "ack=false" in result["truncation_note"]
+
+
+def test_routes_view_escapes_hostile_identity_and_ticket_strings() -> None:
+    script = dashboard.HTML.split("<script>", 1)[1].split("</script>", 1)[0]
+    lines = script.splitlines()
+
+    def source(prefix: str) -> str:
+        return next(line for line in lines if line.startswith(prefix))
+
+    hostile = '<img src=x onerror="alert(1)">'
+    route_data = {
+        "rows": [
+            {
+                "id": "TK-hostile",
+                "title": hostile,
+                "status": "closed",
+                "created": {"label": hostile, "at": "2030-01-01T00:00:00Z"},
+                "executed": None,
+                "submitted": None,
+                "reviewed": None,
+                "rework_count": 0,
+                "updated_at": "2030-01-01T00:00:00Z",
+            }
+        ],
+        "seats": [
+            {
+                "label": hostile,
+                "created": 1,
+                "executed": 0,
+                "reviewed": 0,
+                "rework_received": 0,
+                "rework_received_rate": 0,
+            }
+        ],
+        "row_returned": 1,
+        "row_total": 1,
+        "truncated": True,
+        "truncation_note": hostile,
+    }
+    program = "\n".join(
+        [
+            source("const esc="),
+            source("const fmt="),
+            source("const routeStage="),
+            source("function routesView("),
+            "const filterNeedle='';",
+            f"console.log(routesView({{board:{{board_id:'pursers'}},routes:{json.dumps(route_data)}}},{{central:'personal',board:'pursers'}}));",
+        ]
+    )
+    completed = subprocess.run(
+        ["node", "-e", program],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert hostile not in completed.stdout
+    assert "&lt;img src=x onerror=&quot;alert(1)&quot;&gt;" in completed.stdout
+    assert 'id="routes-view"' in completed.stdout
+
+
 def test_detail_views_include_filter_routes_mobile_containment_and_escape_calls() -> None:
-    assert "tickets|timeline|changes|flow" in dashboard.HTML
+    assert "tickets|timeline|changes|flow|routes" in dashboard.HTML
+    assert "g then r" in dashboard.HTML
+    assert "boardHref(current.central,current.board,'routes')" in dashboard.HTML
     assert "e.key==='/'" in dashboard.HTML
     assert "filterNeedle" in dashboard.HTML
     assert "overflow-x:hidden" in dashboard.HTML

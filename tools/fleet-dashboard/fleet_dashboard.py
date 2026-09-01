@@ -36,6 +36,9 @@ SNAPSHOT_MAX_BYTES = 300_000
 EVENT_SCAN_LIMIT = 50
 EVENT_MAX_BYTES = 100_000
 DETAIL_EVENT_SCAN_LIMIT = 100
+ROUTE_WINDOW_DAYS = 7
+MAX_ROUTE_ROWS = 150
+MAX_ROUTE_SEATS = 100
 API_MAX_BYTES = 300_000
 MAX_BOARDS = 50
 MAX_TICKET_ROWS = 25
@@ -590,6 +593,331 @@ def classify_ticket_flow(
     return flow
 
 
+def _provenance_identity(
+    *,
+    name: Any = None,
+    agent_id: Any = None,
+    principal_id: Any = None,
+    agents_by_id: dict[str, dict[str, Any]],
+) -> dict[str, str | None] | None:
+    """Return one bounded actor identity, enriched from the snapshot seat map."""
+    safe_agent_id = _clip(agent_id, MAX_LABEL_CHARS) or None
+    known = agents_by_id.get(safe_agent_id or "", {})
+    safe_name = _clip(name or known.get("agent_name") or safe_agent_id, MAX_LABEL_CHARS)
+    if not safe_name:
+        return None
+    return {
+        "name": safe_name,
+        "agent_id": safe_agent_id,
+        "principal_id": _clip(
+            principal_id or known.get("principal_id"), MAX_LABEL_CHARS
+        )
+        or None,
+        "label": safe_name,
+    }
+
+
+def _provenance_stage(
+    identity: dict[str, str | None] | None, at: Any
+) -> dict[str, Any] | None:
+    if identity is None:
+        return None
+    return {**identity, "at": _clip(at, 40) or None}
+
+
+def assemble_provenance(
+    snapshot: dict[str, Any],
+    events: list[Any],
+    *,
+    now: datetime,
+    event_window_truncated: bool = False,
+) -> dict[str, Any]:
+    """Assemble a seven-day ticket route from bounded snapshot and journal data."""
+    current = now.astimezone(timezone.utc)
+    cutoff = current - timedelta(days=ROUTE_WINDOW_DAYS)
+    source_agents = snapshot.get("agents")
+    agents_by_id = (
+        {
+            str(agent.get("agent_id")): agent
+            for agent in source_agents
+            if isinstance(agent, dict) and agent.get("agent_id")
+        }
+        if isinstance(source_agents, list)
+        else {}
+    )
+    source_tickets = snapshot.get("tickets")
+    source_tickets = source_tickets if isinstance(source_tickets, list) else []
+    rows: dict[str, dict[str, Any]] = {}
+
+    def identity(
+        *, name: Any = None, agent_id: Any = None, principal_id: Any = None
+    ) -> dict[str, str | None] | None:
+        return _provenance_identity(
+            name=name,
+            agent_id=agent_id,
+            principal_id=principal_id,
+            agents_by_id=agents_by_id,
+        )
+
+    for ticket in source_tickets:
+        if not isinstance(ticket, dict):
+            continue
+        ticket_id = _clip(ticket.get("ticket_id"), MAX_LABEL_CHARS)
+        if not ticket_id:
+            continue
+        submissions = ticket.get("submission_history")
+        latest_submission = (
+            submissions[-1]
+            if isinstance(submissions, list)
+            and submissions
+            and isinstance(submissions[-1], dict)
+            else {}
+        )
+        reviews = ticket.get("review_history")
+        latest_review = (
+            reviews[-1]
+            if isinstance(reviews, list)
+            and reviews
+            and isinstance(reviews[-1], dict)
+            else {}
+        )
+        rows[ticket_id] = {
+            "id": ticket_id,
+            "title": _clip(ticket.get("title") or "(untitled)", MAX_TITLE_CHARS),
+            "status": _clip(ticket.get("status") or "unknown", 32),
+            "updated_at": _clip(ticket.get("updated_at"), 40) or None,
+            "created": _provenance_stage(
+                identity(
+                    name=ticket.get("created_by"),
+                    agent_id=ticket.get("created_by_agent_id"),
+                    principal_id=ticket.get("created_by_principal_id"),
+                ),
+                ticket.get("created_at"),
+            ),
+            "executed": _provenance_stage(
+                identity(
+                    name=ticket.get("claimed_by"),
+                    agent_id=ticket.get("claimed_by_agent_id"),
+                    principal_id=ticket.get("claimed_by_principal_id"),
+                ),
+                ticket.get("claimed_at"),
+            ),
+            "submitted": _provenance_stage(
+                identity(
+                    name=(
+                        latest_review.get("submitted_by_agent_name")
+                        or ticket.get("submitted_by_agent_name")
+                    ),
+                    agent_id=(
+                        latest_submission.get("submitted_by_agent_id")
+                        or ticket.get("submitted_by_agent_id")
+                    ),
+                    principal_id=(
+                        latest_submission.get("submitted_by_principal_id")
+                        or ticket.get("submitted_by_principal_id")
+                    ),
+                ),
+                latest_submission.get("submitted_at") or ticket.get("submitted_at"),
+            ),
+            "reviewed": _provenance_stage(
+                identity(
+                    name=(
+                        latest_review.get("reviewed_by_agent_name")
+                        or ticket.get("reviewed_by_agent_name")
+                    ),
+                    agent_id=(
+                        latest_review.get("reviewed_by_agent_id")
+                        or ticket.get("reviewed_by_agent_id")
+                    ),
+                    principal_id=(
+                        latest_review.get("reviewed_by_principal_id")
+                        or ticket.get("reviewed_by_principal_id")
+                    ),
+                ),
+                latest_review.get("reviewed_at") or ticket.get("reviewed_at"),
+            ),
+            "rework_count": _nonnegative_int(ticket.get("rejection_count")),
+        }
+
+    event_reworks: dict[str, int] = {}
+    for event in sorted(
+        (item for item in events if isinstance(item, dict)),
+        key=lambda item: item.get("seq") if isinstance(item.get("seq"), int) else -1,
+    ):
+        ticket_id = _clip(event.get("ticket_id"), MAX_LABEL_CHARS)
+        if not ticket_id:
+            continue
+        row = rows.setdefault(
+            ticket_id,
+            {
+                "id": ticket_id,
+                "title": "(event-only ticket)",
+                "status": "unknown",
+                "updated_at": None,
+                "created": None,
+                "executed": None,
+                "submitted": None,
+                "reviewed": None,
+                "rework_count": 0,
+            },
+        )
+        occurred_at = _clip(event.get("occurred_at"), 40) or None
+        if _time_sort_value(occurred_at) >= _time_sort_value(row.get("updated_at")):
+            row["updated_at"] = occurred_at
+            if event.get("status_to"):
+                row["status"] = _clip(event.get("status_to"), 32)
+        actor = identity(agent_id=event.get("actor"))
+        if event.get("kind") == "ticket_created" or (
+            event.get("status_from") == "missing" and event.get("status_to") == "open"
+        ):
+            row["created"] = row["created"] or _provenance_stage(actor, occurred_at)
+        if event.get("status_to") in ACTIVE_CLAIM_STATES:
+            row["executed"] = _provenance_stage(actor, occurred_at)
+        if event.get("status_to") in SUBMITTED_STATES:
+            row["submitted"] = _provenance_stage(actor, occurred_at)
+
+        submitted = identity(
+            name=event.get("submitted_by_agent_name"),
+            agent_id=event.get("submitted_by_agent_id"),
+            principal_id=event.get("submitted_by_principal_id"),
+        )
+        if submitted is not None:
+            previous_at = row["submitted"].get("at") if row["submitted"] else None
+            row["submitted"] = _provenance_stage(submitted, previous_at)
+        reviewer = identity(
+            name=event.get("reviewed_by_agent_name"),
+            agent_id=event.get("reviewed_by_agent_id") or event.get("reviewed_by"),
+            principal_id=event.get("reviewed_by_principal_id"),
+        )
+        if reviewer is not None:
+            row["reviewed"] = _provenance_stage(reviewer, occurred_at)
+        elif event.get("status_to") == "closed":
+            row["reviewed"] = _provenance_stage(actor, occurred_at)
+
+        bounced = event.get("review_verdict") == "reject" or (
+            event.get("status_from") == "submitted"
+            and event.get("status_to") in {"open", "claimed", "rejected"}
+        )
+        if bounced:
+            event_reworks[ticket_id] = event_reworks.get(ticket_id, 0) + 1
+
+    for ticket_id, count in event_reworks.items():
+        rows[ticket_id]["rework_count"] = max(rows[ticket_id]["rework_count"], count)
+
+    selected = [
+        row
+        for row in rows.values()
+        if (updated := _parse_time(row.get("updated_at"))) is not None
+        and updated >= cutoff
+    ]
+    selected.sort(key=lambda row: row["updated_at"] or "", reverse=True)
+
+    principals_by_name: dict[str, set[str]] = {}
+    for row in selected:
+        for field in ("created", "executed", "submitted", "reviewed"):
+            stage = row[field]
+            if stage and stage.get("principal_id"):
+                principals_by_name.setdefault(stage["name"], set()).add(
+                    stage["principal_id"]
+                )
+    for row in selected:
+        for field in ("created", "executed", "submitted", "reviewed"):
+            stage = row[field]
+            if stage and len(principals_by_name.get(stage["name"], set())) > 1:
+                stage["label"] = f"{stage['name']} · …{stage['principal_id'][-6:]}"
+
+    seat_sets: dict[tuple[str, str], dict[str, Any]] = {}
+
+    def seat_for(stage: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not stage:
+            return None
+        key = (
+            stage.get("name") or "",
+            stage.get("principal_id") or stage.get("agent_id") or "",
+        )
+        return seat_sets.setdefault(
+            key,
+            {
+                "label": stage.get("label") or stage.get("name") or "Unknown",
+                "created": set(),
+                "executed": set(),
+                "reviewed": set(),
+                "reworked": set(),
+            },
+        )
+
+    for row in selected:
+        for field in ("created", "executed", "reviewed"):
+            seat = seat_for(row[field])
+            if seat is not None:
+                seat[field].add(row["id"])
+        if row["rework_count"]:
+            seat = seat_for(row["submitted"] or row["executed"])
+            if seat is not None:
+                seat["reworked"].add(row["id"])
+
+    seats = []
+    for seat in seat_sets.values():
+        executed = len(seat["executed"])
+        seats.append(
+            {
+                "label": seat["label"],
+                "created": len(seat["created"]),
+                "executed": executed,
+                "reviewed": len(seat["reviewed"]),
+                "rework_received": len(seat["reworked"]),
+                "rework_received_rate": round(
+                    100 * len(seat["reworked"]) / executed, 1
+                ) if executed else 0.0,
+            }
+        )
+    seats.sort(
+        key=lambda seat: (
+            -(seat["created"] + seat["executed"] + seat["reviewed"]),
+            seat["label"],
+        )
+    )
+
+    total_counts = snapshot.get("total_counts")
+    total_tickets = (
+        total_counts.get("tickets")
+        if isinstance(total_counts, dict) and type(total_counts.get("tickets")) is int
+        else len(source_tickets)
+    )
+    omitted_counts = snapshot.get("omitted_counts")
+    snapshot_omitted = (
+        _nonnegative_int(omitted_counts.get("tickets"))
+        if isinstance(omitted_counts, dict)
+        else max(0, total_tickets - len(source_tickets))
+    )
+    route_total = len(selected)
+    route_truncated = bool(
+        snapshot.get("truncated")
+        or snapshot_omitted
+        or event_window_truncated
+        or route_total > MAX_ROUTE_ROWS
+        or len(seats) > MAX_ROUTE_SEATS
+    )
+    note = (
+        f"Default window: last {ROUTE_WINDOW_DAYS} days by updated_at. "
+        f"Bounded source returned {len(source_tickets)} of {total_tickets} snapshot "
+        f"tickets ({snapshot_omitted} omitted) and {len(events)} catchup events "
+        f"with ack=false; older lifecycle steps may be absent."
+    )
+    return {
+        "window_days": ROUTE_WINDOW_DAYS,
+        "window_start": cutoff.isoformat(),
+        "rows": selected[:MAX_ROUTE_ROWS],
+        "row_total": route_total,
+        "row_returned": min(route_total, MAX_ROUTE_ROWS),
+        "row_omitted": max(0, route_total - MAX_ROUTE_ROWS),
+        "seats": seats[:MAX_ROUTE_SEATS],
+        "seat_omitted": max(0, len(seats) - MAX_ROUTE_SEATS),
+        "truncated": route_truncated,
+        "truncation_note": note,
+    }
+
+
 def _refresh_detail_views(result: dict[str, Any], now: datetime) -> None:
     result["timeline"] = group_timeline(result["events"])
     result["changes_24h"] = summarize_changes(
@@ -617,6 +945,12 @@ def project_board_detail(
     tickets.sort(key=lambda item: status_rank.get(item["status"], 3))
 
     source_events = raw.get("events") if isinstance(raw.get("events"), list) else []
+    routes = assemble_provenance(
+        snapshot,
+        source_events,
+        now=now,
+        event_window_truncated=bool(raw.get("event_window_truncated")),
+    )
     events = []
     for event in source_events[-DETAIL_EVENT_SCAN_LIMIT:]:
         if not isinstance(event, dict):
@@ -652,6 +986,7 @@ def project_board_detail(
         "tickets": tickets[:MAX_DETAIL_TICKET_ROWS],
         "events": events,
         "event_returned": len(events),
+        "routes": routes,
         "coordinator_findings": project_coordinator_findings(snapshot),
         "ticket_total": max(snapshot_ticket_total, len(source_tickets)),
         "ticket_returned": min(len(tickets), MAX_DETAIL_TICKET_ROWS),
@@ -664,6 +999,8 @@ def project_board_detail(
             "description_chars": MAX_DESCRIPTION_CHARS,
             "required_fields_per_ticket": MAX_REQUIRED_FIELDS,
             "events": DETAIL_EVENT_SCAN_LIMIT,
+            "route_rows": MAX_ROUTE_ROWS,
+            "route_seats": MAX_ROUTE_SEATS,
         },
     }
     result["ticket_omitted"] = max(
@@ -683,6 +1020,22 @@ def project_board_detail(
         result["event_returned"] = len(result["events"])
         result["truncated"] = True
         _refresh_detail_views(result, now)
+    route_rows_trimmed = False
+    while len(_json_bytes(result)) > API_MAX_BYTES and result["routes"]["rows"]:
+        result["routes"]["rows"].pop()
+        result["routes"]["row_returned"] = len(result["routes"]["rows"])
+        result["routes"]["row_omitted"] = max(
+            0,
+            result["routes"]["row_total"]
+            - result["routes"]["row_returned"],
+        )
+        result["routes"]["truncated"] = True
+        result["truncated"] = True
+        route_rows_trimmed = True
+    if route_rows_trimmed:
+        result["routes"]["truncation_note"] += (
+            " Additional route rows were omitted by the dashboard API byte cap."
+        )
     if len(_json_bytes(result)) > API_MAX_BYTES:
         raise ValueError("detail projection metadata exceeds API byte cap")
     return result
@@ -987,11 +1340,13 @@ class FleetFetcher:
                     int(snapshot.get("latest_seq", 0)),
                     event_limit,
                 )
+                latest_seq = int(snapshot.get("latest_seq", 0))
             return {
                 "label": label,
                 "board_id": board_id,
                 "snapshot": snapshot,
                 "events": events,
+                "event_window_truncated": latest_seq > event_limit,
             }
         except Exception as exc:  # noqa: BLE001 - isolate one unavailable board.
             return {
@@ -1234,19 +1589,21 @@ function updateConnectionState(){const banner=document.querySelector('#connectio
 function markConnectionSuccess(key,at=new Date()){connectionFailures.delete(key);lastSuccessAt=at;updateConnectionState()}
 function markConnectionFailure(key){connectionFailures.add(key);updateConnectionState()}
 function applyPreferences(){document.documentElement.dataset.theme=theme;document.documentElement.dataset.density=density;document.querySelector('#theme-toggle').textContent=theme==='dark'?'Light theme':'Dark theme';document.querySelector('#density-toggle').textContent=density==='comfortable'?'Compact density':'Comfortable density'}
-function route(){let m=location.hash.match(/^#\/central\/([^/?]+)\/(board\/([^/?]+)(?:\/(tickets|timeline|changes|flow))?|overhead|config)(?:\?(.*))?$/);try{if(m){const central=decodeURIComponent(m[1]);if(!/^[A-Za-z0-9._-]{1,80}$/.test(central))return null;if(m[2]==='overhead'||m[2]==='config')return{central,kind:m[2]};const board=decodeURIComponent(m[3]);if(!/^[A-Za-z0-9._-]{1,80}$/.test(board))return null;const q=new URLSearchParams(m[5]||'');return{central,kind:'board',board,view:m[4]||'tickets',ticket:q.get('ticket'),since:q.get('since')}}m=location.hash.match(/^#\/board\/([^/?]+)(?:\/(tickets|timeline|changes|flow))?(?:\?(.*))?$/);if(m){const board=decodeURIComponent(m[1]),q=new URLSearchParams(m[3]||'');return/^[A-Za-z0-9._-]{1,80}$/.test(board)?{central:defaultCentral,kind:'board',board,view:m[2]||'tickets',ticket:q.get('ticket'),since:q.get('since')}:null}if(location.hash==='#/config')return{central:defaultCentral,kind:'config'};return null}catch{return null}}
+function route(){let m=location.hash.match(/^#\/central\/([^/?]+)\/(board\/([^/?]+)(?:\/(tickets|timeline|changes|flow|routes))?|overhead|config)(?:\?(.*))?$/);try{if(m){const central=decodeURIComponent(m[1]);if(!/^[A-Za-z0-9._-]{1,80}$/.test(central))return null;if(m[2]==='overhead'||m[2]==='config')return{central,kind:m[2]};const board=decodeURIComponent(m[3]);if(!/^[A-Za-z0-9._-]{1,80}$/.test(board))return null;const q=new URLSearchParams(m[5]||'');return{central,kind:'board',board,view:m[4]||'tickets',ticket:q.get('ticket'),since:q.get('since')}}m=location.hash.match(/^#\/board\/([^/?]+)(?:\/(tickets|timeline|changes|flow|routes))?(?:\?(.*))?$/);if(m){const board=decodeURIComponent(m[1]),q=new URLSearchParams(m[3]||'');return/^[A-Za-z0-9._-]{1,80}$/.test(board)?{central:defaultCentral,kind:'board',board,view:m[2]||'tickets',ticket:q.get('ticket'),since:q.get('since')}:null}if(location.hash==='#/config')return{central:defaultCentral,kind:'config'};return null}catch{return null}}
 function renderCentral(d){const central=d.central,s=d.pool_summary,boards=filterHomeBoards(d.boards,filterNeedle),agents=d.agents.filter(a=>matches([a.agent_name,a.pool_status,...a.boards],filterNeedle));return `<section class="central-group" data-central="${esc(central)}"><div class="top central-heading"><div><h2>${esc(central)}</h2><p class="muted">Independent central trust domain</p></div><nav class="tabs"><a class="tab" href="${centralHref(central,'overhead')}">Overhead</a><a class="tab" href="${centralHref(central,'config')}">Config</a></nav></div><section class="strip">${['online','busy','available','stale'].map(k=>`<div class="metric"><span>${esc(k)}</span><b>${esc(s[k])}</b></div>`).join('')}</section><section class="grid">${boards.map(b=>`<article class="card"><a class="board-link" href="${boardHref(central,b.board_id)}"><div class="top"><div><h2>${esc(b.label)}</h2><span class="meta">${esc(b.board_id)}</span></div>${b.truncated?'<span class="status">bounded view</span>':''}</div></a>${b.error?`<p class="error">Unavailable: ${esc(b.error)}</p>`:`<div class="counts">${Object.entries(b.counts).map(([k,v])=>`<span class="pill">${esc(k.replace('_',' '))}: <b>${esc(v)}</b></span>`).join('')}</div><div class="table-scroll"><table><thead><tr><th>Ticket</th><th>Title</th><th>Status</th><th class="hide-small">Claimed by</th></tr></thead><tbody>${b.tickets.length?b.tickets.map(t=>`<tr><td><a class="id" href="${ticketHref(central,b.board_id,t.id)}">${esc(t.id)}</a></td><td>${esc(t.title)}</td><td><span class="status">${esc(t.status)}</span></td><td class="hide-small">${esc(t.claimed_by||'—')}</td></tr>`).join(''):'<tr><td colspan="4" class="empty">No matching tickets</td></tr>'}</tbody></table></div>`}</article>`).join('')||'<p class="empty">No boards match the filter.</p>'}</section><section class="card pool"><h2>Agent pool · ${esc(central)}</h2>${agents.length?agents.map(a=>`<details class="agent" data-state-key="${esc(`agent:${central}:${a.agent_name}`)}"><summary><b>${esc(a.agent_name)}${a.duplicate_name?' <span class="warning">duplicate name</span>':''}</b><span>${esc(a.pool_status)}</span><span>${esc(a.boards.join(', '))}</span><span>${esc(fmt(a.last_seen))}</span></summary><div class="agent-body table-scroll"><table><thead><tr><th>Project</th><th>Role</th><th>Current claim</th><th>Last seen</th></tr></thead><tbody>${a.seats.map(seat=>`<tr><td><a href="${boardHref(central,seat.board_id)}">${esc(seat.project)}</a><div class="meta">${esc(seat.board_id)}</div></td><td>${esc(seat.role||'—')}</td><td>${seat.current_ticket_id?`<a class="id" href="${ticketHref(central,seat.board_id,seat.current_ticket_id)}">${esc(seat.current_ticket_id)}</a><div>${esc(seat.current_ticket_title)}</div>`:'—'}</td><td>${esc(fmt(seat.last_seen))}</td></tr>`).join('')}</tbody></table></div></details>`).join(''):'<p class="empty">No agents match the filter.</p>'}</section></section>`}
 function renderFleet(){document.querySelector('#central-sections').innerHTML=centralLabels.map(label=>fleetData[label]?renderCentral(fleetData[label]):`<section class="central-group unavailable" data-central="${esc(label)}"><div class="top central-heading"><div><h2>${esc(label)}</h2><p class="error">Unavailable: ${esc(fleetErrors[label]||'loading')}</p></div><nav class="tabs"><a class="tab" href="${centralHref(label,'overhead')}">Overhead</a><a class="tab" href="${centralHref(label,'config')}">Config</a></nav></div></section>`).join('');const newest=Object.values(fleetData).map(d=>d.generated_at).sort().at(-1);document.querySelector('#state').textContent=newest?`Updated ${fmt(newest)}`:'No central available';if(typeof bindInteractive==='function')bindInteractive(document.querySelector('#central-sections'));if(typeof renderSearchResults==='function')renderSearchResults()}
 function renderOverhead(d){document.querySelector('#detail-view').innerHTML=`<a class="back" href="#/">← All centrals</a><div class="top"><div><h2>Protocol overhead · ${esc(d.central)}</h2><p class="muted">Estimated from request and response bytes; not provider billing.</p></div></div><section class="card pool">${d.seats.length?`<div class="table-scroll"><table><thead><tr><th>Seat</th><th>Today</th><th>7-day</th><th>Top tools by bytes</th></tr></thead><tbody>${d.seats.map(s=>`<tr><td><b>${esc(s.agent_name)}</b><div class="meta">${esc(s.board_id)}</div></td><td>${esc(s.today_bytes)} B<div class="meta">≈ ${esc(s.today_estimated_tokens)} tokens · ${esc(s.today_calls)} calls</div></td><td>${esc(s.seven_day_bytes)} B<div class="meta">≈ ${esc(s.seven_day_estimated_tokens)} tokens · ${esc(s.seven_day_calls)} calls</div></td><td class="overhead-tools">${s.top_tools.map(t=>`${esc(t.tool)}: ${esc(t.bytes)} B`).join(' · ')||'—'}</td></tr>`).join('')}</tbody></table></div>`:`<p class="empty">No bridge overhead stats yet (${esc(d.source_status)}).</p>`}</section>`}
 function sortedTickets(items){const rank=s=>['claimed','in_progress','creating_report'].includes(s)?0:['submitted','reviewing','in_review'].includes(s)?1:s==='open'?2:3;return [...items].sort((a,b)=>rank(a.status)-rank(b.status)||(detailSort==='oldest'?String(a.updated_at||'').localeCompare(String(b.updated_at||'')):String(b.updated_at||'').localeCompare(String(a.updated_at||''))))}
-function tabs(d,r){return `<nav class="tabs" aria-label="Board views">${[['tickets','Tickets'],['timeline','Timeline'],['changes','Changes'],['flow','Ticket Flow']].map(([v,label])=>`<a class="tab${r.view===v?' active':''}" href="${boardHref(r.central,d.board.board_id,v)}">${esc(label)}</a>`).join('')}</nav>`}
+function tabs(d,r){return `<nav class="tabs" aria-label="Board views">${[['tickets','Tickets'],['timeline','Timeline'],['changes','Changes'],['flow','Ticket Flow'],['routes','Routes']].map(([v,label])=>`<a class="tab${r.view===v?' active':''}" href="${boardHref(r.central,d.board.board_id,v)}">${esc(label)}</a>`).join('')}</nav>`}
 function ticketView(d,r){const rows=sortedTickets(d.tickets).filter(t=>matches([t.id,t.title,t.status,t.claimed_by,t.description],filterNeedle));const visible=!r.ticket||rows.some(t=>t.id===r.ticket);return `${visible?'':`<p class="warning">Requested ticket ${esc(r.ticket)} is outside this bounded response or filter.</p>`}<div class="toolbar"><span>${esc(rows.length)} of ${esc(d.ticket_returned)} returned tickets</span><label>Updated <select id="ticket-sort"><option value="newest"${detailSort==='newest'?' selected':''}>newest first</option><option value="oldest"${detailSort==='oldest'?' selected':''}>oldest first</option></select></label></div><section class="card"><div class="table-scroll"><table><thead><tr><th>Ticket</th><th>Title and details</th><th>Status</th><th class="hide-small">Updated</th></tr></thead><tbody>${rows.length?rows.map(t=>`<tr><td><span class="id">${esc(t.id)}</span></td><td><details class="ticket-detail" data-ticket="${esc(t.id)}" data-state-key="${esc(`ticket:${r.central}:${d.board.board_id}:${t.id}`)}"${r.ticket===t.id?' open':''}><summary>${esc(t.title)}</summary><p class="ticket-copy">${esc(t.description||'No description')}</p>${t.required_fields.length?`<div class="required">${t.required_fields.map(x=>`<span class="pill">${esc(x)}</span>`).join('')}</div>`:''}${t.latest_submission_summary?`<p class="meta ticket-copy">Latest submission: ${esc(t.latest_submission_summary)}</p>`:''}${t.review_label?`<p class="meta">Review: ${esc(t.review_label)}</p>`:''}</details></td><td><span class="status">${esc(t.status)}</span><div class="meta">${esc(t.claimed_by||'')}</div></td><td class="meta hide-small">${esc(fmt(t.updated_at))}</td></tr>`).join(''):'<tr><td colspan="4" class="empty">No tickets match the filter.</td></tr>'}</tbody></table></div></section>`}
 function timelineView(d,r){const bySeq=new Map(d.events.map(e=>[e.seq,e]));const groups=d.timeline.map(day=>({...day,tickets:day.tickets.map(t=>({...t,events:t.event_seqs.map(seq=>bySeq.get(seq)).filter(Boolean).filter(e=>eventMatches(e,t.ticket_id,filterNeedle))})).filter(t=>t.events.length)})).filter(day=>day.tickets.length);return `<p class="muted bounded-note">Showing last ${esc(d.event_returned)} events from a read-only bounded catchup (ack=false).</p><section class="timeline">${groups.length?groups.map(day=>`<details class="card" data-state-key="${esc(`timeline-day:${r.central}:${d.board.board_id}:${day.day}`)}" open><summary><b>${esc(day.day)}</b></summary>${day.tickets.map(t=>`<details class="timeline-ticket" data-state-key="${esc(`timeline-ticket:${r.central}:${d.board.board_id}:${t.ticket_id}`)}"><summary><a class="id" href="${ticketHref(r.central,d.board.board_id,t.ticket_id)}">${esc(t.ticket_id)}</a> · ${esc(t.events.length)} event(s)</summary><div class="table-scroll"><table><tbody>${t.events.map(e=>`<tr><td class="id">${esc(e.seq)}</td><td>${esc(e.kind)}</td><td>${esc(e.status_from||'—')} → ${esc(e.status_to||'—')}</td><td class="meta">${esc(fmt(e.occurred_at))}</td></tr>`).join('')}</tbody></table></div></details>`).join('')}</details>`).join(''):'<p class="empty">No timeline events match the filter.</p>'}</section>`}
 function changesFor(events,since,generatedAt){const cutoff=since===null?new Date(generatedAt).getTime()-86400000:null,chosen=events.filter(e=>since!==null?Number.isInteger(e.seq)&&e.seq>since:new Date(e.occurred_at).getTime()>=cutoff),counts={created:0,claimed:0,submitted:0,closed:0,rejected:0};for(const e of chosen){if(e.kind==='ticket_created')counts.created++;if(e.status_to==='claimed')counts.claimed++;if(e.status_to==='submitted')counts.submitted++;if(e.status_to==='closed')counts.closed++;if(e.review_verdict==='reject'||(e.status_from==='submitted'&&['open','claimed','rejected'].includes(e.status_to)&&Number(e.rejection_count)>0))counts.rejected++}return{counts,event_count:chosen.length}}
 function changesView(d,r){const valid=r.since!==null&&/^\d+$/.test(r.since),since=valid?Number(r.since):null,events=filterChangeEvents(d.events,filterNeedle),summary=changesFor(events,since,d.generated_at);return `<div class="toolbar"><div><b>${since===null?'Last 24 hours':`After seq ${esc(since)}`}</b><p class="muted">Calculated only from the ${esc(d.event_returned)} returned events.</p></div><form id="changes-form"><label>Starting seq <input id="since-seq" inputmode="numeric" pattern="[0-9]*" value="${since===null?'':esc(since)}" placeholder="blank = 24h"></label> <button type="submit">Apply</button></form></div><section class="strip change-grid">${Object.entries(summary.counts).map(([name,count])=>`<div class="metric"><span>${esc(name)}</span><b>${esc(count)}</b></div>`).join('')}</section><p class="muted">${esc(summary.event_count)} bounded event(s) matched.</p>`}
 function flowView(d,r){const byId=new Map(d.tickets.map(t=>[t.id,t])),labels={open:'Open',claimed:'Claimed',submitted:'Submitted',closed_today:'Closed today'};return `<p class="muted bounded-note">Classified from ${esc(d.ticket_returned)} returned tickets; omitted snapshot rows are not inferred.</p><section class="flow">${Object.entries(labels).map(([key,label])=>{const tickets=d.ticket_flow[key].map(id=>byId.get(id)).filter(Boolean).filter(t=>matches([t.id,t.title,t.claimed_by,t.status],filterNeedle));return `<div class="flow-column"><h3>${esc(label)} · ${esc(tickets.length)}</h3>${tickets.map(t=>`<a class="flow-card" href="${ticketHref(r.central,d.board.board_id,t.id)}"><span class="id">${esc(t.id)}</span><div>${esc(t.title)}</div><span class="meta">${esc(t.claimed_by||'Unassigned')}</span></a>`).join('')||'<p class="empty">No matching tickets</p>'}</div>`}).join('')}</section>`}
+const routeStage=stage=>stage?`<b>${esc(stage.label)}</b><span class="meta">${esc(fmt(stage.at))}</span>`:'<span class="muted">—</span>';
+function routesView(d,r){const routeData=d.routes||{rows:[],seats:[],row_returned:0,row_total:0,truncated:true,truncation_note:'Routes source unavailable.'},rows=routeData.rows.filter(t=>matches([t.id,t.title,t.status,t.created?.label,t.executed?.label,t.submitted?.label,t.reviewed?.label,t.rework_count],filterNeedle)),seats=routeData.seats.filter(s=>matches([s.label,s.created,s.executed,s.reviewed,s.rework_received_rate],filterNeedle));return `<section id="routes-view"><p class="${routeData.truncated?'warning':'muted'} bounded-note">${esc(routeData.truncation_note)}</p><h3 class="pool">Seat load in the window</h3><section class="route-load" aria-label="Per-seat route totals">${seats.length?seats.map(s=>`<article class="route-seat" data-route-seat="${esc(s.label)}"><b>${esc(s.label)}</b><div class="counts"><span class="pill">created ${esc(s.created)}</span><span class="pill">executed ${esc(s.executed)}</span><span class="pill">reviewed ${esc(s.reviewed)}</span><span class="pill">rework received ${esc(s.rework_received_rate)}% (${esc(s.rework_received)})</span></div></article>`).join(''):'<p class="empty">No seats match the filter.</p>'}</section><p class="muted">Showing ${esc(rows.length)} matching route(s) from ${esc(routeData.row_returned)} returned; ${esc(routeData.row_total)} assembled before row bounds.</p><section class="card pool"><div class="table-scroll"><table aria-label="Ticket provenance routes"><thead><tr><th>Ticket</th><th>Created by</th><th>Executed by</th><th>Submitted by</th><th>Reviewed / closed by</th><th>Rework</th><th>Updated</th></tr></thead><tbody>${rows.length?rows.map(t=>`<tr data-route-ticket="${esc(t.id)}"><td><a class="id" href="${ticketHref(r.central,d.board.board_id,t.id)}">${esc(t.id)}</a><div>${esc(t.title)}</div><span class="status">${esc(t.status)}</span></td><td class="route-stage">${routeStage(t.created)}</td><td class="route-stage">${routeStage(t.executed)}</td><td class="route-stage">${routeStage(t.submitted)}</td><td class="route-stage">${routeStage(t.reviewed)}</td><td>${esc(t.rework_count)}</td><td class="meta">${esc(fmt(t.updated_at))}</td></tr>`).join(''):'<tr><td colspan="7" class="empty">No routes match the filter.</td></tr>'}</tbody></table></div></section></section>`}
 function findings(d){if(!d.coordinator_findings)return'';return `<section class="card"><h3>Coordinator findings</h3><div class="finding-list">${d.coordinator_findings.items.map(f=>`<div class="finding"><b>${esc(f.kind)}</b>${f.ticket_id?` <span class="id">${esc(f.ticket_id)}</span>`:''}<p>${esc(f.text)}</p></div>`).join('')||'<p class="empty">No current findings</p>'}</div>${d.coordinator_findings.truncated_count?`<p class="warning">${esc(d.coordinator_findings.truncated_count)} findings omitted by the bounded state.</p>`:''}</section>`}
-function renderDetail(d){const r=route();if(!r||r.kind!=='board'||r.central!==d.central||r.board!==d.board.board_id)return;const views={tickets:ticketView,timeline:timelineView,changes:changesView,flow:flowView};document.querySelector('#detail-view').innerHTML=`<a class="back" href="#/">← All centrals</a><div class="top"><div><h2>${esc(d.board.label)} · ${esc(d.central)}</h2><span class="meta">${esc(d.board.board_id)}</span></div>${d.truncated?`<span class="status">${esc(d.ticket_returned)} of ${esc(d.ticket_total)} tickets shown</span>`:''}</div><div class="toolbar">${tabs(d,r)}<span class="muted">Read-only bounded view · ${esc(d.central)}</span></div>${r.view==='tickets'?findings(d):''}${views[r.view](d,r)}`;document.querySelector('#ticket-sort')?.addEventListener('change',e=>{detailSort=e.target.value;renderDetail(d)});document.querySelector('#changes-form')?.addEventListener('submit',e=>{e.preventDefault();const value=document.querySelector('#since-seq').value.trim();location.hash=`/central/${encodeURIComponent(r.central)}/board/${encodeURIComponent(d.board.board_id)}/changes${value?`?since=${encodeURIComponent(value)}`:''}`});document.querySelector('#state').textContent=`Updated ${fmt(d.generated_at)} · ${esc(d.central)}`;bindInteractive(document.querySelector('#detail-view'));renderSearchResults();if(r.ticket){const target=[...document.querySelectorAll('[data-ticket]')].find(x=>x.dataset.ticket===r.ticket);if(target){target.open=true;sectionStates.set(target.dataset.stateKey,true);target.scrollIntoView({block:'center'})}}}
+function renderDetail(d){const r=route();if(!r||r.kind!=='board'||r.central!==d.central||r.board!==d.board.board_id)return;const views={tickets:ticketView,timeline:timelineView,changes:changesView,flow:flowView,routes:routesView};document.querySelector('#detail-view').innerHTML=`<a class="back" href="#/">← All centrals</a><div class="top"><div><h2>${esc(d.board.label)} · ${esc(d.central)}</h2><span class="meta">${esc(d.board.board_id)}</span></div>${d.truncated?`<span class="status">${esc(d.ticket_returned)} of ${esc(d.ticket_total)} tickets shown</span>`:''}</div><div class="toolbar">${tabs(d,r)}<span class="muted">Read-only bounded view · ${esc(d.central)}</span></div>${r.view==='tickets'?findings(d):''}${views[r.view](d,r)}`;document.querySelector('#ticket-sort')?.addEventListener('change',e=>{detailSort=e.target.value;renderDetail(d)});document.querySelector('#changes-form')?.addEventListener('submit',e=>{e.preventDefault();const value=document.querySelector('#since-seq').value.trim();location.hash=`/central/${encodeURIComponent(r.central)}/board/${encodeURIComponent(d.board.board_id)}/changes${value?`?since=${encodeURIComponent(value)}`:''}`});document.querySelector('#state').textContent=`Updated ${fmt(d.generated_at)} · ${esc(d.central)}`;bindInteractive(document.querySelector('#detail-view'));renderSearchResults();if(r.ticket){const target=[...document.querySelectorAll('[data-ticket]')].find(x=>x.dataset.ticket===r.ticket);if(target){target.open=true;sectionStates.set(target.dataset.stateKey,true);target.scrollIntoView({block:'center'})}}}
 const CENTRAL_REQUEST_TIMEOUT_MS=4000;
 async function fetchJson(path,options={}){const response=await fetch(path,{cache:'no-store',...options});if(!response.ok)throw new Error(`HTTP ${response.status}`);return response.json()}
 async function fetchWithTimeout(path,timeoutMs=CENTRAL_REQUEST_TIMEOUT_MS){const controller=new AbortController();let timer;const timeout=new Promise((_,reject)=>{timer=setTimeout(()=>{controller.abort();reject(new Error('central request timed out'))},timeoutMs)});try{return await Promise.race([fetchJson(path,{signal:controller.signal}),timeout])}finally{clearTimeout(timer)}}
@@ -1258,6 +1615,19 @@ async function refreshDetail(){const r=route();if(!r||r.kind!=='board')return;co
 function syncRoute(){const r=route();document.querySelector('#home-view').hidden=!!r;document.querySelector('#detail-view').hidden=!r||r.kind==='config';if(detailTimer){clearInterval(detailTimer);detailTimer=null}for(const key of [...connectionFailures])if(key.startsWith('detail:')||key.startsWith('overhead:'))connectionFailures.delete(key);updateConnectionState();if(r?.kind==='board'){if(detailData?.central===r.central&&detailData?.board?.board_id===r.board)renderDetail(detailData);else document.querySelector('#detail-view').innerHTML='<p class="empty">Loading board detail…</p>';refreshDetail();detailTimer=setInterval(refreshDetail,5000)}else if(r?.kind==='overhead'){document.querySelector('#detail-view').innerHTML='<p class="empty">Loading overhead…</p>';refreshOverhead();detailTimer=setInterval(refreshOverhead,5000)}else if(!r)renderFleet()}
 document.querySelector('#filter').addEventListener('input',e=>{filterNeedle=e.target.value.toLocaleLowerCase();searchSelection=0;const r=route();if(r?.kind==='board'&&detailData)renderDetail(detailData);else if(!r)renderFleet();else renderSearchResults()});document.querySelector('#search-results').addEventListener('click',e=>{const target=e.target.closest('[data-search-index]');if(target){e.preventDefault();jumpSearchResult(Number(target.dataset.searchIndex))}});document.querySelector('#theme-toggle').addEventListener('click',()=>{theme=theme==='dark'?'light':'dark';applyPreferences()});document.querySelector('#density-toggle').addEventListener('click',()=>{density=density==='comfortable'?'compact':'comfortable';applyPreferences()});document.querySelector('#help-toggle').addEventListener('click',()=>document.querySelector('#help-overlay').showModal());document.querySelector('#help-close').addEventListener('click',()=>document.querySelector('#help-overlay').close());document.addEventListener('keydown',e=>{const editing=['INPUT','TEXTAREA','SELECT'].includes(document.activeElement?.tagName);if(e.key==='Escape'){document.querySelector('#search-results').hidden=true;document.querySelector('#help-overlay').close();return}if(e.key==='?'&&!editing){e.preventDefault();document.querySelector('#help-overlay').showModal();return}if(e.key==='/'&&!editing){e.preventDefault();document.querySelector('#filter').focus();return}if(document.activeElement===document.querySelector('#filter')&&['ArrowDown','ArrowUp'].includes(e.key)){e.preventDefault();searchSelection=Math.max(0,Math.min(searchItems.length-1,searchSelection+(e.key==='ArrowDown'?1:-1)));renderSearchResults();return}if(document.activeElement===document.querySelector('#filter')&&e.key==='Enter'){e.preventDefault();jumpSearchResult(searchSelection);return}if(editing)return;if(goPrefix){clearTimeout(goTimer);goPrefix=false;if(e.key==='f')location.hash='#/';if(e.key==='o')location.hash=centralHref(defaultCentral,'overhead');if(e.key==='c')location.hash=centralHref(defaultCentral,'config');return}if(e.key==='g'){goPrefix=true;goTimer=setTimeout(()=>{goPrefix=false},800)}});window.addEventListener('hashchange',syncRoute);applyPreferences();loadCentrals().then(()=>{refreshFleet();syncRoute();if(typeof syncConfigRoute==='function')syncConfigRoute()}).catch(e=>{document.querySelector('#state').textContent='Startup failed';markConnectionFailure('startup')});setInterval(refreshFleet,5000);
 </script></body></html>"""
+
+HTML = HTML.replace(
+    "</style>",
+    ".route-load{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;margin:12px 0 18px}"
+    ".route-seat{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:10px}"
+    ".route-seat .counts{margin:8px 0 0}.route-stage{min-width:150px}.route-stage .meta{display:block;white-space:nowrap}</style>",
+).replace(
+    "<dt>g then f</dt><dd>Fleet overview</dd><dt>g then o</dt>",
+    "<dt>g then f</dt><dd>Fleet overview</dd><dt>g then r</dt><dd>Routes for the current board</dd><dt>g then o</dt>",
+).replace(
+    "if(e.key==='f')location.hash='#/';if(e.key==='o')",
+    "if(e.key==='f')location.hash='#/';if(e.key==='r'){const current=route();if(current?.kind==='board')location.hash=boardHref(current.central,current.board,'routes')}if(e.key==='o')",
+)
 
 # Keep the existing bounded fleet SPA intact; layer the one explicit write surface
 # as an isolated hash page and API client.
