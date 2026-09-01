@@ -27,10 +27,10 @@ from urllib.parse import urlsplit
 from mcp.server.apps import Apps, ResourceCsp
 from mcp.server.mcpserver import MCPServer
 
+from . import PRODUCT_VERSION
 from .artifacts import import_verified_component, verify_component_artifacts
 
 PINNED_CLIENT_VERSION = "0.1.0a13"
-PRODUCT_VERSION = "5.0.0a14"
 MAX_EVENTS = 200
 MAX_TICKETS = 500
 AGENT_STALE_AFTER_MINUTES = 60

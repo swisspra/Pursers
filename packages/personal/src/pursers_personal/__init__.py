@@ -1,5 +1,13 @@
 """On Board Personal Preview public package."""
 
-__version__ = "5.0.0a5"
+from importlib.metadata import PackageNotFoundError, version
 
-__all__ = ["__version__"]
+PRODUCT_VERSION = "5.0.0a14"
+
+try:
+    __version__ = version("pursers-personal")
+except PackageNotFoundError:
+    __version__ = PRODUCT_VERSION
+
+
+__all__ = ["PRODUCT_VERSION", "__version__"]
