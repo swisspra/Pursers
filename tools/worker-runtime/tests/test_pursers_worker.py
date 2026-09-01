@@ -8,9 +8,12 @@ import sys
 import tempfile
 import threading
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 
@@ -288,6 +291,144 @@ def test_max_tier_light_skips_heavy_and_claims_light() -> None:
         assert '"event":"ticket_skipped"' in transcript
         assert '"ticket_id":"TK-heavy"' in transcript
         assert '"ticket_tier":"heavy"' in transcript
+
+
+def test_fresh_light_api_advertises_before_idle_wait_and_blocks_heavy_dispatch() -> None:
+    class Result:
+        is_error = False
+        content: list[Any] = []
+
+        def __init__(self, value: dict[str, Any]) -> None:
+            self.structured_content = {"result": value}
+
+    class Transport:
+        def __init__(self) -> None:
+            self.principal_id = "PR-tier-integration"
+            self.profiles: dict[str, dict[str, Any]] = {}
+            self.join_calls: list[tuple[str, dict[str, Any]]] = []
+
+        async def call_tool(
+            self, name: str, arguments: dict[str, Any], **_options: Any
+        ) -> Result:
+            board_id = str(arguments["board_id"])
+            if name == "board_join":
+                profile = {
+                    "board_id": board_id,
+                    "agent_id": worker_module.wait_bridge._derived_agent_id(
+                        self.principal_id,
+                        str(arguments["agent_name"]),
+                        board_id,
+                    ),
+                    "principal_id": self.principal_id,
+                    "agent_name": arguments["agent_name"],
+                    "role": "worker",
+                    "status": "active",
+                    "membership_role": "member",
+                    "last_activity_at": datetime.now(timezone.utc).isoformat(),
+                    "task_focus": arguments.get("task_focus"),
+                }
+                self.profiles[board_id] = profile
+                self.join_calls.append((board_id, dict(arguments)))
+                return Result(profile)
+            if name == "board_catchup":
+                return Result(
+                    {
+                        "events": [],
+                        "next_cursor": 0,
+                        "has_more": False,
+                        "resync_required": False,
+                    }
+                )
+            if name == "ticket_list":
+                return Result({"tickets": []})
+            raise AssertionError(f"unexpected tool: {name}")
+
+    async def scenario() -> tuple[Transport, bool]:
+        with tempfile.TemporaryDirectory() as raw:
+            selected = replace(
+                config(Path(raw), "http://unused", max_tier="light"),
+                boards=("alpha", "beta"),
+            )
+            api = worker_module.PursersBoardAPI(selected, "TOKEN_PLACEHOLDER")
+            transport = Transport()
+            api.client = SimpleNamespace(
+                _client=transport,
+                agent_name=selected.agent_name,
+                identity=worker_module.wait_bridge.JoinedIdentity(
+                    worker_module.wait_bridge.BOARD_ID,
+                    worker_module.wait_bridge._derived_agent_id(
+                        transport.principal_id,
+                        selected.agent_name,
+                    ),
+                    transport.principal_id,
+                    selected.agent_name,
+                    "worker",
+                ),
+            )
+            all_pending = True
+            with (
+                patch.object(worker_module.wait_bridge, "WAIT_MODE", "poll"),
+                patch.object(
+                    worker_module.wait_bridge, "DEFAULT_POLL_INTERVAL_S", 0.01
+                ),
+            ):
+                for expected_joins in (2, 4):
+                    waiting = asyncio.create_task(api.wait({}))
+                    for _ in range(100):
+                        if len(transport.join_calls) == expected_joins:
+                            break
+                        await asyncio.sleep(0)
+                    all_pending = all_pending and not waiting.done()
+                    waiting.cancel()
+                    await asyncio.gather(waiting, return_exceptions=True)
+            return transport, all_pending
+
+    transport, was_pending = asyncio.run(scenario())
+    assert was_pending is True
+    assert set(transport.profiles) == {"alpha", "beta"}
+    assert all(
+        profile["task_focus"] == "worker-runtime max_tier=light"
+        for profile in transport.profiles.values()
+    )
+    assert all(
+        call["task_focus"] == "worker-runtime max_tier=light"
+        for _board_id, call in transport.join_calls
+    )
+    assert [board_id for board_id, _call in transport.join_calls] == [
+        "alpha",
+        "beta",
+        "alpha",
+        "beta",
+    ]
+
+    coordinator_path = (
+        Path(__file__).parents[2] / "coordinator" / "coordinator.py"
+    )
+    coordinator_spec = importlib.util.spec_from_file_location(
+        "worker_tier_coordinator", coordinator_path
+    )
+    assert coordinator_spec and coordinator_spec.loader
+    coordinator = importlib.util.module_from_spec(coordinator_spec)
+    sys.modules[coordinator_spec.name] = coordinator
+    coordinator_spec.loader.exec_module(coordinator)
+    now = datetime.now(timezone.utc)
+    snapshot = {
+        "alpha": {
+            "agents": [transport.profiles["alpha"]],
+            "tickets": [
+                {
+                    "ticket_id": "TK-heavy",
+                    "status": "open",
+                    "priority": "medium",
+                    "created_at": (now - timedelta(hours=2)).isoformat(),
+                    "tags": ["tier:heavy"],
+                }
+            ],
+        }
+    }
+    assert coordinator.plan_actions(
+        snapshot, {"alpha": {"drop_history": []}}, {}, now
+    ) == []
 
 
 def test_assigned_ticket_is_claimed_before_earlier_unassigned_ticket() -> None:

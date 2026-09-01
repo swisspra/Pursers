@@ -1064,6 +1064,7 @@ async def _wait_for_work_many(
     only_mine: bool = True,
     project: str | None = None,
     agent_name: str | None = None,
+    task_focus: str | None = None,
 ) -> dict[str, Any]:
     """Wait across independent board cursors and identities on one transport."""
     board_order = _normalize_boards(boards)
@@ -1085,7 +1086,10 @@ async def _wait_for_work_many(
     for board_id in board_order:
         try:
             view = _BoardView(client, board_id)
-            joined = await view.board_join(agent_name=call_agent_name)
+            joined = await view.board_join(
+                agent_name=call_agent_name,
+                task_focus=task_focus,
+            )
         except BoardClientError as exc:
             skipped[board_id] = str(exc)
             continue

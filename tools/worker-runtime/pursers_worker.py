@@ -294,6 +294,7 @@ class PursersBoardAPI:
             timeout_s=180,
             only_mine=False,
             agent_name=self.config.agent_name,
+            task_focus=f"worker-runtime max_tier={self.config.max_tier}",
         )
 
     async def claim(self, board_id: str, ticket_id: str) -> dict[str, Any]:
