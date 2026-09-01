@@ -1008,6 +1008,139 @@ def test_read_cycle_records_only_snapshot_error_class(tmp_path: Path) -> None:
     assert previous == {"board-a": {}}
 
 
+@pytest.mark.parametrize(
+    "missing_key", [coordinator.STATE_KEY, coordinator.CONFIG_STATE_KEY]
+)
+def test_read_cycle_missing_optional_state_stays_healthy_for_three_polls(
+    tmp_path: Path, missing_key: str
+) -> None:
+    class Reader:
+        async def call(self, name: str, board_id: str, **arguments: Any) -> dict:
+            key = arguments.get("key")
+            if name == "board_state_get" and key == "project_registry":
+                return {
+                    "state": {
+                        "value": json.dumps(
+                            {
+                                "schema_version": 1,
+                                "projects": {
+                                    "sample": {
+                                        "board_id": "pursers",
+                                        "work_dir": str(tmp_path),
+                                        "status": "active",
+                                    }
+                                },
+                            }
+                        )
+                    }
+                }
+            if name == "board_snapshot":
+                return {
+                    "board": {"board_id": board_id},
+                    "agents": [],
+                    "tickets": [],
+                    "truncated": False,
+                }
+            if name == "ticket_list":
+                return {"count": 0, "total_matching": 0, "tickets": []}
+            if name == "board_state_get" and key == missing_key:
+                raise ValueError("state key not found")
+            if name == "board_state_get" and key == coordinator.INTAKE_STATE_KEY:
+                raise ValueError("state key not found")
+            if name == "board_state_get":
+                return {"state": {"value": "{}"}}
+            raise AssertionError(f"unexpected call: {name}")
+
+    streaks: dict[str, int] = {}
+    for _poll in range(3):
+        projects, snapshots, previous = asyncio.run(
+            coordinator.read_cycle(Reader(), "pursers")
+        )
+        assert "state_error_classes" not in snapshots["pursers"]
+        state = coordinator.analyze_cycle(
+            projects,
+            snapshots,
+            previous,
+            (),
+            NOW,
+            degraded_streaks=streaks,
+        )["pursers"]
+        assert state["board_health"]["status"] == "healthy"
+        assert state["board_health"]["consecutive_degraded_polls"] == 0
+        assert all(
+            item["kind"] != "board-degraded" for item in state["findings"]
+        )
+
+
+def test_read_cycle_real_optional_state_failure_degrades_after_three_polls(
+    tmp_path: Path,
+) -> None:
+    class Reader:
+        async def call(self, name: str, board_id: str, **arguments: Any) -> dict:
+            key = arguments.get("key")
+            if name == "board_state_get" and key == "project_registry":
+                return {
+                    "state": {
+                        "value": json.dumps(
+                            {
+                                "schema_version": 1,
+                                "projects": {
+                                    "sample": {
+                                        "board_id": "pursers",
+                                        "work_dir": str(tmp_path),
+                                        "status": "active",
+                                    }
+                                },
+                            }
+                        )
+                    }
+                }
+            if name == "board_snapshot":
+                return {
+                    "board": {"board_id": board_id},
+                    "agents": [],
+                    "tickets": [],
+                    "truncated": False,
+                }
+            if name == "ticket_list":
+                return {"count": 0, "total_matching": 0, "tickets": []}
+            if name == "board_state_get" and key == coordinator.STATE_KEY:
+                raise TimeoutError("state service timed out")
+            if name == "board_state_get" and key == coordinator.INTAKE_STATE_KEY:
+                raise ValueError("state key not found")
+            if name == "board_state_get":
+                return {"state": {"value": "{}"}}
+            raise AssertionError(f"unexpected call: {name}")
+
+    streaks: dict[str, int] = {}
+    state: dict[str, Any] = {}
+    for expected_streak in (1, 2, 3):
+        projects, snapshots, previous = asyncio.run(
+            coordinator.read_cycle(Reader(), "pursers")
+        )
+        assert snapshots["pursers"]["state_error_classes"] == {
+            coordinator.STATE_KEY: "TimeoutError"
+        }
+        state = coordinator.analyze_cycle(
+            projects,
+            snapshots,
+            previous,
+            (),
+            NOW,
+            degraded_streaks=streaks,
+        )["pursers"]
+        assert (
+            state["board_health"]["consecutive_degraded_polls"]
+            == expected_streak
+        )
+
+    finding = next(
+        item for item in state["findings"] if item["kind"] == "board-degraded"
+    )
+    assert finding["degradation_reason"] == "state-failed"
+    assert finding["error_class"] == "TimeoutError"
+
+
 def test_write_reports_isolates_failed_board_and_mirrors_degraded_finding(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

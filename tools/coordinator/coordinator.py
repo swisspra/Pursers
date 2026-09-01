@@ -2074,6 +2074,10 @@ def _previous_payload(raw: Mapping[str, Any] | None) -> dict[str, Any]:
         return {}
 
 
+def _missing_optional_state(exc: Exception) -> bool:
+    return "state key not found" in str(exc).lower()
+
+
 async def read_cycle(reader: RawReader, home_board: str) -> tuple[list[Project], dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
     registry = await reader.call("board_state_get", home_board, key="project_registry")
     projects = parse_registry(registry)
@@ -2127,9 +2131,10 @@ async def read_cycle(reader: RawReader, home_board: str) -> tuple[list[Project],
             prior = await reader.call("board_state_get", board_id, key=STATE_KEY)
         except Exception as exc:  # Missing optional state or an unavailable board.
             prior = None
-            snapshots[board_id].setdefault("state_error_classes", {})[
-                STATE_KEY
-            ] = type(exc).__name__
+            if not _missing_optional_state(exc):
+                snapshots[board_id].setdefault("state_error_classes", {})[
+                    STATE_KEY
+                ] = type(exc).__name__
         previous[board_id] = _previous_payload(prior)
         try:
             intake = await reader.call(
@@ -2142,7 +2147,7 @@ async def read_cycle(reader: RawReader, home_board: str) -> tuple[list[Project],
         config = await reader.call("board_state_get", home_board, key=CONFIG_STATE_KEY)
     except Exception as exc:  # An absent config uses flags then built-ins.
         config = None
-        if home_board in snapshots:
+        if home_board in snapshots and not _missing_optional_state(exc):
             snapshots[home_board].setdefault("state_error_classes", {})[
                 CONFIG_STATE_KEY
             ] = type(exc).__name__
