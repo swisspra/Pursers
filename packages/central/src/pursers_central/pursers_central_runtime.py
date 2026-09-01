@@ -7,7 +7,10 @@ import json
 import os
 from pathlib import Path
 
+import uvicorn
+
 from . import central
+from .runtime_health import create_streamable_http_app
 
 
 def _env(name: str, default: str | None = None) -> str | None:
@@ -60,8 +63,12 @@ def main() -> None:
         )
         return
     with central.CentralDataLock(args.data_dir):
-        mcp, _ = central.build_server(args.host, args.port, args.data_dir)
-        mcp.run(
-            transport="streamable-http", host=args.host, port=args.port,
-            streamable_http_path="/mcp", stateless_http=True,
+        mcp, service = central.build_server(args.host, args.port, args.data_dir)
+        app = create_streamable_http_app(mcp, service, host=args.host)
+        uvicorn.run(
+            app,
+            host=args.host,
+            port=args.port,
+            server_header=False,
+            access_log=False,
         )

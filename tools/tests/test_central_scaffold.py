@@ -71,6 +71,7 @@ def test_init_creates_secret_free_layout_permissions_and_runbook(
     assert plist["Label"] == label
     assert plist["KeepAlive"] is True
     assert plist["ProgramArguments"] == [str(root / "launch-central.sh")]
+    assert plist["SoftResourceLimits"] == {"NumberOfFiles": 4096}
     assert _mode(root / "launch-central.sh") == 0o700
 
     assert "RUNBOOK" in output

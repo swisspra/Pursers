@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any, Mapping
 from urllib.parse import urlparse
 
+import uvicorn
 from mcp.server.auth.middleware.auth_context import get_access_token
 from mcp.server.auth.provider import TokenVerifier, principal_components
 from mcp.server.auth.settings import AuthSettings
@@ -44,6 +45,11 @@ from journal import (
     _require_text,
 )
 from jwt_verifier import JWTTokenVerifier, JWTVerifierConfig
+from runtime_health import (
+    RuntimeDiagnostics,
+    create_streamable_http_app,
+    log_runtime_error,
+)
 from scrub import Policy, ScrubRejected, scrub
 from transactional_sqlite import TransactionalSQLiteStore
 
@@ -364,6 +370,7 @@ class CentralJournal(Journal):
 
 class CentralBoard:
     def __init__(self, root: Path):
+        self.diagnostics = RuntimeDiagnostics()
         self.backend = os.environ.get("STORE_BACKEND", "sqlite").strip().lower()
         if self.backend != "sqlite":
             raise ValueError("Personal Central requires SQLite storage")
@@ -1013,6 +1020,13 @@ class SubscriptionAuthorization:
                 )
                 try:
                     if generation_error is not None:
+                        log_runtime_error(
+                            self.service.diagnostics,
+                            "tool_error",
+                            ValueError(generation_error),
+                            include_traceback=False,
+                            tool=str(tool_name or "unknown"),
+                        )
                         return {
                             "content": [{"type": "text", "text": generation_error}],
                             "isError": True,
@@ -1042,6 +1056,15 @@ class SubscriptionAuthorization:
                                         principal.principal_id,
                                     )
                                 except (PermissionError, ValueError):
+                                    log_runtime_error(
+                                        self.service.diagnostics,
+                                        "tool_error",
+                                        PermissionError(
+                                            "board access denied: principal is not a member"
+                                        ),
+                                        include_traceback=False,
+                                        tool=str(tool_name or "unknown"),
+                                    )
                                     # Match ordinary tool authorization failures so
                                     # callers receive a model-visible tool error,
                                     # while still short-circuiting before schema and
@@ -1132,7 +1155,23 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 try:
                     return await function(*args, **kwargs)
                 except (PermissionError, ValueError) as exc:
+                    log_runtime_error(
+                        service.diagnostics,
+                        "tool_error",
+                        exc,
+                        include_traceback=False,
+                        tool=function.__name__,
+                    )
                     raise ToolError(str(exc)) from exc
+                except Exception as exc:
+                    log_runtime_error(
+                        service.diagnostics,
+                        "tool_error",
+                        exc,
+                        include_traceback=True,
+                        tool=function.__name__,
+                    )
+                    raise
 
             return mcp.tool()(wrapped)
 
@@ -5595,13 +5634,14 @@ def main() -> None:
         )
         return
     with CentralDataLock(args.data_root):
-        mcp, _ = build_server(args.host, args.port, args.data_root)
-        mcp.run(
-            transport="streamable-http",
+        mcp, service = build_server(args.host, args.port, args.data_root)
+        app = create_streamable_http_app(mcp, service, host=args.host)
+        uvicorn.run(
+            app,
             host=args.host,
             port=args.port,
-            streamable_http_path="/mcp",
-            stateless_http=True,
+            server_header=False,
+            access_log=False,
         )
 
 
