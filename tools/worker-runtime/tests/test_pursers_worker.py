@@ -84,15 +84,31 @@ class FakeBoard:
         self.renewals += 1
 
 
+class BlockingBoard(FakeBoard):
+    def __init__(self) -> None:
+        super().__init__()
+        self.wait_cancelled = False
+
+    async def wait(self, _cursors: dict[str, int]) -> dict[str, Any]:
+        self.waited = True
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            self.wait_cancelled = True
+            raise
+
+
 class FakeLLMServer:
     def __init__(self, responses: list[dict[str, Any]]) -> None:
         self.responses = list(responses)
         self.requests: list[dict[str, Any]] = []
+        self.authorizations: list[str | None] = []
         owner = self
 
         class Handler(BaseHTTPRequestHandler):
             def do_POST(self) -> None:
                 length = int(self.headers["Content-Length"])
+                owner.authorizations.append(self.headers.get("Authorization"))
                 owner.requests.append(json.loads(self.rfile.read(length)))
                 message = owner.responses.pop(0)
                 body = json.dumps({"choices": [{"message": message}]}).encode()
@@ -151,6 +167,7 @@ def config(
         base_url=base_url,
         api_key_env="WORKER_TEST_KEY",
         api_key_file=None,
+        api_key_keychain=None,
         model="test-model",
         max_tokens=500,
         max_iterations=max_iterations,
@@ -471,6 +488,30 @@ def test_assigned_ticket_is_claimed_before_earlier_unassigned_ticket() -> None:
 
         assert board.claims == [("board-one", "TK-assigned")]
 
+def test_stop_interrupts_blocked_board_wait() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        board = BlockingBoard()
+        selected = config(root, "http://unused")
+        worker = worker_module.Worker(
+            selected,
+            board,
+            object(),
+            worker_module.SessionLog(selected.log_file),
+            directive="STATIC",
+        )
+
+        async def exercise() -> None:
+            running = asyncio.create_task(worker.run())
+            while not board.waited:
+                await asyncio.sleep(0)
+            worker.stop.set()
+            await asyncio.wait_for(running, timeout=1)
+
+        asyncio.run(exercise())
+
+        assert board.wait_cancelled is True
+
 
 def test_path_escape_rejected_then_give_up_releases_claim() -> None:
     with tempfile.TemporaryDirectory() as raw:
@@ -718,3 +759,70 @@ def test_static_directive_prefix_is_byte_identical_across_tickets() -> None:
         assert first_prefix == second_prefix
         assert first[1] != second[1]
         assert first[2] != second[2]
+
+
+def test_keychain_config_uses_exact_security_argv_and_never_exposes_secret(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    token = tmp_path / "seat.jwt"
+    token.write_text("TOKEN_PRIVATE")
+    token.chmod(0o600)
+    config_path = tmp_path / "worker.toml"
+    config_path.write_text(
+        'boards = "registry"\n'
+        '[seat]\nagent_name = "keychain-worker"\n'
+        'central_url = "https://central.invalid/mcp"\n'
+        f'token_file = "{token}"\n'
+        '[llm]\nbase_url = "https://provider.invalid/v1"\n'
+        'api_key_keychain = "keychain-worker"\nmodel = "model-one"\n'
+    )
+    config_path.chmod(0o600)
+    loaded = worker_module.load_config(config_path)
+    calls: list[list[str]] = []
+
+    def fake_run(argv: list[str], **kwargs: Any) -> Any:
+        calls.append(argv)
+        assert kwargs == {"check": True, "capture_output": True, "text": True}
+        return type("Result", (), {"stdout": "KEYCHAIN_SECRET\n"})()
+
+    monkeypatch.setattr(worker_module.sys, "platform", "darwin")
+    monkeypatch.setattr(worker_module.subprocess, "run", fake_run)
+
+    assert worker_module.read_secret(loaded, "api") == "KEYCHAIN_SECRET"
+    assert calls == [[
+        "/usr/bin/security", "find-generic-password", "-s", "pursers-worker",
+        "-a", "keychain-worker", "-w",
+    ]]
+    assert "KEYCHAIN_SECRET" not in config_path.read_text()
+
+
+def test_keyless_loopback_is_allowed_but_remote_requires_a_key_source(
+    tmp_path: Path,
+) -> None:
+    token = tmp_path / "seat.jwt"
+    token.write_text("TOKEN_PRIVATE")
+    token.chmod(0o600)
+
+    def write_config(base_url: str) -> Path:
+        path = tmp_path / "worker.toml"
+        path.write_text(
+            'boards = "registry"\n'
+            '[seat]\nagent_name = "ollama-worker"\n'
+            'central_url = "https://central.invalid/mcp"\n'
+            f'token_file = "{token}"\n'
+            f'[llm]\nbase_url = "{base_url}"\nmodel = "local-model"\n'
+        )
+        path.chmod(0o600)
+        return path
+
+    loaded = worker_module.load_config(write_config("http://127.0.0.1:11434/v1"))
+    assert worker_module.read_secret(loaded, "api") == ""
+    with FakeLLMServer([{"content": "ok"}]) as server:
+        loaded = worker_module.load_config(write_config(server.url))
+        result = asyncio.run(
+            worker_module.OpenAICompatible(loaded, "").complete([], [])
+        )
+        assert result == {"content": "ok"}
+        assert server.authorizations == [None]
+    with pytest.raises(ValueError, match="exactly one"):
+        worker_module.load_config(write_config("https://provider.invalid/v1"))
