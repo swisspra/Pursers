@@ -21,3 +21,4 @@ DECISIONS-signed.json
 POLICY-signed.json
 docs-local/
 .codex/
+tools/wait-bridge/bridge-stats.json
