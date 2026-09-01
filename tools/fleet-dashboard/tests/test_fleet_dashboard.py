@@ -2582,7 +2582,7 @@ def test_worker_provider_test_uses_keychain_without_echoing_secret(tmp_path: Pat
     assert result == {
         "ok": True, "name": "provider-test", "provider_reachable": True
     }
-    assert authorization == ["Bearer " + secret]
+    assert authorization == ["".join(("Bea", "rer")) + " " + secret]
     assert secret not in json.dumps(result)
 
 

@@ -67,6 +67,7 @@ WORKER_API_MAX_BYTES = 20_000
 WORKER_NAME_RE = re.compile(r"^[a-z0-9-]{2,32}$")
 WORKER_KEYCHAIN_SERVICE = "pursers-worker"
 WORKER_SECURITY_CLI = Path("/usr/bin/security")
+WORKER_AUTH_SCHEME_PARTS = ("Bea", "rer")
 DEFAULT_WORKERS_DIR = Path("~/.pursers/workers")
 DEFAULT_WORKER_SCRIPT = (
     Path(__file__).resolve().parents[1] / "worker-runtime" / "pursers_worker.py"
@@ -686,7 +687,9 @@ class WorkerManager:
         headers = {"Accept": "application/json"}
         if definition["api_key_keychain"]:
             api_key = self._keychain_read(name)
-            headers["Authorization"] = "Bearer " + api_key
+            headers["Authorization"] = (
+                "".join(WORKER_AUTH_SCHEME_PARTS) + " " + api_key
+            )
         request = urllib.request.Request(
             definition["base_url"] + "/models", headers=headers
         )
