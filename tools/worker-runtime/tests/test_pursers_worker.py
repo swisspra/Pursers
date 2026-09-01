@@ -32,14 +32,15 @@ class FakeBoard:
         self.work: Path | None = None
         self.on_submit: Any = None
         self.waited = False
+        self.events = [{"board_id": "board-one", "ticket_id": "TK-scratch"}]
+        self.tickets: dict[str, dict[str, Any]] = {}
+        self.identity = "AI-worker-one"
 
     async def wait(self, _cursors: dict[str, int]) -> dict[str, Any]:
         self.waited = True
         return {
             "new_seq": {"board-one": 1},
-            "events": [
-                {"board_id": "board-one", "ticket_id": "TK-scratch"}
-            ],
+            "events": self.events,
         }
 
     async def claim(self, board_id: str, ticket_id: str) -> dict[str, Any]:
@@ -47,7 +48,18 @@ class FakeBoard:
         return {"ok": True}
 
     async def ticket(self, _board_id: str, ticket_id: str) -> dict[str, Any]:
-        return {"ticket_id": ticket_id, "required_fields": ["test_output"]}
+        return self.tickets.get(
+            ticket_id,
+            {
+                "ticket_id": ticket_id,
+                "status": "open",
+                "tags": [],
+                "required_fields": ["test_output"],
+            },
+        )
+
+    async def agent_id(self, _board_id: str) -> str:
+        return self.identity
 
     async def work_dir(self, _board_id: str) -> Path:
         assert self.work is not None
@@ -120,7 +132,14 @@ def tool_call(call_id: str, name: str, arguments: dict[str, Any]) -> dict[str, A
     }
 
 
-def config(root: Path, base_url: str, *, max_iterations: int = 4) -> Any:
+def config(
+    root: Path,
+    base_url: str,
+    *,
+    max_iterations: int = 4,
+    max_tier: str = "heavy",
+    require_assigned_only: bool = False,
+) -> Any:
     return worker_module.Config(
         agent_name="worker-one",
         central_url="https://central.invalid/mcp",
@@ -134,6 +153,8 @@ def config(root: Path, base_url: str, *, max_iterations: int = 4) -> Any:
         max_iterations=max_iterations,
         command_timeout_s=3,
         log_file=root / "session.log",
+        max_tier=max_tier,
+        require_assigned_only=require_assigned_only,
     )
 
 
@@ -181,6 +202,133 @@ def test_fake_server_happy_path_claim_edit_submit_and_secret_free_log() -> None:
         assert "API_KEY_PRIVATE" not in log
         assert "TOKEN_PRIVATE" not in log
         assert "done" not in log
+
+
+@pytest.mark.parametrize(
+    ("max_tier", "ticket_tier", "expected"),
+    [
+        ("light", "light", 1),
+        ("light", "standard", None),
+        ("light", "heavy", None),
+        ("standard", "light", 1),
+        ("standard", "standard", 1),
+        ("standard", "heavy", None),
+        ("heavy", "light", 1),
+        ("heavy", "standard", 1),
+        ("heavy", "heavy", 1),
+    ],
+)
+def test_tier_filter_matrix(
+    max_tier: str, ticket_tier: str, expected: int | None
+) -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        selected = config(Path(raw), "http://unused", max_tier=max_tier)
+        ticket = {"status": "open", "tags": [f"tier:{ticket_tier}"]}
+        assert worker_module.claim_priority(selected, ticket, "AI-worker-one") == expected
+
+
+def test_absent_tier_defaults_to_standard_and_assigned_only_is_enforced() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        light = config(root, "http://unused", max_tier="light")
+        assigned = config(
+            root,
+            "http://unused",
+            max_tier="standard",
+            require_assigned_only=True,
+        )
+        ticket = {"status": "open", "tags": []}
+
+        assert worker_module.ticket_tier(ticket) == "standard"
+        assert worker_module.claim_priority(light, ticket, "AI-worker-one") is None
+        assert worker_module.claim_priority(assigned, ticket, "AI-worker-one") is None
+        ticket["assigned_to_agent_id"] = "AI-worker-one"
+        assert worker_module.claim_priority(assigned, ticket, "AI-worker-one") == 0
+
+
+def test_max_tier_light_skips_heavy_and_claims_light() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        work = root / "work"
+        work.mkdir()
+        board = FakeBoard()
+        board.work = work
+        board.events = [
+            {"board_id": "board-one", "ticket_id": "TK-heavy"},
+            {"board_id": "board-one", "ticket_id": "TK-light"},
+        ]
+        board.tickets = {
+            "TK-heavy": {
+                "ticket_id": "TK-heavy",
+                "status": "open",
+                "tags": ["tier:heavy"],
+            },
+            "TK-light": {
+                "ticket_id": "TK-light",
+                "status": "open",
+                "tags": ["tier:light"],
+            },
+        }
+        with FakeLLMServer(
+            [tool_call("one", "submit_work", {"summary": "light done"})]
+        ) as server:
+            selected = config(root, server.url, max_tier="light")
+            worker = worker_module.Worker(
+                selected,
+                board,
+                worker_module.OpenAICompatible(selected, "key"),
+                worker_module.SessionLog(selected.log_file),
+                directive="STATIC",
+            )
+            board.on_submit = worker.stop.set
+            asyncio.run(worker.run())
+
+        assert board.claims == [("board-one", "TK-light")]
+        transcript = selected.log_file.read_text()
+        assert '"event":"ticket_skipped"' in transcript
+        assert '"ticket_id":"TK-heavy"' in transcript
+        assert '"ticket_tier":"heavy"' in transcript
+
+
+def test_assigned_ticket_is_claimed_before_earlier_unassigned_ticket() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        work = root / "work"
+        work.mkdir()
+        board = FakeBoard()
+        board.work = work
+        board.events = [
+            {"board_id": "board-one", "ticket_id": "TK-unassigned"},
+            {"board_id": "board-one", "ticket_id": "TK-assigned"},
+        ]
+        board.tickets = {
+            "TK-unassigned": {
+                "ticket_id": "TK-unassigned",
+                "status": "open",
+                "tags": [],
+            },
+            "TK-assigned": {
+                "ticket_id": "TK-assigned",
+                "status": "open",
+                "tags": [],
+                "assigned_to_agent_id": board.identity,
+            },
+        }
+        with FakeLLMServer(
+            [tool_call("one", "submit_work", {"summary": "assigned done"})]
+        ) as server:
+            selected = config(root, server.url)
+            worker = worker_module.Worker(
+                selected,
+                board,
+                worker_module.OpenAICompatible(selected, "key"),
+                worker_module.SessionLog(selected.log_file),
+                directive="STATIC",
+            )
+            board.on_submit = worker.stop.set
+            asyncio.run(worker.run())
+
+        assert board.claims == [("board-one", "TK-assigned")]
 
 
 def test_path_escape_rejected_then_give_up_releases_claim() -> None:
@@ -389,8 +537,20 @@ def test_config_requires_mode_0600_and_never_accepts_inline_keys() -> None:
 
         assert loaded.api_key_env == "PROXY_KEY"
         assert loaded.api_key_file is None
+        assert loaded.max_tier == "heavy"
+        assert loaded.require_assigned_only is False
 
         document = json.loads(path.read_text())
+        document["claim"] = {
+            "max_tier": "light",
+            "require_assigned_only": True,
+        }
+        path.write_text(json.dumps(document))
+        path.chmod(0o600)
+        loaded = worker_module.load_config(path)
+        assert loaded.max_tier == "light"
+        assert loaded.require_assigned_only is True
+
         document["llm"]["api_key"] = "INLINE_FORBIDDEN"
         path.write_text(json.dumps(document))
         path.chmod(0o600)

@@ -546,10 +546,18 @@ class _BoardView:
             self._refresh_generation(result)
         return result
 
-    async def board_join(self, *, agent_name: str | None = None) -> dict[str, Any]:
+    async def board_join(
+        self,
+        *,
+        agent_name: str | None = None,
+        task_focus: str | None = None,
+    ) -> dict[str, Any]:
         selected = self.agent_name if agent_name is None else agent_name
+        arguments = {"agent_name": selected}
+        if task_focus is not None:
+            arguments["task_focus"] = task_focus
         joined = await self._call(
-            "board_join", {"agent_name": selected}, refresh=True
+            "board_join", arguments, refresh=True
         )
         self.identity = JoinedIdentity(
             joined["board_id"],

@@ -67,6 +67,63 @@ def test_stage_two_names_least_loaded_live_assignee() -> None:
     assert finding["would_assign_to_agent_id"] == "AI-free"
 
 
+def test_force_assignment_respects_advertised_max_tier() -> None:
+    snapshot = {
+        "board-a": {
+            "agents": [
+                {
+                    "agent_id": "AI-light",
+                    "agent_name": "worker-light",
+                    "last_activity_at": ago(20),
+                    "status": "active",
+                    "membership_role": "member",
+                    "task_focus": "worker-runtime max_tier=light",
+                },
+                {
+                    "agent_id": "AI-heavy",
+                    "agent_name": "worker-heavy",
+                    "last_activity_at": ago(10),
+                    "status": "active",
+                    "membership_role": "member",
+                    "task_focus": "worker-runtime max_tier=heavy",
+                },
+            ],
+            "tickets": [
+                {
+                    "ticket_id": "TK-heavy",
+                    "status": "open",
+                    "priority": "medium",
+                    "created_at": ago(3_601),
+                    "tags": ["tier:heavy"],
+                }
+            ],
+        }
+    }
+
+    actions = coordinator.plan_actions(
+        snapshot, {"board-a": {"drop_history": []}}, {}, NOW
+    )
+
+    assert len(actions) == 1
+    assert actions[0].kind == "assign"
+    assert actions[0].target_agent_id == "AI-heavy"
+
+    snapshot["board-a"]["agents"] = snapshot["board-a"]["agents"][:1]
+    assert coordinator.plan_actions(
+        snapshot, {"board-a": {"drop_history": []}}, {}, NOW
+    ) == []
+
+
+def test_absent_ticket_tier_defaults_standard_for_coordinator() -> None:
+    light = {"task_focus": "worker-runtime max_tier=light"}
+    standard = {"task_focus": "worker-runtime max_tier=standard"}
+    ticket = {"tags": []}
+
+    assert coordinator.ticket_tier(ticket) == "standard"
+    assert coordinator.tier_allows(light, ticket) is False
+    assert coordinator.tier_allows(standard, ticket) is True
+
+
 @pytest.mark.parametrize(
     "kind",
     [

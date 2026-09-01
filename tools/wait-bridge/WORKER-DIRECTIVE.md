@@ -70,6 +70,10 @@ Run this loop continuously. Each pass is one unit of work:
      you each time.
 2. **CLAIM** — `ticket_claim` the returned ticket. If the claim fails (another
    worker won the race), go back to WAIT — do not fight for it.
+   - Creators may tag difficulty as `tier:light`, `tier:standard`, or
+     `tier:heavy`; no tier tag means `standard`. Headless workers must leave
+     tickets above their configured `claim.max_tier` untouched, and prefer a
+     ticket assigned to their exact seat over every unassigned ticket.
 3. **UNDERSTAND** — read the ticket and any linked memories/briefing. If it was
    rejected before, read the fix instructions and address them.
 4. **DO** — perform the work in your project directory via the file-editing MCP.

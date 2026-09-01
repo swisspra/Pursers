@@ -61,6 +61,8 @@ DEFAULT_AUTO_CATEGORIES = ("docs", "tests", "audit-analysis", "bug")
 DEFAULT_ALWAYS_ASK_CATEGORIES = tuple(
     category for category in INTAKE_CATEGORIES if category not in DEFAULT_AUTO_CATEGORIES
 )
+TIER_ORDER = {"light": 0, "standard": 1, "heavy": 2}
+MAX_TIER_FOCUS_RE = re.compile(r"(?:^|\s)max_tier[=:](light|standard|heavy)(?:\s|$)")
 
 
 @dataclass(frozen=True)
@@ -680,6 +682,28 @@ def _agent_loads(tickets: Sequence[Mapping[str, Any]]) -> Counter[str]:
     )
 
 
+def ticket_tier(ticket: Mapping[str, Any]) -> str:
+    tags = ticket.get("tags")
+    if not isinstance(tags, (list, tuple)):
+        return "standard"
+    tiers = [
+        tag.removeprefix("tier:")
+        for tag in tags
+        if isinstance(tag, str) and tag in {f"tier:{tier}" for tier in TIER_ORDER}
+    ]
+    return max(tiers, key=TIER_ORDER.__getitem__, default="standard")
+
+
+def agent_max_tier(agent: Mapping[str, Any]) -> str:
+    focus = agent.get("task_focus")
+    match = MAX_TIER_FOCUS_RE.search(focus) if isinstance(focus, str) else None
+    return match.group(1) if match else "heavy"
+
+
+def tier_allows(agent: Mapping[str, Any], ticket: Mapping[str, Any]) -> bool:
+    return TIER_ORDER[agent_max_tier(agent)] >= TIER_ORDER[ticket_tier(ticket)]
+
+
 def choose_assignee(
     agents: Sequence[Mapping[str, Any]],
     tickets: Sequence[Mapping[str, Any]],
@@ -1261,7 +1285,11 @@ def plan_actions(
         age = age_seconds(ticket.get("created_at"), now) or 0
         window = max(1, int(age // threshold))
         ticket_id = str(ticket.get("ticket_id"))
-        eligible = eligible_by_board.get(board_id, [])
+        eligible = [
+            agent
+            for agent in eligible_by_board.get(board_id, [])
+            if tier_allows(agent, ticket)
+        ]
         if stage == 2:
             recent_assign = any(
                 row.get("kind") == "assign"

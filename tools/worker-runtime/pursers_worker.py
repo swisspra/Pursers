@@ -33,6 +33,7 @@ DIRECTIVE_PATH = WAIT_ROOT / "WORKER-DIRECTIVE.md"
 MAX_TOOL_OUTPUT = 20_000
 MAX_FILE_READ = 100_000
 LEASE_INTERVAL_S = 20.0
+TIER_ORDER = {"light": 0, "standard": 1, "heavy": 2}
 SHELL_ENV_ALLOWLIST = (
     "LANG",
     "LC_ALL",
@@ -61,6 +62,8 @@ class Config:
     max_iterations: int
     command_timeout_s: int
     log_file: Path
+    max_tier: str
+    require_assigned_only: bool
 
 
 def _private_file(path: Path, label: str) -> Path:
@@ -95,6 +98,15 @@ def load_config(path: str | Path) -> Config:
         raise ValueError("config requires seat and llm objects")
     if "token" in seat or "api_key" in llm:
         raise ValueError("inline tokens and API keys are forbidden")
+    claim = document.get("claim", {})
+    if not isinstance(claim, dict):
+        raise ValueError("claim must be an object")
+    max_tier = claim.get("max_tier", "heavy")
+    if not isinstance(max_tier, str) or max_tier not in TIER_ORDER:
+        raise ValueError("claim.max_tier must be light, standard, or heavy")
+    require_assigned_only = claim.get("require_assigned_only", False)
+    if type(require_assigned_only) is not bool:
+        raise ValueError("claim.require_assigned_only must be a boolean")
     boards_raw = document.get("boards", "registry")
     if boards_raw == "registry":
         boards: str | tuple[str, ...] = "registry"
@@ -142,7 +154,42 @@ def load_config(path: str | Path) -> Config:
         max_iterations=positive("max_iterations", 40),
         command_timeout_s=positive("command_timeout_s", 120),
         log_file=log_file,
+        max_tier=max_tier,
+        require_assigned_only=require_assigned_only,
     )
+
+
+def ticket_tier(ticket: dict[str, Any]) -> str:
+    """Return the highest valid tier tag; an absent/invalid tag is standard."""
+    tags = ticket.get("tags")
+    if not isinstance(tags, (list, tuple)):
+        return "standard"
+    tiers = [
+        tag.removeprefix("tier:")
+        for tag in tags
+        if isinstance(tag, str) and tag in {f"tier:{tier}" for tier in TIER_ORDER}
+    ]
+    return max(tiers, key=TIER_ORDER.__getitem__, default="standard")
+
+
+def claim_priority(config: Config, ticket: dict[str, Any], agent_id: str) -> int | None:
+    """Return assigned-first priority, or None when the ticket must be skipped."""
+    if ticket.get("status") != "open":
+        return None
+    if TIER_ORDER[ticket_tier(ticket)] > TIER_ORDER[config.max_tier]:
+        return None
+    assigned_id = ticket.get("assigned_to_agent_id")
+    assigned_to = ticket.get("assigned_to")
+    if assigned_id:
+        assigned_to_me = str(assigned_id) == agent_id
+    elif assigned_to:
+        assigned_to_me = str(assigned_to).casefold() in {
+            agent_id.casefold(),
+            config.agent_name.casefold(),
+        }
+    else:
+        return None if config.require_assigned_only else 1
+    return 0 if assigned_to_me else None
 
 
 def read_secret(config: Config, kind: str) -> str:
@@ -194,6 +241,7 @@ class BoardAPI(Protocol):
     async def wait(self, cursors: dict[str, int]) -> dict[str, Any]: ...
     async def claim(self, board_id: str, ticket_id: str) -> dict[str, Any]: ...
     async def ticket(self, board_id: str, ticket_id: str) -> dict[str, Any]: ...
+    async def agent_id(self, board_id: str) -> str: ...
     async def work_dir(self, board_id: str) -> Path: ...
     async def renew(self, board_id: str, ticket_id: str) -> None: ...
     async def submit(
@@ -231,7 +279,10 @@ class PursersBoardAPI:
         view = self.views.get(board_id)
         if view is None:
             view = wait_bridge._BoardView(self.client, board_id)
-            await view.board_join(agent_name=self.config.agent_name)
+            await view.board_join(
+                agent_name=self.config.agent_name,
+                task_focus=f"worker-runtime max_tier={self.config.max_tier}",
+            )
             self.views[board_id] = view
         return view
 
@@ -259,6 +310,12 @@ class PursersBoardAPI:
         if result.get("error"):
             raise RuntimeError(str(result["error"]))
         return result.get("ticket", result)
+
+    async def agent_id(self, board_id: str) -> str:
+        view = await self._view(board_id)
+        if view.identity is None:  # pragma: no cover - _view always joins.
+            raise RuntimeError("board identity is unavailable")
+        return str(view.identity.agent_id)
 
     async def work_dir(self, board_id: str) -> Path:
         self.registry = self.registry or await wait_bridge._read_project_registry(
@@ -559,11 +616,46 @@ class Worker:
         while not self.stop.is_set():
             waited = await self.board.wait(cursors)
             cursors = dict(waited.get("new_seq", cursors))
-            for event in waited.get("events", []):
+            candidates: list[tuple[int, int, str, str, dict[str, Any]]] = []
+            seen: set[tuple[str, str]] = set()
+            for index, event in enumerate(waited.get("events", [])):
                 ticket_id = event.get("ticket_id")
                 board_id = event.get("board_id")
                 if not ticket_id or not board_id:
                     continue
+                key = (str(board_id), str(ticket_id))
+                if key in seen:
+                    continue
+                seen.add(key)
+                try:
+                    ticket = await self.board.ticket(str(board_id), str(ticket_id))
+                    agent_id = await self.board.agent_id(str(board_id))
+                except Exception as exc:
+                    self.log.write(
+                        "candidate_read_failed",
+                        board_id=board_id,
+                        ticket_id=ticket_id,
+                        error=type(exc).__name__,
+                    )
+                    continue
+                priority = claim_priority(self.config, ticket, agent_id)
+                if priority is None:
+                    self.log.write(
+                        "ticket_skipped",
+                        board_id=board_id,
+                        ticket_id=ticket_id,
+                        ticket_tier=ticket_tier(ticket),
+                        max_tier=self.config.max_tier,
+                        assigned_to=ticket.get("assigned_to_agent_id")
+                        or ticket.get("assigned_to"),
+                        require_assigned_only=self.config.require_assigned_only,
+                    )
+                    continue
+                candidates.append(
+                    (priority, index, str(board_id), str(ticket_id), ticket)
+                )
+
+            for _priority, _index, board_id, ticket_id, ticket in sorted(candidates):
                 try:
                     await self.board.claim(board_id, ticket_id)
                 except Exception:
@@ -580,6 +672,8 @@ class Worker:
                     )
                     await self._release(board_id, ticket_id, "board API failure")
                 break
+            if not candidates:
+                await asyncio.sleep(1)
 
 
 async def async_main(config_path: Path) -> None:

@@ -16,6 +16,10 @@ agent_name = "worker-api-1"
 central_url = "https://127.0.0.1:8766/mcp"
 token_file = "/private/path/seat.jwt"
 
+[claim]
+max_tier = "standard" # light | standard | heavy; default heavy
+require_assigned_only = false
+
 [llm]
 base_url = "https://proxy.example/v1"
 api_key_env = "OPENAI_COMPATIBLE_API_KEY"
