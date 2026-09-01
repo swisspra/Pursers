@@ -5,6 +5,28 @@ All notable changes to Pursers are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [5.0.0a14] - 2026-09-01
+
+This release includes `pursers-personal==5.0.0a14`, `pursers==5.0.0a14`, and
+`pursers-central==0.1.0a19`.
+
+### Added
+
+- Central runtime health hardening after a live healthz-500 incident
+  (proximate cause: sqlite "unable to open database file" under file-descriptor
+  pressure): a `runtime_health` module, full-detail healthz/tool error logging
+  in machine-readable single lines, and a concurrency/disconnect stress
+  regression that holds healthz at 200 under a 128-FD limit.
+- Dashboard Workers tab: click-to-add API workers with OpenAI-compatible
+  presets, API keys stored in the macOS Keychain (never on disk), Test button,
+  and start/stop lifecycle; worker runtime gained the keychain key source and
+  graceful SIGTERM during long waits.
+- Worker tier filtering: `tier:light|standard|heavy` ticket tags,
+  per-worker `max_tier` and assigned-first claiming, and tier-aware
+  coordinator dispatch.
+- Session context-pressure panel (overhead v2): per-poll estimated tokens per
+  seat with trend and compact-recommendation badges.
+
 ## [5.0.0a13] - 2026-09-01
 
 This release includes `pursers-personal==5.0.0a13`, `pursers==5.0.0a13`, and
