@@ -16,6 +16,13 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
+
+def _bridge_version() -> str:
+    import re as _re
+    text = (ROOT / "pyproject.toml").read_text()
+    return _re.search(r'version = "([^"]+)"', text).group(1)
+
+
 CLIENT_SRC = ROOT.parents[1] / "packages" / "client" / "src"
 sys.path.insert(0, str(CLIENT_SRC))
 sys.path.insert(0, str(ROOT))
@@ -280,7 +287,7 @@ class SeatAdminTests(unittest.TestCase):
                     (
                         "from importlib.metadata import version; "
                         "import registry_admin, registry_doctor, seat_admin; "
-                        "assert version('pursers-wait-bridge') == '0.1.0a4'; "
+                        f"assert version('pursers-wait-bridge') == {_bridge_version()!r}; "
                         "assert version('pursers-client') == '0.1.0a13'; "
                         "assert version('mcp') == '2.1.1'; "
                         "assert hasattr(registry_doctor.LiveBackend, 'board_snapshot'); "
