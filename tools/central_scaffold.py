@@ -170,6 +170,7 @@ def _plist(root: Path, label: str) -> bytes:
         "RunAtLoad": True,
         "KeepAlive": True,
         "ProcessType": "Background",
+        "SoftResourceLimits": {"NumberOfFiles": 4096},
         "StandardOutPath": str(root / "logs" / "central.out.log"),
         "StandardErrorPath": str(root / "logs" / "central.err.log"),
     }

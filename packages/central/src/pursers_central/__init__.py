@@ -18,6 +18,7 @@ _names = (
     "sqlite_store",
     "transactional_sqlite",
     "instance_lock",
+    "runtime_health",
 )
 _previous = {name: sys.modules.get(name) for name in _names}
 try:
