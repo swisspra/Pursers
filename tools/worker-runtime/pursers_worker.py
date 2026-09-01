@@ -611,7 +611,20 @@ class Worker:
     async def run(self) -> None:
         cursors: dict[str, int] = {}
         while not self.stop.is_set():
-            waited = await self.board.wait(cursors)
+            board_wait = asyncio.create_task(self.board.wait(cursors))
+            shutdown = asyncio.create_task(self.stop.wait())
+            try:
+                done, _ = await asyncio.wait(
+                    (board_wait, shutdown), return_when=asyncio.FIRST_COMPLETED
+                )
+                if shutdown in done:
+                    break
+                waited = board_wait.result()
+            finally:
+                for task in (board_wait, shutdown):
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(board_wait, shutdown, return_exceptions=True)
             cursors = dict(waited.get("new_seq", cursors))
             for event in waited.get("events", []):
                 ticket_id = event.get("ticket_id")

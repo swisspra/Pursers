@@ -69,6 +69,20 @@ class FakeBoard:
         self.renewals += 1
 
 
+class BlockingBoard(FakeBoard):
+    def __init__(self) -> None:
+        super().__init__()
+        self.wait_cancelled = False
+
+    async def wait(self, _cursors: dict[str, int]) -> dict[str, Any]:
+        self.waited = True
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            self.wait_cancelled = True
+            raise
+
+
 class FakeLLMServer:
     def __init__(self, responses: list[dict[str, Any]]) -> None:
         self.responses = list(responses)
@@ -184,6 +198,31 @@ def test_fake_server_happy_path_claim_edit_submit_and_secret_free_log() -> None:
         assert "API_KEY_PRIVATE" not in log
         assert "TOKEN_PRIVATE" not in log
         assert "done" not in log
+
+
+def test_stop_interrupts_blocked_board_wait() -> None:
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        board = BlockingBoard()
+        selected = config(root, "http://unused")
+        worker = worker_module.Worker(
+            selected,
+            board,
+            object(),
+            worker_module.SessionLog(selected.log_file),
+            directive="STATIC",
+        )
+
+        async def exercise() -> None:
+            running = asyncio.create_task(worker.run())
+            while not board.waited:
+                await asyncio.sleep(0)
+            worker.stop.set()
+            await asyncio.wait_for(running, timeout=1)
+
+        asyncio.run(exercise())
+
+        assert board.wait_cancelled is True
 
 
 def test_path_escape_rejected_then_give_up_releases_claim() -> None:
