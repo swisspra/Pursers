@@ -466,6 +466,9 @@ async def test_rpc_envelope_preserves_kwargs() -> None:
         ),
         ("board_catchup", "cursor must be a non-negative integer"),
         ("board_catchup", "limit must be between 1 and 1000"),
+        ("board_snapshot", "max_bytes is too small for snapshot metadata"),
+        ("board_catchup", "max_bytes is too small for catchup metadata"),
+        ("board_catchup", "max_bytes is too small for one journal event"),
     ],
 )
 @pytest.mark.anyio
@@ -636,6 +639,9 @@ async def test_rpc_redacts_unrecognized_wrapped_ticket_status() -> None:
         "expected_generation argument conflicts with generation metadata",
         "cursor must be a non-negative integer",
         "limit must be between 1 and 1000",
+        "max_bytes is too small for snapshot metadata",
+        "max_bytes is too small for catchup metadata",
+        "max_bytes is too small for one journal event",
     ],
 )
 @pytest.mark.parametrize("error_type", [ValueError, TypeError])

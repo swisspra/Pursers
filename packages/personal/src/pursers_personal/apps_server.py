@@ -128,6 +128,9 @@ _SAFE_CENTRAL_VALIDATION_DETAILS = (
         r"^expected_generation argument conflicts with generation metadata$"
     ),
     re.compile(r"^cursor must be a non-negative integer$"),
+    re.compile(r"^max_bytes is too small for snapshot metadata$"),
+    re.compile(r"^max_bytes is too small for catchup metadata$"),
+    re.compile(r"^max_bytes is too small for one journal event$"),
     re.compile(r"^ticket (?:not found|already exists)$"),
     re.compile(
         r"^ticket is (?:open|claimed|in_progress|creating_report|submitted|"
