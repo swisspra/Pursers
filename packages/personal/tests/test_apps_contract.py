@@ -414,17 +414,53 @@ async def test_rpc_envelope_preserves_kwargs() -> None:
     assert await call == {"ok": True}
 
 
+@pytest.mark.parametrize(
+    ("tool_name", "detail"),
+    [
+        (
+            "ticket_create",
+            "generated-ID tickets require: description, target_url",
+        ),
+        (
+            "ticket_create",
+            "scope must be READ-ONLY, interactive-no-send, or interactive",
+        ),
+        (
+            "ticket_create",
+            "board:intake ticket creation requires coordinator_op_key",
+        ),
+        ("ticket_review", "verdict must be approve or reject"),
+        ("ticket_list", "unsupported ticket status"),
+        ("memory_write", "scope must be private or project"),
+        ("memory_write", "unsupported memory_type"),
+        ("memory_write", "priority must be between 0 and 3"),
+        ("memory_write", "archived must be a boolean"),
+        ("memory_write", "archive provenance requires archived=true"),
+        ("memory_read", "since must be an ISO-8601 timestamp"),
+        ("memory_handoff", "next_steps must contain at least one item"),
+        (
+            "board_state_update",
+            "expected_sha256 must be a lowercase SHA-256 digest",
+        ),
+    ],
+)
 @pytest.mark.anyio
-async def test_rpc_surfaces_allowlisted_central_validation_detail() -> None:
-    detail = "generated-ID tickets require: description, target_url"
+async def test_rpc_surfaces_allowlisted_central_validation_detail(
+    tool_name: str,
+    detail: str,
+) -> None:
     wrapped = (
-        "[TextContent(type='text', text='Error executing tool ticket_create: "
+        f"[TextContent(type='text', text='Error executing tool {tool_name}: "
         f"{detail}', annotations=None, meta=None)]"
     )
 
     class ValidationClient(FakeClient):
-        async def ticket_create(self) -> None:
-            raise FakeClientError(wrapped)
+        pass
+
+    async def fail_validation(_self: FakeClient) -> None:
+        raise FakeClientError(wrapped)
+
+    setattr(ValidationClient, tool_name, fail_validation)
 
     state = LiveDashboard(
         fake_config(),
@@ -438,7 +474,7 @@ async def test_rpc_surfaces_allowlisted_central_validation_detail() -> None:
     state._probe_central = healthy_probe  # type: ignore[method-assign]
     try:
         with pytest.raises(RuntimeError) as caught:
-            await state._rpc("ticket_create")
+            await state._rpc(tool_name)
         assert str(caught.value) == (
             f"Central request failed (FakeClientError): {detail}"
         )
@@ -542,16 +578,34 @@ async def test_rpc_redacts_unrecognized_wrapped_ticket_status() -> None:
         await state.stop()
 
 
+@pytest.mark.parametrize(
+    "detail",
+    [
+        "priority must be low, medium, high, or critical",
+        "scope must be READ-ONLY, interactive-no-send, or interactive",
+        "board:intake ticket creation requires coordinator_op_key",
+        "verdict must be approve or reject",
+        "unsupported ticket status",
+        "scope must be private or project",
+        "unsupported memory_type",
+        "priority must be between 0 and 3",
+        "archived must be a boolean",
+        "archive provenance requires archived=true",
+        "since must be an ISO-8601 timestamp",
+        "next_steps must contain at least one item",
+        "expected_sha256 must be a lowercase SHA-256 digest",
+    ],
+)
 @pytest.mark.parametrize("error_type", [ValueError, TypeError])
 def test_request_error_surfaces_direct_validation_types(
     error_type: type[Exception],
+    detail: str,
 ) -> None:
     state = LiveDashboard(
         fake_config(),
         client_class=FakeClient,
         client_error_class=FakeClientError,
     )
-    detail = "priority must be low, medium, high, or critical"
     assert state._safe_request_error(error_type(detail)) == (
         f"Central request failed ({error_type.__name__}): {detail}"
     )
