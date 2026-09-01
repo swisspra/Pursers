@@ -109,6 +109,25 @@ _SAFE_CENTRAL_VALIDATION_DETAILS = (
     re.compile(r"^since must be an ISO-8601 timestamp$"),
     re.compile(r"^next_steps must contain at least one item$"),
     re.compile(r"^expected_sha256 must be a lowercase SHA-256 digest$"),
+    re.compile(r"^role must be admin, member, or reviewer$"),
+    re.compile(r"^token_budget must be between 256 and 50000$"),
+    re.compile(r"^scrub_profile must be strict or internal$"),
+    re.compile(r"^review_policy must be strict or workflow$"),
+    re.compile(r"^invite role must be member or reviewer$"),
+    re.compile(r"^expected_status must be open$"),
+    re.compile(r"^expires_at must be an ISO-8601 timestamp$"),
+    re.compile(r"^expires_at must include a timezone$"),
+    re.compile(r"^expires_at must be within the next hour$"),
+    re.compile(r"^limit must be between 1 and (?:100|200|500|1000)$"),
+    re.compile(r"^since_minutes must be positive$"),
+    re.compile(r"^depth must be between 0 and 10$"),
+    re.compile(
+        r"^expected generation SHA-256 must be 64 lowercase hex characters$"
+    ),
+    re.compile(
+        r"^expected_generation argument conflicts with generation metadata$"
+    ),
+    re.compile(r"^cursor must be a non-negative integer$"),
     re.compile(r"^ticket (?:not found|already exists)$"),
     re.compile(
         r"^ticket is (?:open|claimed|in_progress|creating_report|submitted|"
