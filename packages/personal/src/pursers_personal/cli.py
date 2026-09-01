@@ -4,15 +4,19 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-from contextlib import AsyncExitStack
 import json
 import os
 import platform
+import plistlib
+import re
+import shutil
 import socket
 import subprocess
 import sys
+from collections.abc import Sequence
+from contextlib import AsyncExitStack
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 
 from . import __version__
 from .artifacts import (
@@ -21,8 +25,10 @@ from .artifacts import (
     safe_component_summary,
 )
 from .integration import (
-    IntegrationError,
+    ENTRY_NAME,
     LAUNCHCTL_PATH,
+    MAX_CONFIG_BYTES,
+    IntegrationError,
     _apply_integration_locked,
     _integration_lock,
     _rollback_integration_locked,
@@ -31,8 +37,8 @@ from .integration import (
     prepare_integration,
 )
 
-
 PGREP_PATH = "/usr/bin/pgrep"
+_PROFILE_DIRECTORY_RE = re.compile(r"^project-[0-9a-f]{24}$")
 
 
 class RotationActivationError(IntegrationError):
@@ -63,6 +69,10 @@ def _default_claude_config() -> Path:
         / "Claude"
         / "claude_desktop_config.json"
     )
+
+
+def _default_claude_code_config() -> Path:
+    return Path.home() / ".claude" / "settings.json"
 
 
 def _console_path(value: Path | None) -> Path:
@@ -123,7 +133,10 @@ def _tcp_status(url: str) -> dict[str, Any]:
             "healthy": False,
             "message": f"Central is not accepting loopback connections ({type(exc).__name__})",
         }
-    return {"healthy": True, "message": "Central loopback port is accepting connections"}
+    return {
+        "healthy": True,
+        "message": "Central loopback port is accepting connections",
+    }
 
 
 def _setup_port(api: Any, args: argparse.Namespace) -> int:
@@ -134,9 +147,7 @@ def _setup_port(api: Any, args: argparse.Namespace) -> int:
     project = args.project.expanduser().resolve(strict=True)
     profile_path = api.profile_path_for_project(project, root)
     if profile_path.exists() and not profile_path.is_symlink():
-        profile = _profile_action(
-            api, "load", api.load_personal_profile, profile_path
-        )
+        profile = _profile_action(api, "load", api.load_personal_profile, profile_path)
         return int(profile.central_port)
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
         probe.bind(("127.0.0.1", 0))
@@ -146,7 +157,153 @@ def _setup_port(api: Any, args: argparse.Namespace) -> int:
     return port
 
 
-def _authenticated_status(profile: Any, *, host_id: str, session: str) -> dict[str, Any]:
+def _resolved_target(path: Path) -> Path:
+    try:
+        return path.expanduser().resolve(strict=False)
+    except (OSError, RuntimeError) as exc:
+        raise IntegrationError("cannot resolve the requested host config path") from exc
+
+
+def _targets_claude_desktop_config(host_config: Path) -> bool:
+    return _resolved_target(host_config) == _resolved_target(_default_claude_config())
+
+
+def _setup_coordinates(api: Any, args: argparse.Namespace) -> tuple[Path, Path, Path]:
+    project = args.project.expanduser().resolve(strict=True)
+    if not project.is_dir():
+        raise IntegrationError("project root must be a directory")
+    root = (args.profiles_root or api.default_profiles_root()).expanduser().absolute()
+    if root.is_symlink():
+        raise IntegrationError("profiles root must not be a symlink")
+    profile_path = api.profile_path_for_project(project, root)
+    return project, root, profile_path
+
+
+def _host_entry_action(host_config: Path) -> str:
+    target = host_config.expanduser().absolute()
+    if not target.exists() and not target.is_symlink():
+        return "create-config-and-add-entry"
+    if target.is_symlink() or not target.is_file():
+        raise IntegrationError("host config must be a regular non-symlink file")
+    if target.stat().st_size > MAX_CONFIG_BYTES:
+        raise IntegrationError("host config is too large")
+    try:
+        document = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise IntegrationError("host config is not valid UTF-8 JSON") from exc
+    if not isinstance(document, dict):
+        raise IntegrationError("host config root must be an object")
+    servers = document.get("mcpServers")
+    if servers is None:
+        return "add-mcpServers-and-entry"
+    if not isinstance(servers, dict):
+        raise IntegrationError("host config mcpServers must be an object")
+    return "add-entry" if ENTRY_NAME not in servers else "conflict-existing-entry"
+
+
+def _setup_plan(args: argparse.Namespace, api: Any) -> dict[str, Any]:
+    if args.activate:
+        raise IntegrationError("--activate requires --apply")
+    project, root, profile_path = _setup_coordinates(api, args)
+    if profile_path.exists() or profile_path.is_symlink():
+        profile = _profile_action(api, "load", api.load_personal_profile, profile_path)
+        identity = _profile_action(
+            api,
+            "identity resolution",
+            api.doctor_identity_summary,
+            host=args.host_id,
+            session=args.session,
+            explicit_profile=profile.profile_path,
+        )
+        current = integration_status(profile.profile_path)
+        if current["state"] == "applied":
+            requested_console = _console_path(args.console)
+            expected = {
+                "profile_path": str(profile.profile_path),
+                "console_path": str(requested_console),
+                "host_id": args.host_id,
+                "session": args.session,
+            }
+            if any(current.get(key) != value for key, value in expected.items()):
+                raise IntegrationError(
+                    "requested profile, console, host, or session differs from installed integration"
+                )
+            return {
+                "status": "existing",
+                "product_version": __version__,
+                "identity_statement": identity["identity_statement"],
+                "profile": identity,
+                "integration": current,
+                "host_restart_required": False,
+                "central_initialization_required": False,
+            }
+        if current["state"] == "preparing":
+            raise IntegrationError(
+                "interrupted integration detected; run rollback before setup"
+            )
+        if current["state"] not in {"not-installed", "rolled_back", "uninstalled"}:
+            raise IntegrationError("integration receipt state is unsupported")
+        plan = prepare_integration(
+            profile,
+            console_path=_console_path(args.console),
+            launch_agents_dir=args.launch_agents_dir,
+            host_config_path=args.host_config,
+            host_id=args.host_id,
+            session=args.session,
+        )
+        integration = {"status": "planned", **plan.safe_summary()}
+        integration["profile_action"] = "reuse"
+        integration["port_strategy"] = "reuse-existing"
+        integration["port"] = profile.central_port
+        return {
+            "status": "planned",
+            "product_version": __version__,
+            "identity_statement": identity["identity_statement"],
+            "profile": identity,
+            "integration": integration,
+            "host_support": "candidate-unverified-until-host-gate",
+            "host_restart_required": False,
+            "central_initialization_required": False,
+        }
+
+    if args.port is not None and not 1 <= int(args.port) <= 65_535:
+        raise IntegrationError("port must be between 1 and 65535")
+    console = _console_path(args.console)
+    integration = {
+        "status": "planned",
+        "profile_action": "create-on-apply",
+        "profile_path": str(profile_path),
+        "project_root": str(project),
+        "profiles_root": str(root),
+        "port_strategy": "explicit" if args.port is not None else "ephemeral-on-apply",
+        "port": int(args.port) if args.port is not None else None,
+        "console_path": str(console),
+        "launch_agents_dir": str(args.launch_agents_dir.expanduser().absolute()),
+        "service_action": "create-on-apply",
+        "host_target": str(args.host_config.expanduser().absolute()),
+        "host_entry_action": _host_entry_action(args.host_config),
+        "host_id": args.host_id,
+        "session": args.session,
+        "contains_credential": False,
+    }
+    return {
+        "status": "planned",
+        "product_version": __version__,
+        "profile": {
+            "action": "create-on-apply",
+            "profile_path": str(profile_path),
+            "project_root": str(project),
+        },
+        "integration": integration,
+        "host_support": "candidate-unverified-until-host-gate",
+        "host_restart_required": False,
+        "central_initialization_required": False,
+    }
+
+
+def _authenticated_status(
+    profile: Any, *, host_id: str, session: str
+) -> dict[str, Any]:
     """Verify Central through pure authenticated reads; never join or mutate."""
     api = _profile_api()
     context = api.resolve_personal_context(profile, host=host_id, session=session)
@@ -194,8 +351,7 @@ def _authenticated_status(profile: Any, *, host_id: str, session: str) -> dict[s
                 )
                 matches = (
                     status.get("board_id") == context.board_id
-                    and snapshot.get("board", {}).get("board_id")
-                    == context.board_id
+                    and snapshot.get("board", {}).get("board_id") == context.board_id
                     and status.get("review_policy") == api.PERSONAL_REVIEW_POLICY
                     and agent_present
                 )
@@ -266,8 +422,7 @@ def _initialize_personal_board(
                             != context.authenticated_principal_id
                             or identity.agent_name != context.agent_name
                             or status.get("board_id") != context.board_id
-                            or status.get("review_policy")
-                            != api.PERSONAL_REVIEW_POLICY
+                            or status.get("review_policy") != api.PERSONAL_REVIEW_POLICY
                         ):
                             raise IntegrationError(
                                 "Personal board initialization returned a mismatched identity or policy"
@@ -304,12 +459,18 @@ def _run_launchctl(command: list[str]) -> None:
             command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE
         )
     except subprocess.CalledProcessError as exc:
-        raise IntegrationError("launchctl command failed for the owned Personal service") from exc
+        raise IntegrationError(
+            "launchctl command failed for the owned Personal service"
+        ) from exc
 
 
 def _host_is_running(host_id: str) -> bool:
     if host_id != "claude-desktop":
-        raise IntegrationError("host lifecycle checks support only Claude Desktop")
+        print(
+            "pursers-personal: lifecycle check skipped for an unrecognized host id",
+            file=sys.stderr,
+        )
+        return False
     if platform.system() != "Darwin":
         raise IntegrationError("Claude Desktop lifecycle checks require macOS")
     _system_binary(Path(PGREP_PATH), "pgrep")
@@ -396,7 +557,9 @@ def _deactivate_service(label: str, service_target: Path) -> str:
     return "stopped"
 
 
-def _emit(value: dict[str, Any], *, as_json: bool, identity_first: bool = False) -> None:
+def _emit(
+    value: dict[str, Any], *, as_json: bool, identity_first: bool = False
+) -> None:
     if as_json:
         print(json.dumps(value, indent=2, sort_keys=True))
         return
@@ -487,39 +650,300 @@ def _setup_integration(
 def command_setup(args: argparse.Namespace) -> dict[str, Any]:
     # Fail before profile/key/config creation if any shipped runtime byte drifts.
     safe_component_summary()
-    if args.apply:
+    if not args.apply:
+        return _setup_plan(args, _profile_api())
+    host_config = getattr(args, "host_config", _default_claude_config())
+    if _targets_claude_desktop_config(host_config):
         _require_host_closed(args.host_id)
     api = _profile_api()
-    port = _setup_port(api, args)
-    profile = _profile_action(
-        api,
-        "setup",
-        api.ensure_personal_profile,
-        args.project,
-        profiles_root=args.profiles_root,
-        port=port,
+    _project, _root, profile_path = _setup_coordinates(api, args)
+    try:
+        port = _setup_port(api, args)
+        profile = _profile_action(
+            api,
+            "setup",
+            api.ensure_personal_profile,
+            args.project,
+            profiles_root=args.profiles_root,
+            port=port,
+        )
+        identity = _profile_action(
+            api,
+            "identity resolution",
+            api.doctor_identity_summary,
+            host=args.host_id,
+            session=args.session,
+            explicit_profile=profile.profile_path,
+        )
+        return _setup_integration(args, profile, identity)
+    except (IntegrationError, OSError, ValueError) as exc:
+        if not profile_path.parent.exists():
+            raise
+        raise IntegrationError(
+            f"setup failed: {exc}; no profile was deleted. "
+            "Inspect the expected profile path at "
+            f"{profile_path.parent} with `profiles list`; remove it only after it is "
+            "reported orphaned by `profiles prune --orphaned --dry-run`, then use "
+            "`profiles prune --orphaned --commit`"
+        ) from exc
+
+
+def _value_references_path(value: Any, target: str) -> bool:
+    if isinstance(value, str):
+        return value == target
+    if isinstance(value, list):
+        return any(_value_references_path(item, target) for item in value)
+    if isinstance(value, dict):
+        return any(_value_references_path(item, target) for item in value.values())
+    return False
+
+
+def _host_config_reference(path: Path, profile_path: Path) -> tuple[bool, bool]:
+    target = path.expanduser().absolute()
+    if not target.exists() and not target.is_symlink():
+        return False, False
+    if target.is_symlink() or not target.is_file():
+        return False, True
+    try:
+        if target.stat().st_size > MAX_CONFIG_BYTES:
+            return False, True
+        document = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return False, True
+    return _value_references_path(document, str(profile_path)), False
+
+
+def _launch_agent_references(
+    launch_dirs: set[Path], profile_path: Path
+) -> tuple[list[str], bool]:
+    references: list[str] = []
+    uncertain = False
+    for launch_dir in sorted(launch_dirs, key=str):
+        directory = launch_dir.expanduser().absolute()
+        if not directory.exists() and not directory.is_symlink():
+            continue
+        if directory.is_symlink() or not directory.is_dir():
+            uncertain = True
+            continue
+        try:
+            candidates = sorted(directory.iterdir(), key=lambda item: item.name)
+        except OSError:
+            uncertain = True
+            continue
+        for candidate in candidates:
+            if candidate.suffix != ".plist":
+                continue
+            if candidate.is_symlink() or not candidate.is_file():
+                uncertain = True
+                continue
+            try:
+                if candidate.stat().st_size > MAX_CONFIG_BYTES:
+                    uncertain = True
+                    continue
+                document = plistlib.loads(candidate.read_bytes())
+            except (OSError, plistlib.InvalidFileException, ValueError, OverflowError):
+                uncertain = True
+                continue
+            if not isinstance(document, dict):
+                uncertain = True
+                continue
+            if _value_references_path(document, str(profile_path)):
+                references.append(str(candidate))
+    return references, uncertain
+
+
+def _profile_scan_paths(args: argparse.Namespace) -> tuple[set[Path], set[Path]]:
+    host_configs = {
+        _default_claude_config().expanduser().absolute(),
+        _default_claude_code_config().expanduser().absolute(),
+    }
+    host_configs.update(
+        path.expanduser().absolute() for path in getattr(args, "host_config", [])
     )
-    identity = _profile_action(
-        api,
-        "identity resolution",
-        api.doctor_identity_summary,
-        host=args.host_id,
-        session=args.session,
-        explicit_profile=profile.profile_path,
+    launch_dirs = {_default_launch_agents().expanduser().absolute()}
+    launch_dirs.update(
+        path.expanduser().absolute() for path in getattr(args, "launch_agents_dir", [])
     )
-    return _setup_integration(args, profile, identity)
+    return host_configs, launch_dirs
+
+
+def _scan_profiles(args: argparse.Namespace) -> tuple[Path, list[dict[str, Any]]]:
+    api = _profile_api()
+    root = (args.profiles_root or api.default_profiles_root()).expanduser().absolute()
+    if not root.exists() and not root.is_symlink():
+        return root, []
+    if root.is_symlink() or not root.is_dir():
+        raise IntegrationError("profiles root must be a regular directory")
+    base_host_configs, base_launch_dirs = _profile_scan_paths(args)
+    results: list[dict[str, Any]] = []
+    for directory in sorted(root.iterdir(), key=lambda item: item.name):
+        if not _PROFILE_DIRECTORY_RE.fullmatch(directory.name):
+            continue
+        profile_path = directory / "profile.json"
+        if directory.is_symlink() or not directory.is_dir():
+            results.append(
+                {
+                    "profile_path": str(profile_path),
+                    "status": "unsafe",
+                    "orphaned": False,
+                    "prunable": False,
+                    "reason": "profile directory is not a regular directory",
+                }
+            )
+            continue
+        try:
+            profile = _profile_action(
+                api, "load", api.load_personal_profile, profile_path
+            )
+        except (IntegrationError, OSError, ValueError):
+            results.append(
+                {
+                    "profile_path": str(profile_path),
+                    "status": "invalid",
+                    "orphaned": False,
+                    "prunable": False,
+                    "reason": "profile could not be verified",
+                }
+            )
+            continue
+
+        host_configs = set(base_host_configs)
+        launch_targets = {
+            launch_dir / f"com.onboard.personal.{profile.profile_id}.plist"
+            for launch_dir in base_launch_dirs
+        }
+        uncertain = False
+        try:
+            integration = integration_status(profile_path)
+        except (IntegrationError, OSError, ValueError):
+            integration = {"targets": []}
+            uncertain = True
+        for target in integration.get("targets", []):
+            if not isinstance(target, dict) or not isinstance(target.get("path"), str):
+                uncertain = True
+                continue
+            target_path = Path(target["path"]).expanduser().absolute()
+            if target.get("kind") == "host-config":
+                host_configs.add(target_path)
+            elif target.get("kind") == "service":
+                launch_targets.add(target_path)
+
+        host_references: list[str] = []
+        for host_config in sorted(host_configs, key=str):
+            referenced, unreadable = _host_config_reference(host_config, profile_path)
+            uncertain = uncertain or unreadable
+            if referenced:
+                host_references.append(str(host_config))
+        scanned_launch_references, unreadable_launch_agent = _launch_agent_references(
+            base_launch_dirs, profile_path
+        )
+        uncertain = uncertain or unreadable_launch_agent
+        explicit_launch_references = [
+            str(path) for path in launch_targets if path.exists() or path.is_symlink()
+        ]
+        if any(path.is_symlink() for path in launch_targets):
+            uncertain = True
+        launch_references = sorted(
+            set(scanned_launch_references + explicit_launch_references)
+        )
+        orphaned = not host_references and not launch_references and not uncertain
+        results.append(
+            {
+                "profile_path": str(profile_path),
+                "project_root": str(profile.project_root),
+                "profile_id": profile.profile_id,
+                "board_id": profile.board_id,
+                "status": "verified",
+                "host_references": host_references,
+                "launch_agent_references": launch_references,
+                "reference_check_complete": not uncertain,
+                "orphaned": orphaned,
+                "prunable": orphaned,
+                "reason": (
+                    "no known host entry or LaunchAgent references this profile"
+                    if orphaned
+                    else "profile is referenced or reference verification was incomplete"
+                ),
+            }
+        )
+    return root, results
+
+
+def command_profiles_list(args: argparse.Namespace) -> dict[str, Any]:
+    root, profiles = _scan_profiles(args)
+    return {
+        "status": "ok",
+        "profiles_root": str(root),
+        "count": len(profiles),
+        "profiles": profiles,
+    }
+
+
+def command_profiles_prune(args: argparse.Namespace) -> dict[str, Any]:
+    root, profiles = _scan_profiles(args)
+    candidates = [profile for profile in profiles if profile.get("prunable")]
+    removed: list[str] = []
+    if args.commit:
+        for candidate in candidates:
+            profile_path = Path(str(candidate["profile_path"]))
+            fresh_root, fresh_profiles = _scan_profiles(args)
+            fresh = next(
+                (
+                    item
+                    for item in fresh_profiles
+                    if item.get("profile_path") == str(profile_path)
+                ),
+                None,
+            )
+            directory = profile_path.parent
+            if (
+                fresh_root != root
+                or fresh is None
+                or not fresh.get("prunable")
+                or directory.parent != root
+                or directory.is_symlink()
+                or not _PROFILE_DIRECTORY_RE.fullmatch(directory.name)
+            ):
+                continue
+            shutil.rmtree(directory)
+            removed.append(str(profile_path))
+    return {
+        "status": "pruned" if args.commit else "planned",
+        "mode": "commit" if args.commit else "dry-run",
+        "profiles_root": str(root),
+        "candidate_count": len(candidates),
+        "removed_count": len(removed),
+        "candidates": [str(item["profile_path"]) for item in candidates],
+        "removed": removed,
+    }
 
 
 def command_doctor(args: argparse.Namespace) -> dict[str, Any]:
     api = _profile_api()
     profile, source = _selected_profile(args)
     integration = integration_status(profile.profile_path)
-    installed_host = integration.get("host_id") if integration["state"] == "applied" else None
-    installed_session = integration.get("session") if integration["state"] == "applied" else None
-    if args.host_id is not None and installed_host is not None and args.host_id != installed_host:
-        raise IntegrationError("requested host identity differs from installed integration")
-    if args.session is not None and installed_session is not None and args.session != installed_session:
-        raise IntegrationError("requested session identity differs from installed integration")
+    installed_host = (
+        integration.get("host_id") if integration["state"] == "applied" else None
+    )
+    installed_session = (
+        integration.get("session") if integration["state"] == "applied" else None
+    )
+    if (
+        args.host_id is not None
+        and installed_host is not None
+        and args.host_id != installed_host
+    ):
+        raise IntegrationError(
+            "requested host identity differs from installed integration"
+        )
+    if (
+        args.session is not None
+        and installed_session is not None
+        and args.session != installed_session
+    ):
+        raise IntegrationError(
+            "requested session identity differs from installed integration"
+        )
     host_id = str(installed_host or args.host_id or "claude-desktop")
     session = str(installed_session or args.session or "primary")
     identity = _profile_action(
@@ -544,8 +968,16 @@ def command_doctor(args: argparse.Namespace) -> dict[str, Any]:
         }
     )
     checks = [
-        {"name": "profile", "healthy": True, "message": "Private Personal profile verified"},
-        {"name": "components", "healthy": True, "message": "Installed component bytes verified"},
+        {
+            "name": "profile",
+            "healthy": True,
+            "message": "Private Personal profile verified",
+        },
+        {
+            "name": "components",
+            "healthy": True,
+            "message": "Installed component bytes verified",
+        },
         {
             "name": "integration",
             "healthy": integration["state"] == "applied",
@@ -728,9 +1160,7 @@ def command_remove(args: argparse.Namespace, *, uninstall: bool) -> dict[str, An
                 for item in status["targets"]
                 if item["kind"] == "service"
             )
-            service_stop = _deactivate_service(
-                str(status["label"]), service_target
-            )
+            service_stop = _deactivate_service(str(status["label"]), service_target)
         result = _rollback_integration_locked(
             profile_path,
             terminal_state="uninstalled" if uninstall else "rolled_back",
@@ -746,13 +1176,33 @@ def _add_profile_selector(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--profiles-root", type=Path)
 
 
+def _add_profile_inventory_options(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--profiles-root", type=Path)
+    parser.add_argument(
+        "--host-config",
+        type=Path,
+        action="append",
+        default=[],
+        help="additional host config to inspect for profile references",
+    )
+    parser.add_argument(
+        "--launch-agents-dir",
+        type=Path,
+        action="append",
+        default=[],
+        help="additional LaunchAgents directory to inspect",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--version", action="version", version=__version__)
     parser.add_argument("--json", action="store_true", help="emit JSON only")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    setup = subparsers.add_parser("setup", help="create a profile and plan/apply local integration")
+    setup = subparsers.add_parser(
+        "setup", help="create a profile and plan/apply local integration"
+    )
     setup.add_argument("--project", type=Path, required=True)
     setup.add_argument("--profiles-root", type=Path)
     setup.add_argument(
@@ -763,33 +1213,64 @@ def build_parser() -> argparse.ArgumentParser:
     setup.add_argument("--host-id", default="claude-desktop")
     setup.add_argument("--session", default="primary")
     setup.add_argument("--console", type=Path)
-    setup.add_argument("--launch-agents-dir", type=Path, default=_default_launch_agents())
+    setup.add_argument(
+        "--launch-agents-dir", type=Path, default=_default_launch_agents()
+    )
     setup.add_argument("--host-config", type=Path, default=_default_claude_config())
     setup.add_argument("--apply", action="store_true")
     setup.add_argument("--activate", action="store_true")
 
-    doctor = subparsers.add_parser("doctor", help="show effective identity and actionable checks")
+    profiles = subparsers.add_parser(
+        "profiles", help="list profiles and safely prune verified orphans"
+    )
+    profile_commands = profiles.add_subparsers(dest="profiles_command", required=True)
+    profiles_list = profile_commands.add_parser("list", help="list profile references")
+    _add_profile_inventory_options(profiles_list)
+    profiles_prune = profile_commands.add_parser(
+        "prune", help="remove only verified orphan profiles"
+    )
+    _add_profile_inventory_options(profiles_prune)
+    profiles_prune.add_argument("--orphaned", action="store_true", required=True)
+    prune_mode = profiles_prune.add_mutually_exclusive_group(required=True)
+    prune_mode.add_argument("--dry-run", action="store_true")
+    prune_mode.add_argument("--commit", action="store_true")
+
+    doctor = subparsers.add_parser(
+        "doctor", help="show effective identity and actionable checks"
+    )
     _add_profile_selector(doctor)
     doctor.add_argument("--host-id")
     doctor.add_argument("--session")
 
-    central = subparsers.add_parser("central", help="run the strict loopback Central service")
+    central = subparsers.add_parser(
+        "central", help="run the strict loopback Central service"
+    )
     _add_profile_selector(central)
 
-    mcp = subparsers.add_parser("mcp", help="run the profile-backed Apps/chat stdio facade")
+    mcp = subparsers.add_parser(
+        "mcp", help="run the profile-backed Apps/chat stdio facade"
+    )
     mcp.add_argument("--profile", type=Path, required=True)
     mcp.add_argument("--host-id", required=True)
     mcp.add_argument("--session", required=True)
 
-    rotate = subparsers.add_parser("rotate", help="rotate the local signing key and capability")
+    rotate = subparsers.add_parser(
+        "rotate", help="rotate the local signing key and capability"
+    )
     rotate.add_argument("--profile", type=Path, required=True)
-    rotate.add_argument("--activate", action="store_true", help="restart the owned service")
+    rotate.add_argument(
+        "--activate", action="store_true", help="restart the owned service"
+    )
 
-    restart = subparsers.add_parser("restart", help="restart only the owned Personal service")
+    restart = subparsers.add_parser(
+        "restart", help="restart only the owned Personal service"
+    )
     _add_profile_selector(restart)
     restart.add_argument("--activate", action="store_true")
 
-    rollback = subparsers.add_parser("rollback", help="restore exact pre-setup integration bytes")
+    rollback = subparsers.add_parser(
+        "rollback", help="restore exact pre-setup integration bytes"
+    )
     _add_profile_selector(rollback)
     rollback.add_argument(
         "--activate",
@@ -797,7 +1278,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="deprecated compatibility flag; the owned service is always stopped safely",
     )
 
-    uninstall = subparsers.add_parser("uninstall", help="remove integration but retain profile/data")
+    uninstall = subparsers.add_parser(
+        "uninstall", help="remove integration but retain profile/data"
+    )
     _add_profile_selector(uninstall)
     uninstall.add_argument(
         "--activate",
@@ -814,6 +1297,12 @@ def main(argv: Sequence[str] | None = None) -> None:
         if args.command == "setup":
             result = command_setup(args)
             _emit(result, as_json=args.json, identity_first=True)
+        elif args.command == "profiles":
+            if args.profiles_command == "list":
+                result = command_profiles_list(args)
+            else:
+                result = command_profiles_prune(args)
+            _emit(result, as_json=args.json)
         elif args.command == "doctor":
             result = command_doctor(args)
             _emit(result, as_json=args.json, identity_first=True)

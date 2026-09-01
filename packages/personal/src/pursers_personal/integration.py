@@ -17,7 +17,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
-
 ENTRY_NAME = "pursers-personal"
 LAUNCHCTL_PATH = "/bin/launchctl"
 RECEIPT_NAME = "integration-receipt.json"
@@ -462,20 +461,18 @@ def _host_payload(
     host_id: str,
     session: str,
 ) -> bytes:
-    if host_id != "claude-desktop":
-        raise IntegrationError("Personal Preview config supports only the Claude Desktop candidate")
     if current is None:
         document: dict[str, Any] = {}
     else:
         try:
             document = json.loads(current.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise IntegrationError("Claude Desktop config is not valid UTF-8 JSON") from exc
+            raise IntegrationError("host config is not valid UTF-8 JSON") from exc
         if not isinstance(document, dict):
-            raise IntegrationError("Claude Desktop config root must be an object")
+            raise IntegrationError("host config root must be an object")
     servers = document.setdefault("mcpServers", {})
     if not isinstance(servers, dict):
-        raise IntegrationError("Claude Desktop mcpServers must be an object")
+        raise IntegrationError("host config mcpServers must be an object")
     if ENTRY_NAME in servers:
         raise IntegrationError("unowned pursers-personal host entry already exists")
     servers[ENTRY_NAME] = {
