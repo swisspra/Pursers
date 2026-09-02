@@ -569,7 +569,7 @@ def _closed_ticket(commit: str, closed_at: datetime) -> dict[str, object]:
         "ticket_id": "TK-integration",
         "status": "closed",
         "target_url": "sample/path",
-        "reviewed_at": closed_at.isoformat(),
+        "closed_at": closed_at.isoformat(),
         "submission_history": [{"commit_hash": commit}],
     }
 
@@ -593,6 +593,35 @@ def test_pre_watermark_ticket_is_suppressed_and_counted(tmp_path: Path) -> None:
     assert state["integration_watch_since"] == NOW.isoformat()
 
 
+def test_first_close_history_beats_recent_review_and_updated_timestamps(
+    tmp_path: Path,
+) -> None:
+    project, submitted = _non_ancestor_fixture(tmp_path)
+    first_close = NOW - timedelta(days=2)
+    ticket = _closed_ticket(submitted, NOW + timedelta(days=2))
+    ticket["updated_at"] = (NOW + timedelta(days=3)).isoformat()
+    ticket["review_history"] = [
+        {
+            "status_to": "closed",
+            "reviewed_at": first_close.isoformat(),
+            "verdict": "approve",
+        },
+        {
+            "status_to": "open",
+            "reviewed_at": (NOW + timedelta(days=1)).isoformat(),
+            "verdict": "reject",
+        },
+    ]
+
+    findings, suppressed = coordinator.evaluate_integration_watch(
+        project, [ticket], NOW
+    )
+
+    assert coordinator._ticket_closed_at(ticket) == first_close
+    assert findings == []
+    assert suppressed == 1
+
+
 def test_unknown_commit_object_is_informational(tmp_path: Path) -> None:
     _git(tmp_path, "init", "-q")
     _git(tmp_path, "config", "user.email", "test@example.invalid")
@@ -602,6 +631,7 @@ def test_unknown_commit_object_is_informational(tmp_path: Path) -> None:
     _git(tmp_path, "commit", "-qm", "first")
     project = coordinator.Project("sample", "board-a", tmp_path, "HEAD")
     ticket = _closed_ticket("a" * 40, NOW + timedelta(seconds=1))
+    ticket["updated_at"] = (NOW + timedelta(days=30)).isoformat()
 
     findings, suppressed = coordinator.evaluate_integration_watch(
         project, [ticket], NOW
@@ -637,6 +667,107 @@ def test_ticket_closed_exactly_at_watermark_is_not_suppressed(tmp_path: Path) ->
 
     assert suppressed == 0
     assert findings[0]["kind"] == "closed-but-unmerged"
+
+
+def test_analyze_cycle_uses_complete_ticket_list_for_watermark_count(
+    tmp_path: Path,
+) -> None:
+    project, submitted = _non_ancestor_fixture(tmp_path)
+    old = _closed_ticket(submitted, NOW - timedelta(seconds=1))
+    recent = _closed_ticket(submitted, NOW + timedelta(seconds=1))
+    state = coordinator.analyze_cycle(
+        [project],
+        {
+            "board-a": {
+                "board": {"board_id": "board-a"},
+                "agents": [],
+                "tickets": [recent],
+                "intake_tickets": [old],
+                "intake_tickets_complete": True,
+            }
+        },
+        {},
+        (),
+        NOW,
+        integration_watch_since=NOW,
+    )["board-a"]
+
+    assert state["suppressed_pre_watermark"] == 1
+    assert all(item["kind"] != "closed-but-unmerged" for item in state["findings"])
+
+
+def test_pre_watermark_closed_at_suppressed_even_with_recent_reviewed_at(
+    tmp_path: Path,
+) -> None:
+    """Regression: pre-watermark closed_at must suppress even when reviewed_at
+    was bumped by a later probe or metadata write."""
+    project, submitted = _non_ancestor_fixture(tmp_path)
+    ticket = _closed_ticket(submitted, NOW - timedelta(days=10))
+    # Simulate a probe that bumped reviewed_at to a recent timestamp
+    ticket["reviewed_at"] = (NOW + timedelta(days=1)).isoformat()
+    ticket["updated_at"] = (NOW + timedelta(days=2)).isoformat()
+
+    findings, suppressed = coordinator.evaluate_integration_watch(
+        project, [ticket], NOW
+    )
+
+    assert suppressed == 1
+    assert findings == []
+
+
+def test_first_close_from_review_history_beats_bumped_fields(
+    tmp_path: Path,
+) -> None:
+    """When closed_at is absent but review_history records the first close,
+    the watermark must use that earliest close, ignoring reviewed_at/updated_at."""
+    project, submitted = _non_ancestor_fixture(tmp_path)
+    first_close = NOW - timedelta(days=5)
+    ticket = {
+        "ticket_id": "TK-history-only",
+        "status": "closed",
+        "target_url": "sample/path",
+        "reviewed_at": (NOW + timedelta(days=3)).isoformat(),
+        "updated_at": (NOW + timedelta(days=4)).isoformat(),
+        "submission_history": [{"commit_hash": submitted}],
+        "review_history": [
+            {
+                "status_to": "closed",
+                "reviewed_at": first_close.isoformat(),
+                "verdict": "approve",
+            },
+            {
+                "status_to": "open",
+                "reviewed_at": (NOW + timedelta(days=1)).isoformat(),
+                "verdict": "reject",
+            },
+        ],
+    }
+
+    findings, suppressed = coordinator.evaluate_integration_watch(
+        project, [ticket], NOW
+    )
+
+    assert coordinator._ticket_closed_at(ticket) == first_close
+    assert suppressed == 1
+    assert findings == []
+
+
+def test_no_close_time_available_returns_none_and_is_not_suppressed(
+    tmp_path: Path,
+) -> None:
+    """When neither closed_at nor review_history close entries exist,
+    _ticket_closed_at returns None, and the ticket is not suppressed."""
+    project, submitted = _non_ancestor_fixture(tmp_path)
+    ticket = {
+        "ticket_id": "TK-no-close-time",
+        "status": "closed",
+        "target_url": "sample/path",
+        "reviewed_at": (NOW + timedelta(days=3)).isoformat(),
+        "updated_at": (NOW + timedelta(days=4)).isoformat(),
+        "submission_history": [{"commit_hash": submitted}],
+    }
+
+    assert coordinator._ticket_closed_at(ticket) is None
 
 
 def test_integration_watch_cli_validates_iso_timestamp() -> None:
@@ -2929,6 +3060,31 @@ def test_intake_cas_drain_rejects_append_between_read_and_write() -> None:
 
 def _config_state(value: dict[str, Any]) -> dict[str, Any]:
     return {"state": {"value": json.dumps(value)}}
+
+
+def test_explicit_integration_watermark_is_not_cleared_by_live_config(
+    tmp_path: Path,
+) -> None:
+    token = tmp_path / "token"
+    token.write_text("opaque", encoding="utf-8")
+    args = coordinator.parse_args(
+        [
+            "--token-path",
+            str(token),
+            "--integration-watch-since",
+            "2026-08-27T00:00:00Z",
+        ]
+    )
+
+    resolved = coordinator.resolve_coordinator_config(
+        _config_state({"schema_version": 1, "integration_watch_since": None}),
+        args,
+    )
+
+    assert resolved.integration_watch_since == datetime(
+        2026, 8, 27, tzinfo=timezone.utc
+    )
+    assert resolved.sources["integration_watch_since"] == "flag"
 
 
 def test_live_config_precedence_and_invalid_field_fallback(tmp_path: Path) -> None:

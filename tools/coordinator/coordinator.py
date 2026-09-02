@@ -256,15 +256,19 @@ def resolve_coordinator_config(
         "repeat_abandon_count": choose("thresholds.abandoner_drops", thresholds_doc.get("abandoner_drops"), lambda value: type(value) is int and 1 <= value <= 20, "abandoner_drops", Thresholds.repeat_abandon_count, present="abandoner_drops" in thresholds_doc),
         "repeat_abandon_window_seconds": choose("thresholds.abandoner_window_days", thresholds_doc.get("abandoner_window_days"), lambda value: type(value) is int and 1 <= value <= 365, "abandoner_window_days", 7, present="abandoner_window_days" in thresholds_doc) * 86_400,
     }
-    integration = choose(
-        "integration_watch_since",
-        document.get("integration_watch_since") if document else None,
-        lambda value: value is None or parse_time(value) is not None,
-        "integration_watch_since",
-        None,
-        present=document is not None and "integration_watch_since" in document,
-        transform=parse_time,
-    )
+    if "integration_watch_since" in explicit:
+        integration = parse_time(args.integration_watch_since)
+        sources["integration_watch_since"] = "flag"
+    else:
+        integration = choose(
+            "integration_watch_since",
+            document.get("integration_watch_since") if document else None,
+            lambda value: value is None or parse_time(value) is not None,
+            "integration_watch_since",
+            None,
+            present=document is not None and "integration_watch_since" in document,
+            transform=parse_time,
+        )
     if document is not None and document.get("schema_version") != 1:
         invalid.append("schema_version")
     auto = choose("intake.auto_categories", intake_doc.get("auto_categories"), lambda value: _csv_categories(value) is not None, "intake_auto_categories", DEFAULT_AUTO_CATEGORIES, present="auto_categories" in intake_doc, transform=lambda value: _csv_categories(value) or ())
@@ -1674,10 +1678,25 @@ def extract_commit_hash(ticket: Mapping[str, Any]) -> str | None:
 
 
 def _ticket_closed_at(ticket: Mapping[str, Any]) -> datetime | None:
-    for key in ("closed_at", "reviewed_at", "updated_at"):
-        parsed = parse_time(ticket.get(key))
-        if parsed is not None:
-            return parsed
+    """Return the earliest close time from closed_at or review history.
+
+    Never uses reviewed_at or updated_at: probes and other metadata writes
+    can advance those timestamps later, defeating watermark suppression.
+    """
+    candidates: list[datetime] = []
+    direct = parse_time(ticket.get("closed_at"))
+    if direct is not None:
+        candidates.append(direct)
+    histories = ticket.get("review_history")
+    if isinstance(histories, list):
+        for review in histories:
+            if not isinstance(review, Mapping) or review.get("status_to") != "closed":
+                continue
+            reviewed_at = parse_time(review.get("reviewed_at"))
+            if reviewed_at is not None:
+                candidates.append(reviewed_at)
+    if candidates:
+        return min(candidates)
     return None
 
 
@@ -2384,7 +2403,15 @@ def analyze_cycle(
         prior_marks = previous.get(board_id, {}).get("privacy_watermarks", {})
         watermarks_by_board[board_id] = dict(prior_marks) if isinstance(prior_marks, Mapping) else {}
     for project in projects:
-        tickets = [row for row in snapshots[project.board_id].get("tickets", []) if isinstance(row, Mapping)]
+        snapshot = snapshots[project.board_id]
+        ticket_key = (
+            "intake_tickets"
+            if snapshot.get("intake_tickets_complete") is True
+            else "tickets"
+        )
+        tickets = [
+            row for row in snapshot.get(ticket_key, []) if isinstance(row, Mapping)
+        ]
         integration, suppressed = evaluate_integration_watch(
             project, tickets, integration_watch_since
         )
