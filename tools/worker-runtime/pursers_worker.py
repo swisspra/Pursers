@@ -616,7 +616,6 @@ class GitWorktreeManager:
                 self._run(root, "worktree", "remove", "--force", str(path))
                 self.log.write("orphan_worktree_removed", work_dir=str(path))
 
-
 class BoardAPI(Protocol):
     async def wait(self, cursors: dict[str, int]) -> dict[str, Any]: ...
     async def claim(self, board_id: str, ticket_id: str) -> dict[str, Any]: ...
