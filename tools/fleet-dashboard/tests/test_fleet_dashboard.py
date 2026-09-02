@@ -3320,3 +3320,141 @@ def test_aggregate_fleet_agent_without_role_produces_null_role() -> None:
 
     agent = result["agents"][0]
     assert agent["seats"][0]["role"] is None
+
+
+# ── Role-chip rendering tests (JS layer via node) ──────────────────────
+
+def _extract_js_function(html: str, name: str) -> str:
+    """Extract a named JS function definition from the dashboard HTML.
+    
+    The dashboard's JS functions are minified onto single lines, so we
+    extract the full line containing the function definition.
+    """
+    import re as _re
+    # Match the start of the function definition on its line
+    pattern = _re.compile(
+        rf"(?:const|function)\s+{_re.escape(name)}\s*[=(][^\n]+",
+    )
+    match = pattern.search(html)
+    assert match is not None, f"JS function {name} not found in HTML"
+    return match.group(0)
+
+
+def _run_js_with_seats(esc_fn: str, render_fn: str, seats: list[dict], fallback: str = "worker") -> str:
+    """Execute renderRoleChips with given seats in node and return stdout."""
+    seats_json = json.dumps(seats)
+    fallback_json = json.dumps(fallback)
+    script = (
+        f"{esc_fn};\n"
+        f"{render_fn};\n"
+        f"console.log(renderRoleChips({seats_json},{fallback_json}));\n"
+    )
+    result = subprocess.run(
+        ["node", "-e", script],
+        capture_output=True, text=True, timeout=10,
+    )
+    assert result.returncode == 0, f"node failed: {result.stderr}"
+    return result.stdout.strip()
+
+
+@pytest.fixture(scope="module")
+def _role_chip_js():
+    """Extract esc and renderRoleChips from the dashboard HTML once per module."""
+    esc_fn = _extract_js_function(dashboard.HTML, "esc")
+    render_fn = _extract_js_function(dashboard.HTML, "renderRoleChips")
+    return esc_fn, render_fn
+
+
+def test_render_role_chips_differing_roles_produce_labeled_per_board_chips(_role_chip_js):
+    """Multi-board differing roles: each role chip is labeled with its board_id."""
+    esc_fn, render_fn = _role_chip_js
+    seats = [
+        {"board_id": "fullplatts", "role": "member"},
+        {"board_id": "pursers", "role": "reviewer"},
+    ]
+    html = _run_js_with_seats(esc_fn, render_fn, seats)
+
+    # Two separate role-chip spans
+    assert html.count('class="role-chip"') == 2
+    # Each chip has a board label and role
+    assert '<span class="chip-board">fullplatts</span>' in html
+    assert '<span class="chip-role">member</span>' in html
+    assert '<span class="chip-board">pursers</span>' in html
+    assert '<span class="chip-role">reviewer</span>' in html
+    # Does NOT collapse to (all boards)
+    assert "(all boards)" not in html
+
+
+def test_render_role_chips_identical_roles_collapse_to_single_chip(_role_chip_js):
+    """Identical roles on every board collapse to one '(all boards)' chip."""
+    esc_fn, render_fn = _role_chip_js
+    seats = [
+        {"board_id": "board-a", "role": "worker"},
+        {"board_id": "board-b", "role": "worker"},
+    ]
+    html = _run_js_with_seats(esc_fn, render_fn, seats)
+
+    # Single role-chip span
+    assert html.count('class="role-chip"') == 1
+    assert "(all boards)" in html
+    assert "worker" in html
+    # Board names are in the title attribute
+    assert "board-a" in html
+    assert "board-b" in html
+
+
+def test_render_role_chips_hostile_board_names_are_escaped(_role_chip_js):
+    """Hostile board names are HTML-escaped before interpolation."""
+    esc_fn, render_fn = _role_chip_js
+    seats = [
+        {"board_id": "<script>alert('xss')</script>", "role": "member"},
+        {"board_id": 'evil" onclick="alert(1)', "role": "reviewer"},
+    ]
+    html = _run_js_with_seats(esc_fn, render_fn, seats)
+
+    # No raw script tag
+    assert "<script>" not in html
+    assert "</script>" not in html
+    # Escaped versions present
+    assert "&lt;script&gt;" in html
+    assert "&lt;/script&gt;" in html
+    # Quotes escaped
+    assert "&quot;" in html
+    # No raw onclick
+    assert 'onclick="alert(1)"' not in html
+    # Two chips (roles differ: member vs reviewer)
+    assert html.count('class="role-chip"') == 2
+
+
+def test_render_role_chips_empty_seats_uses_fallback(_role_chip_js):
+    """Empty or null seats return the fallback string."""
+    esc_fn, render_fn = _role_chip_js
+    assert _run_js_with_seats(esc_fn, render_fn, []) == "worker"
+    assert _run_js_with_seats(esc_fn, render_fn, [], "reviewer") == "reviewer"
+
+
+def test_render_role_chips_missing_fields_are_skipped(_role_chip_js):
+    """Seats without role or board_id are skipped."""
+    esc_fn, render_fn = _role_chip_js
+    seats = [
+        {"board_id": "board-a", "role": None},       # skipped
+        {"board_id": "board-b", "role": "member"},     # kept
+        {"board_id": None, "role": "reviewer"},        # skipped
+    ]
+    html = _run_js_with_seats(esc_fn, render_fn, seats)
+    assert "board-b" in html
+    assert "member" in html
+    assert "board-a" not in html
+
+
+def test_live_agent_card_uses_render_role_chips():
+    """The liveAgentCard JS function calls renderRoleChips for the agent-role span."""
+    # Verify the integration point: liveAgentCard references renderRoleChips
+    assert "renderRoleChips(a.seats" in dashboard.HTML
+
+
+def test_role_chip_css_is_present():
+    """The .role-chip CSS rules are in the HTML stylesheet."""
+    assert ".role-chip{" in dashboard.HTML
+    assert ".chip-board{" in dashboard.HTML
+    assert ".chip-role{" in dashboard.HTML
