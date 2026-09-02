@@ -1,7 +1,7 @@
 # COMBINED KILL/RESTART SIMULATION TRANSCRIPT
 ## Showing Orphan Claim Recovery + Orphan Worktree Removal in One Startup Pass
 
-**Commit:** 1cae452758453f5c296e0dd8ec962c766c01a2b7
+**Commit:** 04abe8f320d367bd47e19303701b04c63497c465
 **Branch:** api/integrate-worktree-5e4e347
 **Base:** main (b7e1a5a + single-claim invariant + worktree isolation 5e4e347)
 
