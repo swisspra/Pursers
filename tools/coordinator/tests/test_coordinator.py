@@ -2498,7 +2498,7 @@ def test_missing_intake_token_is_draft_only_with_clear_note() -> None:
     token, issue = coordinator.load_intake_credential(None)
 
     assert token is None
-    assert issue == "approved-missing-board-intake-grant"
+    assert issue == "missing-board-intake-grant"
     assert coordinator.intake_credential_note(issue) == (
         "coordinator: intake enabled without a usable --intake-token-path; "
         "intake remains draft-only."
@@ -2517,19 +2517,56 @@ def test_write_scoped_intake_token_is_refused_with_central_reason(
     token, issue = coordinator.load_intake_credential(str(path))
 
     assert token is None
-    assert issue == "approved-intake-token-has-board-write"
+    assert issue == "intake-token-has-board-write"
     note = coordinator.intake_credential_note(issue)
     assert "board:write" in note
     assert "Central rejects coordinator op-key usage" in note
 
 
-def test_write_scoped_intake_token_keeps_approved_ask_queued() -> None:
-    approved = {
-        **_intake_row("ask-write-scoped", "Publish the next release"),
-        "approved": True,
-        "approved_by": "dashboard-seat",
-        "approved_at": NOW.isoformat(),
-    }
+@pytest.mark.parametrize(
+    ("approved", "credential_issue", "expected_kind", "expected_rule"),
+    [
+        (
+            False,
+            "missing-board-intake-grant",
+            "intake-pending",
+            "missing-board-intake-grant",
+        ),
+        (
+            True,
+            "missing-board-intake-grant",
+            "intake-approved-scope-missing",
+            "approved-missing-board-intake-grant",
+        ),
+        (
+            False,
+            "intake-token-has-board-write",
+            "intake-pending",
+            "intake-token-has-board-write",
+        ),
+        (
+            True,
+            "intake-token-has-board-write",
+            "intake-approved-write-scope-refused",
+            "approved-intake-token-has-board-write",
+        ),
+    ],
+)
+def test_intake_credential_finding_matrix_distinguishes_approval(
+    approved: bool,
+    credential_issue: str,
+    expected_kind: str,
+    expected_rule: str,
+) -> None:
+    row = _intake_row("ask-credential-matrix", "Update the README guide")
+    if approved:
+        row.update(
+            {
+                "approved": True,
+                "approved_by": "dashboard-seat",
+                "approved_at": NOW.isoformat(),
+            }
+        )
 
     async def unexpected_create(*_args: Any) -> str:
         raise AssertionError("write-scoped intake credential must not create")
@@ -2540,7 +2577,7 @@ def test_write_scoped_intake_token_keeps_approved_ask_queued() -> None:
             {
                 "board-a": {
                     "tickets": [],
-                    "coordinator_intake_state": _intake_state([approved]),
+                    "coordinator_intake_state": _intake_state([row]),
                 }
             },
             NOW,
@@ -2549,14 +2586,14 @@ def test_write_scoped_intake_token_keeps_approved_ask_queued() -> None:
             dry_run=False,
             create_ticket=unexpected_create,
             intake_authorized=False,
-            intake_authorization_rule="approved-intake-token-has-board-write",
+            intake_authorization_rule=credential_issue,
         )
     )
 
     assert updates == {}
-    assert findings[0]["kind"] == "intake-approved-write-scope-refused"
-    assert "Central rejects" in findings[0]["message"]
-    assert "write-less" in findings[0]["next_action"]
+    assert findings[0]["kind"] == expected_kind
+    assert findings[0]["matrix_rule"] == expected_rule
+    assert ("approved" in findings[0]["message"].lower()) is approved
 
 
 def test_intake_is_disabled_by_default(tmp_path: Path) -> None:

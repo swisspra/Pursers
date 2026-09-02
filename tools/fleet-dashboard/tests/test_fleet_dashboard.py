@@ -1672,6 +1672,7 @@ def valid_coordinator_config() -> dict:
         "integration_watch_since": None,
         "intake": {
             "enabled": False,
+            "token_path": "/var/run/pursers/coordinator-intake.jwt",
             "auto_categories": ["docs", "tests", "audit-analysis", "bug"],
             "always_ask_categories": [
                 "production-code",
@@ -2177,10 +2178,35 @@ def test_config_hash_page_renders_all_knobs_and_sources() -> None:
         *dashboard.CONFIG_THRESHOLD_FIELDS,
         *dashboard.CONFIG_PRESSURE_FIELDS,
         "integration_watch_since",
+        "token_path",
         "rate_per_hour",
     ):
         assert field in dashboard.HTML
     assert "source:" in dashboard.HTML
+
+
+def test_config_round_trips_optional_intake_token_path() -> None:
+    config = valid_coordinator_config()
+
+    assert dashboard.validate_coordinator_config(config) == config
+    config["intake"].pop("token_path")
+    assert dashboard.validate_coordinator_config(config) == config
+    config["intake"]["token_path"] = None
+    assert dashboard.validate_coordinator_config(config) == config
+    assert 'name="token_path"' in dashboard.HTML
+    assert "token_path:f.get('token_path').trim()||null" in dashboard.HTML
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["", "relative/intake.jwt", " /absolute/intake.jwt", "/tmp/../intake.jwt", "/tmp/intake\n.jwt", 7],
+)
+def test_config_rejects_unsafe_intake_token_path(value: object) -> None:
+    config = valid_coordinator_config()
+    config["intake"]["token_path"] = value
+
+    with pytest.raises(ValueError, match="safe absolute path"):
+        dashboard.validate_coordinator_config(config)
 
 
 def test_config_accepts_optional_context_pressure_thresholds() -> None:

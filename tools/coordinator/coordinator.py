@@ -690,10 +690,25 @@ def intake_finding(
             "Approved intake remains queued behind coordinator safety limits."
         ),
     }
+    if kind == "intake-pending" and rule == "missing-board-intake-grant":
+        messages[kind] = (
+            "Coordinator intake credential lacks board:intake; the ask has no "
+            "approval and remains draft-only."
+        )
+    elif kind == "intake-pending" and rule == "intake-token-has-board-write":
+        messages[kind] = (
+            "Intake credential carries board:write; Central rejects coordinator "
+            "op-key usage, so the ask has no approval and remains draft-only."
+        )
     if rule == "approved-intake-token-has-board-write":
         next_action = (
             f"Provision a write-less board:read + {INTAKE_SCOPE} credential, "
             f"then retry ask {ask.ask_id}; the approved ask remains queued."
+        )
+    elif rule == "intake-token-has-board-write":
+        next_action = (
+            f"Provision a write-less board:read + {INTAKE_SCOPE} credential, "
+            f"then review ask {ask.ask_id}; the queue remains intact."
         )
     elif decision != "ask":
         next_action = (
@@ -2777,14 +2792,29 @@ async def process_intakes(
             if ask.approved:
                 decision, rule = "auto", "human-approved"
             if decision == "auto" and not intake_authorized and not dry_run:
-                decision, rule = (
-                    "ask",
-                    intake_authorization_rule
-                    or (
+                credential_rule = intake_authorization_rule
+                if credential_rule in {
+                    "intake-token-has-board-write",
+                    "approved-intake-token-has-board-write",
+                }:
+                    credential_rule = (
+                        "approved-intake-token-has-board-write"
+                        if ask.approved
+                        else "intake-token-has-board-write"
+                    )
+                elif credential_rule in {
+                    "missing-board-intake-grant",
+                    "approved-missing-board-intake-grant",
+                    None,
+                }:
+                    credential_rule = (
                         "approved-missing-board-intake-grant"
                         if ask.approved
                         else "missing-board-intake-grant"
-                    ),
+                    )
+                decision, rule = (
+                    "ask",
+                    credential_rule,
                 )
             if decision == "auto" and board_id in breakers:
                 decision, rule = "ask", "create-breaker-draft-only"
@@ -3079,21 +3109,24 @@ def capability_scopes(token: str) -> frozenset[str]:
 def load_intake_credential(path_value: str | None) -> tuple[str | None, str | None]:
     """Load the optional write-less intake credential and return a safe issue code."""
     if not path_value:
-        return None, "approved-missing-board-intake-grant"
+        return None, "missing-board-intake-grant"
     try:
         token = _read_token(path_value)
     except ValueError:
-        return None, "approved-missing-board-intake-grant"
+        return None, "missing-board-intake-grant"
     scopes = capability_scopes(token)
     if "board:write" in scopes:
-        return None, "approved-intake-token-has-board-write"
+        return None, "intake-token-has-board-write"
     if INTAKE_SCOPE not in scopes:
-        return None, "approved-missing-board-intake-grant"
+        return None, "missing-board-intake-grant"
     return token, None
 
 
 def intake_credential_note(issue: str) -> str:
-    if issue == "approved-intake-token-has-board-write":
+    if issue in {
+        "intake-token-has-board-write",
+        "approved-intake-token-has-board-write",
+    }:
         return (
             "coordinator: intake token carries board:write; Central rejects "
             "coordinator op-key usage, so intake remains draft-only."

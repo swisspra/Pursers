@@ -61,9 +61,10 @@ intake credential must include
 principals and rejects it for a normal writer.
 
 If intake is enabled without a usable intake token, the daemon prints one line
-and leaves approved asks queued with the existing scope-missing finding. A
-write-scoped intake token is also refused locally and produces a finding; the
-main credential continues all non-intake work unchanged.
+and leaves asks queued as drafts. Findings distinguish asks that have explicit
+human approval from auto-category asks that do not. A write-scoped intake token
+is also refused locally with the same approval distinction; the main credential
+continues all non-intake work unchanged.
 
 The live config equivalent is `intake.token_path`:
 
@@ -76,6 +77,9 @@ The live config equivalent is `intake.token_path`:
   }
 }
 ```
+
+The fleet dashboard preserves this key when editing other coordinator settings
+and accepts only `null` or a safe absolute path.
 
 Provision both principals as board members. This example intentionally lists
 scopes only; token minting and key material remain operator-only:
