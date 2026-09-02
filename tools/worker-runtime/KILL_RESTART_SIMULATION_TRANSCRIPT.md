@@ -1,7 +1,7 @@
 # COMBINED KILL/RESTART SIMULATION TRANSCRIPT
 ## Showing Orphan Claim Recovery + Orphan Worktree Removal in One Startup Pass
 
-**Commit:** e80a7dd41c2af5a83570d6a069154151e232c80e
+**Commit:** 06936aa33b2914b1a54db5a46873ca6e97c2cec4
 **Branch:** api/integrate-worktree-5e4e347
 **Base:** main (b7e1a5a + d332868) + single-claim invariant + worktree isolation (5e4e347)
 
@@ -16,7 +16,7 @@
 ### Command
 
 ```
-$ cd /Users/swissp/Desktop/Claude/MCP Server/Pursers-local && \
+$ cd "/Users/swissp/Desktop/Claude/MCP Server/Pursers-local" && \
   /opt/homebrew/bin/python3.12 -m pytest \
   tools/worker-runtime/tests/test_pursers_worker.py \
   -v --tb=short
@@ -107,7 +107,7 @@ tools/worker-runtime/tests/test_pursers_worker.py::test_startup_sweep_work_dir_f
 tools/worker-runtime/tests/test_pursers_worker.py::test_startup_sweep_integration_ref_fails_releases_orphan_claim PASSED [ 98%]
 tools/worker-runtime/tests/test_pursers_worker.py::test_startup_sweep_prepare_fails_releases_orphan_claim PASSED [100%]
 
-============================= 74 passed in 18.95s ==============================
+============================= 74 passed in 17.66s ==============================
 ```
 
 ### Exit Status
@@ -117,7 +117,7 @@ $ echo $?
 0
 ```
 
-**Result: 74 passed, 0 failed, 0 deselected, 0 errors in 18.95s ✓**
+**Result: 74 passed, 0 failed, 0 deselected, 0 errors in 17.66s ✓**
 
 ---
 
@@ -126,7 +126,7 @@ $ echo $?
 ### Command
 
 ```
-$ cd /Users/swissp/Desktop/Claude/MCP Server/Pursers-local && \
+$ cd "/Users/swissp/Desktop/Claude/MCP Server/Pursers-local" && \
   /opt/homebrew/bin/python3.12 -m pytest \
   tools/worker-runtime/tests/test_pursers_worker.py::test_startup_sweep_orphan_worktree_combined \
   -v --tb=long
@@ -144,7 +144,7 @@ collecting ... collected 1 item
 
 tools/worker-runtime/tests/test_pursers_worker.py::test_startup_sweep_orphan_worktree_combined PASSED [100%]
 
-============================== 1 passed in 2.32s ===============================
+============================== 1 passed in 0.93s ===============================
 ```
 
 ### Exit Status
@@ -154,7 +154,7 @@ $ echo $?
 0
 ```
 
-**Result: 1 passed in 2.32s ✓**
+**Result: 1 passed in 0.93s ✓**
 
 ---
 
@@ -163,7 +163,7 @@ $ echo $?
 ### Command
 
 ```
-$ cd /Users/swissp/Desktop/Claude/MCP Server/Pursers-local && \
+$ cd "/Users/swissp/Desktop/Claude/MCP Server/Pursers-local" && \
   /opt/homebrew/bin/python3.12 -m pytest \
   tools/worker-runtime/tests/test_pursers_worker.py \
   -k "orphan or startup_sweep" -v --tb=short
@@ -191,7 +191,7 @@ tools/worker-runtime/tests/test_pursers_worker.py::test_startup_sweep_work_dir_f
 tools/worker-runtime/tests/test_pursers_worker.py::test_startup_sweep_integration_ref_fails_releases_orphan_claim PASSED [ 90%]
 tools/worker-runtime/tests/test_pursers_worker.py::test_startup_sweep_prepare_fails_releases_orphan_claim PASSED [100%]
 
-====================== 11 passed, 63 deselected in 4.57s =======================
+====================== 11 passed, 63 deselected in 2.99s =======================
 ```
 
 ### Exit Status
@@ -201,7 +201,7 @@ $ echo $?
 0
 ```
 
-**Result: 11 passed, 0 failed, 63 deselected (not relevant) in 4.57s ✓**
+**Result: 11 passed, 0 failed, 63 deselected (not relevant) in 2.99s ✓**
 
 ---
 
@@ -300,5 +300,5 @@ async def _startup_sweep(self) -> None:
 - ✓ Worktree removed via `cleanup(session, submitted=False)`
 - ✓ All logging events present in session log
 - ✓ No UnboundLocalError on setup failures (outcome initialized before try)
-- ✓ 74 tests pass, 0 failed, 0 deselected in 18.95s
-- ✓ 11 orphan/startup_sweep tests pass in 4.57s
+- ✓ 74 tests pass, 0 failed, 0 deselected in 17.66s
+- ✓ 11 orphan/startup_sweep tests pass in 2.99s
