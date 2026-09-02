@@ -2278,6 +2278,34 @@ def intake_fetcher(
     )
 
 
+def seed_intake_draft(
+    central: FakeIntakeCentral,
+    ask: dict,
+    *,
+    title: str = "Publish release 2.0",
+    category: str = "release-ci",
+) -> None:
+    evidence = json.dumps(
+        {
+            "ask_id": ask["id"],
+            "category": category,
+            "decision": "ask",
+            "draft": {"title": title},
+        }
+    )
+    central.values[(ask["board_id"], "coordinator_findings")] = json.dumps(
+        {
+            "findings": [
+                {
+                    "kind": "intake-pending",
+                    "ask_id": ask["id"],
+                    "evidence": evidence,
+                }
+            ]
+        }
+    )
+
+
 @pytest.mark.parametrize(
     ("board_id", "text", "message"),
     [
@@ -2424,6 +2452,7 @@ def test_intake_approve_and_decline_are_cas_guarded() -> None:
     central = FakeIntakeCentral()
     fetcher = intake_fetcher(central)
     first = asyncio.run(fetcher.save_intake("pursers", "Publish the release notes"))
+    seed_intake_draft(central, first["ask"])
     approved = asyncio.run(
         fetcher.decide_intake(
             "pursers",
@@ -2479,6 +2508,7 @@ def test_intake_decision_endpoint_returns_conflict_for_stale_cas() -> None:
     central = FakeIntakeCentral()
     fetcher = intake_fetcher(central)
     created = asyncio.run(fetcher.save_intake("pursers", "Publish release notes"))
+    seed_intake_draft(central, created["ask"])
     cache = dashboard.DashboardCache(fetcher, 5)
     server, thread = _serve_cache(cache)
     payload = {
@@ -2555,6 +2585,7 @@ def test_intake_pending_finding_exposes_bounded_draft_preview() -> None:
         {
             "ask_id": "ask-preview",
             "category": "release-ci",
+            "decision": "ask",
             "draft": {"title": "Publish release 2.0"},
         }
     )
@@ -2589,6 +2620,40 @@ def test_intake_pending_finding_exposes_bounded_draft_preview() -> None:
     assert "data-intake-action=\"approve\"" in dashboard.HTML
     assert "data-intake-action=\"decline\"" in dashboard.HTML
     assert "Draft ticket title" in dashboard.HTML
+
+
+def test_intake_approval_waits_for_matching_validated_coordinator_draft() -> None:
+    central = FakeIntakeCentral()
+    fetcher = intake_fetcher(central)
+    created = asyncio.run(fetcher.save_intake("pursers", "Publish release notes"))
+    ask = created["ask"]
+
+    with pytest.raises(dashboard.ConfigConflictError, match="draft is not ready"):
+        asyncio.run(
+            fetcher.decide_intake(
+                "pursers",
+                ask["id"],
+                "approve",
+                created["expected_sha256"],
+            )
+        )
+    assert len(central.calls) == 1
+    assert "Waiting for the coordinator draft" in dashboard.HTML
+    assert "${x.draft?'<button type=\"button\" class=\"approve\"" in dashboard.HTML
+    assert "data-intake-action=\"decline\"" in dashboard.HTML
+    assert "actionable:false,intake_status:'consumed (gone)'" in dashboard.HTML
+    assert "${x.actionable&&!x.approved?" in dashboard.HTML
+
+    seed_intake_draft(central, ask, title="Coordinator release draft")
+    approved = asyncio.run(
+        fetcher.decide_intake(
+            "pursers",
+            ask["id"],
+            "approve",
+            created["expected_sha256"],
+        )
+    )
+    assert approved["ask"]["approved_title"] == "Coordinator release draft"
 
 
 def test_dashboard_write_whitelist_is_exact_across_both_writes() -> None:

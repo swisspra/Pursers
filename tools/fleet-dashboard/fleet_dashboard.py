@@ -108,6 +108,7 @@ MAX_INTAKE_ROWS = 1_000
 INTAKE_DOCUMENT_SCHEMA_VERSION = 1
 MAX_INTAKE_TOMBSTONES = 20
 INTAKE_TITLE_MAX_CHARS = 200
+MAX_INTAKE_DRAFT_EVIDENCE_CHARS = 4_000
 CONFIG_CATEGORIES = (
     "docs",
     "tests",
@@ -308,6 +309,61 @@ def _encode_intake_document(
         sort_keys=True,
         separators=(",", ":"),
     )
+
+
+def _validated_intake_draft(raw: Any, ask_id: str) -> dict[str, str] | None:
+    """Return one bounded, matching coordinator draft or fail closed."""
+    state = raw.get("state") if isinstance(raw, dict) else None
+    value = state.get("value") if isinstance(state, dict) else None
+    if isinstance(value, str):
+        try:
+            document = json.loads(value)
+        except json.JSONDecodeError:
+            return None
+    else:
+        document = value
+    if isinstance(document, list):
+        findings = document
+    elif isinstance(document, dict):
+        findings = document.get("findings", document.get("items"))
+    else:
+        return None
+    if not isinstance(findings, list):
+        return None
+    matches: list[dict[str, str]] = []
+    for finding in findings[:MAX_FINDINGS]:
+        if (
+            not isinstance(finding, dict)
+            or finding.get("kind") != "intake-pending"
+            or finding.get("ask_id") != ask_id
+        ):
+            continue
+        evidence = finding.get("evidence")
+        if (
+            not isinstance(evidence, str)
+            or len(evidence) > MAX_INTAKE_DRAFT_EVIDENCE_CHARS
+        ):
+            continue
+        try:
+            evidence_document = json.loads(evidence)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(evidence_document, dict):
+            continue
+        draft = evidence_document.get("draft")
+        title = draft.get("title") if isinstance(draft, dict) else None
+        category = evidence_document.get("category")
+        if (
+            evidence_document.get("ask_id") != ask_id
+            or evidence_document.get("decision") != "ask"
+            or not isinstance(title, str)
+            or not title.strip()
+            or len(title.strip()) > INTAKE_TITLE_MAX_CHARS
+            or category not in CONFIG_CATEGORIES
+        ):
+            continue
+        matches.append({"title": title.strip(), "category": category})
+    return matches[0] if len(matches) == 1 else None
 
 
 def validate_coordinator_config(value: Any) -> dict[str, Any]:
@@ -1243,29 +1299,14 @@ def project_coordinator_findings(snapshot: dict[str, Any]) -> dict[str, Any] | N
         text = finding.get("message") or finding.get("summary") or finding.get("detail")
         if not isinstance(text, str):
             text = json.dumps(finding, ensure_ascii=False, sort_keys=True)
-        draft_preview = None
-        evidence = finding.get("evidence")
-        if isinstance(evidence, str):
-            try:
-                evidence_document = json.loads(evidence)
-            except json.JSONDecodeError:
-                evidence_document = None
-            draft = (
-                evidence_document.get("draft")
-                if isinstance(evidence_document, dict)
-                else None
+        ask_id = finding.get("ask_id")
+        draft_preview = (
+            _validated_intake_draft(
+                {"state": {"value": {"findings": findings}}}, ask_id
             )
-            title = draft.get("title") if isinstance(draft, dict) else None
-            category = (
-                evidence_document.get("category")
-                if isinstance(evidence_document, dict)
-                else None
-            )
-            if isinstance(title, str) and title.strip():
-                draft_preview = {
-                    "title": _clip(title, INTAKE_TITLE_MAX_CHARS),
-                    "category": _clip(category, MAX_LABEL_CHARS) or "pending",
-                }
+            if isinstance(ask_id, str)
+            else None
+        )
         items.append(
             {
                 "kind": kind,
@@ -2556,14 +2597,28 @@ class FleetFetcher:
                 if action == "approve":
                     if ask.get("approved") is True:
                         raise ConfigConflictError("pending ask is already approved")
+                    try:
+                        raw_findings = await client.board_state_get(
+                            key=FINDINGS_STATE_KEY
+                        )
+                    except BoardClientError as exc:
+                        if "state key not found" not in str(exc):
+                            raise
+                        raw_findings = {}
+                    draft = _validated_intake_draft(raw_findings, ask_id)
+                    if draft is None:
+                        raise ConfigConflictError(
+                            "coordinator draft is not ready; refresh pending asks"
+                        )
                     decided = {
                         **ask,
                         "approved": True,
                         "approved_by": self.config.agent_name,
                         "approved_at": decided_at,
+                        "approved_title": (
+                            title.strip() if title is not None else draft["title"]
+                        ),
                     }
-                    if title is not None:
-                        decided["approved_title"] = title.strip()
                     rows[index] = decided
                     result = {"ask": decided}
                 else:
@@ -2900,8 +2955,8 @@ HTML = (
 const CONFIG_CATEGORIES=['docs','tests','audit-analysis','bug','production-code','release-ci','membership-roles','board-registry'];
 const intakeQueues=new Map(),recentIntake=new Map();
 const intakeKey=r=>`${r.central}/${r.board}`;
-function intakeDraft(d,ask){const item=(d.coordinator_findings?.items||[]).find(f=>f.ask_id===ask.id&&f.draft?.title);return item?.draft||{title:String(ask.text||'').slice(0,200),category:'awaiting coordinator draft'}}
-function intakePanel(d,r){const key=intakeKey(r),state=intakeQueues.get(key),waiting=state?.waiting||[],declined=state?.declined||[],waitingIds=new Set(waiting.map(x=>x.id)),declinedIds=new Set(declined.map(x=>x.id)),recent=recentIntake.get(key)||[],rows=waiting.slice(-25).map(x=>({...x,intake_status:x.approved?'approved · waiting for coordinator':'waiting',draft:intakeDraft(d,x)}));for(const item of declined)rows.push({...item,intake_status:'declined'});for(const ask of recent)if(!waitingIds.has(ask.id)&&!declinedIds.has(ask.id))rows.push({...ask,intake_status:'consumed (gone)'});rows.sort((a,b)=>String(b.created_at||b.declined_at||'').localeCompare(String(a.created_at||a.declined_at||'')));return `<section class="card pool intake-layout"><form id="intake-form" class="intake-form"><div><h3>สั่งงาน / new ask</h3><p class="muted">5–500 characters · maximum 10 asks/hour</p></div><textarea name="text" minlength="5" maxlength="500" required placeholder="Describe one concrete ask for ${esc(d.board.label)}"></textarea><button type="submit">Submit ask</button><span id="intake-status" class="muted">${state?.error?esc(state.error):'Ready'}</span></form><div><h3>Pending asks</h3><p class="muted">Review the drafted title/category, then Approve or Decline. Approval authorizes creation while coordinator limits and idempotency still apply.</p><div>${rows.length?rows.map(x=>`<div class="intake-row" data-ask-id="${esc(x.id)}"><span class="status">${esc(x.intake_status)}</span> <span class="id">${esc(x.id)}</span><p>${esc(x.text)}</p>${x.draft?`<div class="intake-preview"><span class="meta">Draft category · ${esc(x.draft.category)}</span><label>Draft ticket title<input data-intake-title maxlength="200" value="${esc(x.approved_title||x.draft.title)}" ${x.approved?'disabled':''}></label></div>`:''}<span class="meta">${esc(fmt(x.created_at||x.declined_at))} · ${esc(x.requested_by||x.declined_by)}</span>${x.draft&&!x.approved?`<div class="intake-actions"><button type="button" class="approve" data-intake-action="approve">Approve</button><button type="button" class="decline" data-intake-action="decline">Decline</button><span class="muted" data-intake-result></span></div>`:''}</div>`).join(''):'<p class="empty">No asks are waiting.</p>'}</div></div></section>`}
+function intakeDraft(d,ask){const item=(d.coordinator_findings?.items||[]).find(f=>f.kind==='intake-pending'&&f.ask_id===ask.id&&f.draft?.title&&f.draft?.category);return item?.draft||null}
+function intakePanel(d,r){const key=intakeKey(r),state=intakeQueues.get(key),waiting=state?.waiting||[],declined=state?.declined||[],waitingIds=new Set(waiting.map(x=>x.id)),declinedIds=new Set(declined.map(x=>x.id)),recent=recentIntake.get(key)||[],rows=waiting.slice(-25).map(x=>{const draft=intakeDraft(d,x);return{...x,draft,actionable:true,intake_status:x.approved?'approved · waiting for coordinator':draft?'waiting':'waiting for coordinator draft'}});for(const item of declined)rows.push({...item,actionable:false,intake_status:'declined'});for(const ask of recent)if(!waitingIds.has(ask.id)&&!declinedIds.has(ask.id))rows.push({...ask,actionable:false,intake_status:'consumed (gone)'});rows.sort((a,b)=>String(b.created_at||b.declined_at||'').localeCompare(String(a.created_at||a.declined_at||'')));return `<section class="card pool intake-layout"><form id="intake-form" class="intake-form"><div><h3>สั่งงาน / new ask</h3><p class="muted">5–500 characters · maximum 10 asks/hour</p></div><textarea name="text" minlength="5" maxlength="500" required placeholder="Describe one concrete ask for ${esc(d.board.label)}"></textarea><button type="submit">Submit ask</button><span id="intake-status" class="muted">${state?.error?esc(state.error):'Ready'}</span></form><div><h3>Pending asks</h3><p class="muted">Review the drafted title/category, then Approve or Decline. Approval authorizes creation while coordinator limits and idempotency still apply.</p><div>${rows.length?rows.map(x=>`<div class="intake-row" data-ask-id="${esc(x.id)}"><span class="status">${esc(x.intake_status)}</span> <span class="id">${esc(x.id)}</span><p>${esc(x.text)}</p>${x.draft?`<div class="intake-preview"><span class="meta">Draft category · ${esc(x.draft.category)}</span><label>Draft ticket title<input data-intake-title maxlength="200" value="${esc(x.approved_title||x.draft.title)}" ${x.approved?'disabled':''}></label></div>`:x.actionable?'<p class="muted">Waiting for the coordinator draft. Approve becomes available after its title and category arrive.</p>':''}<span class="meta">${esc(fmt(x.created_at||x.declined_at))} · ${esc(x.requested_by||x.declined_by)}</span>${x.actionable&&!x.approved?`<div class="intake-actions">${x.draft?'<button type="button" class="approve" data-intake-action="approve">Approve</button>':''}<button type="button" class="decline" data-intake-action="decline">Decline</button><span class="muted" data-intake-result></span></div>`:''}</div>`).join(''):'<p class="empty">No asks are waiting.</p>'}</div></div></section>`}
 async function refreshIntake(r,rerender=false){const key=intakeKey(r);try{const data=await fetchJson(`/api/intake?${apiCentral(r.central)}&board_id=${encodeURIComponent(r.board)}`);intakeQueues.set(key,data)}catch(e){intakeQueues.set(key,{waiting:[],error:`Intake unavailable: ${e.message}`})}const current=route();if(rerender&&detailData&&current?.kind==='board'&&current.central===r.central&&current.board===r.board)renderDetail(detailData)}
 async function submitIntake(event){event.preventDefault();const r=route();if(!r||r.kind!=='board')return;const form=event.target,status=form.querySelector('#intake-status'),button=form.querySelector('button'),text=new FormData(form).get('text');button.disabled=true;status.className='muted';status.textContent='Submitting…';try{const response=await fetch(`/api/intake?${apiCentral(r.central)}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({board_id:r.board,text})});let body={};try{body=await response.json()}catch(_e){}if(!response.ok)throw new Error(body.error||`HTTP ${response.status}`);const key=intakeKey(r),recent=recentIntake.get(key)||[];recentIntake.set(key,[body.ask,...recent.filter(x=>x.id!==body.ask.id)].slice(0,25));form.reset();status.textContent=`Queued ${body.ask.id}`;await refreshIntake(r,true)}catch(e){status.className='error';status.textContent=`Submit failed: ${e.message}`}finally{button.disabled=false}}
 async function decideIntake(event){const r=route();if(!r||r.kind!=='board')return;const button=event.currentTarget,row=button.closest('[data-ask-id]'),state=intakeQueues.get(intakeKey(r)),action=button.dataset.intakeAction,status=row.querySelector('[data-intake-result]'),title=row.querySelector('[data-intake-title]')?.value.trim();for(const item of row.querySelectorAll('button'))item.disabled=true;status.className='muted';status.textContent=`${action==='approve'?'Approving':'Declining'}…`;const payload={board_id:r.board,ask_id:row.dataset.askId,action,expected_sha256:state?.expected_sha256};if(action==='approve'&&title)payload.title=title;try{const response=await fetch(`/api/intake?${apiCentral(r.central)}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});let body={};try{body=await response.json()}catch(_error){}if(!response.ok)throw new Error(body.error||`HTTP ${response.status}`);await refreshIntake(r,true)}catch(error){status.className='error';status.textContent=`Decision failed: ${error.message}`;for(const item of row.querySelectorAll('button'))item.disabled=false}}
