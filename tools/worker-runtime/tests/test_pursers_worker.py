@@ -105,6 +105,21 @@ class FakeBoard:
     async def principal_id(self, _board_id: str) -> str:
         return self.principal
 
+    async def ticket_list(self, board_id: str, **kwargs: Any) -> list[dict[str, Any]]:
+        tickets = list(self.tickets.values())
+        if "status" in kwargs:
+            tickets = [t for t in tickets if t.get("status") == kwargs["status"]]
+        if "claimed_by_agent_id" in kwargs:
+            tickets = [t for t in tickets if t.get("claimed_by_agent_id") == kwargs["claimed_by_agent_id"]]
+        if "claimed_by" in kwargs:
+            tickets = [t for t in tickets if t.get("claimed_by") == kwargs["claimed_by"]]
+        if "include_closed" in kwargs and not kwargs["include_closed"]:
+            tickets = [t for t in tickets if t.get("status") != "closed"]
+        return tickets
+
+    async def boards(self) -> list[str]:
+        return ["board-one"]
+
     async def review(
         self,
         board_id: str,
@@ -1463,3 +1478,374 @@ def test_scratch_board_worker_reject_resubmit_approve_e2e() -> None:
             "worker resubmits -> submitted",
             "API reviewer approves -> closed",
         ]
+
+
+# ---------------------------------------------------------------------------
+# Single-claim invariant tests
+# ---------------------------------------------------------------------------
+
+class SweepBoard(FakeBoard):
+    """FakeBoard that simulates orphaned claims for startup sweep tests."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._agent_id = "AI-worker-one"
+        self._board_ids = ["board-one"]
+        self._listed_tickets: list[dict[str, Any]] = []
+
+    async def agent_id(self, _board_id: str) -> str:
+        return self._agent_id
+
+    async def boards(self) -> list[str]:
+        return self._board_ids
+
+    async def ticket_list(self, board_id: str, **kwargs: Any) -> list[dict[str, Any]]:
+        tickets = self._listed_tickets
+        if "status" in kwargs:
+            tickets = [t for t in tickets if t.get("status") == kwargs["status"]]
+        if "claimed_by_agent_id" in kwargs:
+            tickets = [t for t in tickets if t.get("claimed_by_agent_id") == kwargs["claimed_by_agent_id"]]
+        if "claimed_by" in kwargs:
+            tickets = [t for t in tickets if t.get("claimed_by") == kwargs["claimed_by"]]
+        return tickets
+
+
+def test_startup_sweep_resume_path() -> None:
+    """Exactly one orphaned claimed ticket → resume it via run_ticket."""
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        work = root / "work"
+        work.mkdir()
+        board = SweepBoard()
+        board.work = work
+        board._listed_tickets = [
+            {
+                "ticket_id": "TK-orphan",
+                "status": "claimed",
+                "claimed_by_agent_id": "AI-worker-one",
+                "tags": [],
+                "required_fields": ["test_output"],
+            }
+        ]
+        with FakeLLMServer(
+            [
+                tool_call(
+                    "one", "write_file", {"path": "resumed.txt", "content": "resumed"}
+                ),
+                tool_call(
+                    "two",
+                    "submit_work",
+                    {
+                        "summary": "resumed orphan",
+                        "files_changed": ["resumed.txt"],
+                        "notes": "test_output: ok",
+                    },
+                ),
+            ]
+        ) as server:
+            selected = config(root, server.url)
+            worker = worker_module.Worker(
+                selected,
+                board,
+                worker_module.OpenAICompatible(selected, "key"),
+                worker_module.SessionLog(selected.log_file),
+                directive="STATIC",
+            )
+            board.on_submit = worker.stop.set
+            asyncio.run(worker.run())
+
+        assert (work / "resumed.txt").read_text() == "resumed"
+        assert board.claims == []  # sweep resumes directly without claim
+        assert board.submissions[0]["ticket_id"] == "TK-orphan"
+        transcript = selected.log_file.read_text()
+        assert '"event":"startup_sweep_found_orphans"' in transcript
+        assert '"event":"startup_sweep_resume"' in transcript
+        assert '"ticket_id":"TK-orphan"' in transcript
+
+
+def test_startup_sweep_release_path() -> None:
+    """Multiple orphaned claims → release all with 'orphaned by restart'."""
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        work = root / "work"
+        work.mkdir()
+        board = SweepBoard()
+        board.work = work
+        board._listed_tickets = [
+            {
+                "ticket_id": "TK-orphan-1",
+                "status": "claimed",
+                "claimed_by_agent_id": "AI-worker-one",
+                "tags": [],
+                "required_fields": ["test_output"],
+            },
+            {
+                "ticket_id": "TK-orphan-2",
+                "status": "claimed",
+                "claimed_by_agent_id": "AI-worker-one",
+                "tags": [],
+                "required_fields": ["test_output"],
+            },
+        ]
+        # No LLM needed — sweep releases both, then run() enters wait loop
+        board.events = []  # No events → wait blocks
+        selected = config(root, "http://unused")
+        worker = worker_module.Worker(
+            selected,
+            board,
+            object(),  # LLM won't be called
+            worker_module.SessionLog(selected.log_file),
+            directive="STATIC",
+        )
+
+        async def exercise() -> None:
+            running = asyncio.create_task(worker.run())
+            # Let the sweep complete, then stop
+            while len(board.releases) < 2:
+                await asyncio.sleep(0)
+            worker.stop.set()
+            await asyncio.wait_for(running, timeout=2)
+
+        asyncio.run(exercise())
+
+        assert board.releases == ["orphaned by restart", "orphaned by restart"]
+        assert board.claims == []
+        transcript = selected.log_file.read_text()
+        assert '"event":"startup_sweep_found_orphans"' in transcript
+        assert '"count":2' in transcript
+        assert '"event":"startup_sweep_resume"' not in transcript
+
+
+def test_claim_guard_refuses_while_holding() -> None:
+    """When _active_claim is set and server confirms still claimed, refuse new claim."""
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        work = root / "work"
+        work.mkdir()
+        board = FakeBoard()
+        board.work = work
+        board.events = [
+            {"board_id": "board-one", "ticket_id": "TK-open"},
+        ]
+        board.tickets = {
+            "TK-open": {
+                "ticket_id": "TK-open",
+                "status": "open",
+                "tags": [],
+                "required_fields": ["test_output"],
+            },
+        }
+        board.tickets["TK-held"] = {
+            "ticket_id": "TK-held",
+            "status": "claimed",
+            "tags": [],
+            "required_fields": ["test_output"],
+        }
+        selected = config(root, "http://unused")
+        worker = worker_module.Worker(
+            selected,
+            board,
+            object(),
+            worker_module.SessionLog(selected.log_file),
+            directive="STATIC",
+        )
+        worker._active_claim = ("board-one", "TK-held")
+
+        async def exercise() -> None:
+            running = asyncio.create_task(worker.run())
+            while not board.waited:
+                await asyncio.sleep(0)
+            await asyncio.sleep(0.1)
+            worker.stop.set()
+            await asyncio.wait_for(running, timeout=2)
+
+        asyncio.run(exercise())
+
+        transcript = selected.log_file.read_text()
+        assert '"event":"claim_blocked_holding"' in transcript
+        assert '"active_ticket":"TK-held"' in transcript
+        assert board.claims == []
+
+def test_release_read_back_mismatch() -> None:
+    """Release read-back fails -> board added to _released_with_issues."""
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        work = root / "work"
+        work.mkdir()
+
+        class MismatchBoard(FakeBoard):
+            """Returns non-open status after release; blocks second wait."""
+            def __init__(self) -> None:
+                super().__init__()
+                self._wait_count = 0
+                self._release_called = False
+
+            async def ticket(self, board_id: str, ticket_id: str) -> dict[str, Any]:
+                if ticket_id == "TK-mismatch":
+                    status = "claimed" if self._release_called else "open"
+                    return {"ticket_id": ticket_id, "status": status}
+                return await super().ticket(board_id, ticket_id)
+
+            async def release(self, board_id: str, ticket_id: str, reason: str) -> None:
+                self._release_called = True
+                await super().release(board_id, ticket_id, reason)
+
+            async def wait(self, cursors: dict[str, int]) -> dict[str, Any]:
+                self._wait_count += 1
+                if self._wait_count == 1:
+                    return await super().wait(cursors)
+                try:
+                    await asyncio.Future()
+                except asyncio.CancelledError:
+                    raise
+
+        board = MismatchBoard()
+        board.work = work
+        board.events = [
+            {"board_id": "board-one", "ticket_id": "TK-mismatch"},
+        ]
+        board.tickets = {
+            "TK-mismatch": {
+                "ticket_id": "TK-mismatch",
+                "status": "open",
+                "tags": [],
+                "required_fields": ["test_output"],
+            },
+        }
+        with FakeLLMServer(
+            [
+                tool_call("one", "give_up", {"reason": "test release read-back"}),
+            ]
+        ) as server:
+            selected = config(root, server.url)
+            worker = worker_module.Worker(
+                selected,
+                board,
+                worker_module.OpenAICompatible(selected, "key"),
+                worker_module.SessionLog(selected.log_file),
+                directive="STATIC",
+            )
+
+            async def exercise() -> None:
+                running = asyncio.create_task(worker.run())
+                while len(board.releases) < 1:
+                    await asyncio.sleep(0)
+                worker.stop.set()
+                await asyncio.wait_for(running, timeout=2)
+
+            asyncio.run(exercise())
+
+        transcript = selected.log_file.read_text()
+        assert '"event":"release_unverified"' in transcript
+        assert '"actual_status":"claimed"' in transcript
+
+
+def test_claim_guard_board_check_refuses_existing_claim() -> None:
+    """Board-level check refuses new claim when server shows an existing claim by this seat."""
+    import asyncio
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        work = root / "work"
+        work.mkdir()
+        board = FakeBoard()
+        board.work = work
+        board.events = [
+            {"board_id": "board-one", "ticket_id": "TK-open"},
+        ]
+        board.tickets = {
+            "TK-open": {
+                "ticket_id": "TK-open",
+                "status": "open",
+                "tags": [],
+                "required_fields": ["test_output"],
+            },
+        }
+        # Simulate an existing claim on the board by this seat
+        board.tickets["TK-orphan"] = {
+            "ticket_id": "TK-orphan",
+            "status": "claimed",
+            "claimed_by_agent_id": "AI-worker-one",
+            "tags": [],
+            "required_fields": ["test_output"],
+        }
+        selected = config(root, "http://unused")
+        worker = worker_module.Worker(
+            selected,
+            board,
+            object(),
+            worker_module.SessionLog(selected.log_file),
+            directive="STATIC",
+        )
+
+        async def exercise() -> None:
+            running = asyncio.create_task(worker.run())
+            while not board.waited:
+                await asyncio.sleep(0)
+            await asyncio.sleep(0.1)
+            worker.stop.set()
+            await asyncio.wait_for(running, timeout=2)
+
+        asyncio.run(exercise())
+
+        transcript = selected.log_file.read_text()
+        assert "\"event\":\"claim_blocked_board_check\"" in transcript
+        # Should not have claimed the new ticket
+        assert len(board.claims) == 0 or board.claims[0][1] == "TK-orphan"
+
+
+def test_sigterm_path_unchanged() -> None:
+    """SIGTERM (stop.set) still gracefully releases the claim."""
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        work = root / "work"
+        work.mkdir()
+        board = FakeBoard()
+        board.work = work
+        board.events = [{"board_id": "board-one", "ticket_id": "TK-sigterm"}]
+        board.tickets = {
+            "TK-sigterm": {
+                "ticket_id": "TK-sigterm",
+                "status": "open",
+                "tags": [],
+                "required_fields": ["test_output"],
+            },
+        }
+        with FakeLLMServer(
+            [
+                tool_call(
+                    "one", "write_file", {"path": "sig.txt", "content": "ok"}
+                ),
+                tool_call(
+                    "two",
+                    "submit_work",
+                    {
+                        "summary": "sigterm done",
+                        "files_changed": ["sig.txt"],
+                        "notes": "test_output: ok",
+                    },
+                ),
+            ]
+        ) as server:
+            selected = config(root, server.url)
+            worker = worker_module.Worker(
+                selected,
+                board,
+                worker_module.OpenAICompatible(selected, "key"),
+                worker_module.SessionLog(selected.log_file),
+                directive="STATIC",
+            )
+
+            async def exercise() -> None:
+                running = asyncio.create_task(worker.run())
+                while not board.claims:
+                    await asyncio.sleep(0)
+                # Signal stop — next iteration of run_ticket will catch it
+                worker.stop.set()
+                await asyncio.wait_for(running, timeout=2)
+
+            asyncio.run(exercise())
+
+        assert board.claims == [("board-one", "TK-sigterm")]
+        assert any("graceful shutdown" in r for r in board.releases)
+        transcript = selected.log_file.read_text()
+        assert '"reason":"graceful shutdown"' in transcript

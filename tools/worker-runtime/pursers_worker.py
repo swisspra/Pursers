@@ -392,6 +392,8 @@ class BoardAPI(Protocol):
         review_notes: str,
         fix_instructions: str | None,
     ) -> None: ...
+    async def ticket_list(self, board_id: str, **kwargs: Any) -> list[dict[str, Any]]: ...
+    async def boards(self) -> list[str]: ...
 
 
 class PursersBoardAPI:
@@ -533,6 +535,15 @@ class PursersBoardAPI:
                 if isinstance(ticket, dict) and ticket.get("status") == "submitted"
             )
         return submitted
+
+    async def ticket_list(self, board_id: str, **kwargs: Any) -> list[dict[str, Any]]:
+        result = await (await self._view(board_id)).ticket_list(**kwargs)
+        if result.get("error"):
+            raise RuntimeError(str(result["error"]))
+        return result.get("tickets", [])
+
+    async def boards(self) -> list[str]:
+        return await self._boards()
 
     async def review(
         self,
@@ -942,6 +953,8 @@ class Worker:
         self.log = log
         self.directive = directive or DIRECTIVE_PATH.read_text(encoding="utf-8")
         self.stop = asyncio.Event()
+        self._active_claim: tuple[str, str] | None = None
+        self._released_with_issues: set[str] = set()
 
     def messages(
         self, board_id: str, ticket: dict[str, Any], work_dir: Path
@@ -1057,7 +1070,7 @@ class Worker:
         if name == "give_up":
             reason = _text(args.get("reason"), "reason")
             self.log.write("give_up", ticket_id=ticket_id, reason=reason)
-            await self.board.release(board_id, ticket_id, reason)
+            await self._release(board_id, ticket_id, reason)
             return "released", True
         raise ValueError(f"unknown tool: {name}")
 
@@ -1069,6 +1082,31 @@ class Worker:
             self.log.write(
                 "release_failed", ticket_id=ticket_id, error=type(exc).__name__
             )
+        verified = await self._verify_release(board_id, ticket_id)
+        if not verified:
+            self._released_with_issues.add(board_id)
+
+    async def _verify_release(self, board_id: str, ticket_id: str) -> bool:
+        """Verify a released ticket is actually open; log and return False on mismatch."""
+        try:
+            current = await self.board.ticket(board_id, ticket_id)
+        except Exception as exc:
+            self.log.write(
+                "release_unverified",
+                board_id=board_id,
+                ticket_id=ticket_id,
+                reason=f"ticket fetch failed after release: {type(exc).__name__}",
+            )
+            return False
+        if current.get("status") != "open":
+            self.log.write(
+                "release_unverified",
+                board_id=board_id,
+                ticket_id=ticket_id,
+                actual_status=current.get("status"),
+            )
+            return False
+        return True
 
     async def _renew(self, board_id: str, ticket_id: str) -> None:
         try:
@@ -1137,9 +1175,80 @@ class Worker:
             renewal.cancel()
             await asyncio.gather(renewal, return_exceptions=True)
 
+    async def _find_own_claims(
+        self, board_id: str, agent_id: str
+    ) -> list[dict[str, Any]]:
+        """Fetch all claimed tickets on a board and filter locally for this seat."""
+        try:
+            all_claimed = await self.board.ticket_list(board_id, status="claimed")
+        except Exception:
+            return []
+        agent_id_lower = agent_id.casefold()
+        name_lower = self.config.agent_name.casefold()
+        own: list[dict[str, Any]] = []
+        for ticket in all_claimed:
+            cid = ticket.get("claimed_by_agent_id") or ""
+            cb = ticket.get("claimed_by") or ""
+            if cid and str(cid).casefold() == agent_id_lower:
+                own.append(ticket)
+            elif cb and str(cb).casefold() in {agent_id_lower, name_lower}:
+                own.append(ticket)
+        return own
+
+    async def _startup_sweep(self) -> None:
+        """Scan all boards for orphaned claims by this seat; resume or release."""
+        try:
+            board_ids = await self.board.boards()
+        except Exception as exc:
+            self.log.write("startup_sweep_boards_failed", error=type(exc).__name__)
+            return
+        if not board_ids:
+            return
+        for board_id in board_ids:
+            try:
+                agent_id = await self.board.agent_id(board_id)
+            except Exception:
+                continue
+            claimed = await self._find_own_claims(board_id, agent_id)
+            if not claimed:
+                continue
+            self.log.write(
+                "startup_sweep_found_orphans",
+                board_id=board_id,
+                count=len(claimed),
+            )
+            if len(claimed) == 1 and claimed[0].get("status") == "claimed":
+                ticket = claimed[0]
+                ticket_id = str(ticket["ticket_id"])
+                try:
+                    work_dir = await self.board.work_dir(board_id)
+                    self._active_claim = (board_id, ticket_id)
+                    self.log.write(
+                        "startup_sweep_resume",
+                        board_id=board_id,
+                        ticket_id=ticket_id,
+                    )
+                    await self.run_ticket(board_id, ticket, work_dir)
+                    self._active_claim = None
+                    continue
+                except Exception as exc:
+                    self.log.write(
+                        "startup_sweep_resume_failed",
+                        board_id=board_id,
+                        ticket_id=ticket_id,
+                        error=type(exc).__name__,
+                    )
+                    self._active_claim = None
+            # Release all (multiple or resume failed)
+            for ticket in claimed:
+                ticket_id = str(ticket["ticket_id"])
+                await self._release(board_id, ticket_id, "orphaned by restart")
+
     async def run(self) -> None:
+        await self._startup_sweep()
         cursors: dict[str, int] = {}
         while not self.stop.is_set():
+            self._released_with_issues.clear()
             board_wait = asyncio.create_task(self.board.wait(cursors))
             shutdown = asyncio.create_task(self.stop.wait())
             try:
@@ -1195,6 +1304,43 @@ class Worker:
                 )
 
             for _priority, _index, board_id, ticket_id, ticket in sorted(candidates):
+                if board_id in self._released_with_issues:
+                    self.log.write(
+                        "claim_blocked_release_unverified",
+                        board_id=board_id,
+                        ticket_id=ticket_id,
+                    )
+                    continue
+                if self._active_claim is not None:
+                    active_board, active_ticket = self._active_claim
+                    try:
+                        current = await self.board.ticket(active_board, active_ticket)
+                    except Exception:
+                        current = None
+                    if current is not None and current.get("status") == "claimed":
+                        self.log.write(
+                            "claim_blocked_holding",
+                            board_id=board_id,
+                            ticket_id=ticket_id,
+                            active_board=active_board,
+                            active_ticket=active_ticket,
+                        )
+                        break
+                    self._active_claim = None
+                # Board-level check: query server for any existing claim by this seat
+                try:
+                    current_agent_id = await self.board.agent_id(board_id)
+                    existing = await self._find_own_claims(board_id, current_agent_id)
+                    if existing:
+                        self.log.write(
+                            "claim_blocked_board_check",
+                            board_id=board_id,
+                            ticket_id=ticket_id,
+                            existing_count=len(existing),
+                        )
+                        break
+                except Exception:
+                    pass
                 try:
                     await self.board.claim(board_id, ticket_id)
                 except Exception:
@@ -1202,7 +1348,9 @@ class Worker:
                 try:
                     ticket = await self.board.ticket(board_id, ticket_id)
                     work_dir = await self.board.work_dir(board_id)
+                    self._active_claim = (board_id, ticket_id)
                     await self.run_ticket(board_id, ticket, work_dir)
+                    self._active_claim = None
                 except Exception as exc:
                     self.log.write(
                         "claimed_ticket_failure",
@@ -1235,6 +1383,7 @@ class Reviewer:
         )
         self.limiter = limiter or ReviewRateLimiter(config.max_reviews_per_hour)
         self.stop = asyncio.Event()
+        self._active_review: tuple[str, str] | None = None
         self.seen_submissions: set[tuple[str, str, str]] = set()
         self.seen_submission_order: deque[tuple[str, str, str]] = deque()
 
@@ -1384,6 +1533,15 @@ class Reviewer:
         self, board_id: str, ticket: dict[str, Any], work_dir: Path
     ) -> str:
         ticket_id = str(ticket["ticket_id"])
+        if self._active_review is not None:
+            active_board, active_ticket = self._active_review
+            self._finding(
+                "concurrent_review_refused",
+                board_id,
+                ticket_id,
+                f"already reviewing {active_ticket} on {active_board}",
+            )
+            return "skipped"
         reviewed_revision = submission_revision(ticket)
         if reviewed_revision is None:
             self._finding(
@@ -1402,8 +1560,10 @@ class Reviewer:
             submitted_by_principal_id=submitted_by_principal_id,
             submission_digest=revision_digest,
         )
+        self._active_review = (board_id, ticket_id)
 
         def finished(outcome: str) -> str:
+            self._active_review = None
             self.log.write(
                 "review_finished",
                 board_id=board_id,
