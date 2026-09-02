@@ -1,7 +1,7 @@
 # COMBINED KILL/RESTART SIMULATION TRANSCRIPT
 ## Showing Orphan Claim Recovery + Orphan Worktree Removal in One Startup Pass
 
-**Commit:** cc3d6c54b0eddeeca797a965348757b868594a9a
+**Commit:** b9355525003aab37eebb0fc7531d3856293c63a4
 **Branch:** api/integrate-worktree-5e4e347
 **Base:** main (b7e1a5a + single-claim invariant + worktree isolation 5e4e347)
 
@@ -107,7 +107,7 @@ tools/worker-runtime/tests/test_pursers_worker.py::test_startup_sweep_work_dir_f
 tools/worker-runtime/tests/test_pursers_worker.py::test_startup_sweep_integration_ref_fails_releases_orphan_claim PASSED [ 98%]
 tools/worker-runtime/tests/test_pursers_worker.py::test_startup_sweep_prepare_fails_releases_orphan_claim PASSED [100%]
 
-============================= 74 passed in 15.91s ==============================
+============================= 74 passed in 17.18s ==============================
 ```
 
 ### Exit Status
@@ -144,7 +144,7 @@ collecting ... collected 1 item
 
 tools/worker-runtime/tests/test_pursers_worker.py::test_startup_sweep_orphan_worktree_combined PASSED [100%]
 
-============================== 1 passed in 0.94s ===============================
+============================== 1 passed in 0.87s ===============================
 ```
 
 **Exit status: 0 (0 = success)**
@@ -186,7 +186,7 @@ tools/worker-runtime/tests/test_pursers_worker.py::test_startup_sweep_work_dir_f
 tools/worker-runtime/tests/test_pursers_worker.py::test_startup_sweep_integration_ref_fails_releases_orphan_claim PASSED [ 90%]
 tools/worker-runtime/tests/test_pursers_worker.py::test_startup_sweep_prepare_fails_releases_orphan_claim PASSED [100%]
 
-====================== 11 passed, 63 deselected in 4.71s =======================
+====================== 11 passed, 63 deselected in 5.63s =======================
 ```
 
 **Exit status: 0 (0 = success)**
