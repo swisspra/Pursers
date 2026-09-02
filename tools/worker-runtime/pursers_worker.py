@@ -881,7 +881,11 @@ def _readonly_command(command: str) -> tuple[list[str], bool]:
         raise PermissionError("invalid read-only command")
     executable = Path(argv[0]).name
     if executable == "git":
-        if len(argv) < 2 or argv[1] not in {
+        if len(argv) < 2:
+            raise PermissionError("git command is not in the read-only allowlist")
+        subcommand = argv[1]
+        # Fully read-only git subcommands (no mutating sub-subcommands)
+        if subcommand in {
             "status",
             "diff",
             "show",
@@ -893,21 +897,38 @@ def _readonly_command(command: str) -> tuple[list[str], bool]:
             "blame",
             "grep",
         }:
-            raise PermissionError("git command is not in the read-only allowlist")
-        forbidden = (
-            "--output",
-            "--exec",
-            "--upload-pack",
-            "--receive-pack",
-            "--ext-diff",
-            "--textconv",
-            "--no-index",
-            "--filters",
-            "--open-files-in-pager",
-        )
-        if any(part == "-o" or part.startswith(forbidden) for part in argv[2:]):
-            raise PermissionError("git write-capable option is forbidden")
-        return argv, True
+            forbidden = (
+                "--output",
+                "--exec",
+                "--upload-pack",
+                "--receive-pack",
+                "--ext-diff",
+                "--textconv",
+                "--no-index",
+                "--filters",
+                "--open-files-in-pager",
+            )
+            if any(part == "-o" or part.startswith(forbidden) for part in argv[2:]):
+                raise PermissionError("git write-capable option is forbidden")
+            return argv, True
+        # branch -- read-only listing and --contains checks only
+        if subcommand == "branch":
+            mutating = {"-d", "-D", "-m", "-M", "-c", "-C",
+                        "--delete", "--move", "--copy", "--edit-description"}
+            for part in argv[2:]:
+                if part in mutating:
+                    raise PermissionError("git branch mutation is forbidden")
+                # Block combined short flags like -dD, -mM, etc.
+                if part.startswith("-") and not part.startswith("--") and len(part) > 1:
+                    if any(c in part[1:] for c in "dDmMcC"):
+                        raise PermissionError("git branch mutation is forbidden")
+            return argv, True
+        # worktree -- only allow read-only list subcommand
+        if subcommand == "worktree":
+            if len(argv) < 3 or argv[2] != "list":
+                raise PermissionError("git worktree only allows 'list' subcommand")
+            return argv, True
+        raise PermissionError("git command is not in the read-only allowlist")
     if executable in {"pytest", "py.test"}:
         return argv, True
     if (

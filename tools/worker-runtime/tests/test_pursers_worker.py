@@ -1889,3 +1889,246 @@ def test_sigterm_path_unchanged() -> None:
         assert any("graceful shutdown" in r for r in board.releases)
         transcript = selected.log_file.read_text()
         assert '"reason":"graceful shutdown"' in transcript
+
+
+# ── git readonly allowlist tests ─────────────────────────────────────────────
+
+
+def test_git_readonly_allowlist_allowed_matrix() -> None:
+    """Every read-only git command in the verification kit must pass."""
+    allowed = [
+        # Core verification commands
+        "git status",
+        "git diff",
+        "git diff --name-status",
+        "git diff --cached",
+        "git show",
+        "git show --name-status",
+        "git show HEAD",
+        "git log",
+        "git log --oneline -5",
+        "git log --name-status",
+        "git rev-parse HEAD",
+        "git rev-parse --abbrev-ref HEAD",
+        "git cat-file -t HEAD",
+        "git cat-file -p HEAD",
+        "git merge-base HEAD main",
+        "git merge-base --is-ancestor HEAD main",
+        "git ls-files",
+        "git blame main.py",
+        "git grep foo",
+        # branch -- read-only operations
+        "git branch",
+        "git branch --contains HEAD",
+        "git branch --contains v1.0",
+        "git branch -a",
+        "git branch -r",
+        "git branch -v",
+        "git branch -vv",
+        "git branch --list",
+        "git branch --merged",
+        "git branch --no-merged",
+        "git branch --sort=-committerdate",
+        # worktree -- only list
+        "git worktree list",
+    ]
+    for cmd in allowed:
+        try:
+            argv, needs_copy = worker_module._readonly_command(cmd)
+        except PermissionError as exc:
+            pytest.fail(
+                f"allowed command {cmd!r} was blocked: {exc}"
+            )
+
+
+def test_git_readonly_allowlist_mutating_blocked() -> None:
+    """Every mutating git command must be blocked."""
+    blocked = [
+        # Core mutating commands (not in subcommand set at all)
+        "git commit -m test",
+        "git commit --allow-empty -m test",
+        "git checkout -b new",
+        "git checkout main",
+        "git reset --hard",
+        "git reset HEAD",
+        "git clean -fd",
+        "git clean -n",
+        "git fetch origin",
+        "git fetch --all",
+        "git push origin main",
+        "git push --force",
+        "git merge feature",
+        "git rebase main",
+        "git rebase --onto main feature",
+        "git stash",
+        "git stash pop",
+        "git tag v1.0",
+        "git tag -d v1.0",
+        "git config user.name test",
+        "git add .",
+        "git rm file",
+        "git mv old new",
+        "git clone https://example.com/repo",
+        "git init",
+        "git remote add origin https://example.com/repo",
+        "git submodule add https://example.com/repo",
+        # branch mutating commands
+        "git branch -d feature",
+        "git branch -D feature",
+        "git branch -m old new",
+        "git branch -M old new",
+        "git branch -c old new",
+        "git branch -C old new",
+        "git branch --delete feature",
+        "git branch --move old new",
+        "git branch --copy old new",
+        "git branch --edit-description",
+        "git branch -dD",  # combined short flags
+        "git branch -mM",  # combined short flags
+        # worktree mutating commands
+        "git worktree add ../new",
+        "git worktree add ../new main",
+        "git worktree remove ../new",
+        "git worktree prune",
+        "git worktree lock ../new",
+        "git worktree unlock ../new",
+        "git worktree move ../old ../new",
+    ]
+    for cmd in blocked:
+        try:
+            worker_module._readonly_command(cmd)
+            pytest.fail(
+                f"mutating command {cmd!r} was unexpectedly allowed"
+            )
+        except PermissionError:
+            pass
+
+
+def test_git_readonly_allowlist_flag_injection_blocked() -> None:
+    """Write-capable flags on allowed subcommands must be blocked."""
+    injections = [
+        # --output flag
+        "git diff --output /tmp/out",
+        "git log --output /tmp/out",
+        "git show --output /tmp/out",
+        # -o short flag
+        "git diff -o /tmp/out",
+        "git log -o /tmp/out",
+        "git show -o /tmp/out",
+        # --exec
+        "git log --exec=/bin/sh",
+        "git diff --exec=/bin/sh",
+        # --upload-pack
+        "git log --upload-pack=/bin/sh",
+        # --receive-pack
+        "git log --receive-pack=/bin/sh",
+        # --ext-diff
+        "git diff --ext-diff",
+        # --textconv
+        "git show --textconv",
+        # --no-index (allows diffing outside repo)
+        "git diff --no-index /etc/hosts /etc/passwd",
+        # --filters
+        "git log --filters",
+        # --open-files-in-pager
+        "git diff --open-files-in-pager",
+    ]
+    for cmd in injections:
+        try:
+            worker_module._readonly_command(cmd)
+            pytest.fail(
+                f"flag injection {cmd!r} was unexpectedly allowed"
+            )
+        except PermissionError:
+            pass
+
+
+def test_git_name_status_works_as_flag() -> None:
+    """--name-status must work on diff, show, and log (it's not a subcommand)."""
+    for cmd in [
+        "git diff --name-status",
+        "git show --name-status",
+        "git log --name-status",
+    ]:
+        try:
+            argv, needs_copy = worker_module._readonly_command(cmd)
+        except PermissionError as exc:
+            pytest.fail(
+                f"name-status flag {cmd!r} was blocked: {exc}"
+            )
+
+
+def test_git_worktree_list_is_only_allowed_worktree_subcommand() -> None:
+    """Only 'git worktree list' is allowed; any other worktree subcommand is blocked."""
+    mutating = [
+        "git worktree add ../new",
+        "git worktree add ../new main",
+        "git worktree remove ../new",
+        "git worktree prune",
+        "git worktree lock ../new",
+        "git worktree unlock ../new",
+        "git worktree move ../old ../new",
+        "git worktree",  # missing sub-subcommand
+    ]
+    for cmd in mutating:
+        try:
+            worker_module._readonly_command(cmd)
+            pytest.fail(
+                f"worktree {cmd!r} was unexpectedly allowed"
+            )
+        except PermissionError:
+            pass
+    # The one allowed form
+    try:
+        argv, needs_copy = worker_module._readonly_command("git worktree list")
+    except PermissionError as exc:
+        pytest.fail(f"git worktree list was blocked: {exc}")
+
+
+def test_git_branch_mutation_flags_all_blocked() -> None:
+    """Every mutating branch flag (short, long, combined) must be blocked."""
+    for cmd in [
+        "git branch -d feature",
+        "git branch -D feature",
+        "git branch -m old new",
+        "git branch -M old new",
+        "git branch -c old new",
+        "git branch -C old new",
+        "git branch --delete feature",
+        "git branch --move old new",
+        "git branch --copy old new",
+        "git branch --edit-description",
+    ]:
+        try:
+            worker_module._readonly_command(cmd)
+            pytest.fail(f"branch mutation {cmd!r} was unexpectedly allowed")
+        except PermissionError:
+            pass
+
+
+def test_git_non_git_commands_blocked() -> None:
+    """Non-git commands must be blocked by the reviewer allowlist."""
+    for cmd in [
+        "touch forbidden",
+        "rm file",
+        "mv a b",
+        "cp a b",
+        "echo hello > file",
+        "cat > file",
+        "vim file",
+        "nano file",
+        "mkdir dir",
+        "chmod +x file",
+        "python3 -c 'print(1)'",
+        "ls",
+        "whoami",
+        "curl http://example.com",
+        "wget http://example.com",
+    ]:
+        try:
+            worker_module._readonly_command(cmd)
+            pytest.fail(
+                f"non-git command {cmd!r} was unexpectedly allowed"
+            )
+        except PermissionError:
+            pass
