@@ -3,7 +3,7 @@
 
 ### Test: `test_startup_sweep_orphan_worktree_combined`
 
-**Commit:** df4b2ed8a4f850dc0d1153a19ec75649ee61b971
+**Commit:** b544f7d203384c0ffa51f7bef3afeb519813c329
 **Branch:** api/integrate-worktree-5e4e347
 **Base:** main (b7e1a5a) + single-claim invariant (864f412) + worktree isolation (5e4e347)
 
