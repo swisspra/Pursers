@@ -3181,3 +3181,142 @@ def test_worker_manager_accepts_v2_role_and_tier_only_when_supported(
     assert definition["role"] == "reviewer"
     assert definition["max_tier"] == "standard"
     assert "--role reviewer" in definition["seat_admin_command"]
+
+
+def test_aggregate_fleet_seats_preserve_board_id_and_role_for_chip_labeling() -> None:
+    """Multi-board seats carry board_id + role so the JS can label each chip."""
+    now = datetime(2030, 1, 2, 12, tzinfo=timezone.utc)
+    recent = (now - timedelta(seconds=20)).isoformat()
+    rows = [
+        {
+            "label": "Full Platts",
+            "board_id": "fullplatts",
+            "snapshot": {
+                "agents": [
+                    {
+                        "principal_id": "PR-1",
+                        "agent_name": "worker-a",
+                        "agent_id": "AI-one",
+                        "last_activity_at": recent,
+                        "lifecycle_status": "active",
+                        "membership_role": "member",
+                        "status": "working",
+                    }
+                ],
+                "tickets": [],
+            },
+            "events": [],
+        },
+        {
+            "label": "Pursers",
+            "board_id": "pursers",
+            "snapshot": {
+                "agents": [
+                    {
+                        "principal_id": "PR-1",
+                        "agent_name": "worker-a",
+                        "agent_id": "AI-two",
+                        "last_activity_at": recent,
+                        "lifecycle_status": "active",
+                        "membership_role": "reviewer",
+                        "status": "active",
+                    }
+                ],
+                "tickets": [],
+            },
+            "events": [],
+        },
+    ]
+
+    result = dashboard.aggregate_fleet(rows, stale_seconds=300, now=now)
+
+    agent = result["agents"][0]
+    assert len(agent["seats"]) == 2
+    seat_roles = {(s["board_id"], s["role"]) for s in agent["seats"]}
+    assert ("fullplatts", "member") in seat_roles
+    assert ("pursers", "reviewer") in seat_roles
+
+
+def test_aggregate_fleet_identical_roles_still_keep_board_ids() -> None:
+    """When the same role appears on every board, seats still carry board_id."""
+    now = datetime(2030, 1, 2, 12, tzinfo=timezone.utc)
+    recent = (now - timedelta(seconds=20)).isoformat()
+    rows = [
+        {
+            "label": "Alpha",
+            "board_id": "board-a",
+            "snapshot": {
+                "agents": [
+                    {
+                        "principal_id": "PR-1",
+                        "agent_name": "worker-b",
+                        "agent_id": "AI-a",
+                        "last_activity_at": recent,
+                        "lifecycle_status": "active",
+                        "membership_role": "worker",
+                        "status": "active",
+                    }
+                ],
+                "tickets": [],
+            },
+            "events": [],
+        },
+        {
+            "label": "Beta",
+            "board_id": "board-b",
+            "snapshot": {
+                "agents": [
+                    {
+                        "principal_id": "PR-1",
+                        "agent_name": "worker-b",
+                        "agent_id": "AI-b",
+                        "last_activity_at": recent,
+                        "lifecycle_status": "active",
+                        "membership_role": "worker",
+                        "status": "active",
+                    }
+                ],
+                "tickets": [],
+            },
+            "events": [],
+        },
+    ]
+
+    result = dashboard.aggregate_fleet(rows, stale_seconds=300, now=now)
+
+    agent = result["agents"][0]
+    assert len(agent["seats"]) == 2
+    roles = {s["role"] for s in agent["seats"]}
+    assert roles == {"worker"}
+    assert {s["board_id"] for s in agent["seats"]} == {"board-a", "board-b"}
+
+
+def test_aggregate_fleet_agent_without_role_produces_null_role() -> None:
+    """An agent without membership_role or role gets role=None in the seat."""
+    now = datetime(2030, 1, 2, 12, tzinfo=timezone.utc)
+    recent = (now - timedelta(seconds=20)).isoformat()
+    rows = [
+        {
+            "label": "No Role Board",
+            "board_id": "norole",
+            "snapshot": {
+                "agents": [
+                    {
+                        "principal_id": "PR-1",
+                        "agent_name": "ghost",
+                        "agent_id": "AI-ghost",
+                        "last_activity_at": recent,
+                        "lifecycle_status": "active",
+                        "status": "active",
+                    }
+                ],
+                "tickets": [],
+            },
+            "events": [],
+        },
+    ]
+
+    result = dashboard.aggregate_fleet(rows, stale_seconds=300, now=now)
+
+    agent = result["agents"][0]
+    assert agent["seats"][0]["role"] is None
