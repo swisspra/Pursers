@@ -3087,6 +3087,43 @@ def test_explicit_integration_watermark_is_not_cleared_by_live_config(
     assert resolved.sources["integration_watch_since"] == "flag"
 
 
+
+def test_explicit_unparseable_integration_watch_since_is_invalid() -> None:
+    """When --integration-watch-since is explicitly supplied but unparseable,
+    resolve_coordinator_config must record it in invalid_fields instead of
+    silently resolving integration_watch_since to None."""
+    import argparse
+    args = argparse.Namespace()
+    args._explicit_config_flags = frozenset({"integration_watch_since"})
+    args.integration_watch_since = "not-a-timestamp"
+    # All other fields needed by resolve_coordinator_config
+    args.stale_seconds = 300
+    args.lease_warning_ratio = 0.8
+    args.grace_seconds = 600
+    args.starved_seconds = 1800
+    args.critical_starved_seconds = 600
+    args.review_backlog_seconds = 1800
+    args.abandoner_drops = 3
+    args.abandoner_window_days = 7
+    args.intake_auto_categories = ",".join(coordinator.DEFAULT_AUTO_CATEGORIES)
+    args.intake_always_ask_categories = ",".join(coordinator.DEFAULT_ALWAYS_ASK_CATEGORIES)
+    args.intake_enabled = False
+    args.intake_token_path = None
+    args.work_domain_always_ask = True
+    args.intake_rate_per_hour = 5
+
+    resolved = coordinator.resolve_coordinator_config(
+        {"state": {"value": json.dumps({"schema_version": 1})}},
+        args,
+    )
+
+    assert "integration_watch_since" in resolved.invalid_fields
+    assert resolved.integration_watch_since is None
+    assert resolved.sources["integration_watch_since"] == "flag"
+
+
+
+
 def test_live_config_precedence_and_invalid_field_fallback(tmp_path: Path) -> None:
     token = tmp_path / "token"
     token.write_text("opaque", encoding="utf-8")

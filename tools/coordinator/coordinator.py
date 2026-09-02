@@ -259,6 +259,8 @@ def resolve_coordinator_config(
     if "integration_watch_since" in explicit:
         integration = parse_time(args.integration_watch_since)
         sources["integration_watch_since"] = "flag"
+        if integration is None:
+            invalid.append("integration_watch_since")
     else:
         integration = choose(
             "integration_watch_since",
