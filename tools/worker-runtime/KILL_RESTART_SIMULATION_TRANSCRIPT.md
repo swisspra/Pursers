@@ -1,9 +1,9 @@
 # COMBINED KILL/RESTART SIMULATION TRANSCRIPT
 ## Showing Orphan Claim Recovery + Orphan Worktree Removal in One Startup Pass
 
-**Commit:** 06936aa33b2914b1a54db5a46873ca6e97c2cec4
+**Commit:** 7e931135dc193844896babe88074c5ea831ec2f1
 **Branch:** api/integrate-worktree-5e4e347
-**Base:** main (b7e1a5a + d332868) + single-claim invariant + worktree isolation (5e4e347)
+**Base:** main (b7e1a5a + single-claim invariant + worktree isolation 5e4e347)
 
 **Test date:** 2026-09-02
 **Python:** 3.12.14 (pytest 9.1.1, anyio 4.14.2)
@@ -16,17 +16,17 @@
 ### Command
 
 ```
-$ cd "/Users/swissp/Desktop/Claude/MCP Server/Pursers-local" && \
-  /opt/homebrew/bin/python3.12 -m pytest \
+$ cd /Users/swissp/Desktop/Claude/MCP\ Server/Pursers-local && \
+  .venv_test/bin/python3 -m pytest \
   tools/worker-runtime/tests/test_pursers_worker.py \
-  -v --tb=short
+  -v
 ```
 
 ### Full Output
 
 ```
 ============================= test session starts ==============================
-platform darwin -- Python 3.12.14, pytest-9.1.1, pluggy-1.6.0 -- /opt/homebrew/opt/python@3.12/bin/python3.12
+platform darwin -- Python 3.12.14, pytest-9.1.1, pluggy-1.6.0 -- /Users/swissp/Desktop/Claude/MCP Server/Pursers-local/.venv_test/bin/python3
 cachedir: .pytest_cache
 rootdir: /Users/swissp/Desktop/Claude/MCP Server/Pursers-local
 plugins: anyio-4.14.2
@@ -107,7 +107,7 @@ tools/worker-runtime/tests/test_pursers_worker.py::test_startup_sweep_work_dir_f
 tools/worker-runtime/tests/test_pursers_worker.py::test_startup_sweep_integration_ref_fails_releases_orphan_claim PASSED [ 98%]
 tools/worker-runtime/tests/test_pursers_worker.py::test_startup_sweep_prepare_fails_releases_orphan_claim PASSED [100%]
 
-============================= 74 passed in 17.66s ==============================
+============================= 74 passed in 15.91s ==============================
 ```
 
 ### Exit Status
@@ -117,7 +117,7 @@ $ echo $?
 0
 ```
 
-**Result: 74 passed, 0 failed, 0 deselected, 0 errors in 17.66s ✓**
+**Result: 74 passed, 0 failed, 0 deselected, 0 errors ✓**
 
 ---
 
@@ -126,8 +126,8 @@ $ echo $?
 ### Command
 
 ```
-$ cd "/Users/swissp/Desktop/Claude/MCP Server/Pursers-local" && \
-  /opt/homebrew/bin/python3.12 -m pytest \
+$ cd /Users/swissp/Desktop/Claude/MCP\ Server/Pursers-local && \
+  .venv_test/bin/python3 -m pytest \
   tools/worker-runtime/tests/test_pursers_worker.py::test_startup_sweep_orphan_worktree_combined \
   -v --tb=long
 ```
@@ -136,7 +136,7 @@ $ cd "/Users/swissp/Desktop/Claude/MCP Server/Pursers-local" && \
 
 ```
 ============================= test session starts ==============================
-platform darwin -- Python 3.12.14, pytest-9.1.1, pluggy-1.6.0 -- /opt/homebrew/opt/python@3.12/bin/python3.12
+platform darwin -- Python 3.12.14, pytest-9.1.1, pluggy-1.6.0 -- /Users/swissp/Desktop/Claude/MCP Server/Pursers-local/.venv_test/bin/python3
 cachedir: .pytest_cache
 rootdir: /Users/swissp/Desktop/Claude/MCP Server/Pursers-local
 plugins: anyio-4.14.2
@@ -144,17 +144,12 @@ collecting ... collected 1 item
 
 tools/worker-runtime/tests/test_pursers_worker.py::test_startup_sweep_orphan_worktree_combined PASSED [100%]
 
-============================== 1 passed in 0.93s ===============================
+============================== 1 passed in 0.94s ===============================
 ```
 
-### Exit Status
+**Exit status: 0 (0 = success)**
 
-```
-$ echo $?
-0
-```
-
-**Result: 1 passed in 0.93s ✓**
+**Result: 1 passed ✓**
 
 ---
 
@@ -163,8 +158,8 @@ $ echo $?
 ### Command
 
 ```
-$ cd "/Users/swissp/Desktop/Claude/MCP Server/Pursers-local" && \
-  /opt/homebrew/bin/python3.12 -m pytest \
+$ cd /Users/swissp/Desktop/Claude/MCP\ Server/Pursers-local && \
+  .venv_test/bin/python3 -m pytest \
   tools/worker-runtime/tests/test_pursers_worker.py \
   -k "orphan or startup_sweep" -v --tb=short
 ```
@@ -173,7 +168,7 @@ $ cd "/Users/swissp/Desktop/Claude/MCP Server/Pursers-local" && \
 
 ```
 ============================= test session starts ==============================
-platform darwin -- Python 3.12.14, pytest-9.1.1, pluggy-1.6.0 -- /opt/homebrew/opt/python@3.12/bin/python3.12
+platform darwin -- Python 3.12.14, pytest-9.1.1, pluggy-1.6.0 -- /Users/swissp/Desktop/Claude/MCP Server/Pursers-local/.venv_test/bin/python3
 cachedir: .pytest_cache
 rootdir: /Users/swissp/Desktop/Claude/MCP Server/Pursers-local
 plugins: anyio-4.14.2
@@ -191,17 +186,12 @@ tools/worker-runtime/tests/test_pursers_worker.py::test_startup_sweep_work_dir_f
 tools/worker-runtime/tests/test_pursers_worker.py::test_startup_sweep_integration_ref_fails_releases_orphan_claim PASSED [ 90%]
 tools/worker-runtime/tests/test_pursers_worker.py::test_startup_sweep_prepare_fails_releases_orphan_claim PASSED [100%]
 
-====================== 11 passed, 63 deselected in 2.99s =======================
+====================== 11 passed, 63 deselected in 4.71s =======================
 ```
 
-### Exit Status
+**Exit status: 0 (0 = success)**
 
-```
-$ echo $?
-0
-```
-
-**Result: 11 passed, 0 failed, 63 deselected (not relevant) in 2.99s ✓**
+**Result: 11 passed, 0 failed, 63 deselected ✓**
 
 ---
 
@@ -215,9 +205,9 @@ and restarts, as verified by the test `test_startup_sweep_orphan_worktree_combin
 A worker process is running, holding claim `TK-orphaned` and an active worktree
 checkout. The process is killed (SIGKILL) mid-flight:
 
-- The board still shows the ticket as claimed by the dead process
-- The worktree checkout exists on disk
-- Neither the claim nor the worktree has a live owner
+* The board still shows the ticket as claimed by the dead process
+* The worktree checkout exists on disk
+* Neither the claim nor the worktree has a live owner
 
 On restart, `_startup_sweep()` recovers BOTH in a single pass.
 
@@ -225,39 +215,39 @@ On restart, `_startup_sweep()` recovers BOTH in a single pass.
 
 ```
 Phase 1: Initialize git repo and create orphan worktree
-  → GitWorktreeManager.prepare(repo, "TK-orphaned", "main")
-  → Creates worktree at: repo/.git/pursers-worktrees/worker-one-tk-orphaned/
-  → Branch: api/worker-one-orphaned
-  → Logs: worktree_created
+  -> GitWorktreeManager.prepare(repo, "TK-orphaned", "main")
+  -> Creates worktree at: repo/.git/pursers-worktrees/worker-one-tk-orphaned/
+  -> Branch: api/worker-one-orphaned
+  -> Logs: worktree_created
 
 Phase 2: Simulate orphaned claim on board
-  → Board lists TK-orphaned as claimed by "AI-worker-one"
-  → Board.live_claims is empty (process is dead)
+  -> Board lists TK-orphaned as claimed by "AI-worker-one"
+  -> Board.live_claims is empty (process is dead)
 
 Phase 3: _startup_sweep() executes this sequence:
-  1. _find_own_claims() → finds TK-orphaned → logs startup_sweep_found_orphans
+  1. _find_own_claims() -> finds TK-orphaned -> logs startup_sweep_found_orphans
   2. Enters try block:
-     a. work_dir() → returns repo path
-     b. integration_ref() → returns "main"
-     c. worktrees.prepare() → finds existing worktree, logs worktree_reused
-     d. run_ticket() → fails (no LLM), caught internally
-        → Logs: hard_failure
-        → Calls _release("LLM or runtime hard failure")
-        → Returns "released"
+     a. work_dir() -> returns repo path
+     b. integration_ref() -> returns "main"
+     c. worktrees.prepare() -> finds existing worktree, logs worktree_reused
+     d. run_ticket() -> fails (no LLM), caught internally
+        -> Logs: hard_failure
+        -> Calls _release("LLM or runtime hard failure")
+        -> Returns "released"
      e. finally: cleanup(session, submitted=False)
-        → Worktree is clean, removed
-        → Logs: worktree_removed
+        -> Worktree is clean, removed
+        -> Logs: worktree_removed
 
 Phase 4: Verification
-  ✓ Claim was released exactly once
-  ✓ Orphan worktree was removed from disk
-  ✓ Log contains: startup_sweep_found_orphans, startup_sweep_resume,
+  - Claim was released exactly once
+  - Orphan worktree was removed from disk
+  - Log contains: startup_sweep_found_orphans, startup_sweep_resume,
                   hard_failure, worktree_removed
 ```
 
 ### Session Log Events (in order)
 
-```json
+```
 {"event":"startup_sweep_found_orphans","agent_id":"AI-worker-one","ticket_id":"TK-orphaned","board_id":"board-one"}
 {"event":"startup_sweep_resume","agent_id":"AI-worker-one","ticket_id":"TK-orphaned","board_id":"board-one"}
 {"event":"worktree_reused","ticket_id":"TK-orphaned","work_dir":".../pursers-worktrees/worker-one-tk-orphaned","branch":"api/worker-one-orphaned","readonly":false}
@@ -280,7 +270,7 @@ All pass because `outcome = "released"` is initialized **before** the try block:
 
 ```python
 async def _startup_sweep(self) -> None:
-    outcome = "released"  # ← Initialized before try block
+    outcome = "released"  # <- Initialized before try block
     try:
         ...
         outcome = await self.run_ticket(...)
@@ -294,11 +284,11 @@ async def _startup_sweep(self) -> None:
 
 **Combined kill/restart recovery verified in a single startup pass:**
 
-- ✓ Orphan claim detected via `_find_own_claims()` using `ticket_list(status="claimed", claimed_by_agent_id=...)`
-- ✓ Orphan worktree detected via `GitWorktreeManager.prepare()` (reuses existing worktree)
-- ✓ Claim released via `_release("LLM or runtime hard failure")`
-- ✓ Worktree removed via `cleanup(session, submitted=False)`
-- ✓ All logging events present in session log
-- ✓ No UnboundLocalError on setup failures (outcome initialized before try)
-- ✓ 74 tests pass, 0 failed, 0 deselected in 17.66s
-- ✓ 11 orphan/startup_sweep tests pass in 2.99s
+* [x] Orphan claim detected via `_find_own_claims()` using `ticket_list(status="claimed", claimed_by_agent_id=...)`
+* [x] Orphan worktree detected via `GitWorktreeManager.prepare()` (reuses existing worktree)
+* [x] Claim released via `_release("LLM or runtime hard failure")`
+* [x] Worktree removed via `cleanup(session, submitted=False)`
+* [x] All logging events present in session log
+* [x] No UnboundLocalError on setup failures (outcome initialized before try)
+* [x] 74 tests pass, 0 failed, 0 deselected
+* [x] 11 orphan/startup_sweep tests pass
