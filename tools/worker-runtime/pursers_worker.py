@@ -913,20 +913,58 @@ def _readonly_command(command: str) -> tuple[list[str], bool]:
             return argv, True
         # branch -- read-only listing and --contains checks only
         if subcommand == "branch":
-            mutating = {"-d", "-D", "-m", "-M", "-c", "-C",
-                        "--delete", "--move", "--copy", "--edit-description"}
-            for part in argv[2:]:
-                if part in mutating:
+            mutating = {"-d", "-D", "-m", "-M", "-c", "-C", "-f", "-t",
+                        "--delete", "--move", "--copy", "--edit-description",
+                        "--force", "--track", "--set-upstream-to", "--unset-upstream"}
+            forbidden = (
+                "--output", "--exec", "--upload-pack", "--receive-pack",
+                "--ext-diff", "--textconv", "--no-index", "--filters",
+                "--open-files-in-pager",
+            )
+            # Flags that consume a following positional value argument
+            _value_taking = frozenset({
+                "--contains", "--no-contains", "--merged", "--no-merged",
+                "--points-at", "--sort", "--format", "--abbrev", "--pattern",
+            })
+            _combined_mutating = "dDmMcCftu"
+            _i = 2
+            while _i < len(argv):
+                _part = argv[_i]
+                if _part in mutating:
                     raise PermissionError("git branch mutation is forbidden")
-                # Block combined short flags like -dD, -mM, etc.
-                if part.startswith("-") and not part.startswith("--") and len(part) > 1:
-                    if any(c in part[1:] for c in "dDmMcC"):
+                # Also handle --flag=value form for mutating flags
+                if any(_part.startswith(_m + "=") for _m in mutating if _m.startswith("--")):
+                    raise PermissionError("git branch mutation is forbidden")
+                if _part == "-o" or _part.startswith(forbidden):
+                    raise PermissionError("git write-capable option is forbidden")
+                # Combined short flags like -dD, -vf, -vu
+                if _part.startswith("-") and not _part.startswith("--") and len(_part) > 1:
+                    if any(_c in _part[1:] for _c in _combined_mutating):
                         raise PermissionError("git branch mutation is forbidden")
+                # Value-taking flags consume their next argument
+                if _part in _value_taking:
+                    _i += 2
+                    continue
+                # Also handle --flag=value form
+                if any(_part.startswith(_f + "=") for _f in _value_taking):
+                    _i += 1
+                    continue
+                # Positional non-flag argument = branch creation (e.g. "git branch newname")
+                if not _part.startswith("-"):
+                    raise PermissionError("git branch positional arguments are forbidden")
+                _i += 1
             return argv, True
         # worktree -- only allow read-only list subcommand
         if subcommand == "worktree":
             if len(argv) < 3 or argv[2] != "list":
                 raise PermissionError("git worktree only allows 'list' subcommand")
+            _forbidden = (
+                "--output", "--exec", "--upload-pack", "--receive-pack",
+                "--ext-diff", "--textconv", "--no-index", "--filters",
+                "--open-files-in-pager",
+            )
+            if any(_part == "-o" or _part.startswith(_forbidden) for _part in argv[3:]):
+                raise PermissionError("git write-capable option is forbidden")
             return argv, True
         raise PermissionError("git command is not in the read-only allowlist")
     if executable in {"pytest", "py.test"}:

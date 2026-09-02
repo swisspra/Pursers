@@ -1985,6 +1985,19 @@ def test_git_readonly_allowlist_mutating_blocked() -> None:
         "git branch --edit-description",
         "git branch -dD",  # combined short flags
         "git branch -mM",  # combined short flags
+        # branch positional/hole vectors (from first rejection)
+        "git branch newname",
+        "git branch newname HEAD",
+        "git branch -f main HEAD~1",
+        "git branch --force main HEAD~1",
+        "git branch -t t main",
+        "git branch --track t main",
+        "git branch --set-upstream-to=origin/main",
+        "git branch -u origin/main",
+        "git branch --unset-upstream",
+        "git branch -vf",  # combined short flags with force
+        "git branch -vt",  # combined short flags with track
+        "git branch -vu",  # combined short flags with upstream
         # worktree mutating commands
         "git worktree add ../new",
         "git worktree add ../new main",
@@ -2007,11 +2020,11 @@ def test_git_readonly_allowlist_mutating_blocked() -> None:
 def test_git_readonly_allowlist_flag_injection_blocked() -> None:
     """Write-capable flags on allowed subcommands must be blocked."""
     injections = [
-        # --output flag
+        # --output flag on fully-read-only subcommands
         "git diff --output /tmp/out",
         "git log --output /tmp/out",
         "git show --output /tmp/out",
-        # -o short flag
+        # -o short flag on fully-read-only subcommands
         "git diff -o /tmp/out",
         "git log -o /tmp/out",
         "git show -o /tmp/out",
@@ -2032,6 +2045,13 @@ def test_git_readonly_allowlist_flag_injection_blocked() -> None:
         "git log --filters",
         # --open-files-in-pager
         "git diff --open-files-in-pager",
+        # --output flag on branch subcommand
+        "git branch --list --output /tmp/x",
+        "git branch -o /tmp/x",
+        "git branch --contains HEAD --output /tmp/x",
+        # --output flag on worktree list subcommand
+        "git worktree list -o /tmp/x",
+        "git worktree list --output /tmp/x",
     ]
     for cmd in injections:
         try:
@@ -2098,6 +2118,16 @@ def test_git_branch_mutation_flags_all_blocked() -> None:
         "git branch --move old new",
         "git branch --copy old new",
         "git branch --edit-description",
+        # Additional hole vectors from first rejection
+        "git branch newname",
+        "git branch newname HEAD",
+        "git branch -f main HEAD~1",
+        "git branch --force main HEAD~1",
+        "git branch -t t main",
+        "git branch --track t main",
+        "git branch --set-upstream-to=origin/main",
+        "git branch -u origin/main",
+        "git branch --unset-upstream",
     ]:
         try:
             worker_module._readonly_command(cmd)
