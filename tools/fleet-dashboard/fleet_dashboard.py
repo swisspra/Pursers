@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -104,6 +105,9 @@ INTAKE_TEXT_MAX_CHARS = 500
 INTAKE_RATE_LIMIT = 10
 INTAKE_RATE_WINDOW_SECONDS = 3_600
 MAX_INTAKE_ROWS = 1_000
+INTAKE_DOCUMENT_SCHEMA_VERSION = 1
+MAX_INTAKE_TOMBSTONES = 20
+INTAKE_TITLE_MAX_CHARS = 200
 CONFIG_CATEGORIES = (
     "docs",
     "tests",
@@ -203,19 +207,31 @@ def _dashboard_state_update_arguments(
 
 def _intake_state_value(
     raw: Any, board_id: str
-) -> tuple[list[dict[str, Any]], str | None]:
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str | None]:
     """Parse and preserve the coordinator-compatible intake queue."""
     state = raw.get("state") if isinstance(raw, dict) else None
     value = state.get("value") if isinstance(state, dict) else None
     if value is None:
-        return [], None
+        return [], [], None
     if not isinstance(value, str):
         raise ConfigConflictError("coordinator_intake state is malformed")
     try:
-        rows = json.loads(value)
+        document = json.loads(value)
     except json.JSONDecodeError as exc:
         raise ConfigConflictError("coordinator_intake state is malformed") from exc
-    if not isinstance(rows, list) or len(rows) > MAX_INTAKE_ROWS:
+    if isinstance(document, list):
+        rows, tombstones = document, []
+    elif (
+        isinstance(document, dict)
+        and set(document) == {"schema_version", "asks", "tombstones"}
+        and document.get("schema_version") == INTAKE_DOCUMENT_SCHEMA_VERSION
+        and isinstance(document.get("asks"), list)
+        and isinstance(document.get("tombstones"), list)
+    ):
+        rows, tombstones = document["asks"], document["tombstones"]
+    else:
+        raise ConfigConflictError("coordinator_intake state is malformed")
+    if len(rows) > MAX_INTAKE_ROWS or len(tombstones) > MAX_INTAKE_TOMBSTONES:
         raise ConfigConflictError("coordinator_intake state is malformed")
     clean: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -232,9 +248,66 @@ def _intake_state_value(
         ask_id = required["id"].strip()
         if ask_id in seen or required["board_id"].strip() != board_id:
             raise ConfigConflictError("coordinator_intake state is malformed")
+        approved = row.get("approved", False)
+        approval_values = (row.get("approved_by"), row.get("approved_at"))
+        approved_title = row.get("approved_title")
+        if type(approved) is not bool or (
+            approved
+            and not all(
+                isinstance(item, str) and item.strip() for item in approval_values
+            )
+        ):
+            raise ConfigConflictError("coordinator_intake state is malformed")
+        if not approved and any(
+            item is not None for item in (*approval_values, approved_title)
+        ):
+            raise ConfigConflictError("coordinator_intake state is malformed")
+        if approved_title is not None and (
+            not isinstance(approved_title, str)
+            or not approved_title.strip()
+            or len(approved_title.strip()) > INTAKE_TITLE_MAX_CHARS
+        ):
+            raise ConfigConflictError("coordinator_intake state is malformed")
         seen.add(ask_id)
         clean.append(json.loads(json.dumps(row)))
-    return clean, value
+    clean_tombstones: list[dict[str, Any]] = []
+    tombstone_ids: set[str] = set()
+    for row in tombstones:
+        if not isinstance(row, dict):
+            raise ConfigConflictError("coordinator_intake state is malformed")
+        required = {
+            name: row.get(name)
+            for name in ("id", "text", "board_id", "declined_by", "declined_at")
+        }
+        if not all(
+            isinstance(item, str) and item.strip() for item in required.values()
+        ):
+            raise ConfigConflictError("coordinator_intake state is malformed")
+        ask_id = required["id"].strip()
+        if (
+            ask_id in seen
+            or ask_id in tombstone_ids
+            or required["board_id"].strip() != board_id
+        ):
+            raise ConfigConflictError("coordinator_intake state is malformed")
+        tombstone_ids.add(ask_id)
+        clean_tombstones.append(json.loads(json.dumps(row)))
+    return clean, clean_tombstones, value
+
+
+def _encode_intake_document(
+    rows: list[dict[str, Any]], tombstones: list[dict[str, Any]]
+) -> str:
+    return json.dumps(
+        {
+            "schema_version": INTAKE_DOCUMENT_SCHEMA_VERSION,
+            "asks": rows,
+            "tombstones": tombstones[-MAX_INTAKE_TOMBSTONES:],
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
 
 
 def validate_coordinator_config(value: Any) -> dict[str, Any]:
@@ -1170,12 +1243,37 @@ def project_coordinator_findings(snapshot: dict[str, Any]) -> dict[str, Any] | N
         text = finding.get("message") or finding.get("summary") or finding.get("detail")
         if not isinstance(text, str):
             text = json.dumps(finding, ensure_ascii=False, sort_keys=True)
+        draft_preview = None
+        evidence = finding.get("evidence")
+        if isinstance(evidence, str):
+            try:
+                evidence_document = json.loads(evidence)
+            except json.JSONDecodeError:
+                evidence_document = None
+            draft = (
+                evidence_document.get("draft")
+                if isinstance(evidence_document, dict)
+                else None
+            )
+            title = draft.get("title") if isinstance(draft, dict) else None
+            category = (
+                evidence_document.get("category")
+                if isinstance(evidence_document, dict)
+                else None
+            )
+            if isinstance(title, str) and title.strip():
+                draft_preview = {
+                    "title": _clip(title, INTAKE_TITLE_MAX_CHARS),
+                    "category": _clip(category, MAX_LABEL_CHARS) or "pending",
+                }
         items.append(
             {
                 "kind": kind,
                 "level": level,
                 "text": _clip(text, MAX_FINDING_CHARS),
                 "ticket_id": _clip(finding.get("ticket_id"), MAX_LABEL_CHARS) or None,
+                "ask_id": _clip(finding.get("ask_id"), 120) or None,
+                "draft": draft_preview,
             }
         )
     return {
@@ -2300,10 +2398,11 @@ class FleetFetcher:
                 if "state key not found" not in str(exc):
                     raise
                 raw = {}
-        rows, current_text = _intake_state_value(raw, board_id)
+        rows, tombstones, current_text = _intake_state_value(raw, board_id)
         return {
             "board_id": board_id,
             "waiting": rows,
+            "declined": tombstones,
             "expected_sha256": (
                 hashlib.sha256(current_text.encode("utf-8")).hexdigest()
                 if current_text is not None
@@ -2338,7 +2437,7 @@ class FleetFetcher:
                     if "state key not found" not in str(exc):
                         raise
                     raw = {}
-                rows, current_text = _intake_state_value(raw, board_id)
+                rows, tombstones, current_text = _intake_state_value(raw, board_id)
                 recent_queue = {
                     row["id"]
                     for row in rows
@@ -2371,9 +2470,7 @@ class FleetFetcher:
                     "board_id": board_id,
                     "created_at": created_at,
                 }
-                encoded = json.dumps(
-                    [*rows, ask], sort_keys=True, separators=(",", ":")
-                )
+                encoded = _encode_intake_document([*rows, ask], tombstones)
                 if len(rows) >= MAX_INTAKE_ROWS:
                     raise IntakeRateLimitError("intake queue is full")
                 expected = None
@@ -2398,6 +2495,108 @@ class FleetFetcher:
             "ask": ask,
             "expected_sha256": hashlib.sha256(encoded.encode("utf-8")).hexdigest(),
             "concurrency": "cas" if current_text is not None else "lww",
+        }
+
+    async def decide_intake(
+        self,
+        board_id: Any,
+        ask_id: Any,
+        action: Any,
+        expected_sha256: Any,
+        title: Any = None,
+    ) -> dict[str, Any]:
+        if not isinstance(board_id, str) or not BOARD_ID_RE.fullmatch(board_id):
+            raise ValueError("invalid board_id")
+        if (
+            not isinstance(ask_id, str)
+            or not ask_id.strip()
+            or len(ask_id.strip()) > 120
+        ):
+            raise ValueError("invalid ask_id")
+        if action not in {"approve", "decline"}:
+            raise ValueError("action must be approve or decline")
+        if not isinstance(expected_sha256, str) or not re.fullmatch(
+            r"[0-9a-f]{64}", expected_sha256
+        ):
+            raise ValueError("expected_sha256 must be a SHA-256 digest")
+        if title is not None and (
+            not isinstance(title, str)
+            or not title.strip()
+            or len(title.strip()) > INTAKE_TITLE_MAX_CHARS
+        ):
+            raise ValueError("title must be 1 to 200 characters")
+        if action == "decline" and title is not None:
+            raise ValueError("decline does not accept a title")
+        active = {active_board for _label, active_board in await self._boards()}
+        if board_id not in active:
+            raise ValueError("board_id is not registry-active")
+        now = self.now_factory()
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+        decided_at = now.astimezone(timezone.utc).isoformat()
+
+        with self._intake_write_lock:
+            async with self._client(board_id) as client:
+                raw = await client.board_state_get(key=INTAKE_STATE_KEY)
+                rows, tombstones, current_text = _intake_state_value(raw, board_id)
+                if current_text is None or not hmac.compare_digest(
+                    hashlib.sha256(current_text.encode("utf-8")).hexdigest(),
+                    expected_sha256,
+                ):
+                    raise ConfigConflictError(
+                        "coordinator_intake changed; refresh pending asks"
+                    )
+                index = next(
+                    (offset for offset, row in enumerate(rows) if row["id"] == ask_id),
+                    None,
+                )
+                if index is None:
+                    raise ConfigConflictError("pending ask changed; refresh pending asks")
+                ask = rows[index]
+                if action == "approve":
+                    if ask.get("approved") is True:
+                        raise ConfigConflictError("pending ask is already approved")
+                    decided = {
+                        **ask,
+                        "approved": True,
+                        "approved_by": self.config.agent_name,
+                        "approved_at": decided_at,
+                    }
+                    if title is not None:
+                        decided["approved_title"] = title.strip()
+                    rows[index] = decided
+                    result = {"ask": decided}
+                else:
+                    rows.pop(index)
+                    tombstone = {
+                        "id": ask["id"],
+                        "text": ask["text"],
+                        "board_id": board_id,
+                        "declined_by": self.config.agent_name,
+                        "declined_at": decided_at,
+                    }
+                    tombstones.append(tombstone)
+                    tombstones = tombstones[-MAX_INTAKE_TOMBSTONES:]
+                    result = {"tombstone": tombstone}
+                encoded = _encode_intake_document(rows, tombstones)
+                arguments = _dashboard_state_update_arguments(
+                    agent_name=self.config.agent_name,
+                    key=INTAKE_STATE_KEY,
+                    value=encoded,
+                    expected_sha256=expected_sha256,
+                )
+                try:
+                    await client._call("board_state_update", arguments)
+                except BoardClientError as exc:
+                    raise ConfigConflictError(
+                        "coordinator_intake changed; refresh pending asks"
+                    ) from exc
+        return {
+            "ok": True,
+            "action": action,
+            **result,
+            "expected_sha256": hashlib.sha256(encoded.encode("utf-8")).hexdigest(),
+            "concurrency": "cas",
         }
 
     async def save_config(
@@ -2590,6 +2789,25 @@ class DashboardCache:
             asyncio.run(self.fetchers[label].save_intake(board_id, text)), label
         )
 
+    def decide_intake(
+        self,
+        board_id: Any,
+        ask_id: Any,
+        action: Any,
+        expected_sha256: Any,
+        title: Any = None,
+        central: str | None = None,
+    ) -> dict[str, Any]:
+        label = self.resolve_central(central)
+        return self._labeled(
+            asyncio.run(
+                self.fetchers[label].decide_intake(
+                    board_id, ask_id, action, expected_sha256, title
+                )
+            ),
+            label,
+        )
+
 
 HTML = r"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -2627,8 +2845,8 @@ function changesView(d,r){const valid=r.since!==null&&/^\d+$/.test(r.since),sinc
 function flowView(d,r){const byId=new Map(d.tickets.map(t=>[t.id,t])),labels={open:'Open',claimed:'Claimed',submitted:'Submitted',closed_today:'Closed today'};return `<p class="muted bounded-note">Classified from ${esc(d.ticket_returned)} returned tickets; omitted snapshot rows are not inferred.</p><section class="flow">${Object.entries(labels).map(([key,label])=>{const tickets=d.ticket_flow[key].map(id=>byId.get(id)).filter(Boolean).filter(t=>matches([t.id,t.title,t.claimed_by,t.status],filterNeedle));return `<div class="flow-column"><h3>${esc(label)} · ${esc(tickets.length)}</h3>${tickets.map(t=>`<a class="flow-card" href="${ticketHref(r.central,d.board.board_id,t.id)}"><span class="id">${esc(t.id)}</span><div>${esc(t.title)}</div><span class="meta">${esc(t.claimed_by||'Unassigned')}</span></a>`).join('')||'<p class="empty">No matching tickets</p>'}</div>`}).join('')}</section>`}
 const routeStage=stage=>stage?`<b>${esc(stage.label)}</b><span class="meta">${esc(fmt(stage.at))}</span>`:'<span class="muted">—</span>';
 function routesView(d,r){const routeData=d.routes||{rows:[],seats:[],row_returned:0,row_total:0,truncated:true,truncation_note:'Routes source unavailable.'},rows=routeData.rows.filter(t=>matches([t.id,t.title,t.status,t.created?.label,t.executed?.label,t.submitted?.label,t.reviewed?.label,t.rework_count],filterNeedle)),seats=routeData.seats.filter(s=>matches([s.label,s.created,s.executed,s.reviewed,s.rework_received_rate],filterNeedle));return `<section id="routes-view"><p class="${routeData.truncated?'warning':'muted'} bounded-note">${esc(routeData.truncation_note)}</p><h3 class="pool">Seat load in the window</h3><section class="route-load" aria-label="Per-seat route totals">${seats.length?seats.map(s=>`<article class="route-seat" data-route-seat="${esc(s.label)}"><b>${esc(s.label)}</b><div class="counts"><span class="pill">created ${esc(s.created)}</span><span class="pill">executed ${esc(s.executed)}</span><span class="pill">reviewed ${esc(s.reviewed)}</span><span class="pill">rework received ${esc(s.rework_received_rate)}% (${esc(s.rework_received)})</span></div></article>`).join(''):'<p class="empty">No seats match the filter.</p>'}</section><p class="muted">Showing ${esc(rows.length)} matching route(s) from ${esc(routeData.row_returned)} returned; ${esc(routeData.row_total)} assembled before row bounds.</p><section class="card pool"><div class="table-scroll"><table aria-label="Ticket provenance routes"><thead><tr><th>Ticket</th><th>Created by</th><th>Executed by</th><th>Submitted by</th><th>Reviewed / closed by</th><th>Rework</th><th>Updated</th></tr></thead><tbody>${rows.length?rows.map(t=>`<tr data-route-ticket="${esc(t.id)}"><td><a class="id" href="${ticketHref(r.central,d.board.board_id,t.id)}">${esc(t.id)}</a><div>${esc(t.title)}</div><span class="status">${esc(t.status)}</span></td><td class="route-stage">${routeStage(t.created)}</td><td class="route-stage">${routeStage(t.executed)}</td><td class="route-stage">${routeStage(t.submitted)}</td><td class="route-stage">${routeStage(t.reviewed)}</td><td>${esc(t.rework_count)}</td><td class="meta">${esc(fmt(t.updated_at))}</td></tr>`).join(''):'<tr><td colspan="7" class="empty">No routes match the filter.</td></tr>'}</tbody></table></div></section></section>`}
-function findings(d){if(!d.coordinator_findings)return'';return `<section class="card"><h3>Coordinator findings</h3><div class="finding-list">${d.coordinator_findings.items.map(f=>`<div class="finding"><b>${esc(f.kind)}</b>${f.ticket_id?` <span class="id">${esc(f.ticket_id)}</span>`:''}<p>${esc(f.text)}</p></div>`).join('')||'<p class="empty">No current findings</p>'}</div>${d.coordinator_findings.truncated_count?`<p class="warning">${esc(d.coordinator_findings.truncated_count)} findings omitted by the bounded state.</p>`:''}</section>`}
-function renderDetail(d){const r=route();if(!r||r.kind!=='board'||r.central!==d.central||r.board!==d.board.board_id)return;const views={tickets:ticketView,timeline:timelineView,changes:changesView,flow:flowView,routes:routesView};document.querySelector('#detail-view').innerHTML=`<a class="back" href="#/">← All centrals</a><div class="top"><div><h2>${esc(d.board.label)} · ${esc(d.central)}</h2><span class="meta">${esc(d.board.board_id)}</span></div>${d.truncated?`<span class="status">${esc(d.ticket_returned)} of ${esc(d.ticket_total)} tickets shown</span>`:''}</div><div class="toolbar">${tabs(d,r)}<span class="muted">Two guarded writes only: config and intake · ${esc(d.central)}</span></div>${intakePanel(d,r)}${r.view==='tickets'?findings(d):''}${views[r.view](d,r)}`;document.querySelector('#intake-form')?.addEventListener('submit',submitIntake);document.querySelector('#ticket-sort')?.addEventListener('change',e=>{detailSort=e.target.value;renderDetail(d)});document.querySelector('#changes-form')?.addEventListener('submit',e=>{e.preventDefault();const value=document.querySelector('#since-seq').value.trim();location.hash=`/central/${encodeURIComponent(r.central)}/board/${encodeURIComponent(d.board.board_id)}/changes${value?`?since=${encodeURIComponent(value)}`:''}`});document.querySelector('#state').textContent=`Updated ${fmt(d.generated_at)} · ${esc(d.central)}`;bindInteractive(document.querySelector('#detail-view'));renderSearchResults();if(r.ticket){const target=[...document.querySelectorAll('[data-ticket]')].find(x=>x.dataset.ticket===r.ticket);if(target){target.open=true;sectionStates.set(target.dataset.stateKey,true);target.scrollIntoView({block:'center'})}}}
+function findings(d){if(!d.coordinator_findings)return'';return `<section class="card"><h3>Coordinator findings</h3><div class="finding-list">${d.coordinator_findings.items.map(f=>`<div class="finding"><b>${esc(f.kind)}</b>${f.ticket_id?` <span class="id">${esc(f.ticket_id)}</span>`:''}<p>${esc(f.text)}</p>${f.draft?`<p class="meta">Draft · ${esc(f.draft.category)} · ${esc(f.draft.title)}</p>`:''}</div>`).join('')||'<p class="empty">No current findings</p>'}</div>${d.coordinator_findings.truncated_count?`<p class="warning">${esc(d.coordinator_findings.truncated_count)} findings omitted by the bounded state.</p>`:''}</section>`}
+function renderDetail(d){const r=route();if(!r||r.kind!=='board'||r.central!==d.central||r.board!==d.board.board_id)return;const views={tickets:ticketView,timeline:timelineView,changes:changesView,flow:flowView,routes:routesView};document.querySelector('#detail-view').innerHTML=`<a class="back" href="#/">← All centrals</a><div class="top"><div><h2>${esc(d.board.label)} · ${esc(d.central)}</h2><span class="meta">${esc(d.board.board_id)}</span></div>${d.truncated?`<span class="status">${esc(d.ticket_returned)} of ${esc(d.ticket_total)} tickets shown</span>`:''}</div><div class="toolbar">${tabs(d,r)}<span class="muted">Two guarded writes only: config and intake · ${esc(d.central)}</span></div>${intakePanel(d,r)}${r.view==='tickets'?findings(d):''}${views[r.view](d,r)}`;document.querySelector('#intake-form')?.addEventListener('submit',submitIntake);for(const button of document.querySelectorAll('[data-intake-action]'))button.addEventListener('click',decideIntake);document.querySelector('#ticket-sort')?.addEventListener('change',e=>{detailSort=e.target.value;renderDetail(d)});document.querySelector('#changes-form')?.addEventListener('submit',e=>{e.preventDefault();const value=document.querySelector('#since-seq').value.trim();location.hash=`/central/${encodeURIComponent(r.central)}/board/${encodeURIComponent(d.board.board_id)}/changes${value?`?since=${encodeURIComponent(value)}`:''}`});document.querySelector('#state').textContent=`Updated ${fmt(d.generated_at)} · ${esc(d.central)}`;bindInteractive(document.querySelector('#detail-view'));renderSearchResults();if(r.ticket){const target=[...document.querySelectorAll('[data-ticket]')].find(x=>x.dataset.ticket===r.ticket);if(target){target.open=true;sectionStates.set(target.dataset.stateKey,true);target.scrollIntoView({block:'center'})}}}
 const CENTRAL_REQUEST_TIMEOUT_MS=4000;
 async function fetchJson(path,options={}){const response=await fetch(path,{cache:'no-store',...options});if(!response.ok)throw new Error(`HTTP ${response.status}`);return response.json()}
 async function fetchWithTimeout(path,timeoutMs=CENTRAL_REQUEST_TIMEOUT_MS){const controller=new AbortController();let timer;const timeout=new Promise((_,reject)=>{timer=setTimeout(()=>{controller.abort();reject(new Error('central request timed out'))},timeoutMs)});try{return await Promise.race([fetchJson(path,{signal:controller.signal}),timeout])}finally{clearTimeout(timer)}}
@@ -2666,7 +2884,7 @@ HTML = (
         ".config-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px}"
         ".config-grid label{display:grid;gap:5px}.config-grid input,.config-grid select,.config-grid button{background:var(--panel2);border:1px solid var(--line);border-radius:8px;color:var(--text);padding:8px}"
         ".source{font-size:11px;color:var(--muted)}.central-group{margin-top:28px;padding-top:20px;border-top:2px solid var(--line)}.central-heading{align-items:center}.central-group.unavailable{border:1px solid var(--bad);border-radius:12px;padding:16px}"
-        ".intake-layout{display:grid;grid-template-columns:minmax(260px,1fr) minmax(300px,2fr);gap:14px}.intake-form{display:grid;gap:8px}.intake-form textarea{min-height:82px;resize:vertical;background:var(--panel2);border:1px solid var(--line);border-radius:8px;color:var(--text);padding:8px}.intake-row{padding:8px 0;border-top:1px solid var(--line)}@media(max-width:800px){.intake-layout{grid-template-columns:1fr}}</style>",
+        ".intake-layout{display:grid;grid-template-columns:minmax(260px,1fr) minmax(300px,2fr);gap:14px}.intake-form{display:grid;gap:8px}.intake-form textarea{min-height:82px;resize:vertical;background:var(--panel2);border:1px solid var(--line);border-radius:8px;color:var(--text);padding:8px}.intake-row{padding:10px 0;border-top:1px solid var(--line)}.intake-preview{display:grid;gap:5px;margin:8px 0}.intake-preview input{width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:8px;color:var(--text);padding:8px}.intake-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}.intake-actions button{border:1px solid var(--line);border-radius:8px;padding:7px 10px}.intake-actions .approve{background:var(--good);color:var(--bg)}.intake-actions .decline{background:var(--panel2);color:var(--text)}@media(max-width:800px){.intake-layout{grid-template-columns:1fr}}</style>",
     )
     .replace(
         "Live boards and shared agent pool</p>",
@@ -2682,9 +2900,11 @@ HTML = (
 const CONFIG_CATEGORIES=['docs','tests','audit-analysis','bug','production-code','release-ci','membership-roles','board-registry'];
 const intakeQueues=new Map(),recentIntake=new Map();
 const intakeKey=r=>`${r.central}/${r.board}`;
-function intakePanel(d,r){const key=intakeKey(r),state=intakeQueues.get(key),waiting=state?.waiting||[],waitingIds=new Set(waiting.map(x=>x.id)),recent=recentIntake.get(key)||[],rows=waiting.slice(-25).map(x=>({...x,intake_status:'waiting'}));for(const ask of recent)if(!waitingIds.has(ask.id))rows.push({...ask,intake_status:'consumed (gone)'});rows.sort((a,b)=>String(b.created_at||'').localeCompare(String(a.created_at||'')));return `<section class="card pool intake-layout"><form id="intake-form" class="intake-form"><div><h3>สั่งงาน / new ask</h3><p class="muted">5–500 characters · maximum 10 asks/hour</p></div><textarea name="text" minlength="5" maxlength="500" required placeholder="Describe one concrete ask for ${esc(d.board.label)}"></textarea><button type="submit">Submit ask</button><span id="intake-status" class="muted">${state?.error?esc(state.error):'Ready'}</span></form><div><h3>Pending asks</h3><p class="muted">Intake is processed by the coordinator per the /config matrix and may produce a DRAFT that needs approval.</p><div>${rows.length?rows.map(x=>`<div class="intake-row"><span class="status">${esc(x.intake_status)}</span> <span class="id">${esc(x.id)}</span><p>${esc(x.text)}</p><span class="meta">${esc(fmt(x.created_at))} · ${esc(x.requested_by)}</span></div>`).join(''):'<p class="empty">No asks are waiting.</p>'}</div></div></section>`}
+function intakeDraft(d,ask){const item=(d.coordinator_findings?.items||[]).find(f=>f.ask_id===ask.id&&f.draft?.title);return item?.draft||{title:String(ask.text||'').slice(0,200),category:'awaiting coordinator draft'}}
+function intakePanel(d,r){const key=intakeKey(r),state=intakeQueues.get(key),waiting=state?.waiting||[],declined=state?.declined||[],waitingIds=new Set(waiting.map(x=>x.id)),declinedIds=new Set(declined.map(x=>x.id)),recent=recentIntake.get(key)||[],rows=waiting.slice(-25).map(x=>({...x,intake_status:x.approved?'approved · waiting for coordinator':'waiting',draft:intakeDraft(d,x)}));for(const item of declined)rows.push({...item,intake_status:'declined'});for(const ask of recent)if(!waitingIds.has(ask.id)&&!declinedIds.has(ask.id))rows.push({...ask,intake_status:'consumed (gone)'});rows.sort((a,b)=>String(b.created_at||b.declined_at||'').localeCompare(String(a.created_at||a.declined_at||'')));return `<section class="card pool intake-layout"><form id="intake-form" class="intake-form"><div><h3>สั่งงาน / new ask</h3><p class="muted">5–500 characters · maximum 10 asks/hour</p></div><textarea name="text" minlength="5" maxlength="500" required placeholder="Describe one concrete ask for ${esc(d.board.label)}"></textarea><button type="submit">Submit ask</button><span id="intake-status" class="muted">${state?.error?esc(state.error):'Ready'}</span></form><div><h3>Pending asks</h3><p class="muted">Review the drafted title/category, then Approve or Decline. Approval authorizes creation while coordinator limits and idempotency still apply.</p><div>${rows.length?rows.map(x=>`<div class="intake-row" data-ask-id="${esc(x.id)}"><span class="status">${esc(x.intake_status)}</span> <span class="id">${esc(x.id)}</span><p>${esc(x.text)}</p>${x.draft?`<div class="intake-preview"><span class="meta">Draft category · ${esc(x.draft.category)}</span><label>Draft ticket title<input data-intake-title maxlength="200" value="${esc(x.approved_title||x.draft.title)}" ${x.approved?'disabled':''}></label></div>`:''}<span class="meta">${esc(fmt(x.created_at||x.declined_at))} · ${esc(x.requested_by||x.declined_by)}</span>${x.draft&&!x.approved?`<div class="intake-actions"><button type="button" class="approve" data-intake-action="approve">Approve</button><button type="button" class="decline" data-intake-action="decline">Decline</button><span class="muted" data-intake-result></span></div>`:''}</div>`).join(''):'<p class="empty">No asks are waiting.</p>'}</div></div></section>`}
 async function refreshIntake(r,rerender=false){const key=intakeKey(r);try{const data=await fetchJson(`/api/intake?${apiCentral(r.central)}&board_id=${encodeURIComponent(r.board)}`);intakeQueues.set(key,data)}catch(e){intakeQueues.set(key,{waiting:[],error:`Intake unavailable: ${e.message}`})}const current=route();if(rerender&&detailData&&current?.kind==='board'&&current.central===r.central&&current.board===r.board)renderDetail(detailData)}
 async function submitIntake(event){event.preventDefault();const r=route();if(!r||r.kind!=='board')return;const form=event.target,status=form.querySelector('#intake-status'),button=form.querySelector('button'),text=new FormData(form).get('text');button.disabled=true;status.className='muted';status.textContent='Submitting…';try{const response=await fetch(`/api/intake?${apiCentral(r.central)}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({board_id:r.board,text})});let body={};try{body=await response.json()}catch(_e){}if(!response.ok)throw new Error(body.error||`HTTP ${response.status}`);const key=intakeKey(r),recent=recentIntake.get(key)||[];recentIntake.set(key,[body.ask,...recent.filter(x=>x.id!==body.ask.id)].slice(0,25));form.reset();status.textContent=`Queued ${body.ask.id}`;await refreshIntake(r,true)}catch(e){status.className='error';status.textContent=`Submit failed: ${e.message}`}finally{button.disabled=false}}
+async function decideIntake(event){const r=route();if(!r||r.kind!=='board')return;const button=event.currentTarget,row=button.closest('[data-ask-id]'),state=intakeQueues.get(intakeKey(r)),action=button.dataset.intakeAction,status=row.querySelector('[data-intake-result]'),title=row.querySelector('[data-intake-title]')?.value.trim();for(const item of row.querySelectorAll('button'))item.disabled=true;status.className='muted';status.textContent=`${action==='approve'?'Approving':'Declining'}…`;const payload={board_id:r.board,ask_id:row.dataset.askId,action,expected_sha256:state?.expected_sha256};if(action==='approve'&&title)payload.title=title;try{const response=await fetch(`/api/intake?${apiCentral(r.central)}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});let body={};try{body=await response.json()}catch(_error){}if(!response.ok)throw new Error(body.error||`HTTP ${response.status}`);await refreshIntake(r,true)}catch(error){status.className='error';status.textContent=`Decision failed: ${error.message}`;for(const item of row.querySelectorAll('button'))item.disabled=false}}
 const CONFIG_NUMBERS=[['stale_seconds','Stale seconds',10,86400],['lease_warning_ratio','Lease warning ratio',.1,1],['grace_seconds','Grace seconds',10,86400],['starved_seconds','Starved seconds',10,86400],['critical_starved_seconds','Critical starved seconds',10,86400],['review_backlog_seconds','Review backlog seconds',10,86400],['abandoner_drops','Abandoner drops',1,20],['abandoner_window_days','Abandoner window days',1,365],['context_watch_tokens_per_poll','Context watch tokens / poll',1000,10000000],['context_compact_tokens_per_poll','Context compact tokens / poll',1001,20000000],['context_trend_compact_ratio','Context trend compact ratio',1.01,10]];
 let coordinatorConfig=null;
 const sourceFor=(d,path)=>d.sources?.[path]||'unknown';
@@ -3166,19 +3386,42 @@ def make_handler(
                         )
                     )
                 else:
-                    if not isinstance(request, dict) or set(request) != {
-                        "board_id",
-                        "text",
-                    }:
-                        raise ValueError("request must contain only board_id and text")
-                    body = _json_bytes(
-                        cache_call(
-                            "save_intake",
-                            request["board_id"],
-                            request["text"],
-                            central=central,
+                    if not isinstance(request, dict):
+                        raise ValueError("intake request must be an object")
+                    if set(request) == {"board_id", "text"}:
+                        body = _json_bytes(
+                            cache_call(
+                                "save_intake",
+                                request["board_id"],
+                                request["text"],
+                                central=central,
+                            )
                         )
-                    )
+                    elif set(request) in (
+                        {"board_id", "ask_id", "action", "expected_sha256"},
+                        {
+                            "board_id",
+                            "ask_id",
+                            "action",
+                            "expected_sha256",
+                            "title",
+                        },
+                    ):
+                        body = _json_bytes(
+                            cache_call(
+                                "decide_intake",
+                                request["board_id"],
+                                request["ask_id"],
+                                request["action"],
+                                request["expected_sha256"],
+                                request.get("title"),
+                                central=central,
+                            )
+                        )
+                    else:
+                        raise ValueError(
+                            "intake request must be a new ask or approve/decline decision"
+                        )
             except KeyError:
                 if route == "/api/workers" or worker_action is not None:
                     self._send(

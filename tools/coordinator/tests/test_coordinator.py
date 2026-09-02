@@ -1776,6 +1776,202 @@ def _intake_row(ask_id: str, text: str) -> dict[str, str]:
     }
 
 
+def test_human_approved_intake_bypasses_matrix_with_same_identity() -> None:
+    approved = {
+        **_intake_row("ask-approved", "Publish the next release"),
+        "approved": True,
+        "approved_by": "dashboard-seat",
+        "approved_at": NOW.isoformat(),
+        "approved_title": "Edited approved release",
+    }
+    unapproved = _intake_row("ask-unapproved", "Publish another release")
+    created: list[tuple[str, coordinator.IntakeDraft]] = []
+
+    async def create(board_id: str, draft: coordinator.IntakeDraft) -> str:
+        created.append((board_id, draft))
+        return draft.ticket_id
+
+    findings, updates = asyncio.run(
+        coordinator.process_intakes(
+            [_intake_project()],
+            {
+                "board-a": {
+                    "tickets": [],
+                    "coordinator_intake_state": _intake_state(
+                        [approved, unapproved]
+                    ),
+                }
+            },
+            NOW,
+            coordinator.RuntimeState.for_mode("active"),
+            enabled=True,
+            dry_run=False,
+            create_ticket=create,
+        )
+    )
+
+    assert [(board_id, draft.title) for board_id, draft in created] == [
+        ("board-a", "Edited approved release")
+    ]
+    assert created[0][1].op_key.startswith("coord-intake-")
+    assert created[0][1].ticket_id.startswith("TK-intake-")
+    assert [item["kind"] for item in findings] == [
+        "intake-created",
+        "intake-pending",
+    ]
+    assert findings[0]["matrix_rule"] == "human-approved"
+    assert findings[1]["matrix_rule"] == "personal-release-ci-always-ask"
+    assert updates == {"board-a": frozenset({"ask-approved"})}
+
+
+def test_approved_intake_calls_ticket_create_with_op_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    class FakeClient:
+        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+            pass
+
+        async def __aenter__(self) -> "FakeClient":
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+        async def _call(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+            calls.append((name, arguments))
+            return {"ticket": {"ticket_id": arguments["ticket_id"]}}
+
+    fake_module = type(
+        "FakePursersClient",
+        (),
+        {"BoardClient": FakeClient, "BoardClientError": RuntimeError},
+    )
+    monkeypatch.setitem(sys.modules, "pursers_client", fake_module)
+    approved = {
+        **_intake_row("ask-e2e", "Publish the next release"),
+        "approved": True,
+        "approved_by": "dashboard-seat",
+        "approved_at": NOW.isoformat(),
+    }
+
+    async def create(board_id: str, draft: coordinator.IntakeDraft) -> str:
+        return await coordinator.create_intake_ticket(
+            "https://board.invalid/mcp",
+            "opaque",
+            "coordinator-test",
+            board_id,
+            draft,
+        )
+
+    findings, updates = asyncio.run(
+        coordinator.process_intakes(
+            [_intake_project()],
+            {
+                "board-a": {
+                    "tickets": [],
+                    "coordinator_intake_state": _intake_state([approved]),
+                }
+            },
+            NOW,
+            coordinator.RuntimeState.for_mode("active"),
+            enabled=True,
+            dry_run=False,
+            create_ticket=create,
+        )
+    )
+
+    assert [name for name, _arguments in calls] == ["ticket_create"]
+    arguments = calls[0][1]
+    assert arguments["coordinator_op_key"].startswith("coord-intake-")
+    assert arguments["tags"] == [
+        "coordinator-intake",
+        f"op:{arguments['coordinator_op_key']}",
+    ]
+    assert findings[0]["kind"] == "intake-created"
+    assert updates == {"board-a": frozenset({"ask-e2e"})}
+
+
+def test_approved_intake_without_scope_stays_with_grant_finding() -> None:
+    approved = {
+        **_intake_row("ask-approved", "Publish the next release"),
+        "approved": True,
+        "approved_by": "dashboard-seat",
+        "approved_at": NOW.isoformat(),
+    }
+
+    async def unexpected_create(*_args: Any) -> str:
+        raise AssertionError("missing board:intake must not attempt creation")
+
+    findings, updates = asyncio.run(
+        coordinator.process_intakes(
+            [_intake_project()],
+            {
+                "board-a": {
+                    "tickets": [],
+                    "coordinator_intake_state": _intake_state([approved]),
+                }
+            },
+            NOW,
+            coordinator.RuntimeState.for_mode("active"),
+            enabled=True,
+            dry_run=False,
+            create_ticket=unexpected_create,
+            intake_authorized=False,
+        )
+    )
+
+    assert updates == {}
+    assert findings[0]["kind"] == "intake-approved-scope-missing"
+    assert findings[0]["matrix_rule"] == "approved-missing-board-intake-grant"
+    assert "lacks board:intake" in findings[0]["message"]
+    assert "Grant board:intake" in findings[0]["next_action"]
+    assert "approved ask remains queued" in findings[0]["next_action"]
+
+
+def test_approved_intake_keeps_hourly_rate_limit() -> None:
+    approved = {
+        **_intake_row("ask-approved", "Publish the next release"),
+        "approved": True,
+        "approved_by": "dashboard-seat",
+        "approved_at": NOW.isoformat(),
+    }
+    tickets = [
+        {
+            "ticket_id": f"TK-{index}",
+            "tags": ["coordinator-intake"],
+            "created_at": ago(index + 1),
+        }
+        for index in range(5)
+    ]
+
+    async def unexpected_create(*_args: Any) -> str:
+        raise AssertionError("rate-limited approved intake must not create")
+
+    findings, updates = asyncio.run(
+        coordinator.process_intakes(
+            [_intake_project()],
+            {
+                "board-a": {
+                    "tickets": tickets,
+                    "coordinator_intake_state": _intake_state([approved]),
+                }
+            },
+            NOW,
+            coordinator.RuntimeState.for_mode("active"),
+            enabled=True,
+            dry_run=False,
+            create_ticket=unexpected_create,
+        )
+    )
+
+    assert updates == {}
+    assert findings[0]["kind"] == "intake-approved-deferred"
+    assert findings[0]["matrix_rule"] == "hourly-auto-create-limit"
+    assert "remains queued" in findings[0]["next_action"]
+
+
 def _matching_replay_ticket(draft: coordinator.IntakeDraft) -> dict[str, Any]:
     return {
         "ticket_id": draft.ticket_id,
@@ -2368,7 +2564,52 @@ def test_intake_queue_is_drained_only_after_finding_publish(
         coordinator.STATE_KEY,
         coordinator.INTAKE_STATE_KEY,
     ]
-    assert [item["id"] for item in json.loads(calls[1][1])] == ["ask-appended"]
+    drained = json.loads(calls[1][1])
+    assert drained["schema_version"] == coordinator.INTAKE_DOCUMENT_SCHEMA_VERSION
+    assert [item["id"] for item in drained["asks"]] == ["ask-appended"]
+    assert drained["tombstones"] == []
+
+
+def test_intake_drain_preserves_decline_tombstones() -> None:
+    tombstone = {
+        "id": "ask-declined",
+        "text": "Declined ask",
+        "board_id": "board-a",
+        "declined_by": "operator",
+        "declined_at": NOW.isoformat(),
+    }
+    value = coordinator._serialize_intake(
+        [
+            coordinator.IntakeAsk(
+                "ask-done", "Update docs", "operator", "board-a"
+            )
+        ],
+        [tombstone],
+    )
+
+    class Client:
+        agent_name = "coordinator-test"
+        written: str | None = None
+
+        async def board_state_get(self, key: str) -> dict[str, Any]:
+            assert key == coordinator.INTAKE_STATE_KEY
+            return {"state": {"value": value}}
+
+        async def _call(self, name: str, arguments: dict[str, Any]) -> None:
+            assert name == "board_state_update"
+            assert arguments["expected_sha256"] == hashlib.sha256(
+                value.encode()
+            ).hexdigest()
+            self.written = arguments["value"]
+
+    client = Client()
+    asyncio.run(
+        coordinator.drain_intake(client, "board-a", frozenset({"ask-done"}))
+    )
+    assert client.written is not None
+    document = json.loads(client.written)
+    assert document["asks"] == []
+    assert document["tombstones"] == [tombstone]
 
 
 def test_intake_cas_drain_rejects_append_between_read_and_write() -> None:
@@ -2406,6 +2647,8 @@ def test_intake_cas_drain_rejects_append_between_read_and_write() -> None:
         "ask-done",
         "ask-appended",
     ]
+
+
 def _config_state(value: dict[str, Any]) -> dict[str, Any]:
     return {"state": {"value": json.dumps(value)}}
 

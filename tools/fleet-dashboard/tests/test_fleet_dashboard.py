@@ -2417,7 +2417,178 @@ def test_intake_get_endpoint_and_ui_render_waiting_and_consumed_states() -> None
     assert "สั่งงาน / new ask" in dashboard.HTML
     assert "Pending asks" in dashboard.HTML
     assert "consumed (gone)" in dashboard.HTML
-    assert "may produce a DRAFT that needs approval" in dashboard.HTML
+    assert "Review the drafted title/category, then Approve or Decline" in dashboard.HTML
+
+
+def test_intake_approve_and_decline_are_cas_guarded() -> None:
+    central = FakeIntakeCentral()
+    fetcher = intake_fetcher(central)
+    first = asyncio.run(fetcher.save_intake("pursers", "Publish the release notes"))
+    approved = asyncio.run(
+        fetcher.decide_intake(
+            "pursers",
+            first["ask"]["id"],
+            "approve",
+            first["expected_sha256"],
+            "Edited release ticket",
+        )
+    )
+
+    assert approved["ask"] == {
+        **first["ask"],
+        "approved": True,
+        "approved_by": "dashboard-seat",
+        "approved_at": "2030-01-01T12:00:00+00:00",
+        "approved_title": "Edited release ticket",
+    }
+    assert approved["concurrency"] == "cas"
+    with pytest.raises(dashboard.ConfigConflictError, match="changed"):
+        asyncio.run(
+            fetcher.decide_intake(
+                "pursers",
+                first["ask"]["id"],
+                "decline",
+                first["expected_sha256"],
+            )
+        )
+
+    second = asyncio.run(fetcher.save_intake("pursers", "Deploy the next release"))
+    declined = asyncio.run(
+        fetcher.decide_intake(
+            "pursers",
+            second["ask"]["id"],
+            "decline",
+            second["expected_sha256"],
+        )
+    )
+    state = asyncio.run(fetcher.fetch_intake("pursers"))
+    assert declined["tombstone"] == {
+        "id": second["ask"]["id"],
+        "text": "Deploy the next release",
+        "board_id": "pursers",
+        "declined_by": "dashboard-seat",
+        "declined_at": "2030-01-01T12:00:00+00:00",
+    }
+    assert [row["id"] for row in state["waiting"]] == [first["ask"]["id"]]
+    assert state["declined"] == [declined["tombstone"]]
+    assert {call[2]["key"] for call in central.calls} == {"coordinator_intake"}
+    assert all("expected_sha256" in call[2] for call in central.calls[1:])
+
+
+def test_intake_decision_endpoint_returns_conflict_for_stale_cas() -> None:
+    central = FakeIntakeCentral()
+    fetcher = intake_fetcher(central)
+    created = asyncio.run(fetcher.save_intake("pursers", "Publish release notes"))
+    cache = dashboard.DashboardCache(fetcher, 5)
+    server, thread = _serve_cache(cache)
+    payload = {
+        "board_id": "pursers",
+        "ask_id": created["ask"]["id"],
+        "action": "approve",
+        "expected_sha256": created["expected_sha256"],
+        "title": "Approved release notes",
+    }
+
+    def request() -> urllib.request.Request:
+        return urllib.request.Request(
+            f"http://127.0.0.1:{server.server_port}/api/intake",
+            data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+
+    try:
+        with urllib.request.urlopen(request()) as response:
+            assert response.status == 200
+            assert json.load(response)["ask"]["approved_title"] == (
+                "Approved release notes"
+            )
+        with pytest.raises(urllib.error.HTTPError) as captured:
+            urllib.request.urlopen(request())
+        assert captured.value.code == 409
+        assert "changed" in json.load(captured.value)["error"]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+def test_intake_decline_tombstones_are_bounded_to_twenty() -> None:
+    central = FakeIntakeCentral()
+    asks = [
+        {
+            "id": "ask-current",
+            "text": "Publish current release",
+            "requested_by": "operator",
+            "board_id": "pursers",
+        }
+    ]
+    tombstones = [
+        {
+            "id": f"ask-old-{index}",
+            "text": f"Old ask {index}",
+            "board_id": "pursers",
+            "declined_by": "operator",
+            "declined_at": f"2030-01-01T11:{index:02d}:00+00:00",
+        }
+        for index in range(20)
+    ]
+    encoded = dashboard._encode_intake_document(asks, tombstones)
+    central.values[("pursers", "coordinator_intake")] = encoded
+    result = asyncio.run(
+        intake_fetcher(central).decide_intake(
+            "pursers",
+            "ask-current",
+            "decline",
+            hashlib.sha256(encoded.encode()).hexdigest(),
+        )
+    )
+    state = asyncio.run(intake_fetcher(central).fetch_intake("pursers"))
+
+    assert len(state["declined"]) == 20
+    assert state["declined"][0]["id"] == "ask-old-1"
+    assert state["declined"][-1] == result["tombstone"]
+
+
+def test_intake_pending_finding_exposes_bounded_draft_preview() -> None:
+    evidence = json.dumps(
+        {
+            "ask_id": "ask-preview",
+            "category": "release-ci",
+            "draft": {"title": "Publish release 2.0"},
+        }
+    )
+    result = dashboard.project_coordinator_findings(
+        {
+            "state": {
+                "coordinator_findings": {
+                    "value": json.dumps(
+                        {
+                            "findings": [
+                                {
+                                    "kind": "intake-pending",
+                                    "level": "warn",
+                                    "message": "Approval required",
+                                    "ask_id": "ask-preview",
+                                    "evidence": evidence,
+                                }
+                            ]
+                        }
+                    )
+                }
+            }
+        }
+    )
+
+    assert result is not None
+    assert result["items"][0]["ask_id"] == "ask-preview"
+    assert result["items"][0]["draft"] == {
+        "title": "Publish release 2.0",
+        "category": "release-ci",
+    }
+    assert "data-intake-action=\"approve\"" in dashboard.HTML
+    assert "data-intake-action=\"decline\"" in dashboard.HTML
+    assert "Draft ticket title" in dashboard.HTML
 
 
 def test_dashboard_write_whitelist_is_exact_across_both_writes() -> None:

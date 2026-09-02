@@ -48,6 +48,8 @@ INTAKE_RATE_LIMIT = 5
 INTAKE_RATE_WINDOW_SECONDS = 3_600
 INTAKE_BREAKER_FAILURES = 3
 INTAKE_SCOPE = "board:intake"
+INTAKE_DOCUMENT_SCHEMA_VERSION = 1
+MAX_INTAKE_TOMBSTONES = 20
 INTAKE_CATEGORIES = (
     "docs",
     "tests",
@@ -140,6 +142,11 @@ class IntakeAsk:
     text: str
     requested_by: str
     board_id: str
+    approved: bool = False
+    approved_by: str | None = None
+    approved_at: str | None = None
+    approved_title: str | None = None
+    created_at: str | None = None
 
 
 @dataclass(frozen=True)
@@ -357,18 +364,33 @@ def parse_registry(raw: Mapping[str, Any]) -> list[Project]:
     return sorted(projects, key=lambda item: (item.board_id, item.name))
 
 
-def parse_intake(raw: Mapping[str, Any] | None, board_id: str) -> list[IntakeAsk]:
-    """Parse the intentionally small, human-written intake queue."""
+def _intake_rows(raw: Mapping[str, Any] | None) -> tuple[list[Any], list[Any]]:
+    """Read legacy list state or the dashboard's versioned decision document."""
     if not raw:
-        return []
+        return [], []
     state = raw.get("state")
     value = state.get("value") if isinstance(state, Mapping) else None
     try:
-        rows = json.loads(value) if isinstance(value, str) else value
+        document = json.loads(value) if isinstance(value, str) else value
     except json.JSONDecodeError as exc:
         raise ValueError("coordinator_intake is malformed") from exc
-    if not isinstance(rows, list):
-        raise ValueError("coordinator_intake must be a list")
+    if isinstance(document, list):
+        return document, []
+    if (
+        not isinstance(document, Mapping)
+        or document.get("schema_version") != INTAKE_DOCUMENT_SCHEMA_VERSION
+        or set(document) != {"schema_version", "asks", "tombstones"}
+        or not isinstance(document.get("asks"), list)
+        or not isinstance(document.get("tombstones"), list)
+        or len(document["tombstones"]) > MAX_INTAKE_TOMBSTONES
+    ):
+        raise ValueError("coordinator_intake must be a list or intake document")
+    return document["asks"], document["tombstones"]
+
+
+def parse_intake(raw: Mapping[str, Any] | None, board_id: str) -> list[IntakeAsk]:
+    """Parse the intentionally small, human-written intake queue."""
+    rows, _tombstones = _intake_rows(raw)
     asks: list[IntakeAsk] = []
     seen: set[str] = set()
     for row in rows:
@@ -384,6 +406,39 @@ def parse_intake(raw: Mapping[str, Any] | None, board_id: str) -> list[IntakeAsk
             raise ValueError("coordinator_intake ids must be unique")
         if values["board_id"].strip() != board_id:
             raise ValueError("coordinator_intake entry board_id does not match its board")
+        approved = row.get("approved", False)
+        if type(approved) is not bool:
+            raise ValueError("coordinator_intake approved must be a boolean")
+        approved_by = row.get("approved_by")
+        approved_at = row.get("approved_at")
+        approved_title = row.get("approved_title")
+        created_at = row.get("created_at")
+        if not approved and any(
+            value is not None for value in (approved_by, approved_at, approved_title)
+        ):
+            raise ValueError("unapproved intake cannot contain approval metadata")
+        if approved and not all(
+            isinstance(value, str) and value.strip()
+            for value in (approved_by, approved_at)
+        ):
+            raise ValueError("approved intake requires approved_by and approved_at")
+        if approved and (
+            len(str(approved_by).strip()) > 120
+            or len(str(approved_at).strip()) > 80
+        ):
+            raise ValueError("approved intake metadata exceeds its size limit")
+        if approved_title is not None and (
+            not isinstance(approved_title, str)
+            or not approved_title.strip()
+            or len(approved_title.strip()) > 200
+        ):
+            raise ValueError("approved intake title must be 1 to 200 characters")
+        if created_at is not None and (
+            not isinstance(created_at, str)
+            or not created_at.strip()
+            or len(created_at.strip()) > 80
+        ):
+            raise ValueError("intake created_at is invalid")
         seen.add(ask_id)
         asks.append(
             IntakeAsk(
@@ -391,6 +446,15 @@ def parse_intake(raw: Mapping[str, Any] | None, board_id: str) -> list[IntakeAsk
                 text=str(values["text"]).strip(),
                 requested_by=str(values["requested_by"]).strip(),
                 board_id=board_id,
+                approved=approved,
+                approved_by=(str(approved_by).strip() if approved else None),
+                approved_at=(str(approved_at).strip() if approved else None),
+                approved_title=(
+                    str(approved_title).strip() if approved_title is not None else None
+                ),
+                created_at=(
+                    str(created_at).strip() if created_at is not None else None
+                ),
             )
         )
     return asks
@@ -506,7 +570,7 @@ def deterministic_intake_draft(ask: IntakeAsk, project: Project) -> IntakeDraft:
     }[category]
     scope = "READ-ONLY" if category == "audit-analysis" else "interactive-no-send"
     compact = " ".join(ask.text.split())
-    title = compact[:197] + ("..." if len(compact) > 197 else "")
+    title = ask.approved_title or compact[:197] + ("..." if len(compact) > 197 else "")
     description = "\n".join(
         (
             "Structured coordinator intake.",
@@ -592,6 +656,12 @@ def intake_finding(
         "intake-created": "Structured intake created a ticket.",
         "intake-would-create": "Structured intake would create a ticket in active execution.",
         "intake-pending": "Structured intake requires operator approval.",
+        "intake-approved-scope-missing": (
+            "Approved but coordinator lacks board:intake — grant the scope."
+        ),
+        "intake-approved-deferred": (
+            "Approved intake remains queued behind coordinator safety limits."
+        ),
     }
     return {
         "kind": kind,
@@ -602,12 +672,22 @@ def intake_finding(
         "next_action": (
             (
                 f"Grant {INTAKE_SCOPE} alongside board:coordinate, then retry ask "
-                f"{ask.ask_id}; the queue remains intact."
-                if rule == "missing-board-intake-grant"
+                f"{ask.ask_id}; the approved ask remains queued."
+                if rule == "approved-missing-board-intake-grant"
                 else (
-                    f"Review ask {ask.ask_id}; after an explicit approve/create or "
-                    "decline decision, remove it from coordinator_intake. Until then "
-                    "the pending draft remains queued."
+                    f"Grant {INTAKE_SCOPE} alongside board:coordinate, then retry ask "
+                    f"{ask.ask_id}; the queue remains intact."
+                    if rule == "missing-board-intake-grant"
+                    else (
+                        f"Approved ask {ask.ask_id} remains queued; resolve {rule} "
+                        "and let the coordinator retry."
+                        if ask.approved
+                        else (
+                            f"Review ask {ask.ask_id}; after an explicit approve/create "
+                            "or decline decision, remove it from coordinator_intake. "
+                            "Until then the pending draft remains queued."
+                        )
+                    )
                 )
             )
             if decision == "ask"
@@ -2439,18 +2519,44 @@ async def mutate_action(
         )
 
 
-def _serialize_intake(asks: Sequence[IntakeAsk]) -> str:
+def _serialize_intake(
+    asks: Sequence[IntakeAsk], tombstones: Sequence[Mapping[str, Any]] = ()
+) -> str:
     return json.dumps(
-        [
-            {
-                "id": ask.ask_id,
-                "text": ask.text,
-                "requested_by": ask.requested_by,
-                "board_id": ask.board_id,
-            }
-            for ask in asks
-        ],
+        {
+            "schema_version": INTAKE_DOCUMENT_SCHEMA_VERSION,
+            "asks": [
+                {
+                    "id": ask.ask_id,
+                    "text": ask.text,
+                    "requested_by": ask.requested_by,
+                    "board_id": ask.board_id,
+                    **({"approved": True} if ask.approved else {}),
+                    **(
+                        {
+                            "approved_by": ask.approved_by,
+                            "approved_at": ask.approved_at,
+                        }
+                        if ask.approved
+                        else {}
+                    ),
+                    **(
+                        {"approved_title": ask.approved_title}
+                        if ask.approved_title is not None
+                        else {}
+                    ),
+                    **(
+                        {"created_at": ask.created_at}
+                        if ask.created_at is not None
+                        else {}
+                    ),
+                }
+                for ask in asks
+            ],
+            "tombstones": [dict(item) for item in tombstones][-MAX_INTAKE_TOMBSTONES:],
+        },
         ensure_ascii=False,
+        sort_keys=True,
         separators=(",", ":"),
     )
 
@@ -2616,8 +2722,17 @@ async def process_intakes(
                 always_ask_categories=always_ask_categories,
                 work_domain_always_ask=work_domain_always_ask,
             )
+            if ask.approved:
+                decision, rule = "auto", "human-approved"
             if decision == "auto" and not intake_authorized and not dry_run:
-                decision, rule = "ask", "missing-board-intake-grant"
+                decision, rule = (
+                    "ask",
+                    (
+                        "approved-missing-board-intake-grant"
+                        if ask.approved
+                        else "missing-board-intake-grant"
+                    ),
+                )
             if decision == "auto" and board_id in breakers:
                 decision, rule = "ask", "create-breaker-draft-only"
             if decision == "auto" and recent_creates is None:
@@ -2630,7 +2745,22 @@ async def process_intakes(
                 decision, rule = "ask", "hourly-auto-create-limit"
             if decision == "ask":
                 findings.append(
-                    intake_finding("intake-pending", "warn", ask, draft, decision, rule)
+                    intake_finding(
+                        (
+                            "intake-approved-scope-missing"
+                            if rule == "approved-missing-board-intake-grant"
+                            else (
+                                "intake-approved-deferred"
+                                if ask.approved
+                                else "intake-pending"
+                            )
+                        ),
+                        "warn",
+                        ask,
+                        draft,
+                        decision,
+                        rule,
+                    )
                 )
                 continue
             if dry_run:
@@ -2696,6 +2826,7 @@ async def drain_intake(
     """Re-read immediately before drain so concurrent appends are preserved."""
     raw = await client.board_state_get(INTAKE_STATE_KEY)
     current = parse_intake(raw, board_id)
+    _rows, tombstones = _intake_rows(raw)
     remaining = [ask for ask in current if ask.ask_id not in processed_ids]
     state = raw.get("state") if isinstance(raw, Mapping) else None
     expected_value = state.get("value") if isinstance(state, Mapping) else None
@@ -2706,7 +2837,7 @@ async def drain_intake(
         {
             "agent_name": client.agent_name,
             "key": INTAKE_STATE_KEY,
-            "value": _serialize_intake(remaining),
+            "value": _serialize_intake(remaining, tombstones),
             "expected_sha256": hashlib.sha256(
                 expected_value.encode("utf-8")
             ).hexdigest(),
