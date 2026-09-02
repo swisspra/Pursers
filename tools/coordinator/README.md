@@ -66,6 +66,17 @@ human approval from auto-category asks that do not. A write-scoped intake token
 is also refused locally with the same approval distinction; the main credential
 continues all non-intake work unchanged.
 
+### Approve or decline an ask
+
+The fleet dashboard keeps a new ask pending until the coordinator publishes a
+matching draft title and category. Before that draft arrives, the dashboard
+keeps **Decline** available but hides **Approve** and title editing. Approving
+records the human decision in `coordinator_intake`; declining removes the ask
+and records a bounded tombstone for visibility. The coordinator alone creates
+an approved ticket with the separate `board:intake` credential. Approval
+bypasses the category matrix, but not the scope check, rate limit, circuit
+breaker, or deterministic operation-key replay protection.
+
 The live config equivalent is `intake.token_path`:
 
 ```json
