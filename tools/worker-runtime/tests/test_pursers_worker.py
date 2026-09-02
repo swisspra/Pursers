@@ -1023,9 +1023,7 @@ def test_fake_llm_reviewer_approve_reject_and_garbage(
 def test_session_log_persists_and_clears_bounded_review_state(
     tmp_path: Path,
 ) -> None:
-    path = tmp_path / "reviewer.log"
-    log = worker_module.SessionLog(path)
-    log.begin_session("reviewer")
+    log = worker_module.SessionLog(tmp_path / "reviewer.log")
 
     log.write(
         "review_started",
@@ -1048,6 +1046,29 @@ def test_session_log_persists_and_clears_bounded_review_state(
         log.write("review_run_shell", command=f"check-{index}")
     assert json.loads(log.review_state_path.read_text()) == state
 
+    log.write(
+        "review_finished",
+        board_id="board-one",
+        ticket_id="TK-active",
+        outcome="approve",
+    )
+    assert not log.review_state_path.exists()
+
+
+def test_session_log_runtime_session_fences_stale_review_state(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "reviewer.log"
+    original = worker_module.SessionLog(path)
+    original.begin_session("reviewer")
+    original.write(
+        "review_started",
+        board_id="board-one",
+        ticket_id="TK-stale",
+    )
+    for index in range(25):
+        original.write("review_run_shell", command=f"stale-{index}")
+
     replacement = worker_module.SessionLog(path)
     replacement.begin_session("reviewer")
     assert not replacement.review_state_path.exists()
@@ -1058,18 +1079,18 @@ def test_session_log_persists_and_clears_bounded_review_state(
     replacement.write(
         "review_started",
         board_id="board-one",
-        ticket_id="TK-replacement",
+        ticket_id="TK-active",
     )
     for index in range(25):
         replacement.write("review_run_shell", command=f"replacement-{index}")
     assert json.loads(replacement.review_state_path.read_text())["ticket_id"] == (
-        "TK-replacement"
+        "TK-active"
     )
 
     replacement.write(
         "review_finished",
         board_id="board-one",
-        ticket_id="TK-replacement",
+        ticket_id="TK-active",
         outcome="approve",
     )
     assert not replacement.review_state_path.exists()

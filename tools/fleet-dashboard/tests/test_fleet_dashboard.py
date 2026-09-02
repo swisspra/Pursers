@@ -2608,14 +2608,6 @@ def test_active_review_requires_explicit_unfinished_lifecycle() -> None:
         "ticket_id": "TK-review",
     }
     assert dashboard._active_review_from_log([started, finished]) is None
-    session_fence = json.dumps(
-        {
-            "event": "runtime_session_started",
-            "role": "reviewer",
-            "session_id": "replacement",
-        }
-    )
-    assert dashboard._active_review_from_log([started, session_fence]) is None
     unrelated_finish = json.dumps(
         {
             "event": "review_finished",
@@ -2626,6 +2618,25 @@ def test_active_review_requires_explicit_unfinished_lifecycle() -> None:
     assert dashboard._active_review_from_log(
         [started, unrelated_finish]
     ) == {"board_id": "board-one", "ticket_id": "TK-review"}
+
+
+def test_active_review_runtime_session_fence_invalidates_stale_lifecycle() -> None:
+    started = json.dumps(
+        {
+            "event": "review_started",
+            "board_id": "board-one",
+            "ticket_id": "TK-stale-review",
+        }
+    )
+    session_fence = json.dumps(
+        {
+            "event": "runtime_session_started",
+            "role": "reviewer",
+            "session_id": "replacement",
+        }
+    )
+
+    assert dashboard._active_review_from_log([started, session_fence]) is None
 
 
 def test_worker_provider_test_uses_keychain_without_echoing_secret(
