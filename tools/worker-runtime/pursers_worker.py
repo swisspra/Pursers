@@ -26,7 +26,10 @@ from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import urlsplit
 
-import tomllib
+try:
+    import tomllib
+except ModuleNotFoundError:
+    import tomli as tomllib
 
 ROOT = Path(__file__).resolve().parents[2]
 CLIENT_SRC = ROOT / "packages" / "client" / "src"
@@ -1617,6 +1620,7 @@ class Worker:
                 ticket_id = str(ticket["ticket_id"])
                 session = None
                 resumed_ok = False
+                outcome = "released"
                 try:
                     source_dir = await self.board.work_dir(board_id)
                     integration_ref = await self.board.integration_ref(board_id)

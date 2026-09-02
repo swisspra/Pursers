@@ -2604,3 +2604,168 @@ def test_orphan_worktree_sweep_preserves_active_claim_worktree(
         "active claim worktree should survive sweep"
     )
     assert asyncio.run(manager.cleanup(active_session, submitted=False)) is True
+
+
+class FailingSweepBoard(SweepBoard):
+    """SweepBoard that raises on work_dir() to simulate a board failure during startup sweep."""
+
+    def __init__(self, fail_on: str = "work_dir") -> None:
+        super().__init__()
+        self.fail_on = fail_on
+
+    async def work_dir(self, _board_id: str) -> Path:
+        if self.fail_on == "work_dir":
+            raise RuntimeError("board work_dir unavailable")
+        return await super().work_dir(_board_id)
+
+    async def integration_ref(self, _board_id: str) -> str:
+        if self.fail_on == "integration_ref":
+            raise RuntimeError("integration_ref unavailable")
+        return await super().integration_ref(_board_id)
+
+
+class FailingGitWorktreeManager(worker_module.GitWorktreeManager):
+    """GitWorktreeManager that raises on prepare() to simulate a git or filesystem failure."""
+
+    async def prepare(
+        self,
+        source_dir: Path,
+        ticket_id: str,
+        integration_ref: str = "main",
+        *,
+        readonly: bool = False,
+    ) -> worker_module.WorktreeSession:
+        raise RuntimeError("worktree prepare failed")
+
+
+def test_startup_sweep_work_dir_fails_releases_orphan_claim() -> None:
+    """When work_dir() raises during _startup_sweep, the claim is released
+    and no UnboundLocalError escapes because outcome is initialized before try."""
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        work = root / "work"
+        work.mkdir()
+        board = FailingSweepBoard(fail_on="work_dir")
+        board.work = work
+        board._listed_tickets = [
+            {
+                "ticket_id": "TK-orphan",
+                "status": "claimed",
+                "claimed_by_agent_id": "AI-worker-one",
+                "tags": [],
+                "required_fields": ["test_output"],
+            }
+        ]
+        selected = config(root, "http://unused")
+        log = worker_module.SessionLog(selected.log_file)
+        worker = worker_module.Worker(
+            selected,
+            board,
+            object(),  # LLM won't be called
+            log,
+            directive="STATIC",
+        )
+
+        async def exercise() -> None:
+            await worker._startup_sweep()
+
+        # This must not raise UnboundLocalError
+        asyncio.run(exercise())
+
+        # Verify the claim was released with 'orphaned by restart'
+        assert board.releases == ["orphaned by restart"], (
+            f"expected one release, got {board.releases}"
+        )
+        # Verify no worktree was created (session stayed None)
+        transcript = selected.log_file.read_text()
+        assert '"event":"startup_sweep_resume_failed"' in transcript
+        assert '"event":"startup_sweep_resume"' not in transcript
+        assert '"error":"RuntimeError"' in transcript
+        assert '"event":"worktree_created"' not in transcript
+
+
+def test_startup_sweep_integration_ref_fails_releases_orphan_claim() -> None:
+    """When integration_ref() raises during _startup_sweep, the claim is released
+    and no UnboundLocalError escapes."""
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        work = root / "work"
+        work.mkdir()
+        board = FailingSweepBoard(fail_on="integration_ref")
+        board.work = work
+        board._listed_tickets = [
+            {
+                "ticket_id": "TK-orphan",
+                "status": "claimed",
+                "claimed_by_agent_id": "AI-worker-one",
+                "tags": [],
+                "required_fields": ["test_output"],
+            }
+        ]
+        selected = config(root, "http://unused")
+        log = worker_module.SessionLog(selected.log_file)
+        worker = worker_module.Worker(
+            selected,
+            board,
+            object(),  # LLM won't be called
+            log,
+            directive="STATIC",
+        )
+
+        async def exercise() -> None:
+            await worker._startup_sweep()
+
+        # This must not raise UnboundLocalError
+        asyncio.run(exercise())
+
+        assert board.releases == ["orphaned by restart"], (
+            f"expected one release, got {board.releases}"
+        )
+        transcript = selected.log_file.read_text()
+        assert '"event":"startup_sweep_resume_failed"' in transcript
+        assert '"error":"RuntimeError"' in transcript
+
+
+def test_startup_sweep_prepare_fails_releases_orphan_claim() -> None:
+    """When GitWorktreeManager.prepare() raises during _startup_sweep,
+    the claim is released and no UnboundLocalError escapes."""
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        work = root / "work"
+        work.mkdir()
+        board = SweepBoard()
+        board.work = work
+        board._listed_tickets = [
+            {
+                "ticket_id": "TK-orphan",
+                "status": "claimed",
+                "claimed_by_agent_id": "AI-worker-one",
+                "tags": [],
+                "required_fields": ["test_output"],
+            }
+        ]
+        selected = config(root, "http://unused")
+        log = worker_module.SessionLog(selected.log_file)
+        failing_manager = FailingGitWorktreeManager("worker-one", log)
+        worker = worker_module.Worker(
+            selected,
+            board,
+            object(),  # LLM won't be called
+            log,
+            directive="STATIC",
+            worktrees=failing_manager,
+        )
+
+        async def exercise() -> None:
+            await worker._startup_sweep()
+
+        # This must not raise UnboundLocalError
+        asyncio.run(exercise())
+
+        assert board.releases == ["orphaned by restart"], (
+            f"expected one release, got {board.releases}"
+        )
+        transcript = selected.log_file.read_text()
+        assert '"event":"startup_sweep_resume_failed"' in transcript
+        assert '"error":"RuntimeError"' in transcript
+        assert '"event":"worktree_created"' not in transcript
