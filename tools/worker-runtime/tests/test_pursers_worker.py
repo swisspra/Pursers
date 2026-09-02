@@ -1689,6 +1689,70 @@ def test_startup_sweep_release_path() -> None:
         assert '"event":"startup_sweep_resume"' not in transcript
 
 
+
+
+def test_startup_sweep_orphan_worktree_combined(tmp_path: Path) -> None:
+    """End-to-end test: killed-process leaves orphan claim + orphan worktree.
+    _startup_sweep must release the claim and remove the worktree in one pass."""
+    repo = init_git_repo(tmp_path)
+    board = SweepBoard()
+    board.work = repo
+    board.identity = "AI-worker-one"
+    board.live_claims = set()
+
+    # Create an orphan worktree for a ticket (simulating a killed process)
+    log = worker_module.SessionLog(tmp_path / "session.log")
+    manager = worker_module.GitWorktreeManager("worker-one", log)
+    orphan_session = asyncio.run(manager.prepare(repo, "TK-orphaned", "main"))
+    orphan_workdir = orphan_session.work_dir
+    assert orphan_workdir.exists()
+
+    # Set up the orphan claim on the board (matches the worktree's ticket)
+    board._listed_tickets = [
+        {
+            "ticket_id": "TK-orphaned",
+            "status": "claimed",
+            "claimed_by_agent_id": "AI-worker-one",
+            "tags": [],
+            "required_fields": ["test_output"],
+        }
+    ]
+
+    # Create a Worker with the GitWorktreeManager but no usable LLM.
+    # run_ticket will fail with AttributeError, triggering the exception path
+    # which releases the claim and cleans up the worktree via finally.
+    selected = config(tmp_path, "http://unused")
+    worker = worker_module.Worker(
+        selected,
+        board,
+        object(),  # No LLM -- run_ticket will fail
+        worker_module.SessionLog(selected.log_file),
+        directive="STATIC",
+        worktrees=manager,
+    )
+
+    async def exercise() -> None:
+        await worker._startup_sweep()
+
+    asyncio.run(exercise())
+
+    # Verify the claim was released
+    # run_ticket catches the exception internally and releases the claim
+    # ("LLM or runtime hard failure" from object() LLM, not "orphaned by restart")
+    assert len(board.releases) == 1, "claim should have been released exactly once"
+    # Verify the orphaned worktree was removed
+    assert not orphan_workdir.exists(), (
+        "orphaned worktree should be removed by startup sweep"
+    )
+    # Verify the log shows the full combined recovery
+    transcript = selected.log_file.read_text()
+    assert '"event":"startup_sweep_found_orphans"' in transcript
+    assert '"event":"startup_sweep_resume"' in transcript
+    # run_ticket catches the exception internally, so resume_failed not logged
+    assert '"event":"hard_failure"' in transcript
+    assert '"event":"worktree_removed"' in transcript
+
+
 def test_claim_guard_refuses_while_holding() -> None:
     """When _active_claim is set and server confirms still claimed, refuse new claim."""
     with tempfile.TemporaryDirectory() as raw:

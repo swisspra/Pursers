@@ -1615,6 +1615,8 @@ class Worker:
             if len(claimed) == 1 and claimed[0].get("status") == "claimed":
                 ticket = claimed[0]
                 ticket_id = str(ticket["ticket_id"])
+                session = None
+                resumed_ok = False
                 try:
                     source_dir = await self.board.work_dir(board_id)
                     integration_ref = await self.board.integration_ref(board_id)
@@ -1627,13 +1629,11 @@ class Worker:
                         board_id=board_id,
                         ticket_id=ticket_id,
                     )
-                    await self.run_ticket(
+                    outcome = await self.run_ticket(
                         board_id, ticket, session.work_dir, session.branch
                     )
                     self._active_claim = None
-                    if session is not None:
-                        await self.worktrees.cleanup(session, submitted=False)
-                    continue
+                    resumed_ok = True
                 except Exception as exc:
                     self.log.write(
                         "startup_sweep_resume_failed",
@@ -1642,6 +1642,24 @@ class Worker:
                         error=type(exc).__name__,
                     )
                     self._active_claim = None
+                    outcome = "released"
+                finally:
+                    if session is not None:
+                        try:
+                            await self.worktrees.cleanup(
+                                session, submitted=outcome == "submitted"
+                            )
+                        except Exception as exc:
+                            self.log.write(
+                                "startup_sweep_cleanup_failed",
+                                ticket_id=ticket_id,
+                                error=type(exc).__name__,
+                            )
+                if not resumed_ok:
+                    await self._release(
+                        board_id, ticket_id, "orphaned by restart"
+                    )
+                continue
             # Release all (multiple or resume failed)
             for ticket in claimed:
                 ticket_id = str(ticket["ticket_id"])
