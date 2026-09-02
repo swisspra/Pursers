@@ -4,6 +4,7 @@ import asyncio
 import importlib.util
 import json
 import stat
+import subprocess
 import sys
 import tempfile
 import threading
@@ -39,6 +40,7 @@ class FakeBoard:
         self.identity = "AI-worker-one"
         self.principal = "PR-reviewer"
         self.reviews: list[dict[str, Any]] = []
+        self.live_claims: set[tuple[str, str]] = set()
 
     async def wait(self, _cursors: dict[str, int]) -> dict[str, Any]:
         self.waited = True
@@ -68,6 +70,15 @@ class FakeBoard:
     async def work_dir(self, _board_id: str) -> Path:
         assert self.work is not None
         return self.work
+
+    async def integration_ref(self, _board_id: str) -> str:
+        return "main"
+
+    async def work_specs(self) -> list[tuple[Path, str]]:
+        return [] if self.work is None else [(self.work, "main")]
+
+    async def active_claims(self) -> set[tuple[str, str]]:
+        return set(self.live_claims)
 
     async def submit(
         self, board_id: str, ticket_id: str, arguments: dict[str, Any]
@@ -240,6 +251,28 @@ def config(
         role=role,
         max_reviews_per_hour=max_reviews_per_hour,
     )
+
+
+def init_git_repo(root: Path) -> Path:
+    repo = root / "repo"
+    repo.mkdir()
+    subprocess.run(
+        ["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Pursers Test"], cwd=repo, check=True
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "pursers-test@example.invalid"],
+        cwd=repo,
+        check=True,
+    )
+    (repo / "README.md").write_text("base\n")
+    subprocess.run(["git", "add", "README.md"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "base"], cwd=repo, check=True, capture_output=True
+    )
+    return repo
 
 
 def test_fake_server_happy_path_claim_edit_submit_and_secret_free_log() -> None:
@@ -2162,3 +2195,348 @@ def test_git_non_git_commands_blocked() -> None:
             )
         except PermissionError:
             pass
+
+
+# ---------------------------------------------------------------------------
+# Worktree isolation tests
+# ---------------------------------------------------------------------------
+
+def test_git_worktree_creation_jails_ticket_and_prompts_for_commit(
+    tmp_path: Path,
+) -> None:
+    repo = init_git_repo(tmp_path)
+    selected = config(tmp_path, "http://unused")
+    log = worker_module.SessionLog(selected.log_file)
+    manager = worker_module.GitWorktreeManager("Worker One", log)
+
+    session = asyncio.run(manager.prepare(repo, "TK-alpha123", "main"))
+
+    assert session.isolated is True
+    assert session.branch == "api/worker-one-alpha123"
+    assert session.work_dir == (
+        repo / ".git" / "pursers-worktrees" / "worker-one-tk-alpha123"
+    )
+    assert worker_module._jailed(session.work_dir, "result.txt") == (
+        session.work_dir / "result.txt"
+    )
+    with pytest.raises(PermissionError, match="escapes assigned work directory"):
+        worker_module._jailed(session.work_dir, "../escape.txt")
+    worker = worker_module.Worker(
+        selected, FakeBoard(), object(), log, directive="STATIC", worktrees=manager
+    )
+    context = json.loads(
+        worker.messages(
+            "board-one", {"ticket_id": "TK-alpha123"}, session.work_dir, session.branch
+        )[1]["content"].removeprefix("BOARD CONTEXT\n")
+    )
+    assert context["checkout"] == "dedicated per-ticket git worktree"
+    assert context["ticket_branch"] == session.branch
+    assert "commit" in context["commit_requirement"]
+    created = json.loads(log.path.read_text().splitlines()[-1])
+    assert created["event"] == "worktree_created"
+    assert created["work_dir"] == str(session.work_dir)
+    assert asyncio.run(manager.cleanup(session, submitted=False)) is True
+
+
+def test_git_worktree_cleanup_release_and_submitted_dirty_checkout(
+    tmp_path: Path,
+) -> None:
+    repo = init_git_repo(tmp_path)
+    log = worker_module.SessionLog(tmp_path / "session.log")
+    manager = worker_module.GitWorktreeManager("worker-cleanup", log)
+    clean = asyncio.run(manager.prepare(repo, "TK-clean", "main"))
+
+    assert asyncio.run(manager.cleanup(clean, submitted=False)) is True
+    assert not clean.work_dir.exists()
+
+    dirty = asyncio.run(manager.prepare(repo, "TK-dirty", "main"))
+    (dirty.work_dir / "uncommitted.txt").write_text("ticket output")
+    assert asyncio.run(manager.cleanup(dirty, submitted=False)) is False
+    assert dirty.work_dir.exists()
+    assert asyncio.run(manager.cleanup(dirty, submitted=True)) is True
+    assert not dirty.work_dir.exists()
+    assert "worktree_retained_dirty" in log.path.read_text()
+
+
+def test_git_worktree_startup_sweeps_only_clean_inactive_orphans(
+    tmp_path: Path,
+) -> None:
+    repo = init_git_repo(tmp_path)
+    manager = worker_module.GitWorktreeManager(
+        "worker-sweep", worker_module.SessionLog(tmp_path / "session.log")
+    )
+    active = asyncio.run(manager.prepare(repo, "TK-active", "main"))
+
+    asyncio.run(
+        manager.sweep([(repo, "main")], {("board-one", "TK-active")})
+    )
+    assert active.work_dir.exists()
+    asyncio.run(manager.sweep([(repo, "main")], set()))
+    assert not active.work_dir.exists()
+
+    dirty = asyncio.run(manager.prepare(repo, "TK-dirty-orphan", "main"))
+    (dirty.work_dir / "dirty.txt").write_text("preserve me")
+    asyncio.run(manager.sweep([(repo, "main")], set()))
+    assert dirty.work_dir.exists()
+    assert asyncio.run(manager.cleanup(dirty, submitted=True)) is True
+
+
+def test_git_worktree_non_git_passthrough(tmp_path: Path) -> None:
+    work = tmp_path / "plain"
+    work.mkdir()
+    manager = worker_module.GitWorktreeManager(
+        "worker-plain", worker_module.SessionLog(tmp_path / "session.log")
+    )
+
+    session = asyncio.run(manager.prepare(work, "TK-plain", "main"))
+
+    assert session == worker_module.WorktreeSession(
+        work.resolve(), work.resolve(), None, isolated=False, readonly=False
+    )
+    assert asyncio.run(manager.cleanup(session, submitted=False)) is False
+
+
+def test_two_workers_receive_distinct_ticket_worktrees(tmp_path: Path) -> None:
+    repo = init_git_repo(tmp_path)
+    first = worker_module.GitWorktreeManager(
+        "worker-one", worker_module.SessionLog(tmp_path / "one.log")
+    )
+    second = worker_module.GitWorktreeManager(
+        "worker-two", worker_module.SessionLog(tmp_path / "two.log")
+    )
+
+    async def simulate_concurrent_claims() -> tuple[Any, Any]:
+        return await asyncio.gather(
+            first.prepare(repo, "TK-first111", "main"),
+            second.prepare(repo, "TK-second222", "main"),
+        )
+
+    first_session, second_session = asyncio.run(simulate_concurrent_claims())
+    transcript = {
+        "worker-one": str(first_session.work_dir),
+        "worker-two": str(second_session.work_dir),
+    }
+    assert first_session.work_dir != second_session.work_dir
+    assert first_session.branch == "api/worker-one-first111"
+    assert second_session.branch == "api/worker-two-second222"
+    assert all(Path(path).is_dir() for path in transcript.values())
+    assert asyncio.run(first.cleanup(first_session, submitted=False)) is True
+    assert asyncio.run(second.cleanup(second_session, submitted=False)) is True
+
+
+def test_reviewer_worktree_is_detached_and_readonly_context(tmp_path: Path) -> None:
+    repo = init_git_repo(tmp_path)
+    selected = config(tmp_path, "http://unused", role="reviewer")
+    manager = worker_module.GitWorktreeManager(
+        "reviewer-one", worker_module.SessionLog(tmp_path / "reviewer.log")
+    )
+
+    session = asyncio.run(
+        manager.prepare(repo, "TK-review123", "main", readonly=True)
+    )
+    branch = subprocess.run(
+        ["git", "branch", "--show-current"],
+        cwd=session.work_dir,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    reviewer = worker_module.Reviewer(
+        selected,
+        FakeBoard(),
+        object(),
+        worker_module.SessionLog(selected.log_file),
+        directive="STATIC REVIEWER",
+        worktrees=manager,
+    )
+    context = json.loads(
+        reviewer.messages("board-one", {"ticket_id": "TK-review123"}, session.work_dir)[
+            1
+        ]["content"].removeprefix("BOARD CONTEXT\n")
+    )
+
+    assert branch == ""
+    assert session.readonly is True
+    assert "read-only" in context["access"]
+    assert asyncio.run(manager.cleanup(session, submitted=False)) is True
+
+
+def test_worker_commits_in_ticket_branch_then_submit_cleans_worktree(
+    tmp_path: Path,
+) -> None:
+    repo = init_git_repo(tmp_path)
+    subprocess.run(
+        ["git", "config", "--local", "--unset-all", "user.name"],
+        cwd=repo,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "config", "--local", "--unset-all", "user.email"],
+        cwd=repo,
+        check=True,
+    )
+    board = FakeBoard()
+    board.work = repo
+    with FakeLLMServer(
+        [
+            tool_call(
+                "commit",
+                "run_shell",
+                {
+                    "command": (
+                        "printf 'done\n' > result.txt && "
+                        "git add result.txt && git commit -m ticket"
+                    )
+                },
+            ),
+            tool_call(
+                "submit",
+                "submit_work",
+                {
+                    "summary": "committed ticket output",
+                    "files_changed": ["result.txt"],
+                    "notes": "test_output: simulated pass",
+                },
+            ),
+        ]
+    ) as server:
+        selected = config(tmp_path, server.url)
+        worker = worker_module.Worker(
+            selected,
+            board,
+            worker_module.OpenAICompatible(selected, "key"),
+            worker_module.SessionLog(selected.log_file),
+            directive="STATIC",
+        )
+        board.on_submit = worker.stop.set
+        asyncio.run(worker.run())
+
+    branch = "api/worker-one-scratch"
+    worktree = repo / ".git" / "pursers-worktrees" / "worker-one-tk-scratch"
+    committed = subprocess.run(
+        ["git", "show", f"{branch}:result.txt"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    board_context = json.loads(
+        server.requests[0]["messages"][1]["content"].removeprefix(
+            "BOARD CONTEXT\n")
+    )
+    assert committed == "done\n"
+    assert not worktree.exists()
+    assert board_context["work_dir"] == str(worktree)
+    assert board_context["ticket_branch"] == branch
+
+
+def test_board_api_exposes_registry_refs_and_only_own_active_claims(
+    tmp_path: Path,
+) -> None:
+    class View:
+        identity = SimpleNamespace(agent_id="AI-worker-one", principal_id="PR-one")
+
+        async def ticket_list(self, **arguments: Any) -> dict[str, Any]:
+            assert arguments == {
+                "status": "claimed",
+                "include_closed": False,
+                "limit": 500,
+            }
+            return {
+                "tickets": [
+                    {
+                        "ticket_id": "TK-own",
+                        "status": "claimed",
+                        "claimed_by_agent_id": "AI-worker-one",
+                    },
+                    {
+                        "ticket_id": "TK-other",
+                        "status": "claimed",
+                        "claimed_by_agent_id": "AI-other",
+                    },
+                ]
+            }
+
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    selected = replace(config(tmp_path, "http://unused"), boards=("alpha",))
+    api = worker_module.PursersBoardAPI(selected, "TOKEN_PLACEHOLDER")
+    api.registry = {
+        "schema_version": 1,
+        "projects": {
+            "first": {
+                "board_id": "alpha",
+                "work_dir": str(first),
+                "status": "active",
+                "integration_ref": "develop",
+            },
+            "second": {
+                "board_id": "beta",
+                "work_dir": str(second),
+                "status": "paused",
+            },
+        },
+    }
+    api.views = {"alpha": View()}
+
+    assert asyncio.run(api.integration_ref("alpha")) == "develop"
+    assert asyncio.run(api.work_specs()) == [(first.resolve(), "develop")]
+    assert asyncio.run(api.active_claims()) == {("alpha", "TK-own")}
+
+
+# ---------------------------------------------------------------------------
+# Orphan worktree sweep integration tests (combines worktree + single-claim)
+# ---------------------------------------------------------------------------
+
+def test_orphan_worktree_sweep_cleans_killed_process_worktree(
+    tmp_path: Path,
+) -> None:
+    """Simulate a killed process leaving an orphaned worktree + orphaned claim.
+    The startup sweep must recover both: the claim is released, and the
+    orphaned worktree is removed."""
+    repo = init_git_repo(tmp_path)
+    log = worker_module.SessionLog(tmp_path / "session.log")
+    manager = worker_module.GitWorktreeManager("worker-killed", log)
+
+    # Create a worktree for a ticket that was claimed but is now orphaned
+    # (as if the process was killed mid-flight)
+    orphan_session = asyncio.run(
+        manager.prepare(repo, "TK-orphaned", "main")
+    )
+    orphan_workdir = orphan_session.work_dir
+    assert orphan_workdir.exists()
+
+    # Now simulate the sweep with NO active claims — the orphaned worktree
+    # should be removed
+    asyncio.run(manager.sweep([(repo, "main")], set()))
+    assert not orphan_workdir.exists(), (
+        "orphaned worktree should have been removed by sweep"
+    )
+    log_text = log.path.read_text()
+    assert "orphan_worktree_removed" in log_text
+
+
+def test_orphan_worktree_sweep_preserves_active_claim_worktree(
+    tmp_path: Path,
+) -> None:
+    """Ensure that a worktree for an active claim is NOT swept."""
+    repo = init_git_repo(tmp_path)
+    log = worker_module.SessionLog(tmp_path / "session.log")
+    manager = worker_module.GitWorktreeManager("worker-active", log)
+
+    active_session = asyncio.run(
+        manager.prepare(repo, "TK-active-claim", "main")
+    )
+    assert active_session.work_dir.exists()
+
+    # Sweep with the active claim present — worktree should survive
+    asyncio.run(
+        manager.sweep(
+            [(repo, "main")],
+            {("board-one", "TK-active-claim")},
+        )
+    )
+    assert active_session.work_dir.exists(), (
+        "active claim worktree should survive sweep"
+    )
+    assert asyncio.run(manager.cleanup(active_session, submitted=False)) is True

@@ -8,6 +8,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import shlex
 import shutil
 import signal
@@ -370,6 +371,249 @@ class SessionLog:
         )
 
 
+
+@dataclass(frozen=True)
+class WorktreeSession:
+    source_dir: Path
+    work_dir: Path
+    branch: str | None
+    isolated: bool
+    readonly: bool
+
+
+class GitWorktreeManager:
+    """Create one isolated checkout per ticket without touching the source tree."""
+
+    def __init__(self, agent_name: str, log: SessionLog) -> None:
+        self.agent_name = self._component(agent_name)
+        self.log = log
+
+    @staticmethod
+    def _component(value: str) -> str:
+        clean = re.sub(r"[^a-zA-Z0-9._-]+", "-", value).strip("-.").lower()
+        if not clean:
+            raise ValueError("worktree identity is empty after normalization")
+        return clean[:96]
+
+    @staticmethod
+    def _run(
+        repo: Path, *arguments: str, check: bool = True
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["git", "-C", str(repo), *arguments],
+            check=check,
+            capture_output=True,
+            text=True,
+        )
+
+    def _repo(self, work_dir: Path) -> tuple[Path, Path] | None:
+        try:
+            root_result = self._run(work_dir, "rev-parse", "--show-toplevel")
+            root = Path(root_result.stdout.strip()).resolve()
+            common_result = self._run(root, "rev-parse", "--git-common-dir")
+        except (OSError, subprocess.CalledProcessError):
+            return None
+        common = Path(common_result.stdout.strip())
+        if not common.is_absolute():
+            common = root / common
+        return root, common.resolve()
+
+    def _location(self, common: Path, ticket_id: str) -> tuple[Path, str]:
+        ticket = self._component(ticket_id)
+        suffix = self._component(ticket_id.rsplit("-", 1)[-1])
+        return (
+            common / "pursers-worktrees" / f"{self.agent_name}-{ticket}",
+            f"api/{self.agent_name}-{suffix}",
+        )
+
+    async def prepare(
+        self,
+        source_dir: Path,
+        ticket_id: str,
+        integration_ref: str = "main",
+        *,
+        readonly: bool = False,
+    ) -> WorktreeSession:
+        return await asyncio.to_thread(
+            self._prepare, source_dir, ticket_id, integration_ref, readonly
+        )
+
+    def _prepare(
+        self,
+        source_dir: Path,
+        ticket_id: str,
+        integration_ref: str,
+        readonly: bool,
+    ) -> WorktreeSession:
+        source_dir = source_dir.resolve()
+        resolved = self._repo(source_dir)
+        if resolved is None:
+            self.log.write(
+                "worktree_passthrough", ticket_id=ticket_id, work_dir=str(source_dir)
+            )
+            return WorktreeSession(
+                source_dir, source_dir, None, isolated=False, readonly=readonly
+            )
+        if (
+            not integration_ref
+            or integration_ref.startswith("-")
+            or any(ord(character) < 0x20 for character in integration_ref)
+        ):
+            raise ValueError("integration_ref is unsafe")
+        root, common = resolved
+        worktree, branch = self._location(common, ticket_id)
+        if worktree.exists():
+            current_root = self._repo(worktree)
+            current_branch = self._run(
+                worktree, "branch", "--show-current", check=False
+            ).stdout.strip()
+            if current_root is None or current_root[0] != worktree:
+                raise RuntimeError(f"dedicated worktree path is unsafe: {worktree}")
+            if readonly and current_branch:
+                raise RuntimeError(f"review worktree is not detached: {worktree}")
+            if not readonly and current_branch != branch:
+                raise RuntimeError(
+                    f"dedicated worktree has unexpected branch: {worktree}"
+                )
+            self.log.write(
+                "worktree_reused",
+                ticket_id=ticket_id,
+                work_dir=str(worktree),
+                branch=current_branch or None,
+                readonly=readonly,
+            )
+            return WorktreeSession(
+                root,
+                worktree,
+                current_branch or None,
+                isolated=True,
+                readonly=readonly,
+            )
+        worktree.parent.mkdir(parents=True, exist_ok=True)
+        self._run(root, "rev-parse", "--verify", f"{integration_ref}^{{commit}}")
+        if readonly:
+            self._run(
+                root,
+                "worktree",
+                "add",
+                "--detach",
+                str(worktree),
+                integration_ref,
+            )
+            session_branch = None
+        else:
+            exists = self._run(
+                root,
+                "show-ref",
+                "--verify",
+                "--quiet",
+                f"refs/heads/{branch}",
+                check=False,
+            ).returncode == 0
+            if exists:
+                self._run(root, "worktree", "add", str(worktree), branch)
+            else:
+                self._run(
+                    root,
+                    "worktree",
+                    "add",
+                    "-b",
+                    branch,
+                    str(worktree),
+                    integration_ref,
+                )
+            session_branch = branch
+        self.log.write(
+            "worktree_created",
+            ticket_id=ticket_id,
+            source_dir=str(root),
+            work_dir=str(worktree),
+            branch=session_branch,
+            readonly=readonly,
+        )
+        return WorktreeSession(
+            root, worktree, session_branch, isolated=True, readonly=readonly
+        )
+
+    async def cleanup(self, session: WorktreeSession, *, submitted: bool) -> bool:
+        if not session.isolated:
+            return False
+        return await asyncio.to_thread(self._cleanup, session, submitted)
+
+    def _cleanup(self, session: WorktreeSession, submitted: bool) -> bool:
+        status = self._run(session.work_dir, "status", "--porcelain", check=False)
+        clean = status.returncode == 0 and not status.stdout.strip()
+        if not clean and not submitted:
+            self.log.write(
+                "worktree_retained_dirty",
+                work_dir=str(session.work_dir),
+                branch=session.branch,
+            )
+            return False
+        self._run(
+            session.source_dir,
+            "worktree",
+            "remove",
+            "--force",
+            str(session.work_dir),
+        )
+        self.log.write(
+            "worktree_removed",
+            work_dir=str(session.work_dir),
+            branch=session.branch,
+            submitted=submitted,
+        )
+        return True
+
+    async def sweep(
+        self,
+        work_specs: list[tuple[Path, str]],
+        active_claims: set[tuple[str, str]],
+    ) -> None:
+        await asyncio.to_thread(self._sweep, work_specs, active_claims)
+
+    def _sweep(
+        self,
+        work_specs: list[tuple[Path, str]],
+        active_claims: set[tuple[str, str]],
+    ) -> None:
+        active_ticket_ids = {
+            self._component(ticket_id) for _board_id, ticket_id in active_claims
+        }
+        visited: set[Path] = set()
+        for source_dir, _integration_ref in work_specs:
+            resolved = self._repo(source_dir.resolve())
+            if resolved is None:
+                continue
+            root, common = resolved
+            if common in visited:
+                continue
+            visited.add(common)
+            managed_root = common / "pursers-worktrees"
+            result = self._run(root, "worktree", "list", "--porcelain")
+            for line in result.stdout.splitlines():
+                if not line.startswith("worktree "):
+                    continue
+                path = Path(line.removeprefix("worktree ")).resolve()
+                try:
+                    relative = path.relative_to(managed_root)
+                except ValueError:
+                    continue
+                prefix = f"{self.agent_name}-"
+                if not relative.name.startswith(prefix):
+                    continue
+                ticket_component = relative.name.removeprefix(prefix)
+                if ticket_component in active_ticket_ids:
+                    continue
+                status = self._run(path, "status", "--porcelain", check=False)
+                clean = status.returncode == 0 and not status.stdout.strip()
+                if not clean:
+                    self.log.write("orphan_worktree_retained_dirty", work_dir=str(path))
+                    continue
+                self._run(root, "worktree", "remove", "--force", str(path))
+                self.log.write("orphan_worktree_removed", work_dir=str(path))
+
+
 class BoardAPI(Protocol):
     async def wait(self, cursors: dict[str, int]) -> dict[str, Any]: ...
     async def claim(self, board_id: str, ticket_id: str) -> dict[str, Any]: ...
@@ -394,6 +638,9 @@ class BoardAPI(Protocol):
     ) -> None: ...
     async def ticket_list(self, board_id: str, **kwargs: Any) -> list[dict[str, Any]]: ...
     async def boards(self) -> list[str]: ...
+    async def integration_ref(self, board_id: str) -> str: ...
+    async def work_specs(self) -> list[tuple[Path, str]]: ...
+    async def active_claims(self) -> set[tuple[str, str]]: ...
 
 
 class PursersBoardAPI:
@@ -544,6 +791,50 @@ class PursersBoardAPI:
 
     async def boards(self) -> list[str]:
         return await self._boards()
+
+    async def integration_ref(self, board_id: str) -> str:
+        self.registry = self.registry or await wait_bridge._read_project_registry(
+            self.client
+        )
+        for project in self.registry['projects'].values():
+            if project['board_id'] == board_id and project['status'] == 'active':
+                return str(project.get('integration_ref', 'main'))
+        raise ValueError(f'no active project registry entry for board {board_id}')
+
+    async def work_specs(self) -> list[tuple[Path, str]]:
+        self.registry = self.registry or await wait_bridge._read_project_registry(
+            self.client
+        )
+        specs: list[tuple[Path, str]] = []
+        seen: set[Path] = set()
+        for project in self.registry['projects'].values():
+            if project['status'] != 'active':
+                continue
+            work_dir = Path(project['work_dir']).resolve()
+            if work_dir in seen:
+                continue
+            seen.add(work_dir)
+            specs.append((work_dir, str(project.get('integration_ref', 'main'))))
+        return specs
+
+    async def active_claims(self) -> set[tuple[str, str]]:
+        claims: set[tuple[str, str]] = set()
+        for board_id in await self._boards():
+            agent_id = await self.agent_id(board_id)
+            result = await (await self._view(board_id)).ticket_list(
+                status='claimed', include_closed=False, limit=500
+            )
+            if result.get('error'):
+                raise RuntimeError(str(result['error']))
+            for ticket in result.get('tickets', []):
+                if not isinstance(ticket, dict) or ticket.get('status') != 'claimed':
+                    continue
+                claimant = ticket.get('claimed_by_agent_id') or ticket.get(
+                    'claimed_by'
+                )
+                if claimant in {agent_id, self.config.agent_name}:
+                    claims.add((board_id, str(ticket.get('ticket_id', ''))))
+        return {(board_id, ticket_id) for board_id, ticket_id in claims if ticket_id}
 
     async def review(
         self,
@@ -970,7 +1261,7 @@ def _readonly_command(command: str) -> tuple[list[str], bool]:
     if executable in {"pytest", "py.test"}:
         return argv, True
     if (
-        executable in {"python", "python3"}
+        (executable in {"python", "python3"} or re.match(r"^python3\.\d+$", executable))
         and len(argv) >= 3
         and argv[1:3] in (["-m", "pytest"], ["-m", "unittest"])
     ):
@@ -1005,22 +1296,39 @@ class Worker:
         log: SessionLog,
         *,
         directive: str | None = None,
+        worktrees: GitWorktreeManager | None = None,
     ) -> None:
         self.config = config
         self.board = board
         self.llm = llm
         self.log = log
         self.directive = directive or DIRECTIVE_PATH.read_text(encoding="utf-8")
+        self.worktrees = worktrees or GitWorktreeManager(config.agent_name, log)
         self.stop = asyncio.Event()
         self._active_claim: tuple[str, str] | None = None
         self._released_with_issues: set[str] = set()
 
     def messages(
-        self, board_id: str, ticket: dict[str, Any], work_dir: Path
+        self,
+        board_id: str,
+        ticket: dict[str, Any],
+        work_dir: Path,
+        branch: str | None = None,
     ) -> list[dict[str, Any]]:
         context = {
             "board_id": board_id,
             "work_dir": str(work_dir),
+            "checkout": (
+                "dedicated per-ticket git worktree"
+                if branch is not None
+                else "registered non-git work directory"
+            ),
+            "ticket_branch": branch,
+            "commit_requirement": (
+                "commit all ticket changes on ticket_branch before submit_work"
+                if branch is not None
+                else None
+            ),
             "review": (
                 "independent reviewer required; never review or merge your own work"
             ),
@@ -1037,8 +1345,22 @@ class Worker:
             },
         ]
 
-    def _shell_argv(self, command: str) -> list[str] | None:
+    @staticmethod
+    def _sandbox_available() -> bool:
         if sys.platform != "darwin" or not SANDBOX_EXEC.is_file():
+            return False
+        try:
+            subprocess.run(
+                [str(SANDBOX_EXEC), "-p", "(version 1)(allow default)",
+                 "/bin/sh", "-c", "true"],
+                capture_output=True, timeout=5, check=True,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return False
+        return True
+
+    def _shell_argv(self, command: str) -> list[str] | None:
+        if not self._sandbox_available():
             return None
         protected = [self.config.token_file]
         if self.config.api_key_file is not None:
@@ -1079,6 +1401,15 @@ class Worker:
             }
             shell_env["HOME"] = str(work_dir)
             shell_env["TMPDIR"] = str(work_dir)
+            git_identity = GitWorktreeManager._component(self.config.agent_name)
+            shell_env.update(
+                {
+                    "GIT_AUTHOR_NAME": f"Pursers {git_identity}",
+                    "GIT_AUTHOR_EMAIL": f"{git_identity}@pursers.local",
+                    "GIT_COMMITTER_NAME": f"Pursers {git_identity}",
+                    "GIT_COMMITTER_EMAIL": f"{git_identity}@pursers.local",
+                }
+            )
             shell_argv = self._shell_argv(command)
             process_args = shell_argv or ["/bin/sh", "-lc", command]
             process = await asyncio.create_subprocess_exec(
@@ -1183,10 +1514,14 @@ class Worker:
             raise
 
     async def run_ticket(
-        self, board_id: str, ticket: dict[str, Any], work_dir: Path
+        self,
+        board_id: str,
+        ticket: dict[str, Any],
+        work_dir: Path,
+        branch: str | None = None,
     ) -> str:
         ticket_id = str(ticket["ticket_id"])
-        messages = self.messages(board_id, ticket, work_dir)
+        messages = self.messages(board_id, ticket, work_dir, branch)
         renewal = asyncio.create_task(self._renew(board_id, ticket_id))
         try:
             for _ in range(self.config.max_iterations):
@@ -1255,7 +1590,8 @@ class Worker:
         return own
 
     async def _startup_sweep(self) -> None:
-        """Scan all boards for orphaned claims by this seat; resume or release."""
+        """Scan all boards for orphaned claims by this seat; resume or release.
+        Also sweep orphaned worktrees from previous runs."""
         try:
             board_ids = await self.board.boards()
         except Exception as exc:
@@ -1280,15 +1616,23 @@ class Worker:
                 ticket = claimed[0]
                 ticket_id = str(ticket["ticket_id"])
                 try:
-                    work_dir = await self.board.work_dir(board_id)
+                    source_dir = await self.board.work_dir(board_id)
+                    integration_ref = await self.board.integration_ref(board_id)
                     self._active_claim = (board_id, ticket_id)
+                    session = await self.worktrees.prepare(
+                        source_dir, ticket_id, integration_ref
+                    )
                     self.log.write(
                         "startup_sweep_resume",
                         board_id=board_id,
                         ticket_id=ticket_id,
                     )
-                    await self.run_ticket(board_id, ticket, work_dir)
+                    await self.run_ticket(
+                        board_id, ticket, session.work_dir, session.branch
+                    )
                     self._active_claim = None
+                    if session is not None:
+                        await self.worktrees.cleanup(session, submitted=False)
                     continue
                 except Exception as exc:
                     self.log.write(
@@ -1302,6 +1646,13 @@ class Worker:
             for ticket in claimed:
                 ticket_id = str(ticket["ticket_id"])
                 await self._release(board_id, ticket_id, "orphaned by restart")
+        # Sweep orphaned worktrees from previous runs
+        try:
+            work_specs = await self.board.work_specs()
+            active_claims = await self.board.active_claims()
+            await self.worktrees.sweep(work_specs, active_claims)
+        except Exception as exc:
+            self.log.write("worktree_sweep_failed", error=type(exc).__name__)
 
     async def run(self) -> None:
         await self._startup_sweep()
@@ -1404,11 +1755,22 @@ class Worker:
                     await self.board.claim(board_id, ticket_id)
                 except Exception:
                     continue
+                session: WorktreeSession | None = None
+                outcome = "released"
                 try:
                     ticket = await self.board.ticket(board_id, ticket_id)
-                    work_dir = await self.board.work_dir(board_id)
+                    source_dir = await self.board.work_dir(board_id)
+                    integration_ref = await self.board.integration_ref(board_id)
                     self._active_claim = (board_id, ticket_id)
-                    await self.run_ticket(board_id, ticket, work_dir)
+                    session = await self.worktrees.prepare(
+                        source_dir, ticket_id, integration_ref
+                    )
+                    outcome = await self.run_ticket(
+                        board_id,
+                        ticket,
+                        session.work_dir,
+                        session.branch,
+                    )
                     self._active_claim = None
                 except Exception as exc:
                     self.log.write(
@@ -1417,6 +1779,18 @@ class Worker:
                         error=type(exc).__name__,
                     )
                     await self._release(board_id, ticket_id, "board API failure")
+                finally:
+                    if session is not None:
+                        try:
+                            await self.worktrees.cleanup(
+                                session, submitted=outcome == "submitted"
+                            )
+                        except Exception as exc:
+                            self.log.write(
+                                "worktree_cleanup_failed",
+                                ticket_id=ticket_id,
+                                error=type(exc).__name__,
+                            )
                 break
             if not candidates:
                 await asyncio.sleep(1)
@@ -1432,6 +1806,7 @@ class Reviewer:
         *,
         directive: str | None = None,
         limiter: ReviewRateLimiter | None = None,
+        worktrees: GitWorktreeManager | None = None,
     ) -> None:
         self.config = config
         self.board = board
@@ -1441,6 +1816,7 @@ class Reviewer:
             encoding="utf-8"
         )
         self.limiter = limiter or ReviewRateLimiter(config.max_reviews_per_hour)
+        self.worktrees = worktrees or GitWorktreeManager(config.agent_name, log)
         self.stop = asyncio.Event()
         self._active_review: tuple[str, str] | None = None
         self.seen_submissions: set[tuple[str, str, str]] = set()
@@ -1455,11 +1831,20 @@ class Reviewer:
             self.seen_submissions.discard(self.seen_submission_order.popleft())
 
     def messages(
-        self, board_id: str, ticket: dict[str, Any], work_dir: Path
+        self,
+        board_id: str,
+        ticket: dict[str, Any],
+        work_dir: Path,
+        branch: str | None = None,
     ) -> list[dict[str, Any]]:
         context = {
             "board_id": board_id,
             "work_dir": str(work_dir),
+            "checkout": (
+                "dedicated per-ticket git worktree (detached, read-only)"
+                if branch is not None
+                else "registered non-git work directory"
+            ),
             "access": "read-only independent review; never claim, edit, or submit work",
         }
         return [
@@ -1491,7 +1876,7 @@ class Reviewer:
         )
 
     def _sandbox_argv(self, argv: list[str], work_dir: Path) -> list[str]:
-        if sys.platform != "darwin" or not SANDBOX_EXEC.is_file():
+        if not Worker._sandbox_available():
             return argv
         protected = [self.config.token_file]
         if self.config.api_key_file is not None:
@@ -1589,7 +1974,11 @@ class Reviewer:
         raise PermissionError(f"tool {name!r} is unavailable in reviewer mode")
 
     async def run_review(
-        self, board_id: str, ticket: dict[str, Any], work_dir: Path
+        self,
+        board_id: str,
+        ticket: dict[str, Any],
+        work_dir: Path,
+        branch: str | None = None,
     ) -> str:
         ticket_id = str(ticket["ticket_id"])
         if self._active_review is not None:
@@ -1633,7 +2022,7 @@ class Reviewer:
             )
             return outcome
 
-        messages = self.messages(board_id, ticket, work_dir)
+        messages = self.messages(board_id, ticket, work_dir, branch)
         try:
             for _ in range(self.config.max_iterations):
                 if self.stop.is_set():
@@ -1755,6 +2144,13 @@ class Reviewer:
 
     async def run(self) -> None:
         cursors: dict[str, int] = {}
+        # Sweep orphaned worktrees on startup
+        try:
+            work_specs = await self.board.work_specs()
+            active_claims = await self.board.active_claims()
+            await self.worktrees.sweep(work_specs, active_claims)
+        except Exception as exc:
+            self.log.write("worktree_sweep_failed", error=type(exc).__name__)
         while not self.stop.is_set():
             try:
                 candidates = await self.board.submitted()
@@ -1817,8 +2213,36 @@ class Reviewer:
                         pass
                     selected = True
                     break
-                work_dir = await self.board.work_dir(board_id)
-                await self.run_review(board_id, ticket, work_dir)
+                session: WorktreeSession | None = None
+                try:
+                    source_dir = await self.board.work_dir(board_id)
+                    integration_ref = await self.board.integration_ref(board_id)
+                    session = await self.worktrees.prepare(
+                        source_dir,
+                        ticket_id,
+                        integration_ref,
+                        readonly=True,
+                    )
+                    await self.run_review(
+                        board_id, ticket, session.work_dir, session.branch
+                    )
+                except Exception as exc:
+                    self._finding(
+                        "review_worktree_failure",
+                        board_id,
+                        ticket_id,
+                        type(exc).__name__,
+                    )
+                finally:
+                    if session is not None:
+                        try:
+                            await self.worktrees.cleanup(session, submitted=False)
+                        except Exception as exc:
+                            self.log.write(
+                                "worktree_cleanup_failed",
+                                ticket_id=ticket_id,
+                                error=type(exc).__name__,
+                            )
                 self._remember_submission(submission_key)
                 selected = True
                 break
