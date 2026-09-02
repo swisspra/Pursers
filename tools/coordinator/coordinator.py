@@ -85,6 +85,7 @@ class CoordinatorConfig:
     thresholds: Thresholds
     integration_watch_since: datetime | None
     intake_enabled: bool
+    intake_token_path: str | None
     auto_categories: tuple[str, ...]
     always_ask_categories: tuple[str, ...]
     work_domain_always_ask: bool
@@ -281,6 +282,28 @@ def resolve_coordinator_config(
         sources["intake.auto_categories"] = "flag" if "intake_auto_categories" in explicit else "default"
         sources["intake.always_ask_categories"] = "flag" if "intake_always_ask_categories" in explicit else "default"
     enabled = choose("intake.enabled", intake_doc.get("enabled"), lambda value: type(value) is bool, "intake_enabled", False, present="enabled" in intake_doc)
+    configured_token_path = intake_doc.get("token_path")
+    token_path_present = "token_path" in intake_doc
+    token_path_valid = configured_token_path is None or (
+        isinstance(configured_token_path, str)
+        and bool(configured_token_path.strip())
+        and Path(configured_token_path).is_absolute()
+    )
+    if token_path_present and token_path_valid:
+        intake_token_path = (
+            configured_token_path.strip()
+            if isinstance(configured_token_path, str)
+            else None
+        )
+        sources["intake.token_path"] = "config"
+    else:
+        if token_path_present:
+            invalid.append("intake.token_path")
+        cli_token_path = getattr(args, "intake_token_path", None)
+        intake_token_path = cli_token_path.strip() if cli_token_path else None
+        sources["intake.token_path"] = (
+            "flag" if "intake_token_path" in explicit else "default"
+        )
     work_ask = choose("intake.work_domain_always_ask", intake_doc.get("work_domain_always_ask"), lambda value: type(value) is bool, "work_domain_always_ask", True, present="work_domain_always_ask" in intake_doc)
     rate = choose("intake.rate_per_hour", intake_doc.get("rate_per_hour"), lambda value: type(value) is int and 1 <= value <= 20, "intake_rate_per_hour", INTAKE_RATE_LIMIT, present="rate_per_hour" in intake_doc)
     threshold_values = Thresholds(**fields)
@@ -297,9 +320,9 @@ def resolve_coordinator_config(
             "abandoner_window_days": threshold_values.repeat_abandon_window_seconds // 86_400,
         },
         "integration_watch_since": integration.isoformat() if integration else None,
-        "intake": {"enabled": enabled, "auto_categories": list(auto), "always_ask_categories": list(always), "work_domain_always_ask": work_ask, "rate_per_hour": rate},
+        "intake": {"enabled": enabled, "token_path": intake_token_path, "auto_categories": list(auto), "always_ask_categories": list(always), "work_domain_always_ask": work_ask, "rate_per_hour": rate},
     }
-    return CoordinatorConfig(threshold_values, integration, enabled, tuple(auto), tuple(always), work_ask, rate, effective, sources, tuple(sorted(set(invalid))))
+    return CoordinatorConfig(threshold_values, integration, enabled, intake_token_path, tuple(auto), tuple(always), work_ask, rate, effective, sources, tuple(sorted(set(invalid))))
 
 
 def config_invalid_finding(
@@ -659,44 +682,53 @@ def intake_finding(
         "intake-approved-scope-missing": (
             "Approved but coordinator lacks board:intake — grant the scope."
         ),
+        "intake-approved-write-scope-refused": (
+            "Approved intake credential carries board:write; Central rejects "
+            "coordinator op-key usage for that credential."
+        ),
         "intake-approved-deferred": (
             "Approved intake remains queued behind coordinator safety limits."
         ),
     }
+    if rule == "approved-intake-token-has-board-write":
+        next_action = (
+            f"Provision a write-less board:read + {INTAKE_SCOPE} credential, "
+            f"then retry ask {ask.ask_id}; the approved ask remains queued."
+        )
+    elif decision != "ask":
+        next_action = (
+            f"Run with --enable-intake without --dry-run to create {draft.ticket_id}."
+            if kind == "intake-would-create"
+            else f"Review {created_ticket_id or draft.ticket_id} on {ask.board_id}."
+        )
+    elif rule == "approved-missing-board-intake-grant":
+        next_action = (
+            f"Grant {INTAKE_SCOPE} alongside board:coordinate, then retry ask "
+            f"{ask.ask_id}; the approved ask remains queued."
+        )
+    elif rule == "missing-board-intake-grant":
+        next_action = (
+            f"Grant {INTAKE_SCOPE} alongside board:coordinate, then retry ask "
+            f"{ask.ask_id}; the queue remains intact."
+        )
+    elif ask.approved:
+        next_action = (
+            f"Approved ask {ask.ask_id} remains queued; resolve {rule} "
+            "and let the coordinator retry."
+        )
+    else:
+        next_action = (
+            f"Review ask {ask.ask_id}; after an explicit approve/create "
+            "or decline decision, remove it from coordinator_intake. "
+            "Until then the pending draft remains queued."
+        )
     return {
         "kind": kind,
         "level": level,
         "board_id": ask.board_id,
         "message": messages.get(kind, "Structured intake produced a finding."),
         "evidence": _draft_evidence(ask, draft, decision, rule),
-        "next_action": (
-            (
-                f"Grant {INTAKE_SCOPE} alongside board:coordinate, then retry ask "
-                f"{ask.ask_id}; the approved ask remains queued."
-                if rule == "approved-missing-board-intake-grant"
-                else (
-                    f"Grant {INTAKE_SCOPE} alongside board:coordinate, then retry ask "
-                    f"{ask.ask_id}; the queue remains intact."
-                    if rule == "missing-board-intake-grant"
-                    else (
-                        f"Approved ask {ask.ask_id} remains queued; resolve {rule} "
-                        "and let the coordinator retry."
-                        if ask.approved
-                        else (
-                            f"Review ask {ask.ask_id}; after an explicit approve/create "
-                            "or decline decision, remove it from coordinator_intake. "
-                            "Until then the pending draft remains queued."
-                        )
-                    )
-                )
-            )
-            if decision == "ask"
-            else (
-                f"Run with --enable-intake without --dry-run to create {draft.ticket_id}."
-                if kind == "intake-would-create"
-                else f"Review {created_ticket_id or draft.ticket_id} on {ask.board_id}."
-            )
-        ),
+        "next_action": next_action,
         "ask_id": ask.ask_id,
         "category": draft.category,
         "matrix_rule": rule,
@@ -2107,7 +2139,10 @@ def format_digest(
 class RawReader:
     """Non-joining Central session restricted to bounded, pure read tools."""
 
-    ALLOWED = frozenset({"board_state_get", "board_snapshot", "ticket_list"})
+    ALLOWED = frozenset(
+        {"board_state_get", "board_snapshot", "ticket_get", "ticket_list"}
+    )
+    TRANSPORT_BOARD = "read-only"
 
     def __init__(self, url: str, token: str):
         self.url = url
@@ -2125,7 +2160,7 @@ class RawReader:
         self._stack = AsyncExitStack()
         # Reuse the verified client's secret-bearing HTTP construction without
         # entering BoardClient itself; entering it would join/mutate a seat.
-        transport_owner = BoardClient(self.url, self._token, "read-only")
+        transport_owner = BoardClient(self.url, self._token, self.TRANSPORT_BOARD)
         http = await self._stack.enter_async_context(
             transport_owner._http()  # noqa: SLF001 - intentional non-joining path.
         )
@@ -2142,6 +2177,13 @@ class RawReader:
             raise RuntimeError("raw reader rejected a non-pure tool")
         result = await self._client.call_tool(name, {"board_id": board_id, **arguments})
         return self._decode(result)
+
+
+class IntakeCaller(RawReader):
+    """Non-joining Central session limited to intake ticket creation."""
+
+    ALLOWED = frozenset({"ticket_create"})
+    TRANSPORT_BOARD = "intake-only"
 
 
 def _previous_payload(raw: Mapping[str, Any] | None) -> dict[str, Any]:
@@ -2620,37 +2662,46 @@ async def create_intake_ticket(
     agent_name: str,
     board_id: str,
     draft: IntakeDraft,
+    *,
+    replay_token: str,
 ) -> str:
     """Create once using the ask-derived ticket id as the durable op-key."""
-    from pursers_client import BoardClient, BoardClientError
+    from pursers_client import BoardClientError
 
-    async with BoardClient(url, token, board_id, agent_name=agent_name) as client:
-        try:
-            result = await client._call(  # noqa: SLF001 - new narrow capability.
+    try:
+        async with IntakeCaller(url, token) as client:
+            result = await client.call(
                 "ticket_create",
-                {
-                    "agent_name": agent_name,
-                    "ticket_id": draft.ticket_id,
-                    "title": draft.title,
-                    "description": draft.description,
-                    "scope": draft.scope,
-                    "required_fields": list(draft.required_fields),
-                    "tags": ["coordinator-intake", f"op:{draft.op_key}"],
-                    "target_url": draft.target_url,
-                    "unassigned": True,
-                    "coordinator_op_key": draft.op_key,
-                },
+                board_id,
+                agent_name=agent_name,
+                ticket_id=draft.ticket_id,
+                title=draft.title,
+                description=draft.description,
+                scope=draft.scope,
+                required_fields=list(draft.required_fields),
+                tags=["coordinator-intake", f"op:{draft.op_key}"],
+                target_url=draft.target_url,
+                unassigned=True,
+                coordinator_op_key=draft.op_key,
             )
-        except BoardClientError as exc:
-            if "ticket already exists" not in str(exc):
-                raise
-            existing = (await client.ticket_get(draft.ticket_id)).get("ticket", {})
+    except BoardClientError as exc:
+        if "ticket already exists" not in str(exc):
+            raise
+        async with RawReader(url, replay_token) as reader:
+            existing = (
+                await reader.call(
+                    "ticket_get",
+                    board_id,
+                    agent_name=agent_name,
+                    ticket_id=draft.ticket_id,
+                )
+            ).get("ticket", {})
             if not isinstance(existing, Mapping) or not _matches_intake_replay(
                 existing, draft
             ):
                 raise RuntimeError("intake idempotency collision") from exc
             return draft.ticket_id
-        return str(result["ticket"]["ticket_id"])
+    return str(result["ticket"]["ticket_id"])
 
 
 async def process_intakes(
@@ -2664,6 +2715,7 @@ async def process_intakes(
     create_ticket: Callable[[str, IntakeDraft], Awaitable[str]],
     drafter: IntakeDrafter = deterministic_intake_draft,
     intake_authorized: bool = True,
+    intake_authorization_rule: str | None = None,
     auto_categories: Sequence[str] = DEFAULT_AUTO_CATEGORIES,
     always_ask_categories: Sequence[str] = DEFAULT_ALWAYS_ASK_CATEGORIES,
     work_domain_always_ask: bool = True,
@@ -2727,7 +2779,8 @@ async def process_intakes(
             if decision == "auto" and not intake_authorized and not dry_run:
                 decision, rule = (
                     "ask",
-                    (
+                    intake_authorization_rule
+                    or (
                         "approved-missing-board-intake-grant"
                         if ask.approved
                         else "missing-board-intake-grant"
@@ -2747,12 +2800,16 @@ async def process_intakes(
                 findings.append(
                     intake_finding(
                         (
-                            "intake-approved-scope-missing"
-                            if rule == "approved-missing-board-intake-grant"
+                            "intake-approved-write-scope-refused"
+                            if rule == "approved-intake-token-has-board-write"
                             else (
-                                "intake-approved-deferred"
-                                if ask.approved
-                                else "intake-pending"
+                                "intake-approved-scope-missing"
+                                if rule == "approved-missing-board-intake-grant"
+                                else (
+                                    "intake-approved-deferred"
+                                    if ask.approved
+                                    else "intake-pending"
+                                )
                             )
                         ),
                         "warn",
@@ -3019,11 +3076,44 @@ def capability_scopes(token: str) -> frozenset[str]:
     return frozenset()
 
 
+def load_intake_credential(path_value: str | None) -> tuple[str | None, str | None]:
+    """Load the optional write-less intake credential and return a safe issue code."""
+    if not path_value:
+        return None, "approved-missing-board-intake-grant"
+    try:
+        token = _read_token(path_value)
+    except ValueError:
+        return None, "approved-missing-board-intake-grant"
+    scopes = capability_scopes(token)
+    if "board:write" in scopes:
+        return None, "approved-intake-token-has-board-write"
+    if INTAKE_SCOPE not in scopes:
+        return None, "approved-missing-board-intake-grant"
+    return token, None
+
+
+def intake_credential_note(issue: str) -> str:
+    if issue == "approved-intake-token-has-board-write":
+        return (
+            "coordinator: intake token carries board:write; Central rejects "
+            "coordinator op-key usage, so intake remains draft-only."
+        )
+    return (
+        "coordinator: intake enabled without a usable --intake-token-path; "
+        "intake remains draft-only."
+    )
+
+
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     effective_argv = list(sys.argv[1:] if argv is None else argv)
     parser = argparse.ArgumentParser(description="Run the fleet coordinator")
     parser.add_argument("--url", default=os.environ.get("ONBOARD_CENTRAL_URL", DEFAULT_URL))
     parser.add_argument("--token-path", default=os.environ.get("PURSERS_COORDINATOR_TOKEN_PATH") or os.environ.get("ONBOARD_TOKEN_FILE"))
+    parser.add_argument(
+        "--intake-token-path",
+        default=os.environ.get("PURSERS_COORDINATOR_INTAKE_TOKEN_PATH"),
+        help="Write-less board:read + board:intake credential used only for ticket_create",
+    )
     parser.add_argument("--home-board", default=os.environ.get("ONBOARD_BOARD_ID", "pursers"))
     parser.add_argument("--agent-name", default="coordinator-1")
     parser.add_argument("--mode", choices=("shadow", "active"), default="shadow")
@@ -3082,6 +3172,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--integration-watch-since": "integration_watch_since",
         "--enable-intake": "intake_enabled",
         "--disable-intake": "intake_enabled",
+        "--intake-token-path": "intake_token_path",
         "--intake-auto-categories": "intake_auto_categories",
         "--intake-always-ask-categories": "intake_always_ask_categories",
         "--work-domain-always-ask": "work_domain_always_ask",
@@ -3125,10 +3216,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 async def run(args: argparse.Namespace) -> None:
     token = _read_token(args.token_path)
-    intake_authorized = INTAKE_SCOPE in capability_scopes(token)
     terms_path = os.environ.get("PURSERS_PRIVACY_TERMS")
     runtime = RuntimeState.for_mode("shadow" if args.dry_run else args.mode)
     degraded_streaks: dict[str, int] = {}
+    reported_intake_issues: set[str] = set()
     while True:
         now = utc_now()
         async with RawReader(args.url, token) as reader:
@@ -3136,6 +3227,16 @@ async def run(args: argparse.Namespace) -> None:
         live_config = resolve_coordinator_config(
             snapshots.get(args.home_board, {}).get("coordinator_config_state"), args
         )
+        intake_token, intake_authorization_rule = load_intake_credential(
+            live_config.intake_token_path
+        )
+        if (
+            live_config.intake_enabled
+            and intake_authorization_rule
+            and intake_authorization_rule not in reported_intake_issues
+        ):
+            print(intake_credential_note(intake_authorization_rule), file=sys.stderr)
+            reported_intake_issues.add(intake_authorization_rule)
         thresholds = live_config.thresholds
         terms = load_privacy_terms(terms_path, [project.work_dir for project in projects])
         states = analyze_cycle(
@@ -3179,14 +3280,16 @@ async def run(args: argparse.Namespace) -> None:
             runtime,
             enabled=live_config.intake_enabled,
             dry_run=args.dry_run,
-            create_ticket=lambda board_id, draft: create_intake_ticket(
+            create_ticket=lambda board_id, draft, create_token=intake_token: create_intake_ticket(
                 args.url,
-                token,
+                create_token or "",
                 args.agent_name,
                 board_id,
                 draft,
+                replay_token=token,
             ),
-            intake_authorized=intake_authorized,
+            intake_authorized=intake_authorization_rule is None,
+            intake_authorization_rule=intake_authorization_rule,
             auto_categories=live_config.auto_categories,
             always_ask_categories=live_config.always_ask_categories,
             work_domain_always_ask=live_config.work_domain_always_ask,

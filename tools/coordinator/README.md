@@ -23,6 +23,7 @@ Example one-cycle shadow validation:
 PYTHONPATH=packages/client/src \
 python tools/coordinator/coordinator.py \
   --token-path /absolute/path/to/coordinator-token \
+  --intake-token-path /absolute/path/to/coordinator-intake-token \
   --home-board pursers \
   --mode shadow \
   --once
@@ -48,10 +49,38 @@ including finding and digest writes.
 - Three consecutive mutation failures open the circuit breaker and change the
   process's effective mode to shadow.
 
-The runtime credential should contain only `board:read` and
-`board:coordinate`, and its principal must be pre-admitted as a board `member`.
-Central restricts that scope to `ticket_assign`, `agent_nudge`, the
-`coordinator_findings` state key, and coordinator daily/weekly digest memories.
-It cannot create, claim, submit, review, close, or cancel tickets; change board
-membership or policy; or write other state or memories. Provisioning and
-rotation remain operator-only actions.
+## Dual credentials for intake
+
+The daemon uses two principals. `--token-path` is the main credential for
+joining boards, reading fleet state, assignments/nudges, findings, queue drain,
+and digests, including the read used to verify an idempotent replay.
+`--intake-token-path` is used only by a non-joining `ticket_create` call. The
+intake credential must include
+`board:read board:intake`, may include `board:coordinate`, and must not include
+`board:write`: Central reserves `coordinator_op_key` for write-less intake
+principals and rejects it for a normal writer.
+
+If intake is enabled without a usable intake token, the daemon prints one line
+and leaves approved asks queued with the existing scope-missing finding. A
+write-scoped intake token is also refused locally and produces a finding; the
+main credential continues all non-intake work unchanged.
+
+The live config equivalent is `intake.token_path`:
+
+```json
+{
+  "schema_version": 1,
+  "intake": {
+    "enabled": true,
+    "token_path": "/absolute/path/to/coordinator-intake-token"
+  }
+}
+```
+
+Provision both principals as board members. This example intentionally lists
+scopes only; token minting and key material remain operator-only:
+
+```text
+coordinator-main:   board:read board:write board:coordinate
+coordinator-intake: board:read board:intake
+```

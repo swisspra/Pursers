@@ -1761,6 +1761,13 @@ def _intake_state(rows: list[dict[str, str]]) -> dict[str, Any]:
     return {"state": {"value": json.dumps(rows)}}
 
 
+def _token_with_scopes(*scopes: str) -> str:
+    payload = base64.urlsafe_b64encode(
+        json.dumps({"scope": " ".join(scopes)}).encode()
+    ).decode().rstrip("=")
+    return f"header.{payload}.signature"
+
+
 def _intake_project(domain: str = "personal") -> coordinator.Project:
     return coordinator.Project(
         "project-a", "board-a", Path("/tmp/project-a"), domain=domain
@@ -1827,11 +1834,11 @@ def test_human_approved_intake_bypasses_matrix_with_same_identity() -> None:
 def test_approved_intake_calls_ticket_create_with_op_key(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    calls: list[tuple[str, dict[str, Any]]] = []
+    calls: list[tuple[dict[str, str], str, str, dict[str, Any]]] = []
 
     class FakeClient:
-        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
-            pass
+        def __init__(self, _url: str, token: str) -> None:
+            self.headers = {"Authorization": f"Bearer {token}"}
 
         async def __aenter__(self) -> "FakeClient":
             return self
@@ -1839,16 +1846,13 @@ def test_approved_intake_calls_ticket_create_with_op_key(
         async def __aexit__(self, *_args: Any) -> None:
             return None
 
-        async def _call(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-            calls.append((name, arguments))
+        async def call(
+            self, name: str, board_id: str, **arguments: Any
+        ) -> dict[str, Any]:
+            calls.append((self.headers, name, board_id, arguments))
             return {"ticket": {"ticket_id": arguments["ticket_id"]}}
 
-    fake_module = type(
-        "FakePursersClient",
-        (),
-        {"BoardClient": FakeClient, "BoardClientError": RuntimeError},
-    )
-    monkeypatch.setitem(sys.modules, "pursers_client", fake_module)
+    monkeypatch.setattr(coordinator, "IntakeCaller", FakeClient)
     approved = {
         **_intake_row("ask-e2e", "Publish the next release"),
         "approved": True,
@@ -1859,10 +1863,11 @@ def test_approved_intake_calls_ticket_create_with_op_key(
     async def create(board_id: str, draft: coordinator.IntakeDraft) -> str:
         return await coordinator.create_intake_ticket(
             "https://board.invalid/mcp",
-            "opaque",
+            "intake-token-b",
             "coordinator-test",
             board_id,
             draft,
+            replay_token="main-token-a",
         )
 
     findings, updates = asyncio.run(
@@ -1882,8 +1887,12 @@ def test_approved_intake_calls_ticket_create_with_op_key(
         )
     )
 
-    assert [name for name, _arguments in calls] == ["ticket_create"]
-    arguments = calls[0][1]
+    assert [name for _headers, name, _board_id, _arguments in calls] == [
+        "ticket_create"
+    ]
+    headers, _name, board_id, arguments = calls[0]
+    assert headers == {"Authorization": "Bearer intake-token-b"}
+    assert board_id == "board-a"
     assert arguments["coordinator_op_key"].startswith("coord-intake-")
     assert arguments["tags"] == [
         "coordinator-intake",
@@ -1994,31 +2003,42 @@ def _matching_replay_ticket(draft: coordinator.IntakeDraft) -> dict[str, Any]:
 def _install_replay_client(
     monkeypatch: pytest.MonkeyPatch, existing: Mapping[str, Any]
 ) -> None:
-    class ReplayError(Exception):
-        pass
+    from pursers_client import BoardClientError
 
-    class ReplayClient:
+    class ReplayIntakeCaller:
         def __init__(self, *_args: Any, **_kwargs: Any) -> None:
             pass
 
-        async def __aenter__(self) -> "ReplayClient":
+        async def __aenter__(self) -> "ReplayIntakeCaller":
             return self
 
         async def __aexit__(self, *_args: Any) -> None:
             return None
 
-        async def _call(self, *_args: Any, **_kwargs: Any) -> None:
-            raise ReplayError("ticket already exists")
+        async def call(
+            self, name: str, _board_id: str, **_arguments: Any
+        ) -> dict[str, Any]:
+            assert name == "ticket_create"
+            raise BoardClientError("ticket already exists")
 
-        async def ticket_get(self, _ticket_id: str) -> dict[str, Any]:
+    class ReplayReader:
+        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+            pass
+
+        async def __aenter__(self) -> "ReplayReader":
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+        async def call(
+            self, name: str, _board_id: str, **_arguments: Any
+        ) -> dict[str, Any]:
+            assert name == "ticket_get"
             return {"ticket": dict(existing)}
 
-    fake_module = type(
-        "FakePursersClient",
-        (),
-        {"BoardClient": ReplayClient, "BoardClientError": ReplayError},
-    )
-    monkeypatch.setitem(sys.modules, "pursers_client", fake_module)
+    monkeypatch.setattr(coordinator, "IntakeCaller", ReplayIntakeCaller)
+    monkeypatch.setattr(coordinator, "RawReader", ReplayReader)
 
 
 def test_existing_intake_ticket_exact_replay_is_accepted(
@@ -2039,6 +2059,7 @@ def test_existing_intake_ticket_exact_replay_is_accepted(
             "coordinator-test",
             "board-a",
             draft,
+            replay_token="main-token-a",
         )
     )
 
@@ -2085,6 +2106,7 @@ def test_existing_intake_ticket_mismatch_is_collision(
                 "coordinator-test",
                 "board-a",
                 draft,
+                replay_token="main-token-a",
             )
         )
 
@@ -2116,6 +2138,7 @@ def test_existing_intake_ticket_missing_field_is_collision(
                 "coordinator-test",
                 "board-a",
                 draft,
+                replay_token="main-token-a",
             )
         )
 
@@ -2142,6 +2165,7 @@ def test_intake_collision_failure_keeps_queue_and_never_reports_created(
             "coordinator-test",
             board_id,
             candidate,
+            replay_token="main-token-a",
         )
 
     findings, updates = asyncio.run(
@@ -2470,6 +2494,71 @@ def test_capability_scopes_reads_jwt_hint_without_trusting_it() -> None:
     assert coordinator.capability_scopes("opaque") == frozenset()
 
 
+def test_missing_intake_token_is_draft_only_with_clear_note() -> None:
+    token, issue = coordinator.load_intake_credential(None)
+
+    assert token is None
+    assert issue == "approved-missing-board-intake-grant"
+    assert coordinator.intake_credential_note(issue) == (
+        "coordinator: intake enabled without a usable --intake-token-path; "
+        "intake remains draft-only."
+    )
+
+
+def test_write_scoped_intake_token_is_refused_with_central_reason(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "intake.jwt"
+    path.write_text(
+        _token_with_scopes("board:read", "board:intake", "board:write"),
+        encoding="utf-8",
+    )
+
+    token, issue = coordinator.load_intake_credential(str(path))
+
+    assert token is None
+    assert issue == "approved-intake-token-has-board-write"
+    note = coordinator.intake_credential_note(issue)
+    assert "board:write" in note
+    assert "Central rejects coordinator op-key usage" in note
+
+
+def test_write_scoped_intake_token_keeps_approved_ask_queued() -> None:
+    approved = {
+        **_intake_row("ask-write-scoped", "Publish the next release"),
+        "approved": True,
+        "approved_by": "dashboard-seat",
+        "approved_at": NOW.isoformat(),
+    }
+
+    async def unexpected_create(*_args: Any) -> str:
+        raise AssertionError("write-scoped intake credential must not create")
+
+    findings, updates = asyncio.run(
+        coordinator.process_intakes(
+            [_intake_project()],
+            {
+                "board-a": {
+                    "tickets": [],
+                    "coordinator_intake_state": _intake_state([approved]),
+                }
+            },
+            NOW,
+            coordinator.RuntimeState.for_mode("active"),
+            enabled=True,
+            dry_run=False,
+            create_ticket=unexpected_create,
+            intake_authorized=False,
+            intake_authorization_rule="approved-intake-token-has-board-write",
+        )
+    )
+
+    assert updates == {}
+    assert findings[0]["kind"] == "intake-approved-write-scope-refused"
+    assert "Central rejects" in findings[0]["message"]
+    assert "write-less" in findings[0]["next_action"]
+
+
 def test_intake_is_disabled_by_default(tmp_path: Path) -> None:
     token = tmp_path / "token"
     token.write_text("opaque", encoding="utf-8")
@@ -2483,6 +2572,158 @@ def test_intake_is_disabled_by_default(tmp_path: Path) -> None:
     assert default.intake_enabled is False
     assert enabled.intake_enabled is True
     assert disabled.intake_enabled is False
+
+
+def test_intake_token_path_flag_and_config_key_precedence(tmp_path: Path) -> None:
+    main = tmp_path / "main.jwt"
+    flag_intake = tmp_path / "flag-intake.jwt"
+    config_intake = tmp_path / "config-intake.jwt"
+    main.write_text("main", encoding="utf-8")
+    flag_intake.write_text("flag", encoding="utf-8")
+    config_intake.write_text("config", encoding="utf-8")
+    args = coordinator.parse_args(
+        [
+            "--token-path", str(main),
+            "--intake-token-path", str(flag_intake),
+            "--enable-intake",
+        ]
+    )
+    document = {
+        "schema_version": 1,
+        "thresholds": {
+            "stale_seconds": 300,
+            "lease_warning_ratio": 0.8,
+            "grace_seconds": 600,
+            "starved_seconds": 1800,
+            "critical_starved_seconds": 600,
+            "review_backlog_seconds": 1800,
+            "abandoner_drops": 3,
+            "abandoner_window_days": 7,
+        },
+        "integration_watch_since": None,
+        "intake": {
+            "enabled": True,
+            "token_path": str(config_intake),
+            "auto_categories": list(coordinator.DEFAULT_AUTO_CATEGORIES),
+            "always_ask_categories": list(coordinator.DEFAULT_ALWAYS_ASK_CATEGORIES),
+            "work_domain_always_ask": True,
+            "rate_per_hour": 5,
+        },
+    }
+
+    config = coordinator.resolve_coordinator_config(_config_state(document), args)
+
+    assert args.intake_token_path == str(flag_intake)
+    assert config.intake_token_path == str(config_intake)
+    assert config.sources["intake.token_path"] == "config"
+
+
+def test_dual_credential_approved_ask_fake_e2e(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    main_path = tmp_path / "main.jwt"
+    intake_path = tmp_path / "intake.jwt"
+    main_token = _token_with_scopes("board:read", "board:write", "board:coordinate")
+    intake_token = _token_with_scopes("board:read", "board:intake")
+    main_path.write_text(main_token, encoding="utf-8")
+    intake_path.write_text(intake_token, encoding="utf-8")
+    approved = {
+        **_intake_row("ask-dual-e2e", "Update coordinator documentation"),
+        "approved": True,
+        "approved_by": "dashboard-seat",
+        "approved_at": NOW.isoformat(),
+    }
+    observed: list[tuple[str, dict[str, str]]] = []
+    published: dict[str, Any] = {}
+
+    class FakeRawReader:
+        def __init__(self, _url: str, token: str) -> None:
+            observed.append(("main-read", {"Authorization": f"Bearer {token}"}))
+
+        async def __aenter__(self) -> "FakeRawReader":
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+    async def fake_read_cycle(
+        _reader: Any, _home_board: str
+    ) -> tuple[list[coordinator.Project], dict[str, dict[str, Any]], dict[str, Any]]:
+        return (
+            [_intake_project()],
+            {
+                "board-a": {
+                    "tickets": [],
+                    "coordinator_intake_state": _intake_state([approved]),
+                }
+            },
+            {},
+        )
+
+    async def fake_create(
+        _url: str,
+        token: str,
+        _agent_name: str,
+        _board_id: str,
+        draft: coordinator.IntakeDraft,
+        *,
+        replay_token: str,
+    ) -> str:
+        assert replay_token == main_token
+        observed.append(("intake-create", {"Authorization": f"Bearer {token}"}))
+        return draft.ticket_id
+
+    async def fake_write_reports(
+        _url: str,
+        token: str,
+        _home_board: str,
+        _agent_name: str,
+        states: Mapping[str, Mapping[str, Any]],
+        _previous: Mapping[str, Mapping[str, Any]],
+        _now: datetime,
+        intake_updates: Mapping[str, frozenset[str]] | None = None,
+    ) -> None:
+        observed.append(("main-report", {"Authorization": f"Bearer {token}"}))
+        published["states"] = states
+        published["intake_updates"] = intake_updates
+
+    monkeypatch.setattr(coordinator, "RawReader", FakeRawReader)
+    monkeypatch.setattr(coordinator, "read_cycle", fake_read_cycle)
+    monkeypatch.setattr(coordinator, "utc_now", lambda: NOW)
+    monkeypatch.setattr(coordinator, "load_privacy_terms", lambda *_args: {})
+    monkeypatch.setattr(
+        coordinator,
+        "analyze_cycle",
+        lambda *_args, **_kwargs: {
+            "board-a": coordinator.bound_findings_state([], NOW)
+        },
+    )
+    monkeypatch.setattr(coordinator, "plan_actions", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(coordinator, "create_intake_ticket", fake_create)
+    monkeypatch.setattr(coordinator, "write_reports", fake_write_reports)
+    args = coordinator.parse_args(
+        [
+            "--token-path", str(main_path),
+            "--intake-token-path", str(intake_path),
+            "--home-board", "board-a",
+            "--enable-intake", "--mode", "active", "--once",
+        ]
+    )
+
+    asyncio.run(coordinator.run(args))
+
+    assert observed == [
+        ("main-read", {"Authorization": f"Bearer {main_token}"}),
+        ("intake-create", {"Authorization": f"Bearer {intake_token}"}),
+        ("main-report", {"Authorization": f"Bearer {main_token}"}),
+    ]
+    assert published["intake_updates"] == {
+        "board-a": frozenset({"ask-dual-e2e"})
+    }
+    assert any(
+        item["kind"] == "intake-created"
+        for item in published["states"]["board-a"]["findings"]
+    )
 
 
 def test_intake_queue_is_drained_only_after_finding_publish(
