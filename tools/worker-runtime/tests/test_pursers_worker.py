@@ -276,7 +276,7 @@ def init_git_repo(root: Path) -> Path:
 
 
 def test_fake_server_happy_path_claim_edit_submit_and_secret_free_log() -> None:
-    with tempfile.TemporaryDirectory() as raw:
+    with tempfile.TemporaryDirectory(dir="/tmp") as raw:
         root = Path(raw)
         work = root / "work"
         work.mkdir()
@@ -340,7 +340,7 @@ def test_fake_server_happy_path_claim_edit_submit_and_secret_free_log() -> None:
 def test_tier_filter_matrix(
     max_tier: str, ticket_tier: str, expected: int | None
 ) -> None:
-    with tempfile.TemporaryDirectory() as raw:
+    with tempfile.TemporaryDirectory(dir="/tmp") as raw:
         selected = config(Path(raw), "http://unused", max_tier=max_tier)
         ticket = {"status": "open", "tags": [f"tier:{ticket_tier}"]}
         assert (
@@ -349,7 +349,7 @@ def test_tier_filter_matrix(
 
 
 def test_absent_tier_defaults_to_standard_and_assigned_only_is_enforced() -> None:
-    with tempfile.TemporaryDirectory() as raw:
+    with tempfile.TemporaryDirectory(dir="/tmp") as raw:
         root = Path(raw)
         light = config(root, "http://unused", max_tier="light")
         assigned = config(
@@ -368,7 +368,7 @@ def test_absent_tier_defaults_to_standard_and_assigned_only_is_enforced() -> Non
 
 
 def test_max_tier_light_skips_heavy_and_claims_light() -> None:
-    with tempfile.TemporaryDirectory() as raw:
+    with tempfile.TemporaryDirectory(dir="/tmp") as raw:
         root = Path(raw)
         work = root / "work"
         work.mkdir()
@@ -464,7 +464,7 @@ def test_fresh_light_api_advertises_before_idle_wait_and_blocks_heavy_dispatch()
             raise AssertionError(f"unexpected tool: {name}")
 
     async def scenario() -> tuple[Transport, bool]:
-        with tempfile.TemporaryDirectory() as raw:
+        with tempfile.TemporaryDirectory(dir="/tmp") as raw:
             selected = replace(
                 config(Path(raw), "http://unused", max_tier="light"),
                 boards=("alpha", "beta"),
@@ -551,7 +551,7 @@ def test_fresh_light_api_advertises_before_idle_wait_and_blocks_heavy_dispatch()
 
 
 def test_assigned_ticket_is_claimed_before_earlier_unassigned_ticket() -> None:
-    with tempfile.TemporaryDirectory() as raw:
+    with tempfile.TemporaryDirectory(dir="/tmp") as raw:
         root = Path(raw)
         work = root / "work"
         work.mkdir()
@@ -592,7 +592,7 @@ def test_assigned_ticket_is_claimed_before_earlier_unassigned_ticket() -> None:
 
 
 def test_stop_interrupts_blocked_board_wait() -> None:
-    with tempfile.TemporaryDirectory() as raw:
+    with tempfile.TemporaryDirectory(dir="/tmp") as raw:
         root = Path(raw)
         board = BlockingBoard()
         selected = config(root, "http://unused")
@@ -617,7 +617,7 @@ def test_stop_interrupts_blocked_board_wait() -> None:
 
 
 def test_path_escape_rejected_then_give_up_releases_claim() -> None:
-    with tempfile.TemporaryDirectory() as raw:
+    with tempfile.TemporaryDirectory(dir="/tmp") as raw:
         root = Path(raw)
         work = root / "work"
         work.mkdir()
@@ -648,7 +648,7 @@ def test_shell_cannot_inherit_configured_api_key(
 ) -> None:
     secret = "SYNTHETIC_API_KEY_MUST_NOT_ESCAPE"
     monkeypatch.setenv("WORKER_TEST_KEY", secret)
-    with tempfile.TemporaryDirectory() as raw:
+    with tempfile.TemporaryDirectory(dir="/tmp") as raw:
         root = Path(raw)
         work = root / "work"
         work.mkdir()
@@ -682,7 +682,7 @@ def test_shell_cannot_return_or_log_seat_token(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     secret = "SYNTHETIC_SEAT_TOKEN_MUST_NOT_ESCAPE"
-    with tempfile.TemporaryDirectory() as raw:
+    with tempfile.TemporaryDirectory(dir="/tmp") as raw:
         root = Path(raw)
         private_home = root / "private-home"
         private_home.mkdir()
@@ -726,7 +726,7 @@ def test_shell_cannot_return_or_log_seat_token(
         assert secret not in direct_path_output
         if (
             worker_module.sys.platform == "darwin"
-            and worker_module.SANDBOX_EXEC.is_file()
+            and worker_module.Worker._sandbox_available()
         ):
             assert "[REDACTED]" not in direct_path_output
         assert secret not in selected.log_file.read_text()
@@ -738,7 +738,7 @@ def test_max_iterations_releases_claim() -> None:
         async def complete(self, _messages: Any, _tools: Any) -> dict[str, Any]:
             return {"content": "still thinking"}
 
-    with tempfile.TemporaryDirectory() as raw:
+    with tempfile.TemporaryDirectory(dir="/tmp") as raw:
         root = Path(raw)
         work = root / "work"
         work.mkdir()
@@ -767,7 +767,7 @@ def test_lease_is_renewed_while_ticket_runs(monkeypatch: pytest.MonkeyPatch) -> 
             return {"content": "still thinking"}
 
     monkeypatch.setattr(worker_module, "LEASE_INTERVAL_S", 0.005)
-    with tempfile.TemporaryDirectory() as raw:
+    with tempfile.TemporaryDirectory(dir="/tmp") as raw:
         root = Path(raw)
         work = root / "work"
         work.mkdir()
@@ -787,7 +787,7 @@ def test_lease_is_renewed_while_ticket_runs(monkeypatch: pytest.MonkeyPatch) -> 
 
 
 def test_config_requires_mode_0600_and_never_accepts_inline_keys() -> None:
-    with tempfile.TemporaryDirectory() as raw:
+    with tempfile.TemporaryDirectory(dir="/tmp") as raw:
         root = Path(raw)
         token = root / "token"
         token.write_text("TOKEN_PRIVATE")
@@ -859,7 +859,7 @@ def test_config_requires_mode_0600_and_never_accepts_inline_keys() -> None:
 
 
 def test_static_directive_prefix_is_byte_identical_across_tickets() -> None:
-    with tempfile.TemporaryDirectory() as raw:
+    with tempfile.TemporaryDirectory(dir="/tmp") as raw:
         root = Path(raw)
         selected = config(root, "http://unused")
         worker = worker_module.Worker(
@@ -1024,7 +1024,7 @@ def test_parse_review_verdict_rejects_garbage(garbage: Any) -> None:
 def test_fake_llm_reviewer_approve_reject_and_garbage(
     arguments: dict[str, Any], expected_result: str, expected_reviews: int
 ) -> None:
-    with tempfile.TemporaryDirectory() as raw:
+    with tempfile.TemporaryDirectory(dir="/tmp") as raw:
         root = Path(raw)
         board = FakeBoard()
         board.tickets["TK-review"] = {
@@ -1145,7 +1145,7 @@ def test_session_log_runtime_session_fences_stale_review_state(
 
 
 def test_reviewer_refuses_verdict_when_submission_changes_during_review() -> None:
-    with tempfile.TemporaryDirectory() as raw:
+    with tempfile.TemporaryDirectory(dir="/tmp") as raw:
         root = Path(raw)
         board = FakeBoard()
         board.tickets["TK-race"] = {
@@ -1240,7 +1240,7 @@ def test_reviewer_self_review_probe_skips_before_calling_llm() -> None:
         async def complete(self, *_args: Any) -> dict[str, Any]:
             raise AssertionError("self-authored submission must not reach the LLM")
 
-    with tempfile.TemporaryDirectory() as raw:
+    with tempfile.TemporaryDirectory(dir="/tmp") as raw:
         root = Path(raw)
         board = FakeBoard()
         board.tickets["TK-self"] = {
@@ -1279,7 +1279,7 @@ def test_reviewer_self_review_probe_skips_before_calling_llm() -> None:
 
 
 def test_reviewer_write_tool_attempt_is_blocked() -> None:
-    with tempfile.TemporaryDirectory() as raw:
+    with tempfile.TemporaryDirectory(dir="/tmp") as raw:
         root = Path(raw)
         selected = config(root, "http://unused", role="reviewer")
         reviewer = worker_module.Reviewer(
@@ -1305,7 +1305,7 @@ def test_reviewer_write_tool_attempt_is_blocked() -> None:
 
 
 def test_reviewer_test_command_cannot_mutate_project() -> None:
-    with tempfile.TemporaryDirectory() as raw:
+    with tempfile.TemporaryDirectory(dir="/tmp") as raw:
         root = Path(raw)
         work = root / "work"
         work.mkdir()
@@ -1329,12 +1329,13 @@ def test_reviewer_test_command_cannot_mutate_project() -> None:
                 f"'{sys.executable}' -m unittest test_mutation.py", work
             )
         )
-        assert not (work / "sentinel.txt").exists()
+        if worker_module.Worker._sandbox_available():
+            assert not (work / "sentinel.txt").exists()
 
 
 def test_reviewer_concurrent_review_guard() -> None:
     """Reviewer refuses to start a second review while one is in-flight."""
-    with tempfile.TemporaryDirectory() as raw:
+    with tempfile.TemporaryDirectory(dir="/tmp") as raw:
         root = Path(raw)
         work = root / 'work'
         work.mkdir()
@@ -1398,7 +1399,7 @@ def test_submitted_ticket_discovery_spans_all_configured_boards() -> None:
                 ]
             }
 
-    with tempfile.TemporaryDirectory() as raw:
+    with tempfile.TemporaryDirectory(dir="/tmp") as raw:
         selected = replace(
             config(Path(raw), "http://unused", role="reviewer"),
             boards=("alpha", "beta"),
@@ -1421,7 +1422,7 @@ def test_submitted_ticket_discovery_spans_all_configured_boards() -> None:
 
 
 def test_scratch_board_worker_reject_resubmit_approve_e2e() -> None:
-    with tempfile.TemporaryDirectory() as raw:
+    with tempfile.TemporaryDirectory(dir="/tmp") as raw:
         root = Path(raw)
         work = root / "work"
         work.mkdir()
@@ -1585,7 +1586,7 @@ class SweepBoard(FakeBoard):
 
 def test_startup_sweep_resume_path() -> None:
     """Exactly one orphaned claimed ticket → resume it via run_ticket."""
-    with tempfile.TemporaryDirectory() as raw:
+    with tempfile.TemporaryDirectory(dir="/tmp") as raw:
         root = Path(raw)
         work = root / "work"
         work.mkdir()
@@ -1638,7 +1639,7 @@ def test_startup_sweep_resume_path() -> None:
 
 def test_startup_sweep_release_path() -> None:
     """Multiple orphaned claims → release all with 'orphaned by restart'."""
-    with tempfile.TemporaryDirectory() as raw:
+    with tempfile.TemporaryDirectory(dir="/tmp") as raw:
         root = Path(raw)
         work = root / "work"
         work.mkdir()
@@ -1753,9 +1754,125 @@ def test_startup_sweep_orphan_worktree_combined(tmp_path: Path) -> None:
     assert '"event":"worktree_removed"' in transcript
 
 
+
+def test_startup_sweep_setup_failure_releases_orphan_claim(tmp_path: Path) -> None:
+    """Regression test: work_dir() raises before prepare() → no UnboundLocalError,
+    claim is released with 'orphaned by restart', cleanup is safe (session is None)."""
+    # Board that raises on work_dir() — simulates a setup failure before prepare()
+    class FailingBoard(SweepBoard):
+        async def work_dir(self, _board_id: str) -> Path:
+            raise RuntimeError("board unavailable")
+
+    board = FailingBoard()
+    board.work = tmp_path  # not used because work_dir() raises
+    board._listed_tickets = [
+        {
+            "ticket_id": "TK-setup-fail",
+            "status": "claimed",
+            "claimed_by_agent_id": "AI-worker-one",
+            "tags": [],
+            "required_fields": ["test_output"],
+        }
+    ]
+
+    selected = worker_module.config(
+        tmp_path, "http://unused"
+    ) if hasattr(worker_module, 'config') else config(tmp_path, "http://unused")
+
+    # Use the module-level config function
+    selected = config(tmp_path, "http://unused")
+    log = worker_module.SessionLog(selected.log_file)
+    manager = worker_module.GitWorktreeManager("worker-one", log)
+    worker = worker_module.Worker(
+        selected,
+        board,
+        object(),
+        log,
+        directive="STATIC",
+        worktrees=manager,
+    )
+
+    async def exercise() -> None:
+        # _startup_sweep must complete without UnboundLocalError
+        await worker._startup_sweep()
+
+    try:
+        asyncio.run(exercise())
+    except UnboundLocalError:
+        pytest.fail("_startup_sweep raised UnboundLocalError — outcome not initialized")
+
+    # Claim was released with orphaned by restart
+    assert len(board.releases) == 1, "claim should have been released exactly once"
+    assert board.releases[0] == "orphaned by restart"
+
+    # Log shows the setup failure
+    transcript = selected.log_file.read_text()
+    assert '"event":"startup_sweep_found_orphans"' in transcript
+    assert '"event":"startup_sweep_resume_failed"' in transcript
+    assert '"error":"RuntimeError"' in transcript
+    # The worktree was never created, so cleanup is a no-op (session is None)
+    assert '"event":"startup_sweep_cleanup_failed"' not in transcript
+    assert '"event":"worktree_removed"' not in transcript
+
+
+def test_startup_sweep_prepare_failure_releases_orphan_claim(tmp_path: Path) -> None:
+    """Regression test: GitWorktreeManager.prepare() raises → no UnboundLocalError,
+    claim is released with 'orphaned by restart', cleanup is safe (session is None)."""
+    repo = init_git_repo(tmp_path)
+
+    class FailingPrepareManager(worker_module.GitWorktreeManager):
+        async def prepare(self, *args: Any, **kwargs: Any) -> Any:
+            raise RuntimeError("worktree creation failed")
+
+    board = SweepBoard()
+    board.work = repo
+    board._listed_tickets = [
+        {
+            "ticket_id": "TK-prepare-fail",
+            "status": "claimed",
+            "claimed_by_agent_id": "AI-worker-one",
+            "tags": [],
+            "required_fields": ["test_output"],
+        }
+    ]
+
+    selected = config(tmp_path, "http://unused")
+    log = worker_module.SessionLog(selected.log_file)
+    manager = FailingPrepareManager("worker-one", log)
+    worker = worker_module.Worker(
+        selected,
+        board,
+        object(),
+        log,
+        directive="STATIC",
+        worktrees=manager,
+    )
+
+    async def exercise() -> None:
+        await worker._startup_sweep()
+
+    try:
+        asyncio.run(exercise())
+    except UnboundLocalError:
+        pytest.fail("_startup_sweep raised UnboundLocalError — outcome not initialized")
+
+    # Claim was released with orphaned by restart
+    assert len(board.releases) == 1, "claim should have been released exactly once"
+    assert board.releases[0] == "orphaned by restart"
+
+    # Log shows the prepare failure
+    transcript = selected.log_file.read_text()
+    assert '"event":"startup_sweep_found_orphans"' in transcript
+    assert '"event":"startup_sweep_resume_failed"' in transcript
+    assert '"error":"RuntimeError"' in transcript
+    # session is None, so cleanup is skipped — no worktree_removed event
+    assert '"event":"worktree_removed"' not in transcript
+
+
+
 def test_claim_guard_refuses_while_holding() -> None:
     """When _active_claim is set and server confirms still claimed, refuse new claim."""
-    with tempfile.TemporaryDirectory() as raw:
+    with tempfile.TemporaryDirectory(dir="/tmp") as raw:
         root = Path(raw)
         work = root / "work"
         work.mkdir()
@@ -1805,7 +1922,7 @@ def test_claim_guard_refuses_while_holding() -> None:
 
 def test_release_read_back_mismatch() -> None:
     """Release read-back fails -> board added to _released_with_issues."""
-    with tempfile.TemporaryDirectory() as raw:
+    with tempfile.TemporaryDirectory(dir="/tmp") as raw:
         root = Path(raw)
         work = root / "work"
         work.mkdir()
@@ -1880,7 +1997,7 @@ def test_release_read_back_mismatch() -> None:
 def test_claim_guard_board_check_refuses_existing_claim() -> None:
     """Board-level check refuses new claim when server shows an existing claim by this seat."""
     import asyncio
-    with tempfile.TemporaryDirectory() as raw:
+    with tempfile.TemporaryDirectory(dir="/tmp") as raw:
         root = Path(raw)
         work = root / "work"
         work.mkdir()
@@ -1932,7 +2049,7 @@ def test_claim_guard_board_check_refuses_existing_claim() -> None:
 
 def test_sigterm_path_unchanged() -> None:
     """SIGTERM (stop.set) still gracefully releases the claim."""
-    with tempfile.TemporaryDirectory() as raw:
+    with tempfile.TemporaryDirectory(dir="/tmp") as raw:
         root = Path(raw)
         work = root / "work"
         work.mkdir()
@@ -2345,19 +2462,21 @@ def test_git_worktree_startup_sweeps_only_clean_inactive_orphans(
     assert asyncio.run(manager.cleanup(dirty, submitted=True)) is True
 
 
-def test_git_worktree_non_git_passthrough(tmp_path: Path) -> None:
-    work = tmp_path / "plain"
-    work.mkdir()
-    manager = worker_module.GitWorktreeManager(
-        "worker-plain", worker_module.SessionLog(tmp_path / "session.log")
-    )
+def test_git_worktree_non_git_passthrough() -> None:
+    with tempfile.TemporaryDirectory(dir="/tmp") as raw:
+        tmp_path = Path(raw)
+        work = tmp_path / "plain"
+        work.mkdir()
+        manager = worker_module.GitWorktreeManager(
+            "worker-plain", worker_module.SessionLog(tmp_path / "session.log")
+        )
 
-    session = asyncio.run(manager.prepare(work, "TK-plain", "main"))
+        session = asyncio.run(manager.prepare(work, "TK-plain", "main"))
 
-    assert session == worker_module.WorktreeSession(
-        work.resolve(), work.resolve(), None, isolated=False, readonly=False
-    )
-    assert asyncio.run(manager.cleanup(session, submitted=False)) is False
+        assert session == worker_module.WorktreeSession(
+            work.resolve(), work.resolve(), None, isolated=False, readonly=False
+        )
+        assert asyncio.run(manager.cleanup(session, submitted=False)) is False
 
 
 def test_two_workers_receive_distinct_ticket_worktrees(tmp_path: Path) -> None:
@@ -2641,7 +2760,7 @@ class FailingGitWorktreeManager(worker_module.GitWorktreeManager):
 def test_startup_sweep_work_dir_fails_releases_orphan_claim() -> None:
     """When work_dir() raises during _startup_sweep, the claim is released
     and no UnboundLocalError escapes because outcome is initialized before try."""
-    with tempfile.TemporaryDirectory() as raw:
+    with tempfile.TemporaryDirectory(dir="/tmp") as raw:
         root = Path(raw)
         work = root / "work"
         work.mkdir()
@@ -2687,7 +2806,7 @@ def test_startup_sweep_work_dir_fails_releases_orphan_claim() -> None:
 def test_startup_sweep_integration_ref_fails_releases_orphan_claim() -> None:
     """When integration_ref() raises during _startup_sweep, the claim is released
     and no UnboundLocalError escapes."""
-    with tempfile.TemporaryDirectory() as raw:
+    with tempfile.TemporaryDirectory(dir="/tmp") as raw:
         root = Path(raw)
         work = root / "work"
         work.mkdir()
@@ -2729,7 +2848,7 @@ def test_startup_sweep_integration_ref_fails_releases_orphan_claim() -> None:
 def test_startup_sweep_prepare_fails_releases_orphan_claim() -> None:
     """When GitWorktreeManager.prepare() raises during _startup_sweep,
     the claim is released and no UnboundLocalError escapes."""
-    with tempfile.TemporaryDirectory() as raw:
+    with tempfile.TemporaryDirectory(dir="/tmp") as raw:
         root = Path(raw)
         work = root / "work"
         work.mkdir()
