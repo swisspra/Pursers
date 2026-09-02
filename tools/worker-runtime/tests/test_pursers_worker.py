@@ -1299,6 +1299,46 @@ def test_reviewer_test_command_cannot_mutate_project() -> None:
         assert not (work / "sentinel.txt").exists()
 
 
+def test_reviewer_concurrent_review_guard() -> None:
+    """Reviewer refuses to start a second review while one is in-flight."""
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        work = root / 'work'
+        work.mkdir()
+        board = FakeBoard()
+        board.tickets['TK-review'] = {
+            'ticket_id': 'TK-review',
+            'status': 'submitted',
+            'submitted_at': 'submission-1',
+            'submitted_by_principal_id': 'PR-other',
+            'submission_history': [
+                {
+                    'submitted_at': 'submission-1',
+                    'submitted_by_principal_id': 'PR-other',
+                }
+            ],
+        }
+        selected = config(root, 'http://unused', role='reviewer')
+        reviewer = worker_module.Reviewer(
+            selected,
+            board,
+            object(),
+            worker_module.SessionLog(selected.log_file),
+            directive='STATIC REVIEWER',
+        )
+        reviewer._active_review = ('board-one', 'TK-already-reviewing')
+
+        result = asyncio.run(
+            reviewer.run_review('board-one', board.tickets['TK-review'], work)
+        )
+
+        assert result == 'skipped'
+        assert board.reviews == []
+        transcript = selected.log_file.read_text()
+        assert 'concurrent_review_refused' in transcript
+        assert 'TK-already-reviewing' in transcript
+
+
 def test_review_rate_limiter_uses_rolling_hour() -> None:
     now = [100.0]
     limiter = worker_module.ReviewRateLimiter(2, clock=lambda: now[0])
