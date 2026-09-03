@@ -9,9 +9,27 @@ import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import ModuleType
 from typing import Any, Mapping
 
 import pytest
+
+
+try:
+    __import__("pursers_client")
+except ModuleNotFoundError:
+    client_stub = ModuleType("pursers_client")
+
+    class _StubBoardClientError(RuntimeError):
+        pass
+
+    class _StubBoardClient:
+        pass
+
+    client_stub.BoardClient = _StubBoardClient
+    client_stub.BoardClientError = _StubBoardClientError
+    client_stub.GENERATION_META_KEY = "io.onboard/expected-generation"
+    sys.modules["pursers_client"] = client_stub
 
 
 MODULE_PATH = Path(__file__).parents[1] / "coordinator.py"
