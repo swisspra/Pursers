@@ -358,8 +358,12 @@ class SessionLog:
         return value
 
     def write(self, event: str, **fields: Any) -> None:
-        safe = self.scrub(
-            {"ts": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z", "event": event, **fields}
+        safe = self.scrub(fields)
+        safe["event"] = event
+        safe["ts"] = (
+            datetime.datetime.now(datetime.timezone.utc)
+            .strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3]
+            + "Z"
         )
         with self.path.open("a", encoding="utf-8") as stream:
             stream.write(json.dumps(safe, sort_keys=True, separators=(",", ":")) + "\n")
