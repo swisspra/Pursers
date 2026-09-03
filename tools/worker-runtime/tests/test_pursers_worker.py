@@ -2,7 +2,7 @@ from __future__ import annotations
 
 # Reproducible isolated-checkout bootstrap:
 # python3 -m venv .venv
-# .venv/bin/python -m pip install "pytest==9.1.1" ./packages/client
+# .venv/bin/python -m pip install "pytest>=8.4,<9" ./packages/client
 # .venv/bin/python -m pytest tools/worker-runtime/tests/test_pursers_worker.py
 
 import asyncio
