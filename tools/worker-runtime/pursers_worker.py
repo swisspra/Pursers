@@ -139,13 +139,20 @@ def load_config(path: str | Path) -> Config:
     roles_raw = claim.get("roles", [])
     if not isinstance(roles_raw, (list, tuple)):
         raise ValueError("claim.roles must be a list of lowercase slug strings")
-    roles = tuple(
-        dict.fromkeys(
-            str(item).strip().lower()
-            for item in roles_raw
-            if isinstance(item, str) and item.strip()
-        )
-    )
+    roles_list: list[str] = []
+    for item in roles_raw:
+        if not isinstance(item, str) or not item.strip():
+            raise ValueError(
+                "claim.roles entries must be non-empty strings"
+            )
+        slug = item.strip().lower()
+        if not slug.isidentifier() or slug != item.strip():
+            raise ValueError(
+                f"claim.roles entry {item!r} is not a valid lowercase slug"
+            )
+        if slug not in roles_list:
+            roles_list.append(slug)
+    roles = tuple(roles_list)
     review = document.get("review", {})
     if not isinstance(review, dict):
         raise ValueError("review must be an object")
@@ -253,19 +260,14 @@ def claim_priority(config: Config, ticket: dict[str, Any], agent_id: str) -> int
     if TIER_ORDER[ticket_tier(ticket)] > TIER_ORDER[config.max_tier]:
         return None
 
-    # Role guard: if ticket has role: tags and seat's roles don't intersect, skip.
-    # Specialist seat claims role-matching tickets or untagged tickets.
-    # Generalist seat (config.roles empty) claims only untagged tickets.
+    # Role guard: if ticket has role: tags and seat has declared roles,
+    # the seat must have at least one matching role to claim it.
+    # Generalist seat (config.roles empty) claims everything.
     # Reviewer mode ignores role tags.
     t_roles = ticket_roles(ticket)
-    if config.role != "reviewer":
-        if t_roles:
-            if not (set(config.roles) & t_roles):
-                return None
-        elif config.roles:
-            # Special logic from prompt: "A seat WITH roles still claims untagged tickets"
-            # and "role-tag match over untagged".
-            pass
+    if config.role != "reviewer" and config.roles:
+        if t_roles and not (set(config.roles) & t_roles):
+            return None
 
     assigned_id = ticket.get("assigned_to_agent_id")
     assigned_to = ticket.get("assigned_to")
@@ -280,9 +282,8 @@ def claim_priority(config: Config, ticket: dict[str, Any], agent_id: str) -> int
         if config.require_assigned_only:
             return None
         # Priority: assigned (0) > role-match (1) > untagged (2)
-        if t_roles and set(config.roles) & t_roles:
+        if t_roles and config.roles and set(config.roles) & t_roles:
             return 1
-        # Generalist (empty roles) or specialist with untagged ticket
         return 1 if not config.roles else 2
 
     return 0 if assigned_to_me else None
