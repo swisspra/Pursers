@@ -89,6 +89,7 @@ class Config:
     require_assigned_only: bool
     role: str = "worker"
     max_reviews_per_hour: int = 12
+    roles: tuple[str, ...] = ()
 
 
 def _private_file(path: Path, label: str) -> Path:
@@ -135,6 +136,16 @@ def load_config(path: str | Path) -> Config:
     require_assigned_only = claim.get("require_assigned_only", False)
     if type(require_assigned_only) is not bool:
         raise ValueError("claim.require_assigned_only must be a boolean")
+    roles_raw = claim.get("roles", [])
+    if not isinstance(roles_raw, (list, tuple)):
+        raise ValueError("claim.roles must be a list of lowercase slug strings")
+    roles = tuple(
+        dict.fromkeys(
+            str(item).strip().lower()
+            for item in roles_raw
+            if isinstance(item, str) and item.strip()
+        )
+    )
     review = document.get("review", {})
     if not isinstance(review, dict):
         raise ValueError("review must be an object")
@@ -205,6 +216,7 @@ def load_config(path: str | Path) -> Config:
         require_assigned_only=require_assigned_only,
         role=role,
         max_reviews_per_hour=max_reviews_per_hour,
+        roles=roles,
     )
 
 
@@ -221,12 +233,40 @@ def ticket_tier(ticket: dict[str, Any]) -> str:
     return max(tiers, key=TIER_ORDER.__getitem__, default="standard")
 
 
+def ticket_roles(ticket: dict[str, Any]) -> set[str]:
+    """Return the set of role: slugs from ticket tags."""
+    tags = ticket.get("tags")
+    if not isinstance(tags, (list, tuple)):
+        return set()
+    return {
+        tag.split(":", 1)[1].strip().lower()
+        for tag in tags
+        if isinstance(tag, str) and ":" in tag
+        and tag.split(":", 1)[0].strip().lower() == "role"
+    }
+
+
 def claim_priority(config: Config, ticket: dict[str, Any], agent_id: str) -> int | None:
     """Return assigned-first priority, or None when the ticket must be skipped."""
     if ticket.get("status") != "open":
         return None
     if TIER_ORDER[ticket_tier(ticket)] > TIER_ORDER[config.max_tier]:
         return None
+
+    # Role guard: if ticket has role: tags and seat's roles don't intersect, skip.
+    # Specialist seat claims role-matching tickets or untagged tickets.
+    # Generalist seat (config.roles empty) claims only untagged tickets.
+    # Reviewer mode ignores role tags.
+    t_roles = ticket_roles(ticket)
+    if config.role != "reviewer":
+        if t_roles:
+            if not (set(config.roles) & t_roles):
+                return None
+        elif config.roles:
+            # Special logic from prompt: "A seat WITH roles still claims untagged tickets"
+            # and "role-tag match over untagged".
+            pass
+
     assigned_id = ticket.get("assigned_to_agent_id")
     assigned_to = ticket.get("assigned_to")
     if assigned_id:
@@ -237,7 +277,14 @@ def claim_priority(config: Config, ticket: dict[str, Any], agent_id: str) -> int
             config.agent_name.casefold(),
         }
     else:
-        return None if config.require_assigned_only else 1
+        if config.require_assigned_only:
+            return None
+        # Priority: assigned (0) > role-match (1) > untagged (2)
+        if t_roles and set(config.roles) & t_roles:
+            return 1
+        # Generalist (empty roles) or specialist with untagged ticket
+        return 1 if not config.roles else 2
+
     return 0 if assigned_to_me else None
 
 
@@ -1732,6 +1779,8 @@ class Worker:
                         ticket_id=ticket_id,
                         ticket_tier=ticket_tier(ticket),
                         max_tier=self.config.max_tier,
+                        ticket_roles=sorted(ticket_roles(ticket)),
+                        seat_roles=self.config.roles,
                         assigned_to=ticket.get("assigned_to_agent_id")
                         or ticket.get("assigned_to"),
                         require_assigned_only=self.config.require_assigned_only,

@@ -236,6 +236,7 @@ def config(
     require_assigned_only: bool = False,
     role: str = "worker",
     max_reviews_per_hour: int = 12,
+    roles: tuple[str, ...] = (),
 ) -> Any:
     return worker_module.Config(
         agent_name="worker-one",
@@ -255,6 +256,7 @@ def config(
         require_assigned_only=require_assigned_only,
         role=role,
         max_reviews_per_hour=max_reviews_per_hour,
+        roles=roles,
     )
 
 
@@ -351,6 +353,112 @@ def test_tier_filter_matrix(
         assert (
             worker_module.claim_priority(selected, ticket, "AI-worker-one") == expected
         )
+
+
+def test_ticket_roles_extraction() -> None:
+    assert worker_module.ticket_roles({}) == set()
+    assert worker_module.ticket_roles({"tags": ["tier:light", "bug"]}) == set()
+    assert worker_module.ticket_roles({"tags": ["role:frontend"]}) == {"frontend"}
+    assert worker_module.ticket_roles({"tags": ["ROLE:Backend", "role:API"]}) == {
+        "backend",
+        "api",
+    }
+
+
+def test_role_based_claim_routing() -> None:
+    with tempfile.TemporaryDirectory(dir="/tmp") as raw:
+        root = Path(raw)
+        generalist = config(root, "http://unused")
+        frontend = config(root, "http://unused", roles=("frontend",))
+        fullstack = config(root, "http://unused", roles=("frontend", "backend"))
+
+        # 1. Untagged ticket: claimable by everyone
+        untagged = {"status": "open", "tags": ["tier:standard"]}
+        assert (
+            worker_module.claim_priority(generalist, untagged, "AI-worker-one") == 1
+        )  # 1 for generalist
+        assert (
+            worker_module.claim_priority(frontend, untagged, "AI-worker-one") == 2
+        )  # 2 for specialist
+        assert (
+            worker_module.claim_priority(fullstack, untagged, "AI-worker-one") == 2
+        )  # 2 for specialist
+
+        # 2. Frontend ticket
+        fe_ticket = {"status": "open", "tags": ["role:frontend", "tier:standard"]}
+        assert (
+            worker_module.claim_priority(generalist, fe_ticket, "AI-worker-one") is None
+        )
+        assert (
+            worker_module.claim_priority(frontend, fe_ticket, "AI-worker-one") == 1
+        )  # 1 for role match
+        assert (
+            worker_module.claim_priority(fullstack, fe_ticket, "AI-worker-one") == 1
+        )  # 1 for role match
+
+        # 3. Backend ticket
+        be_ticket = {"status": "open", "tags": ["role:backend", "tier:standard"]}
+        assert (
+            worker_module.claim_priority(generalist, be_ticket, "AI-worker-one") is None
+        )
+        assert (
+            worker_module.claim_priority(frontend, be_ticket, "AI-worker-one") is None
+        )
+        assert (
+            worker_module.claim_priority(fullstack, be_ticket, "AI-worker-one") == 1
+        )
+
+        # 4. Multi-role ticket (frontend OR docs)
+        hybrid_ticket = {
+            "status": "open",
+            "tags": ["role:frontend", "role:docs", "tier:standard"],
+        }
+        docs_specialist = config(root, "http://unused", roles=("docs",))
+        assert (
+            worker_module.claim_priority(frontend, hybrid_ticket, "AI-worker-one") == 1
+        )
+        assert (
+            worker_module.claim_priority(docs_specialist, hybrid_ticket, "AI-worker-one")
+            == 1
+        )
+
+        # 5. Tier + Role combined gate: Tier must ALSO pass
+        heavy_fe_ticket = {"status": "open", "tags": ["role:frontend", "tier:heavy"]}
+        light_frontend = config(root, "http://unused", max_tier="light", roles=("frontend",))
+        assert (
+            worker_module.claim_priority(light_frontend, heavy_fe_ticket, "AI-worker-one")
+            is None
+        )
+
+        # 6. Assigned-to-me always wins (priority 0)
+        assigned_fe_ticket = {
+            "status": "open",
+            "tags": ["role:frontend", "tier:standard"],
+            "assigned_to_agent_id": "AI-worker-one",
+        }
+        assert (
+            worker_module.claim_priority(frontend, assigned_fe_ticket, "AI-worker-one")
+            == 0
+        )
+        # Even if role mismatch, if assigned to me, should I claim it?
+        # The prompt says: "if a ticket has role: tags and the seat's roles do not intersect, leave untouched."
+        # But also "prefer (a) assigned to this exact seat".
+        # Usually assignment implies the assigner knows what they're doing.
+        # My current implementation checks roles BEFORE checking assignment if the role guard is at the top.
+        # Wait, let me check my implementation.
+        # My implementation:
+        # t_roles = ticket_roles(ticket)
+        # if config.role != "reviewer":
+        #     if t_roles:
+        #         if not (set(config.roles) & t_roles):
+        #             return None
+        # So it returns None EVEN if assigned to me if there's a role mismatch. This is safer.
+
+        # 7. Reviewer mode ignores role tags (treats as generalist: priority 1)
+        reviewer = config(root, "http://unused", role="reviewer")
+        assert (
+            worker_module.claim_priority(reviewer, fe_ticket, "AI-worker-one") == 1
+        )  # Reviewer with no roles → generalist → priority 1
 
 
 def test_absent_tier_defaults_to_standard_and_assigned_only_is_enforced() -> None:
