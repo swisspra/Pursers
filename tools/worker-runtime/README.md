@@ -20,6 +20,7 @@ token_file = "/private/path/seat.jwt"
 [claim]
 max_tier = "standard" # light | standard | heavy; default heavy
 require_assigned_only = false
+roles = ["frontend", "backend"] # optional role slugs; empty = generalist
 
 [review]
 max_reviews_per_hour = 12 # reviewer safety limit; default 12
@@ -44,8 +45,14 @@ Never put a key inline in the config. `boards` may be `"registry"` or a JSON
 array / TOML string array of board IDs.
 
 The model receives the static worker directive first, then board context, then
-the dynamic ticket. Available tools are bounded file reads/writes, timeboxed
-shell commands jailed to the registry work directory, submit, and give-up.
+the dynamic ticket. `claim.roles` are optional role slugs (e.g. `frontend`,
+`backend`). A specialist seat claims only untagged tickets or tickets whose
+`role:` tags intersect its configured roles. A generalist (empty `claim.roles`)
+retains the original behavior and claims every tier-eligible ticket. Tickets
+with valid `role:` tags unseen by a specialist seat are skipped. Priority among
+claimable tickets is assigned > role-match > untagged; tier limits still apply.
+Reviewer mode ignores role tags. Available tools are bounded file reads/writes,
+timeboxed shell commands jailed to the registry work directory, submit, and give-up.
 Commands (not their output) are recorded in a mode-`0600` local session log.
 The shell receives a non-secret environment with `HOME` and `TMPDIR` reset to
 the assigned work directory. Configured token/key values are redacted from
