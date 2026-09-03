@@ -2208,7 +2208,9 @@ class RawReader:
         if self._stack:
             await self._stack.aclose()
 
-    async def call(self, name: str, board_id: str, **arguments: Any) -> dict[str, Any]:
+    async def call(
+        self, name: str, board_id: str, **arguments: Any
+    ) -> dict[str, Any]:
         if name not in self.ALLOWED or self._decode is None:
             raise RuntimeError("raw reader rejected a non-pure tool")
         result = await self._client.call_tool(name, {"board_id": board_id, **arguments})
@@ -2216,10 +2218,46 @@ class RawReader:
 
 
 class IntakeCaller(RawReader):
-    """Non-joining Central session limited to intake ticket creation."""
+    """Central session limited to generation-fenced intake ticket creation."""
 
     ALLOWED = frozenset({"ticket_create"})
     TRANSPORT_BOARD = "intake-only"
+
+    def __init__(self, url: str, token: str):
+        super().__init__(url, token)
+        self._generation_token: str | None = None
+
+    async def rejoin(self, board_id: str, agent_name: str) -> None:
+        if self._client is None or self._decode is None:
+            raise RuntimeError("intake caller is not entered")
+        joined = self._decode(
+            await self._client.call_tool(
+                "board_join",
+                {"board_id": board_id, "agent_name": agent_name},
+            )
+        )
+        generation = joined.get("generation_token")
+        if not isinstance(generation, str) or not generation:
+            raise RuntimeError("board_join returned no generation_token")
+        self._generation_token = generation
+
+    async def call(
+        self, name: str, board_id: str, **arguments: Any
+    ) -> dict[str, Any]:
+        if name not in self.ALLOWED or self._client is None or self._decode is None:
+            raise RuntimeError("intake caller rejected a non-create tool")
+        payload = {"board_id": board_id, **arguments}
+        if self._generation_token is None:
+            result = await self._client.call_tool(name, payload)
+        else:
+            from pursers_client import GENERATION_META_KEY
+
+            result = await self._client.call_tool(
+                name,
+                payload,
+                meta={GENERATION_META_KEY: self._generation_token},
+            )
+        return self._decode(result)
 
 
 def _previous_payload(raw: Mapping[str, Any] | None) -> dict[str, Any]:
@@ -2712,22 +2750,31 @@ async def create_intake_ticket(
     """Create once using the ask-derived ticket id as the durable op-key."""
     from pursers_client import BoardClientError
 
+    async def create(client: IntakeCaller) -> dict[str, Any]:
+        return await client.call(
+            "ticket_create",
+            board_id,
+            agent_name=agent_name,
+            ticket_id=draft.ticket_id,
+            title=draft.title,
+            description=draft.description,
+            scope=draft.scope,
+            required_fields=list(draft.required_fields),
+            tags=["coordinator-intake", f"op:{draft.op_key}"],
+            target_url=draft.target_url,
+            unassigned=True,
+            coordinator_op_key=draft.op_key,
+        )
+
     try:
         async with IntakeCaller(url, token) as client:
-            result = await client.call(
-                "ticket_create",
-                board_id,
-                agent_name=agent_name,
-                ticket_id=draft.ticket_id,
-                title=draft.title,
-                description=draft.description,
-                scope=draft.scope,
-                required_fields=list(draft.required_fields),
-                tags=["coordinator-intake", f"op:{draft.op_key}"],
-                target_url=draft.target_url,
-                unassigned=True,
-                coordinator_op_key=draft.op_key,
-            )
+            try:
+                result = await create(client)
+            except Exception as exc:
+                if "stale or missing board generation" not in str(exc).lower():
+                    raise
+                await client.rejoin(board_id, agent_name)
+                result = await create(client)
     except BoardClientError as exc:
         if "ticket already exists" not in str(exc):
             raise
@@ -2845,7 +2892,7 @@ async def process_intakes(
                     "ask",
                     credential_rule,
                 )
-            if decision == "auto" and board_id in breakers:
+            if decision == "auto" and board_id in breakers and not ask.approved:
                 decision, rule = "ask", "create-breaker-draft-only"
             if decision == "auto" and recent_creates is None:
                 decision, rule = "ask", "incomplete-rate-history-draft-only"
@@ -2916,7 +2963,8 @@ async def process_intakes(
                 else:
                     continue
                 continue
-            failures[board_id] = 0
+            failures.pop(board_id, None)
+            breakers.discard(board_id)
             if recent_creates is not None:
                 recent_creates += 1
             findings.append(
