@@ -53,6 +53,20 @@ model-visible output and logs; on macOS, the subprocess is additionally denied
 read access to the configured secret files. The runtime never reviews or merges
 its own work.
 
+## Per-ticket worktrees
+
+For a registered Git project, the worker creates a dedicated worktree after it
+claims a ticket and checks out the board's integration ref on
+`api/<normalized-agent-name>-<normalized-ticket-suffix>`. The checkout lives at
+`<git-common-dir>/pursers-worktrees/<normalized-agent-name>-<normalized-ticket-id>`;
+registered non-Git directories are used directly instead.
+
+When ticket processing ends, submitted worktrees are removed. Clean
+unsubmitted worktrees are also removed, while dirty unsubmitted worktrees are
+retained for recovery. At startup, the worker resumes a single outstanding
+claim when possible, then sweeps its managed worktree directory: clean
+worktrees without an active claim are removed and dirty ones are retained.
+
 For API review, provision a dedicated board reviewer seat with a different
 principal/token from every worker, then set `seat.role = "reviewer"`. The
 reviewer discovers submitted tickets across all configured boards and never
