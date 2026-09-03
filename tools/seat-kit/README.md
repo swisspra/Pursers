@@ -42,6 +42,7 @@ get <TK>
 claim <TK>
 renew <TK>
 submit <TK> <summary> <notes> <files-csv>
+wait --since <cursor> [--timeout <seconds>] [--poll]
 ```
 
 Reviewer seats:
@@ -52,6 +53,7 @@ list-all
 get <TK>
 approve <TK> <notes>
 reject <TK> <notes> <fix>
+wait --submitted --since <cursor> [--timeout <seconds>] [--poll]
 ```
 
 `submit` keeps the worker active for review/retry. Include the model used and
@@ -59,15 +61,25 @@ real verification output in the notes required by the ticket.
 
 ## Wait verb
 
-Both worker and reviewer seats include a `wait` command:
+Worker seats include:
 
 ```text
 wait --since <cursor> [--timeout <seconds>] [--poll]
 ```
 
-Blocks until new work arrives using Central's `subscriptions/listen` mechanism
-via `BoardClient.events()`. The default path performs one long subscription
-wait on `board://<board>/journal` and never calls `ticket_list` during idle.
+Reviewer seats use the explicit submitted-work filter:
+
+```text
+wait --submitted --since <cursor> [--timeout <seconds>] [--poll]
+```
+
+The default path performs one long MCP 2026-07-28 `subscriptions/listen` wait
+through `BoardClient.events()` on the board journal and the seat's exact agent
+URI. It passes `acknowledge=False` and `touch=False`, so refetch cannot touch
+activity, acknowledge a cursor, renew/reap leases, or otherwise mutate Central.
+It never calls `ticket_list` while idle. A generated seat fails closed with a
+clear error when its installed `pursers_client` predates this approved pure
+subscription API.
 
 Returns a bounded JSON response:
 ```json
@@ -76,14 +88,26 @@ Returns a bounded JSON response:
 
 On `timed_out=true`, re-arm immediately by passing `--since <new_seq>`.
 
-**Poll fallback:** Pass `--poll` to enable a 2-second `board_catchup` loop.
-This is **not** the default — the default path uses subscriptions/listen only.
+**Poll fallback:** Pass `--poll` to explicitly select a 2-second
+`board_catchup(..., touch=False)` loop. Push mode never falls back to polling
+implicitly.
 
-**Timeout:** Default 270s (Goose profile). Derives from the `--client` profile:
-- `goose`: 300s host timeout → 270s block
-- `codex`: 230s → 200s
-- `claude`: 240s → 210s
-- `generic`: 180s → 150s
+**Timeout:** The generated default derives from `--client`:
+
+- `goose`: 300s host timeout -> 270s wait
+- `codex`: 620s configured tool timeout -> 560s wait
+- `claude`: 21,600s operational rotation -> 21,540s wait
+- `generic`: conservative 180s host timeout -> 150s wait
+
+For Goose's opt-in one-hour profile, put this exact line in the extension's
+`config.yaml`:
+
+```yaml
+timeout: 3600
+```
+
+Then run `board.sh wait --timeout 3540 --since <cursor>`. For Codex, configure
+`tool_timeout_sec = 620` before using its generated 560-second default.
 
 ## Relentless loop
 
@@ -94,7 +118,10 @@ The generated `AGENTS.md` and `.goosehints` contain the relentless loop:
 3. **UNDERSTAND** — `bin/board.sh get <TK>`.
 4. **DO** — Work. Renew every ~10 min with `bin/board.sh renew <TK>`.
 5. **SUBMIT** — `bin/board.sh submit <TK> <summary> <notes> <files-csv>`.
-6. **RE-ARM** — Return to WAIT. On timeout, re-arm with the returned cursor.
+6. **AWAIT REVIEW** — Keep the ticket slot occupied; on rejection, fix and
+   resubmit the same ticket.
+7. **RE-ARM** — Only after approval/closure, wait for the next ticket. On a
+   timeout, re-arm with the returned cursor.
 
 **Never** poll `bin/board.sh list` in a loop. The wait verb blocks on Central's
 subscriptions/listen, using zero model turns except the re-arm.
