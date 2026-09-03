@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 from urllib.parse import urlparse
 
 import uvicorn
@@ -972,11 +972,30 @@ class CentralBoard:
 
     def subscription_allowed(self, uri: str, principal_id: str) -> bool:
         parsed = urlparse(uri)
-        if parsed.scheme != "board" or not parsed.netloc:
+        if (
+            parsed.scheme != "board"
+            or not parsed.netloc
+            or parsed.params
+            or parsed.query
+            or parsed.fragment
+        ):
             return False
         try:
-            return self.principal_is_member(parsed.netloc, principal_id)
-        except ValueError:
+            board_id = require_id("board_id", parsed.netloc)
+            document = self.load(board_id)
+            self.resolve_board_context(document, principal_id)
+            if parsed.path == "/agent" or parsed.path.startswith("/agent/"):
+                segments = parsed.path.split("/")
+                if len(segments) != 3 or segments[:2] != ["", "agent"]:
+                    return False
+                requested_agent_id = require_id("agent_id", segments[2])
+                member = document.get("members", {}).get(requested_agent_id)
+                return bool(
+                    member
+                    and member.get("principal_id") == principal_id
+                )
+            return True
+        except (PermissionError, ValueError):
             return False
 
 
@@ -1213,6 +1232,14 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         else:
             pending.append((ctx, payload_ref))
             pending.append((ctx, journal_uri))
+        for agent_id in sorted(set(recipients)):
+            if not isinstance(agent_id, str) or not agent_id:
+                continue
+            seat_uri = f"board://{board_id}/agent/{agent_id}"
+            if pending is None:
+                await ctx.notify_resource_updated(seat_uri)
+            else:
+                pending.append((ctx, seat_uri))
         return event
 
     async def append_once_and_publish(
@@ -1252,6 +1279,14 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             else:
                 pending.append((ctx, payload_ref))
                 pending.append((ctx, journal_uri))
+            for agent_id in sorted(set(recipients)):
+                if not isinstance(agent_id, str) or not agent_id:
+                    continue
+                seat_uri = f"board://{board_id}/agent/{agent_id}"
+                if pending is None:
+                    await ctx.notify_resource_updated(seat_uri)
+                else:
+                    pending.append((ctx, seat_uri))
         return event, created
 
     async def publish_admission_event(
@@ -1590,6 +1625,45 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
 
     def ticket_recipients(document: dict[str, Any], actor: dict[str, Any]) -> list[str]:
         return service.admitted_agent_ids(document, actor["agent_id"])
+
+    def selected_ticket_recipients(
+        document: dict[str, Any],
+        actor: dict[str, Any],
+        candidate_ids: Iterable[str | None],
+    ) -> list[str]:
+        admitted = set(service.admitted_agent_ids(document, actor["agent_id"]))
+        return sorted(
+            candidate
+            for candidate in set(candidate_ids)
+            if isinstance(candidate, str) and candidate in admitted
+        )
+
+    def ticket_creation_recipients(
+        document: dict[str, Any], actor: dict[str, Any], ticket: dict[str, Any]
+    ) -> list[str]:
+        assigned_id = ticket.get("assigned_to_agent_id")
+        if isinstance(assigned_id, str):
+            return selected_ticket_recipients(document, actor, [assigned_id])
+        assigned_to = ticket.get("assigned_to")
+        assignment_kind = ticket.get("assigned_to_kind")
+        if isinstance(assigned_to, str) and assignment_kind in {
+            "agent_name",
+            "agent_platform",
+            "unresolved",
+        }:
+            field = (
+                "agent_platform"
+                if assignment_kind == "agent_platform"
+                else "agent_name"
+            )
+            requested = assigned_to.casefold()
+            matches = [
+                member.get("agent_id")
+                for member in document.get("members", {}).values()
+                if str(member.get(field, "")).casefold() == requested
+            ]
+            return selected_ticket_recipients(document, actor, matches)
+        return ticket_recipients(document, actor)
 
     def memory_recipients(
         document: dict[str, Any], actor: dict[str, Any], scope: str
@@ -3312,7 +3386,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             scrub_audit = record_scrub_allows(
                 document, actor, now, allow_counts
             )
-            recipients = ticket_recipients(document, actor)
+            recipients = ticket_creation_recipients(document, actor, ticket)
             return {
                 "actor": actor,
                 "ticket": copy.deepcopy(ticket),
@@ -4146,7 +4220,11 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 ):
                     ticket.pop(key, None)
             ticket["updated_at"] = iso_at(now)
-            recipients = ticket_recipients(document, actor)
+            recipients = selected_ticket_recipients(
+                document,
+                actor,
+                [submitted_by_agent_id, ticket.get("created_by_agent_id")],
+            )
             scrub_audit = record_scrub_allows(
                 document, actor, now, allow_counts
             )
@@ -5411,6 +5489,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         cursor: int | None = None,
         limit: int = 100,
         ack: bool = True,
+        touch: bool = True,
         max_events: int = DEFAULT_CATCHUP_MAX_EVENTS,
         max_bytes: int = DEFAULT_CATCHUP_MAX_BYTES,
         expected_generation: str | None = None,
@@ -5418,6 +5497,9 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         """Drain a byte- and event-bounded journal page.
 
         Optionally acknowledge only the cursor represented in this response.
+        ``touch=False`` is a pure wake-cue refetch: it does not update member
+        activity, reap or renew leases, acknowledge a cursor, or validate a
+        write generation. Visibility and response bounds remain unchanged.
         """
         board_id = require_id("board_id", board_id)
         agent_name = require_id("agent_name", agent_name)
@@ -5436,19 +5518,24 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 f"max_bytes must be between {MIN_CATCHUP_MAX_BYTES} and "
                 f"{MAX_CATCHUP_MAX_BYTES}"
             )
+        if type(touch) is not bool:
+            raise ValueError("touch must be a boolean")
         principal = current_principal()
         require_scope(principal, "board:read")
         document = service.load(board_id)
         actor = service.member(document, principal, agent_name)
+        acknowledged_cursor = service.cursors.get(
+            principal.principal_id, agent_name, board_id
+        )
         start = (
-            service.cursors.get(principal.principal_id, agent_name, board_id)
+            acknowledged_cursor
             if cursor is None else cursor
         )
         # Validate the caller-controlled page before any compatibility heartbeat.
         service.journal.read_after(board_id, start, limit)
         release_events: list[dict[str, Any]] = []
         renewed: list[str] = []
-        if "board:write" in principal.scopes:
+        if touch and "board:write" in principal.scopes:
             now = time.time()
 
             def prepare(document: dict[str, Any]) -> dict[str, Any]:
@@ -5554,7 +5641,8 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 "scan_count": len(page["events"]),
                 "effective_scan_count": effective_scan_count,
                 "visible_count": len(events),
-                "acknowledged_cursor": effective_cursor if ack else start,
+                "acknowledged_cursor": acknowledged_cursor,
+                "touched": touch,
                 "release_events": release_events,
                 "implicitly_renewed": renewed,
                 "total_counts": {
@@ -5591,7 +5679,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         if visible and not returned:
             raise ValueError("max_bytes is too small for one journal event")
 
-        if ack and not page["resync_required"]:
+        if touch and ack and not page["resync_required"]:
             service.validate_generation(board_id)
             result["acknowledged_cursor"] = service.cursors.ack(
                 principal.principal_id,

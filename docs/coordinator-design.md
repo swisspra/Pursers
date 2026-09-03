@@ -37,18 +37,26 @@ release another seat's unexpired claim, while `admin` is much broader than the
 job. Before phase 2, add a narrow coordinator/dispatcher capability or role
 that grants only the new assignment and nudge operations described below.
 
-Phase 1 should use the non-joining read path used by `fleet_snapshot`. The
-current wait bridge joins a seat and calls `board_catchup`; those calls update
-agent activity and can renew leases even with `ack=false`. Therefore they do
-not meet a literal "no board writes" phase-1 boundary. A pure journal read or
-read-only wake cue is a missing primitive. Until it exists, phase 1 polls pure
-snapshots and computes changes locally, without retaining a journal cursor or
-depending on catchup/resync behavior. It reads the registry through raw,
-non-joining `board_state_get(key="project_registry")`, equivalent to the
-`RawBoardReader` path behind `fleet_snapshot`. It must not start the wait bridge
-or call its `project_registry_get`, because bridge startup joins a home-board
-seat. Cursor-based catchup begins only in phase 2, which may use
+Phase 1 should use the non-joining read path used by `fleet_snapshot`.
+`board_catchup(..., touch=false)` is the side-effect-free journal refetch for
+subscribed seats: it preserves member activity, ticket leases, expired claims,
+and the persisted consumer cursor even when `ack=true`. The default
+`touch=true` behavior remains the compatibility path. Central does not reap a
+seat merely because it is silent on a subscription, so no separate agent
+heartbeat is required; a seat holding work keeps that work alive with the
+existing `lease_renew` tool at its TTL-derived cadence. Phase 1 still reads the
+registry through raw, non-joining
+`board_state_get(key="project_registry")`, equivalent to the `RawBoardReader`
+path behind `fleet_snapshot`, because starting the wait bridge joins a home
+board seat. Cursor-based catchup begins only in phase 2, which may use
 `a2a_wait(boards="registry")` with one cursor per board.
+
+Committed events continue to publish the board journal cue. Events with exact
+recipients also publish `board://<board>/agent/<agent_id>` after commit;
+assignment, nudge, and review-result recipients are narrowed to their target
+or ticket participants. Subscription authorization permits a principal to
+listen only to its own agent IDs, while the journal remains board-member
+scoped.
 
 ### Availability model
 
