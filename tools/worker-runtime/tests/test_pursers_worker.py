@@ -1144,6 +1144,25 @@ def test_session_log_runtime_session_fences_stale_review_state(
     assert not replacement.review_state_path.exists()
 
 
+def test_session_log_write_includes_ts_timestamp() -> None:
+    """Every SessionLog.write() call includes a 'ts' field that parses as UTC datetime."""
+    with tempfile.TemporaryDirectory(dir="/tmp") as raw:
+        log = worker_module.SessionLog(Path(raw) / "session.log")
+        log.write("test_event", detail="hello")
+        line = json.loads(log.path.read_text().splitlines()[-1])
+        assert "ts" in line, "ts field must be present"
+        ts = datetime.fromisoformat(line["ts"].rstrip("Z"))
+        assert ts.tzinfo is not None or line["ts"].endswith("Z"), (
+            "ts must be timezone-aware UTC"
+        )
+        # Verify it parses to a reasonable recent time
+        now = datetime.now(timezone.utc)
+        delta = now - ts.replace(tzinfo=timezone.utc) if ts.tzinfo is None else now - ts
+        assert 0 <= delta.total_seconds() < 60, (
+            f"ts {line['ts']} is not within the last 60 seconds"
+        )
+
+
 def test_reviewer_refuses_verdict_when_submission_changes_during_review() -> None:
     with tempfile.TemporaryDirectory(dir="/tmp") as raw:
         root = Path(raw)
