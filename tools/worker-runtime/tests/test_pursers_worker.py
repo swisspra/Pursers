@@ -359,44 +359,47 @@ def test_ticket_roles_extraction() -> None:
     assert worker_module.ticket_roles({}) == set()
     assert worker_module.ticket_roles({"tags": ["tier:light", "bug"]}) == set()
     assert worker_module.ticket_roles({"tags": ["role:frontend"]}) == {"frontend"}
-    assert worker_module.ticket_roles({"tags": ["ROLE:Backend", "role:API"]}) == {
-        "backend",
-        "api",
-    }
+    assert worker_module.ticket_roles(
+        {"tags": ["role:frontend", "role:backend-api"]}
+    ) == {"frontend", "backend-api"}
+    assert worker_module.ticket_roles(
+        {
+            "tags": [
+                "role:",
+                "ROLE:frontend",
+                "role:Frontend",
+                "role:bad_slug",
+                "role:-docs",
+                "role:docs-",
+                7,
+            ]
+        }
+    ) == set()
 
 
 def test_role_based_claim_routing() -> None:
     with tempfile.TemporaryDirectory(dir="/tmp") as raw:
         root = Path(raw)
-        generalist = config(root, "http://unused")  # roles=() empty
+        generalist = config(root, "http://unused")
         frontend = config(root, "http://unused", roles=("frontend",))
         fullstack = config(root, "http://unused", roles=("frontend", "backend"))
 
-        # 1. Untagged ticket: claimable by everyone
         untagged = {"status": "open", "tags": ["tier:standard"]}
-        assert (
-            worker_module.claim_priority(generalist, untagged, "AI-worker-one") == 1
-        )
-        assert (
-            worker_module.claim_priority(frontend, untagged, "AI-worker-one") == 2
-        )
-        assert (
-            worker_module.claim_priority(fullstack, untagged, "AI-worker-one") == 2
-        )
+        assert worker_module.claim_priority(generalist, untagged, "AI-worker-one") == 1
+        assert worker_module.claim_priority(frontend, untagged, "AI-worker-one") == 2
+        assert worker_module.claim_priority(fullstack, untagged, "AI-worker-one") == 2
 
-        # 2. Generalist (empty roles) claims EVERYTHING, including role-tagged tickets
         fe_ticket = {"status": "open", "tags": ["role:frontend", "tier:standard"]}
-        assert (
-            worker_module.claim_priority(generalist, fe_ticket, "AI-worker-one") == 1
-        )
-
-        # 3. Specialist matches
+        assert worker_module.claim_priority(generalist, fe_ticket, "AI-worker-one") == 1
         assert (
             worker_module.claim_priority(frontend, fe_ticket, "AI-worker-one") == 1
         )
+        assert (
+            worker_module.claim_priority(fullstack, fe_ticket, "AI-worker-one") == 1
+        )
 
-        # 4. Specialist mismatch
         be_ticket = {"status": "open", "tags": ["role:backend", "tier:standard"]}
+        assert worker_module.claim_priority(generalist, be_ticket, "AI-worker-one") == 1
         assert (
             worker_module.claim_priority(frontend, be_ticket, "AI-worker-one") is None
         )
@@ -404,7 +407,6 @@ def test_role_based_claim_routing() -> None:
             worker_module.claim_priority(fullstack, be_ticket, "AI-worker-one") == 1
         )
 
-        # 5. Multi-tag intersect
         hybrid_ticket = {
             "status": "open",
             "tags": ["role:frontend", "role:docs", "tier:standard"],
@@ -418,41 +420,39 @@ def test_role_based_claim_routing() -> None:
             == 1
         )
 
-        # 6. Tier + Role combined gate
         heavy_fe_ticket = {"status": "open", "tags": ["role:frontend", "tier:heavy"]}
-        light_frontend = config(root, "http://unused", max_tier="light", roles=("frontend",))
+        light_frontend = config(
+            root, "http://unused", max_tier="light", roles=("frontend",)
+        )
         assert (
             worker_module.claim_priority(light_frontend, heavy_fe_ticket, "AI-worker-one")
             is None
         )
 
-        # 7. Assigned-to-me with role mismatch: assigned wins (role guard checked first)
-        assigned_mismatch_fe = {
+        assigned_fe_ticket = {
             "status": "open",
             "tags": ["role:frontend", "tier:standard"],
             "assigned_to_agent_id": "AI-worker-one",
         }
-        assigned_mismatch_be = {
-            "status": "open",
-            "tags": ["role:backend", "tier:standard"],
-            "assigned_to_agent_id": "AI-worker-one",
-        }
-        # Match: priority 0
         assert (
-            worker_module.claim_priority(frontend, assigned_mismatch_fe, "AI-worker-one")
+            worker_module.claim_priority(frontend, assigned_fe_ticket, "AI-worker-one")
             == 0
         )
-        # Mismatch: None (role guard fires before assignment check)
         assert (
-            worker_module.claim_priority(frontend, assigned_mismatch_be, "AI-worker-one")
+            worker_module.claim_priority(
+                config(root, "http://unused", roles=("backend",)),
+                assigned_fe_ticket,
+                "AI-worker-one",
+            )
             is None
         )
-
-        # 8. Reviewer mode ignores role tags
-        reviewer = config(root, "http://unused", role="reviewer")
         assert (
-            worker_module.claim_priority(reviewer, fe_ticket, "AI-worker-one") == 1
+            worker_module.claim_priority(generalist, assigned_fe_ticket, "AI-worker-one")
+            == 0
         )
+
+        reviewer = config(root, "http://unused", role="reviewer")
+        assert worker_module.claim_priority(reviewer, fe_ticket, "AI-worker-one") == 1
 
 
 def test_absent_tier_defaults_to_standard_and_assigned_only_is_enforced() -> None:
@@ -930,6 +930,7 @@ def test_config_requires_mode_0600_and_never_accepts_inline_keys() -> None:
         assert loaded.require_assigned_only is False
         assert loaded.role == "worker"
         assert loaded.max_reviews_per_hour == 12
+        assert loaded.roles == ()
 
         document = json.loads(path.read_text())
         document["claim"] = {
@@ -963,6 +964,97 @@ def test_config_requires_mode_0600_and_never_accepts_inline_keys() -> None:
         path.chmod(0o600)
         with pytest.raises(ValueError, match="inline"):
             worker_module.load_config(path)
+
+
+def _write_roles_config(root: Path, roles: Any, *, suffix: str = ".json") -> Path:
+    token = root / "roles-token"
+    token.write_text("TOKEN_PRIVATE")
+    token.chmod(0o600)
+    path = root / f"roles{suffix}"
+    if suffix == ".json":
+        document = {
+            "seat": {
+                "agent_name": "worker-one",
+                "central_url": "https://central.invalid/mcp",
+                "token_file": str(token),
+            },
+            "boards": "registry",
+            "claim": {"roles": roles},
+            "llm": {
+                "base_url": "http://proxy.invalid/v1",
+                "api_key_env": "PROXY_KEY",
+                "model": "model-one",
+            },
+        }
+        path.write_text(json.dumps(document))
+    else:
+        path.write_text(
+            "\n".join(
+                (
+                    'boards = "registry"',
+                    "[seat]",
+                    'agent_name = "worker-one"',
+                    'central_url = "https://central.invalid/mcp"',
+                    f"token_file = {json.dumps(str(token))}",
+                    "[claim]",
+                    f"roles = {json.dumps(roles)}",
+                    "[llm]",
+                    'base_url = "http://proxy.invalid/v1"',
+                    'api_key_env = "PROXY_KEY"',
+                    'model = "model-one"',
+                )
+            )
+        )
+    path.chmod(0o600)
+    return path
+
+
+def test_claim_roles_parse_from_json_and_toml() -> None:
+    with tempfile.TemporaryDirectory(dir="/tmp") as raw:
+        root = Path(raw)
+        json_config = _write_roles_config(
+            root, ["frontend", "backend", "frontend"]
+        )
+        toml_config = _write_roles_config(
+            root, ["docs", "backend-api"], suffix=".toml"
+        )
+
+        assert worker_module.load_config(json_config).roles == (
+            "frontend",
+            "backend",
+        )
+        assert worker_module.load_config(toml_config).roles == (
+            "docs",
+            "backend-api",
+        )
+
+
+@pytest.mark.parametrize(
+    "roles",
+    ["frontend", None, [1], ["Frontend"], ["front_end"], [""], ["frontend-"]],
+)
+def test_claim_roles_reject_invalid_values(roles: Any) -> None:
+    with tempfile.TemporaryDirectory(dir="/tmp") as raw:
+        path = _write_roles_config(Path(raw), roles)
+
+        with pytest.raises(ValueError, match="claim.roles"):
+            worker_module.load_config(path)
+
+
+def test_empty_claim_roles_is_generalist_for_role_tagged_ticket() -> None:
+    with tempfile.TemporaryDirectory(dir="/tmp") as raw:
+        root = Path(raw)
+        selected = worker_module.load_config(_write_roles_config(root, []))
+
+        assert selected.roles == ()
+        assert (
+            worker_module.claim_priority(
+                selected,
+                {"status": "open", "tags": ["role:frontend", "tier:standard"]},
+                "AI-worker-one",
+            )
+            == 1
+        )
 
 
 def test_static_directive_prefix_is_byte_identical_across_tickets() -> None:

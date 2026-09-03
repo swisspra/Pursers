@@ -48,10 +48,11 @@ The model receives the static worker directive first, then board context, then
 the dynamic ticket. `claim.roles` are optional role slugs (e.g. `frontend`,
 `backend`). A specialist seat claims only untagged tickets or tickets whose
 `role:` tags intersect its configured roles. A generalist (empty `claim.roles`)
-claims only untagged tickets. Tickets with `role:` tags unseen by a specialist
-seat are skipped. Priority among claimable tickets: assigned > role-match >
-untagged. Reviewer mode ignores role tags. Available tools are bounded file reads/writes, timeboxed
-shell commands jailed to the registry work directory, submit, and give-up.
+retains the original behavior and claims every tier-eligible ticket. Tickets
+with valid `role:` tags unseen by a specialist seat are skipped. Priority among
+claimable tickets is assigned > role-match > untagged; tier limits still apply.
+Reviewer mode ignores role tags. Available tools are bounded file reads/writes,
+timeboxed shell commands jailed to the registry work directory, submit, and give-up.
 Commands (not their output) are recorded in a mode-`0600` local session log.
 The shell receives a non-secret environment with `HOME` and `TMPDIR` reset to
 the assigned work directory. Configured token/key values are redacted from

@@ -54,6 +54,7 @@ MAX_SEEN_SUBMISSIONS = 2_048
 REVIEW_STATE_SUFFIX = ".review-state.json"
 LEASE_INTERVAL_S = 20.0
 TIER_ORDER = {"light": 0, "standard": 1, "heavy": 2}
+ROLE_SLUG_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 SHELL_ENV_ALLOWLIST = (
     "LANG",
     "LC_ALL",
@@ -137,22 +138,12 @@ def load_config(path: str | Path) -> Config:
     if type(require_assigned_only) is not bool:
         raise ValueError("claim.require_assigned_only must be a boolean")
     roles_raw = claim.get("roles", [])
-    if not isinstance(roles_raw, (list, tuple)):
+    if not isinstance(roles_raw, list) or not all(
+        isinstance(item, str) and ROLE_SLUG_RE.fullmatch(item)
+        for item in roles_raw
+    ):
         raise ValueError("claim.roles must be a list of lowercase slug strings")
-    roles_list: list[str] = []
-    for item in roles_raw:
-        if not isinstance(item, str) or not item.strip():
-            raise ValueError(
-                "claim.roles entries must be non-empty strings"
-            )
-        slug = item.strip().lower()
-        if not slug.isidentifier() or slug != item.strip():
-            raise ValueError(
-                f"claim.roles entry {item!r} is not a valid lowercase slug"
-            )
-        if slug not in roles_list:
-            roles_list.append(slug)
-    roles = tuple(roles_list)
+    roles = tuple(dict.fromkeys(roles_raw))
     review = document.get("review", {})
     if not isinstance(review, dict):
         raise ValueError("review must be an object")
@@ -241,16 +232,18 @@ def ticket_tier(ticket: dict[str, Any]) -> str:
 
 
 def ticket_roles(ticket: dict[str, Any]) -> set[str]:
-    """Return the set of role: slugs from ticket tags."""
+    """Return valid role slugs, ignoring malformed ticket tags."""
     tags = ticket.get("tags")
     if not isinstance(tags, (list, tuple)):
         return set()
-    return {
-        tag.split(":", 1)[1].strip().lower()
-        for tag in tags
-        if isinstance(tag, str) and ":" in tag
-        and tag.split(":", 1)[0].strip().lower() == "role"
-    }
+    roles = set()
+    for tag in tags:
+        if not isinstance(tag, str) or not tag.startswith("role:"):
+            continue
+        role = tag.removeprefix("role:")
+        if ROLE_SLUG_RE.fullmatch(role):
+            roles.add(role)
+    return roles
 
 
 def claim_priority(config: Config, ticket: dict[str, Any], agent_id: str) -> int | None:
@@ -260,14 +253,10 @@ def claim_priority(config: Config, ticket: dict[str, Any], agent_id: str) -> int
     if TIER_ORDER[ticket_tier(ticket)] > TIER_ORDER[config.max_tier]:
         return None
 
-    # Role guard: if ticket has role: tags and seat has declared roles,
-    # the seat must have at least one matching role to claim it.
-    # Generalist seat (config.roles empty) claims everything.
-    # Reviewer mode ignores role tags.
     t_roles = ticket_roles(ticket)
-    if config.role != "reviewer" and config.roles:
-        if t_roles and not (set(config.roles) & t_roles):
-            return None
+    role_match = bool(set(config.roles) & t_roles)
+    if config.role != "reviewer" and config.roles and t_roles and not role_match:
+        return None
 
     assigned_id = ticket.get("assigned_to_agent_id")
     assigned_to = ticket.get("assigned_to")
@@ -281,8 +270,7 @@ def claim_priority(config: Config, ticket: dict[str, Any], agent_id: str) -> int
     else:
         if config.require_assigned_only:
             return None
-        # Priority: assigned (0) > role-match (1) > untagged (2)
-        if t_roles and config.roles and set(config.roles) & t_roles:
+        if role_match:
             return 1
         return 1 if not config.roles else 2
 
