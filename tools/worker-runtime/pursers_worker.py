@@ -7,6 +7,7 @@ import argparse
 import asyncio
 import datetime
 import hashlib
+import inspect
 import json
 import os
 import re
@@ -53,6 +54,22 @@ MAX_REVIEW_FIELD = 5_000
 MAX_SEEN_SUBMISSIONS = 2_048
 REVIEW_STATE_SUFFIX = ".review-state.json"
 LEASE_INTERVAL_S = 20.0
+DEFAULT_WAIT_TIMEOUT_S = 21_600
+WAIT_HOST_PROFILES = frozenset(
+    {
+        "codex",
+        "codex-cli",
+        "goose",
+        "claude-code",
+        "claude-desktop",
+        "headless",
+    }
+)
+PUSH_WAIT_DEPENDENCY_ERROR = (
+    "subscription-first wait requires the merged Central/client and wait-bridge "
+    "push-wait foundations; set PURSERS_WAIT_MODE=poll only as an explicit "
+    "compatibility fallback"
+)
 TIER_ORDER = {"light": 0, "standard": 1, "heavy": 2}
 ROLE_SLUG_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 SHELL_ENV_ALLOWLIST = (
@@ -91,6 +108,8 @@ class Config:
     role: str = "worker"
     max_reviews_per_hour: int = 12
     roles: tuple[str, ...] = ()
+    wait_timeout_s: int = DEFAULT_WAIT_TIMEOUT_S
+    wait_host_profile: str = "headless"
 
 
 def _private_file(path: Path, label: str) -> Path:
@@ -150,6 +169,18 @@ def load_config(path: str | Path) -> Config:
     max_reviews_per_hour = review.get("max_reviews_per_hour", 12)
     if type(max_reviews_per_hour) is not int or max_reviews_per_hour < 1:
         raise ValueError("review.max_reviews_per_hour must be a positive integer")
+    wait = document.get("wait", {})
+    if not isinstance(wait, dict):
+        raise ValueError("wait must be an object")
+    wait_timeout_s = wait.get("timeout_s", DEFAULT_WAIT_TIMEOUT_S)
+    if type(wait_timeout_s) is not int or wait_timeout_s < 1:
+        raise ValueError("wait.timeout_s must be a positive integer")
+    wait_host_profile = wait.get("host_profile", "headless")
+    if wait_host_profile not in WAIT_HOST_PROFILES:
+        raise ValueError(
+            "wait.host_profile must be codex, codex-cli, goose, claude-code, "
+            "claude-desktop, or headless"
+        )
     boards_raw = document.get("boards", "registry")
     if boards_raw == "registry":
         boards: str | tuple[str, ...] = "registry"
@@ -215,6 +246,8 @@ def load_config(path: str | Path) -> Config:
         role=role,
         max_reviews_per_hour=max_reviews_per_hour,
         roles=roles,
+        wait_timeout_s=wait_timeout_s,
+        wait_host_profile=wait_host_profile,
     )
 
 
@@ -691,6 +724,8 @@ class BoardAPI(Protocol):
 class PursersBoardAPI:
     def __init__(self, config: Config, token: str) -> None:
         self.config = config
+        os.environ["PURSERS_HOST"] = config.wait_host_profile
+        os.environ["PURSERS_HOST_TIMEOUT_S"] = str(config.wait_timeout_s)
         self.client = BoardClient(
             config.central_url,
             token,
@@ -699,6 +734,24 @@ class PursersBoardAPI:
         )
         self.registry: dict[str, Any] | None = None
         self.views: dict[str, Any] = {}
+
+    @staticmethod
+    def _push_wait_ready() -> bool:
+        """Require the public, side-effect-free client/bridge foundation."""
+        try:
+            event_parameters = inspect.signature(BoardClient.events).parameters
+        except (TypeError, ValueError):
+            return False
+        return (
+            wait_bridge.WAIT_MODE == "push"
+            and callable(getattr(wait_bridge, "host_block_limit_s", None))
+            and {
+                "resource_subscriptions",
+                "acknowledge",
+                "touch",
+                "cursor_callback",
+            }.issubset(event_parameters)
+        )
 
     async def __aenter__(self) -> PursersBoardAPI:
         await self.client.__aenter__()
@@ -734,11 +787,14 @@ class PursersBoardAPI:
         return view
 
     async def wait(self, cursors: dict[str, int]) -> dict[str, Any]:
+        if os.environ.get("PURSERS_WAIT_MODE", "").strip().lower() != "poll":
+            if not self._push_wait_ready():
+                raise RuntimeError(PUSH_WAIT_DEPENDENCY_ERROR)
         return await wait_bridge._wait_for_work_many(
             self.client,
             boards=await self._boards(),
             since_seq=cursors,
-            timeout_s=180,
+            timeout_s=self.config.wait_timeout_s,
             only_mine=False,
             agent_name=self.config.agent_name,
             task_focus=(
@@ -1858,8 +1914,6 @@ class Worker:
                                 error=type(exc).__name__,
                             )
                 break
-            if not candidates:
-                await asyncio.sleep(1)
 
 
 class Reviewer:
@@ -2191,7 +2245,7 @@ class Reviewer:
 
     async def _wait_or_stop(
         self, cursors: dict[str, int]
-    ) -> tuple[dict[str, int], bool]:
+    ) -> tuple[dict[str, Any] | None, bool]:
         board_wait = asyncio.create_task(self.board.wait(cursors))
         shutdown = asyncio.create_task(self.stop.wait())
         try:
@@ -2199,14 +2253,53 @@ class Reviewer:
                 (board_wait, shutdown), return_when=asyncio.FIRST_COMPLETED
             )
             if shutdown in done:
-                return cursors, True
-            waited = board_wait.result()
-            return dict(waited.get("new_seq", cursors)), False
+                return None, True
+            return board_wait.result(), False
         finally:
             for task in (board_wait, shutdown):
                 if not task.done():
                     task.cancel()
             await asyncio.gather(board_wait, shutdown, return_exceptions=True)
+
+    @staticmethod
+    def _resync_required(waited: dict[str, Any]) -> bool:
+        resynced = waited.get("resynced")
+        if isinstance(resynced, dict):
+            return any(bool(value) for value in resynced.values())
+        return bool(resynced or waited.get("resync_required"))
+
+    async def _submitted_from_cues(
+        self, waited: dict[str, Any]
+    ) -> list[tuple[str, dict[str, Any]]]:
+        candidates: list[tuple[str, dict[str, Any]]] = []
+        seen: set[tuple[str, str]] = set()
+        for event in waited.get("events", []):
+            if not isinstance(event, dict):
+                continue
+            if not (
+                event.get("status_to") == "submitted"
+                or event.get("kind") in {"ticket_submitted", "review_requested"}
+            ):
+                continue
+            board_id = str(event.get("board_id") or "")
+            ticket_id = str(event.get("ticket_id") or "")
+            key = (board_id, ticket_id)
+            if not board_id or not ticket_id or key in seen:
+                continue
+            seen.add(key)
+            try:
+                ticket = await self.board.ticket(board_id, ticket_id)
+            except Exception as exc:
+                self.log.write(
+                    "submitted_cue_read_failed",
+                    board_id=board_id,
+                    ticket_id=ticket_id,
+                    error=type(exc).__name__,
+                )
+                continue
+            if ticket.get("status") == "submitted":
+                candidates.append((board_id, ticket))
+        return candidates
 
     async def run(self) -> None:
         cursors: dict[str, int] = {}
@@ -2217,17 +2310,14 @@ class Reviewer:
             await self.worktrees.sweep(work_specs, active_claims)
         except Exception as exc:
             self.log.write("worktree_sweep_failed", error=type(exc).__name__)
+        pending: deque[tuple[str, dict[str, Any]]] = deque()
+        try:
+            pending.extend(await self.board.submitted())
+        except Exception as exc:
+            self.log.write("submitted_discovery_failed", error=type(exc).__name__)
         while not self.stop.is_set():
-            try:
-                candidates = await self.board.submitted()
-            except Exception as exc:
-                self.log.write("submitted_discovery_failed", error=type(exc).__name__)
-                cursors, stopped = await self._wait_or_stop(cursors)
-                if stopped:
-                    break
-                continue
-            selected = False
-            for board_id, listed_ticket in candidates:
+            while pending and not self.stop.is_set():
+                board_id, listed_ticket = pending.popleft()
                 ticket_id = str(listed_ticket.get("ticket_id", ""))
                 latest = _latest_submission(listed_ticket)
                 submission_key = (
@@ -2277,8 +2367,8 @@ class Reviewer:
                         )
                     except TimeoutError:
                         pass
-                    selected = True
-                    break
+                    pending.appendleft((board_id, listed_ticket))
+                    continue
                 session: WorktreeSession | None = None
                 try:
                     source_dir = await self.board.work_dir(board_id)
@@ -2310,12 +2400,21 @@ class Reviewer:
                                 error=type(exc).__name__,
                             )
                 self._remember_submission(submission_key)
-                selected = True
+            if self.stop.is_set():
                 break
-            if not selected:
-                cursors, stopped = await self._wait_or_stop(cursors)
-                if stopped:
-                    break
+            waited, stopped = await self._wait_or_stop(cursors)
+            if stopped or waited is None:
+                break
+            cursors = dict(waited.get("new_seq", cursors))
+            if self._resync_required(waited):
+                try:
+                    pending.extend(await self.board.submitted())
+                except Exception as exc:
+                    self.log.write(
+                        "submitted_discovery_failed", error=type(exc).__name__
+                    )
+            else:
+                pending.extend(await self._submitted_from_cues(waited))
 
 
 async def async_main(config_path: Path) -> None:

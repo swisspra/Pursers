@@ -594,6 +594,10 @@ def test_fresh_light_api_advertises_before_idle_wait_and_blocks_heavy_dispatch()
             )
             all_pending = True
             with (
+                patch.dict(
+                    worker_module.os.environ,
+                    {"PURSERS_WAIT_MODE": "poll"},
+                ),
                 patch.object(worker_module.wait_bridge, "WAIT_MODE", "poll"),
                 patch.object(
                     worker_module.wait_bridge, "DEFAULT_POLL_INTERVAL_S", 0.01
@@ -655,6 +659,84 @@ def test_fresh_light_api_advertises_before_idle_wait_and_blocks_heavy_dispatch()
         coordinator.plan_actions(snapshot, {"alpha": {"drop_history": []}}, {}, now)
         == []
     )
+
+
+def test_board_api_passes_configured_wait_timeout_when_push_foundation_is_ready(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    selected = replace(
+        config(tmp_path, "http://unused"),
+        boards=("alpha",),
+        wait_timeout_s=43_200,
+        wait_host_profile="headless",
+    )
+    captured: dict[str, Any] = {}
+
+    async def fake_boards() -> list[str]:
+        return ["alpha"]
+
+    async def fake_wait(_client: Any, **kwargs: Any) -> dict[str, Any]:
+        captured.update(kwargs)
+        return {"new_seq": {"alpha": 9}, "events": [], "timed_out": True}
+
+    monkeypatch.delenv("PURSERS_WAIT_MODE", raising=False)
+    monkeypatch.setattr(
+        worker_module.PursersBoardAPI,
+        "_push_wait_ready",
+        staticmethod(lambda: True),
+    )
+    monkeypatch.setattr(worker_module.wait_bridge, "_wait_for_work_many", fake_wait)
+    api = worker_module.PursersBoardAPI(selected, "TOKEN_PLACEHOLDER")
+    monkeypatch.setattr(api, "_boards", fake_boards)
+
+    result = asyncio.run(api.wait({"alpha": 5}))
+
+    assert worker_module.os.environ["PURSERS_HOST"] == "headless"
+    assert worker_module.os.environ["PURSERS_HOST_TIMEOUT_S"] == "43200"
+    assert captured["timeout_s"] == 43_200
+    assert captured["since_seq"] == {"alpha": 5}
+    assert captured["boards"] == ["alpha"]
+    assert result["timed_out"] is True
+
+
+def test_board_api_default_wait_fails_closed_without_push_foundation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    selected = replace(config(tmp_path, "http://unused"), boards=("alpha",))
+    monkeypatch.delenv("PURSERS_WAIT_MODE", raising=False)
+    monkeypatch.setattr(
+        worker_module.PursersBoardAPI,
+        "_push_wait_ready",
+        staticmethod(lambda: False),
+    )
+    api = worker_module.PursersBoardAPI(selected, "TOKEN_PLACEHOLDER")
+
+    with pytest.raises(RuntimeError, match="merged Central/client"):
+        asyncio.run(api.wait({"alpha": 5}))
+
+
+def test_board_api_explicit_poll_fallback_is_still_available(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    selected = replace(config(tmp_path, "http://unused"), boards=("alpha",))
+    captured: dict[str, Any] = {}
+
+    async def fake_boards() -> list[str]:
+        return ["alpha"]
+
+    async def fake_wait(_client: Any, **kwargs: Any) -> dict[str, Any]:
+        captured.update(kwargs)
+        return {"new_seq": {"alpha": 6}, "events": [], "timed_out": True}
+
+    monkeypatch.setenv("PURSERS_WAIT_MODE", "poll")
+    monkeypatch.setattr(worker_module.wait_bridge, "_wait_for_work_many", fake_wait)
+    api = worker_module.PursersBoardAPI(selected, "TOKEN_PLACEHOLDER")
+    monkeypatch.setattr(api, "_boards", fake_boards)
+
+    result = asyncio.run(api.wait({"alpha": 5}))
+
+    assert captured["timeout_s"] == selected.wait_timeout_s
+    assert result["new_seq"] == {"alpha": 6}
 
 
 def test_assigned_ticket_is_claimed_before_earlier_unassigned_ticket() -> None:
@@ -721,6 +803,114 @@ def test_stop_interrupts_blocked_board_wait() -> None:
         asyncio.run(exercise())
 
         assert board.wait_cancelled is True
+
+
+@pytest.mark.parametrize("role", ["worker", "reviewer"])
+def test_ten_minute_idle_window_has_no_central_calls_beyond_subscription(
+    role: str,
+) -> None:
+    class IdleBoard(FakeBoard):
+        def __init__(self) -> None:
+            super().__init__()
+            self.wait_started = asyncio.Event()
+            self.idle_calls: list[str] = []
+            self.in_idle_window = False
+            self.simulated_elapsed_s = 0
+
+        def record(self, name: str) -> None:
+            if self.in_idle_window:
+                self.idle_calls.append(name)
+
+        async def wait(self, _cursors: dict[str, int]) -> dict[str, Any]:
+            self.in_idle_window = True
+            self.wait_started.set()
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                raise
+
+        async def submitted(self) -> list[tuple[str, dict[str, Any]]]:
+            self.record("ticket_list_submitted")
+            return []
+
+        async def ticket_list(
+            self, board_id: str, **kwargs: Any
+        ) -> list[dict[str, Any]]:
+            self.record("ticket_list")
+            return await super().ticket_list(board_id, **kwargs)
+
+        async def ticket(self, board_id: str, ticket_id: str) -> dict[str, Any]:
+            self.record("ticket_get")
+            return await super().ticket(board_id, ticket_id)
+
+        async def renew(self, board_id: str, ticket_id: str) -> None:
+            self.record("lease_renew")
+            await super().renew(board_id, ticket_id)
+
+    with tempfile.TemporaryDirectory(dir="/tmp") as raw:
+        root = Path(raw)
+        board = IdleBoard()
+        selected = config(root, "http://unused", role=role)
+        log = worker_module.SessionLog(selected.log_file)
+        runtime: Any
+        if role == "reviewer":
+            runtime = worker_module.Reviewer(
+                selected, board, object(), log, directive="STATIC REVIEWER"
+            )
+        else:
+            runtime = worker_module.Worker(
+                selected, board, object(), log, directive="STATIC WORKER"
+            )
+
+        async def exercise() -> None:
+            running = asyncio.create_task(runtime.run())
+            await asyncio.wait_for(board.wait_started.wait(), timeout=1)
+            board.simulated_elapsed_s = 600
+            await asyncio.sleep(0)
+            runtime.stop.set()
+            await asyncio.wait_for(running, timeout=1)
+
+        asyncio.run(exercise())
+
+        assert board.simulated_elapsed_s == 600
+        assert board.idle_calls == []
+
+
+def test_worker_rearms_immediately_after_empty_wait_result() -> None:
+    class RearmBoard(FakeBoard):
+        def __init__(self) -> None:
+            super().__init__()
+            self.wait_calls = 0
+            self.rearmed = asyncio.Event()
+
+        async def wait(self, _cursors: dict[str, int]) -> dict[str, Any]:
+            self.wait_calls += 1
+            if self.wait_calls == 1:
+                return {"new_seq": {"board-one": 7}, "events": []}
+            self.rearmed.set()
+            await asyncio.Future()
+
+    with tempfile.TemporaryDirectory(dir="/tmp") as raw:
+        root = Path(raw)
+        board = RearmBoard()
+        selected = config(root, "http://unused")
+        worker = worker_module.Worker(
+            selected,
+            board,
+            object(),
+            worker_module.SessionLog(selected.log_file),
+            directive="STATIC WORKER",
+        )
+
+        async def exercise() -> None:
+            running = asyncio.create_task(worker.run())
+            await asyncio.wait_for(board.rearmed.wait(), timeout=0.2)
+            worker.stop.set()
+            await asyncio.wait_for(running, timeout=1)
+
+        asyncio.run(exercise())
+
+        assert board.wait_calls == 2
 
 
 def test_path_escape_rejected_then_give_up_releases_claim() -> None:
@@ -931,6 +1121,8 @@ def test_config_requires_mode_0600_and_never_accepts_inline_keys() -> None:
         assert loaded.role == "worker"
         assert loaded.max_reviews_per_hour == 12
         assert loaded.roles == ()
+        assert loaded.wait_host_profile == "headless"
+        assert loaded.wait_timeout_s == 21_600
 
         document = json.loads(path.read_text())
         document["claim"] = {
@@ -942,6 +1134,13 @@ def test_config_requires_mode_0600_and_never_accepts_inline_keys() -> None:
         loaded = worker_module.load_config(path)
         assert loaded.max_tier == "light"
         assert loaded.require_assigned_only is True
+
+        document["wait"] = {"host_profile": "headless", "timeout_s": 43_200}
+        path.write_text(json.dumps(document))
+        path.chmod(0o600)
+        loaded = worker_module.load_config(path)
+        assert loaded.wait_host_profile == "headless"
+        assert loaded.wait_timeout_s == 43_200
 
         document["seat"]["role"] = "reviewer"
         document["review"] = {"max_reviews_per_hour": 7}
@@ -963,6 +1162,45 @@ def test_config_requires_mode_0600_and_never_accepts_inline_keys() -> None:
         path.write_text(json.dumps(document))
         path.chmod(0o600)
         with pytest.raises(ValueError, match="inline"):
+            worker_module.load_config(path)
+
+
+@pytest.mark.parametrize(
+    ("wait", "message"),
+    [
+        ([], "wait must be an object"),
+        ({"timeout_s": 0}, "wait.timeout_s"),
+        ({"timeout_s": True}, "wait.timeout_s"),
+        ({"host_profile": "desktop"}, "wait.host_profile"),
+    ],
+)
+def test_wait_config_rejects_invalid_values(wait: Any, message: str) -> None:
+    with tempfile.TemporaryDirectory(dir="/tmp") as raw:
+        root = Path(raw)
+        token = root / "token"
+        token.write_text("TOKEN_PRIVATE")
+        token.chmod(0o600)
+        path = root / "worker.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "seat": {
+                        "agent_name": "worker-one",
+                        "central_url": "https://central.invalid/mcp",
+                        "token_file": str(token),
+                    },
+                    "wait": wait,
+                    "llm": {
+                        "base_url": "http://proxy.invalid/v1",
+                        "api_key_env": "PROXY_KEY",
+                        "model": "model-one",
+                    },
+                }
+            )
+        )
+        path.chmod(0o600)
+
+        with pytest.raises(ValueError, match=message):
             worker_module.load_config(path)
 
 
@@ -1654,6 +1892,159 @@ def test_submitted_ticket_discovery_spans_all_configured_boards() -> None:
             == beta.calls
             == [{"status": "submitted", "include_closed": False, "limit": 100}]
         )
+
+
+def test_reviewer_scans_once_then_reads_only_submitted_cues() -> None:
+    class CueBoard(FakeBoard):
+        def __init__(self) -> None:
+            super().__init__()
+            self.submitted_calls = 0
+            self.wait_calls = 0
+            self.ticket_reads: list[str] = []
+
+        async def submitted(self) -> list[tuple[str, dict[str, Any]]]:
+            self.submitted_calls += 1
+            return []
+
+        async def wait(self, _cursors: dict[str, int]) -> dict[str, Any]:
+            self.wait_calls += 1
+            if self.wait_calls == 1:
+                return {
+                    "new_seq": {"board-one": 1},
+                    "events": [
+                        {
+                            "board_id": "board-one",
+                            "ticket_id": "TK-ignore",
+                            "kind": "ticket_created",
+                            "status_to": "open",
+                        }
+                    ],
+                    "resynced": {"board-one": False},
+                }
+            return {
+                "new_seq": {"board-one": 2},
+                "events": [
+                    {
+                        "board_id": "board-one",
+                        "ticket_id": "TK-review",
+                        "kind": "ticket_status_changed",
+                        "status_to": "submitted",
+                    }
+                ],
+                "resynced": {"board-one": False},
+            }
+
+        async def ticket(self, board_id: str, ticket_id: str) -> dict[str, Any]:
+            self.ticket_reads.append(ticket_id)
+            return await super().ticket(board_id, ticket_id)
+
+        async def review(self, *args: Any, **kwargs: Any) -> None:
+            await super().review(*args, **kwargs)
+            reviewer.stop.set()
+
+    class ApprovingLLM:
+        async def complete(self, *_args: Any) -> dict[str, Any]:
+            return tool_call(
+                "approve",
+                "submit_review",
+                {"verdict": "approve", "review_notes": "Cue revision verified."},
+            )
+
+    with tempfile.TemporaryDirectory(dir="/tmp") as raw:
+        root = Path(raw)
+        board = CueBoard()
+        board.work = root
+        board.tickets["TK-review"] = {
+            "ticket_id": "TK-review",
+            "status": "submitted",
+            "tags": ["tier:light"],
+            "submitted_at": "submission-1",
+            "submitted_by_principal_id": "PR-worker",
+            "submission_history": [
+                {
+                    "submitted_at": "submission-1",
+                    "submitted_by_principal_id": "PR-worker",
+                }
+            ],
+        }
+        selected = config(root, "http://unused", role="reviewer")
+        reviewer = worker_module.Reviewer(
+            selected,
+            board,
+            ApprovingLLM(),
+            worker_module.SessionLog(selected.log_file),
+            directive="STATIC REVIEWER",
+        )
+
+        asyncio.run(asyncio.wait_for(reviewer.run(), timeout=1))
+
+        assert board.submitted_calls == 1
+        assert board.wait_calls == 2
+        assert "TK-ignore" not in board.ticket_reads
+        assert board.reviews[0]["verdict"] == "approve"
+
+
+def test_reviewer_resync_triggers_one_full_submitted_scan() -> None:
+    class ResyncBoard(FakeBoard):
+        def __init__(self) -> None:
+            super().__init__()
+            self.submitted_calls = 0
+
+        async def submitted(self) -> list[tuple[str, dict[str, Any]]]:
+            self.submitted_calls += 1
+            if self.submitted_calls == 1:
+                return []
+            return [("board-one", self.tickets["TK-review"])]
+
+        async def wait(self, _cursors: dict[str, int]) -> dict[str, Any]:
+            return {
+                "new_seq": {"board-one": 10},
+                "events": [],
+                "resynced": {"board-one": True},
+            }
+
+        async def review(self, *args: Any, **kwargs: Any) -> None:
+            await super().review(*args, **kwargs)
+            reviewer.stop.set()
+
+    class ApprovingLLM:
+        async def complete(self, *_args: Any) -> dict[str, Any]:
+            return tool_call(
+                "approve",
+                "submit_review",
+                {"verdict": "approve", "review_notes": "Resync revision verified."},
+            )
+
+    with tempfile.TemporaryDirectory(dir="/tmp") as raw:
+        root = Path(raw)
+        board = ResyncBoard()
+        board.work = root
+        board.tickets["TK-review"] = {
+            "ticket_id": "TK-review",
+            "status": "submitted",
+            "tags": ["tier:light"],
+            "submitted_at": "submission-1",
+            "submitted_by_principal_id": "PR-worker",
+            "submission_history": [
+                {
+                    "submitted_at": "submission-1",
+                    "submitted_by_principal_id": "PR-worker",
+                }
+            ],
+        }
+        selected = config(root, "http://unused", role="reviewer")
+        reviewer = worker_module.Reviewer(
+            selected,
+            board,
+            ApprovingLLM(),
+            worker_module.SessionLog(selected.log_file),
+            directive="STATIC REVIEWER",
+        )
+
+        asyncio.run(asyncio.wait_for(reviewer.run(), timeout=1))
+
+        assert board.submitted_calls == 2
+        assert board.reviews[0]["verdict"] == "approve"
 
 
 def test_scratch_board_worker_reject_resubmit_approve_e2e() -> None:
