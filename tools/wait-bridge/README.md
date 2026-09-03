@@ -1,10 +1,12 @@
 # Pursers wait bridge
 
 `pursers_wait_server.py` is a stdio MCP server that exposes blocking
-`a2a_wait` and parsed registry lookup through `project_registry_get`. Polling
-is the default. An opt-in MCP v2 push mode uses
-`subscriptions/listen` on the stable `board://<board>/journal` cue only to wake
-the bridge, then refetches and filters the same journal events as polling.
+`a2a_wait` and parsed registry lookup through `project_registry_get`. MCP v2
+`subscriptions/listen` is the default; `PURSERS_WAIT_MODE=poll` is an explicit
+compatibility fallback. Push subscribes to `board://<board>/journal` plus the
+per-seat URI, then uses `BoardClient.events()` for reconnect/dedup and an
+authoritative catchup. A Central with `board_catchup(touch=False)` gets a pure
+refetch; older Centrals fall back loudly to `ack=False` for that deployment.
 Keep it on stdio; wrapping it in an HTTP transport adds request timeouts that
 defeat the wait behavior.
 
@@ -28,7 +30,9 @@ SHA-256 `1a0981ec6cc47aed8eeb5e8f488bef260ab6b5fd5c7c88e2cd99604654103e1a`.
 | `ONBOARD_BOARD_ID` | no | Board ID; defaults to `pursers`. |
 | `ONBOARD_AGENT_NAME` | no | Base board identity; defaults to `pursers-wait-bridge`. |
 | `ONBOARD_AGENT_INSTANCE` | no | Stable per-instance suffix, such as `window-a`. |
-| `PURSERS_WAIT_MODE` | no | `poll` (default) or dark-launch `push`; in multi-board calls, a subscription error falls back to polling only for that board. |
+| `PURSERS_WAIT_MODE` | no | `push` (default) or explicit compatibility `poll`; a subscription error polls only that board for the current call and push is retried on re-arm. |
+| `PURSERS_HOST` | no | `codex` (default), `codex-cli`, `goose`, `claude-code`, `claude-desktop`, or `headless`; selects the safe call ceiling. |
+| `PURSERS_HOST_TIMEOUT_S` | no | Explicit host/runner deadline in seconds; overrides the named profile. |
 
 With no `ONBOARD_AGENT_INSTANCE`, the effective name is exactly
 `ONBOARD_AGENT_NAME`, preserving the single-instance behavior. When the value
@@ -97,10 +101,12 @@ re-arm. Each board keeps its own cursor, generation token, deterministic agent
 ID, filtering, and entry backlog scan. Events always carry `board_id`.
 Invite-required boards that the bearer cannot access are skipped. In push
 mode, each accessible board subscribes independently to
-`board://<board_id>/journal`; a cue refetches only its board, while a failed
-subscription degrades only that board to polling. Heartbeats scan each board
-but renew a lease only on the board where the exact derived agent ID holds the
-claim.
+`board://<board_id>/journal` and `board://<board_id>/agent/<agent_id>`; an
+authoritative event advances only its board, while a failed subscription
+degrades only that board to polling for the current call. The entry backlog
+scan also snapshots leases held by the exact derived agent ID. During the live
+wait there is no discovery poll: only those ticket IDs receive `lease_renew`,
+at `min(300s, ttl/3)`.
 
 ## Project registry
 
@@ -340,12 +346,26 @@ immediately. Every event is a cue to refetch and claim current board state.
 The bridge renews held leases only while `a2a_wait` is blocking; long-running
 work must call Central's `lease_renew` directly.
 
-For a per-call identity, heartbeat lookup first uses the name and then
-exact-filters `claimed_by_agent_id`. This prevents substring matches such as
-`session-a` and `session-a-2` from crossing over. Central authorizes
-`lease_renew` at principal scope, not per agent identity, so this exact ticket
-selection prevents accidental renewals by the bridge but is not a server-side
-identity-isolation guarantee.
+The requested `timeout_s` is capped at `host_timeout - margin`, where
+`margin=min(60,max(30,ceil(10% of host_timeout)))`; Claude Desktop uses at
+least 40s. Defaults are Codex/Codex CLI 620s/560s, Goose 300s/270s, Claude
+Desktop 240s/200s, and Claude Code/headless 21,600s/21,540s. A normal timeout
+returns `timed_out=true`; re-arm immediately with the returned cursor. Claude
+Code receives a progress notification every 300s so its 30-minute stdio idle
+timer does not cancel a healthy long wait. Progress never extends the hard
+deadline.
+
+For a per-call identity, the entry snapshot exact-filters
+`claimed_by_agent_id`. This prevents substring matches such as `session-a` and
+`session-a-2` from crossing over. Central authorizes `lease_renew` at principal
+scope, not per agent identity, so exact ticket selection prevents accidental
+renewals by the bridge but is not a server-side identity-isolation guarantee.
+
+`bridge-stats.json` schema 3 keeps old bridge-to-Central request/response bytes
+under `days` and legacy poll samples under `poll_cycles`. Model-visible cost is
+separate under `model_wait`: per-seat UTC-hour counts of `a2a_wait` returns and
+the exact serialized result bytes inserted into model context. The fleet
+dashboard shows current-hour returns/bytes and 24-hour cue/timeout outcomes.
 
 Run the bridge tests with:
 

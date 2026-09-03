@@ -63,7 +63,8 @@ project-filtered worker.
 Run this loop continuously. Each pass is one unit of work:
 
 1. **WAIT** — call `a2a_wait(since_seq=<last>, project="<your-project>")`. It
-   blocks until a claimable ticket for your project appears, then returns it.
+   opens a subscription-first wait until a claimable ticket for your project
+   appears, then returns it. `PURSERS_WAIT_MODE=poll` is compatibility-only.
    - If it returns `timed_out=true`, no work arrived — **re-arm immediately**:
      call `a2a_wait` again with `since_seq` set to the returned `new_seq`. Keep
      re-arming. This is how you stay available for hours without a human poking
@@ -77,11 +78,10 @@ Run this loop continuously. Each pass is one unit of work:
 3. **UNDERSTAND** — read the ticket and any linked memories/briefing. If it was
    rejected before, read the fix instructions and address them.
 4. **DO** — perform the work in your project directory via the file-editing MCP.
-   **Renew your own claim during long work.** The wait bridge's heartbeat only
-   fires while you are *inside* an `a2a_wait` call — it does **not** run while
-   you are working. If a task runs longer than the claim TTL, call `lease_renew`
-   on your ticket periodically, or the reaper can reclaim it and hand it to
-   another worker mid-flight.
+   **Renew your own claim during long work.** If `a2a_wait` starts while this
+   identity already holds a ticket, the bridge renews that entry-snapshot lease
+   at `min(300s, ttl/3)` without polling for claims. It does **not** run while
+   you are executing work outside `a2a_wait`; call `lease_renew` yourself then.
 5. **SUBMIT** — `ticket_submit` with a clear, honest summary and the evidence
    the ticket's `required_fields` ask for. State what you did, what you
    verified, and anything you could not complete. Do not claim success you did
@@ -118,9 +118,14 @@ Run this loop continuously. Each pass is one unit of work:
 - **Connectors per seat:** `pursers-dev` (board, mcp-remote, HTTP) +
   `pursers-wait-bridge` (a2a_wait, **stdio only — never behind mcp-remote**) +
   a file-editing MCP scoped to the project directory. All three share the same
-  stable `ONBOARD_AGENT_NAME`. Set the host's tool-call timeout to
-  **`tool_timeout_sec = 230`** for the wait-bridge connector — the tool blocks
-  up to ~200s and needs headroom to return before the host cancels it.
+  stable `ONBOARD_AGENT_NAME`. Set `PURSERS_HOST` to `codex`, `codex-cli`,
+  `goose`, `claude-code`, `claude-desktop`, or `headless`. Codex seats should
+  set **`tool_timeout_sec = 620`**; their bridge ceiling is 560s. Existing
+  230s/200s seats remain safe when callers request 200s. Goose defaults to
+  300s/270s, Claude Desktop to 240s/200s, and Claude Code/headless to a 6h/21,540s
+  operational rotation. `PURSERS_HOST_TIMEOUT_S` overrides the host deadline;
+  the bridge applies `min(60,max(30,ceil(10%)))` margin (40s minimum for Claude
+  Desktop). Claude Code receives MCP progress every five minutes.
 - **Reviewer:** decide per deployment — a human reviewing through the board, or
   a dedicated reviewer seat with its **own separate principal/token**. Never the
   worker itself, and never the worker's token.

@@ -106,7 +106,7 @@ class BridgeStatsTests(unittest.TestCase):
         self.record("board_catchup", 100, 300)
 
         document = json.loads(self.path.read_text(encoding="utf-8"))
-        self.assertEqual(document["schema_version"], 2)
+        self.assertEqual(document["schema_version"], 3)
         seat = next(iter(document["days"]["2030-01-01"]["seats"].values()))
         self.assertEqual(seat["request_bytes"], 100)
         self.assertEqual(seat["response_bytes"], 300)
@@ -143,13 +143,31 @@ class BridgeStatsTests(unittest.TestCase):
             asyncio.run(cycle(index))
 
         document = json.loads(self.path.read_text(encoding="utf-8"))
-        self.assertEqual(document["schema_version"], 2)
+        self.assertEqual(document["schema_version"], 3)
         seat = next(iter(document["poll_cycles"].values()))
         self.assertEqual(seat["latest_response_bytes"], 348)
         self.assertEqual(len(seat["samples"]), wait_server.POLL_SAMPLE_LIMIT)
         self.assertEqual(seat["samples"][0]["response_bytes"], 302)
         self.assertEqual(seat["samples"][-1]["response_bytes"], 348)
         self.assertNotIn("9999", json.dumps(seat))
+
+    def test_model_wait_counts_returns_and_exact_payload_bytes_per_hour(self) -> None:
+        result = {
+            "new_seq": 7,
+            "events": [],
+            "waited_s": 180.0,
+            "timed_out": True,
+            "resynced": False,
+        }
+        asyncio.run(
+            self.stats.record_wait_return("board-one", "worker-one", result)
+        )
+        document = json.loads(self.path.read_text(encoding="utf-8"))
+        seat = next(iter(document["model_wait"].values()))
+        bucket = seat["hours"]["2030-01-01T12:00:00Z"]
+        self.assertEqual(bucket["returns"], 1)
+        self.assertEqual(bucket["outcomes"], {"timeout": 1})
+        self.assertEqual(bucket["response_bytes"], wait_server._meter_bytes(result))
 
 
 if __name__ == "__main__":

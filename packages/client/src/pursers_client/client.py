@@ -6,7 +6,7 @@ import asyncio
 import json
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
-from typing import Any, AsyncIterator, Iterable
+from typing import Any, AsyncIterator, Callable, Iterable
 
 import httpx2
 from mcp import Client
@@ -656,6 +656,7 @@ class BoardClient:
         agent_name: str | None = None,
         max_events: int | None = None,
         max_bytes: int | None = None,
+        touch: bool | None = None,
     ) -> dict[str, Any]:
         arguments: dict[str, Any] = {
             "agent_name": self.agent_name if agent_name is None else agent_name,
@@ -667,6 +668,8 @@ class BoardClient:
             arguments["max_events"] = max_events
         if max_bytes is not None:
             arguments["max_bytes"] = max_bytes
+        if touch is not None:
+            arguments["touch"] = touch
         result = await self._call("board_catchup", arguments)
         for event in result.get("events", []):
             payload_ref = event.get("payload_ref")
@@ -787,11 +790,22 @@ class BoardClient:
         *,
         kinds: frozenset[str],
         only_mine: bool,
+        acknowledge: bool = True,
+        touch: bool | None = None,
+        cursor_callback: Callable[[int], None] | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         while True:
+            catchup_arguments: dict[str, Any] = {
+                "agent_name": self.agent_name,
+                "cursor": cursor,
+                "limit": 100,
+                "ack": False,
+            }
+            if touch is not None:
+                catchup_arguments["touch"] = touch
             page = await self._call_with(
                 client, "board_catchup",
-                {"agent_name": self.agent_name, "cursor": cursor, "limit": 100, "ack": False},
+                catchup_arguments,
             )
             start = page["next_cursor"] - page["scan_count"]
             for event in page["events"]:
@@ -804,12 +818,14 @@ class BoardClient:
                         client, event, kinds=kinds, only_mine=only_mine
                     ):
                         yield event
-            if page["scan_count"]:
+            if acknowledge and page["scan_count"]:
                 await self._call_with(
                     client, "board_catchup",
                     {"agent_name": self.agent_name, "cursor": start, "limit": page["scan_count"], "ack": True},
                 )
             cursor = page["next_cursor"]
+            if cursor_callback is not None:
+                cursor_callback(int(cursor))
             if not page["has_more"]:
                 return
 
@@ -854,14 +870,34 @@ class BoardClient:
         *,
         only_mine: bool = True,
         kinds: Iterable[str] | None = None,
+        resource_subscriptions: Iterable[str] | None = None,
+        acknowledge: bool = True,
+        touch: bool | None = None,
+        cursor_callback: Callable[[int], None] | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
-        """Open live first, drain/dedup, then reconnect and drain after stream loss."""
+        """Open live first, drain/dedup, then reconnect and drain after stream loss.
+
+        ``resource_subscriptions`` lets callers select stable cue URIs without
+        running cold discovery. ``acknowledge=False`` keeps cursor ownership
+        call-local; ``touch=False`` is forwarded to Centrals that implement the
+        side-effect-free catchup contract.
+        """
         seen: set[str] = set()
         initial_cursor = from_cursor
+        cursor_state = [from_cursor]
+
+        def remember_cursor(value: int) -> None:
+            cursor_state[0] = value
+            if cursor_callback is not None:
+                cursor_callback(value)
+
         selected_kinds = frozenset(kinds) if kinds is not None else DEFAULT_EVENT_KINDS
         unknown = selected_kinds - KNOWN_EVENT_KINDS
         if unknown:
             raise ValueError(f"unknown event kinds: {sorted(unknown)}")
+        explicit_uris = tuple(resource_subscriptions or ())
+        for uri in explicit_uris:
+            self.watch_resource(str(uri))
         if not self._watched_uris:
             await self.cold_discover()
         while True:
@@ -891,9 +927,12 @@ class BoardClient:
                                 initial_cursor,
                                 kinds=selected_kinds,
                                 only_mine=only_mine,
+                                acknowledge=acknowledge,
+                                touch=touch,
+                                cursor_callback=remember_cursor,
                             ):
                                 yield event
-                            initial_cursor = None
+                            initial_cursor = None if acknowledge else cursor_state[0]
                             async for _cue in subscription:
                                 while self._local_events:
                                     local = self._local_events.pop(0)
@@ -903,6 +942,9 @@ class BoardClient:
                                     seen,
                                     kinds=selected_kinds,
                                     only_mine=only_mine,
+                                    acknowledge=acknowledge,
+                                    touch=touch,
+                                    cursor_callback=remember_cursor,
                                 ):
                                     yield event
             except BaseException as exc:

@@ -1424,6 +1424,46 @@ def test_overhead_uses_inclusive_seven_utc_calendar_days() -> None:
     assert result["seats"][0]["seven_day_bytes"] == 400
 
 
+def test_overhead_projects_model_visible_wait_cost_separately() -> None:
+    document = {
+        "schema_version": 3,
+        "days": {},
+        "poll_cycles": {},
+        "model_wait": {
+            "seat": {
+                "board_id": "board",
+                "agent_name": "worker",
+                "hours": {
+                    "2030-01-10T12:00:00Z": {
+                        "returns": 2,
+                        "response_bytes": 800,
+                        "outcomes": {"cue": 1, "timeout": 1},
+                    }
+                },
+            }
+        },
+    }
+    with tempfile.TemporaryDirectory() as raw:
+        path = Path(raw) / "stats.json"
+        path.write_text(json.dumps(document), encoding="utf-8")
+        result = dashboard.read_overhead_stats(
+            path, now=datetime(2030, 1, 10, 12, 30, tzinfo=timezone.utc)
+        )
+
+    assert result["model_wait"] == [
+        {
+            "board_id": "board",
+            "agent_name": "worker",
+            "returns_per_hour": 2,
+            "context_bytes_per_hour": 800,
+            "estimated_tokens_per_hour": 200,
+            "last_24h_returns": 2,
+            "last_24h_context_bytes": 800,
+            "outcomes": {"cue": 1, "timeout": 1},
+        }
+    ]
+
+
 def test_session_pressure_thresholds_trend_and_worst_first_sorting() -> None:
     def cycle(board: str, agent: str, latest_bytes: int, samples: list[int]) -> dict:
         return {

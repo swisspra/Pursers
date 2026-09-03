@@ -313,23 +313,23 @@ class RegistryDoctorTests(unittest.TestCase):
                 check = rows(self.report(backend, stats_path=path))["bridge-stats"]
                 self.assertEqual(check["status"], "WARN")
 
-    def test_bridge_stats_v2_is_healthy(self) -> None:
-        backend = self.backend()
-        path = self.root / "v2-stats.json"
-        path.write_text(
-            json.dumps(
-                {
-                    "schema_version": 2,
+    def test_supported_bridge_stats_schemas_are_healthy(self) -> None:
+        for schema_version in (2, 3):
+            with self.subTest(schema_version=schema_version):
+                backend = self.backend()
+                path = self.root / f"v{schema_version}-stats.json"
+                document = {
+                    "schema_version": schema_version,
                     "days": {"2030-01-08": {"seats": {}}},
                     "poll_cycles": {},
                 }
-            ),
-            encoding="utf-8",
-        )
+                if schema_version == 3:
+                    document["model_wait"] = {}
+                path.write_text(json.dumps(document), encoding="utf-8")
 
-        check = rows(self.report(backend, stats_path=path))["bridge-stats"]
+                check = rows(self.report(backend, stats_path=path))["bridge-stats"]
 
-        self.assertEqual(check["status"], "PASS")
+                self.assertEqual(check["status"], "PASS")
 
     def test_exit_code_aggregates_worst_status(self) -> None:
         checks = [

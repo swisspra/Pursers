@@ -175,7 +175,7 @@ class PerCallWaitTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.join_calls, [])
         self.assertEqual(client.catchup_calls, [None])
 
-    async def test_heartbeat_filters_substring_matches_by_exact_agent_id(self) -> None:
+    async def test_lease_snapshot_filters_substring_matches_by_exact_agent_id(self) -> None:
         client = FakeClient()
         mine = wait_server._derived_agent_id("PR-shared", "purser-codex")
         sibling = wait_server._derived_agent_id("PR-shared", "purser-codex-2")
@@ -198,7 +198,20 @@ class PerCallWaitTests(unittest.IsolatedAsyncioTestCase):
 
         client.ticket_list = ticket_list  # type: ignore[method-assign]
 
-        await wait_server._heartbeat(client, "purser-codex", mine)
+        held: dict[str, float] = {}
+        await wait_server._scan_open_backlog(
+            client,
+            mine,
+            True,
+            None,
+            held,
+        )
+        await wait_server._renew_due_leases(
+            client,
+            held,
+            {ticket_id: 0.0 for ticket_id in held},
+            1.0,
+        )
 
         self.assertEqual(client.renewed, ["TK-mine"])
 

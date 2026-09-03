@@ -1077,6 +1077,7 @@ def read_overhead_stats(
         "pressure_thresholds": pressure_thresholds,
         "sessions": [],
         "seats": [],
+        "model_wait": [],
         "bounds": {
             "days": OVERHEAD_DAYS,
             "seats": MAX_OVERHEAD_SEATS,
@@ -1092,7 +1093,7 @@ def read_overhead_stats(
         return empty
     except (OSError, UnicodeError, ValueError):
         return {**empty, "source_status": "malformed"}
-    if not isinstance(document, dict) or document.get("schema_version") not in {1, 2}:
+    if not isinstance(document, dict) or document.get("schema_version") not in {1, 2, 3}:
         return {**empty, "source_status": "malformed"}
     raw_days = document.get("days")
     if not isinstance(raw_days, dict):
@@ -1180,6 +1181,68 @@ def read_overhead_stats(
         key=lambda item: (-item["today_bytes"], item["board_id"], item["agent_name"])
     )
 
+    model_wait_rows = []
+    raw_model_wait = document.get("model_wait")
+    raw_model_wait = raw_model_wait if isinstance(raw_model_wait, dict) else {}
+    current_hour = current.replace(minute=0, second=0, microsecond=0)
+    window_start = current - timedelta(hours=24)
+    for raw in raw_model_wait.values():
+        if not isinstance(raw, dict):
+            continue
+        board_id = raw.get("board_id")
+        agent_name = raw.get("agent_name")
+        hours = raw.get("hours")
+        if (
+            not isinstance(board_id, str)
+            or not board_id
+            or not isinstance(agent_name, str)
+            or not agent_name
+            or not isinstance(hours, dict)
+        ):
+            continue
+        per_hour_returns = 0
+        per_hour_bytes = 0
+        last_24h_returns = 0
+        last_24h_bytes = 0
+        outcomes: dict[str, int] = {}
+        for hour, bucket in hours.items():
+            parsed = _parse_time(hour)
+            if parsed is None or not isinstance(bucket, dict):
+                continue
+            returns = _nonnegative_int(bucket.get("returns"))
+            response_bytes = _nonnegative_int(bucket.get("response_bytes"))
+            if parsed == current_hour:
+                per_hour_returns += returns
+                per_hour_bytes += response_bytes
+            if window_start <= parsed <= current:
+                last_24h_returns += returns
+                last_24h_bytes += response_bytes
+                raw_outcomes = bucket.get("outcomes")
+                if isinstance(raw_outcomes, dict):
+                    for name, count in raw_outcomes.items():
+                        if isinstance(name, str):
+                            outcomes[name] = outcomes.get(name, 0) + _nonnegative_int(count)
+        model_wait_rows.append(
+            {
+                "board_id": _clip(board_id, MAX_LABEL_CHARS),
+                "agent_name": _clip(agent_name, MAX_LABEL_CHARS),
+                "returns_per_hour": per_hour_returns,
+                "context_bytes_per_hour": per_hour_bytes,
+                "estimated_tokens_per_hour": (per_hour_bytes + 3) // 4,
+                "last_24h_returns": last_24h_returns,
+                "last_24h_context_bytes": last_24h_bytes,
+                "outcomes": outcomes,
+            }
+        )
+    model_wait_rows.sort(
+        key=lambda item: (
+            -item["returns_per_hour"],
+            -item["context_bytes_per_hour"],
+            item["board_id"],
+            item["agent_name"],
+        )
+    )
+
     sessions = []
     raw_cycles = document.get("poll_cycles")
     raw_cycles = raw_cycles if isinstance(raw_cycles, dict) else {}
@@ -1265,6 +1328,7 @@ def read_overhead_stats(
         "source_status": "ok",
         "sessions": sessions[:MAX_OVERHEAD_SEATS],
         "seats": rows[:MAX_OVERHEAD_SEATS],
+        "model_wait": model_wait_rows[:MAX_OVERHEAD_SEATS],
         "truncated_sessions": max(0, len(sessions) - MAX_OVERHEAD_SEATS),
         "truncated_seats": max(0, len(rows) - MAX_OVERHEAD_SEATS),
     }
@@ -1274,6 +1338,8 @@ def read_overhead_stats(
     while len(_json_bytes(result)) > API_MAX_BYTES and result["sessions"]:
         result["sessions"].pop()
         result["truncated_sessions"] += 1
+    while len(_json_bytes(result)) > API_MAX_BYTES and result["model_wait"]:
+        result["model_wait"].pop()
     return result
 
 
@@ -2918,7 +2984,7 @@ function renderFleet(){document.querySelector('#central-sections').innerHTML=cen
 const legacyRenderCentralAgentsV1=renderCentral;
 renderCentral=function(d){const base=legacyRenderCentralAgentsV1({...d,agents:[]}),marker='<section class="card pool"><h2>Agent pool · ',start=base.lastIndexOf(marker);if(start<0)return base;const central=d.central,agents=visibleAgents((d.agents||[]).filter(a=>matches([a.agent_name,a.pool_status,...(a.boards||[])],filterNeedle))),pool=`<section class="card pool"><div class="section-title"><h2>Agent pool · ${esc(central)}</h2>${agentVisibilityToggle()}</div>${agents.length?agents.map(a=>`<details class="agent" data-state-key="${esc(`agent:${central}:${a.agent_name}`)}"><summary><b>${esc(a.agent_name)}${a.duplicate_name?' <span class="warning">duplicate name</span>':''}</b>${agentStateSummary(central,a)}<span>${esc((a.boards||[]).join(', '))}</span><span class="meta">${esc(relativeAge(a.last_seen))}</span></summary><div class="agent-body table-scroll"><table><thead><tr><th>Project</th><th>Role</th><th>Current claim</th><th>Last seen</th></tr></thead><tbody>${(a.seats||[]).map(seat=>`<tr><td><a href="${boardHref(central,seat.board_id)}">${esc(seat.project)}</a><div class="meta">${esc(seat.board_id)}</div></td><td>${esc(seat.role||'—')}</td><td>${seat.current_ticket_id?agentTicketLink(central,seat):'<span class="meta">ว่าง/idle</span>'}</td><td>${esc(relativeAge(seat.last_seen))}</td></tr>`).join('')}</tbody></table></div></details>`).join(''):`<p class="empty">${showStaleAgents?'No agents match the filter.':'No active agents match the filter.'}</p>`}</section>`;return`${base.slice(0,start)}${pool}</section>`}
 function pressureBadge(s){const label=s.pressure==='compact'?'COMPACT':s.pressure;return `<span class="status pressure-${esc(s.pressure)}" title="${esc(s.next_action)}">${esc(label)}</span>`}
-function renderOverhead(d){const sessions=d.sessions||[],cumulative=d.seats||[];document.querySelector('#detail-view').innerHTML=`<a class="back" href="#/">← All centrals</a><div class="top"><div><h2>Session context pressure · ${esc(d.central)}</h2><p class="muted">One question: is this session's board context bloating; should we compact?</p></div></div><section class="card pool">${sessions.length?`<div class="table-scroll"><table aria-label="Session context pressure"><thead><tr><th>Seat</th><th>Board</th><th>Est. tokens / poll</th><th>Trend vs median</th><th>Pressure</th></tr></thead><tbody>${sessions.map(s=>`<tr><td><b>${esc(s.agent_name)}</b><div class="meta">sampled ${esc(fmt(s.latest_at))}</div></td><td>${esc(s.board_id)}</td><td>${esc(s.latest_estimated_tokens)}</td><td>${esc(s.trend)} ${s.trend_ratio===null?'—':`${esc(s.trend_ratio)}×`}<div class="meta">24-sample median ≈ ${esc(s.median_estimated_tokens)} tokens · ${esc(s.sample_count)} samples</div></td><td>${pressureBadge(s)}<div class="meta">${esc(s.next_action)}</div></td></tr>`).join('')}</tbody></table></div>`:`<p class="empty">No session pressure samples yet — context pressure is calm (${esc(d.source_status)}).</p>`}</section><details class="card pool" data-state-key="overhead-details:${esc(d.central)}"><summary>Cumulative protocol details</summary>${cumulative.length?`<div class="table-scroll"><table><thead><tr><th>Seat</th><th>Today</th><th>7-day</th><th>Top tools by bytes</th></tr></thead><tbody>${cumulative.map(s=>`<tr><td><b>${esc(s.agent_name)}</b><div class="meta">${esc(s.board_id)}</div></td><td>${esc(s.today_bytes)} B<div class="meta">≈ ${esc(s.today_estimated_tokens)} tokens · ${esc(s.today_calls)} calls</div></td><td>${esc(s.seven_day_bytes)} B<div class="meta">≈ ${esc(s.seven_day_estimated_tokens)} tokens · ${esc(s.seven_day_calls)} calls</div></td><td class="overhead-tools">${s.top_tools.map(t=>`${esc(t.tool)}: ${esc(t.bytes)} B`).join(' · ')||'—'}</td></tr>`).join('')}</tbody></table></div>`:`<p class="empty">No cumulative debug stats.</p>`}</details>`;bindInteractive(document.querySelector('#detail-view'))}
+function renderOverhead(d){const sessions=d.sessions||[],model=d.model_wait||[],cumulative=d.seats||[];document.querySelector('#detail-view').innerHTML=`<a class="back" href="#/">← All centrals</a><div class="top"><div><h2>Session context pressure · ${esc(d.central)}</h2><p class="muted">Model-visible wait cost is separated from bridge-to-Central diagnostics.</p></div></div><section class="card pool"><h3>Model-visible a2a_wait cost</h3>${model.length?`<div class="table-scroll"><table aria-label="Model-visible wait cost"><thead><tr><th>Seat</th><th>Returns this hour</th><th>Context this hour</th><th>24-hour outcomes</th></tr></thead><tbody>${model.map(s=>`<tr><td><b>${esc(s.agent_name)}</b><div class="meta">${esc(s.board_id)}</div></td><td>${esc(s.returns_per_hour)}</td><td>${esc(s.context_bytes_per_hour)} B<div class="meta">≈ ${esc(s.estimated_tokens_per_hour)} tokens</div></td><td>${esc(JSON.stringify(s.outcomes||{}))}<div class="meta">${esc(s.last_24h_returns)} returns · ${esc(s.last_24h_context_bytes)} B</div></td></tr>`).join('')}</tbody></table></div>`:`<p class="empty">No model-visible wait returns yet.</p>`}</section><section class="card pool">${sessions.length?`<div class="table-scroll"><table aria-label="Session context pressure"><thead><tr><th>Seat</th><th>Board</th><th>Est. tokens / poll</th><th>Trend vs median</th><th>Pressure</th></tr></thead><tbody>${sessions.map(s=>`<tr><td><b>${esc(s.agent_name)}</b><div class="meta">sampled ${esc(fmt(s.latest_at))}</div></td><td>${esc(s.board_id)}</td><td>${esc(s.latest_estimated_tokens)}</td><td>${esc(s.trend)} ${s.trend_ratio===null?'—':`${esc(s.trend_ratio)}×`}<div class="meta">24-sample median ≈ ${esc(s.median_estimated_tokens)} tokens · ${esc(s.sample_count)} samples</div></td><td>${pressureBadge(s)}<div class="meta">${esc(s.next_action)}</div></td></tr>`).join('')}</tbody></table></div>`:`<p class="empty">No session pressure samples yet — context pressure is calm (${esc(d.source_status)}).</p>`}</section><details class="card pool" data-state-key="overhead-details:${esc(d.central)}"><summary>Bridge-to-Central diagnostic details</summary>${cumulative.length?`<div class="table-scroll"><table><thead><tr><th>Seat</th><th>Today</th><th>7-day</th><th>Top tools by bytes</th></tr></thead><tbody>${cumulative.map(s=>`<tr><td><b>${esc(s.agent_name)}</b><div class="meta">${esc(s.board_id)}</div></td><td>${esc(s.today_bytes)} B<div class="meta">≈ ${esc(s.today_estimated_tokens)} tokens · ${esc(s.today_calls)} calls</div></td><td>${esc(s.seven_day_bytes)} B<div class="meta">≈ ${esc(s.seven_day_estimated_tokens)} tokens · ${esc(s.seven_day_calls)} calls</div></td><td class="overhead-tools">${s.top_tools.map(t=>`${esc(t.tool)}: ${esc(t.bytes)} B`).join(' · ')||'—'}</td></tr>`).join('')}</tbody></table></div>`:`<p class="empty">No cumulative debug stats.</p>`}</details>`;bindInteractive(document.querySelector('#detail-view'))}
 function sortedTickets(items){const rank=s=>['claimed','in_progress','creating_report'].includes(s)?0:['submitted','reviewing','in_review'].includes(s)?1:s==='open'?2:3;return [...items].sort((a,b)=>rank(a.status)-rank(b.status)||(detailSort==='oldest'?String(a.updated_at||'').localeCompare(String(b.updated_at||'')):String(b.updated_at||'').localeCompare(String(a.updated_at||''))))}
 function tabs(d,r){return `<nav class="tabs" aria-label="Board views">${[['tickets','Tickets'],['timeline','Timeline'],['changes','Changes'],['flow','Ticket Flow'],['routes','Routes']].map(([v,label])=>`<a class="tab${r.view===v?' active':''}" href="${boardHref(r.central,d.board.board_id,v)}">${esc(label)}</a>`).join('')}</nav>`}
 function ticketView(d,r){const rows=sortedTickets(d.tickets).filter(t=>matches([t.id,t.title,t.status,t.claimed_by,t.description],filterNeedle));const visible=!r.ticket||rows.some(t=>t.id===r.ticket);return `${visible?'':`<p class="warning">Requested ticket ${esc(r.ticket)} is outside this bounded response or filter.</p>`}<div class="toolbar"><span>${esc(rows.length)} of ${esc(d.ticket_returned)} returned tickets</span><label>Updated <select id="ticket-sort"><option value="newest"${detailSort==='newest'?' selected':''}>newest first</option><option value="oldest"${detailSort==='oldest'?' selected':''}>oldest first</option></select></label></div><section class="card"><div class="table-scroll"><table><thead><tr><th>Ticket</th><th>Title and details</th><th>Status</th><th class="hide-small">Updated</th></tr></thead><tbody>${rows.length?rows.map(t=>`<tr><td><span class="id">${esc(t.id)}</span></td><td><details class="ticket-detail" data-ticket="${esc(t.id)}" data-state-key="${esc(`ticket:${r.central}:${d.board.board_id}:${t.id}`)}"${r.ticket===t.id?' open':''}><summary>${esc(t.title)}</summary><p class="ticket-copy">${esc(t.description||'No description')}</p>${t.required_fields.length?`<div class="required">${t.required_fields.map(x=>`<span class="pill">${esc(x)}</span>`).join('')}</div>`:''}${t.latest_submission_summary?`<p class="meta ticket-copy">Latest submission: ${esc(t.latest_submission_summary)}</p>`:''}${t.review_label?`<p class="meta">Review: ${esc(t.review_label)}</p>`:''}</details></td><td><span class="status">${esc(t.status)}</span><div class="meta">${esc(t.claimed_by||'')}</div></td><td class="meta hide-small">${esc(fmt(t.updated_at))}</td></tr>`).join(''):'<tr><td colspan="4" class="empty">No tickets match the filter.</td></tr>'}</tbody></table></div></section>`}
