@@ -3149,6 +3149,185 @@ def test_dashboard_v2_ia_agents_and_responsive_contract() -> None:
     assert "http://cdn" not in html
 
 
+def test_agents_hub_defaults_to_active_sorted_status_with_toggle_and_live_work() -> None:
+    script = "\n".join(re.findall(r"<script>(.*?)</script>", dashboard.HTML, re.DOTALL))
+    lines = script.splitlines()
+
+    def source(prefix: str) -> str:
+        return next(line for line in lines if line.startswith(prefix))
+
+    long_title = "Ticket title " + "x" * 80
+    agents = [
+        {
+            "agent_name": "m-stale",
+            "pool_status": "stale",
+            "boards": ["pursers"],
+            "seats": [],
+            "last_seen": "2030-01-01T09:00:00Z",
+        },
+        {
+            "agent_name": "a-available",
+            "pool_status": "available",
+            "boards": ["pursers"],
+            "seats": [],
+            "last_seen": "2030-01-01T11:58:00Z",
+        },
+        {
+            "agent_name": "z-busy",
+            "pool_status": "busy",
+            "boards": ["pursers"],
+            "seats": [
+                {
+                    "board_id": "pursers",
+                    "project": "Pursers",
+                    "role": "worker",
+                    "current_ticket_id": "TK-live",
+                    "current_ticket_title": long_title,
+                    "last_seen": "2030-01-01T11:58:00Z",
+                }
+            ],
+            "last_seen": "2030-01-01T11:58:00Z",
+        },
+    ]
+    program = "\n".join(
+        [
+            source("const esc="),
+            source("const fmt="),
+            source("const agentStatusRank="),
+            source("function compareAgents("),
+            source("function visibleAgents("),
+            source("function relativeAge("),
+            source("function clippedAgentTitle("),
+            source("function agentLiveWork("),
+            source("function agentTicketLink("),
+            source("function agentVisibilityToggle("),
+            source("function pageHead("),
+            source("function workerByName("),
+            source("function renderRoleChips("),
+            source("function liveAgentCard("),
+            source("function renderGuide("),
+            source("function renderAgentsHub("),
+            "Date.now=()=>new Date('2030-01-01T12:00:00Z').getTime();",
+            f"let fleetData={{personal:{{agents:{json.dumps(agents)}}}}},hubWorkers={{}},hubGuide=null,showStaleAgents=false;",
+            "const active=renderAgentsHub();showStaleAgents=true;const all=renderAgentsHub();",
+            "console.log(JSON.stringify({active,all}));",
+        ]
+    )
+    completed = subprocess.run(
+        ["node", "-e", program],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    result = json.loads(completed.stdout)
+    active = result["active"]
+    all_agents = result["all"]
+
+    assert "m-stale" not in active
+    assert active.index("z-busy") < active.index("a-available")
+    assert "Show stale" in active
+    assert 'aria-pressed="false"' in active
+    assert "TK-live" in active
+    assert "Ticket title " + "x" * 34 + "…" in active
+    assert "2m ago" in active
+    assert "ว่าง/idle" in active
+    assert all_agents.index("z-busy") < all_agents.index("a-available")
+    assert all_agents.index("a-available") < all_agents.index("m-stale")
+    assert "Show active only" in all_agents
+    assert 'aria-pressed="true"' in all_agents
+
+
+def test_agent_pool_rows_keep_details_and_default_to_active() -> None:
+    script = "\n".join(re.findall(r"<script>(.*?)</script>", dashboard.HTML, re.DOTALL))
+    lines = script.splitlines()
+
+    def source(prefix: str) -> str:
+        return next(line for line in lines if line.startswith(prefix))
+
+    agents = [
+        {
+            "agent_name": "available-agent",
+            "pool_status": "available",
+            "boards": ["pursers"],
+            "seats": [],
+            "last_seen": "2030-01-01T11:58:00Z",
+            "duplicate_name": False,
+        },
+        {
+            "agent_name": "busy-agent",
+            "pool_status": "busy",
+            "boards": ["pursers"],
+            "seats": [
+                {
+                    "board_id": "pursers",
+                    "project": "Pursers",
+                    "role": "worker",
+                    "current_ticket_id": "TK-held",
+                    "current_ticket_title": "Held ticket",
+                    "last_seen": "2030-01-01T11:58:00Z",
+                }
+            ],
+            "last_seen": "2030-01-01T11:58:00Z",
+            "duplicate_name": False,
+        },
+        {
+            "agent_name": "stale-agent",
+            "pool_status": "stale",
+            "boards": ["pursers"],
+            "seats": [],
+            "last_seen": "2029-12-01T00:00:00Z",
+            "duplicate_name": False,
+        },
+    ]
+    fleet = {
+        "central": "personal",
+        "pool_summary": {"online": 2, "busy": 1, "available": 1, "stale": 1},
+        "boards": [],
+        "agents": agents,
+    }
+    program = "\n".join(
+        [
+            source("const esc="),
+            source("const fmt="),
+            source("const ticketMatches="),
+            source("const filterHomeBoards="),
+            source("const agentStatusRank="),
+            source("function compareAgents("),
+            source("function visibleAgents("),
+            source("function relativeAge("),
+            source("function clippedAgentTitle("),
+            source("function agentLiveWork("),
+            source("function agentTicketLink("),
+            source("function agentStateSummary("),
+            source("function agentVisibilityToggle("),
+            source("function renderCentral("),
+            source("const legacyRenderCentralAgentsV1="),
+            source("renderCentral=function("),
+            "Date.now=()=>new Date('2030-01-01T12:00:00Z').getTime();",
+            f"let filterNeedle='',showStaleAgents=false;const fleet={json.dumps(fleet)};",
+            "const active=renderCentral(fleet);showStaleAgents=true;const all=renderCentral(fleet);",
+            "console.log(JSON.stringify({active,all}));",
+        ]
+    )
+    completed = subprocess.run(
+        ["node", "-e", program],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    result = json.loads(completed.stdout)
+
+    assert "stale-agent" not in result["active"]
+    assert result["active"].index("busy-agent") < result["active"].index(
+        "available-agent"
+    )
+    assert "TK-held" in result["active"]
+    assert "Held ticket" in result["active"]
+    assert "2m ago" in result["active"]
+    assert '<div class="agent-body table-scroll"><table>' in result["active"]
+    assert "stale-agent" in result["all"]
+
+
 def test_worker_manager_accepts_v2_role_and_tier_only_when_supported(
     tmp_path: Path,
 ) -> None:
