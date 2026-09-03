@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+# Reproducible isolated-checkout bootstrap:
+# python3 -m venv .venv
+# .venv/bin/python -m pip install "pytest>=8.4,<9" ./packages/client
+# .venv/bin/python -m pytest tools/worker-runtime/tests/test_pursers_worker.py
+
 import asyncio
 import importlib.util
 import json
@@ -1142,6 +1147,42 @@ def test_session_log_runtime_session_fences_stale_review_state(
         outcome="approve",
     )
     assert not replacement.review_state_path.exists()
+
+
+def test_session_log_write_includes_ts_timestamp() -> None:
+    """Every SessionLog.write() call includes a 'ts' field that parses as UTC datetime."""
+    with tempfile.TemporaryDirectory(dir="/tmp") as raw:
+        log = worker_module.SessionLog(Path(raw) / "session.log")
+        log.write("test_event", detail="hello")
+        line = json.loads(log.path.read_text().splitlines()[-1])
+        assert "ts" in line, "ts field must be present"
+        ts = datetime.fromisoformat(line["ts"].rstrip("Z"))
+        assert ts.tzinfo is not None or line["ts"].endswith("Z"), (
+            "ts must be timezone-aware UTC"
+        )
+        # Verify it parses to a reasonable recent time
+        now = datetime.now(timezone.utc)
+        delta = now - ts.replace(tzinfo=timezone.utc) if ts.tzinfo is None else now - ts
+        assert 0 <= delta.total_seconds() < 60, (
+            f"ts {line['ts']} is not within the last 60 seconds"
+        )
+
+
+def test_session_log_ts_cannot_be_overridden_by_caller() -> None:
+    """Caller-supplied 'ts=' must not override the writer-generated timestamp."""
+    with tempfile.TemporaryDirectory(dir="/tmp") as raw:
+        log = worker_module.SessionLog(Path(raw) / "session.log")
+        log.write("test_event", ts="bad")
+        line = json.loads(log.path.read_text().splitlines()[-1])
+        assert line["ts"] != "bad", "caller-supplied ts must not override generated ts"
+        assert line["ts"].endswith("Z"), "ts must end with Z"
+        # Verify it's a valid generated UTC timestamp
+        ts = datetime.fromisoformat(line["ts"].rstrip("Z"))
+        now = datetime.now(timezone.utc)
+        delta = now - ts.replace(tzinfo=timezone.utc) if ts.tzinfo is None else now - ts
+        assert 0 <= delta.total_seconds() < 60, (
+            f"ts {line['ts']} is not within the last 60 seconds"
+        )
 
 
 def test_reviewer_refuses_verdict_when_submission_changes_during_review() -> None:
