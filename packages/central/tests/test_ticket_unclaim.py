@@ -99,6 +99,41 @@ class TicketUnclaimTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(claimed.is_error)
         return ticket_id
 
+    async def test_ticket_transport_allows_bearer_prose_and_placeholders(self) -> None:
+        self.principal = self.admin
+        for index, description in enumerate(
+            (
+                "The literal Bearer scheme word is harmless prose.",
+                "Authorization example: Bearer <placeholder>",
+                "Authorization example: Bearer [REDACTED]",
+                "Authorization example: Bearer placeholder_value",
+            )
+        ):
+            created = await self.call(
+                "ticket_create",
+                agent_name="admin-agent",
+                title=f"scrub documentation case {index}",
+                description=description,
+                target_url="pursers/packages/central",
+                scope="interactive-no-send",
+                required_fields=["tests"],
+            )
+            self.assertFalse(created.is_error)
+            self.assertTrue(created.structured_content["ok"])
+
+    async def test_ticket_transport_still_blocks_real_bearer_value(self) -> None:
+        self.principal = self.admin
+        with self.assertRaisesRegex(ToolError, "bearer_token"):
+            await self.call(
+                "ticket_create",
+                agent_name="admin-agent",
+                title="unsafe bearer value",
+                description="Authorization: Bearer ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+                target_url="pursers/packages/central",
+                scope="interactive-no-send",
+                required_fields=["tests"],
+            )
+
     async def test_claimer_unclaims_to_open_and_emits_journal_event(self) -> None:
         ticket_id = await self.create_and_claim()
         before_seq = self.service.journal.read_after("pursers", 0, 1)[

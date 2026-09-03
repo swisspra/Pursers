@@ -82,9 +82,16 @@ DEFAULT_RULES: tuple[Rule, ...] = (
         re.IGNORECASE,
         "secret",
     ),
+    # Raw documentation placeholders can satisfy the token length/charset.
+    # Exempt only complete, recognizable placeholder forms; suffixed values
+    # with credential-like material still fail closed.
     Rule(
         "bearer_token",
-        r"\bBearer[ \t]+(?P<secret>[A-Za-z0-9._~+/=-]{16,})",
+        r"\bBearer[ \t]+(?P<secret>"
+        r"(?!(?:placeholder|redacted|example|sample|dummy|your)"
+        r"(?:[_-](?:access|auth|bearer|credential|secret|token|value|here))*"
+        r"(?![A-Za-z0-9._~+/=-]))"
+        r"[A-Za-z0-9._~+/=-]{16,})(?![A-Za-z0-9._~+/=-])",
         re.IGNORECASE,
         "secret",
     ),
