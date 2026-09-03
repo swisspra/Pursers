@@ -2033,6 +2033,146 @@ def test_approved_intake_calls_ticket_create_with_op_key(
     assert updates == {"board-a": frozenset({"ask-e2e"})}
 
 
+def test_intake_stale_generation_rejoins_then_retries_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+    rejoins: list[tuple[str, str]] = []
+
+    class FakeClient:
+        def __init__(self, *_args: Any) -> None:
+            pass
+
+        async def __aenter__(self) -> "FakeClient":
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+        async def rejoin(self, board_id: str, agent_name: str) -> None:
+            rejoins.append((board_id, agent_name))
+
+        async def call(
+            self, _name: str, _board_id: str, **arguments: Any
+        ) -> dict[str, Any]:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise PermissionError("stale or missing board generation")
+            return {"ticket": {"ticket_id": arguments["ticket_id"]}}
+
+    monkeypatch.setattr(coordinator, "IntakeCaller", FakeClient)
+    draft = coordinator.deterministic_intake_draft(
+        coordinator.IntakeAsk(
+            "ask-generation", "Update the README guide", "operator", "board-a"
+        ),
+        _intake_project(),
+    )
+
+    ticket_id = asyncio.run(
+        coordinator.create_intake_ticket(
+            "https://board.invalid/mcp",
+            "opaque",
+            "coordinator-test",
+            "board-a",
+            draft,
+            replay_token="main-token-a",
+        )
+    )
+
+    assert ticket_id == draft.ticket_id
+    assert calls == 2
+    assert rejoins == [("board-a", "coordinator-test")]
+
+
+def test_intake_persistent_stale_generation_retries_at_most_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+    rejoins = 0
+
+    class FakeClient:
+        def __init__(self, *_args: Any) -> None:
+            pass
+
+        async def __aenter__(self) -> "FakeClient":
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+        async def rejoin(self, _board_id: str, _agent_name: str) -> None:
+            nonlocal rejoins
+            rejoins += 1
+
+        async def call(
+            self, _name: str, _board_id: str, **_arguments: Any
+        ) -> dict[str, Any]:
+            nonlocal calls
+            calls += 1
+            raise PermissionError("stale or missing board generation")
+
+    monkeypatch.setattr(coordinator, "IntakeCaller", FakeClient)
+    draft = coordinator.deterministic_intake_draft(
+        coordinator.IntakeAsk(
+            "ask-persistent", "Update the README guide", "operator", "board-a"
+        ),
+        _intake_project(),
+    )
+
+    with pytest.raises(PermissionError, match="stale or missing board generation"):
+        asyncio.run(
+            coordinator.create_intake_ticket(
+                "https://board.invalid/mcp",
+                "opaque",
+                "coordinator-test",
+                "board-a",
+                draft,
+                replay_token="main-token-a",
+            )
+        )
+
+    assert calls == 2
+    assert rejoins == 1
+
+
+def test_intake_caller_rejoin_fences_next_create_with_generation() -> None:
+    calls: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
+
+    class FakeTransport:
+        async def call_tool(
+            self, name: str, arguments: dict[str, Any], **kwargs: Any
+        ) -> dict[str, Any]:
+            calls.append((name, arguments, kwargs))
+            if name == "board_join":
+                return {"generation_token": "GEN-current"}
+            return {"ticket": {"ticket_id": "TK-created"}}
+
+    caller = coordinator.IntakeCaller("https://board.invalid/mcp", "opaque")
+    caller._client = FakeTransport()
+    caller._decode = lambda result: result
+
+    async def exercise() -> dict[str, Any]:
+        await caller.rejoin("board-a", "coordinator-test")
+        return await caller.call(
+            "ticket_create", "board-a", agent_name="coordinator-test"
+        )
+
+    assert asyncio.run(exercise()) == {"ticket": {"ticket_id": "TK-created"}}
+    assert calls == [
+        (
+            "board_join",
+            {"board_id": "board-a", "agent_name": "coordinator-test"},
+            {},
+        ),
+        (
+            "ticket_create",
+            {"board_id": "board-a", "agent_name": "coordinator-test"},
+            {"meta": {"io.onboard/expected-generation": "GEN-current"}},
+        ),
+    ]
+
+
 def test_approved_intake_without_scope_stays_with_grant_finding() -> None:
     approved = {
         **_intake_row("ask-approved", "Publish the next release"),
@@ -2422,6 +2562,45 @@ def test_intake_breaker_enters_draft_only_after_three_create_failures() -> None:
         if item["kind"] == "intake-pending"
     )
     assert updates == {}
+
+
+def test_successful_approved_intake_clears_prior_breaker_and_failures() -> None:
+    row = {
+        **_intake_row("ask-healed", "Update the README documentation"),
+        "approved": True,
+        "approved_by": "dashboard-seat",
+        "approved_at": NOW.isoformat(),
+    }
+    runtime = coordinator.RuntimeState.for_mode("active")
+    assert runtime.intake_failures is not None
+    assert runtime.intake_breakers is not None
+    runtime.intake_failures["board-a"] = coordinator.INTAKE_BREAKER_FAILURES
+    runtime.intake_breakers.add("board-a")
+
+    async def create(_board_id: str, draft: coordinator.IntakeDraft) -> str:
+        return draft.ticket_id
+
+    findings, updates = asyncio.run(
+        coordinator.process_intakes(
+            [_intake_project()],
+            {
+                "board-a": {
+                    "tickets": [],
+                    "coordinator_intake_state": _intake_state([row]),
+                }
+            },
+            NOW,
+            runtime,
+            enabled=True,
+            dry_run=False,
+            create_ticket=create,
+        )
+    )
+
+    assert [item["kind"] for item in findings] == ["intake-created"]
+    assert updates == {"board-a": frozenset({"ask-healed"})}
+    assert "board-a" not in runtime.intake_failures
+    assert "board-a" not in runtime.intake_breakers
 
 
 def test_intake_dry_run_shows_auto_and_ask_without_mutations() -> None:
