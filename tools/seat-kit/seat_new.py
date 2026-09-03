@@ -24,8 +24,7 @@ def _repo_leaf(repo: str) -> str:
     return leaf
 
 
-def _board_python(role: str, repo_leaf: str | None) -> str:
-    return f'''#!/usr/bin/env python3
+_BOARD_PYTHON = r'''#!/usr/bin/env python3
 """Generated Pursers seat CLI. Do not put credentials in this file."""
 
 from __future__ import annotations
@@ -35,11 +34,12 @@ import asyncio
 import json
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
-ROLE = {role!r}
-REPO_LEAF = {repo_leaf!r}
+ROLE = '{role}'
+REPO_LEAF = {repo_leaf}
 
 
 def _load_client() -> type[Any]:
@@ -73,6 +73,11 @@ def _parser() -> argparse.ArgumentParser:
         submit.add_argument("summary")
         submit.add_argument("notes")
         submit.add_argument("files_csv")
+        wait = commands.add_parser("wait", help="block until work arrives (subscriptions/listen)")
+        wait.add_argument("--since", type=int, default=0, help="journal cursor to start from")
+        wait.add_argument("--timeout", type=int, default=270, help="max wait seconds")
+        wait.add_argument("--poll", action="store_true", default=False,
+                          help="enable poll fallback (explicit opt-in, not default)")
     else:
         commands.add_parser("list", help="list submitted tickets")
         commands.add_parser("list-all", help="list all non-closed tickets")
@@ -85,11 +90,104 @@ def _parser() -> argparse.ArgumentParser:
         reject.add_argument("ticket_id")
         reject.add_argument("notes")
         reject.add_argument("fix")
+        wait = commands.add_parser("wait", help="block until submitted tickets arrive")
+        wait.add_argument("--since", type=int, default=0, help="journal cursor")
+        wait.add_argument("--timeout", type=int, default=270, help="max wait seconds")
+        wait.add_argument("--submitted", action="store_true", default=True,
+                          help="wait for submitted tickets (default)")
+        wait.add_argument("--poll", action="store_true", default=False,
+                          help="enable poll fallback (explicit opt-in, not default)")
     return parser
 
 
 def _print(value: Any) -> None:
     print(json.dumps(value, indent=2, ensure_ascii=False, sort_keys=True))
+
+
+async def _cmd_wait(
+    client: Any,
+    board_id: str,
+    since: int,
+    timeout_s: int,
+    *,
+    submitted: bool = False,
+    poll_fallback: bool = False,
+) -> None:
+    """Block until work arrives using BoardClient.events() (subscriptions/listen).
+
+    Returns a bounded JSON response with new_seq, events, timed_out.
+    The caller re-arms by passing new_seq as --since.
+
+    Default path: one long subscriptions/listen wait on the board journal.
+    Never calls ticket_list during an idle wait. poll_fallback=True enables
+    the explicit opt-in board_catchup poll loop as a last resort.
+    """
+    started = time.monotonic()
+    events: list[dict[str, Any]] = []
+    cursor = since
+
+    # Watch the board journal URI so events() subscribes to it
+    journal_uri = f"board://{board_id}/journal"
+    client.watch_resource(journal_uri)
+
+    # Use BoardClient.events() for a long subscriptions/listen wait.
+    # events() opens a subscription, drains existing events, then blocks
+    # on subscription cues. It never calls ticket_list during the wait.
+    if submitted:
+        # Reviewer: watch for submitted tickets via ticket_status_changed
+        kinds = {"ticket_status_changed"}
+    else:
+        kinds = {"ticket_created", "ticket_status_changed"}
+
+    try:
+        async with asyncio.timeout(timeout_s):
+            async for event in client.events(
+                from_cursor=cursor if cursor else None,
+                kinds=kinds,
+            ):
+                # Filter reviewer events to status_to=submitted
+                if submitted and event.get("status_to") not in ("submitted", None):
+                    continue
+                events.append(event)
+                seq = event.get("seq", 0) or event.get("new_seq", 0)
+                if seq:
+                    cursor = max(cursor, seq)
+                break
+    except TimeoutError:
+        pass
+    except Exception:
+        # events() unavailable - only use poll if explicitly opted in
+        pass
+
+    if not events and poll_fallback:
+        # Explicit opt-in poll fallback
+        deadline = started + max(1, timeout_s)
+        while True:
+            now = time.monotonic()
+            remaining = deadline - now
+            if remaining <= 0:
+                break
+            await asyncio.sleep(min(2.0, remaining))
+            try:
+                page = await client.board_catchup(
+                    cursor=cursor, limit=50, ack=False
+                )
+                for ev in page.get("events", []):
+                    if ev.get("kind") in kinds:
+                        events.append(ev)
+                        cursor = max(cursor, ev.get("seq", 0))
+                if events:
+                    break
+            except Exception:
+                pass
+
+    timed_out = not events
+    _print({
+        "new_seq": cursor,
+        "events": events,
+        "waited_s": round(time.monotonic() - started, 2),
+        "timed_out": timed_out,
+    })
 
 
 async def _execute(args: argparse.Namespace) -> None:
@@ -102,19 +200,30 @@ async def _execute(args: argparse.Namespace) -> None:
         central_url, token, board_id, agent_name=agent_name
     ) as client:
         await client.board_join()
+        if args.command == "wait":
+            poll = getattr(args, "poll", False)
+            await _cmd_wait(
+                client,
+                board_id,
+                since=args.since,
+                timeout_s=args.timeout,
+                submitted=ROLE != "worker",
+                poll_fallback=poll,
+            )
+            return
         if ROLE == "worker":
             if args.command == "list":
                 open_result = await client.ticket_list(status="open", limit=100)
                 mine_result = await client.ticket_list(
                     assigned_to=agent_name, include_closed=False, limit=100
                 )
-                combined: dict[str, Any] = {{}}
+                combined: dict[str, Any] = {}
                 for result in (open_result, mine_result):
                     for ticket in result.get("tickets", []):
                         ticket_id = ticket.get("ticket_id")
                         if ticket_id:
                             combined[ticket_id] = ticket
-                _print({{"tickets": list(combined.values())}})
+                _print({"tickets": list(combined.values())})
                 return
             if args.command == "get":
                 _print(await client.ticket_get(args.ticket_id))
@@ -166,17 +275,17 @@ async def _execute(args: argparse.Namespace) -> None:
                     )
                 )
                 return
-        raise RuntimeError(f"unsupported command: {{args.command}}")
+        raise RuntimeError(f"unsupported command: {args.command}")
 
 
 def main() -> int:
     try:
         asyncio.run(_execute(_parser().parse_args()))
     except (KeyError, OSError, RuntimeError, ValueError) as exc:
-        print(f"board.sh: {{exc}}", file=sys.stderr)
+        print(f"board.sh: {exc}", file=sys.stderr)
         return 1
     except Exception as exc:  # Keep transport/client failures concise.
-        print(f"board.sh: {{type(exc).__name__}}: {{exc}}", file=sys.stderr)
+        print(f"board.sh: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
     return 0
 
@@ -184,6 +293,14 @@ def main() -> int:
 if __name__ == "__main__":
     raise SystemExit(main())
 '''
+
+
+def _board_python(role: str, repo_leaf: str | None) -> str:
+    repo_leaf_val = repr(repo_leaf) if repo_leaf else "None"
+    # Substitute placeholders using simple replacement to avoid brace conflicts
+    result = _BOARD_PYTHON.replace("{role}", role, 1)
+    result = result.replace("{repo_leaf}", repo_leaf_val, 1)
+    return result
 
 
 def _board_shell(
@@ -234,15 +351,33 @@ def _instructions(*, role: str, name: str, client: str) -> str:
 bin/board.sh get <TK>
 bin/board.sh claim <TK>
 bin/board.sh renew <TK>
-bin/board.sh submit <TK> <summary> <notes> <files-csv>"""
-        loop = """Poll every board via `PURSERS_BOARD`. Claim an open ticket immediately. If nothing is open, sleep 90-120 seconds and poll again. Work one ticket through submission and review before taking another. Renew the lease about every 10 minutes. Submit honestly with all required fields and name the model in use in the notes. If rejected, follow the fix instructions, renew or reclaim as required, and resubmit; otherwise re-arm for the next ticket."""
+bin/board.sh submit <TK> <summary> <notes> <files-csv>
+bin/board.sh wait --since <cursor>"""
+        loop = """Run this loop continuously:
+
+1. **WAIT** -- `bin/board.sh wait --since <cursor>` blocks on Central's subscriptions/listen until claimable work arrives. Returns `{new_seq, events, timed_out}`. On `timed_out=true`, re-arm immediately: `bin/board.sh wait --since <new_seq>`.
+2. **CLAIM** -- `bin/board.sh claim <TK>`. If the claim fails (race lost), go back to WAIT.
+3. **UNDERSTAND** -- `bin/board.sh get <TK>` for full description + required_fields.
+4. **DO** -- Perform the work. Run `bin/board.sh renew <TK>` every ~10 minutes.
+5. **SUBMIT** -- `bin/board.sh submit <TK> <summary> <notes> <files-csv>`.
+6. **RE-ARM** -- Return to WAIT. If rejected, follow fix instructions and resubmit.
+
+Never poll `bin/board.sh list` in a loop. The wait verb blocks on Central's subscriptions/listen, using zero model turns except the re-arm."""
     else:
         commands = """bin/board.sh list
 bin/board.sh list-all
 bin/board.sh get <TK>
 bin/board.sh approve <TK> <notes>
-bin/board.sh reject <TK> <notes> <fix>"""
-        loop = """Poll every board via `PURSERS_BOARD`. Review a submitted ticket immediately. If nothing is submitted, sleep 90-120 seconds and poll again. Inspect the evidence, run relevant verification, and approve or reject honestly. Continue until stopped."""
+bin/board.sh reject <TK> <notes> <fix>
+bin/board.sh wait --since <cursor>"""
+        loop = """Run this loop continuously:
+
+1. **WAIT** -- `bin/board.sh wait --since <cursor>` blocks on Central's subscriptions/listen until submitted tickets arrive. Returns `{new_seq, events, timed_out}`. On `timed_out=true`, re-arm immediately.
+2. **REVIEW** -- `bin/board.sh list` shows submitted tickets. `bin/board.sh get <TK>` for details.
+3. **APPROVE/REJECT** -- `bin/board.sh approve <TK> <notes>` or `bin/board.sh reject <TK> <notes> <fix>`.
+4. **RE-ARM** -- Return to WAIT.
+
+Never poll `bin/board.sh list` in a loop. The wait verb blocks on Central's subscriptions/listen, using zero model turns except the re-arm."""
     return f"""# Pursers seat: {name}
 
 this folder IS your identity: {name}
