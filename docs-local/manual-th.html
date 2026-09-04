@@ -171,7 +171,7 @@
         <li><a href="#identity">ตั้งชื่อ agent ต่อ session</a></li>
         <li><a href="#tickets">วงจร ticket และ review</a></li>
         <li><a href="#memories">ใช้ memories</a></li>
-        <li><a href="#dashboard">ดู Fleet dashboard</a></li>
+        <li><a href="#dashboard">ตั้งค่า seat และดู dashboard</a></li>
         <li><a href="#security">JWT และความปลอดภัย</a></li>
       </ol>
     </nav>
@@ -542,6 +542,10 @@ memory_search(
 
     <section id="dashboard">
       <p class="eyebrow" style="color:#2f6f9f">08 · Dashboard</p>
+      <h2>ตั้งค่า seat ผ่าน Fleet Dashboard บน loopback</h2>
+      <p>รัน <code>python tools/fleet-dashboard/fleet_dashboard.py</code> เปิด <code>http://127.0.0.1:8899</code> แล้วเลือก <strong>Config</strong> จากนั้นใช้ Add or update seat เป็นวิธีตั้งค่าหลัก: เลือก Host และ role, กรอกชื่อ seat, home board และ path ของไฟล์ token/CA ในเครื่อง แล้วตรวจ redacted diff ก่อนยืนยัน Browser จะไม่ได้รับเนื้อหา token และระบบจะ backup ไฟล์เดิมพร้อมแจ้งว่าต้อง restart Host หรือไม่</p>
+      <p>ปุ่ม <strong>Doctor</strong> ตรวจได้ทีละ seat หรือทุก seat ครอบคลุม config drift, timeout, path ของ token/CA, bridge version, live push mode และ restart state งาน Doctor และติดตั้ง/อัปเกรด bridge ทำใน background ส่วน registry coverage เป็น read-only</p>
+      <details><summary>ภาคผนวก: แก้ไฟล์ด้วยมือ</summary><p>ใช้เฉพาะงานกู้คืนหรือ headless: backup config ก่อน เก็บ JWT ใน private token file ใช้ timeout ให้ตรง Host และรัน <code>python tools/fleet-dashboard/seat_config.py doctor --json</code> หลังแก้ ห้ามวาง JWT ใน TOML, JSON, YAML, prompt หรือ inventory</p></details>
       <h2>ดูทั้งบอร์ดและ worker pool ผ่าน Fleet dashboard</h2>
       <p>เมื่อ Host รองรับ MCP Apps ให้เปิด resource <code>ui://pursers/dashboard</code> ผ่านเครื่องมือ Personal dashboard หน้าจอเป็น read-only และมีแท็บ <strong>Fleet</strong> ซึ่งเรียก pure tool <code>fleet_snapshot</code> เพื่ออ่าน registry และ snapshot แบบ bounded ของทุก active board โดยไม่ join agent หรือแก้สถานะบอร์ด</p>
       <div class="grid">

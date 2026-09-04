@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import difflib
 import hashlib
 import hmac
+import ipaddress
 import json
 import os
 import re
@@ -34,7 +36,19 @@ from urllib.parse import parse_qs, unquote, urlsplit
 _CLIENT_SRC = Path(__file__).resolve().parents[2] / "packages" / "client" / "src"
 if (_CLIENT_SRC / "pursers_client").is_dir():
     sys.path.insert(0, str(_CLIENT_SRC))
-from pursers_client import BoardClient, BoardClientError  # noqa: I001
+from pursers_client import BoardClient, BoardClientError  # noqa: E402, I001
+
+_DASHBOARD_DIR = Path(__file__).resolve().parent
+if str(_DASHBOARD_DIR) not in sys.path:
+    sys.path.insert(0, str(_DASHBOARD_DIR))
+from seat_config import (  # noqa: E402, I001
+    BridgeInstaller,
+    DesiredSeat,
+    Doctor,
+    PromptRenderer,
+    SeatInventory,
+    adapter_for,
+)
 
 
 DEFAULT_URL = "https://127.0.0.1:8766/mcp"
@@ -65,6 +79,10 @@ MAX_OVERHEAD_SEATS = 200
 MAX_OVERHEAD_TOOLS = 5
 OVERHEAD_DAYS = 7
 WORKER_API_MAX_BYTES = 20_000
+CONFIG_API_MAX_BYTES = 40_000
+CONFIG_JOB_LIMIT = 100
+CONFIG_PLAN_LIMIT = 50
+CONFIG_STATE_DIR = Path("~/.pursers/fleet-dashboard")
 MAX_REVIEW_STATE_BYTES = 4_096
 REVIEW_STATE_SUFFIX = ".review-state.json"
 WORKER_NAME_RE = re.compile(r"^[a-z0-9-]{2,32}$")
@@ -2812,6 +2830,362 @@ class TimedCache:
             return self._value
 
 
+class SeatConfigManager:
+    """Secret-safe orchestration layer for the dashboard Config page."""
+
+    def __init__(
+        self,
+        inventory_path: str | Path | None = None,
+        *,
+        state_dir: str | Path = CONFIG_STATE_DIR,
+        bridge_installer: BridgeInstaller | None = None,
+        doctor_factory: Callable[[], Doctor] = Doctor,
+        latest_version: Callable[[], str | None] | None = None,
+    ) -> None:
+        self.state_dir = Path(state_dir).expanduser()
+        self.inventory = SeatInventory(inventory_path or self.state_dir / "seats.json")
+        self.bridge_installer = bridge_installer or BridgeInstaller()
+        self.doctor_factory = doctor_factory
+        self.latest_version = latest_version or self._pypi_latest
+        self._plans: dict[str, tuple[DesiredSeat, list[Any]]] = {}
+        self._jobs: dict[str, dict[str, Any]] = {}
+        self._lock = threading.Lock()
+
+    @staticmethod
+    def _pypi_latest() -> str | None:
+        request = urllib.request.Request(
+            "https://pypi.org/pypi/pursers-wait-bridge/json",
+            headers={"Accept": "application/json", "User-Agent": "pursers-dashboard"},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=3) as response:
+                value = json.load(response).get("info", {}).get("version")
+            return value if isinstance(value, str) else None
+        except Exception:  # noqa: BLE001 - optional version hint.
+            return None
+
+    @staticmethod
+    def _desired(value: Any) -> DesiredSeat:
+        if not isinstance(value, dict):
+            raise ValueError("seat must be an object")
+        return DesiredSeat.from_dict(value)
+
+    @staticmethod
+    def _report(rows: list[Any]) -> dict[str, Any]:
+        order = {"PASS": 0, "WARN": 1, "FAIL": 2}
+        checks = [
+            {
+                "seat": row.seat,
+                "check": row.check,
+                "status": row.status,
+                "message": row.message,
+            }
+            for row in rows
+        ]
+        overall = max((row["status"] for row in checks), key=order.get, default="PASS")
+        return {"schema_version": 1, "overall": overall, "checks": checks}
+
+    @staticmethod
+    def _clean_text(value: str) -> str:
+        value = re.sub(
+            r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b",
+            "[REDACTED JWT]",
+            value,
+        )
+        sensitive = re.compile(
+            r"(?im)^(\s*[^:=\n]*(?:token|authorization|secret|password|api[_-]?key|bearer)[^:=\n]*)(\s*[:=]\s*)(.*)$"
+        )
+
+        def redact(match: re.Match[str]) -> str:
+            key = match.group(1).lower()
+            if "file" in key or "path" in key or "env_var" in key:
+                return match.group(0)
+            return f"{match.group(1)}{match.group(2)}[REDACTED]"
+
+        value = sensitive.sub(redact, value)
+        return value
+
+    @classmethod
+    def _diff(cls, change: Any) -> str:
+        before = "" if change.before is None else cls._clean_text(change.before)
+        after = "" if change.after is None else cls._clean_text(change.after)
+        return "".join(
+            difflib.unified_diff(
+                before.splitlines(keepends=True),
+                after.splitlines(keepends=True),
+                fromfile=str(change.path),
+                tofile=str(change.path),
+            )
+        )[:100_000]
+
+    def _journal(self, action: str, **fields: Any) -> None:
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        path = self.state_dir / "config-actions.jsonl"
+        record = {
+            "at": datetime.now(timezone.utc).isoformat(),
+            "action": action,
+            **fields,
+        }
+        descriptor = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        with os.fdopen(descriptor, "a", encoding="utf-8") as stream:
+            stream.write(json.dumps(record, sort_keys=True) + "\n")
+
+    def _bridge_inspection(self) -> dict[str, Any]:
+        status = dict(self.bridge_installer.inspect())
+        command = status.get("command")
+        installed_version = None
+        if isinstance(command, str) and command:
+            try:
+                result = subprocess.run(
+                    [command, "--version"],
+                    check=False,
+                    text=True,
+                    capture_output=True,
+                    timeout=5,
+                )
+                if result.returncode == 0:
+                    installed_version = result.stdout.strip() or None
+            except (OSError, subprocess.SubprocessError):
+                pass
+        status["pinned_version"] = status.pop("version", self.bridge_installer.version)
+        status["installed_version"] = installed_version
+        status["latest_version"] = self.latest_version()
+        status["upgrade_available"] = bool(
+            status["latest_version"] and status["latest_version"] != installed_version
+        )
+        return status
+
+    def seats(self) -> dict[str, Any]:
+        document = self.inventory.load()
+        rows = []
+        for record in document["seats"]:
+            desired = self._desired(record)
+            doctor = record.get("last_doctor")
+            checks = doctor.get("checks", []) if isinstance(doctor, dict) else []
+            restart = next(
+                (row for row in checks if row.get("check") == "restart"), None
+            )
+            live = next(
+                (row for row in checks if row.get("check") == "live-smoke"), None
+            )
+            rows.append(
+                {
+                    **{
+                        key: value
+                        for key, value in record.items()
+                        if key != "last_doctor"
+                    },
+                    "principal_label": (
+                        "worker" if desired.role == "worker" else "review"
+                    ),
+                    "profile": {
+                        "host_timeout_s": desired.profile.host_timeout_s,
+                        "block_s": desired.profile.block_s,
+                    },
+                    "doctor": doctor,
+                    "doctor_status": doctor.get("overall")
+                    if isinstance(doctor, dict)
+                    else None,
+                    "push_mode": "mode=push" in str(live.get("message", ""))
+                    if live
+                    else None,
+                    "needs_restart": bool(restart and restart.get("status") == "WARN"),
+                    "token_file_exists": Path(desired.token_file)
+                    .expanduser()
+                    .is_file(),
+                    "ca_file_exists": Path(desired.ca_file).expanduser().is_file(),
+                }
+            )
+        discovered = []
+        for host, path in (
+            ("codex", Path("~/.codex/config.toml").expanduser()),
+            ("goose", Path("~/.config/goose/config.yaml").expanduser()),
+            (
+                "claude-desktop",
+                Path(
+                    "~/Library/Application Support/Claude/claude_desktop_config.json"
+                ).expanduser(),
+            ),
+        ):
+            if path.is_file() and not any(
+                row.get("config_path") == str(path) for row in rows
+            ):
+                discovered.append({"host": host, "config_path": str(path)})
+        return {"schema_version": 1, "seats": rows, "discovered_configs": discovered}
+
+    def bridge(self) -> dict[str, Any]:
+        return self._bridge_inspection()
+
+    def plan(self, payload: Any) -> dict[str, Any]:
+        desired = self._desired(payload)
+        changes = list(adapter_for(desired).plan(desired))
+        plan_id = uuid.uuid4().hex
+        with self._lock:
+            if len(self._plans) >= CONFIG_PLAN_LIMIT:
+                self._plans.pop(next(iter(self._plans)))
+            self._plans[plan_id] = (desired, changes)
+        self._journal("plan", seat=desired.name, changes=len(changes))
+        return {
+            "plan_id": plan_id,
+            "seat": desired.name,
+            "token_file_exists": Path(desired.token_file).expanduser().is_file(),
+            "ca_file_exists": Path(desired.ca_file).expanduser().is_file(),
+            "changes": [
+                {
+                    "path": str(change.path),
+                    "description": change.description,
+                    "action": change.action,
+                    "diff": self._diff(change),
+                }
+                for change in changes
+            ],
+        }
+
+    def apply(self, plan_id: Any) -> dict[str, Any]:
+        if not isinstance(plan_id, str):
+            raise ValueError("plan_id is required")
+        with self._lock:
+            pending = self._plans.pop(plan_id, None)
+        if pending is None:
+            raise KeyError(plan_id)
+        desired, changes = pending
+        result = adapter_for(desired).apply(changes)
+        self.inventory.upsert(
+            desired, bridge_version=self.bridge_installer.version, doctor=None
+        )
+        backups = list(result.backups)
+        self._journal(
+            "apply", seat=desired.name, changed=len(result.changed), backups=backups
+        )
+        return {
+            "seat": desired.name,
+            "changed": list(result.changed),
+            "backup_paths": backups,
+            "backup_path": backups[0] if backups else None,
+            "needs_restart": bool(result.changed),
+            "restart_prompt": f"Restart {desired.host} to load the updated seat.",
+            "prompt": PromptRenderer().render(desired),
+        }
+
+    def prompt(self, payload: Any) -> dict[str, Any]:
+        desired = self._desired(payload)
+        self._journal("prompt", seat=desired.name)
+        return {"seat": desired.name, "prompt": PromptRenderer().render(desired)}
+
+    def registry(self, fleet: dict[str, Any]) -> dict[str, Any]:
+        names = {row.get("name") for row in self.seats()["seats"]}
+        covered: dict[str, set[str]] = {}
+        for agent in fleet.get("agents", []):
+            if not isinstance(agent, dict) or agent.get("agent_name") not in names:
+                continue
+            for seat in agent.get("seats", []):
+                if isinstance(seat, dict) and isinstance(seat.get("board_id"), str):
+                    covered.setdefault(seat["board_id"], set()).add(agent["agent_name"])
+        boards = []
+        for board in fleet.get("boards", []):
+            if not isinstance(board, dict):
+                continue
+            boards.append(
+                {
+                    "board_id": board.get("board_id"),
+                    "label": board.get("label") or board.get("board_id"),
+                    "seat_coverage": len(
+                        covered.get(str(board.get("board_id")), set())
+                    ),
+                    "configured_seats": len(names),
+                }
+            )
+        return {"boards": boards, "read_only": True}
+
+    def _start_job(self, action: str, target: Callable[[], Any]) -> dict[str, str]:
+        job_id = uuid.uuid4().hex
+        with self._lock:
+            if len(self._jobs) >= CONFIG_JOB_LIMIT:
+                self._jobs.pop(next(iter(self._jobs)))
+            self._jobs[job_id] = {
+                "job_id": job_id,
+                "action": action,
+                "status": "queued",
+            }
+
+        def work() -> None:
+            with self._lock:
+                self._jobs[job_id]["status"] = "running"
+            try:
+                result = target()
+            except Exception as exc:  # noqa: BLE001 - return type only.
+                with self._lock:
+                    self._jobs[job_id].update(status="failed", error=type(exc).__name__)
+                self._journal(
+                    action, job_id=job_id, status="failed", error=type(exc).__name__
+                )
+            else:
+                with self._lock:
+                    self._jobs[job_id].update(status="succeeded", result=result)
+                self._journal(action, job_id=job_id, status="succeeded")
+
+        threading.Thread(target=work, daemon=True, name=f"config-{action}").start()
+        return {"job_id": job_id, "status": "queued"}
+
+    def job(self, job_id: str) -> dict[str, Any]:
+        with self._lock:
+            value = self._jobs.get(job_id)
+            if value is None:
+                raise KeyError(job_id)
+            return dict(value)
+
+    def doctor(self, names: Any = None) -> dict[str, str]:
+        if names is not None and (
+            not isinstance(names, list) or not all(isinstance(v, str) for v in names)
+        ):
+            raise ValueError("names must be a list")
+
+        def run() -> dict[str, Any]:
+            records = self.inventory.load()["seats"]
+            if names is not None:
+                records = [row for row in records if row.get("name") in names]
+            reports = []
+            for record in records:
+                desired = self._desired(record)
+                report = self._report(self.doctor_factory().run(desired))
+                self.inventory.upsert(
+                    desired, bridge_version=self.bridge_installer.version, doctor=report
+                )
+                reports.append({"seat": desired.name, **report})
+            return {"seats": reports}
+
+        return self._start_job("doctor", run)
+
+    def install_bridge(self) -> dict[str, str]:
+        return self._start_job(
+            "bridge-install", lambda: {"command": self.bridge_installer.install()}
+        )
+
+    def upgrade_all(self) -> dict[str, str]:
+        def run() -> dict[str, Any]:
+            command = self.bridge_installer.install()
+            applied = []
+            for record in self.inventory.load()["seats"]:
+                desired = self._desired({**record, "bridge_command": command})
+                adapter = adapter_for(desired)
+                result = adapter.apply(adapter.plan(desired))
+                self.inventory.upsert(
+                    desired, bridge_version=self.bridge_installer.version, doctor=None
+                )
+                applied.append(
+                    {
+                        "seat": desired.name,
+                        "changed": list(result.changed),
+                        "backup_paths": list(result.backups),
+                        "backup_path": result.backups[0] if result.backups else None,
+                        "needs_restart": bool(result.changed),
+                    }
+                )
+            return {"command": command, "seats": applied}
+
+        return self._start_job("bridge-upgrade-all", run)
+
+
 class DashboardCache:
     def __init__(
         self, fetcher: FleetFetcher | list[FleetFetcher], ttl_seconds: float
@@ -3187,16 +3561,58 @@ window.addEventListener('hashchange',syncHub);syncHub();setInterval(refreshHubEx
 </script></body>""",
 )
 
+# Seat setup is a fifth top-level surface. It uses only local, secret-safe APIs.
+HTML = HTML.replace(
+    '<a data-nav="operations" href="#/operations"><span class="nav-icon">⚙</span>Operations</a>',
+    '<a data-nav="operations" href="#/operations"><span class="nav-icon">⚙</span>Operations</a><a data-nav="seats" href="#/seats"><span class="nav-icon">⌘</span>Config</a>',
+    1,
+).replace(
+    "</style>",
+    r"""
+.seat-toolbar,.seat-actions{display:flex;gap:7px;flex-wrap:wrap}.seat-layout{display:grid;grid-template-columns:minmax(0,2fr) minmax(290px,1fr);gap:16px}.seat-stack{display:grid;gap:16px}.seat-form{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.seat-form label{display:grid;gap:5px}.seat-form input,.seat-form select,.seat-form button,.seat-actions button,.seat-toolbar button{background:var(--panel2);border:1px solid var(--line);border-radius:8px;color:var(--text);padding:8px}.seat-form .wide{grid-column:1/-1}.seat-diff{max-height:360px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font-size:11px}.restart-badge{color:var(--warn);font-weight:750}.doctor-check{display:flex;justify-content:space-between;gap:10px;padding:6px 0;border-top:1px solid var(--line)}
+@media(max-width:1000px){.seat-layout{grid-template-columns:1fr}}@media(max-width:600px){.seat-form{grid-template-columns:1fr}.seat-form .wide{grid-column:auto}.primary-nav{grid-template-columns:repeat(5,1fr)}}
+</style>""",
+    1,
+)
+HTML = HTML.replace(
+    "</script></body>",
+    r"""
+</script><script>
+hubKinds.add('seats');
+const seatRouteV1=route,seatRenderHubV1=renderHub;
+let seatData={seats:[],discovered_configs:[]},seatBridge={},seatRegistry={boards:[]},seatPlan=null,seatDoctorResult=null,seatActionMessage='',seatSessionPrompt='';
+route=function(){return location.hash==='#/seats'?{kind:'seats'}:seatRouteV1()};
+function seatPayload(form){const f=new FormData(form);return{host:f.get('host'),role:f.get('role'),name:f.get('name'),central_url:f.get('central_url'),home_board:f.get('home_board'),token_file:f.get('token_file'),ca_file:f.get('ca_file'),bridge_command:f.get('bridge_command'),config_path:f.get('config_path'),seat_dir:f.get('seat_dir')||null,repository:f.get('repository')||null}}
+function seatForm(record={}){return `<form id="seat-wizard" class="seat-form"><label>Host<select name="host">${['codex','codex-cli','goose','claude-code','claude-desktop','headless'].map(x=>`<option ${record.host===x?'selected':''}>${esc(x)}</option>`).join('')}</select></label><label>Role<select name="role"><option ${record.role==='worker'?'selected':''}>worker</option><option ${record.role==='reviewer'?'selected':''}>reviewer</option></select></label><label>Name<input name="name" value="${esc(record.name||'')}" pattern="[A-Za-z0-9][A-Za-z0-9._-]{0,79}" required></label><label>Home board<input name="home_board" value="${esc(record.home_board||'pursers')}" required></label><label class="wide">Central URL<input name="central_url" type="url" value="${esc(record.central_url||'https://127.0.0.1:8766/mcp')}" required></label><label class="wide">Token file path · token never enters this page<input name="token_file" value="${esc(record.token_file||'')}" required></label><label class="wide">CA file path<input name="ca_file" value="${esc(record.ca_file||'')}" required></label><label class="wide">Bridge command<input name="bridge_command" value="${esc(record.bridge_command||seatBridge.command||'pursers-wait-bridge')}" required></label><label class="wide">Host config path<input name="config_path" value="${esc(record.config_path||'')}" required></label><label>Seat directory (Goose)<input name="seat_dir" value="${esc(record.seat_dir||'')}"></label><label>Repository (optional)<input name="repository" value="${esc(record.repository||'')}"></label><button class="primary-action wide" type="submit">Preview exact changes</button><p id="seat-form-status" class="muted wide">Paths are checked locally; token contents are never read into the browser.</p></form>`}
+function seatRows(){const configured=(seatData.seats||[]).map(s=>`<tr><td><b>${esc(s.host)}</b><div class="meta">${esc(s.role)}</div></td><td><span class="id">${esc(s.name)}</span><div class="meta">${esc(s.principal_label)}</div></td><td>${esc(seatBridge.installed_version||'not installed')}<div class="meta">pinned ${esc(s.bridge_version||seatBridge.pinned_version||'unknown')}</div></td><td>${esc(s.profile?.host_timeout_s||'—')}s / ${esc(s.profile?.block_s||'—')}s<div class="meta">push ${s.push_mode===null?'unknown':s.push_mode?'yes':'no'}</div></td><td><span class="status">${esc(s.doctor_status||'not run')}</span>${s.needs_restart?'<div class="restart-badge">NEEDS RESTART</div>':''}</td><td><div class="seat-actions"><button data-seat-action="doctor" data-name="${esc(s.name)}">Doctor</button><button data-seat-action="fix" data-name="${esc(s.name)}">Fix</button><button data-seat-action="prompt" data-name="${esc(s.name)}">Copy prompt</button><button data-seat-action="upgrade">Upgrade bridge</button>${s.host==='goose'?`<button data-seat-action="goose" data-name="${esc(s.name)}">Regenerate Goose</button>`:''}</div></td></tr>`).join('');const discovered=(seatData.discovered_configs||[]).map(s=>`<tr><td><b>${esc(s.host)}</b><div class="meta">discovered</div></td><td><span class="muted">Not inventoried</span><div class="meta">${esc(s.config_path)}</div></td><td>${esc(seatBridge.installed_version||'not installed')}<div class="meta">pinned ${esc(seatBridge.pinned_version||'unknown')}</div></td><td>—</td><td><span class="status">setup needed</span></td><td><button data-seat-action="discover" data-host="${esc(s.host)}" data-path="${esc(s.config_path)}">Use in wizard</button></td></tr>`).join('');return configured+discovered}
+function renderSeats(){const installed=seatBridge.installed_version||'not installed',latest=seatBridge.latest_version||'unavailable';return `${pageHead('Config','Seats and host setup','Configure local seats, verify push-wait health, and upgrade the pinned bridge.','<div class="seat-toolbar"><button data-seat-global="doctor">Doctor all</button><button data-seat-global="install">Install / upgrade bridge</button><button data-seat-global="upgrade-all">Upgrade all seats</button></div>')}${seatActionMessage?`<p class="status">${esc(seatActionMessage)} ${seatSessionPrompt?'<button id="copy-session-prompt">Copy session prompt</button>':''}</p>`:''}<div class="seat-layout"><div class="seat-stack"><section class="card pool"><div class="section-title"><h3>Seat inventory</h3><span class="status">${(seatData.seats||[]).length} configured</span></div><div class="table-scroll"><table><thead><tr><th>Host / role</th><th>Name / principal</th><th>Bridge</th><th>Profile / push</th><th>Doctor</th><th>Actions</th></tr></thead><tbody>${seatRows()||'<tr><td colspan="6" class="empty">No configured seats. Use the wizard.</td></tr>'}</tbody></table></div></section><section class="card pool"><h3>Add or update seat</h3>${seatForm()}</section><section id="seat-plan" class="card pool" ${seatPlan?'':'hidden'}><h3>Confirm changes</h3><p class="muted">Review the diff before applying. Existing files are backed up first.</p><pre class="seat-diff">${esc((seatPlan?.changes||[]).map(c=>`${c.description}\n${c.diff||c.action}`).join('\n')||'No changes required.')}</pre><button id="seat-apply" class="primary-action" ${seatPlan?'':'disabled'}>Confirm and apply</button></section></div><aside class="seat-stack"><section class="card pool"><h3>Wait bridge</h3><p>Installed <b>${esc(installed)}</b></p><p class="meta">Pinned ${esc(seatBridge.pinned_version||'unknown')} · PyPI latest ${esc(latest)}</p><p class="meta">Private CA ${seatBridge.private_ca_active?'active':'not active'}</p></section><section class="card pool"><h3>Doctor</h3><div id="seat-doctor">${seatDoctorResult?doctorResult(seatDoctorResult):'<p class="muted">Run one seat or all seats for config, timeout, token/CA path, bridge, live push, and restart checks.</p>'}</div></section><section class="card pool"><h3>Registry coverage</h3>${(seatRegistry.boards||[]).map(b=>`<div class="doctor-check"><span>${esc(b.label||b.board_id)}</span><span class="status">${esc(b.seat_coverage)}/${esc(b.configured_seats)}</span></div>`).join('')||'<p class="muted">No boards loaded.</p>'}<p class="meta">Read-only registry view.</p></section></aside></div>`}
+async function configPost(path,payload={}){const response=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}),body=await response.json();if(!response.ok)throw new Error(body.error||`HTTP ${response.status}`);return body}
+async function refreshSeats(){try{const [inventory,bridge]=await Promise.all([fetchJson('/api/config/seats'),fetchJson('/api/config/bridge')]);seatData=inventory;seatBridge=bridge;if(navKind()==='seats')renderHub();const central=centralLabels[0];if(central)try{seatRegistry=await fetchJson(`/api/config/registry?${apiCentral(central)}`)}catch(_error){seatRegistry={boards:[],unavailable:true}}if(navKind()==='seats')renderHub()}catch(e){if(navKind()==='seats')document.querySelector('#central-sections').innerHTML=`<p class="error">Config unavailable: ${esc(e.message)}</p>`}}
+function findSeat(name){return (seatData.seats||[]).find(s=>s.name===name)}
+function doctorResult(result){if(!result?.seats)return `<pre class="seat-diff">${esc(JSON.stringify(result,null,2))}</pre>`;return result.seats.map(s=>`<div><b>${esc(s.seat)} · ${esc(s.overall)}</b>${(s.checks||[]).map(c=>`<div class="doctor-check"><span>${esc(c.check)}<span class="meta">${esc(c.message)}</span></span><span class="status">${esc(c.status)}</span></div>`).join('')}${s.overall==='PASS'?'':'<p class="muted">Fix hint: open this seat with Fix, review the plan, then apply and restart the host if prompted.</p>'}</div>`).join('')}
+async function watchConfigJob(job){const host=document.querySelector('#seat-doctor');if(host)host.innerHTML=`<p class="muted">Job ${esc(job.job_id)} running…</p>`;const timer=setInterval(async()=>{try{const state=await fetchJson(`/api/config/jobs/${job.job_id}`);if(state.status==='queued'||state.status==='running')return;clearInterval(timer);if(state.status==='succeeded')seatDoctorResult=state.result;if(host)host.innerHTML=state.status==='succeeded'?doctorResult(state.result):`<p class="error">Job failed: ${esc(state.error)}</p>`;await refreshSeats()}catch(e){clearInterval(timer);if(host)host.innerHTML=`<p class="error">Job polling failed: ${esc(e.message)}</p>`}},1000)}
+async function seatSubmit(event){event.preventDefault();const status=document.querySelector('#seat-form-status');status.textContent='Planning…';try{seatPlan=await configPost('/api/config/plan',seatPayload(event.target));renderSeats();const note=document.querySelector('#seat-plan .muted');note.textContent=`Token file ${seatPlan.token_file_exists?'found':'missing'} · CA file ${seatPlan.ca_file_exists?'found':'missing'}. Review before apply.`;bindSeats()}catch(e){status.className='error wide';status.textContent=`Plan failed: ${e.message}`}}
+async function applySeat(){if(!seatPlan)return;try{const result=await configPost('/api/config/apply',{plan_id:seatPlan.plan_id});seatPlan=null;seatSessionPrompt=result.prompt||'';seatActionMessage=`${result.restart_prompt} Backups: ${(result.backup_paths||[]).join(', ')||'none'}`;await refreshSeats()}catch(e){seatSessionPrompt='';seatActionMessage=`Apply failed: ${e.message}`;renderHub()}}
+async function seatClick(event){const button=event.target.closest('[data-seat-action]');if(!button)return;const action=button.dataset.seatAction;if(action==='discover'){document.querySelector('#seat-wizard').outerHTML=seatForm({host:button.dataset.host,config_path:button.dataset.path});bindSeats();document.querySelector('#seat-wizard').scrollIntoView();return}const seat=findSeat(button.dataset.name);if(action==='doctor')return watchConfigJob(await configPost('/api/config/doctor',{names:[seat.name]}));if(action==='upgrade')return watchConfigJob(await configPost('/api/config/bridge/install',{}));if(action==='prompt'){const result=await configPost('/api/config/prompt',seat);await navigator.clipboard.writeText(result.prompt);button.textContent='Copied';return}if(action==='fix'||action==='goose'){document.querySelector('#seat-wizard').outerHTML=seatForm(seat);bindSeats();document.querySelector('#seat-wizard').requestSubmit()}}
+async function seatGlobal(event){const action=event.target.closest('[data-seat-global]')?.dataset.seatGlobal;if(!action)return;const routes={doctor:['/api/config/doctor',{}],install:['/api/config/bridge/install',{}],'upgrade-all':['/api/config/bridge/upgrade-all',{}]};const [path,payload]=routes[action];watchConfigJob(await configPost(path,payload))}
+function bindSeats(){document.querySelector('#seat-wizard')?.addEventListener('submit',seatSubmit);document.querySelector('#seat-apply')?.addEventListener('click',applySeat);document.querySelector('#copy-session-prompt')?.addEventListener('click',async event=>{await navigator.clipboard.writeText(seatSessionPrompt);event.target.textContent='Copied'});const host=document.querySelector('#central-sections');host.onclick=seatClick;host.querySelector('.page-head')?.addEventListener('click',seatGlobal)}
+renderHub=function(){if(navKind()!=='seats')return seatRenderHubV1();const host=document.querySelector('#central-sections');host.innerHTML=renderSeats();document.querySelector('#state').textContent='Local configuration';bindInteractive(host);bindSeats();syncNav()};
+window.addEventListener('hashchange',()=>{if(navKind()==='seats')refreshSeats()});if(navKind()==='seats')refreshSeats();
+</script></body>""",
+)
+
 
 def make_handler(
     cache: DashboardCache,
     stats_path: str | Path | None = None,
     worker_manager: WorkerManager | None = None,
+    seat_manager: SeatConfigManager | None = None,
 ) -> type[BaseHTTPRequestHandler]:
     selected_stats_path = (
         bridge_stats_path() if stats_path is None else Path(stats_path)
     )
     workers = worker_manager or WorkerManager()
+    seats = seat_manager or SeatConfigManager()
 
     def requested_central(path: str) -> str | None:
         values = parse_qs(urlsplit(path).query, keep_blank_values=True).get("central")
@@ -3314,6 +3730,31 @@ def make_handler(
                 body = _json_bytes({"centrals": labels, "default": labels[0]})
                 self._send(200, "application/json; charset=utf-8", body)
                 return
+            config_job = re.fullmatch(r"/api/config/jobs/([a-f0-9]{32})", route)
+            if route in {"/api/config/seats", "/api/config/bridge"} or config_job:
+                try:
+                    if route == "/api/config/seats":
+                        payload = seats.seats()
+                    elif route == "/api/config/bridge":
+                        payload = seats.bridge()
+                    else:
+                        payload = seats.job(config_job.group(1))
+                except KeyError:
+                    self._send(
+                        404,
+                        "application/json; charset=utf-8",
+                        b'{"error":"job not found"}',
+                    )
+                    return
+                except Exception as exc:  # noqa: BLE001 - bounded type only.
+                    self._send(
+                        503,
+                        "application/json; charset=utf-8",
+                        _json_bytes({"error": type(exc).__name__}),
+                    )
+                    return
+                self._send(200, "application/json; charset=utf-8", _json_bytes(payload))
+                return
             try:
                 central = requested_central(self.path)
                 label = central_label(central)
@@ -3330,6 +3771,20 @@ def make_handler(
                 except Exception as exc:  # noqa: BLE001 - return bounded HTTP error.
                     body = _json_bytes({"error": type(exc).__name__, "central": label})
                     self._send(503, "application/json; charset=utf-8", body)
+                    return
+                self._send(200, "application/json; charset=utf-8", body)
+                return
+            if route == "/api/config/registry":
+                try:
+                    body = _json_bytes(
+                        seats.registry(cache_call("get", central=central))
+                    )
+                except Exception as exc:  # noqa: BLE001 - bounded type only.
+                    self._send(
+                        503,
+                        "application/json; charset=utf-8",
+                        _json_bytes({"error": type(exc).__name__, "central": label}),
+                    )
                     return
                 self._send(200, "application/json; charset=utf-8", body)
                 return
@@ -3468,17 +3923,40 @@ def make_handler(
 
         def do_POST(self) -> None:
             route = urlsplit(self.path).path
+            config_routes = {
+                "/api/config/plan",
+                "/api/config/apply",
+                "/api/config/prompt",
+                "/api/config/doctor",
+                "/api/config/bridge/install",
+                "/api/config/bridge/upgrade-all",
+            }
             worker_action = re.fullmatch(
                 r"/api/workers/([a-z0-9-]{2,32})/(test|start|stop|restart)", route
             )
             if (
-                route not in {"/api/config", "/api/intake", "/api/workers"}
+                route
+                not in {"/api/config", "/api/intake", "/api/workers"} | config_routes
                 and worker_action is None
             ):
                 self._send(
                     404, "application/json; charset=utf-8", b'{"error":"not found"}'
                 )
                 return
+            if route in config_routes:
+                try:
+                    is_loopback = ipaddress.ip_address(
+                        self.client_address[0]
+                    ).is_loopback
+                except ValueError:
+                    is_loopback = False
+                if not is_loopback:
+                    self._send(
+                        403,
+                        "application/json; charset=utf-8",
+                        b'{"error":"loopback required"}',
+                    )
+                    return
             try:
                 central = requested_central(self.path)
                 label = central_label(central)
@@ -3493,7 +3971,10 @@ def make_handler(
                 length = int(self.headers.get("Content-Length", ""))
             except ValueError:
                 length = -1
-            if not 1 <= length <= WORKER_API_MAX_BYTES:
+            body_limit = (
+                CONFIG_API_MAX_BYTES if route in config_routes else WORKER_API_MAX_BYTES
+            )
+            if not 1 <= length <= body_limit:
                 self._send(
                     400,
                     "application/json; charset=utf-8",
@@ -3502,7 +3983,27 @@ def make_handler(
                 return
             try:
                 request = json.loads(self.rfile.read(length))
-                if route == "/api/workers":
+                if route == "/api/config/plan":
+                    body = _json_bytes(seats.plan(request))
+                elif route == "/api/config/apply":
+                    if not isinstance(request, dict) or set(request) != {"plan_id"}:
+                        raise ValueError("request must contain only plan_id")
+                    body = _json_bytes(seats.apply(request["plan_id"]))
+                elif route == "/api/config/prompt":
+                    body = _json_bytes(seats.prompt(request))
+                elif route == "/api/config/doctor":
+                    if not isinstance(request, dict) or not set(request) <= {"names"}:
+                        raise ValueError("request may contain only names")
+                    body = _json_bytes(seats.doctor(request.get("names")))
+                elif route == "/api/config/bridge/install":
+                    if request != {}:
+                        raise ValueError("bridge install body must be an empty object")
+                    body = _json_bytes(seats.install_bridge())
+                elif route == "/api/config/bridge/upgrade-all":
+                    if request != {}:
+                        raise ValueError("bridge upgrade body must be an empty object")
+                    body = _json_bytes(seats.upgrade_all())
+                elif route == "/api/workers":
                     body = _json_bytes(
                         {
                             **workers.save(request, selected_central_url(central)),
@@ -3580,6 +4081,13 @@ def make_handler(
                             "intake request must be a new ask or approve/decline decision"
                         )
             except KeyError:
+                if route in config_routes:
+                    self._send(
+                        404,
+                        "application/json; charset=utf-8",
+                        b'{"error":"plan not found"}',
+                    )
+                    return
                 if route == "/api/workers" or worker_action is not None:
                     self._send(
                         404,
@@ -3771,6 +4279,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--cache-seconds", type=float, default=5.0)
     parser.add_argument("--workers-dir", default=str(DEFAULT_WORKERS_DIR))
     parser.add_argument(
+        "--seat-state-dir", default=str(CONFIG_STATE_DIR), help=argparse.SUPPRESS
+    )
+    parser.add_argument(
         "--worker-script", default=str(DEFAULT_WORKER_SCRIPT), help=argparse.SUPPRESS
     )
     args = parser.parse_args(argv)
@@ -3790,9 +4301,13 @@ def main(argv: list[str] | None = None) -> None:
         [FleetFetcher(config) for config in configs], args.cache_seconds
     )
     worker_manager = WorkerManager(args.workers_dir, worker_script=args.worker_script)
+    seat_state_dir = Path(args.seat_state_dir).expanduser()
+    seat_manager = SeatConfigManager(
+        seat_state_dir / "seats.json", state_dir=seat_state_dir
+    )
     server = ThreadingHTTPServer(
         (args.host, args.port),
-        make_handler(cache, bridge_stats_path(), worker_manager),
+        make_handler(cache, bridge_stats_path(), worker_manager, seat_manager),
     )
     print(f"Fleet Dashboard: http://{args.host}:{args.port}", flush=True)
     try:
