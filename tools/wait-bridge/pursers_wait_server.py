@@ -2141,7 +2141,17 @@ async def _is_relevant(
     ticket_id = event.get("ticket_id")
     if not ticket_id:
         return False
-    if event.get("kind") in {OFFER_EXPIRED, OFFER_REVOKED}:
+    kind = event.get("kind")
+    offered_kind = (
+        REVIEW_OFFERED if wait_for == WAIT_FOR_SUBMITTED else TICKET_OFFERED
+    )
+    if kind in {TICKET_OFFERED, REVIEW_OFFERED}:
+        if kind != offered_kind or event.get("offered_agent_id") != my_agent_id:
+            return False
+        recipients = event.get("recipient_identities")
+        if isinstance(recipients, list) and my_agent_id not in recipients:
+            return False
+    if kind in {OFFER_EXPIRED, OFFER_REVOKED}:
         return bool(
             event.get("offered_agent_id") == my_agent_id
             and event.get("offer_kind")
@@ -2149,13 +2159,16 @@ async def _is_relevant(
         )
     try:
         result = await client.ticket_get(ticket_id)
-    except (BoardClientError, AttributeError, KeyError):
-        return not only_mine and project is None
+    except Exception as exc:
+        if kind in {TICKET_OFFERED, REVIEW_OFFERED}:
+            return False
+        if isinstance(exc, (BoardClientError, AttributeError, KeyError)):
+            return not only_mine and project is None
+        raise
     ticket = result.get("ticket", {})
     dispatch_state = ticket.get("dispatch_state")
     if isinstance(dispatch_state, dict):
         state = dispatch_state.get("state")
-        kind = event.get("kind")
         if wait_for == WAIT_FOR_SUBMITTED:
             offer = ticket.get("review_offer")
             lease = ticket.get("review_lease")
@@ -2201,9 +2214,6 @@ async def _is_relevant(
         relevant = ticket_is_relevant(
             ticket, my_agent_id, only_mine, project, wait_for
         )
-    offered_kind = (
-        REVIEW_OFFERED if wait_for == WAIT_FOR_SUBMITTED else TICKET_OFFERED
-    )
     if relevant and event.get("kind") == offered_kind:
         offer = ticket.get(
             "review_offer" if wait_for == WAIT_FOR_SUBMITTED else "work_offer"

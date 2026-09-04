@@ -384,7 +384,11 @@ class PerCallWaitTests(unittest.IsolatedAsyncioTestCase):
                         "ticket_id": "TK-offer",
                         "status_to": "open",
                     },
-                    {"kind": "ticket_offered", "ticket_id": "TK-offer"},
+                    {
+                        "kind": "ticket_offered",
+                        "ticket_id": "TK-offer",
+                        "offered_agent_id": mine,
+                    },
                 ],
                 "next_cursor": int(arguments["cursor"]) + 2,
                 "has_more": False,
@@ -407,6 +411,55 @@ class PerCallWaitTests(unittest.IsolatedAsyncioTestCase):
                 "skills_required": ["python"],
             },
         )
+
+    async def test_other_seat_offer_read_failure_times_out_for_worker_and_reviewer(
+        self,
+    ) -> None:
+        for role, kind, wait_for in (
+            ("worker", "ticket_offered", "claimable"),
+            ("reviewer", "review_offered", "submitted"),
+        ):
+            with self.subTest(role=role):
+                client = FakeClient(role=role)
+                returned = False
+
+                async def catchup(**arguments: Any) -> dict[str, Any]:
+                    nonlocal returned
+                    events = []
+                    if not returned:
+                        returned = True
+                        events = [{
+                            "kind": kind,
+                            "ticket_id": f"TK-other-{role}",
+                            "offered_agent_id": "AI-other-seat",
+                            "recipient_identities": ["AI-other-seat"],
+                        }]
+                    return {
+                        "events": events,
+                        "next_cursor": int(arguments["cursor"]) + len(events),
+                        "has_more": False,
+                        "resync_required": False,
+                    }
+
+                async def failed_get(_ticket_id: str) -> dict[str, Any]:
+                    raise BoardClientError("transient read failure")
+
+                client.board_catchup = catchup  # type: ignore[method-assign]
+                client.ticket_get = failed_get  # type: ignore[method-assign]
+                with (
+                    patch.object(wait_server, "WAIT_MODE", "poll"),
+                    patch.object(wait_server, "clamp_timeout", return_value=0.03),
+                    patch.object(wait_server, "DEFAULT_POLL_INTERVAL_S", 0.01),
+                ):
+                    result = await wait_server._wait_for_work(
+                        client,
+                        timeout_s=1,
+                        only_mine=False,
+                        wait_for=wait_for,
+                    )
+
+                self.assertTrue(result["timed_out"])
+                self.assertEqual(result["events"], [])
 
     def test_capability_environment_is_explicit_and_legacy_is_absent(self) -> None:
         names = (
