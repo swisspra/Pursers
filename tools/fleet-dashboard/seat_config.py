@@ -37,6 +37,24 @@ DEFAULT_INVENTORY = DEFAULT_STATE_DIR / "seats.json"
 SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
 ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 MANAGED_COMMENT = "# pursers-managed; edit through the fleet dashboard"
+CAPABILITY_ENV = {
+    "tier_max": "PURSERS_TIER_MAX",
+    "skills": "PURSERS_SKILLS",
+    "can_review": "PURSERS_CAN_REVIEW",
+    "can_work": "PURSERS_CAN_WORK",
+    "model": "PURSERS_MODEL",
+    "provider": "PURSERS_PROVIDER",
+}
+CONNECTOR_SKILLS = {
+    "github": "git",
+    "gitlab": "git",
+    "playwright": "browser",
+    "chrome": "browser",
+    "browser": "browser",
+    "sharepoint": "documents",
+    "onedrive": "documents",
+    "pubmed": "research",
+}
 
 
 @dataclass(frozen=True)
@@ -544,6 +562,12 @@ class DesiredSeat:
     personal_command: str = "pursers-personal"
     token_env_var: str = "ONBOARD_CENTRAL_TOKEN"
     bridge_name: str | None = None
+    tier_max: int = 2
+    skills: tuple[str, ...] = ()
+    can_review: bool | None = None
+    can_work: bool = True
+    model: str | None = None
+    provider: str | None = None
 
     def __post_init__(self) -> None:
         if self.host not in HOST_PROFILES:
@@ -556,6 +580,26 @@ class DesiredSeat:
             raise ValueError("home board must be a safe 1-80 character identifier")
         if not ENV_NAME.fullmatch(self.token_env_var):
             raise ValueError("token env var must be a safe identifier")
+        if isinstance(self.tier_max, bool) or self.tier_max not in {1, 2, 3}:
+            raise ValueError("tier_max must be 1, 2, or 3")
+        normalized_skills = tuple(
+            sorted({str(skill).strip().lower() for skill in self.skills if str(skill).strip()})
+        )
+        if any(not SAFE_NAME.fullmatch(skill) for skill in normalized_skills):
+            raise ValueError("skills must contain safe identifiers")
+        object.__setattr__(self, "skills", normalized_skills)
+        if self.can_review is None:
+            object.__setattr__(
+                self,
+                "can_review",
+                self.role == "reviewer" and self.tier_max > 1,
+            )
+        if not isinstance(self.can_review, bool) or not isinstance(self.can_work, bool):
+            raise ValueError("can_review and can_work must be boolean")
+        for field_name in ("model", "provider"):
+            value = getattr(self, field_name)
+            if value is not None and (not isinstance(value, str) or len(value) > 200):
+                raise ValueError(f"{field_name} must be a string up to 200 characters")
 
     @property
     def connector_name(self) -> str:
@@ -568,7 +612,59 @@ class DesiredSeat:
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> "DesiredSeat":
         allowed = {item.name for item in fields(cls)}
-        return cls(**{key: item for key, item in value.items() if key in allowed})
+        selected = {key: item for key, item in value.items() if key in allowed}
+        skills = selected.get("skills", ())
+        if isinstance(skills, list):
+            selected["skills"] = tuple(skills)
+        return cls(**selected)
+
+    @property
+    def capabilities(self) -> dict[str, Any]:
+        return {
+            "tier_max": self.tier_max,
+            "skills": list(self.skills),
+            "can_review": self.can_review,
+            "can_work": self.can_work,
+            "model": self.model,
+            "provider": self.provider,
+            "host": self.host,
+        }
+
+
+def capability_env(desired: DesiredSeat) -> dict[str, str]:
+    values = {
+        "tier_max": str(desired.tier_max),
+        "skills": ",".join(desired.skills),
+        "can_review": str(desired.can_review).lower(),
+        "can_work": str(desired.can_work).lower(),
+        "model": desired.model or "",
+        "provider": desired.provider or "",
+    }
+    return {CAPABILITY_ENV[key]: value for key, value in values.items()}
+
+
+def connector_skill_suggestions(inspection: dict[str, Any]) -> list[str]:
+    """Map configured connector names to editable, non-secret skill hints."""
+    names: list[str] = []
+    document = inspection.get("document")
+    if isinstance(document, dict):
+        for key in ("mcp_servers", "mcpServers"):
+            servers = document.get(key)
+            if isinstance(servers, dict):
+                names.extend(str(name).casefold() for name in servers)
+    text = inspection.get("text")
+    if isinstance(text, str):
+        names.extend(
+            match.group(1).casefold()
+            for match in re.finditer(r"^\s{2}([A-Za-z0-9._-]+):\s*$", text, re.M)
+        )
+    suggestions = {
+        skill
+        for name in names
+        for marker, skill in CONNECTOR_SKILLS.items()
+        if marker in name
+    }
+    return sorted(suggestions)
 
 
 @dataclass(frozen=True)
@@ -754,6 +850,13 @@ ONBOARD_CENTRAL_URL = {_toml_string(desired.central_url)}
 ONBOARD_BOARD_ID = {_toml_string(desired.home_board)}
 ONBOARD_AGENT_NAME = {_toml_string(desired.name)}
 PURSERS_HOST = {_toml_string(desired.host)}
+PURSERS_ROLE = {_toml_string(desired.role)}
+PURSERS_TIER_MAX = {_toml_string(str(desired.tier_max))}
+PURSERS_SKILLS = {_toml_string(','.join(desired.skills))}
+PURSERS_CAN_REVIEW = {_toml_string(str(desired.can_review).lower())}
+PURSERS_CAN_WORK = {_toml_string(str(desired.can_work).lower())}
+PURSERS_MODEL = {_toml_string(desired.model or '')}
+PURSERS_PROVIDER = {_toml_string(desired.provider or '')}
 SSL_CERT_FILE = {_toml_string(desired.ca_file)}
 
 [mcp_servers.pursers-dev]
@@ -798,6 +901,11 @@ def _goose_block(desired: DesiredSeat) -> list[str]:
         f"      ONBOARD_BOARD_ID: {_yaml_quote(desired.home_board)}\n",
         f"      ONBOARD_AGENT_NAME: {_yaml_quote(desired.name)}\n",
         "      PURSERS_HOST: goose\n",
+        f"      PURSERS_ROLE: {_yaml_quote(desired.role)}\n",
+        *[
+            f"      {name}: {_yaml_quote(value)}\n"
+            for name, value in capability_env(desired).items()
+        ],
         f"      SSL_CERT_FILE: {_yaml_quote(desired.ca_file)}\n",
     ]
 
@@ -971,10 +1079,10 @@ def _bridge_json(desired: DesiredSeat) -> dict[str, Any]:
         "ONBOARD_BOARD_ID": desired.home_board,
         "ONBOARD_AGENT_NAME": desired.name,
         "PURSERS_HOST": desired.host,
+        "PURSERS_ROLE": desired.role,
         "SSL_CERT_FILE": desired.ca_file,
+        **capability_env(desired),
     }
-    if desired.role == "orchestrator":
-        env["PURSERS_ROLE"] = "orchestrator"
     return {
         "command": "/bin/sh",
         "args": _bridge_shell_args(),
@@ -1267,13 +1375,21 @@ class PromptRenderer:
             "claude-code": "Claude Code emits progress every 300s during its long rotation.",
             "headless": "Invoke a model only after an actionable cue.",
         }[desired.host]
+        capability_note = (
+            f"Declared capabilities: tier_max={desired.tier_max}; "
+            f"skills={','.join(desired.skills) or 'none'}; "
+            f"can_work={str(desired.can_work).lower()}; "
+            f"can_review={str(desired.can_review).lower()}; "
+            f"model={desired.model or 'unspecified'}; "
+            f"provider={desired.provider or 'unspecified'}."
+        )
         if desired.role == "orchestrator":
             return (
                 f"You are Pursers seat {desired.name} ({desired.role}).\n"
                 f"Pass agent_name={json.dumps(desired.name)} on every board call that accepts it. Never use another name.\n"
                 "start every turn with board_digest; act on closed tickets (merge/verify), file follow-ups, then board_digest_ack; never a2a_wait; never claim.\n"
                 "Never review your own work, never push main, stay in the registered work_dir for the event's board_id, and report evidence faithfully.\n"
-                f"{host_note}"
+                f"{host_note}\n{capability_note}"
             )
         action = (
             "claim, implement, test, commit, push, and submit one ticket"
@@ -1289,7 +1405,7 @@ class PromptRenderer:
             quoted_name=json.dumps(desired.name),
             timeout_s=desired.profile.block_s,
             action=action,
-            host_note=host_note,
+            host_note=f"{host_note}\n{capability_note}",
         )
 
 
@@ -1382,6 +1498,15 @@ def _default_live_probe(desired: DesiredSeat, timeout_s: float) -> dict[str, Any
             identity = client.identity
             if identity is None:
                 raise RuntimeError("board join returned no identity")
+            central_agent = next(
+                (
+                    row
+                    for row in status.get("agents", [])
+                    if isinstance(row, dict)
+                    and row.get("agent_id") == identity.agent_id
+                ),
+                None,
+            )
             resources = (
                 f"board://{desired.home_board}/journal",
                 f"board://{desired.home_board}/agent/{identity.agent_id}",
@@ -1421,11 +1546,14 @@ def _default_live_probe(desired: DesiredSeat, timeout_s: float) -> dict[str, Any
                     available.append(board)
                 except Exception as exc:
                     skipped[board] = type(exc).__name__
-            return {
+            result = {
                 "mode": "push",
                 "registry_boards": available,
                 "skipped_boards": skipped,
             }
+            if central_agent is not None:
+                result["central_agent"] = central_agent
+            return result
 
     return asyncio.run(asyncio.wait_for(probe(), timeout=timeout_s))
 
@@ -1719,6 +1847,44 @@ class Doctor:
                     f"mode={mode}; boards={len(boards)}; skipped={len(skipped)}",
                 )
             )
+            central_agent = result.get("central_agent")
+            if isinstance(central_agent, dict):
+                actual = central_agent.get("capabilities")
+                actual = actual if isinstance(actual, dict) else {}
+                expected = desired.capabilities
+                fields_to_check = [
+                    "tier_max",
+                    "skills",
+                    "can_review",
+                    "can_work",
+                    "host",
+                ]
+                fields_to_check.extend(
+                    field for field in ("model", "provider") if expected.get(field)
+                )
+                drift = [
+                    field
+                    for field in fields_to_check
+                    if (
+                        sorted(actual.get(field, []))
+                        if field == "skills"
+                        and isinstance(actual.get(field), list)
+                        else actual.get(field)
+                    )
+                    != expected.get(field)
+                ]
+                rows.append(
+                    self._check(
+                        desired,
+                        "capability-drift",
+                        "WARN" if drift else "PASS",
+                        (
+                            "Central differs: " + ", ".join(drift)
+                            if drift
+                            else "Central capabilities match"
+                        ),
+                    )
+                )
         except Exception as exc:  # Redacted boundary: never include arguments/tokens.
             rows.append(
                 self._check(desired, "live-smoke", "FAIL", type(exc).__name__)

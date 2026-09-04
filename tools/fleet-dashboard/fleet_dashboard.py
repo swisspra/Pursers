@@ -49,12 +49,14 @@ from seat_config import (  # noqa: I001
     PromptRenderer,
     SeatInventory,
     adapter_for,
+    connector_skill_suggestions,
 )
 
 
 DEFAULT_URL = "https://127.0.0.1:8766/mcp"
 DEFAULT_HOME_BOARD = "pursers"
 SNAPSHOT_LIMIT = 1_000
+DISPATCH_TICKET_LIMIT = 500
 SNAPSHOT_MAX_BYTES = 300_000
 EVENT_SCAN_LIMIT = 50
 EVENT_MAX_BYTES = 100_000
@@ -169,6 +171,8 @@ class IntakeRateLimitError(RuntimeError):
 
 
 class FleetClient(Protocol):
+    async def board_status(self) -> dict[str, Any]: ...
+
     async def board_state_get(self, key: str | None = None) -> dict[str, Any]: ...
 
     async def board_snapshot(
@@ -184,6 +188,18 @@ class FleetClient(Protocol):
         agent_name: str | None = None,
         max_events: int | None = None,
         max_bytes: int | None = None,
+    ) -> dict[str, Any]: ...
+
+    async def ticket_list(
+        self, *, include_closed: bool = False, limit: int = 100
+    ) -> dict[str, Any]: ...
+
+    async def board_dispatch_policy_set(
+        self,
+        *,
+        offer_ttl_s: int,
+        second_opinion: bool,
+        fallback_broadcast: bool,
     ) -> dict[str, Any]: ...
 
 
@@ -2231,7 +2247,7 @@ def aggregate_fleet(
             if isinstance(agent_id, str) and agent_id:
                 group["agent_ids_by_board"].setdefault(board_id, set()).add(agent_id)
             current = current_by_agent.get(str(agent_id or ""))
-            group["seats"][board_id] = {
+            seat_projection = {
                 "board_id": board_id,
                 "project": label,
                 "role": _clip(agent.get("membership_role") or agent.get("role"), 32)
@@ -2248,6 +2264,19 @@ def aggregate_fleet(
                 ),
                 "last_seen": seen_at.isoformat() if seen_at else None,
             }
+            if "capabilities" in agent:
+                seat_projection["capabilities"] = (
+                    agent.get("capabilities")
+                    if isinstance(agent.get("capabilities"), dict)
+                    else {}
+                )
+            if "current_offer" in agent:
+                seat_projection["current_offer"] = (
+                    agent.get("current_offer")
+                    if isinstance(agent.get("current_offer"), dict)
+                    else None
+                )
+            group["seats"][board_id] = seat_projection
             if agent.get("status") == "working" and agent.get(
                 "lifecycle_status"
             ) not in {"handed_off", "inactive"}:
@@ -2292,6 +2321,15 @@ def aggregate_fleet(
                         "status_label": _clip(_ticket_status_label(ticket, now), 64),
                         "claimed_by": _clip(claimed_by, MAX_LABEL_CHARS) or None,
                         "updated_at": _clip(ticket.get("updated_at"), 40) or None,
+                        "tier": ticket.get("tier")
+                        if ticket.get("tier") in {1, 2, 3}
+                        else 2,
+                        "skills_required": ticket.get("skills_required")
+                        if isinstance(ticket.get("skills_required"), list)
+                        else [],
+                        "dispatch_state": ticket.get("dispatch_state")
+                        if isinstance(ticket.get("dispatch_state"), dict)
+                        else None,
                     }
                 )
 
@@ -2401,6 +2439,33 @@ def aggregate_fleet(
     }
 
 
+def dispatch_missing_capabilities(
+    ticket: dict[str, Any], agents: list[dict[str, Any]], kind: str
+) -> list[str]:
+    """Explain which declared capability blocks every visible seat."""
+    capability_rows = [
+        row.get("capabilities")
+        for row in agents
+        if isinstance(row, dict) and isinstance(row.get("capabilities"), dict)
+    ]
+    gate = "can_review" if kind == "review" else "can_work"
+    candidates = [row for row in capability_rows if row.get(gate) is True]
+    missing: list[str] = []
+    if not candidates:
+        missing.append(gate)
+    tier = ticket.get("tier") if ticket.get("tier") in {1, 2, 3} else 2
+    if not any(row.get("tier_max", 0) >= tier for row in candidates):
+        missing.append(f"tier_max>={tier}")
+    required = ticket.get("skills_required")
+    required = required if isinstance(required, list) else []
+    for skill in required:
+        if isinstance(skill, str) and not any(
+            skill in row.get("skills", []) for row in candidates
+        ):
+            missing.append(f"skill:{skill}")
+    return missing
+
+
 class FleetFetcher:
     def __init__(
         self,
@@ -2494,6 +2559,103 @@ class FleetFetcher:
         if row.get("error"):
             raise RuntimeError(str(row["error"]))
         return project_board_detail(row)
+
+    async def fetch_dispatch(self, board_id: str) -> dict[str, Any]:
+        if not BOARD_ID_RE.fullmatch(board_id):
+            raise ValueError("invalid board_id")
+        active = {active_board for _label, active_board in await self._boards()}
+        if board_id not in active:
+            raise ValueError("board_id is not registry-active")
+        async with self._client(board_id) as client:
+            status = await client.board_status()
+            listed = await client.ticket_list(
+                include_closed=False, limit=DISPATCH_TICKET_LIMIT
+            )
+            events = await self._board_event_feed(
+                client,
+                int(status.get("latest_seq", 0)),
+                DETAIL_EVENT_SCAN_LIMIT,
+            )
+        tickets = {
+            row.get("ticket_id"): row
+            for row in listed.get("tickets", [])
+            if isinstance(row, dict) and isinstance(row.get("ticket_id"), str)
+        }
+        agents = status.get("agents") if isinstance(status.get("agents"), list) else []
+        unassignable = []
+        for row in status.get("unassignable_tickets", []):
+            if not isinstance(row, dict):
+                continue
+            ticket_id = row.get("ticket_id")
+            ticket = tickets.get(ticket_id, {})
+            state = ticket.get("dispatch_state")
+            kind = state.get("kind", "work") if isinstance(state, dict) else "work"
+            unassignable.append(
+                {
+                    "ticket_id": ticket_id,
+                    "title": _clip(ticket.get("title") or ticket_id, MAX_TITLE_CHARS),
+                    "reason": _clip(row.get("reason") or "unknown", 80),
+                    "missing": dispatch_missing_capabilities(ticket, agents, kind),
+                }
+            )
+        offers = [
+            {
+                "agent_name": _clip(agent.get("agent_name"), MAX_LABEL_CHARS),
+                **agent["current_offer"],
+            }
+            for agent in agents
+            if isinstance(agent, dict) and isinstance(agent.get("current_offer"), dict)
+        ]
+        offer_kinds = {
+            "ticket_offered",
+            "review_offered",
+            "offer_expired",
+            "offer_revoked",
+            "dispatch_unassignable",
+        }
+        timeline = [
+            {
+                "seq": event.get("seq"),
+                "kind": event.get("kind"),
+                "ticket_id": event.get("ticket_id"),
+                "occurred_at": event.get("occurred_at"),
+            }
+            for event in events
+            if isinstance(event, dict) and event.get("kind") in offer_kinds
+        ][-25:]
+        return {
+            "board_id": board_id,
+            "dispatch_policy": status.get("dispatch_policy", {}),
+            "unassignable_tickets": unassignable,
+            "offers": offers,
+            "timeline": timeline,
+        }
+
+    async def save_dispatch(self, board_id: str, payload: Any) -> dict[str, Any]:
+        if not BOARD_ID_RE.fullmatch(board_id):
+            raise ValueError("invalid board_id")
+        if not isinstance(payload, dict) or set(payload) != {
+            "offer_ttl_s",
+            "second_opinion",
+            "fallback_broadcast",
+        }:
+            raise ValueError("dispatch policy fields are invalid")
+        ttl = payload["offer_ttl_s"]
+        if isinstance(ttl, bool) or not isinstance(ttl, int) or not 1 <= ttl <= 86_400:
+            raise ValueError("offer_ttl_s must be between 1 and 86400")
+        if not isinstance(payload["second_opinion"], bool) or not isinstance(
+            payload["fallback_broadcast"], bool
+        ):
+            raise ValueError("dispatch policy booleans are invalid")
+        active = {active_board for _label, active_board in await self._boards()}
+        if board_id not in active:
+            raise ValueError("board_id is not registry-active")
+        async with self._client(board_id) as client:
+            return await client.board_dispatch_policy_set(
+                offer_ttl_s=ttl,
+                second_opinion=payload["second_opinion"],
+                fallback_broadcast=payload["fallback_broadcast"],
+            )
 
     async def fetch_config(self) -> dict[str, Any]:
         async with self._client(self.config.home_board) as client:
@@ -3047,6 +3209,13 @@ class SeatConfigManager:
             ],
         }
 
+    def suggestions(self, payload: Any) -> dict[str, Any]:
+        desired = self._desired(payload)
+        return {
+            "seat": desired.name,
+            "skills": connector_skill_suggestions(adapter_for(desired).inspect()),
+        }
+
     def apply(self, plan_id: Any) -> dict[str, Any]:
         if not isinstance(plan_id, str):
             raise ValueError("plan_id is required")  # noqa: TRY004 - API contract.
@@ -3081,12 +3250,18 @@ class SeatConfigManager:
     def registry(self, fleet: dict[str, Any]) -> dict[str, Any]:
         names = {row.get("name") for row in self.seats()["seats"]}
         covered: dict[str, set[str]] = {}
+        live_seats: dict[str, dict[str, Any]] = {}
         for agent in fleet.get("agents", []):
             if not isinstance(agent, dict) or agent.get("agent_name") not in names:
                 continue
             for seat in agent.get("seats", []):
                 if isinstance(seat, dict) and isinstance(seat.get("board_id"), str):
                     covered.setdefault(seat["board_id"], set()).add(agent["agent_name"])
+                    live_seats[agent["agent_name"]] = {
+                        "status": agent.get("pool_status"),
+                        "current_offer": seat.get("current_offer"),
+                        "capabilities": seat.get("capabilities", {}),
+                    }
         boards = []
         for board in fleet.get("boards", []):
             if not isinstance(board, dict):
@@ -3101,7 +3276,7 @@ class SeatConfigManager:
                     "configured_seats": len(names),
                 }
             )
-        return {"boards": boards, "read_only": True}
+        return {"boards": boards, "seats": live_seats, "read_only": True}
 
     def _start_job(self, action: str, target: Callable[[], Any]) -> dict[str, str]:
         job_id = uuid.uuid4().hex
@@ -3285,6 +3460,22 @@ class DashboardCache:
         label = self.resolve_central(central)
         return self._labeled(
             asyncio.run(self.fetchers[label].fetch_intake(board_id)), label
+        )
+
+    def get_dispatch(
+        self, board_id: str, central: str | None = None
+    ) -> dict[str, Any]:
+        label = self.resolve_central(central)
+        return self._labeled(
+            asyncio.run(self.fetchers[label].fetch_dispatch(board_id)), label
+        )
+
+    def save_dispatch(
+        self, board_id: str, value: Any, central: str | None = None
+    ) -> dict[str, Any]:
+        label = self.resolve_central(central)
+        return self._labeled(
+            asyncio.run(self.fetchers[label].save_dispatch(board_id, value)), label
         )
 
     def save_config(
@@ -3608,6 +3799,30 @@ window.addEventListener('hashchange',()=>{if(navKind()==='seats')refreshSeats()}
 )
 
 
+HTML = HTML.replace(
+    "</script></body>",
+    r"""
+</script><script>
+let dispatchData={},initialSeatsRefreshPending=true;
+seatPayload=function(form){const f=new FormData(form);return{host:f.get('host'),role:f.get('role'),name:f.get('name'),central_url:f.get('central_url'),home_board:f.get('home_board'),token_file:f.get('token_file'),ca_file:f.get('ca_file'),bridge_command:f.get('bridge_command'),config_path:f.get('config_path'),seat_dir:f.get('seat_dir')||null,repository:f.get('repository')||null,tier_max:Number(f.get('tier_max')),skills:String(f.get('skills')||'').split(',').map(x=>x.trim()).filter(Boolean),can_review:f.get('can_review')==='on',can_work:f.get('can_work')==='on',model:f.get('model')||null,provider:f.get('provider')||null}}
+seatForm=function(record={}){const tier=record.tier_max||2,review=record.can_review??(record.role==='reviewer'&&tier>1),work=record.can_work??true;return `<form id="seat-wizard" class="seat-form"><label>Host<select name="host">${['codex','codex-cli','goose','claude-code','claude-desktop','headless'].map(x=>`<option ${record.host===x?'selected':''}>${esc(x)}</option>`).join('')}</select></label><label>Role<select name="role"><option ${record.role==='worker'?'selected':''}>worker</option><option ${record.role==='reviewer'?'selected':''}>reviewer</option><option ${record.role==='orchestrator'?'selected':''}>orchestrator</option></select></label><label>Name<input name="name" value="${esc(record.name||'')}" pattern="[A-Za-z0-9][A-Za-z0-9._-]{0,79}" required></label><label>Home board<input name="home_board" value="${esc(record.home_board||'pursers')}" required></label><label>Tier max<select name="tier_max">${[1,2,3].map(x=>`<option value="${x}" ${tier===x?'selected':''}>${x}</option>`).join('')}</select></label><label>Skills · comma separated<input name="skills" value="${esc((record.skills||[]).join(','))}" placeholder="git,browser"></label><label><span>Review work</span><input name="can_review" type="checkbox" ${review?'checked':''}></label><label><span>Execute work</span><input name="can_work" type="checkbox" ${work?'checked':''}></label><label>Model<input name="model" value="${esc(record.model||'')}" maxlength="200"></label><label>Provider<input name="provider" value="${esc(record.provider||'')}" maxlength="200"></label><button type="button" data-seat-suggest>Suggest skills from connectors</button><span id="seat-suggestions" class="meta"></span><label class="wide">Central URL<input name="central_url" type="url" value="${esc(record.central_url||'https://127.0.0.1:8766/mcp')}" required></label><label class="wide">Token file path · token never enters this page<input name="token_file" value="${esc(record.token_file||'')}" required></label><label class="wide">CA file path<input name="ca_file" value="${esc(record.ca_file||'')}" required></label><label class="wide">Bridge command<input name="bridge_command" value="${esc(record.bridge_command||seatBridge.command||'pursers-wait-bridge')}" required></label><label class="wide">Host config path<input name="config_path" value="${esc(record.config_path||'')}" required></label><label>Seat directory (Goose)<input name="seat_dir" value="${esc(record.seat_dir||'')}"></label><label>Repository (optional)<input name="repository" value="${esc(record.repository||'')}"></label><button class="primary-action wide" type="submit">Preview exact changes</button><p id="seat-form-status" class="muted wide">Capabilities are written into every host's managed environment block.</p></form>`}
+seatRows=function(){const configured=(seatData.seats||[]).map(s=>{const live=seatRegistry.seats?.[s.name]||{},offer=live.current_offer;return `<tr><td><b>${esc(s.host)}</b><div class="meta">${esc(s.role)}</div></td><td><span class="id">${esc(s.name)}</span><div class="meta">${esc(s.principal_label)}</div></td><td>tier ${esc(s.tier_max||2)} · review ${s.can_review?'yes':'no'} · work ${s.can_work===false?'no':'yes'}<div class="meta">${esc((s.skills||[]).join(', ')||'no skills')}</div></td><td><span class="status">${esc(live.status||'unknown')}</span></td><td>${offer?`<span class="id">${esc(offer.ticket_id)}</span><div class="meta">expires ${esc(fmt(offer.expires_at))}</div>`:'—'}</td><td>${esc(seatBridge.installed_version||'not installed')}<div class="meta">pinned ${esc(s.bridge_version||seatBridge.pinned_version||'unknown')}</div></td><td><div class="seat-actions"><button data-seat-action="doctor" data-name="${esc(s.name)}">Doctor</button><button data-seat-action="fix" data-name="${esc(s.name)}">Fix</button><button data-seat-action="prompt" data-name="${esc(s.name)}">Copy prompt</button><button data-seat-action="upgrade">Upgrade bridge</button>${s.host==='goose'?`<button data-seat-action="goose" data-name="${esc(s.name)}">Regenerate Goose</button>`:''}</div></td></tr>`}).join('');const discovered=(seatData.discovered_configs||[]).map(s=>`<tr><td><b>${esc(s.host)}</b><div class="meta">discovered</div></td><td><span class="muted">Not inventoried</span><div class="meta">${esc(s.config_path)}</div></td><td>—</td><td>setup needed</td><td>—</td><td>${esc(seatBridge.installed_version||'not installed')}</td><td><button data-seat-action="discover" data-host="${esc(s.host)}" data-path="${esc(s.config_path)}">Use in wizard</button></td></tr>`).join('');return configured+discovered}
+function dispatchPanels(){return (seatRegistry.boards||[]).map(board=>{const data=dispatchData[board.board_id];if(!data)return `<article class="card"><h3>${esc(board.label||board.board_id)}</h3><p class="muted">Dispatch data loading…</p></article>`;if(data.error)return `<article class="card"><h3>${esc(board.label||board.board_id)} dispatch</h3><p class="error">Dispatch unavailable: ${esc(data.error)}</p></article>`;const p=data.dispatch_policy||{};return `<article class="card"><h3>${esc(board.label||board.board_id)} dispatch</h3><form class="dispatch-form" data-board="${esc(board.board_id)}"><label>Offer TTL seconds<input name="offer_ttl_s" type="number" min="1" max="86400" value="${esc(p.offer_ttl_s||120)}"></label><label><input name="second_opinion" type="checkbox" ${p.second_opinion?'checked':''}> Second opinion</label><label><input name="fallback_broadcast" type="checkbox" ${p.fallback_broadcast?'checked':''}> Fallback broadcast</label><button type="submit">Save policy</button></form><p class="meta dispatch-status"></p><h4>Unassignable</h4>${(data.unassignable_tickets||[]).map(x=>`<p><span class="id">${esc(x.ticket_id)}</span> ${esc(x.reason)}<span class="meta"> · missing ${(x.missing||[]).map(esc).join(', ')||'unknown'}</span></p>`).join('')||'<p class="empty">None</p>'}<h4>Current offers</h4>${(data.offers||[]).map(x=>`<p><span class="id">${esc(x.ticket_id)}</span> → ${esc(x.agent_name)}<span class="meta"> · expires ${esc(fmt(x.expires_at))}</span></p>`).join('')||'<p class="empty">None</p>'}<details><summary>Recent offer timeline</summary>${(data.timeline||[]).map(x=>`<p>${esc(fmt(x.occurred_at))} · ${esc(x.kind)} · <span class="id">${esc(x.ticket_id||'—')}</span></p>`).join('')||'<p class="empty">No recent offer events.</p>'}</details></article>`}).join('')}
+renderSeats=function(){const installed=seatBridge.installed_version||'not installed',latest=seatBridge.latest_pypi_version||'unavailable',source=seatBridge.resolution_source||'unresolved',bridgeStatus=seatBridge.status||'unknown',bridgeMessage=seatBridge.message||'';return `${pageHead('Config','Seats and dispatch','Declare seat capabilities, verify drift, and inspect per-board offers.','<div class="seat-toolbar"><button data-seat-global="doctor">Doctor all</button><button data-seat-global="install">Install / upgrade bridge</button><button data-seat-global="upgrade-all">Upgrade all seats</button></div>')}${seatActionMessage?`<p class="status">${esc(seatActionMessage)} ${seatSessionPrompt?'<button id="copy-session-prompt">Copy session prompt</button>':''}</p>`:''}<section class="card pool"><div class="section-title"><h3>Seat inventory</h3><span class="status">${(seatData.seats||[]).length} configured</span></div><div class="table-scroll"><table><thead><tr><th>Host / role</th><th>Name</th><th>Capabilities</th><th>State</th><th>Current offer</th><th>Bridge</th><th>Actions</th></tr></thead><tbody>${seatRows()||'<tr><td colspan="7" class="empty">No configured seats. Use the wizard.</td></tr>'}</tbody></table></div></section><div class="seat-layout"><div class="seat-stack"><section class="card pool"><h3>Add or update seat</h3>${seatForm()}</section><section id="seat-plan" class="card pool" ${seatPlan?'':'hidden'}><h3>Confirm changes</h3><p class="muted">Review the diff before applying. Existing files are backed up first.</p><pre class="seat-diff">${esc((seatPlan?.changes||[]).map(c=>`${c.description}\n${c.diff||c.action}`).join('\n')||'No changes required.')}</pre><button id="seat-apply" class="primary-action" ${seatPlan?'':'disabled'}>Confirm and apply</button></section></div><aside class="seat-stack"><section class="card pool"><h3>Wait bridge</h3><p><span class="status">${esc(bridgeStatus)}</span>${bridgeMessage?` ${esc(bridgeMessage)}`:''}</p><p>Installed <b>${esc(installed)}</b></p><p class="meta">Pinned ${esc(seatBridge.pinned_version||'unknown')} · PyPI latest ${esc(latest)} · ${esc(source)}</p></section><section class="card pool"><h3>Doctor</h3><div id="seat-doctor">${seatDoctorResult?doctorResult(seatDoctorResult):'<p class="muted">Doctor compares declared capabilities with Central.</p>'}</div></section></aside></div><section class="pool"><div class="section-title"><h3>Dispatch by board</h3><span class="status">policy · gaps · offers</span></div><div class="grid">${dispatchPanels()}</div></section>`}
+refreshSeats=async function(){try{const [inventory,bridge]=await Promise.all([fetchJson('/api/config/seats'),fetchJson('/api/config/bridge')]);seatData=inventory;seatBridge=bridge;const central=centralLabels[0];if(central){initialSeatsRefreshPending=false;seatRegistry=await fetchJson(`/api/config/registry?${apiCentral(central)}`);const boards=seatRegistry.boards||[],results=await Promise.allSettled(boards.map(async b=>[b.board_id,await fetchJson(`/api/dispatch?${apiCentral(central)}&board_id=${encodeURIComponent(b.board_id)}`)]));for(let i=0;i<results.length;i++){const result=results[i],board=boards[i];if(result.status==='fulfilled')dispatchData[result.value[0]]=result.value[1];else dispatchData[board.board_id]={error:result.reason?.message||'request failed'}}}if(navKind()==='seats')renderHub()}catch(e){if(navKind()==='seats')document.querySelector('#central-sections').innerHTML=`<p class="error">Config unavailable: ${esc(e.message)}</p>`}}
+const refreshCentralBeforeSeats=refreshCentral;refreshCentral=async function(...args){await refreshCentralBeforeSeats(...args);if(initialSeatsRefreshPending&&navKind()==='seats'&&centralLabels.length)await refreshSeats()}
+async function suggestSeatSkills(){const form=document.querySelector('#seat-wizard'),status=document.querySelector('#seat-suggestions');try{const result=await configPost('/api/config/suggestions',seatPayload(form)),input=form.elements.skills,current=String(input.value||'').split(',').map(x=>x.trim()).filter(Boolean);input.value=[...new Set([...current,...result.skills])].join(',');status.textContent=result.skills.length?`Suggested: ${result.skills.join(', ')}`:'No mapped connectors found.'}catch(e){status.textContent=`Suggestions failed: ${e.message}`}}
+async function saveDispatch(event){event.preventDefault();const form=event.target,central=centralLabels[0],board=form.dataset.board,status=form.querySelector('.dispatch-status')||form.nextElementSibling;try{dispatchData[board]=await configPost(`/api/dispatch?${apiCentral(central)}`,{board_id:board,policy:{offer_ttl_s:Number(form.elements.offer_ttl_s.value),second_opinion:form.elements.second_opinion.checked,fallback_broadcast:form.elements.fallback_broadcast.checked}});status.textContent='Policy saved.';await refreshSeats()}catch(e){status.textContent=`Save failed: ${e.message}`}}
+bindSeats=function(){const wizard=document.querySelector('#seat-wizard');wizard?.addEventListener('submit',seatSubmit);if(wizard){const review=wizard.elements.can_review,sync=()=>review.checked=wizard.elements.role.value==='reviewer'&&Number(wizard.elements.tier_max.value)>1;review.addEventListener('input',()=>review.dataset.touched='true');for(const name of ['role','tier_max'])wizard.elements[name].addEventListener('change',()=>{if(!review.dataset.touched)sync()})}document.querySelector('[data-seat-suggest]')?.addEventListener('click',suggestSeatSkills);document.querySelector('#seat-apply')?.addEventListener('click',applySeat);document.querySelector('#copy-session-prompt')?.addEventListener('click',async event=>{await navigator.clipboard.writeText(seatSessionPrompt);event.target.textContent='Copied'});document.querySelectorAll('.dispatch-form').forEach(form=>form.addEventListener('submit',saveDispatch));const host=document.querySelector('#central-sections');host.onclick=seatClick;host.querySelector('.page-head')?.addEventListener('click',seatGlobal)}
+</script></body>""",
+    1,
+).replace(
+    "</style>",
+    ".dispatch-form{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.dispatch-form label{display:grid;gap:4px}.dispatch-form input,.dispatch-form button{background:var(--panel2);border:1px solid var(--line);border-radius:8px;color:var(--text);padding:7px}</style>",
+    1,
+)
+
+
 def make_handler(
     cache: DashboardCache,
     stats_path: str | Path | None = None,
@@ -3891,6 +4106,28 @@ def make_handler(
                     return
                 self._send(200, "application/json; charset=utf-8", body)
                 return
+            if route == "/api/dispatch":
+                try:
+                    board_id = requested_board(self.path)
+                    body = _json_bytes(
+                        cache_call("get_dispatch", board_id, central=central)
+                    )
+                except ValueError as exc:
+                    self._send(
+                        400,
+                        "application/json; charset=utf-8",
+                        _json_bytes({"error": str(exc), "central": label}),
+                    )
+                    return
+                except Exception as exc:  # noqa: BLE001 - bounded type only.
+                    self._send(
+                        503,
+                        "application/json; charset=utf-8",
+                        _json_bytes({"error": type(exc).__name__, "central": label}),
+                    )
+                    return
+                self._send(200, "application/json; charset=utf-8", body)
+                return
             if route == "/api/workers":
                 try:
                     body = _json_bytes(
@@ -3962,11 +4199,13 @@ def make_handler(
             route = urlsplit(self.path).path
             config_routes = {
                 "/api/config/plan",
+                "/api/config/suggestions",
                 "/api/config/apply",
                 "/api/config/prompt",
                 "/api/config/doctor",
                 "/api/config/bridge/install",
                 "/api/config/bridge/upgrade-all",
+                "/api/dispatch",
             }
             worker_action = re.fullmatch(
                 r"/api/workers/([a-z0-9-]{2,32})/(test|start|stop|restart)", route
@@ -4027,6 +4266,8 @@ def make_handler(
                 request = json.loads(self.rfile.read(length))
                 if route == "/api/config/plan":
                     body = _json_bytes(seats.plan(request))
+                elif route == "/api/config/suggestions":
+                    body = _json_bytes(seats.suggestions(request))
                 elif route == "/api/config/apply":
                     if not isinstance(request, dict) or set(request) != {"plan_id"}:
                         raise ValueError("request must contain only plan_id")
@@ -4045,6 +4286,20 @@ def make_handler(
                     if request != {}:
                         raise ValueError("bridge upgrade body must be an empty object")
                     body = _json_bytes(seats.upgrade_all())
+                elif route == "/api/dispatch":
+                    if not isinstance(request, dict) or set(request) != {
+                        "board_id",
+                        "policy",
+                    }:
+                        raise ValueError("request must contain board_id and policy")
+                    body = _json_bytes(
+                        cache_call(
+                            "save_dispatch",
+                            request["board_id"],
+                            request["policy"],
+                            central=central,
+                        )
+                    )
                 elif route == "/api/workers":
                     body = _json_bytes(
                         {

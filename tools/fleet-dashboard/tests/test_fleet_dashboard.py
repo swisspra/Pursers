@@ -3336,6 +3336,13 @@ def test_seat_config_registry_coverage_uses_live_fleet_seats(tmp_path: Path) -> 
                 "configured_seats": 1,
             }
         ],
+        "seats": {
+            "covered-seat": {
+                "status": None,
+                "current_offer": None,
+                "capabilities": {},
+            }
+        },
         "read_only": True,
     }
 
@@ -4037,3 +4044,210 @@ def test_role_chip_css_is_present():
     assert ".role-chip{" in dashboard.HTML
     assert ".chip-board{" in dashboard.HTML
     assert ".chip-role{" in dashboard.HTML
+
+
+def test_dispatch_fetcher_projects_policy_gaps_offers_and_timeline() -> None:
+    class Client:
+        async def __aenter__(self) -> Self:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def board_state_get(self, **_kwargs: object) -> dict:
+            return registry(
+                {
+                    "Pursers": {
+                        "board_id": "pursers",
+                        "status": "active",
+                        "work_dir": "/repo",
+                    }
+                }
+            )
+
+        async def board_status(self) -> dict:
+            return {
+                "latest_seq": 8,
+                "dispatch_policy": {
+                    "offer_ttl_s": 120,
+                    "second_opinion": True,
+                    "fallback_broadcast": False,
+                },
+                "unassignable_tickets": [
+                    {"ticket_id": "TK-hard", "reason": "no_eligible_worker"}
+                ],
+                "agents": [
+                    {
+                        "agent_name": "worker-low",
+                        "capabilities": {
+                            "tier_max": 1,
+                            "skills": [],
+                            "can_work": True,
+                            "can_review": False,
+                        },
+                        "current_offer": {
+                            "ticket_id": "TK-offer",
+                            "expires_at": "2030-01-01T00:02:00Z",
+                        },
+                    }
+                ],
+            }
+
+        async def ticket_list(self, **kwargs: object) -> dict:
+            assert kwargs == {"include_closed": False, "limit": 500}
+            return {
+                "tickets": [
+                    {
+                        "ticket_id": "TK-hard",
+                        "title": "Hard Python work",
+                        "tier": 3,
+                        "skills_required": ["python"],
+                        "dispatch_state": {"state": "unassignable", "kind": "work"},
+                    }
+                ]
+            }
+
+        async def board_catchup(self, **_kwargs: object) -> dict:
+            return {
+                "events": [
+                    {
+                        "seq": 8,
+                        "kind": "ticket_offered",
+                        "ticket_id": "TK-offer",
+                        "occurred_at": "2030-01-01T00:00:00Z",
+                    }
+                ]
+            }
+
+    config = dashboard.Config(
+        url="https://127.0.0.1:8766/mcp",
+        token="token",
+        home_board="pursers",
+        agent_name="dashboard-seat",
+        stale_seconds=300,
+        cache_seconds=5,
+    )
+    fetcher = dashboard.FleetFetcher(config, client_factory=lambda *_a, **_k: Client())
+
+    result = asyncio.run(fetcher.fetch_dispatch("pursers"))
+
+    assert result["dispatch_policy"]["offer_ttl_s"] == 120
+    assert result["offers"][0]["agent_name"] == "worker-low"
+    assert result["unassignable_tickets"][0]["missing"] == [
+        "tier_max>=3",
+        "skill:python",
+    ]
+    assert result["timeline"][0]["kind"] == "ticket_offered"
+
+
+def test_dispatch_policy_save_validates_and_forwards_exact_contract() -> None:
+    calls: list[dict] = []
+
+    class Client:
+        async def __aenter__(self) -> Self:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def board_state_get(self, **_kwargs: object) -> dict:
+            return registry(
+                {
+                    "Pursers": {
+                        "board_id": "pursers",
+                        "status": "active",
+                        "work_dir": "/repo",
+                    }
+                }
+            )
+
+        async def board_dispatch_policy_set(self, **kwargs: object) -> dict:
+            calls.append(dict(kwargs))
+            return {"dispatch_policy": dict(kwargs)}
+
+    config = dashboard.Config(
+        url="https://127.0.0.1:8766/mcp",
+        token="token",
+        home_board="pursers",
+        agent_name="dashboard-seat",
+        stale_seconds=300,
+        cache_seconds=5,
+    )
+    fetcher = dashboard.FleetFetcher(config, client_factory=lambda *_a, **_k: Client())
+    policy = {
+        "offer_ttl_s": 60,
+        "second_opinion": False,
+        "fallback_broadcast": True,
+    }
+
+    result = asyncio.run(fetcher.save_dispatch("pursers", policy))
+
+    assert result["dispatch_policy"] == policy
+    assert calls == [policy]
+    with pytest.raises(ValueError, match="dispatch policy fields"):
+        asyncio.run(fetcher.save_dispatch("pursers", {**policy, "extra": True}))
+
+
+def test_capability_and_dispatch_ui_contract_is_present() -> None:
+    for name in ("tier_max", "skills", "can_review", "can_work"):
+        assert f'name="{name}"' in dashboard.HTML
+    assert "Suggest skills from connectors" in dashboard.HTML
+    assert "Dispatch by board" in dashboard.HTML
+    assert "/api/config/suggestions" in dashboard.HTML
+    assert "/api/dispatch" in dashboard.HTML
+    assert "Dispatch unavailable:" in dashboard.HTML
+    assert "Current offer" in dashboard.HTML
+
+
+def test_dispatch_http_endpoints_use_same_origin_json_guard() -> None:
+    calls: list[tuple[str, object]] = []
+
+    class Cache:
+        def resolve_central(self, value: str | None) -> str:
+            return value or "default"
+
+        def get_dispatch(self, board_id: str) -> dict:
+            calls.append(("get", board_id))
+            return {"board_id": board_id, "dispatch_policy": {"offer_ttl_s": 120}}
+
+        def save_dispatch(self, board_id: str, value: object) -> dict:
+            calls.append((board_id, value))
+            return {"board_id": board_id, "dispatch_policy": value}
+
+    server = dashboard.ThreadingHTTPServer(
+        ("127.0.0.1", 0), dashboard.make_handler(Cache(), seat_manager=SimpleNamespace())
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    policy = {
+        "offer_ttl_s": 60,
+        "second_opinion": True,
+        "fallback_broadcast": False,
+    }
+    try:
+        with urllib.request.urlopen(base + "/api/dispatch?board_id=pursers") as response:
+            assert json.load(response)["board_id"] == "pursers"
+        request = urllib.request.Request(
+            base + "/api/dispatch",
+            data=json.dumps({"board_id": "pursers", "policy": policy}).encode(),
+            headers={"Content-Type": "application/json", "Origin": base},
+            method="POST",
+        )
+        with urllib.request.urlopen(request) as response:
+            assert json.load(response)["dispatch_policy"] == policy
+        blocked = urllib.request.Request(
+            base + "/api/dispatch",
+            data=json.dumps({"board_id": "pursers", "policy": policy}).encode(),
+            headers={"Content-Type": "application/json", "Origin": "https://bad.test"},
+            method="POST",
+        )
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            urllib.request.urlopen(blocked)
+        assert exc.value.code == 403
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+    assert calls == [("get", "pursers"), ("pursers", policy)]

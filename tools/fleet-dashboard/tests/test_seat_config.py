@@ -1046,3 +1046,118 @@ def test_doctor_dead_nvm_npx_path_warns(
     npx_resolved = next(r for r in rows_resolved if r.check == "connector-npx")
     assert npx_resolved.status == "PASS"
     assert "resolves" in npx_resolved.message
+
+
+@pytest.mark.parametrize("host", ["codex", "goose", "claude-desktop", "claude-code"])
+def test_adapters_round_trip_capability_environment(tmp_path: Path, host: str) -> None:
+    config = tmp_path / ("config.toml" if host == "codex" else "config.json")
+    if host == "goose":
+        config.write_text("extensions:\n")
+    target = desired(
+        tmp_path,
+        host,
+        config_path=str(config),
+        tier_max=1,
+        skills=("git", "browser"),
+        can_review=False,
+        can_work=True,
+        model="fast-model",
+        provider="local",
+    )
+    adapter = seat_config.adapter_for(target)
+    adapter.apply(adapter.plan(target))
+
+    if host == "codex":
+        env = tomllib.loads(config.read_text())["mcp_servers"][target.connector_name]["env"]
+    elif host == "goose":
+        text = config.read_text()
+        assert 'PURSERS_TIER_MAX: "1"' in text
+        assert 'PURSERS_SKILLS: "browser,git"' in text
+        assert 'PURSERS_CAN_REVIEW: "false"' in text
+        return
+    else:
+        env = json.loads(config.read_text())["mcpServers"][target.connector_name]["env"]
+    assert env["PURSERS_TIER_MAX"] == "1"
+    assert env["PURSERS_SKILLS"] == "browser,git"
+    assert env["PURSERS_CAN_REVIEW"] == "false"
+    assert env["PURSERS_CAN_WORK"] == "true"
+    assert env["PURSERS_MODEL"] == "fast-model"
+    assert env["PURSERS_PROVIDER"] == "local"
+
+
+def test_prompt_inventory_and_connector_skill_suggestions(tmp_path: Path) -> None:
+    target = desired(
+        tmp_path,
+        "codex",
+        tier_max=3,
+        skills=("research", "git"),
+        can_review=True,
+        model="large-model",
+        provider="provider-a",
+    )
+    prompt = seat_config.PromptRenderer().render(target)
+    inventory = seat_config.SeatInventory(tmp_path / "seats.json")
+    record = inventory.upsert(target, bridge_version="test")
+    suggestions = seat_config.connector_skill_suggestions(
+        {
+            "document": {
+                "mcp_servers": {
+                    "github": {},
+                    "playwright-browser": {},
+                    "sharepoint": {},
+                    "pubmed-search": {},
+                }
+            }
+        }
+    )
+
+    assert "tier_max=3" in prompt
+    assert "skills=git,research" in prompt
+    assert "can_review=true" in prompt
+    assert record["skills"] == ("git", "research")
+    assert suggestions == ["browser", "documents", "git", "research"]
+
+
+def test_doctor_warns_when_central_capabilities_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = desired(tmp_path, "codex", tier_max=3, skills=("git",))
+    Path(target.token_file).write_text("part1.part2.part3")
+    Path(target.ca_file).write_text("ca")
+    bridge = Path(target.bridge_command)
+    bridge.parent.mkdir(parents=True)
+    bridge.write_text("#!/bin/sh\n")
+    bridge.chmod(0o755)
+    seat_config.CodexAdapter(target.config_path).apply(
+        seat_config.CodexAdapter(target.config_path).plan(target)
+    )
+    monkeypatch.setenv("ONBOARD_CENTRAL_TOKEN", "part1.part2.part3")
+
+    def run(command, **_kwargs):
+        if command[0] == "ps":
+            return subprocess.CompletedProcess(command, 0, "", "")
+        return subprocess.CompletedProcess(command, 0, "0.1.0a7\n", "")
+
+    rows = seat_config.Doctor(
+        runner=run,
+        pypi_fetcher=lambda: "0.1.0a7",
+        live_probe=lambda _desired, _timeout: {
+            "mode": "push",
+            "registry_boards": ["pursers"],
+            "skipped_boards": {},
+            "central_agent": {
+                "capabilities": {
+                    "tier_max": 1,
+                    "skills": [],
+                    "can_review": False,
+                    "can_work": True,
+                    "host": "codex",
+                }
+            },
+        },
+    ).run(target)
+
+    drift = next(row for row in rows if row.check == "capability-drift")
+    assert drift.status == "WARN"
+    assert "tier_max" in drift.message
+    assert "skills" in drift.message
