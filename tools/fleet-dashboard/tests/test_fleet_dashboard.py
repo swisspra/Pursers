@@ -3280,9 +3280,9 @@ def test_seat_config_manager_plan_apply_backup_restart_and_no_token_leak(
     assert row["principal_label"] == "worker"
     assert row["needs_restart"] is True
     bridge = manager.bridge()
-    assert bridge["installed_version"] == "0.1.0a6"
+    assert bridge["installed_version"] == "0.1.0a7"
     assert bridge["reported_version"] == "0.1.0a1"
-    assert bridge["pinned_version"] == "0.1.0a6"
+    assert bridge["pinned_version"] == "0.1.0a7"
     assert bridge["latest_pypi_version"] == "0.1.0a7"
     assert bridge["resolution_source"] == "well-known:uv-tool"
     journal = (tmp_path / "state/config-actions.jsonl").read_text()
