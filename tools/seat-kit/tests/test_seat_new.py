@@ -8,8 +8,9 @@ import os
 import sqlite3
 import stat
 import subprocess
+import sys
 import time
-from contextlib import redirect_stdout
+from contextlib import asynccontextmanager, redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -347,6 +348,53 @@ def test_polling_requires_explicit_flag_and_uses_pure_catchup(tmp_path: Path) ->
     assert client.calls == [{"cursor": 7, "limit": 50, "ack": False, "touch": False}]
 
 
+def test_event_wait_closes_stream_before_printing_result(tmp_path: Path) -> None:
+    dest = seat_new.generate(args(tmp_path, client="goose"))
+    generated = load_generated(dest / "bin" / "board.py", "board_close_event")
+
+    class EventClient:
+        identity = SimpleNamespace(agent_id="AI-worker")
+
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def events(
+            self,
+            from_cursor: int | None = None,
+            *,
+            only_mine: bool = True,
+            kinds: frozenset[str] | None = None,
+            resource_subscriptions: tuple[str, ...] | None = None,
+            acknowledge: bool = True,
+            touch: bool | None = None,
+            cursor_callback: Any = None,
+        ):
+            try:
+                yield {
+                    "id": "EV-ready",
+                    "seq": 8,
+                    "kind": "ticket_created",
+                    "ticket_id": "TK-ready",
+                }
+            finally:
+                self.closed = True
+
+    client = EventClient()
+    output = io.StringIO()
+    with redirect_stdout(output):
+        asyncio.run(
+            generated._cmd_wait(
+                client, "pursers", 7, 1, poll_fallback=False
+            )
+        )
+    result = json.loads(output.getvalue())
+
+    assert client.closed is True
+    assert result["new_seq"] == 8
+    assert result["timed_out"] is False
+    assert [event["id"] for event in result["events"]] == ["EV-ready"]
+
+
 async def build_local_central(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     from pursers_central import central
 
@@ -567,3 +615,72 @@ def test_reviewer_wait_submitted_wakes_on_real_central_event(
             central.current_principal = original_current_principal
 
     asyncio.run(exercise())
+
+
+def test_generated_main_real_listen_event_exits_zero_without_stderr(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from pursers_client import BoardClient
+    import pursers_client.client as client_module
+
+    async def prepare():
+        fixture = await build_local_central(tmp_path / "central", monkeypatch)
+        (
+            _central,
+            _mcp,
+            _service,
+            principals,
+            active,
+            _agent_ids,
+            call,
+            _original_current_principal,
+        ) = fixture
+        active["principal"] = principals["worker"]
+        await call("board_join", agent_name="event-actor")
+        created = await call(
+            "ticket_create",
+            agent_name="event-actor",
+            title="generated main early exit",
+            description="exercise generated CLI over a real in-process listen",
+            target_url="pursers/tools/seat-kit",
+            scope="interactive-no-send",
+            required_fields=["test_output"],
+        )
+        return fixture, created.structured_content["ticket"]["ticket_id"]
+
+    fixture, ticket_id = asyncio.run(prepare())
+    central, mcp, _service, _principals, _active, _agent_ids, _call, original = fixture
+
+    @asynccontextmanager
+    async def http_context():
+        yield object()
+
+    class RealListenBoardClient(BoardClient):
+        def _http(self):
+            return http_context()
+
+    dest = seat_new.generate(args(tmp_path / "seat", client="goose"))
+    generated = load_generated(dest / "bin" / "board.py", "board_real_event")
+    monkeypatch.setattr(generated, "_load_client", lambda: RealListenBoardClient)
+    monkeypatch.setattr(
+        client_module, "streamable_http_client", lambda *_a, **_k: mcp
+    )
+    monkeypatch.setenv("ONBOARD_CENTRAL_URL", "http://central.invalid/mcp")
+    monkeypatch.setenv("ONBOARD_CENTRAL_TOKEN", "test-token")
+    monkeypatch.setenv("ONBOARD_BOARD_ID", "pursers")
+    monkeypatch.setenv("ONBOARD_AGENT_NAME", "worker-agent")
+    monkeypatch.setattr(sys, "argv", ["board.sh", "wait", "--timeout", "1"])
+
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    try:
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            returncode = generated.main()
+    finally:
+        central.current_principal = original
+
+    result = json.loads(stdout.getvalue())
+    assert returncode == 0
+    assert stderr.getvalue() == ""
+    assert result["timed_out"] is False
+    assert result["events"][0]["ticket_id"] == ticket_id

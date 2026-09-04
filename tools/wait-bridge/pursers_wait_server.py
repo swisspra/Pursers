@@ -48,7 +48,7 @@ import os
 import sys
 import tempfile
 import time
-from contextlib import asynccontextmanager
+from contextlib import aclosing, asynccontextmanager
 from contextvars import ContextVar
 from datetime import date, datetime, timedelta, timezone
 from functools import lru_cache
@@ -1464,15 +1464,17 @@ async def _event_stream(
     """Use BoardClient.events for reconnect/dedup over stable cue URIs."""
     custom = getattr(parent, "events_for_board", None)
     if callable(custom):
-        async for event in custom(
+        custom_stream = custom(
             board_id,
             from_cursor,
             identity,
             cursor_callback,
             generation_token=generation_token,
             pure_catchup=pure_catchup,
-        ):
-            yield event
+        )
+        async with aclosing(custom_stream):
+            async for event in custom_stream:
+                yield event
         return
     journal_uri = f"board://{board_id}/journal"
     seat_uri = f"board://{board_id}/agent/{identity.agent_id}"
@@ -1489,7 +1491,7 @@ async def _event_stream(
         )
         event_client.identity = identity
         event_client.generation_token = generation_token
-        async for event in event_client.events(
+        events = event_client.events(
             from_cursor=from_cursor,
             only_mine=False,
             kinds=RELEVANT_KINDS,
@@ -1497,8 +1499,10 @@ async def _event_stream(
             acknowledge=False,
             touch=False if pure_catchup else None,
             cursor_callback=cursor_callback,
-        ):
-            yield event
+        )
+        async with aclosing(events):
+            async for event in events:
+                yield event
 
     try:
         async for event in stream([journal_uri, seat_uri]):
@@ -1525,7 +1529,7 @@ async def _push_cues(
         def advance(value: int) -> None:
             queue.put_nowait((board_id, "cursor", str(value)))
 
-        async for event in _event_stream(
+        events = _event_stream(
             client._parent,
             board_id,
             client.identity,
@@ -1533,8 +1537,10 @@ async def _push_cues(
             cursor,
             advance,
             pure_catchup=getattr(client, "_pursers_pure_catchup", None) is True,
-        ):
-            await queue.put((board_id, "event", event))
+        )
+        async with aclosing(events):
+            async for event in events:
+                await queue.put((board_id, "event", event))
         await queue.put((board_id, "failed", "subscription event stream ended"))
     except asyncio.CancelledError:
         raise

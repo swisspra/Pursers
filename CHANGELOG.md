@@ -5,6 +5,14 @@ All notable changes to Pursers are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- `BoardClient.events()` now owns MCP listen scopes in a dedicated producer
+  task, and generated seats close the event stream explicitly after one cue,
+  preventing early-exit cancel-scope errors and false nonzero wait exits.
+
 ## [5.0.0a16] - 2026-09-04
 
 This release includes `pursers-central==0.1.0a20`,

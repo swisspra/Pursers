@@ -239,3 +239,68 @@ async def test_events_reports_each_honored_subscription_handshake(
     pending.cancel()
     await asyncio.gather(pending, return_exceptions=True)
     await events.aclose()
+
+
+@pytest.mark.anyio
+async def test_events_early_close_exits_listen_scopes_in_producer_task(
+    monkeypatch,
+) -> None:
+    import pursers_client.client as client_module
+
+    board = client()
+    journal_uri = "board://board-multi-name/journal"
+    scope_tasks: list[tuple[asyncio.Task[Any] | None, asyncio.Task[Any] | None]] = []
+
+    @asynccontextmanager
+    async def task_bound_context(value):
+        entered = asyncio.current_task()
+        try:
+            yield value
+        finally:
+            exited = asyncio.current_task()
+            scope_tasks.append((entered, exited))
+            if exited is not entered:
+                raise RuntimeError(
+                    "Attempted to exit cancel scope in a different task than it was entered in"
+                )
+
+    class Subscription:
+        honored = SimpleNamespace(resource_subscriptions=[journal_uri])
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            await asyncio.Event().wait()
+            raise StopAsyncIteration
+
+    class Session:
+        def listen(self, **_arguments):
+            return task_bound_context(Subscription())
+
+    async def drain(*_args, **_kwargs):
+        yield {"id": "EV-5", "seq": 5, "kind": "ticket_created"}
+
+    monkeypatch.setattr(board, "_http", lambda: task_bound_context(object()))
+    monkeypatch.setattr(board, "_drain", drain)
+    monkeypatch.setattr(
+        client_module, "streamable_http_client", lambda *_args, **_kwargs: object()
+    )
+    monkeypatch.setattr(
+        client_module,
+        "Client",
+        lambda *_args, **_kwargs: task_bound_context(Session()),
+    )
+
+    events = board.events(
+        from_cursor=4,
+        only_mine=False,
+        resource_subscriptions=(journal_uri,),
+        acknowledge=False,
+        touch=False,
+    )
+    assert (await anext(events))["id"] == "EV-5"
+    await asyncio.create_task(events.aclose())
+
+    assert len(scope_tasks) == 3
+    assert all(entered is exited for entered, exited in scope_tasks)

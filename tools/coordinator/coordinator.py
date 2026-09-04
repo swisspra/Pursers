@@ -13,7 +13,7 @@ import re
 import subprocess
 import sys
 from collections import Counter
-from contextlib import AsyncExitStack
+from contextlib import AsyncExitStack, aclosing
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -2299,7 +2299,7 @@ class JournalSubscriptionPool:
             self.url, self._token, board_id, agent_name=self.agent_name
         )
         try:
-            async for _event in client.events(
+            events = client.events(
                 from_cursor=self.cursors.get(board_id, 0),
                 only_mine=False,
                 resource_subscriptions=(f"board://{board_id}/journal",),
@@ -2307,8 +2307,10 @@ class JournalSubscriptionPool:
                 touch=False,
                 cursor_callback=advance,
                 subscription_callback=ready,
-            ):
-                await self._queue.put(SubscriptionWake(board_id, "cue"))
+            )
+            async with aclosing(events):
+                async for _event in events:
+                    await self._queue.put(SubscriptionWake(board_id, "cue"))
             await self._queue.put(
                 SubscriptionWake(board_id, "lost", "StreamEnded")
             )
