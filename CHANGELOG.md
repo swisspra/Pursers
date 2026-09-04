@@ -5,7 +5,12 @@ All notable changes to Pursers are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] - 5.0.0a16 candidate
+## [5.0.0a16] - 2026-09-04
+
+This release includes `pursers-central==0.1.0a20`,
+`pursers-client==0.1.0a14`, `pursers-personal-import==5.0.0a3`,
+`pursers-personal==5.0.0a16`, `pursers==5.0.0a16`, and
+`pursers-wait-bridge==0.1.0a6`.
 
 ### Added
 

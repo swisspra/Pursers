@@ -155,7 +155,7 @@
         <span class="pill">MCP</span>
         <span class="pill">ใช้ข้ามยี่ห้อ Host</span>
         <span class="pill">มีหลักฐานและผู้ review</span>
-        <span class="pill">Push-wait candidate · 5.0.0a16</span>
+        <span class="pill">Push-wait release · 5.0.0a16</span>
       </div>
     </div>
   </header>
@@ -226,25 +226,25 @@
 
     <section id="install">
       <p class="eyebrow" style="color:#2f6f9f">02 · ติดตั้ง</p>
-      <h2>ติดตั้งชุดล่าสุด และแยก released จาก candidate</h2>
-      <p>ต้องใช้ Python 3.11 ขึ้นไป ชุดที่ publish แล้วล่าสุดใน checkout นี้คือ <code>5.0.0a15</code> ส่วน subscription-first push-wait เป็น candidate สำหรับ <code>5.0.0a16</code> ยังไม่ใช่คำยืนยันว่า a16 ถูก publish แล้ว:</p>
+      <h2>ติดตั้งชุดล่าสุด</h2>
+      <p>ต้องใช้ Python 3.11 ขึ้นไป ชุด released ที่เอกสารนี้อธิบายคือ <code>5.0.0a16</code> และรวม subscription-first push-wait:</p>
       <table>
         <thead><tr><th>ส่วนประกอบ</th><th>เวอร์ชัน</th><th>หน้าที่</th></tr></thead>
         <tbody>
-          <tr><td><code>pursers</code> / <code>pursers-personal</code></td><td><code>5.0.0a15</code></td><td>meta installer, Personal facade และ Fleet dashboard</td></tr>
-          <tr><td><code>pursers-central</code></td><td><code>0.1.0a19</code></td><td>บอร์ดกลาง, authorization, state และ journal cues</td></tr>
-          <tr><td><code>pursers-client</code></td><td><code>0.1.0a13</code></td><td>Python client และ subscription driver</td></tr>
-          <tr><td><code>pursers-personal-import</code></td><td><code>5.0.0a2</code></td><td>นำข้อมูล v4 แบบ one-way cutover</td></tr>
-          <tr><td><code>pursers-wait-bridge</code></td><td><code>0.1.0a5</code></td><td>รอแบบ subscription-first, multi-board และ registry mode</td></tr>
+          <tr><td><code>pursers</code> / <code>pursers-personal</code></td><td><code>5.0.0a16</code></td><td>meta installer, Personal facade และ Fleet dashboard</td></tr>
+          <tr><td><code>pursers-central</code></td><td><code>0.1.0a20</code></td><td>บอร์ดกลาง, authorization, state และ journal cues</td></tr>
+          <tr><td><code>pursers-client</code></td><td><code>0.1.0a14</code></td><td>Python client และ subscription driver</td></tr>
+          <tr><td><code>pursers-personal-import</code></td><td><code>5.0.0a3</code></td><td>นำข้อมูล v4 แบบ one-way cutover</td></tr>
+          <tr><td><code>pursers-wait-bridge</code></td><td><code>0.1.0a6</code></td><td>รอแบบ subscription-first, multi-board และ registry mode</td></tr>
         </tbody>
       </table>
-      <div class="warning"><strong>อย่าตีความ candidate ว่า release:</strong> ใช้ manifest และ checksum ที่ operator อนุมัติ รุ่นบน PyPI เปลี่ยนทับไม่ได้ และไม่ควรผสม component คนละชุด</div>
+      <div class="warning"><strong>ตรวจ release ก่อนติดตั้ง:</strong> ใช้ manifest และ checksum ที่ operator อนุมัติ รุ่นบน PyPI เปลี่ยนทับไม่ได้ และไม่ควรผสม component คนละชุด</div>
       <div class="grid">
         <div class="mini">
           <h3>ติดตั้งถาวรใน environment</h3>
           <pre><code>python -m pip install pursers
 pursers-personal --version</code></pre>
-          <p><code>pursers</code> เป็น meta-package ที่ติดตั้ง Central, client, Personal app และ import utility ให้ครบ ควรเห็น <code>5.0.0a15</code> สำหรับชุด released นี้</p>
+          <p><code>pursers</code> เป็น meta-package ที่ติดตั้ง Central, client, Personal app และ import utility ให้ครบ ควรเห็น <code>5.0.0a16</code> สำหรับชุด released นี้</p>
         </div>
         <div class="mini">
           <h3>รัน wait bridge แบบ isolated</h3>
@@ -449,7 +449,7 @@ python tools/wait-bridge/registry_admin.py remove project-a</code></pre>
   timeout_s=560
 )</code></pre>
       <p>หากได้ <code>timed_out=true</code> ให้ re-arm ทันทีด้วย <code>new_seq</code> ที่คืนมา timeout เป็นเพียงการหมุน call ให้สั้นกว่า deadline ของ Host ไม่ใช่ error</p>
-      <p>CLI seat ที่ generate แล้วใช้ <code>/PATH/TO/Pursers-local/bin/board.sh wait --since &lt;cursor&gt;</code> และ re-arm ด้วย cursor ใหม่ทุกครั้ง สำหรับ poll-only fallback flag ที่มีจริงใน candidate ปัจจุบันสะกดว่า <code>board.sh wait --poll</code>; ห้าม loop <code>board.sh list</code></p>
+      <p>CLI seat ที่ generate แล้วใช้ <code>/PATH/TO/Pursers-local/bin/board.sh wait --since &lt;cursor&gt;</code> และ re-arm ด้วย cursor ใหม่ทุกครั้ง สำหรับ poll-only fallback flag ใน release นี้สะกดว่า <code>board.sh wait --poll</code>; ห้าม loop <code>board.sh list</code></p>
 
       <h3>Seat prompt ตัวอย่าง</h3>
       <pre><code>You are the Pursers worker named pool-codex-1.
@@ -609,7 +609,7 @@ memory_search(
       <p>JWT ยืนยันตัว principal แต่ไม่ได้ทำให้เข้าทุกบอร์ดอัตโนมัติ ผู้ดูแลต้องเพิ่ม principal ด้วย <code>board_member_add</code> หรือออก invite อายุสั้น/ใช้ครั้งเดียวด้วย <code>board_invite</code> แล้วให้ผู้รับ join บอร์ดนั้น ตรวจ role แยกเป็น reader, worker, reviewer หรือ admin ตามงานจริง หาก registry ชี้ไปบอร์ดที่ยังไม่มี membership บอร์ดนั้นจะปรากฏใน <code>skipped_boards</code></p>
 
       <h3>State scrubbing ใน Central a10</h3>
-      <p><code>pursers-central 0.1.0a19</code> scrub ค่าด้วย profile ของบอร์ด; <code>board_state_get</code> คืนค่าที่ผ่านการ scrub ตอนเขียนแล้ว นี่ไม่ใช่เหตุผลให้ใส่ secret ใน <code>project_registry</code>: registry ควรมีเฉพาะ board mapping, work directory และ status</p>
+      <p><code>pursers-central 0.1.0a20</code> scrub ค่าด้วย profile ของบอร์ด; <code>board_state_get</code> คืนค่าที่ผ่านการ scrub ตอนเขียนแล้ว นี่ไม่ใช่เหตุผลให้ใส่ secret ใน <code>project_registry</code>: registry ควรมีเฉพาะ board mapping, work directory และ status</p>
 
       <h3>เช็กลิสต์ก่อนเริ่มรอบงานจริง</h3>
       <table>

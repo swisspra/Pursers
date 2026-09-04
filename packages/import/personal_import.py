@@ -64,7 +64,7 @@ else:  # source-checkout execution
     from transactional_sqlite import TransactionalSQLiteStore
 
 
-__version__ = "5.0.0a2"
+__version__ = "5.0.0a3"
 RUN_SCHEMA_VERSION = 1
 RUN_KIND = "pursers-personal-copy-import"
 CENTRAL_URL = "https://personal-preview.invalid/mcp"

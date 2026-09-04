@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <link rel="icon" href="data:,">
-  <title>Pursers 5.0.0a16 candidate — What's new</title>
+  <title>Pursers 5.0.0a16 — What's new</title>
   <style>
     :root { --ink:#17365d; --muted:#596579; --line:#d9d6cc; --paper:#fbf8f0; --card:#fff; --blue:#2f6f9f; --green:#28745a; --orange:#b75b24; }
     * { box-sizing:border-box; }
@@ -39,9 +39,9 @@
 </head>
 <body>
   <header>
-    <p class="eyebrow">What's new · a16 candidate</p>
+    <p class="eyebrow">What's new · a16 release</p>
     <h1>Workers wait for cues,<br>not timer polls.</h1>
-    <p class="lead">The 5.0.0a16 candidate makes MCP 2026-07-28 <code>subscriptions/listen</code> the primary wait path across interactive, CLI, and headless seats. The currently published package set remains 5.0.0a15 until an operator-approved a16 release exists.</p>
+    <p class="lead">The 5.0.0a16 release makes MCP 2026-07-28 <code>subscriptions/listen</code> the primary wait path across interactive, CLI, and headless seats.</p>
   </header>
 
   <nav aria-label="Contents"><div>
@@ -93,7 +93,7 @@ PURSERS_HOST = "codex"</code></pre>
       <pre><code>/PATH/TO/Pursers-local/bin/board.sh wait --since &lt;cursor&gt;
 # explicit poll-only compatibility path in the current generated seat kit:
 /PATH/TO/Pursers-local/bin/board.sh wait --poll --since &lt;cursor&gt;</code></pre>
-      <div class="note">The current seat-kit flag is <code>--poll</code>. It selects poll-only behavior; there is no <code>--poll-only</code> parser flag in the merged candidate.</div>
+      <div class="note">The current seat-kit flag is <code>--poll</code>. It selects poll-only behavior; there is no <code>--poll-only</code> parser flag in the release.</div>
     </section>
 
     <section id="tickets">
@@ -106,7 +106,7 @@ PURSERS_HOST = "codex"</code></pre>
         <li><code>TK-011d4336785a</code> — follow-up for merged per-seat cue authorization.</li>
         <li><code>TK-a6cd4fc8d082</code> — worker-runtime worker/reviewer cue-driven redo.</li>
       </ul>
-      <p>This page documents the candidate as a coherent program. A follow-up ticket that is still open or claimed is not represented as released or complete.</p>
+      <p>This page documents the a16 release as a coherent program. A follow-up ticket that is still open or claimed is not represented as released or complete.</p>
     </section>
 
     <section id="migration">
