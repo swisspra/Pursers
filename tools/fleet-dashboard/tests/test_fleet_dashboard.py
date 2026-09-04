@@ -11,7 +11,6 @@ import subprocess
 import sys
 import tempfile
 import threading
-import tomllib
 import urllib.error
 import urllib.request
 import uuid
@@ -21,6 +20,7 @@ from types import SimpleNamespace
 from typing import Self
 
 import pytest
+import tomllib
 
 MODULE_PATH = Path(__file__).parents[1] / "fleet_dashboard.py"
 SPEC = importlib.util.spec_from_file_location("fleet_dashboard", MODULE_PATH)
@@ -2989,7 +2989,7 @@ def test_worker_provider_test_uses_keychain_without_echoing_secret(
         thread.join()
 
     assert result == {"ok": True, "name": "provider-test", "provider_reachable": True}
-    assert authorization == ["".join(("Bea", "rer")) + " " + secret]
+    assert authorization == ["".join(("Bea", "rer")) + " " + secret]  # noqa: FLY002
     assert secret not in json.dumps(result)
 
 
@@ -3192,7 +3192,7 @@ def test_dashboard_v2_ia_agents_and_responsive_contract() -> None:
 def test_seat_config_manager_plan_apply_backup_restart_and_no_token_leak(
     tmp_path: Path,
 ) -> None:
-    secret = ".".join(
+    secret = ".".join(  # noqa: FLY002 - avoid a literal token-shaped fixture.
         ("eyJhbGciOiJSUzI1NiJ9", "eyJzdWIiOiJwcmluY2lwYWwifQ", "signature12345")
     )
     config = tmp_path / "config.toml"
@@ -3344,29 +3344,76 @@ def test_config_api_and_ui_contract_are_separate_from_coordinator_config() -> No
             calls.append(("plan", request))
             return {"plan_id": "a" * 32, "changes": []}
 
+        def apply(self, plan_id: object) -> dict:
+            calls.append(("apply", plan_id))
+            return {"backup_path": "/tmp/config.backup", "needs_restart": True}
+
+        def prompt(self, request: object) -> dict:
+            calls.append(("prompt", request))
+            return {"prompt": "session prompt"}
+
+        def doctor(self, names: object) -> dict:
+            calls.append(("doctor", names))
+            return {"job_id": "b" * 32, "status": "queued"}
+
+        def install_bridge(self) -> dict:
+            calls.append(("install", {}))
+            return {"job_id": "c" * 32, "status": "queued"}
+
+        def upgrade_all(self) -> dict:
+            calls.append(("upgrade-all", {}))
+            return {"job_id": "d" * 32, "status": "queued"}
+
+        def job(self, job_id: str) -> dict:
+            calls.append(("job", job_id))
+            return {"job_id": job_id, "status": "succeeded", "result": {}}
+
     server = dashboard.ThreadingHTTPServer(
         ("127.0.0.1", 0), dashboard.make_handler(Cache(), seat_manager=Seats())
     )
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     base = f"http://127.0.0.1:{server.server_port}"
-    try:
-        with urllib.request.urlopen(base + "/api/config/seats") as response:
-            assert json.load(response)["seats"] == []
+
+    def post(path: str, payload: object) -> dict:
         request = urllib.request.Request(
-            base + "/api/config/plan",
-            data=b'{"name":"fixture"}',
-            headers={"Content-Type": "application/json"},
+            base + path,
+            data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json", "Origin": base},
             method="POST",
         )
         with urllib.request.urlopen(request) as response:
-            assert json.load(response)["plan_id"] == "a" * 32
+            return json.load(response)
+
+    try:
+        with urllib.request.urlopen(base + "/api/config/seats") as response:
+            assert json.load(response)["seats"] == []
+        with urllib.request.urlopen(base + "/api/config/bridge") as response:
+            assert json.load(response)["pinned_version"] == "0.1.0a6"
+        with urllib.request.urlopen(base + "/api/config/registry") as response:
+            assert json.load(response)["read_only"] is True
+        assert post("/api/config/plan", {"name": "fixture"})["plan_id"] == "a" * 32
+        assert post("/api/config/apply", {"plan_id": "a" * 32})["backup_path"]
+        assert post("/api/config/prompt", {"name": "fixture"})["prompt"]
+        assert post("/api/config/doctor", {"names": ["fixture"]})["status"] == "queued"
+        assert post("/api/config/bridge/install", {})["job_id"] == "c" * 32
+        assert post("/api/config/bridge/upgrade-all", {})["job_id"] == "d" * 32
+        with urllib.request.urlopen(base + "/api/config/jobs/" + "b" * 32) as response:
+            assert json.load(response)["status"] == "succeeded"
     finally:
         server.shutdown()
         server.server_close()
         thread.join()
 
-    assert calls == [("plan", {"name": "fixture"})]
+    assert calls == [
+        ("plan", {"name": "fixture"}),
+        ("apply", "a" * 32),
+        ("prompt", {"name": "fixture"}),
+        ("doctor", ["fixture"]),
+        ("install", {}),
+        ("upgrade-all", {}),
+        ("job", "b" * 32),
+    ]
     assert 'href="#/seats"' in dashboard.HTML
     assert "Preview exact changes" in dashboard.HTML
     assert "Copy session prompt" in dashboard.HTML
@@ -3374,6 +3421,81 @@ def test_config_api_and_ui_contract_are_separate_from_coordinator_config() -> No
     assert "setInterval(async()=>" in dashboard.HTML
     assert ",1000)" in dashboard.HTML
     assert "/api/config" in dashboard.HTML  # original coordinator route remains.
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["/api/config/bridge/install", "/api/config/bridge/upgrade-all"],
+)
+def test_config_mutations_reject_cross_origin_text_plain_before_action(
+    path: str,
+) -> None:
+    calls: list[str] = []
+
+    class Cache:
+        def resolve_central(self, value: str | None) -> str:
+            return value or "default"
+
+    class Seats:
+        def install_bridge(self) -> dict:
+            calls.append("install")
+            return {"job_id": "a" * 32, "status": "queued"}
+
+        def upgrade_all(self) -> dict:
+            calls.append("upgrade-all")
+            return {"job_id": "b" * 32, "status": "queued"}
+
+    server = dashboard.ThreadingHTTPServer(
+        ("127.0.0.1", 0), dashboard.make_handler(Cache(), seat_manager=Seats())
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    cross_origin = urllib.request.Request(
+        base + path,
+        data=b"{}",
+        headers={"Content-Type": "text/plain", "Origin": "https://attacker.invalid"},
+        method="POST",
+    )
+    same_origin_text = urllib.request.Request(
+        base + path,
+        data=b"{}",
+        headers={"Content-Type": "text/plain", "Origin": base},
+        method="POST",
+    )
+    invalid_host = urllib.request.Request(
+        base + path,
+        data=b"{}",
+        headers={"Content-Type": "application/json", "Host": "attacker.invalid"},
+        method="POST",
+    )
+    same_origin = urllib.request.Request(
+        base + path,
+        data=b"{}",
+        headers={"Content-Type": "application/json", "Origin": base},
+        method="POST",
+    )
+    try:
+        with pytest.raises(urllib.error.HTTPError) as captured:
+            urllib.request.urlopen(cross_origin)
+        assert captured.value.code == 403
+        assert calls == []
+        with pytest.raises(urllib.error.HTTPError) as captured:
+            urllib.request.urlopen(same_origin_text)
+        assert captured.value.code == 415
+        assert calls == []
+        with pytest.raises(urllib.error.HTTPError) as captured:
+            urllib.request.urlopen(invalid_host)
+        assert captured.value.code == 403
+        assert calls == []
+        with urllib.request.urlopen(same_origin) as response:
+            assert json.load(response)["status"] == "queued"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+    assert calls == ["install" if path.endswith("install") else "upgrade-all"]
 
 
 def test_agents_hub_defaults_to_active_sorted_status_with_toggle_and_live_work() -> None:
@@ -3757,7 +3879,10 @@ def _run_js_with_seats(esc_fn: str, render_fn: str, seats: list[dict], fallback:
     )
     result = subprocess.run(
         ["node", "-e", script],
-        capture_output=True, text=True, timeout=10,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
     )
     assert result.returncode == 0, f"node failed: {result.stderr}"
     return result.stdout.strip()

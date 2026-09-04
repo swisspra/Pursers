@@ -19,7 +19,6 @@ import subprocess
 import sys
 import threading
 import time
-import tomllib
 import urllib.error
 import urllib.request
 import uuid
@@ -31,17 +30,19 @@ from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import parse_qs, unquote, urlsplit
 
+import tomllib
+
 # Prefer the sibling source checkout over any installed pursers-client wheel:
 # the dashboard depends on keyword arguments newer than the last published wheel.
 _CLIENT_SRC = Path(__file__).resolve().parents[2] / "packages" / "client" / "src"
 if (_CLIENT_SRC / "pursers_client").is_dir():
     sys.path.insert(0, str(_CLIENT_SRC))
-from pursers_client import BoardClient, BoardClientError  # noqa: E402, I001
+from pursers_client import BoardClient, BoardClientError
 
 _DASHBOARD_DIR = Path(__file__).resolve().parent
 if str(_DASHBOARD_DIR) not in sys.path:
     sys.path.insert(0, str(_DASHBOARD_DIR))
-from seat_config import (  # noqa: E402, I001
+from seat_config import (  # noqa: I001
     BridgeInstaller,
     DesiredSeat,
     Doctor,
@@ -201,7 +202,7 @@ def _state_value(raw: Any) -> tuple[dict[str, Any] | None, str | None]:
 def validate_intake_text(value: Any) -> str:
     """Return one bounded non-blank ask without changing its authored text."""
     if not isinstance(value, str):
-        raise ValueError("text must be a string")
+        raise ValueError("text must be a string")  # noqa: TRY004 - public contract.
     text = value.strip()
     if not INTAKE_TEXT_MIN_CHARS <= len(text) <= INTAKE_TEXT_MAX_CHARS:
         raise ValueError("text must be between 5 and 500 characters")
@@ -661,7 +662,9 @@ class WorkerManager:
         seat = document.get("seat")
         llm = document.get("llm")
         if not isinstance(seat, dict) or not isinstance(llm, dict):
-            raise ValueError("worker config is malformed")
+            raise ValueError(  # noqa: TRY004 - persisted config validation.
+                "worker config is malformed"
+            )
         name = _worker_text(seat.get("agent_name"), "seat.agent_name", limit=32)
         if not WORKER_NAME_RE.fullmatch(name):
             raise ValueError("worker name is invalid")
@@ -2867,7 +2870,7 @@ class SeatConfigManager:
     @staticmethod
     def _desired(value: Any) -> DesiredSeat:
         if not isinstance(value, dict):
-            raise ValueError("seat must be an object")
+            raise ValueError("seat must be an object")  # noqa: TRY004 - API contract.
         return DesiredSeat.from_dict(value)
 
     @staticmethod
@@ -3043,7 +3046,7 @@ class SeatConfigManager:
 
     def apply(self, plan_id: Any) -> dict[str, Any]:
         if not isinstance(plan_id, str):
-            raise ValueError("plan_id is required")
+            raise ValueError("plan_id is required")  # noqa: TRY004 - API contract.
         with self._lock:
             pending = self._plans.pop(plan_id, None)
         if pending is None:
@@ -3702,7 +3705,9 @@ def make_handler(
     def selected_central_url(central: str | None) -> str:
         resolver = getattr(cache, "central_url", None)
         if not callable(resolver):
-            raise RuntimeError("central URL is unavailable")
+            raise RuntimeError(  # noqa: TRY004 - unavailable runtime capability.
+                "central URL is unavailable"
+            )
         return str(resolver(central))
 
     class Handler(BaseHTTPRequestHandler):
@@ -3718,6 +3723,35 @@ def make_handler(
             )
             self.end_headers()
             self.wfile.write(body)
+
+        def _config_post_guard(self) -> tuple[int, bytes] | None:
+            host = self.headers.get("Host", "")
+            try:
+                parsed_host = urlsplit("//" + host)
+                hostname = (parsed_host.hostname or "").casefold()
+                port = parsed_host.port or 80
+                loopback_host = hostname == "localhost" or ipaddress.ip_address(
+                    hostname
+                ).is_loopback
+            except ValueError:
+                return 403, b'{"error":"loopback Host required"}'
+            server_port = int(getattr(self.server, "server_port", 0))
+            if (
+                not loopback_host
+                or port != server_port
+                or parsed_host.username is not None
+                or parsed_host.password is not None
+                or parsed_host.path
+                or parsed_host.query
+                or parsed_host.fragment
+            ):
+                return 403, b'{"error":"loopback Host required"}'
+            origin = self.headers.get("Origin")
+            if origin is not None and origin != "http://" + host:
+                return 403, b'{"error":"same-origin request required"}'
+            if self.headers.get_content_type().casefold() != "application/json":
+                return 415, b'{"error":"application/json required"}'
+            return None
 
         def do_GET(self) -> None:
             route = urlsplit(self.path).path
@@ -3803,7 +3837,7 @@ def make_handler(
                             if callable(threshold_resolver)
                             else None
                         )
-                    except Exception:  # Defaults keep local stats available.
+                    except Exception:  # noqa: BLE001 - optional local settings.
                         pressure_thresholds = None
                     body = _json_bytes(
                         {
@@ -3956,6 +3990,11 @@ def make_handler(
                         "application/json; charset=utf-8",
                         b'{"error":"loopback required"}',
                     )
+                    return
+                guard_error = self._config_post_guard()
+                if guard_error is not None:
+                    status, body = guard_error
+                    self._send(status, "application/json; charset=utf-8", body)
                     return
             try:
                 central = requested_central(self.path)
