@@ -7,6 +7,18 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added
+
+- Atomic review leases use the board's configured work-lease TTL (900 seconds
+  by default) and prevent duplicate verification across the
+  fleet. Central now provides `ticket_review_claim` and optional
+  `ticket_review_release`, renews review leases through `lease_renew`, exposes
+  review state in ticket reads/lists, and emits push-wait cues for claim,
+  expiry, and release.
+- Client and generated reviewer seats support review claim/renew/release and
+  unclaimed-only listing; reviewer approve/reject claims first and returns to
+  wait on a structured `review_already_claimed` conflict.
+
 ### Fixed
 
 - `a2a_wait(wait_for="auto")` now derives reviewer waits from the joined role,

@@ -132,10 +132,17 @@ def _parser() -> argparse.ArgumentParser:
         wait = commands.add_parser("wait", help="block until work arrives (subscriptions/listen)")
         _wait_args(wait)
     else:
-        _target(commands.add_parser("list", help="list submitted tickets"))
+        _target(commands.add_parser("list", help="list unclaimed submitted tickets"))
         _target(commands.add_parser("list-all", help="list all non-closed tickets"))
         get = _target(commands.add_parser("get"))
         get.add_argument("ticket_id")
+        review_claim = _target(commands.add_parser("review-claim"))
+        review_claim.add_argument("ticket_id")
+        renew = _target(commands.add_parser("renew"))
+        renew.add_argument("ticket_id")
+        review_release = _target(commands.add_parser("review-release"))
+        review_release.add_argument("ticket_id")
+        review_release.add_argument("reason", nargs="?")
         approve = _target(commands.add_parser("approve"))
         approve.add_argument("ticket_id")
         approve.add_argument("notes")
@@ -192,7 +199,10 @@ async def _cmd_wait(
             since,
             timeout_s,
             kinds=(
-                frozenset({"ticket_status_changed"})
+                frozenset({
+                    "ticket_status_changed", "ticket_review_claimed",
+                    "review_lease_expired", "review_lease_released",
+                })
                 if submitted
                 else frozenset({"ticket_created", "ticket_status_changed"})
             ),
@@ -213,7 +223,10 @@ async def _cmd_wait(
     journal_uri = f"board://{board_id}/journal"
     seat_uri = f"board://{board_id}/agent/{client.identity.agent_id}"
     kinds = (
-        frozenset({"ticket_status_changed"})
+        frozenset({
+            "ticket_status_changed", "ticket_review_claimed",
+            "review_lease_expired", "review_lease_released",
+        })
         if submitted
         else frozenset({"ticket_created", "ticket_status_changed"})
     )
@@ -381,7 +394,9 @@ async def _execute(args: argparse.Namespace) -> None:
                     return
             else:
                 if args.command == "list":
-                    emit(await target.ticket_list(status="submitted", limit=100))
+                    emit(await target.ticket_list(
+                        status="submitted", review_unclaimed_only=True, limit=100
+                    ))
                     return
                 if args.command == "list-all":
                     emit(await target.ticket_list(include_closed=False, limit=100))
@@ -389,12 +404,31 @@ async def _execute(args: argparse.Namespace) -> None:
                 if args.command == "get":
                     emit(await target.ticket_get(args.ticket_id))
                     return
+                if args.command == "review-claim":
+                    emit(await target.ticket_review_claim(args.ticket_id))
+                    return
+                if args.command == "renew":
+                    emit(await target.lease_renew(args.ticket_id))
+                    return
+                if args.command == "review-release":
+                    emit(await target.ticket_review_release(
+                        args.ticket_id, reason=args.reason
+                    ))
+                    return
                 if args.command == "approve":
+                    claimed = await target.ticket_review_claim(args.ticket_id)
+                    if not claimed.get("ok"):
+                        emit(claimed)
+                        return
                     emit(await target.ticket_review(
                         args.ticket_id, "approve", review_notes=args.notes
                     ))
                     return
                 if args.command == "reject":
+                    claimed = await target.ticket_review_claim(args.ticket_id)
+                    if not claimed.get("ok"):
+                        emit(claimed)
+                        return
                     emit(await target.ticket_review(
                         args.ticket_id, "reject", review_notes=args.notes,
                         fix_instructions=args.fix,
@@ -534,15 +568,20 @@ Never poll `bin/board.sh list` in a loop. Polling exists only behind the explici
         commands = """bin/board.sh list [--board <id>]
 bin/board.sh list-all [--board <id>]
 bin/board.sh get <TK> --board <id>
+bin/board.sh review-claim <TK> --board <id>
+bin/board.sh renew <TK> --board <id>
+bin/board.sh review-release <TK> [reason] --board <id>
 bin/board.sh approve <TK> <notes> --board <id>
 bin/board.sh reject <TK> <notes> <fix> --board <id>
 bin/board.sh wait --submitted --since '<cursor-or-json-map>' [--boards registry|home|<id,id>]"""
         loop = """Run this loop continuously:
 
 1. **WAIT** -- `bin/board.sh wait --submitted --since '<cursor-or-json-map>'` fans out across every active registry board. Re-arm with the entire returned `new_seq` map.
-2. **REVIEW** -- Use the event's board: `bin/board.sh get <TK> --board <id>` for details and registered `work_dir`.
-3. **APPROVE/REJECT** -- `bin/board.sh approve <TK> <notes> --board <id>` or `bin/board.sh reject <TK> <notes> <fix> --board <id>`.
-4. **RE-ARM** -- Return to WAIT.
+2. **LIST** -- `bin/board.sh list --board <id>` returns only unclaimed submitted tickets and shows each ticket's `review_state`.
+3. **CLAIM** -- `bin/board.sh review-claim <TK> --board <id>` before verification. If another reviewer won, return directly to WAIT.
+4. **VERIFY** -- Use `bin/board.sh get <TK> --board <id>` for details and registered `work_dir`. Renew every ~5 minutes with `bin/board.sh renew <TK> --board <id>`.
+5. **APPROVE/REJECT** -- `bin/board.sh approve <TK> <notes> --board <id>` or `bin/board.sh reject <TK> <notes> <fix> --board <id>`; both ensure the lease is held before recording the verdict.
+6. **RE-ARM** -- Return to WAIT. Use `review-release` if abandoning verification without a verdict.
 
 Never poll `bin/board.sh list` in a loop. Polling exists only behind the explicit `wait --submitted --poll` fallback. The default wait blocks on Central's subscriptions/listen, using zero model turns except the re-arm."""
     profile = _profile_guidance(client)
@@ -573,7 +612,7 @@ Wait profile: {profile}
 - one ticket at a time
 - never review your own work
 - workers never call ticket_review
-- reviewers never claim/submit/write code/push
+- reviewers never work-claim/submit/write code/push
 - stay in ticket scope
 - report faithfully
 - never push main / never force-push

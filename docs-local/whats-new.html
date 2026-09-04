@@ -91,6 +91,7 @@ tool_timeout_sec = 620
 [mcp_servers.pursers-wait.env]
 PURSERS_HOST = "codex"</code></pre>
       <p>Do not set <code>PURSERS_WAIT_MODE=push</code>; push is already the default. Set <code>PURSERS_WAIT_MODE=poll</code> only while diagnosing or supporting a transport that cannot subscribe.</p>
+      <p>Reviewer seats now reserve a submitted ticket with <code>review-claim</code> before verification, renew that 900-second lease every five minutes, and release it automatically on approve/reject. <code>list</code> shows only unclaimed submissions; claim, expiry, and release are push-wait cues.</p>
       <pre><code>/PATH/TO/Pursers-local/bin/board.sh wait --since &lt;cursor&gt;
 # explicit poll-only compatibility path in the current generated seat kit:
 /PATH/TO/Pursers-local/bin/board.sh wait --poll --since &lt;cursor&gt;</code></pre>

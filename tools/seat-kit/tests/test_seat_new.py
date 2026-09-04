@@ -180,7 +180,10 @@ def test_worker_and_reviewer_variants_have_only_their_commands(tmp_path: Path) -
     assert 'commands.add_parser("claim")' in worker_py
     assert "ROLE = 'reviewer'" in reviewer_py
     assert 'commands.add_parser("approve")' in reviewer_py
-    assert "reviewers never claim/submit/write code/push" in (
+    assert 'commands.add_parser("review-claim")' in reviewer_py
+    assert 'claimed = await target.ticket_review_claim(args.ticket_id)' in reviewer_py
+    assert 'if not claimed.get("ok")' in reviewer_py
+    assert "reviewers never work-claim/submit/write code/push" in (
         reviewer / "AGENTS.md"
     ).read_text()
 

@@ -108,6 +108,7 @@ SUBMITTED_RELEVANT_KINDS = frozenset(
         "ticket_submitted",
         "ticket_resubmitted",
         "review_lease_changed",
+        "ticket_review_claimed",
         "review_lease_released",
         "review_lease_expired",
     }

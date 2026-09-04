@@ -26,7 +26,14 @@ class ScrubRejectedError(BoardClientError):
 
 
 DEFAULT_EVENT_KINDS = frozenset(
-    {"ticket_created", "ticket_status_changed", "ticket_assigned"}
+    {
+        "ticket_created",
+        "ticket_status_changed",
+        "ticket_assigned",
+        "ticket_review_claimed",
+        "review_lease_expired",
+        "review_lease_released",
+    }
 )
 KNOWN_EVENT_KINDS = DEFAULT_EVENT_KINDS | {"memory_written"}
 GENERATION_META_KEY = "io.onboard/expected-generation"
@@ -397,7 +404,9 @@ class BoardClient:
         return result
 
     async def lease_renew(self, ticket_id: str) -> dict[str, Any]:
-        return await self._call("lease_renew", {"ticket_id": ticket_id})
+        return await self._call(
+            "lease_renew", {"agent_name": self.agent_name, "ticket_id": ticket_id}
+        )
 
     async def board_reap(self) -> dict[str, Any]:
         result = await self._call("board_reap", {})
@@ -428,6 +437,28 @@ class BoardClient:
         self._remember_event(result)
         return result
 
+    async def ticket_review_claim(self, ticket_id: str) -> dict[str, Any]:
+        self._watched_uris.add(f"board://{self.board_id}/ticket/{ticket_id}")
+        result = await self._call(
+            "ticket_review_claim",
+            {"agent_name": self.agent_name, "ticket_id": ticket_id},
+        )
+        self._remember_event(result)
+        return result
+
+    async def ticket_review_release(
+        self, ticket_id: str, *, reason: str | None = None
+    ) -> dict[str, Any]:
+        arguments: dict[str, Any] = {
+            "agent_name": self.agent_name,
+            "ticket_id": ticket_id,
+        }
+        if reason is not None:
+            arguments["reason"] = reason
+        result = await self._call("ticket_review_release", arguments)
+        self._remember_event(result)
+        return result
+
     async def ticket_cancel(self, ticket_id: str, *, reason: str | None = None) -> dict[str, Any]:
         arguments = {"agent_name": self.agent_name, "ticket_id": ticket_id}
         if reason is not None:
@@ -451,8 +482,14 @@ class BoardClient:
         assigned_to: str | None = None,
         include_closed: bool = False,
         limit: int = 100,
+        review_unclaimed_only: bool = False,
     ) -> dict[str, Any]:
-        arguments: dict[str, Any] = {"include_closed": include_closed, "limit": limit}
+        arguments: dict[str, Any] = {
+            "agent_name": self.agent_name,
+            "include_closed": include_closed,
+            "limit": limit,
+            "review_unclaimed_only": review_unclaimed_only,
+        }
         if status is not None:
             arguments["status"] = status
         if assigned_to is not None:

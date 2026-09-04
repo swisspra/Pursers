@@ -59,10 +59,20 @@ Reviewer seats:
 list [--board <id>]
 list-all [--board <id>]
 get <TK> [--board <id>]
+review-claim <TK> [--board <id>]
+renew <TK> [--board <id>]
+review-release <TK> [reason] [--board <id>]
 approve <TK> <notes> [--board <id>]
 reject <TK> <notes> <fix> [--board <id>]
 wait --submitted --since '<cursor-or-json-map>' [--timeout <seconds>] [--boards registry|home|<id,id>] [--poll]
 ```
+
+`list` returns only unclaimed submitted tickets and includes `review_state`.
+Use `review-claim` before verification, `renew` every ~5 minutes, and
+`review-release` only when abandoning without a verdict. `approve` and
+`reject` idempotently ensure that this reviewer holds the lease first; a
+`review_already_claimed` conflict means another reviewer won, so return to
+push-wait without polling.
 
 `submit` keeps the worker active for review/retry. Include the model used and
 real verification output in the notes required by the ticket.
