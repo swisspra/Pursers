@@ -4320,7 +4320,7 @@ def test_push_wait_pressure_supersedes_poll_and_exposes_return_rate(
     assert session["estimated_tokens_per_hour"] == 100_000
 
 
-def test_fallback_poll_wait_does_not_suppress_genuine_poll_history(
+def test_non_push_wait_return_does_not_suppress_genuine_poll_history(
     tmp_path: Path,
 ) -> None:
     document = {
@@ -4335,9 +4335,9 @@ def test_fallback_poll_wait_does_not_suppress_genuine_poll_history(
                     {
                         "at": "2030-01-10T12:00:00Z",
                         "response_bytes": 200_000,
-                        "outcome": "cue",
+                        "outcome": "timeout",
                         "mode": "poll",
-                        "reason": "journal",
+                        "reason": "timeout",
                     }
                 ],
             }
@@ -4362,7 +4362,7 @@ def test_fallback_poll_wait_does_not_suppress_genuine_poll_history(
 
     assert len(result["sessions"]) == 2
     assert {session["reason"] for session in result["sessions"]} == {
-        "journal",
+        "timeout",
         "legacy",
     }
     assert {session["mode"] for session in result["sessions"]} == {"poll"}

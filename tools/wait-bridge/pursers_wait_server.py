@@ -2893,7 +2893,7 @@ async def _wait_for_work(
                             "events": [],
                             "waited_s": round(now - started, 2),
                             "timed_out": True,
-                            "mode": "push",
+                            "mode": actual_mode,
                             "reason": "timeout",
                             "resynced": resynced,
                         }
