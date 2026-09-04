@@ -378,7 +378,7 @@ SSL_CERT_FILE = "&lt;ca_bundle_path&gt;"</code></pre>
   timeout_s=560
 )</code></pre>
       <p>The response returns a cursor per board. Persist the returned <code>new_seq</code> map for the next wait. On <code>timed_out=true</code>, re-arm immediately with that cursor; a timeout is a normal host-safe rotation. An event is only a wake-up hint, so refetch the ticket before claiming it.</p>
-      <p>Generated CLI seats use <code>/PATH/TO/Pursers-local/bin/board.sh wait --since &lt;cursor&gt;</code>. Re-run it with the returned cursor after every cue or timeout. The explicit poll-only compatibility path in the current seat kit is spelled <code>board.sh wait --poll</code>; do not loop <code>board.sh list</code>.</p>
+      <p>Generated CLI seats use <code>/PATH/TO/Pursers-local/bin/board.sh wait --since '&lt;cursor-or-json-map&gt;'</code>. Registry fan-out is the default: one subscription covers every active project board, events include <code>board_id</code> and <code>work_dir</code>, and the complete returned cursor map must be passed back on re-arm. Route later verbs with <code>--board &lt;id&gt;</code>; use <code>--boards home</code> only for legacy single-board behavior. The explicit poll-only compatibility path is <code>board.sh wait --poll</code>; do not loop <code>board.sh list</code>.</p>
 
       <h3>Sample seat prompt</h3>
       <pre><code>You are the Pursers worker named pool-codex-1.
