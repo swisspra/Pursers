@@ -32,6 +32,19 @@ python tools/coordinator/coordinator.py \
 `--dry-run` is stricter: it prints the computed state and performs no writes,
 including finding and digest writes.
 
+## Cue-driven refresh
+
+After one startup materialization, the daemon keeps one
+`BoardClient.events()` subscription on each active registry board's journal.
+The driver uses `board_catchup(touch=false, acknowledge=false)` and never enters
+`BoardClient`, so the read path does not join or touch an agent seat. A cue
+refreshes only its board; healthy idle time causes no Central RPC.
+
+`--poll-seconds` is not the primary loop interval. It defaults to 900 seconds
+and is used only after a board's subscription is lost: the daemon waits that
+delay, performs one fallback refresh for that board, then re-listens from its
+last local cursor. Other healthy boards remain subscribed.
+
 ## Policy and safeguards
 
 - Normal tickets starve at 30 minutes; critical tickets at 10 minutes.

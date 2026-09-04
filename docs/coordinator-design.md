@@ -37,18 +37,14 @@ release another seat's unexpired claim, while `admin` is much broader than the
 job. Before phase 2, add a narrow coordinator/dispatcher capability or role
 that grants only the new assignment and nudge operations described below.
 
-Phase 1 should use the non-joining read path used by `fleet_snapshot`. The
-current wait bridge joins a seat and calls `board_catchup`; those calls update
-agent activity and can renew leases even with `ack=false`. Therefore they do
-not meet a literal "no board writes" phase-1 boundary. A pure journal read or
-read-only wake cue is a missing primitive. Until it exists, phase 1 polls pure
-snapshots and computes changes locally, without retaining a journal cursor or
-depending on catchup/resync behavior. It reads the registry through raw,
-non-joining `board_state_get(key="project_registry")`, equivalent to the
-`RawBoardReader` path behind `fleet_snapshot`. It must not start the wait bridge
-or call its `project_registry_get`, because bridge startup joins a home-board
-seat. Cursor-based catchup begins only in phase 2, which may use
-`a2a_wait(boards="registry")` with one cursor per board.
+Phase 1 uses the non-joining read path used by `fleet_snapshot`. A pure wake
+primitive now exists: Central authorizes `board://<board>/journal`, and
+`BoardClient.events()` can refetch with `board_catchup(touch=false,
+acknowledge=false)`. The coordinator instantiates that public driver without
+entering `BoardClient`, so it opens no agent seat and performs no activity,
+cursor, reap, or lease mutation. One driver remains open per active registry
+board. A cue updates the local cursor and refreshes only that board's bounded
+snapshot; notification payloads remain non-authoritative.
 
 ### Availability model
 
@@ -56,10 +52,9 @@ seat. Cursor-based catchup begins only in phase 2, which may use
   stop claiming, execution, submission, or review.
 - A phase-1 standby reconstructs state from raw, non-joining
   `board_state_get(key="project_registry")`, bounded board snapshots, durable
-  tickets, and its local comparison state. It keeps no journal cursor and has
-  no resync dependency. In phase 2, a standby additionally restores per-board
-  cursors; if one falls behind journal compaction, `resynced=true` triggers a
-  full snapshot refresh.
+  tickets, and its local comparison state, then starts each journal driver at
+  the snapshot watermark. Reconnect deduplication and cursors remain local. A
+  restart safely rebuilds the materialized view before subscribing.
 - Phase 1 may run multiple read-only observers. Phases 2 and 3 use one active
   writer and a cold standby. There is no current compare-and-set leader lease,
   so automatic active-active writes are unsafe. A coordinator leader lease is
@@ -70,15 +65,14 @@ seat. Cursor-based catchup begins only in phase 2, which may use
 
 ## Read model and invariants
 
-At the start of every phase-1 cycle, use the raw, non-joining
-`board_state_get(key="project_registry")` path equivalent to
-`RawBoardReader`/`fleet_snapshot`. Do not call the wait bridge's
-`project_registry_get` in phase 1, because starting that bridge joins a seat.
-Ignore paused entries, deduplicate board IDs, and retain each active entry's
+At startup, use raw, non-joining `board_state_get(key="project_registry")`,
+ignore paused entries, deduplicate board IDs, and retain each active entry's
 absolute `work_dir` only for read-only integration checks. Never infer a work
-directory from a ticket. Phase-1 polls keep local comparison state only: no
-journal cursor, catchup, or resync dependency. Phase 2 introduces cursor-based
-catchup after its write-capable seat and safeguards are authorized.
+directory from a ticket. After the initial materialization, journal
+subscriptions are primary: a cue performs one side-effect-free catchup in the
+public event driver and the coordinator refetches only the cued board. The home
+board cue also re-reads the registry so drivers follow active-board changes.
+Healthy idle subscriptions perform no Central RPC after setup.
 
 For each board, build a bounded materialized view from:
 
@@ -123,8 +117,8 @@ fairness and explicit routing without replacing that path.
    ticket-to-exact-`agent_id` mapping and its reason.
 5. Refetch the ticket and seat immediately before dispatch. Apply only if the
    ticket is still open and the seat is still eligible.
-6. Return to `a2a_wait(boards="registry")` with the returned cursor map. A lost
-   assignment race is normal; refetch and recompute rather than retry blindly.
+6. Return to the per-board journal drivers. A lost assignment race is normal;
+   refetch and recompute rather than retry blindly.
 
 `ticket_create(assigned_to=<exact agent_id>)` can route a newly created ticket.
 There is no existing mutation to assign or reassign an already-open ticket.
@@ -283,9 +277,19 @@ idempotency or state precondition.
 
 Workers and reviewers continue their direct loops. A supervisor restarts the
 coordinator. Phase 1 reloads the registry through the raw non-joining state
-read, snapshots every board, and rebuilds local comparison state without a
-journal cursor. Phase 2 resumes from per-board cursors or a full resync. No
-worker lease is owned by the coordinator.
+read, snapshots every board, rebuilds local comparison state, and subscribes
+from those snapshot watermarks. No worker lease is owned by the coordinator.
+
+### Subscription loss
+
+Loss of one board's journal driver does not restart or refresh healthy boards.
+The coordinator waits `--poll-seconds` (default 900), performs one bounded
+fallback refresh for the affected board, and then reopens its public event
+driver from the last local cursor. There is no periodic sweep while all
+subscriptions are healthy. Health state records
+`consecutive_lost_subscriptions` and `consecutive_degraded_refreshes`; the
+legacy `consecutive_degraded_polls` value is accepted only when migrating old
+persisted state.
 
 ### Coordinator wrong
 
@@ -307,11 +311,11 @@ without affecting read access or workers.
 ### Partial or misleading data
 
 Truncation and unavailable-board warnings are first-class report failures, not
-zero counts. Phase 1 has no cursor/resync path; in phase 2, cursor resync
-triggers a snapshot rebuild. Clock comparisons use server timestamps with a
-configured skew allowance. Prose-only commit parsing may yield `unknown` but
-never a confident negative. Local repository failures do not change board
-state.
+zero counts. A subscription reconnect drains from its local cursor; a restart
+rebuilds the snapshot and begins from that watermark. Clock comparisons use
+server timestamps with a configured skew allowance. Prose-only commit parsing
+may yield `unknown` but never a confident negative. Local repository failures
+do not change board state.
 
 ## Delivery phases and exit criteria
 
@@ -324,8 +328,8 @@ no board mutations.
 Exit only when:
 
 - an audit run confirms zero board writes by the runtime;
-- restart simulations rebuild the same current view without a journal cursor
-  or resync dependency;
+- restart simulations rebuild the same current view and subscribe from each
+  snapshot watermark;
 - fixtures for starvation, stale/expired claims, unavailable/truncated boards,
   and closed-unmerged work produce the expected evidence and no unsafe action;
 - sampled digest counts reconcile with board status and ticket bodies;

@@ -874,13 +874,15 @@ class BoardClient:
         acknowledge: bool = True,
         touch: bool | None = None,
         cursor_callback: Callable[[int], None] | None = None,
+        subscription_callback: Callable[[], None] | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         """Open live first, drain/dedup, then reconnect and drain after stream loss.
 
         ``resource_subscriptions`` lets callers select stable cue URIs without
         running cold discovery. ``acknowledge=False`` keeps cursor ownership
         call-local; ``touch=False`` is forwarded to Centrals that implement the
-        side-effect-free catchup contract.
+        side-effect-free catchup contract. ``subscription_callback`` runs after
+        every successful listen handshake, including reconnects.
         """
         seen: set[str] = set()
         initial_cursor = from_cursor
@@ -918,6 +920,8 @@ class BoardClient:
                                 raise BoardClientError(
                                     f"server did not honor subscriptions: {sorted(missing)}"
                                 )
+                            if subscription_callback is not None:
+                                subscription_callback()
                             while self._local_events:
                                 event = self._local_events.pop(0)
                                 seen.add(event["id"])
