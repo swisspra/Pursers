@@ -87,6 +87,11 @@ Returns a bounded JSON response:
 {"new_seq": {"board": 1}, "events": [...], "timed_out": true|false, "waited_s": <float>, "boards": [...], "skipped_boards": {}}
 ```
 
+Each call reads at most eight catch-up pages and returns at most one relevant
+event per board. The timeout covers that catch-up work. When more history
+remains, `new_seq` stops at the last processed event; immediate re-arms deliver
+the remainder without loss or duplicate delivery.
+
 Each event carries `board_id` and registered `work_dir`. Route `get`, `claim`,
 `renew`, `submit`, and review verbs with `--board <id>`. On `timed_out=true`,
 re-arm immediately by passing the complete JSON `new_seq` map to `--since`.
