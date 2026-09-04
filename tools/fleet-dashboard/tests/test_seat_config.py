@@ -615,6 +615,8 @@ def test_doctor_uvx_under_private_ca_fails(
     monkeypatch.delenv("SSL_CERT_FILE", raising=False)
     monkeypatch.setenv("ONBOARD_CENTRAL_TOKEN", "valid.mock.token")
     system_ca = "/etc/ssl/cert.pem"
+    assert seat_config._is_private_ca(system_ca) is False
+
     target_sys = desired(
         tmp_path,
         "codex",
@@ -638,15 +640,20 @@ def test_doctor_uvx_under_private_ca_fails(
     # Must NOT produce the private-CA FAIL
     assert "uvx --from fails under private CA" not in bridge_check_sys.message
 
-    # 2. Actual non-system SSL_CERT_FILE: must FAIL
-    private_ca = tmp_path / "private-ca.pem"
-    private_ca.write_text("synthetic private CA")
-    monkeypatch.setenv("SSL_CERT_FILE", str(private_ca))
+    # 2. Custom private bundle under a system-like directory: must still be private
+    system_like_dir = tmp_path / "etc/ssl"
+    system_like_dir.mkdir(parents=True)
+    custom_private_ca = system_like_dir / "custom-private-ca.pem"
+    custom_private_ca.write_text("synthetic private CA")
+    assert seat_config._is_private_ca(custom_private_ca) is True
+    assert seat_config._is_private_ca("/etc/ssl/custom-private-bundle.pem") is True
+
+    monkeypatch.setenv("SSL_CERT_FILE", str(custom_private_ca))
     target_priv = desired(
         tmp_path,
         "codex",
         bridge_command="uvx pursers-wait-bridge --from git+https://github.com/swisspra/Pursers.git",
-        ca_file=str(private_ca),
+        ca_file=str(custom_private_ca),
     )
     Path(target_priv.token_file).write_text("part1.part2.part3")
 
@@ -663,12 +670,15 @@ def test_doctor_cat_token_file_reference_validation(
     token_dir.mkdir(parents=True)
     cat_token_file = token_dir / "referenced token.jwt"
 
+    # Use unquoted escaped-space path in shell command: e.g. /dir\ with\ spaces/referenced\ token.jwt
+    escaped_cat_path = str(cat_token_file).replace(" ", r"\ ")
+
     config = tmp_path / "config.toml"
-    # Codex config referencing quoted $(cat "...") with spaces in args
+    # Codex config referencing unquoted escaped-space $(cat ...) in args
     config.write_text(
         f'[mcp_servers.codex-worker]\n'
         f'command = "/bin/sh"\n'
-        f'args = ["-c", \'token=$(cat "{cat_token_file}"); exec pursers-wait-bridge\']\n'
+        f'args = ["-c", \'token=$(cat {escaped_cat_path}); exec pursers-wait-bridge\']\n'
         f'tool_timeout_sec = 620\n'
     )
     target = desired(tmp_path, "codex", config_path=str(config))
@@ -714,7 +724,7 @@ def test_doctor_cat_token_file_reference_validation(
     assert "invalid JWT format" in row_bad["message"]
     assert bad_secret not in json.dumps(report_bad)
 
-    # 4. Valid JWT referenced file -> PASS
+    # 4. Valid JWT referenced file (unquoted escaped-space path) -> PASS
     good_secret = "TOP_SECRET_GOOD_JWT_PAYLOAD"
     cat_token_file.write_text(f"eyJhbGciOi.{good_secret}.signature_123")
     report_good = seat_config._doctor_document(doc.run(target))
@@ -722,6 +732,19 @@ def test_doctor_cat_token_file_reference_validation(
     assert row_good["status"] == "PASS"
     assert "valid JWT" in row_good["message"]
     assert good_secret not in json.dumps(report_good)
+
+    # 5. Also verify quoted path with spaces: $(cat "/path with spaces/token.jwt") -> PASS
+    config.write_text(
+        f'[mcp_servers.codex-worker]\n'
+        f'command = "/bin/sh"\n'
+        f'args = ["-c", \'token=$(cat "{cat_token_file}"); exec pursers-wait-bridge\']\n'
+        f'tool_timeout_sec = 620\n'
+    )
+    report_quoted = seat_config._doctor_document(doc.run(target))
+    row_quoted = next(r for r in report_quoted["checks"] if r["check"] == "token-file")
+    assert row_quoted["status"] == "PASS"
+    assert "valid JWT" in row_quoted["message"]
+    assert good_secret not in json.dumps(report_quoted)
 
 
 def test_doctor_dead_nvm_npx_path_warns(

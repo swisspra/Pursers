@@ -214,26 +214,33 @@ def _is_env_var_defined(
     return False
 
 
-CAT_TOKEN_PATTERN = re.compile(
-    r'\$\(cat\s+(?:(["\'])(?P<quoted>.*?)\1|(?P<unquoted>[^)\n]+))\)'
-)
+CAT_COMMAND_PATTERN = re.compile(r'\$\(\s*(cat\s+[^)\n]+)\)')
 
-SYSTEM_CA_DIRECTORIES = (
-    Path("/etc/ssl"),
-    Path("/private/etc/ssl"),
-    Path("/etc/pki/tls"),
-    Path("/etc/pki/ca-trust"),
-    Path("/etc/ca-certificates"),
-    Path("/usr/share/ca-certificates"),
-    Path("/usr/local/etc/openssl"),
-    Path("/opt/homebrew/etc/openssl"),
-    Path("/opt/homebrew/etc/openssl@3"),
-    Path("/System/Library/OpenSSL"),
-)
+
+def _system_trust_files() -> set[Path]:
+    targets: set[Path] = set()
+    verify_paths = ssl.get_default_verify_paths()
+    if verify_paths.openssl_cafile:
+        targets.add(Path(verify_paths.openssl_cafile).expanduser())
+    for standard in (
+        "/etc/ssl/cert.pem",
+        "/etc/ssl/certs/ca-certificates.crt",
+        "/etc/pki/tls/certs/ca-bundle.crt",
+        "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem",
+        "/etc/ssl/ca-bundle.pem",
+    ):
+        targets.add(Path(standard))
+    resolved_targets: set[Path] = set()
+    for target in targets:
+        try:
+            resolved_targets.add(target.resolve() if target.exists() else target)
+        except Exception:
+            resolved_targets.add(target)
+    return resolved_targets | targets
 
 
 def _is_private_ca(ca_raw: str | Path | None) -> bool:
-    """Determine whether a CA path points to a private CA rather than a system trust path."""
+    """Determine whether a CA path points to a private CA rather than an actual default trust target."""
     if not ca_raw:
         return False
     path = Path(ca_raw).expanduser()
@@ -242,44 +249,9 @@ def _is_private_ca(ca_raw: str | Path | None) -> bool:
     except Exception:
         resolved = path
 
-    verify_paths = ssl.get_default_verify_paths()
-    for sys_ca in (verify_paths.openssl_cafile,):
-        if sys_ca:
-            try:
-                sys_path = Path(sys_ca).expanduser()
-                sys_resolved = sys_path.resolve() if sys_path.exists() else sys_path
-                if resolved == sys_resolved or path == sys_path:
-                    return False
-            except Exception:
-                pass
-
-    for sys_dir in (verify_paths.openssl_capath,):
-        if sys_dir:
-            try:
-                sys_dpath = Path(sys_dir).expanduser()
-                sys_dresolved = sys_dpath.resolve() if sys_dpath.exists() else sys_dpath
-                if (
-                    resolved == sys_dresolved
-                    or sys_dresolved in resolved.parents
-                    or path == sys_dpath
-                    or sys_dpath in path.parents
-                ):
-                    return False
-            except Exception:
-                pass
-
-    for base in SYSTEM_CA_DIRECTORIES:
-        try:
-            base_resolved = base.resolve() if base.exists() else base
-            if (
-                resolved == base_resolved
-                or base_resolved in resolved.parents
-                or path == base
-                or base in path.parents
-            ):
-                return False
-        except Exception:
-            pass
+    system_files = _system_trust_files()
+    if path in system_files or resolved in system_files:
+        return False
 
     return True
 
@@ -295,10 +267,16 @@ def _extract_token_file_references(
         if not text:
             return
         cleaned = text.replace('\\"', '"').replace("\\'", "'")
-        for m in CAT_TOKEN_PATTERN.finditer(cleaned):
-            p = (m.group("quoted") or m.group("unquoted")).strip().strip('"\'')
-            if p:
-                files.append(p)
+        for m in CAT_COMMAND_PATTERN.finditer(cleaned):
+            cmd = m.group(1).strip()
+            try:
+                parts = shlex.split(cmd)
+                if len(parts) >= 2 and parts[0] == "cat":
+                    for p in parts[1:]:
+                        if p and not p.startswith("-"):
+                            files.append(p)
+            except Exception:
+                pass
 
     doc = inspection.get("document", {})
     if isinstance(doc, dict):
