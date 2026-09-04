@@ -61,6 +61,36 @@ def test_registry_includes_home_and_excludes_paused_projects() -> None:
     assert result == [("home-board", "home-board"), ("Active", "board-active")]
 
 
+def test_registry_projects_authoritative_work_dirs() -> None:
+    result = dashboard.parse_project_work_dirs(
+        registry(
+            {
+                "Home": {
+                    "board_id": "home-board",
+                    "status": "active",
+                    "work_dir": "/repo/home",
+                },
+                "Active": {
+                    "board_id": "board-active",
+                    "status": "active",
+                    "work_dir": "/repo/active",
+                },
+                "Paused": {
+                    "board_id": "paused",
+                    "status": "paused",
+                    "work_dir": "/repo/paused",
+                },
+            }
+        ),
+        "home-board",
+    )
+
+    assert result == {
+        "home-board": "/repo/home",
+        "board-active": "/repo/active",
+    }
+
+
 def test_agents_group_by_principal_and_name_across_board_specific_ids() -> None:
     now = datetime(2030, 1, 2, 12, tzinfo=timezone.utc)
     recent = (now - timedelta(seconds=20)).isoformat()
@@ -4037,3 +4067,328 @@ def test_role_chip_css_is_present():
     assert ".role-chip{" in dashboard.HTML
     assert ".chip-board{" in dashboard.HTML
     assert ".chip-role{" in dashboard.HTML
+
+
+def test_origin_verification_uses_exact_remote_branch_and_commit(tmp_path: Path) -> None:
+    calls: list[list[str]] = []
+    commit = "a" * 40
+
+    def runner(command: list[str], **kwargs: object) -> SimpleNamespace:
+        calls.append(command)
+        assert kwargs == {
+            "capture_output": True,
+            "text": True,
+            "timeout": 10,
+            "check": False,
+        }
+        return SimpleNamespace(
+            returncode=0,
+            stdout=f"{commit}\trefs/heads/codex/TK-exact\n",
+        )
+
+    result = dashboard.verify_ticket_commit_on_origin(
+        {
+            "ticket_id": "TK-exact",
+            "status": "submitted",
+            "notes": f"branch_and_commit: codex/TK-exact @ {commit}",
+        },
+        tmp_path,
+        runner=runner,
+    )
+
+    assert result == {
+        "status": "verified",
+        "branch": "codex/TK-exact",
+        "commit": commit,
+    }
+    assert calls[0][-1] == "refs/heads/codex/TK-exact"
+
+
+def test_origin_verification_handles_mismatch_invalid_dir_and_old_closed(
+    tmp_path: Path,
+) -> None:
+    commit = "b" * 40
+    ticket = {
+        "status": "submitted",
+        "notes": f"branch_and_commit: codex/TK-one @ {commit}",
+    }
+    mismatch = dashboard.verify_ticket_commit_on_origin(
+        ticket,
+        tmp_path,
+        runner=lambda *_a, **_k: SimpleNamespace(returncode=0, stdout="c" * 40 + "\trefs/heads/codex/TK-one\n"),
+    )
+    invalid = dashboard.verify_ticket_commit_on_origin(ticket, tmp_path / "missing")
+    old = dashboard.verify_ticket_commit_on_origin(
+        {
+            **ticket,
+            "status": "closed",
+            "closed_at": "2030-01-01T00:00:00+00:00",
+        },
+        tmp_path / "missing",
+        now=datetime(2030, 1, 10, tzinfo=timezone.utc),
+    )
+
+    assert mismatch["status"] == "mismatch"
+    assert invalid == {
+        "status": "cannot_verify",
+        "reason": "registry work_dir does not exist",
+    }
+    assert old == {"status": "stale_closed"}
+
+
+def test_findings_make_board_large_informational_and_dedupe_origin_failure() -> None:
+    findings = [
+        {"kind": "board-large", "level": "warn", "message": "large"},
+        {
+            "kind": "unverifiable-commit",
+            "level": "warn",
+            "message": "one",
+            "ticket_id": "TK-one",
+        },
+        {
+            "kind": "unverifiable-commit",
+            "level": "warn",
+            "message": "two",
+            "ticket_id": "TK-two",
+        },
+    ]
+    snapshot = {
+        "state": {"coordinator_findings": {"value": json.dumps({"findings": findings})}},
+        "_snapshot_truncation": {"hidden_active": 0},
+        "_commit_verification": {
+            "TK-one": {"status": "cannot_verify", "reason": "bad registry path"},
+            "TK-two": {"status": "cannot_verify", "reason": "bad registry path"},
+        },
+    }
+
+    result = dashboard.project_coordinator_findings(snapshot)
+
+    assert result is not None
+    assert [item["kind"] for item in result["items"]] == ["cannot-verify-origin"]
+    snapshot["_snapshot_truncation"]["hidden_active"] = 2
+    result = dashboard.project_coordinator_findings(snapshot)
+    assert result is not None
+    assert [item["kind"] for item in result["items"]] == [
+        "board-active-truncated",
+        "cannot-verify-origin",
+    ]
+
+
+def test_findings_clear_when_the_coordinator_source_is_stale() -> None:
+    result = dashboard.project_coordinator_findings(
+        {
+            "state": {
+                "coordinator_findings": {
+                    "updated_at": "2030-01-01T00:00:00+00:00",
+                    "value": json.dumps(
+                        {
+                            "findings": [
+                                {
+                                    "kind": "stale-source",
+                                    "level": "warn",
+                                    "message": "old condition",
+                                }
+                            ]
+                        }
+                    ),
+                }
+            }
+        },
+        now=datetime(2030, 1, 3, tzinfo=timezone.utc),
+    )
+
+    assert result is None
+
+
+def test_truncated_snapshot_splices_active_ticket_list() -> None:
+    calls: list[tuple[str, dict]] = []
+
+    class Client:
+        async def __aenter__(self) -> Self:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def board_snapshot(self, **kwargs: object) -> dict:
+            calls.append(("snapshot", dict(kwargs)))
+            return {
+                "latest_seq": 4,
+                "truncated": True,
+                "total_counts": {"tickets": 3},
+                "omitted_counts": {"tickets": 2},
+                "agents": [],
+                "tickets": [{"ticket_id": "TK-closed", "status": "closed"}],
+            }
+
+        async def ticket_list(self, **kwargs: object) -> dict:
+            calls.append(("ticket_list", dict(kwargs)))
+            return {
+                "tickets": [
+                    {"ticket_id": "TK-open", "title": "Open", "status": "open"},
+                    {
+                        "ticket_id": "TK-submitted",
+                        "title": "Submitted",
+                        "status": "submitted",
+                    },
+                ]
+            }
+
+        async def board_catchup(self, **kwargs: object) -> dict:
+            return {"events": []}
+
+    config = dashboard.Config(
+        url="https://127.0.0.1:8766/mcp",
+        token="token",
+        home_board="pursers",
+        agent_name="viewer",
+        stale_seconds=300,
+        cache_seconds=5,
+    )
+    fetcher = dashboard.FleetFetcher(config, client_factory=lambda *_a, **_k: Client())
+    raw = asyncio.run(fetcher._read_board("Board", "board"))
+    board = dashboard.aggregate_fleet([raw], stale_seconds=300)["boards"][0]
+
+    assert ("ticket_list", {"include_closed": False, "limit": 1_000}) in calls
+    assert raw["snapshot"]["_snapshot_truncation"] == {
+        "returned": 1,
+        "total": 3,
+        "omitted": 2,
+        "hidden_active": 2,
+    }
+    assert {ticket["id"] for ticket in board["tickets"]} == {
+        "TK-open",
+        "TK-submitted",
+    }
+
+
+def test_push_wait_pressure_supersedes_poll_and_exposes_return_rate(
+    tmp_path: Path,
+) -> None:
+    document = {
+        "schema_version": 3,
+        "days": {},
+        "model_wait": {
+            "push": {
+                "board_id": "board",
+                "agent_name": "worker",
+                "hours": {
+                    "2030-01-10T12:00:00Z": {
+                        "returns": 2,
+                        "response_bytes": 400_000,
+                        "outcomes": {"cue": 2},
+                    }
+                },
+            }
+        },
+        "poll_cycles": {
+            "same": {
+                "board_id": "board",
+                "agent_name": "worker",
+                "latest_at": "2030-01-10T12:10:00Z",
+                "latest_response_bytes": 900_000,
+                "mode": "poll",
+                "samples": [],
+            },
+            "old": {
+                "board_id": "old",
+                "agent_name": "old-worker",
+                "latest_at": "2030-01-08T12:10:00Z",
+                "latest_response_bytes": 900_000,
+                "samples": [],
+            },
+        },
+    }
+    path = tmp_path / "stats.json"
+    path.write_text(json.dumps(document), encoding="utf-8")
+
+    result = dashboard.read_overhead_stats(
+        path, now=datetime(2030, 1, 10, 12, 30, tzinfo=timezone.utc)
+    )
+
+    assert len(result["sessions"]) == 1
+    session = result["sessions"][0]
+    assert session["mode"] == "push"
+    assert session["reason"] == "cue"
+    assert session["returns_per_hour"] == 2
+    assert session["estimated_tokens_per_return"] == 50_000
+    assert session["estimated_tokens_per_hour"] == 100_000
+
+
+def test_single_return_over_one_million_tokens_is_stats_anomaly(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "stats.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 3,
+                "days": {},
+                "poll_cycles": {},
+                "model_wait": {
+                    "seat": {
+                        "board_id": "board",
+                        "agent_name": "worker",
+                        "hours": {
+                            "2030-01-10T12:00:00Z": {
+                                "returns": 1,
+                                "response_bytes": 4_000_004,
+                                "outcomes": {"timeout": 1},
+                            }
+                        },
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = dashboard.read_overhead_stats(
+        path, now=datetime(2030, 1, 10, 12, 30, tzinfo=timezone.utc)
+    )
+
+    session = result["sessions"][0]
+    assert session["pressure"] == "anomaly"
+    assert session["raw_record"]["response_bytes"] == 4_000_004
+    assert "do not compact" in session["next_action"]
+
+
+def test_attention_state_dedupes_persists_and_auto_clears() -> None:
+    now = datetime(2030, 1, 1, 12, tzinfo=timezone.utc)
+    candidate = {"key": "finding|one", "fingerprint": "warn|one"}
+    state, visible = dashboard.reconcile_attention_state({}, [candidate, candidate], now=now)
+    assert visible == [candidate]
+    first_seen = state["finding|one"]["first_seen"]
+
+    state["finding|one"]["acknowledged"] = True
+    persisted, visible = dashboard.reconcile_attention_state(
+        state, [candidate], now=now + timedelta(minutes=5)
+    )
+    assert visible == []
+    assert persisted["finding|one"]["first_seen"] == first_seen
+
+    changed = {**candidate, "fingerprint": "critical|one"}
+    changed_state, visible = dashboard.reconcile_attention_state(
+        persisted, [changed], now=now + timedelta(minutes=10)
+    )
+    assert visible == [changed]
+    changed_state["finding|one"]["snooze_until"] = (
+        now + timedelta(hours=24)
+    ).isoformat()
+    _, visible = dashboard.reconcile_attention_state(
+        changed_state, [changed], now=now + timedelta(hours=1)
+    )
+    assert visible == []
+    cleared, visible = dashboard.reconcile_attention_state(
+        changed_state, [], now=now + timedelta(hours=2)
+    )
+    assert cleared == {}
+    assert visible == []
+
+
+def test_attention_and_truncation_controls_are_rendered() -> None:
+    assert "sessionStorage" in dashboard.HTML
+    assert "data-attention-action=\"ack\"" in dashboard.HTML
+    assert "Snooze 24h" in dashboard.HTML
+    assert "snapshot truncated to ${esc(tr.returned)} of ${esc(tr.total)} tickets" in dashboard.HTML
+    assert "tokens / return" in dashboard.HTML
