@@ -83,9 +83,63 @@ class DispatchTests(unittest.IsolatedAsyncioTestCase):
         )
         self.principal = principal
         joined = await self.call(
-            "board_join", agent_name=name, capabilities=capabilities
+            "board_join", agent_name=name,
+            role="reviewer" if role == "reviewer" else "worker",
+            capabilities=capabilities,
         )
         return joined.structured_content["agent_id"]
+
+    async def test_declared_role_is_independent_from_token_scopes(self) -> None:
+        self.principal = self.admin
+        worker = await self.call("board_join", agent_name="admin-agent")
+        self.assertEqual(worker.structured_content["role"], "worker")
+
+        reviewer = await self.call(
+            "board_onboard", agent_name="admin-reviewer", role="reviewer"
+        )
+        self.assertEqual(reviewer.structured_content["role"], "reviewer")
+
+        inferred = await self.call(
+            "board_join", agent_name="role-migration", role="reviewer"
+        )
+        self.assertTrue(inferred.structured_content["capabilities"]["can_review"])
+        migrated = await self.call("board_join", agent_name="role-migration")
+        self.assertEqual(migrated.structured_content["role"], "worker")
+        self.assertFalse(migrated.structured_content["capabilities"]["can_review"])
+
+        self.principal = self.admin
+        await self.call(
+            "board_member_add", agent_name="admin-agent",
+            principal_id=self.worker_a.principal_id, role="member",
+        )
+        self.principal = self.worker_a
+        with self.assertRaisesRegex(ToolError, "board:review"):
+            await self.call(
+                "board_join", agent_name="worker-a-reviewer", role="reviewer"
+            )
+
+        coordinator = central.Principal(
+            "PR-coordinate", "coordinate",
+            frozenset({"board:read", "board:coordinate"}),
+        )
+        self.principal = self.admin
+        await self.call(
+            "board_member_add", agent_name="admin-agent",
+            principal_id=coordinator.principal_id, role="member",
+        )
+        self.principal = coordinator
+        for role in ("coordinator", "orchestrator"):
+            joined = await self.call(
+                "board_join", agent_name=f"{role}-agent", role=role
+            )
+            self.assertEqual(joined.structured_content["role"], role)
+
+        self.principal = self.admin
+        status = await self.call("board_status")
+        agents = status.structured_content["agents"]
+        admin = next(row for row in agents if row["agent_name"] == "admin-agent")
+        self.assertEqual(admin["role"], "worker")
+        self.assertIn("board:review", admin["scopes"])
 
     async def create(self, **extra: object):
         self.principal = self.admin

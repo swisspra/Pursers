@@ -45,6 +45,7 @@ import asyncio
 import copy
 import fcntl
 import hashlib
+import hmac
 import importlib.metadata
 import json
 import math
@@ -135,6 +136,8 @@ AGENT_NAME = resolve_agent_name(
 )
 _RAW_WAIT_MODE = os.environ.get("PURSERS_WAIT_MODE", "push").strip().lower()
 WAIT_MODE = _RAW_WAIT_MODE if _RAW_WAIT_MODE in {"poll", "push"} else "push"
+SEAT_ROLES = frozenset({"worker", "reviewer", "orchestrator", "coordinator"})
+CONNECTOR_TOKEN_ENV = "PURSERS_BOARD_CONNECTOR_TOKEN"
 
 # --- wait policy (v4-parity constants; see a2a_wait.py) --------------------
 
@@ -800,6 +803,15 @@ def _seat_capabilities() -> dict[str, Any] | None:
     return capabilities
 
 
+def _declared_role() -> str:
+    role = os.environ.get("PURSERS_ROLE", "worker").strip().lower()
+    if role not in SEAT_ROLES:
+        raise ValueError(
+            "PURSERS_ROLE must be worker, reviewer, orchestrator, or coordinator"
+        )
+    return role
+
+
 def _timeout_margin_s(host_timeout_s: int) -> int:
     margin = min(60, max(30, math.ceil(host_timeout_s * 0.10)))
     if os.environ.get("PURSERS_HOST", DEFAULT_HOST).strip().lower() == "claude-desktop":
@@ -865,6 +877,7 @@ class _BoardView:
         self.board_id = board_id
         self._parent = parent
         self.agent_name = getattr(parent, "agent_name", AGENT_NAME)
+        self.role = getattr(parent, "role", "worker")
         self.identity: JoinedIdentity | None = getattr(parent, "identity", None)
         self.generation_token: str | None = getattr(parent, "generation_token", None)
         self._client = raw_client
@@ -932,7 +945,10 @@ class _BoardView:
         capabilities: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         selected = self.agent_name if agent_name is None else agent_name
-        arguments: dict[str, Any] = {"agent_name": selected}
+        arguments: dict[str, Any] = {
+            "agent_name": selected,
+            "role": self.role,
+        }
         if task_focus is not None:
             arguments["task_focus"] = task_focus
         caps = dict(capabilities or {})
@@ -986,6 +1002,20 @@ class BoardJoinFailure(ToolError):
     def __init__(self, cause_class: str, detail: str) -> None:
         self.cause_class = cause_class
         super().__init__(f"board join failed ({cause_class}): {detail}")
+
+
+def _split_identity_failure() -> BoardJoinFailure | None:
+    if os.environ.get("PURSERS_REQUIRE_TOKEN_MATCH", "").strip() != "1":
+        return None
+    connector_token = os.environ.get(CONNECTOR_TOKEN_ENV, "")
+    if not connector_token or not CENTRAL_TOKEN or not hmac.compare_digest(
+        connector_token, CENTRAL_TOKEN
+    ):
+        return BoardJoinFailure(
+            "configuration",
+            "split identity: wait bridge and board connector tokens differ",
+        )
+    return None
 
 
 def _nested_exceptions(exc: BaseException) -> list[BaseException]:
@@ -1096,6 +1126,7 @@ class DeferredBoardConnection:
             CENTRAL_TOKEN,
             BOARD_ID,
             agent_name=AGENT_NAME,
+            role=_declared_role(),
             meter=self.meter,
         )
         entered = False
@@ -1139,6 +1170,16 @@ class DeferredBoardConnection:
                 self._client = None
 
     async def client(self) -> MeteredBoardClient:
+        try:
+            _declared_role()
+        except ValueError as exc:
+            failure = BoardJoinFailure("configuration", str(exc))
+            self._report_failure(failure)
+            raise failure
+        identity_failure = _split_identity_failure()
+        if identity_failure is not None:
+            self._report_failure(identity_failure)
+            raise identity_failure
         if not CENTRAL_TOKEN:
             failure = BoardJoinFailure(
                 "configuration", "ONBOARD_CENTRAL_TOKEN is not set"
@@ -1872,7 +1913,7 @@ async def _lifespan(server: MCPServer) -> AsyncIterator[dict[str, Any]]:
     engine.load_state()
     _GLOBAL_ENGINE = engine
 
-    role = os.environ.get("PURSERS_ROLE", "worker").strip().lower()
+    role = _declared_role()
     if role == "orchestrator":
         await engine.start_subscriber()
     try:
@@ -2605,6 +2646,7 @@ async def _event_stream(
             parent.token,
             board_id,
             agent_name=identity.agent_name,
+            role=identity.role,
             reconnect_delay_s=parent.reconnect_delay_s,
         )
         event_client.identity = identity

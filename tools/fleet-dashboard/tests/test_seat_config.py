@@ -76,6 +76,18 @@ def test_codex_plan_apply_inspect_backup_and_idempotency(tmp_path: Path) -> None
         ["ONBOARD_CENTRAL_TOKEN_FILE"]
         == target.token_file
     )
+    assert (
+        document["mcp_servers"][target.connector_name]["env"]["PURSERS_ROLE"]
+        == "worker"
+    )
+    assert (
+        document["mcp_servers"][target.connector_name]["env"]
+        ["PURSERS_REQUIRE_TOKEN_MATCH"]
+        == "1"
+    )
+    assert "PURSERS_BOARD_CONNECTOR_TOKEN" in document[
+        "mcp_servers"
+    ][target.connector_name]["args"][1]
     assert "# keep this comment" in config.read_text()
     assert len(result.backups) == 1
     assert Path(result.backups[0]).read_text().startswith("# keep this comment")
@@ -507,7 +519,10 @@ def test_inventory_and_doctor_redact_token_and_report_push(
     adapter = seat_config.CodexAdapter(target.config_path)
     adapter.apply(adapter.plan(target))
 
-    monkeypatch.setenv("ONBOARD_CENTRAL_TOKEN", "mock.valid.token")
+    monkeypatch.setenv(
+        "ONBOARD_CENTRAL_TOKEN",
+        "eyJhbGciOi.TOKEN_MUST_NOT_APPEAR.signature",
+    )
 
     def run(command, **_kwargs):
         if command[0] == "ps":
@@ -547,9 +562,10 @@ def test_default_live_probe_checks_status_subscription_and_registry_boards(
     calls = []
 
     class FakeBoardClient:
-        def __init__(self, _url, _token, board, *, agent_name):
+        def __init__(self, _url, _token, board, *, agent_name, role):
             self.board = board
             self.agent_name = agent_name
+            self.role = role
             self.identity = SimpleNamespace(agent_id=f"AI-{board}")
 
         async def __aenter__(self):
@@ -790,6 +806,41 @@ def test_doctor_bearer_env_var_missing_vs_defined(
     env_no_shell = next(r for r in rows_no_shell if r.check == "token-env")
     assert env_no_shell.status == "WARN"
     assert "cannot inspect login shell" in env_no_shell.message
+
+
+def test_doctor_reports_split_identity_fail_and_shared_token_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = desired(tmp_path, "codex")
+    token = "part1.part2.part3"
+    Path(target.token_file).write_text(token)
+    Path(target.ca_file).write_text("ca")
+    command = Path(target.bridge_command)
+    command.parent.mkdir(parents=True)
+    command.write_text("#!/bin/sh\n")
+    command.chmod(0o755)
+    adapter = seat_config.CodexAdapter(target.config_path)
+    adapter.apply(adapter.plan(target))
+    doctor = seat_config.Doctor(
+        pypi_fetcher=lambda: "0.1.0a7",
+        live_probe=lambda _d, _t: {
+            "mode": "push", "registry_boards": ["pursers"], "skipped_boards": {}
+        },
+    )
+
+    monkeypatch.setenv("ONBOARD_CENTRAL_TOKEN", "different.token.value")
+    failed = next(
+        row for row in doctor.run(target) if row.check == "split-identity"
+    )
+    assert failed.status == "FAIL"
+    assert "split identity" in failed.message
+
+    monkeypatch.setenv("ONBOARD_CENTRAL_TOKEN", token)
+    passed = next(
+        row for row in doctor.run(target) if row.check == "split-identity"
+    )
+    assert passed.status == "PASS"
+    assert token not in passed.message
 
 
 def test_doctor_token_file_validation_and_redaction(

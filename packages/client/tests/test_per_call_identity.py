@@ -47,7 +47,7 @@ async def test_default_board_join_preserves_existing_behavior(monkeypatch) -> No
 
     assert captured == {
         "tool": "board_join",
-        "arguments": {"agent_name": "env-default"},
+        "arguments": {"agent_name": "env-default", "role": "worker"},
     }
     assert result["agent_name"] == "env-default"
     assert board.identity == JoinedIdentity(
@@ -76,7 +76,7 @@ async def test_explicit_board_join_returns_identity_without_mutation(monkeypatch
 
     assert captured == {
         "tool": "board_join",
-        "arguments": {"agent_name": "session-x"},
+        "arguments": {"agent_name": "session-x", "role": "worker"},
     }
     assert result["identity"] == JoinedIdentity(
         "board-multi-name", "AI-session-x", "PR-shared", "session-x", "worker"
@@ -84,6 +84,29 @@ async def test_explicit_board_join_returns_identity_without_mutation(monkeypatch
     assert board.agent_name == "env-default"
     assert board.identity is original_identity
     assert board.generation_token == "generation-before-call"
+
+
+@pytest.mark.anyio
+async def test_declared_role_is_forwarded_for_join_and_onboard(monkeypatch) -> None:
+    board = BoardClient(
+        "https://central.example/mcp",
+        "TOKEN_PLACEHOLDER",
+        "board-multi-name",
+        agent_name="review-seat",
+        role="reviewer",
+    )
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    async def call_refresh(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        calls.append((name, arguments))
+        return {**joined(arguments["agent_name"]), "role": arguments["role"]}
+
+    monkeypatch.setattr(board, "_call_refresh", call_refresh)
+    await board.board_join()
+    await board.board_onboard(role="worker")
+
+    assert calls[0][1]["role"] == "reviewer"
+    assert calls[1][1]["role"] == "worker"
 
 
 @pytest.mark.anyio

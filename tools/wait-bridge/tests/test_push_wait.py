@@ -45,10 +45,11 @@ import pursers_wait_server as wait_server  # noqa: E402
 class InProcessBoardClient:
     """Minimal BoardClient-compatible adapter over a real in-process Central."""
 
-    def __init__(self, raw_client: Client) -> None:
+    def __init__(self, raw_client: Client, role: str = "reviewer") -> None:
         self._raw_client = raw_client
         self._client: Any = raw_client
         self.agent_name = "push-listener"
+        self.role = role
         self.identity: JoinedIdentity | None = None
 
     async def _call(self, name: str, **arguments: Any) -> dict[str, Any]:
@@ -57,9 +58,17 @@ class InProcessBoardClient:
         )
         return BoardClient._decode(result)
 
-    async def board_join(self, *, agent_name: str | None = None) -> dict[str, Any]:
+    async def board_join(
+        self,
+        *,
+        agent_name: str | None = None,
+        role: str | None = None,
+        task_focus: str | None = None,
+    ) -> dict[str, Any]:
         selected = self.agent_name if agent_name is None else agent_name
-        joined = await self._call("board_join", agent_name=selected)
+        joined = await self._call(
+            "board_join", agent_name=selected, role=role or self.role
+        )
         identity = JoinedIdentity(
             joined["board_id"],
             joined["agent_id"],
@@ -430,9 +439,9 @@ class PushWaitTests(unittest.IsolatedAsyncioTestCase):
         self.temp_dir.cleanup()
 
     async def _joined_client(
-        self, raw_client: Client
+        self, raw_client: Client, role: str = "reviewer"
     ) -> InProcessBoardClient:
-        client = InProcessBoardClient(raw_client)
+        client = InProcessBoardClient(raw_client, role=role)
         await client.board_join()
         await client.board_join(agent_name="push-actor")
         return client
@@ -649,7 +658,24 @@ class PushWaitTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(
                 b_rotated["events"][0]["offer"]["ticket_id"], expiring_id
             )
+    async def test_auto_wait_uses_declared_worker_with_review_scoped_token(self) -> None:
+        async with Client(self.mcp, mode="2026-07-28", cache=None) as raw:
+            client = await self._joined_client(raw, role="worker")
+            created = await client.create_ticket("review-scoped worker fixture")
+            result = await wait_server._wait_for_work(
+                client,
+                since_seq=0,
+                timeout_s=1,
+                only_mine=False,
+                project="pursers",
+                wait_for="auto",
+            )
 
+        self.assertEqual(client.identity.role, "worker")
+        self.assertFalse(result["timed_out"])
+        self.assertEqual(
+            result["events"][0]["ticket_id"], created["ticket"]["ticket_id"]
+        )
     async def test_push_task_stops_after_first_real_cue_without_cleanup_error(
         self,
     ) -> None:

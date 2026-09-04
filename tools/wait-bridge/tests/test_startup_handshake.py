@@ -38,14 +38,36 @@ class _UnauthorizedHandler(BaseHTTPRequestHandler):
 
 
 class StartupHandshakeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_split_identity_refuses_start_and_matching_token_passes(self) -> None:
+        connection = wait_server.DeferredBoardConnection(
+            wait_server.BridgeStats(Path(tempfile.gettempdir()) / "unused.json")
+        )
+        with patch.dict(
+            os.environ,
+            {
+                "PURSERS_REQUIRE_TOKEN_MATCH": "1",
+                "PURSERS_BOARD_CONNECTOR_TOKEN": "different-token",
+            },
+        ):
+            with self.assertRaisesRegex(wait_server.BoardJoinFailure, "split identity"):
+                await connection.client()
+        with patch.dict(
+            os.environ,
+            {
+                "PURSERS_REQUIRE_TOKEN_MATCH": "1",
+                "PURSERS_BOARD_CONNECTOR_TOKEN": wait_server.CENTRAL_TOKEN,
+            },
+        ):
+            self.assertIsNone(wait_server._split_identity_failure())
+
     async def test_healthy_connection_is_joined_lazily_and_closed_by_owner(
         self,
     ) -> None:
         events: list[str] = []
 
         class HealthyClient:
-            def __init__(self, *_args: object, **_kwargs: object) -> None:
-                events.append("constructed")
+            def __init__(self, *_args: object, **kwargs: object) -> None:
+                events.append(f"constructed:{kwargs['role']}")
                 self.identity: JoinedIdentity | None = None
 
             async def __aenter__(self) -> "HealthyClient":
@@ -62,13 +84,16 @@ class StartupHandshakeTests(unittest.IsolatedAsyncioTestCase):
             wait_server.BridgeStats(Path(tempfile.gettempdir()) / "unused.json")
         )
         self.assertEqual(events, [])
-        with patch.object(wait_server, "MeteredBoardClient", HealthyClient):
+        with (
+            patch.dict(os.environ, {"PURSERS_ROLE": "reviewer"}),
+            patch.object(wait_server, "MeteredBoardClient", HealthyClient),
+        ):
             first = await connection.client()
             second = await connection.client()
             self.assertIs(first, second)
-            self.assertEqual(events, ["constructed", "join"])
+            self.assertEqual(events, ["constructed:reviewer", "join"])
             await connection.close()
-        self.assertEqual(events, ["constructed", "join", "close"])
+        self.assertEqual(events, ["constructed:reviewer", "join", "close"])
 
     async def test_board_join_rejection_has_board_cause_class(self) -> None:
         failure = wait_server._classify_board_join_failure(
