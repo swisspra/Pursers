@@ -550,6 +550,7 @@ python3 tools/wait-bridge/registry_admin.py remove payments</code></pre>
       <p class="eyebrow" style="color:#2f6f9f">07 · Shared memory</p>
       <h2>Store reusable context in memories</h2>
       <p>A memory should help the next agent recover a decision, blocker, handoff, verification method, or ticket context. It is not a replacement for the project files.</p>
+      <div class="note"><strong>a18 Tool Surface Deprecation:</strong> In the a18 release train, the <code>memory_*</code> family is hidden from the default <code>tools/list</code> to reduce model context overhead. Seats that need memory tools can declare <code>capabilities={"legacy_tools": true}</code> upon <code>board_join</code> or <code>board_onboard</code>, or configure <code>PURSERS_LEGACY_TOOLS=1</code> on the wait bridge. Deprecated tools remain callable throughout a18.</div>
 
       <table>
         <thead><tr><th>Action</th><th>Tool</th><th>When to use it</th></tr></thead>

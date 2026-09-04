@@ -548,6 +548,7 @@ Rejecting is normal and cheap; a wrong approval is expensive.</code></pre>
       <p class="eyebrow" style="color:#2f6f9f">07 · Shared memory</p>
       <h2>เก็บบริบทที่ใช้ซ้ำด้วย memories</h2>
       <p>Memory เหมาะกับข้อสรุปที่ agent ถัดไปต้องค้นเจอ เช่น decision, blocker, handoff, วิธีตรวจ หรือบริบทของ ticket ไม่ใช่ที่เก็บไฟล์ project ทั้งก้อน</p>
+      <div class="note"><strong>การปรับลด Tool Surface ใน a18:</strong> ในรุ่น a18 เครื่องมือกลุ่ม <code>memory_*</code> จะถูกซ่อนจาก <code>tools/list</code> เริ่มต้นเพื่อประหยัด context token ของโมเดล หาก Seat ใดจำเป็นต้องใช้งาน สามารถประกาศ <code>capabilities={"legacy_tools": true}</code> ขณะเรียก <code>board_join</code> หรือ <code>board_onboard</code> หรือตั้งตัวแปรแวดล้อม <code>PURSERS_LEGACY_TOOLS=1</code> ที่ wait bridge โดยเครื่องมือที่ deprecated ยังคงเรียกใช้งานได้ตามปกติตลอดช่วง a18</div>
 
       <table>
         <thead><tr><th>งาน</th><th>เครื่องมือ</th><th>ใช้เมื่อ</th></tr></thead>

@@ -120,6 +120,26 @@ SCRUB_EVENT_FIELDS = frozenset(
 )
 REVIEW_POLICIES = frozenset({"strict", "workflow"})
 REVIEW_EVENT_KINDS = frozenset({"board_review_policy_changed"}) | REVIEW_LEASE_KINDS
+DEPRECATION_EVENT_KINDS = frozenset({"deprecated_tool_warning"})
+DEPRECATION_EVENT_FIELDS = frozenset(
+    {"tool", "message", "fixture_provenance", "recipient_identities"}
+)
+DEPRECATED_TOOLS = frozenset(
+    {
+        "agent_nudge",
+        "board_get_briefing",
+        "memory_checkpoint",
+        "memory_handoff",
+        "memory_links",
+        "memory_read",
+        "memory_search",
+        "memory_unpin",
+        "memory_write",
+        "ticket_assign",
+        "ticket_terminate",
+        "ticket_unclaim",
+    }
+)
 REVIEW_CORE_OVERRIDE_FIELDS = frozenset(
     {"review_policy_at_verdict", "review_label", "review_verdict"}
 )
@@ -249,6 +269,32 @@ def iso_at(epoch: float) -> str:
 class CentralJournal(Journal):
     """Extend the pinned core journal with sanitized board-control events."""
 
+    def record_warning(self, board_id: str, warning_record: dict[str, Any]) -> dict[str, Any]:
+        board_id = _require_text("board_id", board_id)
+        record = copy.deepcopy(warning_record)
+
+        def mutate(document: dict[str, Any]) -> None:
+            self._check_document(document, board_id)
+            warnings = document.setdefault("warnings", [])
+            warnings.append(record)
+
+        self.store.read_modify_write(
+            self._path(board_id), mutate, lambda: self._default(board_id)
+        )
+        return record
+
+    def read_warnings(self, board_id: str) -> list[dict[str, Any]]:
+        board_id = _require_text("board_id", board_id)
+        document = self.store.load(self._path(board_id), lambda: self._default(board_id))
+        self._check_document(document, board_id)
+        return copy.deepcopy(document.get("warnings", []))
+
+    def read_after(self, board_id: str, cursor: int, limit: int = 100) -> dict[str, Any]:
+        result = super().read_after(board_id, cursor, limit=limit)
+        document = self.store.load(self._path(board_id), lambda: self._default(board_id))
+        result["warnings"] = copy.deepcopy(document.get("warnings", []))
+        return result
+
     def append(self, board_id: str, event: dict[str, Any]) -> dict[str, Any]:
         kind = _require_text("kind", event.get("kind"))
         custom_core_fields = REVIEW_CORE_OVERRIDE_FIELDS | INTAKE_CORE_OVERRIDE_FIELDS
@@ -259,6 +305,7 @@ class CentralJournal(Journal):
             | ADMISSION_EVENT_KINDS
             | SCRUB_EVENT_KINDS
             | REVIEW_EVENT_KINDS
+            | DEPRECATION_EVENT_KINDS
         ):
             raise ValueError(f"unsupported event kind: {kind}")
         board_id = _require_text("board_id", board_id)
@@ -270,6 +317,7 @@ class CentralJournal(Journal):
             | SCRUB_EVENT_FIELDS
             | REVIEW_EVENT_FIELDS
             | COORDINATOR_EVENT_FIELDS
+            | DEPRECATION_EVENT_FIELDS
         )
         semantic = {
             key: copy.deepcopy(event[key])
@@ -319,6 +367,7 @@ class CentralJournal(Journal):
             | ADMISSION_EVENT_KINDS
             | SCRUB_EVENT_KINDS
             | REVIEW_EVENT_KINDS
+            | DEPRECATION_EVENT_KINDS
         ):
             raise ValueError(f"unsupported event kind: {kind}")
         if not unique_fields:
@@ -332,6 +381,7 @@ class CentralJournal(Journal):
             | SCRUB_EVENT_FIELDS
             | REVIEW_EVENT_FIELDS
             | COORDINATOR_EVENT_FIELDS
+            | DEPRECATION_EVENT_FIELDS
         )
         semantic = {
             key: copy.deepcopy(event[key])
@@ -400,6 +450,32 @@ class CentralBoard:
         self.expected_generation: contextvars.ContextVar[Any] = contextvars.ContextVar(
             "central_expected_generation", default=None
         )
+        self.legacy_principals: set[str] = set()
+        self.deprecated_warned_callers: set[tuple[str, str, str]] = set()
+
+    def register_legacy_capability(self, principal_id: str, enabled: bool = True) -> None:
+        if enabled:
+            self.legacy_principals.add(principal_id)
+        else:
+            self.legacy_principals.discard(principal_id)
+
+    def has_legacy_capability(self, principal_id: str | None) -> bool:
+        if os.environ.get("PURSERS_LEGACY_TOOLS") == "1":
+            return True
+        if principal_id and principal_id in self.legacy_principals:
+            return True
+        if principal_id:
+            try:
+                for doc in self.store.iter_documents("boards"):
+                    for m in doc.get("members", {}).values():
+                        if m.get("principal_id") == principal_id:
+                            caps = m.get("capabilities", {})
+                            if isinstance(caps, Mapping) and caps.get("legacy_tools"):
+                                self.legacy_principals.add(principal_id)
+                                return True
+            except Exception:
+                pass
+        return False
 
     def transaction(self):
         transaction = getattr(self.store, "transaction", None)
@@ -1180,10 +1256,44 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         """Register tools while preserving intentional client-facing failures."""
 
         def register(function: Any) -> Any:
+            tool_name = function.__name__
+            is_deprecated = tool_name in DEPRECATED_TOOLS
+
             @wraps(function)
             async def wrapped(*args: Any, **kwargs: Any) -> Any:
+                if is_deprecated:
+                    board_id = kwargs.get("board_id")
+                    if not board_id and args:
+                        board_id = args[0] if isinstance(args[0], str) else None
+                    actor_key = None
+                    try:
+                        p = current_principal()
+                        actor_key = p.principal_id
+                    except Exception:
+                        actor_key = "anonymous"
+                    if board_id and isinstance(board_id, str):
+                        warn_key = (board_id, actor_key, tool_name)
+                        if warn_key not in service.deprecated_warned_callers:
+                            service.deprecated_warned_callers.add(warn_key)
+                            try:
+                                service.journal.record_warning(
+                                    board_id,
+                                    {
+                                        "kind": "deprecated_tool_warning",
+                                        "tool": tool_name,
+                                        "actor": actor_key,
+                                        "occurred_at": datetime.now(timezone.utc).isoformat(),
+                                        "message": f"Tool '{tool_name}' is deprecated in a18 and scheduled for removal in a19.",
+                                    },
+                                )
+                            except Exception:
+                                pass
                 try:
-                    return await function(*args, **kwargs)
+                    result = await function(*args, **kwargs)
+                    if is_deprecated and isinstance(result, dict):
+                        result.setdefault("_deprecated", True)
+                        result.setdefault("deprecated", True)
+                    return result
                 except (PermissionError, ValueError) as exc:
                     log_runtime_error(
                         service.diagnostics,
@@ -2157,6 +2267,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         now: float, claim_ttl_s: int | None,
         agent_platform: str | None, task_focus: str | None,
         *, allow_workflow_side_effects: bool = True,
+        capabilities: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         membership = service.resolve_board_context(document, principal.principal_id)
         configured_ttl = claim_ttl(document)
@@ -2189,6 +2300,14 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             member["agent_platform"] = agent_platform
         if task_focus is not None:
             member["task_focus"] = task_focus
+        if capabilities is not None:
+            safe_caps = dict(capabilities)
+            member["capabilities"] = safe_caps
+            if safe_caps.get("legacy_tools") is True:
+                service.register_legacy_capability(principal.principal_id, True)
+        elif os.environ.get("PURSERS_LEGACY_TOOLS") == "1":
+            member.setdefault("capabilities", {})["legacy_tools"] = True
+            service.register_legacy_capability(principal.principal_id, True)
         document["members"][identity_id] = member
         renewed: list[str] = []
         for ticket in (
@@ -2530,6 +2649,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         agent_platform: str | None = None,
         task_focus: str | None = None,
         invite_token: str | None = None,
+        capabilities: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Join one explicit board under the verified bearer principal."""
         board_id = require_id("board_id", board_id)
@@ -2573,6 +2693,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 document, principal, agent_name, now, claim_ttl_s,
                 safe_platform, safe_focus,
                 allow_workflow_side_effects=not coordinate_only,
+                capabilities=capabilities,
             )
             member = joined["actor"]
             return {
@@ -2596,6 +2717,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 "admission_recipients": service.admitted_agent_ids(
                     document, member["agent_id"]
                 ),
+                "capabilities": member.get("capabilities", {}),
             }
 
         result = service.mutate(board_id, join, require_generation=False)
@@ -2623,6 +2745,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         ticket_id: str | None = None,
         snapshot_limit: int = DEFAULT_SNAPSHOT_LIMIT,
         snapshot_max_bytes: int = DEFAULT_SNAPSHOT_MAX_BYTES,
+        capabilities: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Join or reactivate an identity and return a compact bounded board briefing."""
         board_id = require_id("board_id", board_id)
@@ -2647,6 +2770,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             joined = join_member(
                 document, principal, agent_name, now, claim_ttl_s,
                 safe_platform, safe_focus,
+                capabilities=capabilities,
             )
             briefing = briefing_payload(
                 document, principal, token_budget, ticket_id=ticket_id
@@ -2707,6 +2831,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             "admission_event": admission_event,
             "snapshot": snapshot,
             "briefing": briefing,
+            "capabilities": result["actor"].get("capabilities", {}),
         }
 
     @tool()
@@ -6086,6 +6211,27 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             )
         return result
 
+    original_list_tools = mcp.list_tools
+
+    async def custom_list_tools(
+        *args: Any, include_legacy: bool | None = None, **kwargs: Any
+    ) -> list[Any]:
+        tools = await original_list_tools(*args, **kwargs)
+        legacy = include_legacy
+        if legacy is None:
+            if os.environ.get("PURSERS_LEGACY_TOOLS") == "1":
+                legacy = True
+            else:
+                try:
+                    p = current_principal()
+                    legacy = service.has_legacy_capability(p.principal_id)
+                except Exception:
+                    legacy = False
+        if not legacy:
+            tools = [t for t in tools if t.name not in DEPRECATED_TOOLS]
+        return tools
+
+    mcp.list_tools = custom_list_tools
     return mcp, service
 
 

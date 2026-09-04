@@ -9,11 +9,24 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- Hide-unless-legacy capability mechanism in Central and Wait-Bridge: seats can declare `capabilities={"legacy_tools": true}` in `board_join` or `board_onboard` to view deprecated tools. Operators can set `PURSERS_LEGACY_TOOLS=1` to force legacy tools to remain visible across all connections.
+- Comprehensive tool surface audit document: `docs/tool-surface-audit.md` covering 7-day usage telemetry across all 5 caller roles, repository caller inventory, 2-view consolidation architecture (`board_status` + `board_snapshot`), and a ticket-ready a19 removal backlog.
 - Orchestrator mode for the wait bridge (`PURSERS_ROLE=orchestrator`): runs a continuous background subscription across all active registry boards, buffering journal events in a bounded ring buffer (5000 events) and refetching changed tickets via side-effect-free (`touch=false`) catchup with zero board writes while idle.
 - Instant non-blocking MCP tools for leaders/orchestrators (Claude Desktop, Claude Code): `board_digest` (returns tickets, new tickets, status transitions, review details, and `branch_and_commit` note on close), `board_digest_ack` (advances the acknowledged cursor), `board_watch`, and `board_unwatch`.
 - Best-effort MCP resource updates (`board://<home_board_id>/digest`) emitted whenever new events arrive in the digest buffer.
 - Persistent orchestrator state file (`~/.pursers/wait-bridge/orchestrator_state_<board>.json`) preserving cursors and event buffer across bridge restarts.
 - Seat config and Fleet Dashboard UI support for role `orchestrator` with custom prompt renderer preventing `a2a_wait` and ticket claims.
+
+### Deprecated
+
+- **Tool Surface Audit & Deprecation (a18, TK-2ffa16368cbb):** 12 superseded, redundant, or unused Central tools are deprecated in a18 and hidden from `tools/list` by default, saving ~1,800 context tokens per turn across all seats:
+  - `agent_nudge`: superseded by autonomous Dispatcher offers (TK-10da96af6455).
+  - `board_get_briefing`: redundant with `board_snapshot` and `board_status`.
+  - `ticket_terminate`: superseded by `ticket_cancel`.
+  - `ticket_unclaim`: superseded by `ticket_review_release` and lease expiry flow.
+  - `ticket_assign`: superseded by autonomous Dispatcher assignment; preserved for admin escape hatch.
+  - `memory_checkpoint`, `memory_handoff`, `memory_links`, `memory_read`, `memory_search`, `memory_unpin`, `memory_write`: specialized memory family with 0 model seat read calls in 7 days; moved behind capability negotiation.
+  - Deprecated tools remain callable for backward compatibility in a18. Invocations emit a `_deprecated: true` annotation and a one-time journal warning per caller (`deprecated_tool_warning`). Physical removal is scheduled for a19.
 
 ## [5.0.0a17] - 2026-09-04
 
