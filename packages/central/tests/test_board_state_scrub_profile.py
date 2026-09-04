@@ -76,13 +76,13 @@ class BoardStateScrubProfileTests(unittest.IsolatedAsyncioTestCase):
             "board_state_update",
             agent_name="admin-agent",
             key="project_registry",
-            value="/Users/example/project",
+            value="/Users/synthetic-user/project",
         )
 
         self.assertFalse(accepted.is_error)
         self.assertEqual(
             accepted.structured_content["state"]["value"],
-            "/Users/example/project",
+            "/Users/synthetic-user/project",
         )
         readback = await self.call(
             "internal-board",
@@ -92,7 +92,7 @@ class BoardStateScrubProfileTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(readback.is_error)
         self.assertEqual(
             readback.structured_content["state"]["value"],
-            "/Users/example/project",
+            "/Users/synthetic-user/project",
         )
 
         self.service.mutate(
@@ -105,7 +105,7 @@ class BoardStateScrubProfileTests(unittest.IsolatedAsyncioTestCase):
                 "board_state_update",
                 agent_name="admin-agent",
                 key="project_registry",
-                value="/Users/example/project",
+                value="/Users/synthetic-user/project",
             )
         self.assertNotIn(
             "project_registry",

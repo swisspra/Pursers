@@ -750,7 +750,7 @@ def test_doctor_cat_token_file_reference_validation(
 def test_doctor_dead_nvm_npx_path_warns(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    dead_path = "/Users/fake/.nvm/versions/node/v24.18.0/bin/npx"
+    dead_path = "/Users/synthetic-user/.nvm/versions/node/v24.18.0/bin/npx"
     config = tmp_path / "config.yaml"
     config.write_text(
         f"extensions:\n"

@@ -16,7 +16,7 @@
 ### Command
 
 ```
-$ cd /Users/swissp/Desktop/Claude/MCP\ Server/Pursers-local && \
+$ cd /Users/synthetic-user/Desktop/Claude/MCP\ Server/Pursers-local && \
   .venv_test/bin/python3 -m pytest \
   tools/worker-runtime/tests/test_pursers_worker.py \
   -v
@@ -26,9 +26,9 @@ $ cd /Users/swissp/Desktop/Claude/MCP\ Server/Pursers-local && \
 
 ```
 ============================= test session starts ==============================
-platform darwin -- Python 3.12.14, pytest-9.1.1, pluggy-1.6.0 -- /Users/swissp/Desktop/Claude/MCP Server/Pursers-local/.venv_test/bin/python3
+platform darwin -- Python 3.12.14, pytest-9.1.1, pluggy-1.6.0 -- /Users/synthetic-user/Desktop/Claude/MCP Server/Pursers-local/.venv_test/bin/python3
 cachedir: .pytest_cache
-rootdir: /Users/swissp/Desktop/Claude/MCP Server/Pursers-local
+rootdir: /Users/synthetic-user/Desktop/Claude/MCP Server/Pursers-local
 plugins: anyio-4.14.2
 collecting ... collected 74 items
 
@@ -126,7 +126,7 @@ $ echo $?
 ### Command
 
 ```
-$ cd /Users/swissp/Desktop/Claude/MCP\ Server/Pursers-local && \
+$ cd /Users/synthetic-user/Desktop/Claude/MCP\ Server/Pursers-local && \
   .venv_test/bin/python3 -m pytest \
   tools/worker-runtime/tests/test_pursers_worker.py::test_startup_sweep_orphan_worktree_combined \
   -v --tb=long
@@ -136,9 +136,9 @@ $ cd /Users/swissp/Desktop/Claude/MCP\ Server/Pursers-local && \
 
 ```
 ============================= test session starts ==============================
-platform darwin -- Python 3.12.14, pytest-9.1.1, pluggy-1.6.0 -- /Users/swissp/Desktop/Claude/MCP Server/Pursers-local/.venv_test/bin/python3
+platform darwin -- Python 3.12.14, pytest-9.1.1, pluggy-1.6.0 -- /Users/synthetic-user/Desktop/Claude/MCP Server/Pursers-local/.venv_test/bin/python3
 cachedir: .pytest_cache
-rootdir: /Users/swissp/Desktop/Claude/MCP Server/Pursers-local
+rootdir: /Users/synthetic-user/Desktop/Claude/MCP Server/Pursers-local
 plugins: anyio-4.14.2
 collecting ... collected 1 item
 
@@ -158,7 +158,7 @@ tools/worker-runtime/tests/test_pursers_worker.py::test_startup_sweep_orphan_wor
 ### Command
 
 ```
-$ cd /Users/swissp/Desktop/Claude/MCP\ Server/Pursers-local && \
+$ cd /Users/synthetic-user/Desktop/Claude/MCP\ Server/Pursers-local && \
   .venv_test/bin/python3 -m pytest \
   tools/worker-runtime/tests/test_pursers_worker.py \
   -k "orphan or startup_sweep" -v --tb=short
@@ -168,9 +168,9 @@ $ cd /Users/swissp/Desktop/Claude/MCP\ Server/Pursers-local && \
 
 ```
 ============================= test session starts ==============================
-platform darwin -- Python 3.12.14, pytest-9.1.1, pluggy-1.6.0 -- /Users/swissp/Desktop/Claude/MCP Server/Pursers-local/.venv_test/bin/python3
+platform darwin -- Python 3.12.14, pytest-9.1.1, pluggy-1.6.0 -- /Users/synthetic-user/Desktop/Claude/MCP Server/Pursers-local/.venv_test/bin/python3
 cachedir: .pytest_cache
-rootdir: /Users/swissp/Desktop/Claude/MCP Server/Pursers-local
+rootdir: /Users/synthetic-user/Desktop/Claude/MCP Server/Pursers-local
 plugins: anyio-4.14.2
 collecting ... collected 74 items / 63 deselected / 11 selected
 
