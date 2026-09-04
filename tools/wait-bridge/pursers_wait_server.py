@@ -157,6 +157,7 @@ STATS_SCHEMA_VERSION = 3
 STATS_RETENTION_DAYS = 7
 POLL_SAMPLE_LIMIT = 24
 WAIT_HOUR_RETENTION = 48
+WAIT_RETURN_SAMPLE_LIMIT = 256
 CONTEXT_READ_TOOLS = frozenset(
     {"board_get_briefing", "board_onboard", "board_snapshot", "board_catchup"}
 )
@@ -286,6 +287,8 @@ class BridgeStats:
         board_id: str,
         agent_name: str,
         result: dict[str, Any],
+        *,
+        mode: str | None = None,
     ) -> None:
         """Record exactly one model-visible a2a_wait result."""
         outcome = "timeout" if result.get("timed_out") else "cue"
@@ -296,6 +299,8 @@ class BridgeStats:
                     agent_name,
                     outcome,
                     _meter_bytes(result),
+                    str(result.get("mode") or mode or "unknown"),
+                    str(result.get("reason") or outcome),
                 )
         except Exception as exc:  # noqa: BLE001 - metering never breaks work.
             _log(f"wait-return stats write failed: {type(exc).__name__}")
@@ -314,6 +319,8 @@ class BridgeStats:
                     agent_name,
                     "digest",
                     _meter_bytes(result),
+                    "digest",
+                    "digest",
                 )
         except Exception as exc:  # noqa: BLE001 - metering never breaks work.
             _log(f"digest stats write failed: {type(exc).__name__}")
@@ -525,6 +532,8 @@ class BridgeStats:
         agent_name: str,
         outcome: str,
         response_bytes: int,
+        mode: str,
+        reason: str,
     ) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         lock_path = self.path.with_suffix(self.path.suffix + ".lock")
@@ -567,6 +576,23 @@ class BridgeStats:
             outcomes[outcome] = int(outcomes.get(outcome, 0)) + 1
             bucket["outcomes"] = outcomes
             seat["hours"] = retained
+            samples = seat.get("returns")
+            samples = samples if isinstance(samples, list) else []
+            samples = [
+                sample
+                for sample in samples[-(WAIT_RETURN_SAMPLE_LIMIT - 1) :]
+                if isinstance(sample, dict)
+            ]
+            samples.append(
+                {
+                    "at": now.isoformat(),
+                    "response_bytes": max(0, int(response_bytes)),
+                    "outcome": outcome,
+                    "mode": mode,
+                    "reason": reason,
+                }
+            )
+            seat["returns"] = samples[-WAIT_RETURN_SAMPLE_LIMIT:]
             model_wait[seat_key] = seat
             output = {
                 "schema_version": STATS_SCHEMA_VERSION,
@@ -2289,7 +2315,7 @@ async def a2a_wait(
     async with meter.poll_cycle():
         result = await run()
     selected_agent = AGENT_NAME if agent_name is None else agent_name
-    await meter.record_wait_return(BOARD_ID, selected_agent, result)
+    await meter.record_wait_return(BOARD_ID, selected_agent, result, mode=WAIT_MODE)
     return result
 
 

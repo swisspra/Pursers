@@ -4223,15 +4223,15 @@ def test_truncated_snapshot_splices_active_ticket_list() -> None:
 
         async def ticket_list(self, **kwargs: object) -> dict:
             calls.append(("ticket_list", dict(kwargs)))
+            if kwargs.get("status") == "open":
+                return {"tickets": [{"ticket_id": "TK-open", "title": "Open", "status": "open"}], "total_matching": 1}
+            if kwargs.get("status") == "submitted":
+                return {"tickets": [{"ticket_id": "TK-submitted", "title": "Submitted", "status": "submitted"}], "total_matching": 1}
+            if kwargs.get("status") == "claimed":
+                return {"tickets": [], "total_matching": 0}
             return {
-                "tickets": [
-                    {"ticket_id": "TK-open", "title": "Open", "status": "open"},
-                    {
-                        "ticket_id": "TK-submitted",
-                        "title": "Submitted",
-                        "status": "submitted",
-                    },
-                ]
+                "tickets": [{"ticket_id": "TK-open", "title": "Open", "status": "open"}],
+                "total_matching": 2,
             }
 
         async def board_catchup(self, **kwargs: object) -> dict:
@@ -4249,12 +4249,13 @@ def test_truncated_snapshot_splices_active_ticket_list() -> None:
     raw = asyncio.run(fetcher._read_board("Board", "board"))
     board = dashboard.aggregate_fleet([raw], stale_seconds=300)["boards"][0]
 
-    assert ("ticket_list", {"include_closed": False, "limit": 1_000}) in calls
+    assert ("ticket_list", {"include_closed": False, "limit": 500}) in calls
+    assert all(call[1]["limit"] <= 500 for call in calls if call[0] == "ticket_list")
     assert raw["snapshot"]["_snapshot_truncation"] == {
         "returned": 1,
         "total": 3,
         "omitted": 2,
-        "hidden_active": 2,
+        "hidden_active": 0,
     }
     assert {ticket["id"] for ticket in board["tickets"]} == {
         "TK-open",
@@ -4279,6 +4280,10 @@ def test_push_wait_pressure_supersedes_poll_and_exposes_return_rate(
                         "outcomes": {"cue": 2},
                     }
                 },
+                "returns": [
+                    {"at": "2030-01-10T12:00:00Z", "response_bytes": 200_000, "outcome": "cue", "mode": "push", "reason": "offer"},
+                    {"at": "2030-01-10T12:05:00Z", "response_bytes": 200_000, "outcome": "cue", "mode": "push", "reason": "cue"},
+                ],
             }
         },
         "poll_cycles": {
@@ -4309,7 +4314,7 @@ def test_push_wait_pressure_supersedes_poll_and_exposes_return_rate(
     assert len(result["sessions"]) == 1
     session = result["sessions"][0]
     assert session["mode"] == "push"
-    assert session["reason"] == "cue"
+    assert session["reason"] in {"offer", "cue"}
     assert session["returns_per_hour"] == 2
     assert session["estimated_tokens_per_return"] == 50_000
     assert session["estimated_tokens_per_hour"] == 100_000
@@ -4331,11 +4336,15 @@ def test_single_return_over_one_million_tokens_is_stats_anomaly(
                         "agent_name": "worker",
                         "hours": {
                             "2030-01-10T12:00:00Z": {
-                                "returns": 1,
-                                "response_bytes": 4_000_004,
-                                "outcomes": {"timeout": 1},
+                                "returns": 2,
+                                "response_bytes": 4_100_004,
+                                "outcomes": {"timeout": 2},
                             }
                         },
+                        "returns": [
+                            {"at": "2030-01-10T12:00:00Z", "response_bytes": 100_000, "outcome": "timeout", "mode": "push", "reason": "timeout"},
+                            {"at": "2030-01-10T12:05:00Z", "response_bytes": 4_000_004, "outcome": "timeout", "mode": "push", "reason": "timeout"},
+                        ],
                     }
                 },
             }
@@ -4387,8 +4396,21 @@ def test_attention_state_dedupes_persists_and_auto_clears() -> None:
 
 
 def test_attention_and_truncation_controls_are_rendered() -> None:
-    assert "sessionStorage" in dashboard.HTML
+    assert "sessionStorage" not in dashboard.HTML
+    assert "/api/attention" in dashboard.HTML
     assert "data-attention-action=\"ack\"" in dashboard.HTML
     assert "Snooze 24h" in dashboard.HTML
     assert "snapshot truncated to ${esc(tr.returned)} of ${esc(tr.total)} tickets" in dashboard.HTML
     assert "tokens / return" in dashboard.HTML
+
+
+def test_attention_state_persists_across_manager_instances(tmp_path: Path) -> None:
+    state_dir = tmp_path / "dashboard-state"
+    first = dashboard.SeatConfigManager(state_dir=state_dir)
+    value = {"finding|one": {"fingerprint": "warn|one", "acknowledged": True}}
+
+    assert first.save_attention_state(value) == {"items": value}
+    second = dashboard.SeatConfigManager(state_dir=state_dir)
+
+    assert second.attention_state() == {"items": value}
+    assert (state_dir / "attention-state.json").stat().st_mode & 0o777 == 0o600

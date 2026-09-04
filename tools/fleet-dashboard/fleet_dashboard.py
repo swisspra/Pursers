@@ -18,6 +18,7 @@ import stat
 import statistics
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -56,6 +57,7 @@ from seat_config import (  # noqa: I001
 DEFAULT_URL = "https://127.0.0.1:8766/mcp"
 DEFAULT_HOME_BOARD = "pursers"
 SNAPSHOT_LIMIT = 1_000
+TICKET_LIST_LIMIT = 500
 SNAPSHOT_MAX_BYTES = 300_000
 EVENT_SCAN_LIMIT = 50
 EVENT_MAX_BYTES = 100_000
@@ -1283,11 +1285,31 @@ def read_overhead_stats(
                 "outcomes": outcomes,
             }
         )
-        if latest_bucket_at is not None and latest_bucket_returns:
+        samples = raw.get("returns")
+        samples = samples if isinstance(samples, list) else []
+        actual: list[tuple[datetime, dict[str, Any], int]] = []
+        for sample in samples:
+            if not isinstance(sample, dict):
+                continue
+            parsed = _parse_time(sample.get("at"))
+            response_bytes = sample.get("response_bytes")
+            if (
+                parsed is None
+                or parsed < window_start
+                or parsed > current
+                or type(response_bytes) is not int
+                or response_bytes < 0
+            ):
+                continue
+            actual.append((parsed, sample, (response_bytes + 3) // 4))
+        push_actual = [row for row in actual if row[1].get("mode") == "push"]
+        selected = push_actual or [row for row in actual if row[1].get("mode") != "digest"]
+        if push_actual:
             recent_push_keys.add((board_id, agent_name))
-            tokens_per_return = (
-                latest_bucket_bytes + latest_bucket_returns * 4 - 1
-            ) // (latest_bucket_returns * 4)
+        if selected:
+            selected.sort(key=lambda row: row[0])
+            chosen = max(selected, key=lambda row: (row[2], row[0]))
+            sample_at, sample, tokens_per_return = chosen
             pressure = (
                 "anomaly"
                 if tokens_per_return > CONTEXT_STATS_ANOMALY_TOKENS
@@ -1299,43 +1321,31 @@ def read_overhead_stats(
                 >= pressure_thresholds["context_watch_tokens_per_poll"]
                 else "ok"
             )
-            reason = max(
-                latest_bucket_outcomes,
-                key=lambda name: _nonnegative_int(latest_bucket_outcomes[name]),
-                default="unknown",
-            )
+            current_samples = [row for row in selected if row[0].replace(minute=0, second=0, microsecond=0) == current_hour]
+            hour_bytes = sum(row[1]["response_bytes"] for row in current_samples)
             push_sessions.append(
                 {
                     "board_id": _clip(board_id, MAX_LABEL_CHARS),
                     "agent_name": _clip(agent_name, MAX_LABEL_CHARS),
-                    "latest_at": latest_bucket_at.isoformat(),
-                    "latest_response_bytes": latest_bucket_bytes,
+                    "latest_at": sample_at.isoformat(),
+                    "latest_response_bytes": sample["response_bytes"],
                     "latest_estimated_tokens": tokens_per_return,
                     "estimated_tokens_per_return": tokens_per_return,
-                    "estimated_tokens_per_hour": (
-                        latest_bucket_bytes + 3
-                    ) // 4,
-                    "returns_per_hour": latest_bucket_returns,
-                    "sample_count": latest_bucket_returns,
-                    "median_estimated_tokens": None,
+                    "estimated_tokens_per_hour": (hour_bytes + 3) // 4,
+                    "returns_per_hour": len(current_samples),
+                    "sample_count": len(selected),
+                    "median_estimated_tokens": round(statistics.median(row[2] for row in selected), 1),
                     "trend_ratio": None,
                     "trend": "→",
-                    "mode": "push",
-                    "reason": reason,
-                    "raw_record": {
-                        "at": latest_bucket_at.isoformat(),
-                        "returns": latest_bucket_returns,
-                        "response_bytes": latest_bucket_bytes,
-                        "outcomes": latest_bucket_outcomes,
-                    }
-                    if pressure == "anomaly"
-                    else None,
+                    "mode": _clip(sample.get("mode") or "unknown", 16),
+                    "reason": _clip(sample.get("reason") or "unknown", 32),
+                    "raw_record": copy.deepcopy(sample) if pressure == "anomaly" else None,
                     "pressure": pressure,
                     "pressure_rank": {"ok": 0, "watch": 1, "compact": 2, "anomaly": 3}[pressure],
                     "next_action": (
                         "Stats anomaly: inspect the raw wait-return record; do not compact from this value."
                         if pressure == "anomaly"
-                        else "Compact only if recent push returns remain over threshold."
+                        else "Compact only if a real wait return remains over threshold."
                         if pressure == "compact"
                         else "No compaction action is currently indicated."
                     ),
@@ -2785,14 +2795,32 @@ class FleetFetcher:
                     else max(0, ticket_total - len(snapshot_tickets))
                 )
                 hidden_active = 0
+                events = await self._board_event_feed(
+                    client,
+                    int(snapshot.get("latest_seq", 0)),
+                    event_limit,
+                )
                 if snapshot.get("truncated") or ticket_omitted:
                     active_page = await client.ticket_list(
-                        include_closed=False, limit=SNAPSHOT_LIMIT
+                        include_closed=False, limit=TICKET_LIST_LIMIT
                     )
                     active_tickets = active_page.get("tickets")
                     active_tickets = (
                         active_tickets if isinstance(active_tickets, list) else []
                     )
+                    active_total = _nonnegative_int(
+                        active_page.get("total_matching", len(active_tickets))
+                    )
+                    if active_total > len(active_tickets):
+                        for status in ("open", "claimed", "submitted"):
+                            page = await client.ticket_list(
+                                status=status,
+                                include_closed=False,
+                                limit=TICKET_LIST_LIMIT,
+                            )
+                            rows = page.get("tickets")
+                            if isinstance(rows, list):
+                                active_tickets.extend(rows)
                     by_id = {
                         item.get("ticket_id"): item
                         for item in snapshot_tickets
@@ -2805,13 +2833,31 @@ class FleetFetcher:
                         ticket_id = ticket.get("ticket_id")
                         if not isinstance(ticket_id, str):
                             continue
-                        if ticket_id not in initial_ids and (
-                            ticket.get("status") == "open"
-                            or ticket.get("status") in ACTIVE_CLAIM_STATES
-                            or ticket.get("status") in SUBMITTED_STATES
-                        ):
-                            hidden_active += 1
                         by_id[ticket_id] = ticket
+                    active_ids = {
+                        ticket.get("ticket_id")
+                        for ticket in active_tickets
+                        if isinstance(ticket, dict)
+                        and isinstance(ticket.get("ticket_id"), str)
+                    }
+                    hidden_active = max(0, active_total - len(active_ids))
+                    event_ticket_ids = []
+                    for event in reversed(events):
+                        ticket_id = event.get("ticket_id") if isinstance(event, dict) else None
+                        if (
+                            isinstance(ticket_id, str)
+                            and ticket_id not in by_id
+                            and ticket_id not in event_ticket_ids
+                        ):
+                            event_ticket_ids.append(ticket_id)
+                    for ticket_id in event_ticket_ids[:TICKET_LIST_LIMIT]:
+                        try:
+                            exact = await client.ticket_get(ticket_id)
+                        except BoardClientError:
+                            continue
+                        ticket = exact.get("ticket")
+                        if isinstance(ticket, dict):
+                            by_id[ticket_id] = ticket
                     snapshot["tickets"] = list(by_id.values())
                 snapshot["_snapshot_truncation"] = {
                     "returned": len(snapshot_tickets),
@@ -2845,11 +2891,6 @@ class FleetFetcher:
                         now=self.now_factory(),
                     )
                 snapshot["_commit_verification"] = verification
-                events = await self._board_event_feed(
-                    client,
-                    int(snapshot.get("latest_seq", 0)),
-                    event_limit,
-                )
                 latest_seq = int(snapshot.get("latest_seq", 0))
             return {
                 "label": label,
@@ -3348,6 +3389,37 @@ class SeatConfigManager:
         descriptor = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
         with os.fdopen(descriptor, "a", encoding="utf-8") as stream:
             stream.write(json.dumps(record, sort_keys=True) + "\n")
+
+    def attention_state(self) -> dict[str, Any]:
+        path = self.state_dir / "attention-state.json"
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, OSError, UnicodeError, ValueError):
+            value = {}
+        return {"items": value if isinstance(value, dict) else {}}
+
+    def save_attention_state(self, value: Any) -> dict[str, Any]:
+        if not isinstance(value, dict) or len(value) > 500:
+            raise ValueError("attention state must be an object with at most 500 items")
+        encoded = json.dumps(value, sort_keys=True, separators=(",", ":"))
+        if len(encoded.encode("utf-8")) > 100_000:
+            raise ValueError("attention state is too large")
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        path = self.state_dir / "attention-state.json"
+        descriptor, temporary = tempfile.mkstemp(
+            dir=self.state_dir, prefix=".attention-state.", text=True
+        )
+        try:
+            os.fchmod(descriptor, 0o600)
+            with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+                stream.write(encoded + "\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, path)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+        return {"items": value}
 
     def _bridge_inspection(self) -> dict[str, Any]:
         status = dict(self.bridge_installer.inspect())
@@ -3906,20 +3978,21 @@ window.addEventListener('hashchange',syncWorkersRoute);syncWorkersRoute();setInt
 </script></body>""",
 )
 
-# Attention state is browser-local: it survives refreshes without expanding the
-# board write surface, and absent conditions disappear on the next live render.
+# Attention state is local dashboard state, durable across browser/process restarts.
 HTML = HTML.replace(
     "</script></body>",
     r"""
 </script><script>
-const attentionStorageKey='pursers.fleet.attention.v1';
-function loadAttentionState(){try{const value=JSON.parse(sessionStorage.getItem(attentionStorageKey)||'{}');return value&&typeof value==='object'?value:{}}catch(_error){return{}}}
-function saveAttentionState(value){try{sessionStorage.setItem(attentionStorageKey,JSON.stringify(value))}catch(_error){}}
+let attentionState={},attentionStateLoaded=false,attentionStateSaved='';
+function loadAttentionState(){return attentionState}
+async function saveAttentionState(value){attentionState=value;if(!attentionStateLoaded)return;const encoded=JSON.stringify(value);if(encoded===attentionStateSaved)return;const response=await fetch('/api/attention',{method:'POST',headers:{'Content-Type':'application/json'},body:encoded});if(!response.ok)throw new Error(`attention state HTTP ${response.status}`);attentionStateSaved=encoded}
+async function refreshAttentionState(){try{const result=await fetchJson('/api/attention');attentionState=result.items&&typeof result.items==='object'?result.items:{};attentionStateSaved=JSON.stringify(attentionState);attentionStateLoaded=true;if(navKind()==='overview')renderHub()}catch(_error){attentionStateLoaded=false}}
 function attentionCandidates(){const rows=[];for(const [central,d] of Object.entries(fleetData)){for(const b of d.boards||[]){for(const f of b.coordinator_findings?.items||[]){rows.push({key:`finding|${central}|${b.board_id}|${f.kind}|${f.ticket_id||''}`,fingerprint:`${f.level}|${f.kind}|${f.text}`,type:'finding',central,board:b,level:f.level||'info',title:f.kind,text:f.text,ticket_id:f.ticket_id})}for(const t of b.tickets||[]){const age=Date.now()-new Date(t.updated_at||Date.now()).getTime();if(t.status==='open'&&age>1800000)rows.push({key:`starved|${central}|${b.board_id}|${t.id}`,fingerprint:'open-over-30m',type:'starved',central,board:b,level:'warn',title:'Starved ticket',text:t.title,ticket_id:t.id,age})}}for(const p of hubOverhead[central]?.sessions||[]){if(p.pressure==='ok')continue;rows.push({key:`context|${central}|${p.board_id}|${p.agent_name}`,fingerprint:`${p.pressure}|${p.mode||'unknown'}|${p.reason||''}`,type:'context',central,board:{board_id:p.board_id,label:p.board_id},level:p.pressure==='compact'||p.pressure==='anomaly'?'critical':'warn',title:p.pressure==='anomaly'?'Context stats anomaly':`Context ${p.pressure}`,text:p.pressure==='anomaly'?`${p.agent_name} · raw wait-return record requires inspection`:`${p.agent_name} · ${p.estimated_tokens_per_return??p.latest_estimated_tokens} tokens / return · ${p.estimated_tokens_per_hour??'—'} / hour · ${p.mode||'unknown'}${p.reason?' · '+p.reason:''}`})}}return rows}
-function reconcileAttention(){const now=new Date(),before=loadAttentionState(),next={},visible=[];for(const item of attentionCandidates()){if(!item.key||next[item.key])continue;const old=before[item.key],same=old?.fingerprint===item.fingerprint;const row={fingerprint:item.fingerprint,first_seen:same&&old.first_seen?old.first_seen:now.toISOString(),last_seen:now.toISOString(),acknowledged:same&&old.acknowledged===true,snooze_until:same?old.snooze_until||null:null};next[item.key]=row;const snoozed=row.snooze_until&&new Date(row.snooze_until)>now;if(!row.acknowledged&&!snoozed)visible.push({...item,...row})}saveAttentionState(next);window.__fleetAttentionPanel={generated_at:now.toISOString(),items:visible.map(x=>({key:x.key,type:x.type,central:x.central,board_id:x.board.board_id,ticket_id:x.ticket_id||null,first_seen:x.first_seen,last_seen:x.last_seen}))};return visible}
+function reconcileAttention(){const now=new Date(),before=loadAttentionState(),next={},visible=[];for(const item of attentionCandidates()){if(!item.key||next[item.key])continue;const old=before[item.key],same=old?.fingerprint===item.fingerprint;const row={fingerprint:item.fingerprint,first_seen:same&&old.first_seen?old.first_seen:now.toISOString(),last_seen:now.toISOString(),acknowledged:same&&old.acknowledged===true,snooze_until:same?old.snooze_until||null:null};next[item.key]=row;const snoozed=row.snooze_until&&new Date(row.snooze_until)>now;if(!row.acknowledged&&!snoozed)visible.push({...item,...row})}saveAttentionState(next).catch(()=>{});window.__fleetAttentionPanel={generated_at:now.toISOString(),items:visible.map(x=>({key:x.key,type:x.type,central:x.central,board_id:x.board.board_id,ticket_id:x.ticket_id||null,first_seen:x.first_seen,last_seen:x.last_seen}))};return visible}
 function attentionRow(x){const link=x.ticket_id?`<a class="id" href="${ticketHref(x.central,x.board.board_id,x.ticket_id)}">${esc(x.ticket_id)}</a>`:`<a href="${centralHref(x.central,'overhead')}">Inspect</a>`;return `<div class="finding-row"><span class="severity ${esc(x.level)}"></span><div><b>${esc(x.title)}</b><p>${esc(x.text)}</p><span class="meta">${esc(x.central)} · ${esc(x.board.label)} · first seen ${esc(fmt(x.first_seen))}</span><div class="attention-actions"><button type="button" data-attention-action="ack" data-attention-key="${esc(x.key)}">Acknowledge</button><button type="button" data-attention-action="snooze" data-attention-key="${esc(x.key)}">Snooze 24h</button></div></div>${link}</div>`}
 function renderAttentionOverview(){const centrals=centralLabels.map(label=>{const d=fleetData[label],error=fleetErrors[label];if(!d)return `<article class="health-card"><div class="signal"><span class="signal-dot bad"></span><b>${esc(label)}</b></div><p class="error">${esc(error||'Connecting…')}</p></article>`;const s=d.pool_summary||{},heartbeat=(d.boards||[]).map(b=>b.coordinator_heartbeat).filter(Boolean).sort().at(-1),tc={open:0,claimed:0,submitted:0,closed_today:0};for(const b of d.boards||[])for(const k in tc)tc[k]+=numberCount((b.counts||{})[k]);return `<article class="health-card"><div class="signal"><span class="signal-dot"></span><b>${esc(label)}</b><span class="status">central up</span></div><p class="meta">Coordinator heartbeat ${esc(heartbeat?fmt(heartbeat):'not observed')}</p><div class="health-metrics"><span>Busy<b>${esc(s.busy||0)}</b></span><span>Ready<b>${esc(s.available||0)}</b></span><span>Stale<b>${esc(s.stale||0)}</b></span></div><div class="health-metrics"><span>Open<b>${esc(tc.open)}</b></span><span>Claimed<b>${esc(tc.claimed)}</b></span><span>Submitted${tc.submitted?' ⚠':''}<b>${esc(tc.submitted)}</b></span><span>Closed today<b>${esc(tc.closed_today)}</b></span></div></article>`}).join('');const surfaced=reconcileAttention().sort((a,b)=>(b.level==='critical')-(a.level==='critical')||(b.age||0)-(a.age||0)),attention=surfaced.slice(0,10);return `${pageHead('Home','Fleet overview','Health and attention across every central.')}<section class="health-grid">${centrals||'<div class="skeleton"></div>'}</section><div class="section-title"><h3>Needs attention</h3><span class="status">${surfaced.length} surfaced</span></div><section class="attention-card">${attention.map(attentionRow).join('')||'<p class="empty">Nothing needs attention. The fleet is calm.</p>'}</section>`}
 function renderAttentionBoardsHub(){const cards=[];for(const [central,d] of Object.entries(fleetData))for(const b of d.boards||[]){const total=Object.values(b.counts||{}).reduce((sum,v)=>sum+numberCount(v),0),tr=b.snapshot_truncation,info=tr&&tr.total>tr.returned?`<span class="status">snapshot truncated to ${esc(tr.returned)} of ${esc(tr.total)} tickets</span>`:'';cards.push(`<article class="board-card"><div><p class="eyebrow">${esc(central)}</p><h3>${esc(b.label)}</h3><span class="meta">${esc(b.board_id)} · ${esc(total)} visible tickets</span> ${info}</div><div class="counts">${Object.entries(b.counts||{}).map(([k,v])=>`<span class="pill">${esc(k.replace('_',' '))} <b>${esc(v)}</b></span>`).join('')}</div><div class="card-actions"><a class="primary-action" href="${boardHref(central,b.board_id)}">Workspace</a><a href="${boardHref(central,b.board_id,'flow')}">Flow</a><a href="${boardHref(central,b.board_id,'timeline')}">Timeline</a><a href="${boardHref(central,b.board_id,'changes')}">Changes</a><a href="${boardHref(central,b.board_id,'routes')}">Routes</a></div></article>`)}return `${pageHead('Boards','Board workspaces','Open one board, then move through tickets, findings, intake, flow, timeline, changes, and routes.')}<section class="boards-list">${cards.join('')||'<div class="skeleton"></div>'}</section>`}
+refreshAttentionState();
 </script></body>""",
     1,
 ).replace(
@@ -4038,7 +4111,7 @@ HTML = HTML.replace(
 renderOverview=renderAttentionOverview;
 renderBoardsHub=renderAttentionBoardsHub;
 const attentionHubClickV1=hubClick;
-hubClick=function(event){const button=event.target.closest('[data-attention-action]');if(!button)return attentionHubClickV1(event);const state=loadAttentionState(),row=state[button.dataset.attentionKey];if(!row)return;if(button.dataset.attentionAction==='ack')row.acknowledged=true;else row.snooze_until=new Date(Date.now()+86400000).toISOString();saveAttentionState(state);renderHub()};
+hubClick=async function(event){const button=event.target.closest('[data-attention-action]');if(!button)return attentionHubClickV1(event);const state=loadAttentionState(),row=state[button.dataset.attentionKey];if(!row)return;if(button.dataset.attentionAction==='ack')row.acknowledged=true;else row.snooze_until=new Date(Date.now()+86400000).toISOString();await saveAttentionState(state);renderHub()};
 if(navKind()==='overview')renderHub();
 </script></body>""",
     1,
@@ -4205,12 +4278,14 @@ def make_handler(
                 self._send(200, "application/json; charset=utf-8", body)
                 return
             config_job = re.fullmatch(r"/api/config/jobs/([a-f0-9]{32})", route)
-            if route in {"/api/config/seats", "/api/config/bridge"} or config_job:
+            if route in {"/api/config/seats", "/api/config/bridge", "/api/attention"} or config_job:
                 try:
                     if route == "/api/config/seats":
                         payload = seats.seats()
                     elif route == "/api/config/bridge":
                         payload = seats.bridge()
+                    elif route == "/api/attention":
+                        payload = seats.attention_state()
                     else:
                         payload = seats.job(config_job.group(1))
                 except KeyError:
@@ -4404,6 +4479,7 @@ def make_handler(
                 "/api/config/doctor",
                 "/api/config/bridge/install",
                 "/api/config/bridge/upgrade-all",
+                "/api/attention",
             }
             worker_action = re.fullmatch(
                 r"/api/workers/([a-z0-9-]{2,32})/(test|start|stop|restart)", route
@@ -4482,6 +4558,8 @@ def make_handler(
                     if request != {}:
                         raise ValueError("bridge upgrade body must be an empty object")
                     body = _json_bytes(seats.upgrade_all())
+                elif route == "/api/attention":
+                    body = _json_bytes(seats.save_attention_state(request))
                 elif route == "/api/workers":
                     body = _json_bytes(
                         {
