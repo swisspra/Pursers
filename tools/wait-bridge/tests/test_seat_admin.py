@@ -265,7 +265,20 @@ class SeatAdminTests(unittest.TestCase):
                 capture_output=True,
                 text=True,
             )
-            wheel = next(dist.glob("*.whl"))
+            subprocess.run(
+                [
+                    uv,
+                    "build",
+                    "--wheel",
+                    "--out-dir",
+                    str(dist),
+                    str(ROOT.parents[1] / "packages" / "client"),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            wheel = next(dist.glob("pursers_wait_bridge-*.whl"))
             subprocess.run(
                 [uv, "venv", "--python", "3.12", str(environment)],
                 check=True,
@@ -274,7 +287,16 @@ class SeatAdminTests(unittest.TestCase):
             )
             python = environment / "bin" / "python"
             subprocess.run(
-                [uv, "pip", "install", "--python", str(python), str(wheel)],
+                [
+                    uv,
+                    "pip",
+                    "install",
+                    "--python",
+                    str(python),
+                    "--find-links",
+                    str(dist),
+                    str(wheel),
+                ],
                 check=True,
                 capture_output=True,
                 text=True,
@@ -288,7 +310,7 @@ class SeatAdminTests(unittest.TestCase):
                         "from importlib.metadata import version; "
                         "import registry_admin, registry_doctor, seat_admin; "
                         f"assert version('pursers-wait-bridge') == {_bridge_version()!r}; "
-                        "assert version('pursers-client') == '0.1.0a14'; "
+                        "assert version('pursers-client') == '0.1.0a15'; "
                         "assert version('mcp') == '2.1.1'; "
                         "assert hasattr(registry_doctor.LiveBackend, 'board_snapshot'); "
                         "assert hasattr(seat_admin.SeatBoardClient, 'board_member_add'); "

@@ -11,7 +11,7 @@ license = "Apache-2.0"
 license-files = ["LICENSE"]
 dependencies = [
   "mcp[cli]==2.1.1",
-  "pursers-client==0.1.0a14",
+  "pursers-client==0.1.0a15",
   "PyJWT[crypto]>=2.10,<3",
   "uvicorn>=0.30,<1",
 ]
