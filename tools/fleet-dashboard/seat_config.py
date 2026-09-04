@@ -950,6 +950,18 @@ ONBOARD_BOARD_ID = {_toml_string(desired.home_board)}
         before = self.path.read_text(encoding="utf-8") if self.path.exists() else None
         if before == after:
             return []
+        if before:
+            try:
+                b_doc = tomllib.loads(before).get("mcp_servers", {})
+                a_doc = tomllib.loads(after).get("mcp_servers", {})
+                name = desired.connector_name
+                board_name = desired.http_connector_name
+                if b_doc.get(name) == a_doc.get(name) and b_doc.get(
+                    board_name
+                ) == a_doc.get(board_name):
+                    return []
+            except Exception:
+                pass
         return [Change(self.path, "Codex wait and board connectors", before, after)]
 
 
@@ -1708,6 +1720,43 @@ class Doctor:
                         ),
                     )
                 )
+        configured_role = None
+        if desired.host in {"codex", "codex-cli"}:
+            configured_role = (
+                inspection.get("document", {})
+                .get("mcp_servers", {})
+                .get(desired.connector_name, {})
+                .get("env", {})
+                .get("PURSERS_ROLE")
+            )
+        elif desired.host in {"claude-desktop", "claude-code"}:
+            configured_role = (
+                inspection.get("document", {})
+                .get("mcpServers", {})
+                .get(desired.connector_name, {})
+                .get("env", {})
+                .get("PURSERS_ROLE")
+            )
+        elif desired.host == "goose":
+            match = re.search(
+                rf"(?ms)^  {re.escape(desired.connector_name)}:\s*$.*?PURSERS_ROLE:\s*([^\s\n]+)",
+                inspection.get("text", ""),
+            )
+            configured_role = match.group(1).strip("\"'") if match else None
+        if configured_role is not None:
+            role_ok = configured_role == desired.role
+            rows.append(
+                self._check(
+                    desired,
+                    "role",
+                    "PASS" if role_ok else "FAIL",
+                    (
+                        f"declared role '{configured_role}' matches seat"
+                        if role_ok
+                        else f"declared role '{configured_role}' differs from seat '{desired.role}'"
+                    ),
+                )
+            )
         timeout = desired.profile.host_timeout_s
         if desired.host in {"codex", "codex-cli"}:
             timeout = (

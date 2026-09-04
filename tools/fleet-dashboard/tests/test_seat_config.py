@@ -201,6 +201,10 @@ def test_codex_worker_and_reviewer_connectors_coexist_and_match_independently(
     assert seat_config._extract_env_token_references(
         reviewer, adapter.inspect()
     ) == ["PURSERS_REVIEW_TOKEN"]
+    assert next(row for row in doctor.run(worker) if row.check == "config").status == "PASS"
+    assert next(row for row in doctor.run(worker) if row.check == "role").status == "PASS"
+    assert next(row for row in doctor.run(reviewer) if row.check == "config").status == "PASS"
+    assert next(row for row in doctor.run(reviewer) if row.check == "role").status == "PASS"
     worker_row = next(
         row for row in doctor.run(worker) if row.check == "split-identity"
     )
