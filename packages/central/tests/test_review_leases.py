@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import contextvars
 import os
 import sys
 import tempfile
@@ -77,9 +79,13 @@ class ReviewLeaseTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def submitted_ticket(self) -> str:
+        return await self.submitted_ticket_on("pursers")
+
+    async def submitted_ticket_on(self, board_id: str) -> str:
         self.principal = self.admin
         created = await self.call(
             "ticket_create",
+            board_id=board_id,
             agent_name="admin-agent",
             title="review lease target",
             description="verify exclusive review",
@@ -89,9 +95,13 @@ class ReviewLeaseTests(unittest.IsolatedAsyncioTestCase):
         )
         ticket_id = created.structured_content["ticket"]["ticket_id"]
         self.principal = self.worker
-        await self.call("ticket_claim", agent_name="worker-agent", ticket_id=ticket_id)
+        await self.call(
+            "ticket_claim", board_id=board_id,
+            agent_name="worker-agent", ticket_id=ticket_id,
+        )
         submitted = await self.call(
             "ticket_submit",
+            board_id=board_id,
             agent_name="worker-agent",
             ticket_id=ticket_id,
             summary="ready",
@@ -101,36 +111,108 @@ class ReviewLeaseTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_only_one_reviewer_wins_the_claim(self) -> None:
         ticket_id = await self.submitted_ticket()
-        self.principal = self.reviewer_a
-        first = await self.call(
-            "ticket_review_claim", agent_name="reviewer-a", ticket_id=ticket_id
+        task_principal = contextvars.ContextVar(
+            "review_race_principal", default=self.admin
         )
-        self.principal = self.reviewer_b
-        second = await self.call(
-            "ticket_review_claim", agent_name="reviewer-b", ticket_id=ticket_id
-        )
-        self.principal = self.reviewer_a
+        central.current_principal = task_principal.get
+        ready: set[str] = set()
+        start = asyncio.Event()
+
+        async def claim_as(
+            principal: central.Principal, agent_name: str
+        ):
+            token = task_principal.set(principal)
+            try:
+                ready.add(agent_name)
+                if len(ready) == 2:
+                    start.set()
+                await start.wait()
+                return await self.call(
+                    "ticket_review_claim",
+                    agent_name=agent_name,
+                    ticket_id=ticket_id,
+                )
+            finally:
+                task_principal.reset(token)
+
+        try:
+            first, second = await asyncio.gather(
+                claim_as(self.reviewer_a, "reviewer-a"),
+                claim_as(self.reviewer_b, "reviewer-b"),
+            )
+        finally:
+            central.current_principal = lambda: self.principal
+        results = [("reviewer-a", first), ("reviewer-b", second)]
+        winners = [item for item in results if item[1].structured_content["ok"]]
+        losers = [item for item in results if not item[1].structured_content["ok"]]
+        self.assertEqual(len(winners), 1)
+        self.assertEqual(len(losers), 1)
+        holder_name, winner = winners[0]
+        _, loser = losers[0]
+
+        self.principal = self.admin
         snapshot = await self.call("board_snapshot")
 
-        self.assertTrue(first.structured_content["ok"])
-        self.assertEqual(first.structured_content["event"]["kind"], "ticket_review_claimed")
-        self.assertFalse(second.structured_content["ok"])
+        self.assertEqual(winner.structured_content["event"]["kind"], "ticket_review_claimed")
         self.assertEqual(
-            second.structured_content["error"],
+            loser.structured_content["error"],
             {
                 "code": "review_already_claimed",
-                "holder_name": "reviewer-a",
-                "expires_at": first.structured_content["review_lease"]["expires_at"],
+                "holder_name": holder_name,
+                "expires_at": winner.structured_content["review_lease"]["expires_at"],
             },
         )
         reviewer = next(
             row for row in snapshot.structured_content["agents"]
-            if row["agent_name"] == "reviewer-a"
+            if row["agent_name"] == holder_name
         )
         self.assertEqual(reviewer["status"], "working")
         self.assertEqual(
             reviewer["lease_expires_at"],
-            first.structured_content["review_lease"]["expires_at"],
+            winner.structured_content["review_lease"]["expires_at"],
+        )
+
+    async def test_review_claim_and_renew_use_board_claim_ttl(self) -> None:
+        board_id = "short-review-ttl"
+        self.principal = self.admin
+        joined = await self.call(
+            "board_join", board_id=board_id,
+            agent_name="admin-agent", claim_ttl_s=120,
+        )
+        self.assertEqual(joined.structured_content["claim_ttl_s"], 120)
+        for principal, role, name in (
+            (self.worker, "member", "worker-agent"),
+            (self.reviewer_a, "reviewer", "reviewer-a"),
+        ):
+            self.principal = self.admin
+            await self.call(
+                "board_member_add", board_id=board_id,
+                agent_name="admin-agent", principal_id=principal.principal_id,
+                role=role,
+            )
+            self.principal = principal
+            await self.call("board_join", board_id=board_id, agent_name=name)
+
+        ticket_id = await self.submitted_ticket_on(board_id)
+        self.principal = self.reviewer_a
+        with patch.object(central.time, "time", return_value=1_000.0):
+            claimed = await self.call(
+                "ticket_review_claim", board_id=board_id,
+                agent_name="reviewer-a", ticket_id=ticket_id,
+            )
+        lease = claimed.structured_content["review_lease"]
+        self.assertEqual(lease["ttl_s"], 120)
+        self.assertEqual(lease["expires_at_epoch"], 1_120.0)
+
+        with patch.object(central.time, "time", return_value=1_050.0):
+            renewed = await self.call(
+                "lease_renew", board_id=board_id,
+                agent_name="reviewer-a", ticket_id=ticket_id,
+            )
+        self.assertEqual(renewed.structured_content["lease_kind"], "review")
+        self.assertEqual(renewed.structured_content["ttl_s"], 120)
+        self.assertEqual(
+            renewed.structured_content["lease_expires_at"], central.iso_at(1_170.0)
         )
 
     async def test_submitter_principal_cannot_claim_review(self) -> None:

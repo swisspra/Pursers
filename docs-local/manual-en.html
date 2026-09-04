@@ -394,7 +394,7 @@ Call ticket_review_claim before verification; if another reviewer won, WAIT agai
 Renew the review lease every 5 minutes while verifying.
 Approve or reject only while holding the lease, then re-arm WAIT.
 Pass agent_name="pool-reviewer-1" on every per-call identity tool.</code></pre>
-      <p>A review claim lasts 900 seconds. <code>ticket_list(review_unclaimed_only=true)</code> exposes <code>review_state</code>; <code>ticket_get</code> shows the full <code>review_lease</code>. A verdict clears the lease, and an expired lease becomes claimable with a push-wait cue—no list polling is needed.</p>
+      <p>A review claim uses the board's configured work-lease TTL (900 seconds by default). <code>ticket_list(review_unclaimed_only=true)</code> exposes <code>review_state</code>; <code>ticket_get</code> shows the full <code>review_lease</code>. A verdict clears the lease, and an expired lease becomes claimable with a push-wait cue—no list polling is needed.</p>
       <p><code>ONBOARD_AGENT_NAME</code> supplies the process default. When one host carries multiple sessions, pass <code>agent_name</code> on each call so the journal records the correct seat. Use an independent reviewer principal, not merely another agent name under the worker's JWT.</p>
     </section>
 

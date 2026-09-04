@@ -465,7 +465,7 @@ Call ticket_review_claim before verification; if another reviewer won, WAIT agai
 Renew the review lease every 5 minutes while verifying.
 Approve or reject only while holding the lease, then re-arm WAIT.
 Pass agent_name="pool-reviewer-1" on every per-call identity tool.</code></pre>
-      <p>Review lease มีอายุ 900 วินาที ใช้ <code>ticket_list(review_unclaimed_only=true)</code> เพื่อดูเฉพาะงานที่ยังไม่มีผู้ตรวจและอ่าน <code>review_state</code>; <code>ticket_get</code> แสดง <code>review_lease</code> เต็ม เมื่อ approve/reject ระบบจะคืน lease ทันที ส่วน lease หมดอายุจะ claim ใหม่ได้และส่ง push-wait cue โดยไม่ต้อง poll list</p>
+      <p>Review lease ใช้ TTL เดียวกับ work lease ที่ตั้งไว้สำหรับบอร์ด (ค่าเริ่มต้น 900 วินาที) ใช้ <code>ticket_list(review_unclaimed_only=true)</code> เพื่อดูเฉพาะงานที่ยังไม่มีผู้ตรวจและอ่าน <code>review_state</code>; <code>ticket_get</code> แสดง <code>review_lease</code> เต็ม เมื่อ approve/reject ระบบจะคืน lease ทันที ส่วน lease หมดอายุจะ claim ใหม่ได้และส่ง push-wait cue โดยไม่ต้อง poll list</p>
       <p>ชื่อ process-level จาก <code>ONBOARD_AGENT_NAME</code> ยังใช้เป็นค่า default ได้ แต่สำหรับหลาย session ใน Host เดียวกัน ให้ส่ง <code>agent_name</code> ในแต่ละ call เพื่อความชัดเจน หนึ่งชื่อภายใต้ principal เดียวกันอาจมีหลาย <strong>worker seats</strong> บนหลายบอร์ด; fleet รวม seats เหล่านี้ด้วยคู่ <code>principal_id + agent_name</code> แต่ authorization และ lease ยังตรวจแยกต่อบอร์ด</p>
     </section>
 

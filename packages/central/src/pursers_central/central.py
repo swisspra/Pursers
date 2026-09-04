@@ -56,7 +56,6 @@ from transactional_sqlite import TransactionalSQLiteStore
 
 ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,80}$")
 DEFAULT_CLAIM_TTL_S = 900
-DEFAULT_REVIEW_LEASE_TTL_S = 900
 MIN_CLAIM_TTL_S = 1
 MAX_CLAIM_TTL_S = 86_400
 PRE_SUBMISSION_STATES = frozenset({"claimed", "in_progress", "creating_report"})
@@ -1343,9 +1342,9 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         ticket["lease_expires_at"] = iso_at(expires)
         ticket["lease_renewed_at"] = iso_at(now)
 
-    def renew_review_lease(lease: dict[str, Any], now: float) -> None:
-        expires = now + DEFAULT_REVIEW_LEASE_TTL_S
-        lease["ttl_s"] = DEFAULT_REVIEW_LEASE_TTL_S
+    def renew_review_lease(lease: dict[str, Any], now: float, ttl_s: int) -> None:
+        expires = now + ttl_s
+        lease["ttl_s"] = ttl_s
         lease["expires_at_epoch"] = expires
         lease["expires_at"] = iso_at(expires)
         lease["renewed_at"] = iso_at(now)
@@ -1361,7 +1360,8 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             return False
 
     def claim_review_lease(
-        ticket: dict[str, Any], actor: dict[str, Any], principal: Principal, now: float
+        ticket: dict[str, Any], actor: dict[str, Any], principal: Principal,
+        now: float, ttl_s: int,
     ) -> dict[str, Any]:
         lease = {
             "reviewer_agent_id": actor["agent_id"],
@@ -1369,7 +1369,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             "reviewer_principal_id": principal.principal_id,
             "claimed_at": iso_at(now),
         }
-        renew_review_lease(lease, now)
+        renew_review_lease(lease, now, ttl_s)
         ticket["review_lease"] = lease
         ticket["updated_at"] = iso_at(now)
         return lease
@@ -4023,7 +4023,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                         or review_lease.get("reviewer_agent_id") == member["agent_id"]
                     )
                 ):
-                    renew_review_lease(review_lease, now)
+                    renew_review_lease(review_lease, now, claim_ttl(document))
                     ticket["updated_at"] = iso_at(now)
                     return {
                         "ticket": copy.deepcopy(ticket),
@@ -4267,7 +4267,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                     existing.get("reviewer_agent_id") == actor["agent_id"]
                     and existing.get("reviewer_principal_id") == principal.principal_id
                 ):
-                    renew_review_lease(existing, now)
+                    renew_review_lease(existing, now, claim_ttl(document))
                     ticket["updated_at"] = iso_at(now)
                     return {
                         "actor": actor,
@@ -4285,7 +4285,9 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                     },
                     "released": released,
                 }
-            lease = claim_review_lease(ticket, actor, principal, now)
+            lease = claim_review_lease(
+                ticket, actor, principal, now, claim_ttl(document)
+            )
             return {
                 "actor": actor,
                 "ticket": copy.deepcopy(ticket),
@@ -4490,7 +4492,9 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                         "released": released,
                     }
             else:
-                lease = claim_review_lease(ticket, actor, principal, now)
+                lease = claim_review_lease(
+                    ticket, actor, principal, now, claim_ttl(document)
+                )
                 lease_claimed = True
             released_lease = copy.deepcopy(lease)
             retryable_rejection = verdict == "reject" and (

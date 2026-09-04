@@ -9,7 +9,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
-- Atomic 900-second review leases prevent duplicate verification across the
+- Atomic review leases use the board's configured work-lease TTL (900 seconds
+  by default) and prevent duplicate verification across the
   fleet. Central now provides `ticket_review_claim` and optional
   `ticket_review_release`, renews review leases through `lease_renew`, exposes
   review state in ticket reads/lists, and emits push-wait cues for claim,
