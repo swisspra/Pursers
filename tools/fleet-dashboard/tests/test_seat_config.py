@@ -705,13 +705,24 @@ def test_doctor_bearer_env_var_missing_vs_defined(
         seat_config.CodexAdapter(target.config_path).plan(target)
     )
 
-    # 1. Variable is unset in current environment and login shell returns empty
+    monkeypatch.setenv("SHELL", "/missing/configured-shell")
+    shell_calls: list[list[str]] = []
+    which_calls: list[str] = []
+
+    def which_with_bash(command: str):
+        which_calls.append(command)
+        return "/fake/bash" if command == "bash" else None
+
+    monkeypatch.setattr(seat_config.shutil, "which", which_with_bash)
+
+    # 1. Variable is unset and the detected login shell reports it unset.
     monkeypatch.delenv("ONBOARD_CENTRAL_TOKEN", raising=False)
 
     def run_missing(command, **_kwargs):
         if command[0] == "ps":
             return subprocess.CompletedProcess(command, 0, "", "")
-        if command[0] == "zsh":
+        if command[0] == "/fake/bash":
+            shell_calls.append(command)
             return subprocess.CompletedProcess(command, 0, "", "")
         return subprocess.CompletedProcess(command, 0, "0.1.0a7\n", "")
 
@@ -724,22 +735,27 @@ def test_doctor_bearer_env_var_missing_vs_defined(
     env_check = next(r for r in rows if r.check == "token-env")
     assert env_check.status == "FAIL"
     assert "'ONBOARD_CENTRAL_TOKEN' is not defined" in env_check.message
-    assert "~/.zshrc" in env_check.message
-    assert "launchctl setenv" in env_check.message
+    assert "source=login-shell (/fake/bash)" in env_check.message
+    assert which_calls[-3:] == ["/missing/configured-shell", "zsh", "bash"]
 
-    # 2. Variable is defined in process env -> PASS
+    # 2. Process environment wins without invoking a shell.
+    before = len(shell_calls)
+    before_which = len(which_calls)
     monkeypatch.setenv("ONBOARD_CENTRAL_TOKEN", "valid-token")
     rows_pass = doc.run(target)
     env_pass = next(r for r in rows_pass if r.check == "token-env")
     assert env_pass.status == "PASS"
+    assert "source=process" in env_pass.message
+    assert len(shell_calls) == before
+    assert len(which_calls) == before_which
 
-    # 3. Variable unset in process env, but defined in login shell -> PASS
+    # 3. Variable unset in process env, but set in detected login shell.
     monkeypatch.delenv("ONBOARD_CENTRAL_TOKEN", raising=False)
 
     def run_shell_defined(command, **_kwargs):
         if command[0] == "ps":
             return subprocess.CompletedProcess(command, 0, "", "")
-        if command[0] == "zsh":
+        if command[0] == "/fake/bash":
             return subprocess.CompletedProcess(command, 0, "set", "")
         return subprocess.CompletedProcess(command, 0, "0.1.0a7\n", "")
 
@@ -751,6 +767,23 @@ def test_doctor_bearer_env_var_missing_vs_defined(
     rows_shell = doc_shell.run(target)
     env_shell = next(r for r in rows_shell if r.check == "token-env")
     assert env_shell.status == "PASS"
+    assert "source=login-shell (/fake/bash)" in env_shell.message
+
+    # 4. No supported shell is inspectable, so absence is not a hard failure.
+    monkeypatch.setattr(seat_config.shutil, "which", lambda _command: None)
+    doc_no_shell = seat_config.Doctor(
+        runner=run_missing,
+        pypi_fetcher=lambda: "0.1.0a7",
+        live_probe=lambda _d, _t: {
+            "mode": "push",
+            "registry_boards": ["pursers"],
+            "skipped_boards": {},
+        },
+    )
+    rows_no_shell = doc_no_shell.run(target)
+    env_no_shell = next(r for r in rows_no_shell if r.check == "token-env")
+    assert env_no_shell.status == "WARN"
+    assert "cannot inspect login shell" in env_no_shell.message
 
 
 def test_doctor_token_file_validation_and_redaction(

@@ -288,32 +288,56 @@ def _validate_token_file(path_raw: str | Path) -> tuple[bool, str]:
     return True, "readable; valid JWT"
 
 
-def _is_env_var_defined(
+def _inspect_env_var(
     var_name: str,
     runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
-) -> bool:
-    """Check if environment variable is defined in process env or login shell.
+) -> tuple[str, str]:
+    """Inspect an environment variable without depending on a specific shell.
 
     launchctl setenv is the durable option for GUI apps on macOS.
     """
     if not ENV_NAME.fullmatch(var_name):
-        return False
+        return "FAIL", f"invalid environment variable name {var_name!r}"
     if os.environ.get(var_name):
-        return True
-    if shutil.which("zsh"):
+        return "PASS", f"environment variable {var_name!r} defined; source=process"
+
+    candidates = [os.environ.get("SHELL", "").strip(), "zsh", "bash"]
+    searched: list[str] = []
+    for candidate in candidates:
+        if not candidate or candidate in searched:
+            continue
+        searched.append(candidate)
+        shell = shutil.which(candidate)
+        if not shell:
+            continue
         try:
             res = runner(
-                ["zsh", "-lic", f'printf %s "${{{var_name}:+set}}"'],
+                [shell, "-lic", f'printf %s "${{{var_name}:+set}}"'],
                 check=False,
                 text=True,
                 capture_output=True,
                 timeout=5,
             )
-            if res.returncode == 0 and res.stdout.strip() == "set":
-                return True
         except Exception:
-            pass
-    return False
+            continue
+        if res.returncode != 0:
+            continue
+        if res.stdout.strip() == "set":
+            return (
+                "PASS",
+                f"environment variable {var_name!r} defined; "
+                f"source=login-shell ({shell})",
+            )
+        return (
+            "FAIL",
+            f"environment variable {var_name!r} is not defined; "
+            f"source=login-shell ({shell})",
+        )
+    return (
+        "WARN",
+        f"cannot inspect login shell for environment variable {var_name!r} "
+        f"(searched {', '.join(searched)})",
+    )
 
 
 CAT_COMMAND_PATTERN = re.compile(r'\$\(\s*(cat\s+[^)\n]+)\)')
@@ -1502,34 +1526,24 @@ class Doctor:
 
         env_token_vars = _extract_env_token_references(desired, inspection)
         if env_token_vars:
-            env_var_ok = True
-            env_var_msg = ""
+            env_status = "PASS"
+            env_messages: list[str] = []
             for var_name in env_token_vars:
-                if not _is_env_var_defined(var_name, self.runner):
-                    env_var_ok = False
-                    env_var_msg = (
-                        f"environment variable {var_name!r} is not defined "
-                        f"(expected in ~/.zshrc; launchctl setenv {var_name} <token> is durable for GUI apps)"
-                    )
+                status, message = _inspect_env_var(var_name, self.runner)
+                env_messages.append(message)
+                if status == "FAIL":
+                    env_status = "FAIL"
                     break
-            if env_var_ok:
-                rows.append(
-                    self._check(
-                        desired,
-                        "token-env",
-                        "PASS",
-                        f"environment variable(s) {', '.join(env_token_vars)} defined",
-                    )
+                if status == "WARN":
+                    env_status = "WARN"
+            rows.append(
+                self._check(
+                    desired,
+                    "token-env",
+                    env_status,
+                    "; ".join(env_messages),
                 )
-            else:
-                rows.append(
-                    self._check(
-                        desired,
-                        "token-env",
-                        "FAIL",
-                        env_var_msg,
-                    )
-                )
+            )
 
         ca_path = Path(desired.ca_file).expanduser()
         ca_ok = ca_path.is_file() and os.access(ca_path, os.R_OK)
