@@ -9,7 +9,7 @@ description = "Blocking wait-for-work MCP bridge for Pursers"
 requires-python = ">=3.11"
 license = "Apache-2.0"
 dependencies = [
-  "pursers-client==0.1.0a14",
+  "pursers-client==0.1.0a15",
 ]
 
 [project.scripts]

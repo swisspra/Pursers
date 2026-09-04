@@ -1977,7 +1977,7 @@ async def test_hung_model_client_exit_does_not_block_dashboard_stop() -> None:
 async def test_app_reads_leave_sqlite_domain_journal_and_cursor_unchanged(
     tmp_path: Path,
 ) -> None:
-    required = {"pursers-central": "0.1.0a20", "pursers-client": "0.1.0a14"}
+    required = {"pursers-central": "0.1.0a20", "pursers-client": "0.1.0a15"}
     for distribution, version in required.items():
         try:
             installed = importlib.metadata.version(distribution)

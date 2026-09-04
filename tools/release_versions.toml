@@ -5,7 +5,7 @@ source_date_epoch = "315532800"
 [packages]
 pursers = "5.0.0a16"
 central = "0.1.0a20"
-client = "0.1.0a14"
+client = "0.1.0a15"
 personal = "5.0.0a16"
 import = "5.0.0a3"
 wait_bridge = "0.1.0a6"
