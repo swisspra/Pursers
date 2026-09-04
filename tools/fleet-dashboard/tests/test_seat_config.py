@@ -198,13 +198,22 @@ def test_codex_worker_and_reviewer_connectors_coexist_and_match_independently(
     )
     monkeypatch.setenv("PURSERS_WORKER_TOKEN", worker_token)
     monkeypatch.setenv("PURSERS_REVIEW_TOKEN", "wrong.review.token")
+    assert seat_config._extract_env_token_references(
+        reviewer, adapter.inspect()
+    ) == ["PURSERS_REVIEW_TOKEN"]
     worker_row = next(
         row for row in doctor.run(worker) if row.check == "split-identity"
+    )
+    reviewer_env_row = next(
+        row for row in doctor.run(reviewer) if row.check == "token-env"
     )
     reviewer_row = next(
         row for row in doctor.run(reviewer) if row.check == "split-identity"
     )
     assert worker_row.status == "PASS"
+    assert reviewer_env_row.status == "PASS"
+    assert "PURSERS_REVIEW_TOKEN" in reviewer_env_row.message
+    assert "PURSERS_WORKER_TOKEN" not in reviewer_env_row.message
     assert reviewer_row.status == "FAIL"
 
     monkeypatch.setenv("PURSERS_WORKER_TOKEN", "wrong.worker.token")

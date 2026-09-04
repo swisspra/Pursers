@@ -528,7 +528,7 @@ def _extract_env_token_references(
         doc = inspection.get("document", {})
         bearer_var = (
             doc.get("mcp_servers", {})
-            .get("pursers-dev", {})
+            .get(desired.http_connector_name, {})
             .get("bearer_token_env_var")
         )
         vars_.append(bearer_var or desired.token_env_var)
