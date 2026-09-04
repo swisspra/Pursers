@@ -13,15 +13,15 @@ TRANSPORT
     HTTP transport would apply its own request timeout and defeat the block.
 
 THE TOOL
-    a2a_wait(since_seq=0, timeout_s=180, only_mine=True)
+    a2a_wait(since_seq=0, timeout_s=180, only_mine=True, wait_for="auto")
       1. CHECK BEFORE BLOCKING: fully drain board_catchup from since_seq and
-         scan current open tickets older than the cursor. If relevant work is
-         found on either path, return immediately (no wait).
+         scan current claimable or submitted tickets older than the cursor.
+         If relevant work is found on either path, return immediately.
       2. Otherwise wait on journal and per-seat subscriptions. Poll only when
          explicitly selected or when listen fails for this call. Entry-snapshot
          held tickets receive lease_renew at min(300s, ttl/3); idle seats issue
          no Central calls while blocked.
-      3. Return a small bounded shape: {new_seq, events, waited_s, timed_out}.
+      3. Return a bounded shape including reason=journal|backlog|timeout.
          timed_out=True is the re-arm cue: call again with since_seq=new_seq.
 
 RELEVANCE
@@ -30,9 +30,11 @@ RELEVANCE
     already drops self-authored events and events this agent is not a
     recipient of (recipient_identities is "every other member" for tickets),
     so what board_catchup hands back is already "not mine to have caused."
-    only_mine=True narrows that further with one ticket_get per candidate
-    event: relevant iff the ticket is unclaimed/unassigned (the open queue),
-    or the agent created it, is assigned to it, or currently holds its claim.
+    For claimable waits, only_mine=True narrows that further with one ticket_get
+    per candidate event: relevant iff the ticket is unclaimed/unassigned (the
+    open queue), or the agent created it, is assigned to it, or holds its claim.
+    Submitted waits instead accept only submission/resubmission/review-lease
+    events and available submitted backlog for a board:review identity.
     memory_written is intentionally ignored -- this tool is a work-arrival
     signal, not a memory watcher (matches v4's DEFAULT_KINDS posture).
 """
@@ -48,6 +50,7 @@ import os
 import sys
 import tempfile
 import time
+from collections import OrderedDict
 from contextlib import aclosing, asynccontextmanager
 from contextvars import ContextVar
 from datetime import date, datetime, timedelta, timezone
@@ -66,7 +69,12 @@ from pursers_client import (
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from agent_naming import resolve_agent_name
-from backlog import backlog_events, ticket_is_relevant
+from backlog import (
+    WAIT_FOR_CLAIMABLE,
+    WAIT_FOR_SUBMITTED,
+    backlog_events,
+    ticket_is_relevant,
+)
 
 VERSION = "0.1.0a6"
 
@@ -91,7 +99,26 @@ MAX_LEASE_RENEW_INTERVAL_S = 300.0
 PROGRESS_INTERVAL_S = 300.0
 CATCHUP_PAGE_LIMIT = 100
 BACKLOG_SCAN_LIMIT = 100
-RELEVANT_KINDS = frozenset({"ticket_created", "ticket_status_changed"})
+CLAIMABLE_RELEVANT_KINDS = frozenset(
+    {"ticket_created", "ticket_status_changed"}
+)
+SUBMITTED_RELEVANT_KINDS = frozenset(
+    {
+        "ticket_status_changed",
+        "ticket_submitted",
+        "ticket_resubmitted",
+        "review_lease_changed",
+        "review_lease_released",
+        "review_lease_expired",
+    }
+)
+RELEVANT_KINDS = CLAIMABLE_RELEVANT_KINDS | SUBMITTED_RELEVANT_KINDS
+WAIT_FOR_AUTO = "auto"
+WAIT_FOR_VALUES = frozenset(
+    {WAIT_FOR_AUTO, WAIT_FOR_CLAIMABLE, WAIT_FOR_SUBMITTED}
+)
+BACKLOG_SUPPRESSION_LIMIT = 500
+_BACKLOG_SEEN: OrderedDict[tuple[str, str, str], str] = OrderedDict()
 CLAIMED_STATES = frozenset({"claimed", "in_progress", "creating_report"})
 HANDOFF_REJOIN_MESSAGE = "call board_onboard or board_join before more work"
 PROJECT_REGISTRY_KEY = "project_registry"
@@ -1097,14 +1124,85 @@ async def _catchup_all(
     return events, cursor, resynced
 
 
+def _normalize_wait_for(wait_for: str) -> str:
+    if not isinstance(wait_for, str):
+        raise ValueError("wait_for must be 'auto', 'claimable', or 'submitted'")
+    normalized = wait_for.strip().lower()
+    if normalized not in WAIT_FOR_VALUES:
+        raise ValueError("wait_for must be 'auto', 'claimable', or 'submitted'")
+    return normalized
+
+
+def _resolve_wait_for(wait_for: str, role: str | None) -> str:
+    selected = _normalize_wait_for(wait_for)
+    if selected == WAIT_FOR_AUTO:
+        return WAIT_FOR_SUBMITTED if role == "reviewer" else WAIT_FOR_CLAIMABLE
+    if selected == WAIT_FOR_SUBMITTED and role != "reviewer":
+        raise ToolError("wait_for='submitted' requires board:review authorization")
+    return selected
+
+
+def _event_matches_wait(event: dict[str, Any], wait_for: str) -> bool:
+    kind = event.get("kind")
+    if wait_for == WAIT_FOR_SUBMITTED:
+        if kind not in SUBMITTED_RELEVANT_KINDS:
+            return False
+        if kind == "ticket_status_changed":
+            return event.get("status_to") == "submitted"
+        return True
+    return kind in CLAIMABLE_RELEVANT_KINDS
+
+
+def _forget_backlog_for_events(board_id: str, events: list[dict]) -> None:
+    ticket_ids = {
+        event.get("ticket_id")
+        for event in events
+        if isinstance(event.get("ticket_id"), str)
+    }
+    if not ticket_ids:
+        return
+    for key in list(_BACKLOG_SEEN):
+        if key[0] == board_id and key[2] in ticket_ids:
+            del _BACKLOG_SEEN[key]
+
+
+def _fresh_backlog_events(
+    board_id: str, wait_for: str, events: list[dict]
+) -> list[dict]:
+    fresh: list[dict] = []
+    for event in events:
+        ticket_id = event.get("ticket_id")
+        if not isinstance(ticket_id, str) or not ticket_id:
+            continue
+        fingerprint = json.dumps(
+            {
+                "status": event.get("status"),
+                "updated_at": event.get("updated_at"),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        key = (board_id, wait_for, ticket_id)
+        if _BACKLOG_SEEN.get(key) == fingerprint:
+            _BACKLOG_SEEN.move_to_end(key)
+            continue
+        _BACKLOG_SEEN[key] = fingerprint
+        _BACKLOG_SEEN.move_to_end(key)
+        fresh.append(event)
+    while len(_BACKLOG_SEEN) > BACKLOG_SUPPRESSION_LIMIT:
+        _BACKLOG_SEEN.popitem(last=False)
+    return fresh
+
+
 async def _is_relevant(
     client: BoardClient,
     event: dict,
     my_agent_id: str | None,
     only_mine: bool,
     project: str | None,
+    wait_for: str = WAIT_FOR_CLAIMABLE,
 ) -> bool:
-    if event.get("kind") not in RELEVANT_KINDS:
+    if not _event_matches_wait(event, wait_for):
         return False
     ticket_id = event.get("ticket_id")
     # We need the ticket body to apply either the project filter or the
@@ -1117,7 +1215,9 @@ async def _is_relevant(
         except BoardClientError:
             return False
         ticket = result.get("ticket", {})
-        return ticket_is_relevant(ticket, my_agent_id, only_mine, project)
+        return ticket_is_relevant(
+            ticket, my_agent_id, only_mine, project, wait_for
+        )
     # No project filter and not only_mine: every relevant-kind event counts.
     return True
 
@@ -1128,10 +1228,13 @@ async def _filter_relevant(
     my_agent_id: str,
     only_mine: bool,
     project: str | None,
+    wait_for: str = WAIT_FOR_CLAIMABLE,
 ) -> list[dict]:
     out = []
     for ev in events:
-        if await _is_relevant(client, ev, my_agent_id, only_mine, project):
+        if await _is_relevant(
+            client, ev, my_agent_id, only_mine, project, wait_for
+        ):
             out.append(ev)
     return out
 
@@ -1142,12 +1245,18 @@ async def _scan_open_backlog(
     only_mine: bool,
     project: str | None,
     held: dict[str, float] | None = None,
+    wait_for: str = WAIT_FOR_CLAIMABLE,
+    board_id: str = BOARD_ID,
 ) -> list[dict]:
-    """Best-effort scan for open work older than the caller's journal cursor."""
+    """Best-effort scan for work older than the caller's journal cursor."""
     try:
-        listed = await client.ticket_list(
-            include_closed=False, limit=BACKLOG_SCAN_LIMIT
-        )
+        arguments: dict[str, Any] = {
+            "include_closed": False,
+            "limit": BACKLOG_SCAN_LIMIT,
+        }
+        if wait_for == WAIT_FOR_SUBMITTED:
+            arguments["status"] = "submitted"
+        listed = await client.ticket_list(**arguments)
     except Exception as exc:
         _log(f"backlog scan: ticket_list failed: {exc}")
         return []
@@ -1166,7 +1275,10 @@ async def _scan_open_backlog(
                 held[ticket["ticket_id"]] = min(
                     MAX_LEASE_RENEW_INTERVAL_S, ttl_s / 3
                 )
-    return backlog_events(tickets, my_agent_id, only_mine, project)
+    projected = backlog_events(
+        tickets, my_agent_id, only_mine, project, wait_for
+    )
+    return _fresh_backlog_events(board_id, wait_for, projected)
 
 
 async def _renew_due_leases(
@@ -1226,6 +1338,7 @@ async def _a2a_wait_impl(
     project: str | None = None,
     agent_name: str | None = None,
     boards: list[str] | str | None = None,
+    wait_for: str = WAIT_FOR_AUTO,
     progress_callback: Callable[[float, float], Awaitable[None]] | None = None,
 ) -> dict[str, Any]:
     """Block until pursers board work arrives, or until timeout_s elapses.
@@ -1257,7 +1370,12 @@ async def _a2a_wait_impl(
     unreadable or malformed registry falls back to the single home board and
     adds registry_warning to that otherwise original response shape.
 
-    Returns {new_seq, events, waited_s, timed_out, resynced}. timed_out=True
+    wait_for: "auto" (default) derives reviewer -> "submitted" and every
+    other joined role -> "claimable". An explicit "submitted" request requires
+    the joined principal's board:review-backed reviewer role.
+
+    Returns {new_seq, events, waited_s, timed_out, reason, resynced}.
+    reason is "journal", "backlog", or "timeout". timed_out=True
     means "no work" -- call again with since_seq=new_seq to re-arm. resynced=True
     means the journal was compacted past our cursor and events were lost:
     re-fetch full state (e.g. ticket_list) before trusting events as complete.
@@ -1278,6 +1396,7 @@ async def _a2a_wait_impl(
                 only_mine=only_mine,
                 project=project,
                 agent_name=agent_name,
+                wait_for=wait_for,
                 progress_callback=progress_callback,
             )
             return {
@@ -1294,6 +1413,7 @@ async def _a2a_wait_impl(
             only_mine=only_mine,
             project=project,
             agent_name=agent_name,
+            wait_for=wait_for,
             progress_callback=progress_callback,
         )
     if isinstance(boards, str):
@@ -1307,6 +1427,7 @@ async def _a2a_wait_impl(
             only_mine=only_mine,
             project=project,
             agent_name=agent_name,
+            wait_for=wait_for,
             progress_callback=progress_callback,
         )
     if isinstance(since_seq, dict):
@@ -1318,6 +1439,7 @@ async def _a2a_wait_impl(
         only_mine=only_mine,
         project=project,
         agent_name=agent_name,
+        wait_for=wait_for,
         progress_callback=progress_callback,
     )
 
@@ -1331,6 +1453,7 @@ async def a2a_wait(
     project: str | None = None,
     agent_name: str | None = None,
     boards: list[str] | str | None = None,
+    wait_for: str = WAIT_FOR_AUTO,
 ) -> dict[str, Any]:
     """Wait for work and record one model-visible return."""
     client = await _client_for_tool(ctx)
@@ -1351,6 +1474,7 @@ async def a2a_wait(
             project,
             agent_name,
             boards,
+            wait_for,
             progress,
         )
     if meter is None:
@@ -1498,6 +1622,7 @@ async def _wait_for_work_many(
     project: str | None = None,
     agent_name: str | None = None,
     task_focus: str | None = None,
+    wait_for: str = WAIT_FOR_AUTO,
     progress_callback: Callable[[float, float], Awaitable[None]] | None = None,
 ) -> dict[str, Any]:
     """Wait across independent board cursors and identities on one transport."""
@@ -1507,6 +1632,7 @@ async def _wait_for_work_many(
     skipped: dict[str, str] = {}
     views: dict[str, _BoardView] = {}
     agent_ids: dict[str, str] = {}
+    wait_for_by_board: dict[str, str] = {}
     budget = clamp_timeout(timeout_s)
     started = time.monotonic()
     deadline = started + budget
@@ -1516,6 +1642,7 @@ async def _wait_for_work_many(
     next_progress = started + progress_cadence if progress_cadence else None
     proj = project.strip().lower() if isinstance(project, str) and project.strip() else None
     call_agent_name = AGENT_NAME if agent_name is None else agent_name
+    requested_wait_for = _normalize_wait_for(wait_for)
     if not isinstance(call_agent_name, str) or not call_agent_name:
         raise ValueError("agent_name must be a non-empty string")
     if client.identity is None:
@@ -1537,12 +1664,23 @@ async def _wait_for_work_many(
             raise BoardClientError("server returned an unexpected per-board agent_id")
         views[board_id] = view
         agent_ids[board_id] = expected_id
+        wait_for_by_board[board_id] = _resolve_wait_for(
+            requested_wait_for,
+            view.identity.role if view.identity is not None else None,
+        )
         held_by_board[board_id] = {}
         lease_due_by_board[board_id] = {}
 
     active = [board_id for board_id in board_order if board_id in views]
 
     def response(events: list[dict], timed_out: bool) -> dict[str, Any]:
+        reason = "timeout"
+        if events:
+            reason = (
+                "backlog"
+                if all(event.get("source") == "backlog_scan" for event in events)
+                else "journal"
+            )
         return {
             "new_seq": dict(cursors),
             "events": events,
@@ -1551,6 +1689,7 @@ async def _wait_for_work_many(
                 else round(time.monotonic() - started, 2)
             ),
             "timed_out": timed_out,
+            "reason": reason,
             "resynced": dict(resynced),
             "skipped_boards": dict(skipped),
         }
@@ -1566,12 +1705,14 @@ async def _wait_for_work_many(
         cursors[board_id] = next_cursor
         if did_resync:
             resynced[board_id] = True
+        _forget_backlog_for_events(board_id, events)
         relevant = await _filter_relevant(
             views[board_id],
             events,
             agent_ids[board_id],
             only_mine,
             proj,
+            wait_for_by_board[board_id],
         )
         if backlog:
             queued = await _scan_open_backlog(
@@ -1580,6 +1721,8 @@ async def _wait_for_work_many(
                 only_mine,
                 proj,
                 held_by_board[board_id],
+                wait_for_by_board[board_id],
+                board_id,
             )
             journal_ids = {
                 event.get("ticket_id")
@@ -1684,6 +1827,7 @@ async def _wait_for_work_many(
                             cursors[board_id], int(str(detail))
                         )
                     elif kind == "event" and isinstance(detail, dict):
+                        _forget_backlog_for_events(board_id, [detail])
                         sequence = detail.get("seq")
                         if isinstance(sequence, int):
                             cursors[board_id] = max(cursors[board_id], sequence)
@@ -1693,6 +1837,7 @@ async def _wait_for_work_many(
                             agent_ids[board_id],
                             only_mine,
                             proj,
+                            wait_for_by_board[board_id],
                         ):
                             found.append({**detail, "board_id": board_id})
                     elif kind == "failed":
@@ -1760,6 +1905,7 @@ async def _wait_for_work(
     only_mine: bool = True,
     project: str | None = None,
     agent_name: str | None = None,
+    wait_for: str = WAIT_FOR_AUTO,
     progress_callback: Callable[[float, float], Awaitable[None]] | None = None,
 ) -> dict[str, Any]:
     """Testable wait implementation with identity kept entirely call-local."""
@@ -1789,10 +1935,13 @@ async def _wait_for_work(
     my_agent_id = _derived_agent_id(
         client.identity.principal_id, call_agent_name
     )
+    role = getattr(client.identity, "role", "worker")
     if explicit_name:
         joined = await _join_for_call(client, call_agent_name, True)
         if joined.get("agent_id") != my_agent_id:
             raise BoardClientError("server returned an unexpected per-call agent_id")
+        role = joined.get("role", role)
+    selected_wait_for = _resolve_wait_for(wait_for, role)
 
     async def poll_once() -> list[dict]:
         nonlocal cursor, resynced
@@ -1805,15 +1954,27 @@ async def _wait_for_work(
         )
         if did_resync:
             resynced = True
+        _forget_backlog_for_events(BOARD_ID, events)
         return await _filter_relevant(
-            client, events, my_agent_id, only_mine, proj
+            client,
+            events,
+            my_agent_id,
+            only_mine,
+            proj,
+            selected_wait_for,
         )
 
     # 1. CHECK BEFORE BLOCKING. Journal events advance the cursor; synthetic
     # backlog cues never carry or fabricate a sequence number.
     relevant = await poll_once()
     backlog = await _scan_open_backlog(
-        client, my_agent_id, only_mine, proj, held
+        client,
+        my_agent_id,
+        only_mine,
+        proj,
+        held,
+        selected_wait_for,
+        BOARD_ID,
     )
     lease_due = {
         ticket_id: started + interval
@@ -1832,6 +1993,11 @@ async def _wait_for_work(
             "events": relevant,
             "waited_s": 0.0,
             "timed_out": False,
+            "reason": (
+                "backlog"
+                if all(event.get("source") == "backlog_scan" for event in relevant)
+                else "journal"
+            ),
             "resynced": resynced,
         }
 
@@ -1855,7 +2021,7 @@ async def _wait_for_work(
                 my_agent_id,
                 client.identity.principal_id,
                 call_agent_name,
-                getattr(client.identity, "role", "worker"),
+                role,
             )
             events = _event_stream(
                 client,
@@ -1879,6 +2045,7 @@ async def _wait_for_work(
                             "events": [],
                             "waited_s": round(now - started, 2),
                             "timed_out": True,
+                            "reason": "timeout",
                             "resynced": resynced,
                         }
                     wait_slice = _maintenance_due_in(
@@ -1893,8 +2060,14 @@ async def _wait_for_work(
                     event = pending_event.result()
                     found: list[dict[str, Any]] = []
                     while True:
+                        _forget_backlog_for_events(BOARD_ID, [event])
                         if await _is_relevant(
-                            client, event, my_agent_id, only_mine, proj
+                            client,
+                            event,
+                            my_agent_id,
+                            only_mine,
+                            proj,
+                            selected_wait_for,
                         ):
                             found.append(event)
                         pending_event = asyncio.create_task(anext(events))
@@ -1908,6 +2081,7 @@ async def _wait_for_work(
                             "events": found,
                             "waited_s": round(time.monotonic() - started, 2),
                             "timed_out": False,
+                            "reason": "journal",
                             "resynced": resynced,
                         }
             finally:
@@ -1945,6 +2119,7 @@ async def _wait_for_work(
                 "events": relevant,
                 "waited_s": round(time.monotonic() - started, 2),
                 "timed_out": False,
+                "reason": "journal",
                 "resynced": resynced,
             }
 
@@ -1954,6 +2129,7 @@ async def _wait_for_work(
         "events": [],
         "waited_s": round(time.monotonic() - started, 2),
         "timed_out": True,
+        "reason": "timeout",
         "resynced": resynced,
     }
 

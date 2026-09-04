@@ -52,6 +52,13 @@ bridge process and one Central connection serve multiple session identities:
 a2a_wait(since_seq=0, project="PROJECT_PLACEHOLDER", agent_name="session-a")
 ```
 
+`wait_for="auto"` is the default: joined reviewer identities wait for
+`submitted` tickets, while workers wait for `claimable` tickets. Callers may
+select `claimable` explicitly; selecting `submitted` requires the joined
+principal's `board:review` authorization. Reviewer journal filtering ignores
+ticket-created/claimed noise and wakes on submissions, resubmissions, and
+review-lease changes.
+
 An explicit identity is joined when its call starts. Joins are stateless and
 idempotent; the bridge deliberately keeps no mutable join cache and does not
 rate-limit them. It never changes the shared client's process-level
@@ -91,6 +98,7 @@ tagged, and `skipped_boards` is absent. With `boards` present, the response is:
   ],
   "waited_s": 0.0,
   "timed_out": false,
+  "reason": "journal",
   "resynced": {"project-a": false, "project-b": false, "invite-only-board": false},
   "skipped_boards": {"invite-only-board": "access denied reason"}
 }
@@ -341,7 +349,10 @@ Call `a2a_wait` with the last returned `new_seq`. On entry, it drains new
 journal events and scans the first 100 currently open tickets, so work older
 than the cursor still wakes the worker. Backlog cues use
 `source="backlog_scan"`, carry no fabricated journal sequence, and leave
-`new_seq` governed only by the real journal. On `timed_out=true`, re-arm
+`new_seq` governed only by the real journal. An unchanged backlog ticket is
+surfaced once per bridge process and then suppressed until a journal change;
+a bridge restart may surface it once again. `reason` reports `journal`,
+`backlog`, or `timeout`. On `timed_out=true`, re-arm
 immediately. Every event is a cue to refetch and claim current board state.
 The bridge renews held leases only while `a2a_wait` is blocking; long-running
 work must call Central's `lease_renew` directly.

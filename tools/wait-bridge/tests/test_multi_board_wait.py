@@ -60,6 +60,7 @@ class FakeListenContext(AbstractAsyncContextManager[FakeSubscription]):
 class FakeTransport:
     def __init__(self, boards: list[str]) -> None:
         self.principal_id = "PR-multi"
+        self.roles = {board_id: "worker" for board_id in boards}
         self.events = {board_id: [] for board_id in boards}
         self.latest = {board_id: 0 for board_id in boards}
         self.tickets: dict[str, dict[str, dict[str, Any]]] = {
@@ -98,7 +99,7 @@ class FakeTransport:
                     ),
                     "principal_id": self.principal_id,
                     "agent_name": agent_name,
-                    "role": "worker",
+                    "role": self.roles[board_id],
                 }
             )
         if name == "board_catchup":
@@ -220,6 +221,9 @@ class FakeRootClient:
 
 
 class MultiBoardWaitTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        wait_server._BACKLOG_SEEN.clear()
+
     async def test_single_board_function_keeps_original_response_shape(self) -> None:
         from test_per_call_wait import FakeClient
 
@@ -236,7 +240,14 @@ class MultiBoardWaitTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.join_calls, [])
         self.assertEqual(
             list(result),
-            ["new_seq", "events", "waited_s", "timed_out", "resynced"],
+            [
+                "new_seq",
+                "events",
+                "waited_s",
+                "timed_out",
+                "reason",
+                "resynced",
+            ],
         )
         self.assertIsInstance(result["new_seq"], int)
         self.assertNotIn("board_id", result["events"][0])
@@ -266,6 +277,49 @@ class MultiBoardWaitTests(unittest.IsolatedAsyncioTestCase):
         )
         lists = [call[1] for call in transport.calls if call[0] == "ticket_list"]
         self.assertEqual(lists, ["alpha", "beta"])
+
+    async def test_reviewer_auto_ignores_open_registry_backlog(self) -> None:
+        transport = FakeTransport(["alpha"])
+        transport.roles["alpha"] = "reviewer"
+        transport.tickets["alpha"]["TK-open"] = {
+            "ticket_id": "TK-open",
+            "status": "open",
+            "target_url": "alpha/work",
+        }
+
+        with (
+            patch.object(wait_server, "WAIT_MODE", "poll"),
+            patch.object(wait_server, "clamp_timeout", return_value=0.03),
+            patch.object(wait_server, "DEFAULT_POLL_INTERVAL_S", 0.01),
+        ):
+            result = await wait_server._wait_for_work_many(
+                FakeRootClient(transport),
+                boards=["alpha"],
+                timeout_s=1,
+                only_mine=False,
+            )
+
+        self.assertTrue(result["timed_out"])
+        self.assertEqual(result["reason"], "timeout")
+
+    async def test_reviewer_auto_surfaces_submitted_registry_backlog(self) -> None:
+        transport = FakeTransport(["alpha"])
+        transport.roles["alpha"] = "reviewer"
+        transport.tickets["alpha"]["TK-submitted"] = {
+            "ticket_id": "TK-submitted",
+            "status": "submitted",
+            "target_url": "alpha/work",
+        }
+
+        result = await wait_server._wait_for_work_many(
+            FakeRootClient(transport),
+            boards=["alpha"],
+            timeout_s=1,
+            only_mine=False,
+        )
+
+        self.assertEqual(result["reason"], "backlog")
+        self.assertEqual(result["events"][0]["ticket_id"], "TK-submitted")
 
     async def test_push_cue_refetches_only_the_cued_board(self) -> None:
         transport = FakeTransport(["alpha", "beta"])

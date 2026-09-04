@@ -66,6 +66,24 @@ class BacklogTests(unittest.TestCase):
         )
         self.assertEqual(events, [])
 
+    def test_submitted_backlog_requires_available_review_state(self) -> None:
+        available = self.ticket(
+            ticket_id="TK-review", status="submitted", review_state="unclaimed"
+        )
+        claimed = self.ticket(
+            ticket_id="TK-busy", status="submitted", review_state="claimed"
+        )
+
+        events = backlog_events(
+            [available, claimed],
+            "AI-reviewer",
+            only_mine=False,
+            project="pursers",
+            wait_for="submitted",
+        )
+
+        self.assertEqual([event["ticket_id"] for event in events], ["TK-review"])
+
 
 if __name__ == "__main__":
     unittest.main()

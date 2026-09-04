@@ -61,6 +61,7 @@
         <article class="card"><strong>Explicit compatibility mode</strong><p><code>PURSERS_WAIT_MODE=poll</code> selects polling deliberately. A push failure is logged, degrades only that board for the current call, and push is retried on the next re-arm.</p></article>
         <article class="card"><strong>Re-arm contract unchanged</strong><p>Process every result once. On <code>timed_out=true</code>, call wait again immediately with the returned <code>new_seq</code>. Never keep two waits live for one seat and board.</p></article>
       </div>
+      <ul><li><strong>Unreleased:</strong> reviewer identities now wait for submissions by default, unchanged backlog cues are surfaced once per bridge process, and each return reports <code>reason=journal|backlog|timeout</code>.</li></ul>
     </section>
 
     <section id="hosts">
