@@ -609,7 +609,7 @@ class DesiredSeat:
     tier_max: int = 2
     skills: tuple[str, ...] = ()
     can_review: bool | None = None
-    can_work: bool = True
+    can_work: bool | None = None
     model: str | None = None
     provider: str | None = None
 
@@ -635,13 +635,21 @@ class DesiredSeat:
             raise ValueError("skills must contain safe identifiers")
         object.__setattr__(self, "skills", normalized_skills)
         if self.can_review is None:
-            object.__setattr__(
-                self,
-                "can_review",
-                self.role == "reviewer" and self.tier_max > 1,
-            )
+            object.__setattr__(self, "can_review", self.role == "reviewer")
+        if self.can_work is None:
+            object.__setattr__(self, "can_work", self.role == "worker")
         if not isinstance(self.can_review, bool) or not isinstance(self.can_work, bool):
             raise ValueError("can_review and can_work must be boolean")
+        if self.role == "worker" and self.can_review:
+            raise ValueError("worker seats cannot declare can_review=true")
+        if self.role == "reviewer" and self.can_work:
+            raise ValueError("reviewer seats cannot declare can_work=true")
+        if self.role in {"orchestrator", "coordinator"} and (
+            self.can_work or self.can_review
+        ):
+            raise ValueError(
+                f"{self.role} seats cannot declare work or review capabilities"
+            )
         for field_name in ("model", "provider"):
             value = getattr(self, field_name)
             if value is not None and (not isinstance(value, str) or len(value) > 200):

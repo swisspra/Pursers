@@ -91,13 +91,18 @@ class DispatchTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_declared_role_is_independent_from_token_scopes(self) -> None:
         self.principal = self.admin
-        worker = await self.call("board_join", agent_name="admin-agent")
+        worker = await self.call("board_join", agent_name="admin-worker-default")
         self.assertEqual(worker.structured_content["role"], "worker")
+        self.assertTrue(worker.structured_content["capabilities"]["can_work"])
+        self.assertFalse(worker.structured_content["capabilities"]["can_review"])
 
         reviewer = await self.call(
             "board_onboard", agent_name="admin-reviewer", role="reviewer"
         )
+        reviewer_id = reviewer.structured_content["agent_id"]
         self.assertEqual(reviewer.structured_content["role"], "reviewer")
+        self.assertFalse(reviewer.structured_content["capabilities"]["can_work"])
+        self.assertTrue(reviewer.structured_content["capabilities"]["can_review"])
 
         inferred = await self.call(
             "board_join", agent_name="role-migration", role="reviewer"
@@ -128,11 +133,29 @@ class DispatchTests(unittest.IsolatedAsyncioTestCase):
             principal_id=coordinator.principal_id, role="member",
         )
         self.principal = coordinator
+        with self.assertRaisesRegex(ToolError, "board:write"):
+            await self.call("board_join", agent_name="coordinate-worker")
+        coordination_ids = []
         for role in ("coordinator", "orchestrator"):
             joined = await self.call(
                 "board_join", agent_name=f"{role}-agent", role=role
             )
+            coordination_ids.append(joined.structured_content["agent_id"])
             self.assertEqual(joined.structured_content["role"], role)
+            self.assertFalse(joined.structured_content["capabilities"]["can_work"])
+            self.assertFalse(joined.structured_content["capabilities"]["can_review"])
+
+        self.principal = self.admin
+        with self.assertRaisesRegex(ToolError, "can_review must be false"):
+            await self.call(
+                "board_join", agent_name="hybrid-worker",
+                capabilities={"can_review": True},
+            )
+        with self.assertRaisesRegex(ToolError, "can_work must be false"):
+            await self.call(
+                "board_join", agent_name="hybrid-reviewer", role="reviewer",
+                capabilities={"can_work": True},
+            )
 
         self.principal = self.admin
         status = await self.call("board_status")
@@ -140,6 +163,14 @@ class DispatchTests(unittest.IsolatedAsyncioTestCase):
         admin = next(row for row in agents if row["agent_name"] == "admin-agent")
         self.assertEqual(admin["role"], "worker")
         self.assertIn("board:review", admin["scopes"])
+
+        await self.call(
+            "board_dispatch_policy_set", agent_name="admin-agent", offer_ttl_s=60
+        )
+        non_workers = [reviewer_id, *coordination_ids]
+        created = await self.create(prefer_agents=non_workers)
+        offered_to = created.structured_content["ticket"]["work_offer"]["agent_id"]
+        self.assertNotIn(offered_to, non_workers)
 
     async def create(self, **extra: object):
         self.principal = self.admin
@@ -421,8 +452,7 @@ class DispatchTests(unittest.IsolatedAsyncioTestCase):
     async def test_unassignable_review_denies_claim_and_direct_verdict(self) -> None:
         submitter = await self.add_seat(
             self.reviewer_a, "submitter",
-            {"tier_max": 3, "skills": ["rust"], "can_work": True, "can_review": True},
-            role="reviewer",
+            {"tier_max": 3, "skills": ["rust"], "can_work": True},
         )
         low = await self.add_seat(
             self.reviewer_b, "reviewer-low",

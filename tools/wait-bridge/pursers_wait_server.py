@@ -2141,7 +2141,13 @@ def _normalize_wait_for(wait_for: str) -> str:
 def _resolve_wait_for(wait_for: str, role: str | None) -> str:
     selected = _normalize_wait_for(wait_for)
     if selected == WAIT_FOR_AUTO:
-        return WAIT_FOR_SUBMITTED if role == "reviewer" else WAIT_FOR_CLAIMABLE
+        if role == "reviewer":
+            return WAIT_FOR_SUBMITTED
+        if role == "worker":
+            return WAIT_FOR_CLAIMABLE
+        raise ToolError(
+            "wait_for='auto' is available only to worker or reviewer seats"
+        )
     if selected == WAIT_FOR_SUBMITTED and role != "reviewer":
         raise ToolError("wait_for='submitted' requires board:review authorization")
     return selected
@@ -2465,8 +2471,9 @@ async def _a2a_wait_impl(
     unreadable or malformed registry falls back to the single home board and
     adds registry_warning to that otherwise original response shape.
 
-    wait_for: "auto" (default) derives reviewer -> "submitted" and every
-    other joined role -> "claimable". An explicit "submitted" request requires
+    wait_for: "auto" (default) derives worker -> "claimable" and reviewer ->
+    "submitted"; coordinator/orchestrator seats must choose an explicit view.
+    An explicit "submitted" request requires
     the joined principal's board:review-backed reviewer role.
 
     Returns {new_seq, events, waited_s, timed_out, reason, resynced}.

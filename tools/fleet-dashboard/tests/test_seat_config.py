@@ -54,6 +54,39 @@ def test_profiles_match_wait_bridge_and_keep_host_margins() -> None:
     }
 
 
+@pytest.mark.parametrize(
+    ("role", "can_work", "can_review"),
+    [
+        ("worker", True, False),
+        ("reviewer", False, True),
+        ("orchestrator", False, False),
+        ("coordinator", False, False),
+    ],
+)
+def test_role_defaults_match_supported_work_queues(
+    tmp_path: Path, role: str, can_work: bool, can_review: bool
+) -> None:
+    target = desired(tmp_path, "codex", role=role)
+    assert target.can_work is can_work
+    assert target.can_review is can_review
+
+
+@pytest.mark.parametrize(
+    ("role", "override"),
+    [
+        ("worker", {"can_review": True}),
+        ("reviewer", {"can_work": True}),
+        ("orchestrator", {"can_work": True}),
+        ("coordinator", {"can_review": True}),
+    ],
+)
+def test_role_rejects_incompatible_capability(
+    tmp_path: Path, role: str, override: dict[str, bool]
+) -> None:
+    with pytest.raises(ValueError):
+        desired(tmp_path, "codex", role=role, **override)
+
+
 def test_codex_plan_apply_inspect_backup_and_idempotency(tmp_path: Path) -> None:
     config = tmp_path / "config.toml"
     config.write_text("# keep this comment\n[features]\nweb_search = true\n")
@@ -808,10 +841,11 @@ def test_doctor_bearer_env_var_missing_vs_defined(
     assert "cannot inspect login shell" in env_no_shell.message
 
 
+@pytest.mark.parametrize("role", ["worker", "reviewer"])
 def test_doctor_reports_split_identity_fail_and_shared_token_pass(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, role: str
 ) -> None:
-    target = desired(tmp_path, "codex")
+    target = desired(tmp_path, "codex", role=role)
     token = "part1.part2.part3"
     Path(target.token_file).write_text(token)
     Path(target.ca_file).write_text("ca")
@@ -1140,6 +1174,7 @@ def test_prompt_inventory_and_connector_skill_suggestions(tmp_path: Path) -> Non
     target = desired(
         tmp_path,
         "codex",
+        role="reviewer",
         tier_max=3,
         skills=("research", "git"),
         can_review=True,

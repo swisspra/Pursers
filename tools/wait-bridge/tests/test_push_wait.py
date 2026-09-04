@@ -470,12 +470,15 @@ class PushWaitTests(unittest.IsolatedAsyncioTestCase):
                 principal: central.Principal,
                 name: str,
                 capabilities: dict[str, Any],
+                *,
+                role: str = "worker",
             ) -> InProcessBoardClient:
                 self.principal = principal
-                client = InProcessBoardClient(raw)
+                client = InProcessBoardClient(raw, role=role)
                 client.agent_name = name
                 joined = await client._call(
-                    "board_join", agent_name=name, capabilities=capabilities
+                    "board_join", agent_name=name, role=role,
+                    capabilities=capabilities,
                 )
                 client.identity = JoinedIdentity(
                     joined["board_id"], joined["agent_id"],
@@ -505,10 +508,12 @@ class PushWaitTests(unittest.IsolatedAsyncioTestCase):
             ra = await join(
                 reviewer_a, "live-reviewer-a",
                 {"can_work": False, "can_review": True},
+                role="reviewer",
             )
             rb = await join(
                 reviewer_b, "live-reviewer-b",
                 {"can_work": False, "can_review": True},
+                role="reviewer",
             )
 
             legacy_cursor = int(

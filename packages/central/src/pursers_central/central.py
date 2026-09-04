@@ -2745,7 +2745,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
     def normalized_capabilities(
         value: Mapping[str, Any] | None,
         *,
-        default_can_review: bool,
+        role: str,
     ) -> dict[str, Any]:
         raw = dict(value or {})
         allowed = {
@@ -2766,13 +2766,22 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             not isinstance(item, str) or not item.strip() for item in skills
         ):
             raise ValueError("capabilities.skills must be a list of non-empty strings")
+        role_defaults = {
+            "worker": (True, False),
+            "reviewer": (False, True),
+            "orchestrator": (False, False),
+            "coordinator": (False, False),
+        }
+        default_can_work, default_can_review = role_defaults.get(
+            role, role_defaults["worker"]
+        )
         result: dict[str, Any] = {
             "model": raw.get("model"),
             "provider": raw.get("provider"),
             "tier_max": tier_max,
             "skills": sorted(set(item.strip() for item in skills)),
             "can_review": raw.get("can_review", default_can_review),
-            "can_work": raw.get("can_work", True),
+            "can_work": raw.get("can_work", default_can_work),
             "host": raw.get("host"),
             "max_parallel": 1,
         }
@@ -2783,6 +2792,21 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             if not isinstance(raw["legacy_tools"], bool):
                 raise ValueError("capabilities.legacy_tools must be boolean")
             result["legacy_tools"] = raw["legacy_tools"]
+        if role == "reviewer" and result["can_work"]:
+            raise ValueError(
+                "capabilities.can_work must be false for role reviewer"
+            )
+        if role == "worker" and result["can_review"]:
+            raise ValueError(
+                "capabilities.can_review must be false for role worker"
+            )
+        if role in {"orchestrator", "coordinator"} and (
+            result["can_work"] or result["can_review"]
+        ):
+            raise ValueError(
+                f"capabilities.can_work and capabilities.can_review must be false "
+                f"for role {role}"
+            )
         for field in ("model", "provider", "host"):
             item = result[field]
             if item is not None and (not isinstance(item, str) or not item.strip()):
@@ -2795,7 +2819,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         raw = member.get("capabilities")
         return normalized_capabilities(
             raw if isinstance(raw, Mapping) else None,
-            default_can_review=member.get("role") == "reviewer",
+            role=str(member.get("role") or "worker"),
         )
 
     def validate_seat_role(principal: Principal, role: str) -> str:
@@ -2804,7 +2828,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 "role must be worker, reviewer, orchestrator, or coordinator"
             )
         required_scope = {
-            "worker": None,
+            "worker": "board:write",
             "reviewer": "board:review",
             "orchestrator": "board:coordinate",
             "coordinator": "board:coordinate",
@@ -2832,6 +2856,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         identity_id = agent_id(document["board_id"], principal.principal_id, agent_name)
         existing = document["members"].get(identity_id)
         rejoined = existing is not None
+        previous_role = existing.get("role") if existing is not None else None
         member = existing or {
             "agent_id": identity_id,
             "agent_name": agent_name,
@@ -2854,14 +2879,28 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             member["task_focus"] = task_focus
         if capabilities is not None:
             member["capabilities"] = normalized_capabilities(
-                capabilities, default_can_review=role == "reviewer"
+                capabilities, role=role
             )
             member["capabilities_explicit"] = True
-        elif not member.get("capabilities_explicit", False):
+        else:
+            previous = member.get("capabilities")
+            preserved = dict(previous) if isinstance(previous, Mapping) else {}
+            if previous_role != role:
+                preserved.pop("can_work", None)
+                preserved.pop("can_review", None)
+            elif role == "worker":
+                preserved["can_review"] = False
+            elif role == "reviewer":
+                preserved["can_work"] = False
+            else:
+                preserved["can_work"] = False
+                preserved["can_review"] = False
             member["capabilities"] = normalized_capabilities(
-                None, default_can_review=role == "reviewer"
+                preserved, role=role
             )
-            member["capabilities_explicit"] = False
+            member["capabilities_explicit"] = bool(
+                member.get("capabilities_explicit", False)
+            )
         if os.environ.get("PURSERS_LEGACY_TOOLS") == "1":
             member["capabilities"]["legacy_tools"] = True
         document["members"][identity_id] = member
@@ -3220,7 +3259,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             )
         principal = current_principal()
         role = validate_seat_role(principal, role)
-        coordinate_only = require_board_write_or_coordinate(principal)
+        coordinate_only = role in {"orchestrator", "coordinator"}
         if coordinate_only and claim_ttl_s is not None:
             raise PermissionError(
                 "coordinator authorization cannot change board claim policy"
@@ -3323,7 +3362,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             ticket_id = require_id("ticket_id", ticket_id)
         principal = current_principal()
         role = validate_seat_role(principal, role)
-        coordinate_only = require_board_write_or_coordinate(principal)
+        coordinate_only = role in {"orchestrator", "coordinator"}
         safe_platform = clean_text("agent_platform", agent_platform, max_length=80)
         safe_focus = clean_text("task_focus", task_focus, max_length=500)
 
@@ -3605,7 +3644,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 document, principal, agent_name, now
             )
             normalized = normalized_capabilities(
-                capabilities, default_can_review=actor.get("role") == "reviewer"
+                capabilities, role=str(actor.get("role") or "worker")
             )
             actor["capabilities"] = normalized
             actor["capabilities_explicit"] = True

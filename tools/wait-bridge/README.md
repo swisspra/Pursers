@@ -59,8 +59,9 @@ a2a_wait(since_seq=0, project="PROJECT_PLACEHOLDER", agent_name="session-a")
 ```
 
 `wait_for="auto"` is the default: a seat declared as `reviewer` waits for
-`submitted` tickets, while every other declared role waits for `claimable`
-tickets. Token scopes authorize actions but never select the wait mode. Callers
+`submitted` tickets, while a `worker` waits for `claimable` tickets.
+Coordinator and orchestrator seats must select an explicit view. Token scopes
+authorize actions but never select the wait mode. Callers
 may select `claimable` explicitly; selecting `submitted` requires a joined
 reviewer seat, whose join also requires `board:review`. Reviewer filtering ignores
 ticket-created/claimed noise and wakes on submissions, resubmissions, and

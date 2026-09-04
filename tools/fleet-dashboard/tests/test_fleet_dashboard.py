@@ -4223,7 +4223,9 @@ def test_dispatch_timeline_reads_cross_seat_central_projection(
             role=role,
         )
         joined = await call(
-            "board_join", principal, agent_name=name, capabilities=capabilities
+            "board_join", principal, agent_name=name,
+            role="reviewer" if role == "reviewer" else "worker",
+            capabilities=capabilities,
         )
         return joined["agent_id"]
 
@@ -4411,6 +4413,9 @@ def test_capability_and_dispatch_ui_contract_is_present() -> None:
     assert "Dispatch unavailable:" in dashboard.HTML
     assert "Current offer" in dashboard.HTML
     assert "Runtime consumption requires Dispatch Part 2" in dashboard.HTML
+    assert ">coordinator</option>" in dashboard.HTML
+    assert "review.checked=role==='reviewer'" in dashboard.HTML
+    assert "work.checked=role==='worker'" in dashboard.HTML
 
 
 def test_dispatch_http_endpoints_use_same_origin_json_guard() -> None:

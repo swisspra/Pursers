@@ -93,10 +93,14 @@ class CoordinatorWriteTests(unittest.IsolatedAsyncioTestCase):
         joined = await self.call("board_join", agent_name="worker-agent")
         self.worker_id = joined.structured_content["agent_id"]
         self.principal = self.coordinator
-        joined = await self.call("board_join", agent_name="coordinator-1")
+        joined = await self.call(
+            "board_join", agent_name="coordinator-1", role="coordinator"
+        )
         self.coordinator_id = joined.structured_content["agent_id"]
         self.principal = self.intake_joiner
-        joined = await self.call("board_join", agent_name="intake-coordinator")
+        joined = await self.call(
+            "board_join", agent_name="intake-coordinator", role="coordinator"
+        )
         self.intake_id = joined.structured_content["agent_id"]
 
     async def join_other_worker(self) -> str:

@@ -495,6 +495,13 @@ class PerCallWaitTests(unittest.IsolatedAsyncioTestCase):
                 },
             )
 
+    def test_auto_wait_rejects_non_queue_roles(self) -> None:
+        for role in ("coordinator", "orchestrator"):
+            with self.subTest(role=role), self.assertRaisesRegex(
+                wait_server.ToolError, "only to worker or reviewer"
+            ):
+                wait_server._resolve_wait_for("auto", role)
+
 
 if __name__ == "__main__":
     unittest.main()
