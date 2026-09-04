@@ -3357,9 +3357,15 @@ def test_config_api_and_ui_contract_are_separate_from_coordinator_config() -> No
         def bridge(self) -> dict:
             return {
                 "installed_version": "0.1.0a6",
+                "reported_version": "0.1.0a1",
+                "package_metadata_version": "0.1.0a6",
                 "pinned_version": "0.1.0a6",
                 "latest_pypi_version": "0.1.0a6",
                 "resolution_source": "config:codex",
+                "status": "WARN",
+                "message": (
+                    "version string stale; reported=0.1.0a1; package=0.1.0a6"
+                ),
             }
 
         def registry(self, fleet: dict) -> dict:
@@ -3417,9 +3423,15 @@ def test_config_api_and_ui_contract_are_separate_from_coordinator_config() -> No
             bridge = json.load(response)
             assert bridge == {
                 "installed_version": "0.1.0a6",
+                "reported_version": "0.1.0a1",
+                "package_metadata_version": "0.1.0a6",
                 "pinned_version": "0.1.0a6",
                 "latest_pypi_version": "0.1.0a6",
                 "resolution_source": "config:codex",
+                "status": "WARN",
+                "message": (
+                    "version string stale; reported=0.1.0a1; package=0.1.0a6"
+                ),
             }
         with urllib.request.urlopen(base + "/api/config/registry") as response:
             assert json.load(response)["read_only"] is True
@@ -3451,6 +3463,8 @@ def test_config_api_and_ui_contract_are_separate_from_coordinator_config() -> No
     assert "Token file path · token never enters this page" in dashboard.HTML
     assert "latest_pypi_version" in dashboard.HTML
     assert "resolution_source" in dashboard.HTML
+    assert "seatBridge.status" in dashboard.HTML
+    assert "seatBridge.message" in dashboard.HTML
     assert "Resolved via" in dashboard.HTML
     assert "setInterval(async()=>" in dashboard.HTML
     assert ",1000)" in dashboard.HTML
