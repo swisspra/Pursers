@@ -121,6 +121,7 @@ async def test_bounded_read_parameters_are_forwarded(monkeypatch) -> None:
         ack=False,
         max_events=20,
         max_bytes=100_000,
+        touch=False,
     )
 
     assert calls == [
@@ -134,6 +135,7 @@ async def test_bounded_read_parameters_are_forwarded(monkeypatch) -> None:
                 "ack": False,
                 "max_events": 20,
                 "max_bytes": 100_000,
+                "touch": False,
             },
         ),
     ]

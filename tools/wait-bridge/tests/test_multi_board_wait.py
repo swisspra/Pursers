@@ -30,8 +30,8 @@ class FakeResult:
 
 
 class FakeSubscription:
-    def __init__(self, uri: str, queue: asyncio.Queue[object]) -> None:
-        self.honored = SimpleNamespace(resource_subscriptions=[uri])
+    def __init__(self, uris: list[str], queue: asyncio.Queue[object]) -> None:
+        self.honored = SimpleNamespace(resource_subscriptions=uris)
         self.queue = queue
 
     def __aiter__(self) -> FakeSubscription:
@@ -42,16 +42,16 @@ class FakeSubscription:
 
 
 class FakeListenContext(AbstractAsyncContextManager[FakeSubscription]):
-    def __init__(self, transport: FakeTransport, board_id: str) -> None:
+    def __init__(self, transport: FakeTransport, board_id: str, uris: list[str]) -> None:
         self.transport = transport
         self.board_id = board_id
+        self.uris = uris
 
     async def __aenter__(self) -> FakeSubscription:
         if self.board_id in self.transport.listen_failures:
             raise RuntimeError("synthetic per-board listen failure")
         self.transport.ready[self.board_id].set()
-        uri = f"board://{self.board_id}/journal"
-        return FakeSubscription(uri, self.transport.cues[self.board_id])
+        return FakeSubscription(self.uris, self.transport.cues[self.board_id])
 
     async def __aexit__(self, *_arguments: Any) -> None:
         return None
@@ -123,7 +123,10 @@ class FakeTransport:
             tickets = (
                 self.held[board_id]
                 if payload.get("assigned_to") is not None
-                else list(self.tickets[board_id].values())
+                else [
+                    *self.tickets[board_id].values(),
+                    *self.held[board_id],
+                ]
             )
             if payload.get("status") is not None:
                 tickets = [
@@ -139,7 +142,7 @@ class FakeTransport:
     def listen(self, *, resource_subscriptions: list[str]) -> FakeListenContext:
         uri = resource_subscriptions[0]
         board_id = uri.removeprefix("board://").removesuffix("/journal")
-        return FakeListenContext(self, board_id)
+        return FakeListenContext(self, board_id, resource_subscriptions)
 
     def add_event(self, board_id: str, ticket_id: str, seq: int) -> None:
         self.latest[board_id] = seq
@@ -171,6 +174,49 @@ class FakeRootClient:
             "env-default",
             "worker",
         )
+
+    async def events_for_board(
+        self,
+        board_id: str,
+        from_cursor: int,
+        identity: JoinedIdentity,
+        cursor_callback: Any,
+        *,
+        generation_token: str | None,
+        pure_catchup: bool,
+    ) -> Any:
+        resources = [
+            f"board://{board_id}/journal",
+            f"board://{board_id}/agent/{identity.agent_id}",
+        ]
+        cursor = from_cursor
+
+        async def drain() -> list[dict[str, Any]]:
+            nonlocal cursor
+            raw = await self._client.call_tool(
+                "board_catchup",
+                {
+                    "board_id": board_id,
+                    "agent_name": identity.agent_name,
+                    "cursor": cursor,
+                    "limit": 100,
+                    "ack": False,
+                    **({"touch": False} if pure_catchup else {}),
+                },
+            )
+            page = raw.structured_content["result"]
+            cursor = int(page["next_cursor"])
+            cursor_callback(cursor)
+            return list(page["events"])
+
+        async with self._client.listen(
+            resource_subscriptions=resources
+        ) as subscription:
+            for event in await drain():
+                yield event
+            async for _cue in subscription:
+                for event in await drain():
+                    yield event
 
 
 class MultiBoardWaitTests(unittest.IsolatedAsyncioTestCase):
@@ -309,6 +355,39 @@ class MultiBoardWaitTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(after_alpha, before_alpha)
         self.assertEqual(result["events"][0]["board_id"], "beta")
 
+    async def test_idle_push_wait_makes_no_central_calls_after_subscribe_drain(self) -> None:
+        transport = FakeTransport(["alpha", "beta"])
+        with patch.object(wait_server, "WAIT_MODE", "push"):
+            waiting = asyncio.create_task(
+                wait_server._wait_for_work_many(
+                    FakeRootClient(transport),
+                    boards=["alpha", "beta"],
+                    timeout_s=1,
+                    only_mine=False,
+                )
+            )
+            await asyncio.wait_for(
+                asyncio.gather(
+                    transport.ready["alpha"].wait(),
+                    transport.ready["beta"].wait(),
+                ),
+                timeout=1,
+            )
+            for _ in range(100):
+                catchups = [
+                    call for call in transport.calls
+                    if call[0] == "board_catchup"
+                ]
+                if len(catchups) >= 4:
+                    break
+                await asyncio.sleep(0)
+            calls_after_subscribe_drain = len(transport.calls)
+            result = await asyncio.wait_for(waiting, timeout=1.5)
+
+        self.assertTrue(result["timed_out"])
+        self.assertEqual(len(transport.calls), calls_after_subscribe_drain)
+        self.assertEqual(transport.renewed, [])
+
     async def test_denied_board_is_reported_and_does_not_abort(self) -> None:
         transport = FakeTransport(["alpha", "denied"])
         transport.denied.add("denied")
@@ -335,13 +414,14 @@ class MultiBoardWaitTests(unittest.IsolatedAsyncioTestCase):
                 "ticket_id": "TK-held-beta",
                 "status": "claimed",
                 "claimed_by_agent_id": beta_id,
+                "ttl_s": 900,
             }
         ]
 
         with (
             patch.object(wait_server, "WAIT_MODE", "poll"),
             patch.object(wait_server, "DEFAULT_POLL_INTERVAL_S", 0.05),
-            patch.object(wait_server, "HEARTBEAT_INTERVAL_S", 0.2),
+            patch.object(wait_server, "MAX_LEASE_RENEW_INTERVAL_S", 0.2),
         ):
             await wait_server._wait_for_work_many(
                 FakeRootClient(transport),

@@ -2,10 +2,9 @@
 """Wait-for-work MCP bridge for the Pursers / On Board v5 central.
 
 WHY THIS EXISTS
-    This bridge replicates v4's blocking a2a_wait primitive. Polling remains
-    the default and compatibility fallback. A dark-launch push mode can use
-    MCP v2 subscriptions/listen only as a wake signal, then refetch the same
-    journal/backlog state as polling so notifications never become data.
+    This bridge replicates v4's blocking a2a_wait primitive using MCP v2
+    subscriptions/listen by default. Polling is an explicit compatibility
+    fallback. Notifications are cues; committed journal state remains data.
 
 TRANSPORT
     This server MUST run over stdio (the host spawns it as a subprocess).
@@ -18,10 +17,10 @@ THE TOOL
       1. CHECK BEFORE BLOCKING: fully drain board_catchup from since_seq and
          scan current open tickets older than the cursor. If relevant work is
          found on either path, return immediately (no wait).
-      2. Otherwise poll board_catchup every ~2s until a relevant event shows
-         up or timeout_s elapses. Fire a lease_renew heartbeat for any ticket
-         this agent currently holds every ~20s, so a peer's reaper does not
-         treat a long park as an abandoned claim.
+      2. Otherwise wait on journal and per-seat subscriptions. Poll only when
+         explicitly selected or when listen fails for this call. Entry-snapshot
+         held tickets receive lease_renew at min(300s, ttl/3); idle seats issue
+         no Central calls while blocked.
       3. Return a small bounded shape: {new_seq, events, waited_s, timed_out}.
          timed_out=True is the re-arm cue: call again with since_seq=new_seq.
 
@@ -44,6 +43,7 @@ import asyncio
 import fcntl
 import hashlib
 import json
+import math
 import os
 import sys
 import tempfile
@@ -78,15 +78,16 @@ BASE_AGENT_NAME = os.environ.get("ONBOARD_AGENT_NAME", "pursers-wait-bridge")
 AGENT_NAME = resolve_agent_name(
     BASE_AGENT_NAME, os.environ.get("ONBOARD_AGENT_INSTANCE")
 )
-_RAW_WAIT_MODE = os.environ.get("PURSERS_WAIT_MODE", "poll").strip().lower()
-WAIT_MODE = _RAW_WAIT_MODE if _RAW_WAIT_MODE in {"poll", "push"} else "poll"
+_RAW_WAIT_MODE = os.environ.get("PURSERS_WAIT_MODE", "push").strip().lower()
+WAIT_MODE = _RAW_WAIT_MODE if _RAW_WAIT_MODE in {"poll", "push"} else "push"
 
 # --- wait policy (v4-parity constants; see a2a_wait.py) --------------------
 
 DEFAULT_TIMEOUT_S = 180
-DESKTOP_SAFE_MAX_S = 200        # stay clear of Claude Desktop's ~240s hard cancel
 DEFAULT_POLL_INTERVAL_S = 2.0
-HEARTBEAT_INTERVAL_S = 20.0
+DEFAULT_CLAIM_TTL_S = 900
+MAX_LEASE_RENEW_INTERVAL_S = 300.0
+PROGRESS_INTERVAL_S = 300.0
 CATCHUP_PAGE_LIMIT = 100
 BACKLOG_SCAN_LIMIT = 100
 RELEVANT_KINDS = frozenset({"ticket_created", "ticket_status_changed"})
@@ -95,12 +96,22 @@ HANDOFF_REJOIN_MESSAGE = "call board_onboard or board_join before more work"
 PROJECT_REGISTRY_KEY = "project_registry"
 PROJECT_REGISTRY_SCHEMA_VERSION = 1
 PROJECT_STATUSES = frozenset({"active", "paused"})
-STATS_SCHEMA_VERSION = 2
+STATS_SCHEMA_VERSION = 3
 STATS_RETENTION_DAYS = 7
 POLL_SAMPLE_LIMIT = 24
+WAIT_HOUR_RETENTION = 48
 CONTEXT_READ_TOOLS = frozenset(
     {"board_get_briefing", "board_onboard", "board_snapshot", "board_catchup"}
 )
+HOST_TIMEOUTS_S = {
+    "codex": 620,
+    "codex-cli": 620,
+    "goose": 300,
+    "claude-code": 21_600,
+    "claude-desktop": 240,
+    "headless": 21_600,
+}
+DEFAULT_HOST = "codex"
 
 
 def bridge_stats_path() -> Path:
@@ -122,6 +133,17 @@ def _meter_bytes(value: Any) -> int:
             default=str,
         ).encode("utf-8")
     )
+
+
+def _parse_stats_hour(value: Any) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        return datetime.strptime(value, "%Y-%m-%dT%H:00:00Z").replace(
+            tzinfo=timezone.utc
+        )
+    except ValueError:
+        return None
 
 
 class BridgeStats:
@@ -181,6 +203,25 @@ class BridgeStats:
                     cycle[key] = cycle.get(key, 0) + max(0, int(response_bytes))
         except Exception as exc:  # noqa: BLE001 - metering never breaks work.
             _log(f"stats write failed: {type(exc).__name__}")
+
+    async def record_wait_return(
+        self,
+        board_id: str,
+        agent_name: str,
+        result: dict[str, Any],
+    ) -> None:
+        """Record exactly one model-visible a2a_wait result."""
+        outcome = "timeout" if result.get("timed_out") else "cue"
+        try:
+            async with self._lock:
+                self._record_wait_return_sync(
+                    board_id,
+                    agent_name,
+                    outcome,
+                    _meter_bytes(result),
+                )
+        except Exception as exc:  # noqa: BLE001 - metering never breaks work.
+            _log(f"wait-return stats write failed: {type(exc).__name__}")
 
     def _record_sync(
         self,
@@ -259,6 +300,11 @@ class BridgeStats:
                 "poll_cycles": (
                     document.get("poll_cycles")
                     if isinstance(document.get("poll_cycles"), dict)
+                    else {}
+                ),
+                "model_wait": (
+                    document.get("model_wait")
+                    if isinstance(document.get("model_wait"), dict)
                     else {}
                 ),
             }
@@ -341,6 +387,101 @@ class BridgeStats:
                     else {}
                 ),
                 "poll_cycles": poll_cycles,
+                "model_wait": (
+                    document.get("model_wait")
+                    if isinstance(document.get("model_wait"), dict)
+                    else {}
+                ),
+            }
+            temporary_name: str | None = None
+            try:
+                with tempfile.NamedTemporaryFile(
+                    "w",
+                    encoding="utf-8",
+                    dir=self.path.parent,
+                    prefix=f".{self.path.name}.",
+                    delete=False,
+                ) as stream:
+                    temporary_name = stream.name
+                    json.dump(
+                        output,
+                        stream,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    stream.write("\n")
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(temporary_name, self.path)
+                temporary_name = None
+            finally:
+                if temporary_name is not None:
+                    Path(temporary_name).unlink(missing_ok=True)
+        finally:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+            finally:
+                os.close(descriptor)
+
+    def _record_wait_return_sync(
+        self,
+        board_id: str,
+        agent_name: str,
+        outcome: str,
+        response_bytes: int,
+    ) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = self.path.with_suffix(self.path.suffix + ".lock")
+        descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            try:
+                document = json.loads(self.path.read_text(encoding="utf-8"))
+            except (FileNotFoundError, UnicodeError, ValueError, OSError):
+                document = {}
+            if not isinstance(document, dict):
+                document = {}
+            now = self.clock().astimezone(timezone.utc)
+            hour = now.strftime("%Y-%m-%dT%H:00:00Z")
+            first = now - timedelta(hours=WAIT_HOUR_RETENTION - 1)
+            model_wait = document.get("model_wait")
+            if not isinstance(model_wait, dict):
+                model_wait = {}
+            seat_key = json.dumps([board_id, agent_name], separators=(",", ":"))
+            seat = model_wait.get(seat_key)
+            if not isinstance(seat, dict):
+                seat = {"board_id": board_id, "agent_name": agent_name, "hours": {}}
+            hours = seat.get("hours")
+            hours = hours if isinstance(hours, dict) else {}
+            retained: dict[str, Any] = {}
+            for key, value in hours.items():
+                parsed = _parse_stats_hour(key)
+                if parsed is not None and first <= parsed <= now and isinstance(value, dict):
+                    retained[key] = value
+            bucket = retained.setdefault(
+                hour,
+                {"returns": 0, "response_bytes": 0, "outcomes": {}},
+            )
+            bucket["returns"] = int(bucket.get("returns", 0)) + 1
+            bucket["response_bytes"] = int(bucket.get("response_bytes", 0)) + max(
+                0, int(response_bytes)
+            )
+            outcomes = bucket.get("outcomes")
+            outcomes = outcomes if isinstance(outcomes, dict) else {}
+            outcomes[outcome] = int(outcomes.get(outcome, 0)) + 1
+            bucket["outcomes"] = outcomes
+            seat["hours"] = retained
+            model_wait[seat_key] = seat
+            output = {
+                "schema_version": STATS_SCHEMA_VERSION,
+                "days": document.get("days") if isinstance(document.get("days"), dict) else {},
+                "poll_cycles": (
+                    document.get("poll_cycles")
+                    if isinstance(document.get("poll_cycles"), dict)
+                    else {}
+                ),
+                "model_wait": model_wait,
             }
             temporary_name: str | None = None
             try:
@@ -451,12 +592,46 @@ class MeteredBoardClient(BoardClient):
         )
 
 
+def _host_timeout_s() -> int:
+    explicit = os.environ.get("PURSERS_HOST_TIMEOUT_S", "").strip()
+    if explicit:
+        try:
+            value = int(explicit)
+            if value > 1:
+                return value
+        except ValueError:
+            pass
+        _log("invalid PURSERS_HOST_TIMEOUT_S; using named host profile")
+    host = os.environ.get("PURSERS_HOST", DEFAULT_HOST).strip().lower()
+    if host not in HOST_TIMEOUTS_S:
+        _log(f"invalid PURSERS_HOST={host!r}; using {DEFAULT_HOST!r}")
+        host = DEFAULT_HOST
+    return HOST_TIMEOUTS_S[host]
+
+
+def _timeout_margin_s(host_timeout_s: int) -> int:
+    margin = min(60, max(30, math.ceil(host_timeout_s * 0.10)))
+    if os.environ.get("PURSERS_HOST", DEFAULT_HOST).strip().lower() == "claude-desktop":
+        margin = max(margin, 40)
+    return min(host_timeout_s - 1, margin)
+
+
+def host_block_limit_s() -> int:
+    timeout = _host_timeout_s()
+    return max(1, timeout - _timeout_margin_s(timeout))
+
+
 def clamp_timeout(timeout_s: Any) -> int:
     try:
         t = int(timeout_s)
     except (TypeError, ValueError):
         t = DEFAULT_TIMEOUT_S
-    return max(1, min(t, DESKTOP_SAFE_MAX_S))
+    return max(1, min(t, host_block_limit_s()))
+
+
+def _progress_cadence_s() -> float | None:
+    host = os.environ.get("PURSERS_HOST", DEFAULT_HOST).strip().lower()
+    return PROGRESS_INTERVAL_S if host == "claude-code" else None
 
 
 def _log(msg: str) -> None:
@@ -465,7 +640,7 @@ def _log(msg: str) -> None:
 
 
 if _RAW_WAIT_MODE not in {"poll", "push"}:
-    _log(f"invalid PURSERS_WAIT_MODE={_RAW_WAIT_MODE!r}; using poll")
+    _log(f"invalid PURSERS_WAIT_MODE={_RAW_WAIT_MODE!r}; using push")
 
 
 @lru_cache(maxsize=1_024)
@@ -487,6 +662,7 @@ class _BoardView:
         if raw_client is None:
             raise RuntimeError("BoardClient is not entered")
         self.board_id = board_id
+        self._parent = parent
         self.agent_name = parent.agent_name
         self.identity: JoinedIdentity | None = None
         self.generation_token: str | None = None
@@ -904,6 +1080,8 @@ async def _catchup_all(
     cursor: int,
     agent_name: str,
     explicit_name: bool,
+    *,
+    prefer_pure: bool = False,
 ) -> tuple[list[dict], int, bool]:
     """Fully drain board_catchup pages from cursor. ack=False: this tool owns
     since_seq/new_seq itself via the caller's explicit round trip rather than
@@ -924,16 +1102,37 @@ async def _catchup_all(
             "limit": CATCHUP_PAGE_LIMIT,
             "ack": False,
         }
+        pure_requested = prefer_pure and getattr(
+            client, "_pursers_pure_catchup", None
+        ) is not False
+        if pure_requested:
+            catchup_args["touch"] = False
         if explicit_name:
             catchup_args["agent_name"] = agent_name
         try:
             page = await client.board_catchup(**catchup_args)
         except BoardClientError as exc:
-            if not explicit_name or HANDOFF_REJOIN_MESSAGE not in str(exc):
+            message = str(exc).lower()
+            if pure_requested and any(
+                marker in message
+                for marker in ("touch", "unexpected keyword", "extra input", "not permitted")
+            ):
+                setattr(client, "_pursers_pure_catchup", False)
+                catchup_args.pop("touch", None)
+                _log(
+                    "WARNING: side-effect-free board_catchup is unavailable; "
+                    "using ack=False compatibility refetch for this deployment"
+                )
+                page = await client.board_catchup(**catchup_args)
+            elif not explicit_name or HANDOFF_REJOIN_MESSAGE not in str(exc):
                 raise
-            _log(f"agent={agent_name!r}: handed off; rejoining once")
-            await _join_for_call(client, agent_name, explicit_name)
-            page = await client.board_catchup(**catchup_args)
+            else:
+                _log(f"agent={agent_name!r}: handed off; rejoining once")
+                await _join_for_call(client, agent_name, explicit_name)
+                page = await client.board_catchup(**catchup_args)
+        else:
+            if pure_requested:
+                setattr(client, "_pursers_pure_catchup", True)
         if page.get("resync_required"):
             resynced = True
             cursor = int(page["reset_cursor"])
@@ -990,53 +1189,81 @@ async def _scan_open_backlog(
     my_agent_id: str,
     only_mine: bool,
     project: str | None,
+    held: dict[str, float] | None = None,
 ) -> list[dict]:
     """Best-effort scan for open work older than the caller's journal cursor."""
     try:
         listed = await client.ticket_list(
-            status="open", include_closed=False, limit=BACKLOG_SCAN_LIMIT
+            include_closed=False, limit=BACKLOG_SCAN_LIMIT
         )
     except Exception as exc:
         _log(f"backlog scan: ticket_list failed: {exc}")
         return []
-    return backlog_events(
-        listed.get("tickets", []), my_agent_id, only_mine, project
-    )
+    tickets = listed.get("tickets", [])
+    if held is not None:
+        for ticket in tickets:
+            if (
+                ticket.get("status") in CLAIMED_STATES
+                and ticket.get("claimed_by_agent_id") == my_agent_id
+                and isinstance(ticket.get("ticket_id"), str)
+            ):
+                try:
+                    ttl_s = max(3, int(ticket.get("ttl_s") or DEFAULT_CLAIM_TTL_S))
+                except (TypeError, ValueError):
+                    ttl_s = DEFAULT_CLAIM_TTL_S
+                held[ticket["ticket_id"]] = min(
+                    MAX_LEASE_RENEW_INTERVAL_S, ttl_s / 3
+                )
+    return backlog_events(tickets, my_agent_id, only_mine, project)
 
 
-async def _heartbeat(
-    client: BoardClient, agent_name: str, my_agent_id: str
+async def _renew_due_leases(
+    client: BoardClient,
+    held: dict[str, float],
+    due: dict[str, float],
+    now: float,
 ) -> None:
-    """Best-effort lease_renew for any ticket this agent currently holds.
-
-    Never raises -- a heartbeat failure must not abort the wait. If this
-    agent holds no active claim there is nothing to renew, which is the
-    common case for an idle listener; that is logged, not treated as error.
-    """
-    try:
-        listed = await client.ticket_list(
-            assigned_to=agent_name, include_closed=False, limit=50
-        )
-    except Exception as exc:
-        _log(f"heartbeat: ticket_list failed: {exc}")
-        return
-    held = [
-        t for t in listed.get("tickets", [])
-        if t.get("status") in CLAIMED_STATES and t.get("claimed_by_agent_id") == my_agent_id
-    ]
-    if not held:
-        _log("heartbeat: no active claim to renew")
-        return
-    for ticket in held:
-        ticket_id = ticket["ticket_id"]
+    """Renew the entry-snapshot of held claims without discovery polling."""
+    for ticket_id, interval_s in held.items():
+        if now < due.setdefault(ticket_id, now + interval_s):
+            continue
         try:
             renewed = await client.lease_renew(ticket_id)
             _log(
-                f"heartbeat: agent={agent_name!r} lease_renew {ticket_id} "
+                f"lease maintenance: lease_renew {ticket_id} "
                 f"-> expires {renewed.get('lease_expires_at')}"
             )
         except Exception as exc:
-            _log(f"heartbeat: lease_renew {ticket_id} failed: {exc}")
+            _log(f"lease maintenance: lease_renew {ticket_id} failed: {exc}")
+        finally:
+            due[ticket_id] = now + interval_s
+
+
+def _maintenance_due_in(
+    now: float,
+    remaining: float,
+    lease_due: dict[str, float],
+    next_progress: float | None,
+) -> float:
+    due = [remaining]
+    if lease_due:
+        due.append(max(0.0, min(lease_due.values()) - now))
+    if next_progress is not None:
+        due.append(max(0.0, next_progress - now))
+    return min(due)
+
+
+async def _run_progress(
+    callback: Callable[[float, float], Awaitable[None]] | None,
+    started: float,
+    budget: float,
+) -> None:
+    if callback is None:
+        return
+    try:
+        await callback(max(0.0, time.monotonic() - started), budget)
+    except Exception as exc:
+        _log(f"progress notification failed: {type(exc).__name__}")
 
 
 async def _a2a_wait_impl(
@@ -1047,6 +1274,7 @@ async def _a2a_wait_impl(
     project: str | None = None,
     agent_name: str | None = None,
     boards: list[str] | str | None = None,
+    progress_callback: Callable[[float, float], Awaitable[None]] | None = None,
 ) -> dict[str, Any]:
     """Block until pursers board work arrives, or until timeout_s elapses.
 
@@ -1054,9 +1282,9 @@ async def _a2a_wait_impl(
     then current open tickets are scanned for work older than the cursor.
     Relevant work is returned without waiting, so a re-arm after a long gap
     costs one call.
-    Otherwise polls every ~2s, firing a lease_renew heartbeat roughly every
-    20s for any ticket this agent holds, until a relevant event appears or
-    timeout_s (clamped to a desktop-safe ceiling) elapses.
+    Otherwise uses subscription-first delivery, with polling only as an
+    explicit or per-call compatibility fallback. timeout_s is capped by the
+    configured host deadline minus its safety margin.
 
     project: when set (case-insensitive), only tickets whose target_url starts
     with "<project>/" match -- this is how one shared Pursers board serves
@@ -1082,10 +1310,10 @@ async def _a2a_wait_impl(
     means the journal was compacted past our cursor and events were lost:
     re-fetch full state (e.g. ticket_list) before trusting events as complete.
 
-    HEARTBEAT SCOPE: the lease_renew heartbeat only fires while THIS call is
-    blocking. It does NOT run while you are executing ticket work between
-    a2a_wait calls -- during long work you must renew your own claim (lease_renew)
-    or the reaper can reclaim it. See WORKER-DIRECTIVE.md step DO.
+    LEASE SCOPE: the entry snapshot records claims held by this identity, and
+    only those ticket IDs are renewed while THIS call blocks. No ticket_list
+    heartbeat runs during the wait. During work outside a2a_wait, renew the
+    claim directly. See WORKER-DIRECTIVE.md step DO.
     """
     if boards == "registry":
         try:
@@ -1098,6 +1326,7 @@ async def _a2a_wait_impl(
                 only_mine=only_mine,
                 project=project,
                 agent_name=agent_name,
+                progress_callback=progress_callback,
             )
             return {
                 **result,
@@ -1113,6 +1342,7 @@ async def _a2a_wait_impl(
             only_mine=only_mine,
             project=project,
             agent_name=agent_name,
+            progress_callback=progress_callback,
         )
     if isinstance(boards, str):
         raise ValueError('boards must be a list of board IDs or "registry"')
@@ -1125,6 +1355,7 @@ async def _a2a_wait_impl(
             only_mine=only_mine,
             project=project,
             agent_name=agent_name,
+            progress_callback=progress_callback,
         )
     if isinstance(since_seq, dict):
         raise ValueError("since_seq must be an integer when boards is omitted")
@@ -1135,6 +1366,7 @@ async def _a2a_wait_impl(
         only_mine=only_mine,
         project=project,
         agent_name=agent_name,
+        progress_callback=progress_callback,
     )
 
 
@@ -1148,29 +1380,34 @@ async def a2a_wait(
     agent_name: str | None = None,
     boards: list[str] | str | None = None,
 ) -> dict[str, Any]:
-    """Wait for work and record one context-pressure sample per touched seat."""
+    """Wait for work and record one model-visible return."""
     client = await _client_for_tool(ctx)
     meter = getattr(client, "meter", None)
+    async def progress(elapsed: float, total: float) -> None:
+        await ctx.report_progress(
+            elapsed,
+            total,
+            "Waiting for a Pursers subscription cue",
+        )
+
+    async def run() -> dict[str, Any]:
+        return await _a2a_wait_impl(
+            client,
+            since_seq,
+            timeout_s,
+            only_mine,
+            project,
+            agent_name,
+            boards,
+            progress,
+        )
     if meter is None:
-        return await _a2a_wait_impl(
-            client,
-            since_seq,
-            timeout_s,
-            only_mine,
-            project,
-            agent_name,
-            boards,
-        )
+        return await run()
     async with meter.poll_cycle():
-        return await _a2a_wait_impl(
-            client,
-            since_seq,
-            timeout_s,
-            only_mine,
-            project,
-            agent_name,
-            boards,
-        )
+        result = await run()
+    selected_agent = AGENT_NAME if agent_name is None else agent_name
+    await meter.record_wait_return(BOARD_ID, selected_agent, result)
+    return result
 
 
 def _normalize_boards(boards: list[str]) -> list[str]:
@@ -1202,30 +1439,76 @@ def _multi_cursors(
     return {board_id: cursor for board_id in boards}
 
 
+async def _event_stream(
+    parent: BoardClient,
+    board_id: str,
+    identity: JoinedIdentity,
+    generation_token: str | None,
+    from_cursor: int,
+    cursor_callback: Callable[[int], None],
+    *,
+    pure_catchup: bool,
+) -> AsyncIterator[dict[str, Any]]:
+    """Use BoardClient.events for reconnect/dedup over stable cue URIs."""
+    custom = getattr(parent, "events_for_board", None)
+    if callable(custom):
+        async for event in custom(
+            board_id,
+            from_cursor,
+            identity,
+            cursor_callback,
+            generation_token=generation_token,
+            pure_catchup=pure_catchup,
+        ):
+            yield event
+        return
+    event_client = BoardClient(
+        parent.url,
+        parent.token,
+        board_id,
+        agent_name=identity.agent_name,
+        reconnect_delay_s=parent.reconnect_delay_s,
+    )
+    event_client.identity = identity
+    event_client.generation_token = generation_token
+    resources = [
+        f"board://{board_id}/journal",
+        f"board://{board_id}/agent/{identity.agent_id}",
+    ]
+    async for event in event_client.events(
+        from_cursor=from_cursor,
+        only_mine=False,
+        kinds=RELEVANT_KINDS,
+        resource_subscriptions=resources,
+        acknowledge=False,
+        touch=False if pure_catchup else None,
+        cursor_callback=cursor_callback,
+    ):
+        yield event
+
+
 async def _push_cues(
     board_id: str,
     client: _BoardView,
-    queue: asyncio.Queue[tuple[str, str, str | None]],
+    cursor: int,
+    queue: asyncio.Queue[tuple[str, str, dict[str, Any] | str | None]],
 ) -> None:
-    """Forward one board's stable journal cues; report failure locally."""
+    """Forward authoritative events from BoardClient.events."""
     try:
-        listen = getattr(client._client, "listen", None)
-        if not callable(listen):
-            raise RuntimeError("BoardClient transport does not expose listen()")
-        journal_uri = f"board://{board_id}/journal"
-        async with listen(resource_subscriptions=[journal_uri]) as subscription:
-            honored = {
-                str(uri)
-                for uri in (subscription.honored.resource_subscriptions or ())
-            }
-            if journal_uri not in honored:
-                raise RuntimeError(
-                    f"server did not honor journal subscription: {journal_uri}"
-                )
-            await queue.put((board_id, "ready", None))
-            async for _notification in subscription:
-                await queue.put((board_id, "cue", None))
-            await queue.put((board_id, "failed", "subscription ended"))
+        def advance(value: int) -> None:
+            queue.put_nowait((board_id, "cursor", str(value)))
+
+        async for event in _event_stream(
+            client._parent,
+            board_id,
+            client.identity,
+            client.generation_token,
+            cursor,
+            advance,
+            pure_catchup=getattr(client, "_pursers_pure_catchup", None) is True,
+        ):
+            await queue.put((board_id, "event", event))
+        await queue.put((board_id, "failed", "subscription event stream ended"))
     except asyncio.CancelledError:
         raise
     except Exception as exc:
@@ -1242,6 +1525,7 @@ async def _wait_for_work_many(
     project: str | None = None,
     agent_name: str | None = None,
     task_focus: str | None = None,
+    progress_callback: Callable[[float, float], Awaitable[None]] | None = None,
 ) -> dict[str, Any]:
     """Wait across independent board cursors and identities on one transport."""
     board_order = _normalize_boards(boards)
@@ -1253,7 +1537,10 @@ async def _wait_for_work_many(
     budget = clamp_timeout(timeout_s)
     started = time.monotonic()
     deadline = started + budget
-    last_heartbeat = started
+    held_by_board: dict[str, dict[str, float]] = {}
+    lease_due_by_board: dict[str, dict[str, float]] = {}
+    progress_cadence = _progress_cadence_s() if progress_callback else None
+    next_progress = started + progress_cadence if progress_cadence else None
     proj = project.strip().lower() if isinstance(project, str) and project.strip() else None
     call_agent_name = AGENT_NAME if agent_name is None else agent_name
     if not isinstance(call_agent_name, str) or not call_agent_name:
@@ -1277,6 +1564,8 @@ async def _wait_for_work_many(
             raise BoardClientError("server returned an unexpected per-board agent_id")
         views[board_id] = view
         agent_ids[board_id] = expected_id
+        held_by_board[board_id] = {}
+        lease_due_by_board[board_id] = {}
 
     active = [board_id for board_id in board_order if board_id in views]
 
@@ -1299,6 +1588,7 @@ async def _wait_for_work_many(
             cursors[board_id],
             call_agent_name,
             True,
+            prefer_pure=WAIT_MODE == "push",
         )
         cursors[board_id] = next_cursor
         if did_resync:
@@ -1312,7 +1602,11 @@ async def _wait_for_work_many(
         )
         if backlog:
             queued = await _scan_open_backlog(
-                views[board_id], agent_ids[board_id], only_mine, proj
+                views[board_id],
+                agent_ids[board_id],
+                only_mine,
+                proj,
+                held_by_board[board_id],
             )
             journal_ids = {
                 event.get("ticket_id")
@@ -1335,57 +1629,71 @@ async def _wait_for_work_many(
 
     # Entry-only backlog scans are interleaved board-by-board with catchup.
     relevant = await poll_selected(active, backlog=True)
+    for board_id in active:
+        lease_due_by_board[board_id] = {
+            ticket_id: started + interval
+            for ticket_id, interval in held_by_board[board_id].items()
+        }
     if relevant:
         return response(relevant, False)
     if not active:
         return response([], True)
 
-    final_poll = active
+    async def maintain(now: float) -> None:
+        nonlocal next_progress
+        for board_id in active:
+            await _renew_due_leases(
+                views[board_id],
+                held_by_board[board_id],
+                lease_due_by_board[board_id],
+                now,
+            )
+        if next_progress is not None and now >= next_progress:
+            await _run_progress(progress_callback, started, budget)
+            next_progress = now + (progress_cadence or PROGRESS_INTERVAL_S)
+
+    def maintenance_wait(now: float, remaining: float) -> float:
+        flat_due = {
+            f"{board_id}:{ticket_id}": value
+            for board_id, due in lease_due_by_board.items()
+            for ticket_id, value in due.items()
+        }
+        return _maintenance_due_in(now, remaining, flat_due, next_progress)
+
+    final_poll: list[str] = list(active)
     if WAIT_MODE == "push":
-        queue: asyncio.Queue[tuple[str, str, str | None]] = asyncio.Queue()
+        queue: asyncio.Queue[
+            tuple[str, str, dict[str, Any] | str | None]
+        ] = asyncio.Queue()
         tasks = {
             board_id: asyncio.create_task(
-                _push_cues(board_id, views[board_id], queue)
+                _push_cues(
+                    board_id,
+                    views[board_id],
+                    cursors[board_id],
+                    queue,
+                )
             )
             for board_id in active
         }
         fallback: set[str] = set()
-        pending_ready = set(active)
         try:
-            # Establish every independent subscription, then splice once to
-            # cover mutations racing initial catchup and subscription setup.
-            while pending_ready and time.monotonic() < deadline:
-                remaining = deadline - time.monotonic()
-                try:
-                    async with asyncio.timeout(remaining):
-                        board_id, kind, detail = await queue.get()
-                except TimeoutError:
-                    break
-                if kind == "failed":
-                    fallback.add(board_id)
-                    _log(
-                        f"push unavailable for board={board_id!r}; "
-                        f"falling back to poll: {detail}"
-                    )
-                pending_ready.discard(board_id)
-            relevant = await poll_selected(active)
-            if relevant:
-                return response(relevant, False)
-
             next_poll = time.monotonic() + DEFAULT_POLL_INTERVAL_S
             while True:
                 now = time.monotonic()
                 remaining = deadline - now
                 if remaining <= 0:
                     break
-                heartbeat_due = max(
-                    0.0, HEARTBEAT_INTERVAL_S - (now - last_heartbeat)
-                )
                 poll_due = (
                     max(0.0, next_poll - now) if fallback else remaining
                 )
-                wait_slice = min(remaining, heartbeat_due, poll_due)
-                item: tuple[str, str, str | None] | None = None
+                wait_slice = min(
+                    poll_due,
+                    maintenance_wait(now, remaining),
+                )
+                item: tuple[
+                    str, str, dict[str, Any] | str | None
+                ] | None = None
                 if wait_slice > 0:
                     try:
                         async with asyncio.timeout(wait_slice):
@@ -1393,43 +1701,39 @@ async def _wait_for_work_many(
                     except TimeoutError:
                         pass
 
-                cued: set[str] = set()
-                if item is not None:
-                    board_id, kind, detail = item
-                    if kind == "cue":
-                        cued.add(board_id)
+                items = [item] if item is not None else []
+                while not queue.empty():
+                    items.append(queue.get_nowait())
+                found: list[dict[str, Any]] = []
+                for board_id, kind, detail in items:
+                    if kind == "cursor":
+                        cursors[board_id] = max(
+                            cursors[board_id], int(str(detail))
+                        )
+                    elif kind == "event" and isinstance(detail, dict):
+                        sequence = detail.get("seq")
+                        if isinstance(sequence, int):
+                            cursors[board_id] = max(cursors[board_id], sequence)
+                        if await _is_relevant(
+                            views[board_id],
+                            detail,
+                            agent_ids[board_id],
+                            only_mine,
+                            proj,
+                        ):
+                            found.append({**detail, "board_id": board_id})
                     elif kind == "failed":
                         fallback.add(board_id)
                         _log(
-                            f"push lost for board={board_id!r}; "
-                            f"falling back to poll: {detail}"
+                            "WARNING: subscriptions/listen unavailable for "
+                            f"board={board_id!r}; polling this board for the "
+                            f"remainder of this call and retrying push on re-arm: {detail}"
                         )
-                    while not queue.empty():
-                        board_id, kind, detail = queue.get_nowait()
-                        if kind == "cue":
-                            cued.add(board_id)
-                        elif kind == "failed":
-                            fallback.add(board_id)
-                            _log(
-                                f"push lost for board={board_id!r}; "
-                                f"falling back to poll: {detail}"
-                            )
-                if cued:
-                    relevant = await poll_selected(
-                        [board_id for board_id in active if board_id in cued]
-                    )
-                    if relevant:
-                        return response(relevant, False)
+                if found:
+                    return response(found, False)
 
                 now = time.monotonic()
-                if now - last_heartbeat >= HEARTBEAT_INTERVAL_S:
-                    for board_id in active:
-                        await _heartbeat(
-                            views[board_id],
-                            call_agent_name,
-                            agent_ids[board_id],
-                        )
-                    last_heartbeat = now
+                await maintain(now)
                 if fallback and now >= next_poll:
                     relevant = await poll_selected(
                         [board_id for board_id in active if board_id in fallback]
@@ -1443,23 +1747,21 @@ async def _wait_for_work_many(
             await asyncio.gather(*tasks.values(), return_exceptions=True)
         # Healthy subscriptions are authoritative wake cues. Refetching an
         # uncued healthy board here would break selective push semantics.
-        final_poll = [
-            board_id for board_id in active if board_id in fallback
-        ]
+        final_poll = [board_id for board_id in active if board_id in fallback]
     else:
         cycle = 0
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 break
-            await asyncio.sleep(min(DEFAULT_POLL_INTERVAL_S, remaining))
+            await asyncio.sleep(
+                min(
+                    DEFAULT_POLL_INTERVAL_S,
+                    maintenance_wait(time.monotonic(), remaining),
+                )
+            )
             now = time.monotonic()
-            if now - last_heartbeat >= HEARTBEAT_INTERVAL_S:
-                for board_id in active:
-                    await _heartbeat(
-                        views[board_id], call_agent_name, agent_ids[board_id]
-                    )
-                last_heartbeat = now
+            await maintain(now)
             offset = cycle % len(active)
             interleaved = active[offset:] + active[:offset]
             cycle += 1
@@ -1467,10 +1769,13 @@ async def _wait_for_work_many(
             if relevant:
                 return response(relevant, False)
 
-    # Final boundary refetch catches mutations racing timeout.
-    relevant = await poll_selected(final_poll)
-    if relevant:
-        return response(relevant, False)
+    # A healthy subscription is the boundary authority; timeout does not
+    # trigger an idle Central read. Explicit poll/fallback mode retains the
+    # final compatibility refetch.
+    if final_poll:
+        relevant = await poll_selected(final_poll)
+        if relevant:
+            return response(relevant, False)
     return response([], True)
 
 
@@ -1482,13 +1787,17 @@ async def _wait_for_work(
     only_mine: bool = True,
     project: str | None = None,
     agent_name: str | None = None,
+    progress_callback: Callable[[float, float], Awaitable[None]] | None = None,
 ) -> dict[str, Any]:
     """Testable wait implementation with identity kept entirely call-local."""
     budget = clamp_timeout(timeout_s)
     started = time.monotonic()
     deadline = started + budget
     cursor = max(0, int(since_seq))
-    last_heartbeat = started
+    held: dict[str, float] = {}
+    lease_due: dict[str, float] = {}
+    progress_cadence = _progress_cadence_s() if progress_callback else None
+    next_progress = started + progress_cadence if progress_cadence else None
     resynced = False
     proj = project.strip().lower() if isinstance(project, str) and project.strip() else None
     explicit_name = agent_name is not None
@@ -1508,7 +1817,11 @@ async def _wait_for_work(
     async def poll_once() -> list[dict]:
         nonlocal cursor, resynced
         events, cursor, did_resync = await _catchup_all(
-            client, cursor, call_agent_name, explicit_name
+            client,
+            cursor,
+            call_agent_name,
+            explicit_name,
+            prefer_pure=WAIT_MODE == "push",
         )
         if did_resync:
             resynced = True
@@ -1520,8 +1833,12 @@ async def _wait_for_work(
     # backlog cues never carry or fabricate a sequence number.
     relevant = await poll_once()
     backlog = await _scan_open_backlog(
-        client, my_agent_id, only_mine, proj
+        client, my_agent_id, only_mine, proj, held
     )
+    lease_due = {
+        ticket_id: started + interval
+        for ticket_id, interval in held.items()
+    }
     journal_ticket_ids = {
         event.get("ticket_id") for event in relevant if event.get("ticket_id")
     }
@@ -1538,79 +1855,90 @@ async def _wait_for_work(
             "resynced": resynced,
         }
 
-    # 2. In dark-launch push mode, listen only for a wake cue. Every cue is
-    # followed by the exact same journal refetch/filter path as polling. The
-    # stable journal URI is published alongside every specific payload update,
-    # including tickets which did not exist when this call began.
+    async def maintain(now: float) -> None:
+        nonlocal next_progress
+        await _renew_due_leases(client, held, lease_due, now)
+        if next_progress is not None and now >= next_progress:
+            await _run_progress(progress_callback, started, budget)
+            next_progress = now + (progress_cadence or PROGRESS_INTERVAL_S)
+
+    def advance_cursor(value: int) -> None:
+        nonlocal cursor
+        cursor = max(cursor, value)
+
+    # 2. Push mode uses BoardClient.events() for live-first subscription,
+    # authoritative drain, cursor tracking, deduplication, and reconnect.
     if WAIT_MODE == "push":
         try:
-            mcp_client = getattr(client, "_client", None)
-            listen = getattr(mcp_client, "listen", None)
-            if not callable(listen):
-                raise RuntimeError("BoardClient transport does not expose listen()")
-            journal_uri = f"board://{BOARD_ID}/journal"
-            async with listen(resource_subscriptions=[journal_uri]) as subscription:
-                honored = {
-                    str(uri)
-                    for uri in (
-                        subscription.honored.resource_subscriptions or ()
-                    )
-                }
-                if journal_uri not in honored:
-                    raise RuntimeError(
-                        "server did not honor journal subscription: "
-                        f"{journal_uri}"
-                    )
+            identity = JoinedIdentity(
+                BOARD_ID,
+                my_agent_id,
+                client.identity.principal_id,
+                call_agent_name,
+                getattr(client.identity, "role", "worker"),
+            )
+            events = _event_stream(
+                client,
+                BOARD_ID,
+                identity,
+                getattr(client, "generation_token", None),
+                cursor,
+                advance_cursor,
+                pure_catchup=getattr(
+                    client, "_pursers_pure_catchup", None
+                ) is True,
+            )
+            pending_event = asyncio.create_task(anext(events))
+            try:
                 while True:
                     now = time.monotonic()
                     remaining = deadline - now
                     if remaining <= 0:
-                        break
-                    heartbeat_due_in = max(
-                        0.0, HEARTBEAT_INTERVAL_S - (now - last_heartbeat)
+                        return {
+                            "new_seq": cursor,
+                            "events": [],
+                            "waited_s": round(now - started, 2),
+                            "timed_out": True,
+                            "resynced": resynced,
+                        }
+                    wait_slice = _maintenance_due_in(
+                        now, remaining, lease_due, next_progress
                     )
-                    wait_slice = min(remaining, heartbeat_due_in)
-                    if wait_slice > 0:
-                        try:
-                            async with asyncio.timeout(wait_slice):
-                                await anext(subscription)
-                        except TimeoutError:
-                            pass
-                        else:
-                            relevant = await poll_once()
-                            if relevant:
-                                return {
-                                    "new_seq": cursor,
-                                    "events": relevant,
-                                    "waited_s": round(
-                                        time.monotonic() - started, 2
-                                    ),
-                                    "timed_out": False,
-                                    "resynced": resynced,
-                                }
-
-                    now = time.monotonic()
-                    if now - last_heartbeat >= HEARTBEAT_INTERVAL_S:
-                        await _heartbeat(client, call_agent_name, my_agent_id)
-                        last_heartbeat = now
-
-                # Match poll mode's final boundary refetch: a mutation racing
-                # the timeout is still found even if its notification has not
-                # reached this process yet.
-                relevant = await poll_once()
-                if relevant:
-                    return {
-                        "new_seq": cursor,
-                        "events": relevant,
-                        "waited_s": round(time.monotonic() - started, 2),
-                        "timed_out": False,
-                        "resynced": resynced,
-                    }
+                    done, _ = await asyncio.wait(
+                        {pending_event}, timeout=wait_slice
+                    )
+                    if not done:
+                        await maintain(time.monotonic())
+                        continue
+                    event = pending_event.result()
+                    found: list[dict[str, Any]] = []
+                    while True:
+                        if await _is_relevant(
+                            client, event, my_agent_id, only_mine, proj
+                        ):
+                            found.append(event)
+                        pending_event = asyncio.create_task(anext(events))
+                        await asyncio.sleep(0)
+                        if not pending_event.done():
+                            break
+                        event = pending_event.result()
+                    if found:
+                        return {
+                            "new_seq": cursor,
+                            "events": found,
+                            "waited_s": round(time.monotonic() - started, 2),
+                            "timed_out": False,
+                            "resynced": resynced,
+                        }
+            finally:
+                pending_event.cancel()
+                await asyncio.gather(pending_event, return_exceptions=True)
+                await events.aclose()
         except Exception as exc:
-            # Push is an optimization only. Unsupported protocol versions,
-            # rejected filters, stream loss, and transport errors all retain
-            # the proven poll path for the rest of this call.
-            _log(f"push unavailable; falling back to poll for this call: {exc}")
+            _log(
+                "WARNING: subscriptions/listen unavailable; falling back to "
+                f"poll for this call and retrying push on re-arm: {exc}"
+            )
 
     # 3. Poll until relevant work appears or the budget runs out. This is the
     # default path and the whole-call fallback after any push failure.
@@ -1618,12 +1946,17 @@ async def _wait_for_work(
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             break
-        await asyncio.sleep(min(DEFAULT_POLL_INTERVAL_S, remaining))
+        await asyncio.sleep(
+            min(
+                DEFAULT_POLL_INTERVAL_S,
+                _maintenance_due_in(
+                    time.monotonic(), remaining, lease_due, next_progress
+                ),
+            )
+        )
 
         now = time.monotonic()
-        if now - last_heartbeat >= HEARTBEAT_INTERVAL_S:
-            await _heartbeat(client, call_agent_name, my_agent_id)
-            last_heartbeat = now
+        await maintain(now)
 
         relevant = await poll_once()
         if relevant:

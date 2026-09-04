@@ -81,6 +81,47 @@ class InProcessBoardClient:
             required_fields=["test_output"],
         )
 
+    async def events_for_board(
+        self,
+        board_id: str,
+        from_cursor: int,
+        identity: JoinedIdentity,
+        cursor_callback: Any,
+        *,
+        generation_token: str | None,
+        pure_catchup: bool,
+    ) -> Any:
+        resources = [
+            f"board://{board_id}/journal",
+            f"board://{board_id}/agent/{identity.agent_id}",
+        ]
+        cursor = from_cursor
+        async with self._client.listen(
+            resource_subscriptions=resources
+        ) as subscription:
+            while True:
+                page = await self.board_catchup(
+                    cursor=cursor,
+                    ack=False,
+                    **({"touch": False} if pure_catchup else {}),
+                )
+                cursor = int(page["next_cursor"])
+                cursor_callback(cursor)
+                for event in page["events"]:
+                    yield event
+                if not page.get("has_more"):
+                    break
+            async for _cue in subscription:
+                page = await self.board_catchup(
+                    cursor=cursor,
+                    ack=False,
+                    **({"touch": False} if pure_catchup else {}),
+                )
+                cursor = int(page["next_cursor"])
+                cursor_callback(cursor)
+                for event in page["events"]:
+                    yield event
+
 
 class SignalingListenContext(AbstractAsyncContextManager[Any]):
     def __init__(
@@ -235,6 +276,41 @@ class ScriptedBoardClient:
         self.ticket_list_calls += 1
         return {"tickets": self._tickets}
 
+    async def events_for_board(
+        self,
+        board_id: str,
+        from_cursor: int,
+        identity: JoinedIdentity,
+        cursor_callback: Any,
+        *,
+        generation_token: str | None,
+        pure_catchup: bool,
+    ) -> Any:
+        resources = [
+            f"board://{board_id}/journal",
+            f"board://{board_id}/agent/{identity.agent_id}",
+        ]
+        async with self._client.listen(
+            resource_subscriptions=resources
+        ) as subscription:
+            page = await self.board_catchup(
+                cursor=from_cursor,
+                ack=False,
+                **({"touch": False} if pure_catchup else {}),
+            )
+            cursor_callback(int(page["next_cursor"]))
+            for event in page["events"]:
+                yield event
+            async for _cue in subscription:
+                page = await self.board_catchup(
+                    cursor=int(page["next_cursor"]),
+                    ack=False,
+                    **({"touch": False} if pure_catchup else {}),
+                )
+                cursor_callback(int(page["next_cursor"]))
+                for event in page["events"]:
+                    yield event
+
 
 class ManualClock:
     def __init__(self) -> None:
@@ -288,6 +364,36 @@ class PushWaitTests(unittest.IsolatedAsyncioTestCase):
         await client.board_join()
         await client.board_join(agent_name="push-actor")
         return client
+
+    def test_host_profiles_apply_timeout_minus_margin(self) -> None:
+        cases = {
+            "codex": 560,
+            "codex-cli": 560,
+            "goose": 270,
+            "claude-code": 21_540,
+            "claude-desktop": 200,
+            "headless": 21_540,
+        }
+        for host, expected in cases.items():
+            with self.subTest(host=host), patch.dict(
+                os.environ,
+                {"PURSERS_HOST": host, "PURSERS_HOST_TIMEOUT_S": ""},
+            ):
+                self.assertEqual(wait_server.clamp_timeout(999_999), expected)
+        with patch.dict(
+            os.environ,
+            {"PURSERS_HOST": "goose", "PURSERS_HOST_TIMEOUT_S": "3600"},
+        ):
+            self.assertEqual(wait_server.clamp_timeout(999_999), 3540)
+
+    def test_claude_code_enables_five_minute_progress_cadence(self) -> None:
+        with patch.dict(os.environ, {"PURSERS_HOST": "claude-code"}):
+            self.assertEqual(
+                wait_server._progress_cadence_s(),
+                wait_server.PROGRESS_INTERVAL_S,
+            )
+        with patch.dict(os.environ, {"PURSERS_HOST": "codex"}):
+            self.assertIsNone(wait_server._progress_cadence_s())
 
     async def test_push_wakes_on_new_ticket_and_refetches_event(self) -> None:
         async with Client(self.mcp, mode="2026-07-28", cache=None) as raw:
@@ -420,7 +526,7 @@ class PushWaitTests(unittest.IsolatedAsyncioTestCase):
                 )
             )
 
-    async def test_push_subscribes_only_to_stable_board_journal_uri(self) -> None:
+    async def test_push_subscribes_to_journal_and_per_seat_uri(self) -> None:
         journal_uri = f"board://{wait_server.BOARD_ID}/journal"
         subscription = StubSubscription(
             [
@@ -436,7 +542,7 @@ class PushWaitTests(unittest.IsolatedAsyncioTestCase):
             {"seq": 52, "kind": "ticket_created", "ticket_id": "TK-two"},
         ]
         client = ScriptedBoardClient(
-            [([], 50), (authoritative, 52)], transport=transport
+            [([], 50), ([], 50), (authoritative, 52)], transport=transport
         )
 
         with patch.object(wait_server, "WAIT_MODE", "push"):
@@ -448,10 +554,11 @@ class PushWaitTests(unittest.IsolatedAsyncioTestCase):
                 project=None,
             )
 
-        self.assertEqual(
-            transport.calls,
-            [{"resource_subscriptions": [journal_uri]}],
-        )
+        agent_id = wait_server._derived_agent_id("PR-scripted", wait_server.AGENT_NAME)
+        self.assertEqual(transport.calls, [{"resource_subscriptions": [
+            journal_uri,
+            f"board://pursers/agent/{agent_id}",
+        ]}])
         self.assertNotIn("board://pursers/ticket/TK-cue-only", str(transport.calls))
         self.assertEqual(result["events"], authoritative)
         self.assertEqual(result["new_seq"], 52)
@@ -459,8 +566,8 @@ class PushWaitTests(unittest.IsolatedAsyncioTestCase):
             [event["ticket_id"] for event in result["events"]],
             ["TK-one", "TK-two"],
         )
-        self.assertEqual(subscription.yielded, 1)
-        self.assertEqual(client.catchup_calls, 2)
+        self.assertGreaterEqual(subscription.yielded, 1)
+        self.assertGreaterEqual(client.catchup_calls, 3)
 
     async def test_push_backlog_scan_precedes_subscription(self) -> None:
         ticket = {

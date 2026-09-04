@@ -473,6 +473,7 @@ def _bridge_stats_check(
         if not isinstance(document, dict) or document.get("schema_version") not in {
             1,
             2,
+            3,
         }:
             raise DoctorError("stats schema is invalid")
         days = document.get("days")

@@ -61,8 +61,8 @@ class FakeResult:
 
 
 class FakeSubscription:
-    def __init__(self, uri: str, queue: asyncio.Queue[object]) -> None:
-        self.honored = SimpleNamespace(resource_subscriptions=[uri])
+    def __init__(self, uris: list[str], queue: asyncio.Queue[object]) -> None:
+        self.honored = SimpleNamespace(resource_subscriptions=uris)
         self.queue = queue
 
     def __aiter__(self) -> FakeSubscription:
@@ -73,14 +73,16 @@ class FakeSubscription:
 
 
 class FakeListenContext(AbstractAsyncContextManager[FakeSubscription]):
-    def __init__(self, central: FakePoolCentral, board_id: str) -> None:
+    def __init__(
+        self, central: FakePoolCentral, board_id: str, uris: list[str]
+    ) -> None:
         self.central = central
         self.board_id = board_id
+        self.uris = uris
 
     async def __aenter__(self) -> FakeSubscription:
         self.central.subscription_ready[self.board_id].set()
-        uri = f"board://{self.board_id}/journal"
-        return FakeSubscription(uri, self.central.cues[self.board_id])
+        return FakeSubscription(self.uris, self.central.cues[self.board_id])
 
     async def __aexit__(self, *_arguments: Any) -> None:
         return None
@@ -173,7 +175,7 @@ class FakePoolCentral:
                     for ticket in tickets
                     if ticket.get("claimed_by") == assigned_to
                 ]
-            if status == "open" and assigned_to is None:
+            if status in {None, "open"} and assigned_to is None:
                 self.initial_scan_boards.add(board_id)
                 if {HOME, ALPHA}.issubset(self.initial_scan_boards):
                     self.initial_scan_done.set()
@@ -211,7 +213,7 @@ class FakePoolCentral:
     def listen(self, *, resource_subscriptions: list[str]) -> FakeListenContext:
         uri = resource_subscriptions[0]
         board_id = uri.removeprefix("board://").removesuffix("/journal")
-        return FakeListenContext(self, board_id)
+        return FakeListenContext(self, board_id, resource_subscriptions)
 
     def _append_event(
         self,
@@ -292,6 +294,49 @@ class FakeRootClient:
                 "value": json.dumps(self.central.registry),
             },
         }
+
+    async def events_for_board(
+        self,
+        board_id: str,
+        from_cursor: int,
+        identity: JoinedIdentity,
+        cursor_callback: Any,
+        *,
+        generation_token: str | None,
+        pure_catchup: bool,
+    ) -> Any:
+        resources = [
+            f"board://{board_id}/journal",
+            f"board://{board_id}/agent/{identity.agent_id}",
+        ]
+        cursor = from_cursor
+
+        async def drain() -> list[dict[str, Any]]:
+            nonlocal cursor
+            result = await self.central.call_tool(
+                "board_catchup",
+                {
+                    "board_id": board_id,
+                    "agent_name": identity.agent_name,
+                    "cursor": cursor,
+                    "limit": 100,
+                    "ack": False,
+                    **({"touch": False} if pure_catchup else {}),
+                },
+            )
+            page = BoardClient._decode(result)
+            cursor = int(page["next_cursor"])
+            cursor_callback(cursor)
+            return list(page["events"])
+
+        async with self.central.listen(
+            resource_subscriptions=resources
+        ) as subscription:
+            for event in await drain():
+                yield event
+            async for _cue in subscription:
+                for event in await drain():
+                    yield event
 
 
 def context_for(client: FakeRootClient) -> SimpleNamespace:
@@ -390,14 +435,26 @@ class CrossProjectPoolE2ETests(unittest.IsolatedAsyncioTestCase):
                 claimed["ticket"]["claimed_by_agent_id"], claimed_agent_id
             )
 
-            # The real heartbeat helper sees all active boards but renews only
-            # the board on which this identity actually holds a claim.
+            # Entry snapshots exact-filter held claims; maintenance then renews
+            # only the board on which this identity owns a lease.
             home_view = wait_server._BoardView(client, HOME)
             home_join = await home_view.board_join(agent_name=WORKER)
             alpha_view = wait_server._BoardView(client, ALPHA)
             alpha_join = await alpha_view.board_join(agent_name=WORKER)
-            await wait_server._heartbeat(home_view, WORKER, home_join["agent_id"])
-            await wait_server._heartbeat(alpha_view, WORKER, alpha_join["agent_id"])
+            for view, agent_id in (
+                (home_view, home_join["agent_id"]),
+                (alpha_view, alpha_join["agent_id"]),
+            ):
+                held: dict[str, float] = {}
+                await wait_server._scan_open_backlog(
+                    view, agent_id, True, None, held
+                )
+                await wait_server._renew_due_leases(
+                    view,
+                    held,
+                    {ticket_id: 0.0 for ticket_id in held},
+                    1.0,
+                )
             self.assertEqual(central.renewed, [(ALPHA, "TK-alpha")])
 
             # A second identity still sees independent home-board work. The
