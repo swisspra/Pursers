@@ -794,6 +794,18 @@ def _nested_exceptions(exc: BaseException) -> list[BaseException]:
     return nested
 
 
+def _seat_subscription_can_degrade(exc: BaseException) -> bool:
+    """Return whether a journal+seat listen should retry as journal-only."""
+    detail = " ".join(str(item) for item in _nested_exceptions(exc)).casefold()
+    return any(
+        marker in detail
+        for marker in (
+            "subscription denied",
+            "server did not honor subscriptions",
+        )
+    )
+
+
 def _classify_board_join_failure(exc: BaseException) -> BoardJoinFailure:
     nested = _nested_exceptions(exc)
     names = {type(item).__name__ for item in nested}
@@ -1462,29 +1474,44 @@ async def _event_stream(
         ):
             yield event
         return
-    event_client = BoardClient(
-        parent.url,
-        parent.token,
-        board_id,
-        agent_name=identity.agent_name,
-        reconnect_delay_s=parent.reconnect_delay_s,
-    )
-    event_client.identity = identity
-    event_client.generation_token = generation_token
-    resources = [
-        f"board://{board_id}/journal",
-        f"board://{board_id}/agent/{identity.agent_id}",
-    ]
-    async for event in event_client.events(
-        from_cursor=from_cursor,
-        only_mine=False,
-        kinds=RELEVANT_KINDS,
-        resource_subscriptions=resources,
-        acknowledge=False,
-        touch=False if pure_catchup else None,
-        cursor_callback=cursor_callback,
-    ):
-        yield event
+    journal_uri = f"board://{board_id}/journal"
+    seat_uri = f"board://{board_id}/agent/{identity.agent_id}"
+
+    async def stream(resources: list[str]) -> AsyncIterator[dict[str, Any]]:
+        # Use a fresh client for each attempt because BoardClient retains every
+        # watched URI. Reusing it would silently put the rejected seat URI back.
+        event_client = BoardClient(
+            parent.url,
+            parent.token,
+            board_id,
+            agent_name=identity.agent_name,
+            reconnect_delay_s=parent.reconnect_delay_s,
+        )
+        event_client.identity = identity
+        event_client.generation_token = generation_token
+        async for event in event_client.events(
+            from_cursor=from_cursor,
+            only_mine=False,
+            kinds=RELEVANT_KINDS,
+            resource_subscriptions=resources,
+            acknowledge=False,
+            touch=False if pure_catchup else None,
+            cursor_callback=cursor_callback,
+        ):
+            yield event
+
+    try:
+        async for event in stream([journal_uri, seat_uri]):
+            yield event
+    except Exception as exc:
+        if not _seat_subscription_can_degrade(exc):
+            raise
+        _log(
+            "per-seat subscription unavailable; retrying journal-only before "
+            f"poll fallback: {exc}"
+        )
+        async for event in stream([journal_uri]):
+            yield event
 
 
 async def _push_cues(
@@ -1801,11 +1828,18 @@ async def _wait_for_work(
     resynced = False
     proj = project.strip().lower() if isinstance(project, str) and project.strip() else None
     explicit_name = agent_name is not None
-    call_agent_name = AGENT_NAME if agent_name is None else agent_name
-    if not isinstance(call_agent_name, str) or not call_agent_name:
-        raise ValueError("agent_name must be a non-empty string")
     if client.identity is None:
         raise RuntimeError("BoardClient has no default joined identity")
+    if agent_name is None:
+        call_agent_name = (
+            getattr(client.identity, "agent_name", None)
+            or getattr(client, "agent_name", None)
+            or AGENT_NAME
+        )
+    else:
+        call_agent_name = agent_name
+    if not isinstance(call_agent_name, str) or not call_agent_name:
+        raise ValueError("agent_name must be a non-empty string")
     my_agent_id = _derived_agent_id(
         client.identity.principal_id, call_agent_name
     )
