@@ -72,15 +72,259 @@ def wait_bridge_host_timeouts(path: Path | None = None) -> dict[str, int]:
 
 
 def _bridge_version() -> str:
+    manifest_path = REPOSITORY / "tools/release_versions.toml"
+    if manifest_path.is_file():
+        try:
+            document = tomllib.loads(manifest_path.read_text(encoding="utf-8"))
+            version = document.get("packages", {}).get("wait_bridge")
+            if version:
+                return str(version)
+        except Exception:
+            pass
     document = tomllib.loads((WAIT_BRIDGE / "pyproject.toml").read_text())
     return str(document["project"]["version"])
 
 
+def _pinned_bridge_version() -> str:
+    return _bridge_version()
+
+
 def _package_version(project: str) -> str:
+    manifest_path = REPOSITORY / "tools/release_versions.toml"
+    if manifest_path.is_file():
+        try:
+            document = tomllib.loads(manifest_path.read_text(encoding="utf-8"))
+            version = document.get("packages", {}).get(project)
+            if version:
+                return str(version)
+        except Exception:
+            pass
     document = tomllib.loads(
         (REPOSITORY / f"packages/{project}/pyproject.toml").read_text()
     )
     return str(document["project"]["version"])
+
+
+JWT_PATTERN = re.compile(r"^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$")
+NVM_NPX_PATTERN = re.compile(
+    r"(/[^\s\"\'\)]*?\.nvm/versions/node/[^/\s\"\'\)]+/bin/npx\b)"
+)
+
+
+def _fetch_latest_pypi_version(
+    package: str = "pursers-wait-bridge", timeout_s: float = 3.0
+) -> str | None:
+    """Query PyPI JSON API for latest package version. Returns None if unreachable."""
+    try:
+        import urllib.request
+
+        req = urllib.request.Request(
+            f"https://pypi.org/pypi/{package}/json",
+            headers={"User-Agent": "pursers-fleet-dashboard"},
+        )
+        with urllib.request.urlopen(req, timeout=timeout_s) as response:
+            if response.status == 200:
+                data = json.loads(response.read().decode("utf-8"))
+                version = data.get("info", {}).get("version")
+                return str(version) if version else None
+    except Exception:
+        return None
+    return None
+
+
+def _resolve_command_executable(command: str | Path | None) -> Path | None:
+    if not command:
+        return None
+    path = Path(command).expanduser()
+    if path.is_file() and os.access(path, os.X_OK):
+        return path
+    found = shutil.which(str(command))
+    if found:
+        found_path = Path(found)
+        if found_path.is_file() and os.access(found_path, os.X_OK):
+            return found_path
+    return None
+
+
+def _query_bridge_version(
+    executable: Path,
+    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+) -> str | None:
+    """Deterministically read installed bridge version by running `<shim> --version`."""
+    try:
+        result = runner(
+            [str(executable), "--version"],
+            check=False,
+            text=True,
+            capture_output=True,
+            timeout=5,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip().splitlines()[0].strip().split()[-1]
+    except Exception:
+        pass
+    return None
+
+
+def _validate_token_file(path_raw: str | Path) -> tuple[bool, str]:
+    """Validate token file existence, readability, non-emptiness, and JWT shape.
+
+    CRITICAL: Never print or log token content under any circumstances.
+    """
+    path = Path(path_raw).expanduser()
+    if not path.is_file() or not os.access(path, os.R_OK):
+        return False, "missing or unreadable"
+    try:
+        content = path.read_text(encoding="utf-8").strip()
+    except Exception:
+        return False, "missing or unreadable"
+    if not content:
+        return False, "token file is empty"
+    if not JWT_PATTERN.fullmatch(content):
+        return False, "invalid JWT format (must have three base64url parts)"
+    return True, "readable; valid JWT"
+
+
+def _is_env_var_defined(
+    var_name: str,
+    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+) -> bool:
+    """Check if environment variable is defined in process env or login shell.
+
+    launchctl setenv is the durable option for GUI apps on macOS.
+    """
+    if not ENV_NAME.fullmatch(var_name):
+        return False
+    if os.environ.get(var_name):
+        return True
+    if shutil.which("zsh"):
+        try:
+            res = runner(
+                ["zsh", "-lic", f'printf %s "${{{var_name}:+set}}"'],
+                check=False,
+                text=True,
+                capture_output=True,
+                timeout=5,
+            )
+            if res.returncode == 0 and res.stdout.strip() == "set":
+                return True
+        except Exception:
+            pass
+    return False
+
+
+def _extract_token_file_references(
+    desired: DesiredSeat, inspection: dict[str, Any]
+) -> list[str]:
+    files: list[str] = []
+    if desired.token_file:
+        files.append(desired.token_file)
+
+    doc = inspection.get("document", {})
+    if isinstance(doc, dict):
+        for srv in doc.get("mcp_servers", {}).values():
+            if isinstance(srv, dict):
+                env = srv.get("env", {})
+                if isinstance(env, dict) and "ONBOARD_CENTRAL_TOKEN_FILE" in env:
+                    files.append(str(env["ONBOARD_CENTRAL_TOKEN_FILE"]))
+                raw_args = srv.get("args", [])
+                if isinstance(raw_args, list):
+                    for arg in raw_args:
+                        if isinstance(arg, str):
+                            files.extend(re.findall(r"\$\(cat\s+([^\)\"']+)\)", arg))
+                cmd = srv.get("command", "")
+                if isinstance(cmd, str):
+                    files.extend(re.findall(r"\$\(cat\s+([^\)\"']+)\)", cmd))
+        for srv in doc.get("mcpServers", {}).values():
+            if isinstance(srv, dict):
+                env = srv.get("env", {})
+                if isinstance(env, dict) and "ONBOARD_CENTRAL_TOKEN_FILE" in env:
+                    files.append(str(env["ONBOARD_CENTRAL_TOKEN_FILE"]))
+                raw_args = srv.get("args", [])
+                if isinstance(raw_args, list):
+                    for arg in raw_args:
+                        if isinstance(arg, str):
+                            files.extend(re.findall(r"\$\(cat\s+([^\)\"']+)\)", arg))
+                cmd = srv.get("command", "")
+                if isinstance(cmd, str):
+                    files.extend(re.findall(r"\$\(cat\s+([^\)\"']+)\)", cmd))
+
+    text = inspection.get("text", "")
+    if isinstance(text, str) and text:
+        for m in re.finditer(
+            r"ONBOARD_CENTRAL_TOKEN_FILE:\s*[\"']?([^\"'\n]+)[\"']?", text
+        ):
+            files.append(m.group(1).strip())
+        for m in re.finditer(r"\$\(cat\s+([^\)\"'\n]+)\)", text):
+            files.append(m.group(1).strip())
+
+    seen: set[str] = set()
+    result: list[str] = []
+    for f in files:
+        if f and f not in seen:
+            seen.add(f)
+            result.append(f)
+    return result
+
+
+def _extract_env_token_references(
+    desired: DesiredSeat, inspection: dict[str, Any]
+) -> list[str]:
+    vars_: list[str] = []
+    if desired.host in {"codex", "codex-cli"}:
+        doc = inspection.get("document", {})
+        bearer_var = (
+            doc.get("mcp_servers", {})
+            .get("pursers-dev", {})
+            .get("bearer_token_env_var")
+        )
+        vars_.append(bearer_var or desired.token_env_var)
+
+    text = inspection.get("text", "")
+    if isinstance(text, str) and text:
+        for m in re.finditer(
+            r"^\s*([A-Za-z_][A-Za-z0-9_]*TOKEN[A-Za-z0-9_]*)\s*:", text, re.M
+        ):
+            var_name = m.group(1).strip()
+            if not var_name.endswith("_FILE"):
+                vars_.append(var_name)
+
+    doc = inspection.get("document", {})
+    if isinstance(doc, dict):
+        for srv in doc.get("mcpServers", {}).values():
+            if isinstance(srv, dict):
+                env = srv.get("env", {})
+                if isinstance(env, dict):
+                    for k in env:
+                        if "TOKEN" in k and not k.endswith("_FILE"):
+                            vars_.append(k)
+
+    seen: set[str] = set()
+    result: list[str] = []
+    for v in vars_:
+        if v and v not in seen:
+            seen.add(v)
+            result.append(v)
+    return result
+
+
+def _extract_nvm_npx_paths(inspection: dict[str, Any]) -> list[str]:
+    found: list[str] = []
+    doc = inspection.get("document", {})
+    if isinstance(doc, dict):
+        serialized = json.dumps(doc)
+        found.extend(NVM_NPX_PATTERN.findall(serialized))
+    text = inspection.get("text", "")
+    if isinstance(text, str):
+        found.extend(NVM_NPX_PATTERN.findall(text))
+    seen: set[str] = set()
+    result: list[str] = []
+    for p in found:
+        path_str = p[0] if isinstance(p, tuple) else p
+        if path_str and path_str not in seen:
+            seen.add(path_str)
+            result.append(path_str)
+    return result
 
 
 def _load_seat_new() -> Any:
@@ -642,20 +886,63 @@ class ClaudeCodeAdapter(JsonHostAdapter):
 
 
 class BridgeInstaller:
+    """Installs, upgrades, and inspects the pursers-wait-bridge tool.
+
+    Bridge version inspection deterministically executes the resolved bridge
+    shim or binary with `--version`. The wait bridge server emits its VERSION
+    constant to stdout on `--version`.
+    """
+
     def __init__(
         self,
         version: str | None = None,
         runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+        command: str | Path | None = None,
+        pypi_fetcher: Callable[[], str | None] | None = None,
     ) -> None:
-        self.version = version or _bridge_version()
+        self.version = version or _pinned_bridge_version()
         self.runner = runner
+        self.command = command
+        self.pypi_fetcher = pypi_fetcher
 
-    def inspect(self) -> dict[str, Any]:
-        command = shutil.which("pursers-wait-bridge")
+    def inspect(self, command: str | Path | None = None) -> dict[str, Any]:
+        target = command or self.command or shutil.which("pursers-wait-bridge")
+        resolved = _resolve_command_executable(target)
+        installed_version = (
+            _query_bridge_version(resolved, self.runner) if resolved else None
+        )
+        pinned_version = self.version
+
+        pypi_version = (
+            self.pypi_fetcher()
+            if self.pypi_fetcher is not None
+            else _fetch_latest_pypi_version()
+        )
+
+        if installed_version is None or installed_version != pinned_version:
+            status = "FAIL"
+            if installed_version is None:
+                message = "bridge command does not resolve or failed to report version"
+            else:
+                message = f"installed={installed_version}; pinned={pinned_version}"
+        elif pypi_version is None:
+            status = "WARN"
+            message = (
+                f"installed={installed_version}; pinned={pinned_version}; PyPI unreachable"
+            )
+        else:
+            status = "PASS"
+            message = f"version {installed_version}"
+
         return {
-            "version": self.version,
-            "command": command,
-            "installed": bool(command),
+            "command": str(resolved) if resolved else (str(target) if target else None),
+            "installed": installed_version is not None,
+            "installed_version": installed_version,
+            "pinned_version": pinned_version,
+            "latest_pypi_version": pypi_version,
+            "version": installed_version or pinned_version,
+            "status": status,
+            "message": message,
             "private_ca_active": bool(os.environ.get("SSL_CERT_FILE")),
         }
 
@@ -858,10 +1145,12 @@ class Doctor:
         live_probe: LiveProbe | None = None,
         runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
         clock: Callable[[], float] = time.time,
+        pypi_fetcher: Callable[[], str | None] | None = None,
     ) -> None:
         self.live_probe = live_probe or _default_live_probe
         self.runner = runner
         self.clock = clock
+        self.pypi_fetcher = pypi_fetcher
 
     def _check(
         self,
@@ -936,42 +1225,115 @@ class Doctor:
                 f"configured={timeout}; required>={desired.profile.host_timeout_s}",
             )
         )
-        for label, raw in (
-            ("token-file", desired.token_file),
-            ("ca-file", desired.ca_file),
-        ):
-            path = Path(raw).expanduser()
-            ok = path.is_file() and os.access(path, os.R_OK)
-            rows.append(
-                self._check(
-                    desired,
-                    label,
-                    "PASS" if ok else "FAIL",
-                    "readable" if ok else "missing or unreadable",
+        token_files = _extract_token_file_references(desired, inspection)
+        token_file_ok = True
+        token_file_msg = "readable; valid JWT"
+        for tf in token_files:
+            ok, msg = _validate_token_file(tf)
+            if not ok:
+                token_file_ok = False
+                token_file_msg = msg
+                break
+        rows.append(
+            self._check(
+                desired,
+                "token-file",
+                "PASS" if token_file_ok else "FAIL",
+                token_file_msg,
+            )
+        )
+
+        env_token_vars = _extract_env_token_references(desired, inspection)
+        if env_token_vars:
+            env_var_ok = True
+            env_var_msg = ""
+            for var_name in env_token_vars:
+                if not _is_env_var_defined(var_name, self.runner):
+                    env_var_ok = False
+                    env_var_msg = (
+                        f"environment variable {var_name!r} is not defined "
+                        f"(expected in ~/.zshrc; launchctl setenv {var_name} <token> is durable for GUI apps)"
+                    )
+                    break
+            if env_var_ok:
+                rows.append(
+                    self._check(
+                        desired,
+                        "token-env",
+                        "PASS",
+                        f"environment variable(s) {', '.join(env_token_vars)} defined",
+                    )
                 )
+            else:
+                rows.append(
+                    self._check(
+                        desired,
+                        "token-env",
+                        "FAIL",
+                        env_var_msg,
+                    )
+                )
+
+        ca_path = Path(desired.ca_file).expanduser()
+        ca_ok = ca_path.is_file() and os.access(ca_path, os.R_OK)
+        rows.append(
+            self._check(
+                desired,
+                "ca-file",
+                "PASS" if ca_ok else "FAIL",
+                "readable" if ca_ok else "missing or unreadable",
             )
-        command = Path(desired.bridge_command).expanduser()
-        executable = command.is_file() and os.access(command, os.X_OK)
-        if executable:
-            result = self.runner(
-                [str(command), "--version"],
-                check=False,
-                text=True,
-                capture_output=True,
-                timeout=5,
-            )
-            actual = result.stdout.strip()
-            ok = result.returncode == 0 and actual == _bridge_version()
+        )
+
+        bridge_cmd = desired.bridge_command
+        has_uvx_from = "uvx" in bridge_cmd and "--from" in bridge_cmd
+        private_ca = bool(os.environ.get("SSL_CERT_FILE") or desired.ca_file)
+        if has_uvx_from and private_ca:
             rows.append(
                 self._check(
                     desired,
                     "bridge",
-                    "PASS" if ok else "FAIL",
-                    f"version {actual or 'unknown'}",
+                    "FAIL",
+                    "uvx --from fails under private CA (use BridgeInstaller / pre-installed bridge)",
                 )
             )
         else:
-            rows.append(self._check(desired, "bridge", "FAIL", "command does not resolve"))
+            installer = BridgeInstaller(
+                version=_pinned_bridge_version(),
+                runner=self.runner,
+                pypi_fetcher=self.pypi_fetcher,
+            )
+            bridge_report = installer.inspect(bridge_cmd)
+            rows.append(
+                self._check(
+                    desired,
+                    "bridge",
+                    bridge_report["status"],
+                    bridge_report["message"],
+                )
+            )
+
+        nvm_paths = _extract_nvm_npx_paths(inspection)
+        if nvm_paths:
+            dead_paths = [p for p in nvm_paths if not Path(p).exists()]
+            if dead_paths:
+                rows.append(
+                    self._check(
+                        desired,
+                        "connector-npx",
+                        "WARN",
+                        f"dead nvm npx path: {dead_paths[0]}",
+                    )
+                )
+            else:
+                rows.append(
+                    self._check(
+                        desired,
+                        "connector-npx",
+                        "PASS",
+                        f"nvm npx path resolves: {nvm_paths[0]}",
+                    )
+                )
         if desired.seat_dir:
             shell = Path(desired.seat_dir).expanduser() / "bin/board.sh"
             hints = Path(desired.seat_dir).expanduser() / ".goosehints"
@@ -1155,7 +1517,12 @@ def main(argv: list[str] | None = None) -> int:
         if args.fix:
             adapter.apply(adapter.plan(desired))
         report = _doctor_document(Doctor().run(desired))
-        inventory.upsert(desired, bridge_version=_bridge_version(), doctor=report)
+        installer = BridgeInstaller(runner=subprocess.run)
+        bridge_info = installer.inspect(desired.bridge_command)
+        actual_bridge_ver = (
+            bridge_info.get("installed_version") or _pinned_bridge_version()
+        )
+        inventory.upsert(desired, bridge_version=actual_bridge_ver, doctor=report)
         outputs.append({"seat": desired.name, **report})
     payload = {"schema_version": 1, "seats": outputs}
     if args.json:

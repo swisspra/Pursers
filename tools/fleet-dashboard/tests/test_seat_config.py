@@ -282,9 +282,11 @@ def test_prompt_renderer_has_exact_registry_rearm_and_role_rules(tmp_path: Path)
     assert "Never use another name" in reviewer
 
 
-def test_inventory_and_doctor_redact_token_and_report_push(tmp_path: Path) -> None:
+def test_inventory_and_doctor_redact_token_and_report_push(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     target = desired(tmp_path, "codex")
-    Path(target.token_file).write_text("TOKEN_MUST_NOT_APPEAR")
+    Path(target.token_file).write_text("eyJhbGciOi.TOKEN_MUST_NOT_APPEAR.signature")
     Path(target.ca_file).write_text("synthetic ca")
     command = Path(target.bridge_command)
     command.parent.mkdir()
@@ -293,6 +295,8 @@ def test_inventory_and_doctor_redact_token_and_report_push(tmp_path: Path) -> No
     adapter = seat_config.CodexAdapter(target.config_path)
     adapter.apply(adapter.plan(target))
 
+    monkeypatch.setenv("ONBOARD_CENTRAL_TOKEN", "mock.valid.token")
+
     def run(command, **_kwargs):
         if command[0] == "ps":
             return subprocess.CompletedProcess(command, 0, "", "")
@@ -300,6 +304,7 @@ def test_inventory_and_doctor_redact_token_and_report_push(tmp_path: Path) -> No
 
     doctor = seat_config.Doctor(
         runner=run,
+        pypi_fetcher=lambda: "0.1.0a6",
         live_probe=lambda _desired, timeout: {
             "mode": "push",
             "registry_boards": ["pursers", "project-a"],
@@ -386,14 +391,17 @@ def test_default_live_probe_checks_status_subscription_and_registry_boards(
     assert ("status", "project-board") in calls
 
 
-def test_doctor_poll_is_explicit_warning(tmp_path: Path) -> None:
+def test_doctor_poll_is_explicit_warning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     target = desired(tmp_path, "codex")
-    Path(target.token_file).write_text("redacted")
+    Path(target.token_file).write_text("header.redacted.signature")
     Path(target.ca_file).write_text("ca")
     command = Path(target.bridge_command)
     command.parent.mkdir()
     command.write_text("#!/bin/sh\n")
     command.chmod(0o755)
+    monkeypatch.setenv("ONBOARD_CENTRAL_TOKEN", "mock.jwt.token")
     seat_config.CodexAdapter(target.config_path).apply(
         seat_config.CodexAdapter(target.config_path).plan(target)
     )
@@ -404,6 +412,7 @@ def test_doctor_poll_is_explicit_warning(tmp_path: Path) -> None:
 
     rows = seat_config.Doctor(
         runner=run,
+        pypi_fetcher=lambda: "0.1.0a6",
         live_probe=lambda _desired, _timeout: {
             "mode": "poll",
             "registry_boards": ["pursers"],
@@ -411,3 +420,274 @@ def test_doctor_poll_is_explicit_warning(tmp_path: Path) -> None:
         },
     ).run(target)
     assert next(row for row in rows if row.check == "live-smoke").status == "WARN"
+
+
+def test_bridge_installer_stale_shim_and_pypi(tmp_path: Path) -> None:
+    shim = tmp_path / "bin/pursers-wait-bridge"
+    shim.parent.mkdir(parents=True)
+    shim.write_text("#!/bin/sh\nexit 0\n")
+    shim.chmod(0o755)
+
+    # 1. Stale shim: returns 0.1.0a5 while pinned is 0.1.0a6
+    def run_stale(command, **_kwargs):
+        return subprocess.CompletedProcess(command, 0, "0.1.0a5\n", "")
+
+    installer = seat_config.BridgeInstaller(
+        "0.1.0a6",
+        runner=run_stale,
+        command=shim,
+        pypi_fetcher=lambda: "0.1.0a6",
+    )
+    info = installer.inspect()
+    assert info["installed"] is True
+    assert info["installed_version"] == "0.1.0a5"
+    assert info["pinned_version"] == "0.1.0a6"
+    assert info["latest_pypi_version"] == "0.1.0a6"
+    assert info["status"] == "FAIL"
+    assert "installed=0.1.0a5; pinned=0.1.0a6" in info["message"]
+
+    # In Doctor, stale bridge causes FAIL
+    target = desired(tmp_path, "codex", bridge_command=str(shim))
+    Path(target.token_file).write_text("part1.part2.part3")
+    Path(target.ca_file).write_text("ca")
+    doc = seat_config.Doctor(
+        runner=run_stale,
+        pypi_fetcher=lambda: "0.1.0a6",
+        live_probe=lambda _d, _t: {"mode": "push", "registry_boards": ["pursers"], "skipped_boards": {}},
+    )
+    rows = doc.run(target)
+    bridge_check = next(r for r in rows if r.check == "bridge")
+    assert bridge_check.status == "FAIL"
+
+    # 2. Installed matches pinned, but PyPI is unreachable: WARN
+    def run_current(command, **_kwargs):
+        return subprocess.CompletedProcess(command, 0, "0.1.0a6\n", "")
+
+    installer_warn = seat_config.BridgeInstaller(
+        "0.1.0a6",
+        runner=run_current,
+        command=shim,
+        pypi_fetcher=lambda: None,
+    )
+    info_warn = installer_warn.inspect()
+    assert info_warn["installed_version"] == "0.1.0a6"
+    assert info_warn["latest_pypi_version"] is None
+    assert info_warn["status"] == "WARN"
+    assert "PyPI unreachable" in info_warn["message"]
+
+    doc_warn = seat_config.Doctor(
+        runner=run_current,
+        pypi_fetcher=lambda: None,
+        live_probe=lambda _d, _t: {"mode": "push", "registry_boards": ["pursers"], "skipped_boards": {}},
+    )
+    rows_warn = doc_warn.run(target)
+    bridge_warn = next(r for r in rows_warn if r.check == "bridge")
+    assert bridge_warn.status == "WARN"
+
+
+def test_doctor_bearer_env_var_missing_vs_defined(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = desired(tmp_path, "codex")
+    Path(target.token_file).write_text("part1.part2.part3")
+    Path(target.ca_file).write_text("ca")
+    command = Path(target.bridge_command)
+    command.parent.mkdir(parents=True)
+    command.write_text("#!/bin/sh\n")
+    command.chmod(0o755)
+    seat_config.CodexAdapter(target.config_path).apply(
+        seat_config.CodexAdapter(target.config_path).plan(target)
+    )
+
+    # 1. Variable is unset in current environment and login shell returns empty
+    monkeypatch.delenv("ONBOARD_CENTRAL_TOKEN", raising=False)
+
+    def run_missing(command, **_kwargs):
+        if command[0] == "ps":
+            return subprocess.CompletedProcess(command, 0, "", "")
+        if command[0] == "zsh":
+            return subprocess.CompletedProcess(command, 0, "", "")
+        return subprocess.CompletedProcess(command, 0, "0.1.0a6\n", "")
+
+    doc = seat_config.Doctor(
+        runner=run_missing,
+        pypi_fetcher=lambda: "0.1.0a6",
+        live_probe=lambda _d, _t: {"mode": "push", "registry_boards": ["pursers"], "skipped_boards": {}},
+    )
+    rows = doc.run(target)
+    env_check = next(r for r in rows if r.check == "token-env")
+    assert env_check.status == "FAIL"
+    assert "'ONBOARD_CENTRAL_TOKEN' is not defined" in env_check.message
+    assert "~/.zshrc" in env_check.message
+    assert "launchctl setenv" in env_check.message
+
+    # 2. Variable is defined in process env -> PASS
+    monkeypatch.setenv("ONBOARD_CENTRAL_TOKEN", "valid-token")
+    rows_pass = doc.run(target)
+    env_pass = next(r for r in rows_pass if r.check == "token-env")
+    assert env_pass.status == "PASS"
+
+    # 3. Variable unset in process env, but defined in login shell -> PASS
+    monkeypatch.delenv("ONBOARD_CENTRAL_TOKEN", raising=False)
+
+    def run_shell_defined(command, **_kwargs):
+        if command[0] == "ps":
+            return subprocess.CompletedProcess(command, 0, "", "")
+        if command[0] == "zsh":
+            return subprocess.CompletedProcess(command, 0, "set", "")
+        return subprocess.CompletedProcess(command, 0, "0.1.0a6\n", "")
+
+    doc_shell = seat_config.Doctor(
+        runner=run_shell_defined,
+        pypi_fetcher=lambda: "0.1.0a6",
+        live_probe=lambda _d, _t: {"mode": "push", "registry_boards": ["pursers"], "skipped_boards": {}},
+    )
+    rows_shell = doc_shell.run(target)
+    env_shell = next(r for r in rows_shell if r.check == "token-env")
+    assert env_shell.status == "PASS"
+
+
+def test_doctor_token_file_validation_and_redaction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = desired(tmp_path, "codex")
+    Path(target.ca_file).write_text("ca")
+    command = Path(target.bridge_command)
+    command.parent.mkdir(parents=True)
+    command.write_text("#!/bin/sh\n")
+    command.chmod(0o755)
+    monkeypatch.setenv("ONBOARD_CENTRAL_TOKEN", "valid.mock.token")
+
+    def run_ok(command, **_kwargs):
+        if command[0] == "ps":
+            return subprocess.CompletedProcess(command, 0, "", "")
+        return subprocess.CompletedProcess(command, 0, "0.1.0a6\n", "")
+
+    doc = seat_config.Doctor(
+        runner=run_ok,
+        pypi_fetcher=lambda: "0.1.0a6",
+        live_probe=lambda _d, _t: {"mode": "push", "registry_boards": ["pursers"], "skipped_boards": {}},
+    )
+
+    # 1. Missing file
+    if Path(target.token_file).exists():
+        Path(target.token_file).unlink()
+    row = next(r for r in doc.run(target) if r.check == "token-file")
+    assert row.status == "FAIL"
+    assert row.message == "missing or unreadable"
+
+    # 2. Empty file
+    Path(target.token_file).write_text("   \n")
+    row = next(r for r in doc.run(target) if r.check == "token-file")
+    assert row.status == "FAIL"
+    assert row.message == "token file is empty"
+
+    # 3. Not JWT shape (no dots)
+    secret_bad = "SUPER_SECRET_TOKEN_NOT_JWT"
+    Path(target.token_file).write_text(secret_bad)
+    report = seat_config._doctor_document(doc.run(target))
+    row = next(r for r in report["checks"] if r["check"] == "token-file")
+    assert row["status"] == "FAIL"
+    assert "invalid JWT format" in row["message"]
+    # Ensure sensitive content was NEVER printed or logged
+    assert secret_bad not in json.dumps(report)
+
+    # 4. Not JWT shape (two dots but invalid base64url characters)
+    Path(target.token_file).write_text("part1.part2.part3!@#")
+    row = next(r for r in doc.run(target) if r.check == "token-file")
+    assert row.status == "FAIL"
+    assert "invalid JWT format" in row.message
+
+    # 5. Valid JWT shape
+    secret_good = "SECRET_PAYLOAD_CONTENT"
+    Path(target.token_file).write_text(f"eyJhbGciOi.{secret_good}.signature_abc123")
+    report_good = seat_config._doctor_document(doc.run(target))
+    row_good = next(r for r in report_good["checks"] if r["check"] == "token-file")
+    assert row_good["status"] == "PASS"
+    assert "valid JWT" in row_good["message"]
+    assert secret_good not in json.dumps(report_good)
+
+
+def test_doctor_uvx_under_private_ca_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = desired(
+        tmp_path,
+        "codex",
+        bridge_command="uvx pursers-wait-bridge --from git+https://github.com/swisspra/Pursers.git",
+    )
+    Path(target.token_file).write_text("part1.part2.part3")
+    Path(target.ca_file).write_text("synthetic private CA")
+    monkeypatch.setenv("SSL_CERT_FILE", str(tmp_path / "private-ca.pem"))
+    monkeypatch.setenv("ONBOARD_CENTRAL_TOKEN", "valid.mock.token")
+
+    def run_ok(command, **_kwargs):
+        if command[0] == "ps":
+            return subprocess.CompletedProcess(command, 0, "", "")
+        return subprocess.CompletedProcess(command, 0, "0.1.0a6\n", "")
+
+    doc = seat_config.Doctor(
+        runner=run_ok,
+        pypi_fetcher=lambda: "0.1.0a6",
+        live_probe=lambda _d, _t: {"mode": "push", "registry_boards": ["pursers"], "skipped_boards": {}},
+    )
+    rows = doc.run(target)
+    bridge_check = next(r for r in rows if r.check == "bridge")
+    assert bridge_check.status == "FAIL"
+    assert "uvx --from fails under private CA" in bridge_check.message
+
+
+def test_doctor_dead_nvm_npx_path_warns(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dead_path = "/Users/fake/.nvm/versions/node/v24.18.0/bin/npx"
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        f"extensions:\n"
+        f"  mcp-server:\n"
+        f"    cmd: /bin/sh\n"
+        f"    args:\n"
+        f"      - -c\n"
+        f"      - 'exec {dead_path} -y mcp-remote'\n"
+    )
+    target = desired(tmp_path, "goose", config_path=str(config))
+    Path(target.token_file).write_text("part1.part2.part3")
+    Path(target.ca_file).write_text("ca")
+    command = Path(target.bridge_command)
+    command.parent.mkdir(parents=True)
+    command.write_text("#!/bin/sh\n")
+    command.chmod(0o755)
+
+    def run_ok(command, **_kwargs):
+        if command[0] == "ps":
+            return subprocess.CompletedProcess(command, 0, "", "")
+        return subprocess.CompletedProcess(command, 0, "0.1.0a6\n", "")
+
+    doc = seat_config.Doctor(
+        runner=run_ok,
+        pypi_fetcher=lambda: "0.1.0a6",
+        live_probe=lambda _d, _t: {"mode": "push", "registry_boards": ["pursers"], "skipped_boards": {}},
+    )
+    rows = doc.run(target)
+    npx_check = next(r for r in rows if r.check == "connector-npx")
+    assert npx_check.status == "WARN"
+    assert f"dead nvm npx path: {dead_path}" in npx_check.message
+
+    # Create the file at that path if possible, or test with tmp path matching pattern
+    fake_nvm = tmp_path / ".nvm/versions/node/v24.20.0/bin/npx"
+    fake_nvm.parent.mkdir(parents=True)
+    fake_nvm.write_text("#!/bin/sh\n")
+    fake_nvm.chmod(0o755)
+
+    config.write_text(
+        f"extensions:\n"
+        f"  mcp-server:\n"
+        f"    cmd: /bin/sh\n"
+        f"    args:\n"
+        f"      - -c\n"
+        f"      - 'exec {fake_nvm} -y mcp-remote'\n"
+    )
+    rows_resolved = doc.run(target)
+    npx_resolved = next(r for r in rows_resolved if r.check == "connector-npx")
+    assert npx_resolved.status == "PASS"
+    assert "resolves" in npx_resolved.message
