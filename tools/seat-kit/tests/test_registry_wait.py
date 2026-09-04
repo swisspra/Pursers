@@ -132,7 +132,14 @@ def test_reviewer_submitted_wait_fans_out_registry() -> None:
             )
         )
     assert observed["submitted"] is True
-    assert observed["kinds"] == frozenset({"ticket_status_changed"})
+    assert observed["kinds"] == frozenset(
+        {
+            "ticket_status_changed",
+            "ticket_review_claimed",
+            "review_lease_expired",
+            "review_lease_released",
+        }
+    )
 
 
 def test_all_routed_verbs_accept_board_flag() -> None:
@@ -140,6 +147,8 @@ def test_all_routed_verbs_accept_board_flag() -> None:
         "worker": [["list"], ["get", "TK-x"], ["claim", "TK-x"],
                    ["renew", "TK-x"], ["submit", "TK-x", "s", "n", "f"]],
         "reviewer": [["list"], ["list-all"], ["get", "TK-x"],
+                     ["review-claim", "TK-x"], ["renew", "TK-x"],
+                     ["review-release", "TK-x", "handoff"],
                      ["approve", "TK-x", "n"], ["reject", "TK-x", "n", "f"]],
     }.items():
         parser = generated(role)._parser()

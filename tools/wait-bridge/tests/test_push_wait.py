@@ -329,6 +329,16 @@ class ManualClock:
 
 
 class PushWaitTests(unittest.IsolatedAsyncioTestCase):
+    def test_review_lease_events_are_push_wait_cues(self) -> None:
+        self.assertLessEqual(
+            {
+                "ticket_review_claimed",
+                "review_lease_expired",
+                "review_lease_released",
+            },
+            wait_server.RELEVANT_KINDS,
+        )
+
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory(dir=ROOT)
         self.root = Path(self.temp_dir.name)

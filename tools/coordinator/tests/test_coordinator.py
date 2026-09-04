@@ -241,6 +241,32 @@ def test_review_backlog_threshold_and_two_x_escalation(
     assert "reviewer_seats" in findings[0]["evidence"]
 
 
+def test_review_backlog_reports_active_review_holder() -> None:
+    snapshot = {
+        "board": {"claim_ttl_s": 900},
+        "agents": [],
+        "tickets": [
+            {
+                "ticket_id": "TK-review",
+                "status": "submitted",
+                "submitted_at": ago(2_000),
+                "review_lease": {
+                    "reviewer_agent_name": "reviewer-a",
+                    "expires_at": (NOW + timedelta(minutes=5)).isoformat(),
+                },
+            }
+        ],
+    }
+
+    finding = coordinator.ticket_findings("board-a", snapshot, NOW)[0]
+
+    assert finding["message"] == "Submitted ticket is in review by reviewer-a."
+    assert finding["review_state"] == "in review by reviewer-a"
+    assert finding["review_lease_expires_at"] == (
+        NOW + timedelta(minutes=5)
+    ).isoformat()
+
+
 def test_repeat_abandoner_counts_three_recent_drops_on_one_ticket() -> None:
     ticket = {
         "ticket_id": "TK-repeat",

@@ -91,7 +91,15 @@ MAX_LEASE_RENEW_INTERVAL_S = 300.0
 PROGRESS_INTERVAL_S = 300.0
 CATCHUP_PAGE_LIMIT = 100
 BACKLOG_SCAN_LIMIT = 100
-RELEVANT_KINDS = frozenset({"ticket_created", "ticket_status_changed"})
+RELEVANT_KINDS = frozenset(
+    {
+        "ticket_created",
+        "ticket_status_changed",
+        "ticket_review_claimed",
+        "review_lease_expired",
+        "review_lease_released",
+    }
+)
 CLAIMED_STATES = frozenset({"claimed", "in_progress", "creating_report"})
 HANDOFF_REJOIN_MESSAGE = "call board_onboard or board_join before more work"
 PROJECT_REGISTRY_KEY = "project_registry"

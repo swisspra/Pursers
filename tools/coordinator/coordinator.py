@@ -1020,6 +1020,15 @@ def ticket_findings(
 
         if ticket.get("status") in SUBMITTED_STATES:
             submitted_age = age_seconds(ticket.get("submitted_at"), now)
+            review_lease = ticket.get("review_lease")
+            review_expires = (
+                parse_time(review_lease.get("expires_at"))
+                if isinstance(review_lease, Mapping) else None
+            )
+            review_holder = (
+                str(review_lease.get("reviewer_agent_name") or "reviewer")
+                if review_expires is not None and review_expires > now else None
+            )
             if (
                 submitted_age is not None
                 and submitted_age >= thresholds.review_backlog_seconds
@@ -1033,12 +1042,23 @@ def ticket_findings(
                             else "warn"
                         ),
                         board_id,
-                        "A submitted ticket exceeded the review backlog threshold.",
+                        (
+                            f"Submitted ticket is in review by {review_holder}."
+                            if review_holder
+                            else "A submitted ticket exceeded the review backlog threshold."
+                        ),
                         ticket_id=ticket_id,
                         submitted_at=ticket.get("submitted_at"),
                         observed_age_seconds=int(submitted_age),
                         threshold_seconds=thresholds.review_backlog_seconds,
                         reviewer_seats=reviewer_seats,
+                        review_state=(
+                            f"in review by {review_holder}"
+                            if review_holder else "unclaimed"
+                        ),
+                        review_lease_expires_at=(
+                            review_expires.isoformat() if review_holder else None
+                        ),
                     )
                 )
 

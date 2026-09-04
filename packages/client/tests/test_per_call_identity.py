@@ -144,6 +144,52 @@ async def test_bounded_read_parameters_are_forwarded(monkeypatch) -> None:
 
 
 @pytest.mark.anyio
+async def test_review_lease_calls_carry_the_seat_identity(monkeypatch) -> None:
+    board = client()
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    async def call(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        calls.append((name, arguments))
+        return {"ok": True}
+
+    monkeypatch.setattr(board, "_call", call)
+
+    await board.ticket_review_claim("TK-review")
+    await board.lease_renew("TK-review")
+    await board.ticket_review_release("TK-review", reason="handoff")
+    await board.ticket_list(status="submitted", review_unclaimed_only=True)
+
+    assert calls == [
+        (
+            "ticket_review_claim",
+            {"agent_name": "env-default", "ticket_id": "TK-review"},
+        ),
+        (
+            "lease_renew",
+            {"agent_name": "env-default", "ticket_id": "TK-review"},
+        ),
+        (
+            "ticket_review_release",
+            {
+                "agent_name": "env-default",
+                "ticket_id": "TK-review",
+                "reason": "handoff",
+            },
+        ),
+        (
+            "ticket_list",
+            {
+                "agent_name": "env-default",
+                "include_closed": False,
+                "limit": 100,
+                "review_unclaimed_only": True,
+                "status": "submitted",
+            },
+        ),
+    ]
+
+
+@pytest.mark.anyio
 async def test_interleaved_per_call_joins_do_not_clobber_state(monkeypatch) -> None:
     board = client()
     original_identity = JoinedIdentity(

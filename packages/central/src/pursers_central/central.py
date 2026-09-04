@@ -56,6 +56,7 @@ from transactional_sqlite import TransactionalSQLiteStore
 
 ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,80}$")
 DEFAULT_CLAIM_TTL_S = 900
+DEFAULT_REVIEW_LEASE_TTL_S = 900
 MIN_CLAIM_TTL_S = 1
 MAX_CLAIM_TTL_S = 86_400
 PRE_SUBMISSION_STATES = frozenset({"claimed", "in_progress", "creating_report"})
@@ -113,7 +114,14 @@ SCRUB_EVENT_FIELDS = frozenset(
     }
 )
 REVIEW_POLICIES = frozenset({"strict", "workflow"})
-REVIEW_EVENT_KINDS = frozenset({"board_review_policy_changed"})
+REVIEW_EVENT_KINDS = frozenset(
+    {
+        "board_review_policy_changed",
+        "ticket_review_claimed",
+        "review_lease_expired",
+        "review_lease_released",
+    }
+)
 REVIEW_CORE_OVERRIDE_FIELDS = frozenset(
     {"review_policy_at_verdict", "review_label", "review_verdict"}
 )
@@ -130,6 +138,11 @@ REVIEW_EVENT_FIELDS = frozenset(
         "reviewed_by_agent_id",
         "reviewed_by_agent_name",
         "reviewed_by_principal_id",
+        "reviewer_agent_id",
+        "reviewer_agent_name",
+        "reviewer_principal_id",
+        "review_lease_expires_at",
+        "release_reason",
         "fixture_provenance",
         "recipient_identities",
     }
@@ -1330,10 +1343,58 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         ticket["lease_expires_at"] = iso_at(expires)
         ticket["lease_renewed_at"] = iso_at(now)
 
+    def renew_review_lease(lease: dict[str, Any], now: float) -> None:
+        expires = now + DEFAULT_REVIEW_LEASE_TTL_S
+        lease["ttl_s"] = DEFAULT_REVIEW_LEASE_TTL_S
+        lease["expires_at_epoch"] = expires
+        lease["expires_at"] = iso_at(expires)
+        lease["renewed_at"] = iso_at(now)
+
+    def review_lease_is_live(ticket: Mapping[str, Any], now: float) -> bool:
+        lease = ticket.get("review_lease")
+        if not isinstance(lease, Mapping):
+            return False
+        expires = lease.get("expires_at_epoch")
+        try:
+            return expires is not None and float(expires) > now
+        except (TypeError, ValueError):
+            return False
+
+    def claim_review_lease(
+        ticket: dict[str, Any], actor: dict[str, Any], principal: Principal, now: float
+    ) -> dict[str, Any]:
+        lease = {
+            "reviewer_agent_id": actor["agent_id"],
+            "reviewer_agent_name": actor["agent_name"],
+            "reviewer_principal_id": principal.principal_id,
+            "claimed_at": iso_at(now),
+        }
+        renew_review_lease(lease, now)
+        ticket["review_lease"] = lease
+        ticket["updated_at"] = iso_at(now)
+        return lease
+
     def reap_expired(document: dict[str, Any], now: float) -> list[dict[str, Any]]:
         released: list[dict[str, Any]] = []
         recipients = service.admitted_agent_ids(document)
         for ticket in document["tickets"].values():
+            review_lease = ticket.get("review_lease")
+            if isinstance(review_lease, dict):
+                review_expires = review_lease.get("expires_at_epoch")
+                if review_expires is not None and not review_lease_is_live(ticket, now):
+                    expired = ticket.pop("review_lease")
+                    ticket["updated_at"] = iso_at(now)
+                    released.append(
+                        {
+                            "kind": "review",
+                            "ticket_id": ticket["ticket_id"],
+                            "reviewer_agent_id": expired.get("reviewer_agent_id"),
+                            "reviewer_agent_name": expired.get("reviewer_agent_name"),
+                            "reviewer_principal_id": expired.get("reviewer_principal_id"),
+                            "review_lease_expires_at": expired.get("expires_at"),
+                            "recipients": recipients,
+                        }
+                    )
             if ticket.get("status") not in PRE_SUBMISSION_STATES:
                 continue
             expires = ticket.get("lease_expires_at_epoch")
@@ -1367,6 +1428,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 ticket.pop(key, None)
             released.append(
                 {
+                    "kind": "work",
                     "ticket_id": ticket["ticket_id"],
                     "status_from": old_status,
                     "status_to": "open",
@@ -1406,6 +1468,25 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         events: list[dict[str, Any]] = []
         reaper = {"agent_id": f"board-reaper:{principal.principal_id}"}
         for item in released:
+            if item.get("kind") == "review":
+                events.append(
+                    await append_and_publish(
+                        board_id,
+                        reaper,
+                        "review_lease_expired",
+                        resource_uri(board_id, "ticket", item["ticket_id"]),
+                        item["recipients"],
+                        ctx,
+                        ticket_id=item["ticket_id"],
+                        status_from="submitted",
+                        status_to="submitted",
+                        reviewer_agent_id=item.get("reviewer_agent_id"),
+                        reviewer_agent_name=item.get("reviewer_agent_name"),
+                        reviewer_principal_id=item.get("reviewer_principal_id"),
+                        review_lease_expires_at=item.get("review_lease_expires_at"),
+                    )
+                )
+                continue
             events.append(
                 await append_and_publish(
                     board_id,
@@ -1452,6 +1533,14 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             expiry = ticket.get("lease_expires_at")
             if holder and expiry and ticket.get("status") in PRE_SUBMISSION_STATES:
                 lease_by_agent.setdefault(holder, []).append(expiry)
+            review_lease = ticket.get("review_lease")
+            if isinstance(review_lease, Mapping) and ticket.get("status") == "submitted":
+                review_holder = review_lease.get("reviewer_agent_id")
+                review_expiry = review_lease.get("expires_at")
+                if review_holder and review_expiry:
+                    lease_by_agent.setdefault(str(review_holder), []).append(
+                        str(review_expiry)
+                    )
         projected: list[dict[str, Any]] = []
         for member in document["members"].values():
             membership = document["principal_memberships"].get(member.get("principal_id"))
@@ -3904,12 +3993,16 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         ticket_id: str,
         ctx: Context,
         expected_generation: str | None = None,
+        agent_name: str | None = None,
     ) -> dict[str, Any]:
-        """Renew the authenticated holder's lease before a quiet work period."""
+        """Renew the authenticated holder's work or review lease."""
         board_id = require_id("board_id", board_id)
         ticket_id = require_id("ticket_id", ticket_id)
         principal = current_principal()
-        require_scope(principal, "board:write")
+        if not ({"board:write", "board:review"} & principal.scopes):
+            raise PermissionError(
+                "authenticated principal lacks board:write or board:review authorization"
+            )
         now = time.time()
 
         def renew(document: dict[str, Any]) -> dict[str, Any]:
@@ -3918,6 +4011,25 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             ticket = document["tickets"].get(ticket_id)
             if ticket is None:
                 return {"error": "ticket not found", "released": released}
+            review_lease = ticket.get("review_lease")
+            if ticket.get("status") == "submitted" and isinstance(review_lease, dict):
+                member = None
+                if agent_name is not None:
+                    member = service.member(document, principal, agent_name)
+                if (
+                    review_lease.get("reviewer_principal_id") == principal.principal_id
+                    and (
+                        member is None
+                        or review_lease.get("reviewer_agent_id") == member["agent_id"]
+                    )
+                ):
+                    renew_review_lease(review_lease, now)
+                    ticket["updated_at"] = iso_at(now)
+                    return {
+                        "ticket": copy.deepcopy(ticket),
+                        "released": released,
+                        "lease_kind": "review",
+                    }
             if (
                 ticket.get("status") not in PRE_SUBMISSION_STATES
                 or ticket.get("claimed_by_principal_id") != principal.principal_id
@@ -3929,7 +4041,11 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                     "released": released,
                 }
             renew_claim(ticket, now, claim_ttl(document))
-            return {"ticket": copy.deepcopy(ticket), "released": released}
+            return {
+                "ticket": copy.deepcopy(ticket),
+                "released": released,
+                "lease_kind": "work",
+            }
 
         result = service.mutate(board_id, renew)
         release_events = await publish_releases(board_id, result["released"], principal, ctx)
@@ -3938,8 +4054,17 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         return {
             "ok": True,
             "ticket_id": ticket_id,
-            "lease_expires_at": result["ticket"]["lease_expires_at"],
-            "ttl_s": result["ticket"]["ttl_s"],
+            "lease_kind": result["lease_kind"],
+            "lease_expires_at": (
+                result["ticket"]["review_lease"]["expires_at"]
+                if result["lease_kind"] == "review"
+                else result["ticket"]["lease_expires_at"]
+            ),
+            "ttl_s": (
+                result["ticket"]["review_lease"]["ttl_s"]
+                if result["lease_kind"] == "review"
+                else result["ticket"]["ttl_s"]
+            ),
             "release_events": release_events,
         }
 
@@ -4097,6 +4222,192 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         }
 
     @tool()
+    async def ticket_review_claim(
+        board_id: str,
+        agent_name: str,
+        ticket_id: str,
+        ctx: Context,
+        expected_generation: str | None = None,
+    ) -> dict[str, Any]:
+        """Atomically reserve one submitted ticket for one reviewer seat."""
+        board_id = require_id("board_id", board_id)
+        ticket_id = require_id("ticket_id", ticket_id)
+        principal = current_principal()
+        require_scope(principal, "board:review")
+        now = time.time()
+
+        def claim(document: dict[str, Any]) -> dict[str, Any]:
+            actor, released, renewed = prepare_board_call(
+                document, principal, agent_name, now
+            )
+            ticket = document["tickets"].get(ticket_id)
+            if ticket is None:
+                raise ValueError("ticket not found")
+            if ticket.get("status") != "submitted":
+                raise ValueError(f"ticket is {ticket.get('status')}")
+            if not board_role_allows_review(document, principal):
+                raise PermissionError(
+                    "reviewing agent lacks reviewer board role and board:review authorization"
+                )
+            if ticket.get("submitted_by_principal_id") == principal.principal_id:
+                raise PermissionError(
+                    "self-review denied: authenticated principal submitted this work"
+                )
+            submitted_by_agent_id = ticket.get("submitted_by_agent_id")
+            if (
+                board_review_policy(document) == "workflow"
+                and submitted_by_agent_id == actor["agent_id"]
+            ):
+                raise PermissionError(
+                    "workflow review denied: submitting and reviewing agent must differ"
+                )
+            existing = ticket.get("review_lease")
+            if review_lease_is_live(ticket, now):
+                if (
+                    existing.get("reviewer_agent_id") == actor["agent_id"]
+                    and existing.get("reviewer_principal_id") == principal.principal_id
+                ):
+                    renew_review_lease(existing, now)
+                    ticket["updated_at"] = iso_at(now)
+                    return {
+                        "actor": actor,
+                        "ticket": copy.deepcopy(ticket),
+                        "lease": copy.deepcopy(existing),
+                        "released": released,
+                        "renewed": renewed,
+                        "created": False,
+                    }
+                return {
+                    "error": {
+                        "code": "review_already_claimed",
+                        "holder_name": existing.get("reviewer_agent_name"),
+                        "expires_at": existing.get("expires_at"),
+                    },
+                    "released": released,
+                }
+            lease = claim_review_lease(ticket, actor, principal, now)
+            return {
+                "actor": actor,
+                "ticket": copy.deepcopy(ticket),
+                "lease": copy.deepcopy(lease),
+                "recipients": ticket_recipients(document, actor),
+                "released": released,
+                "renewed": renewed,
+                "created": True,
+            }
+
+        changed = service.mutate(board_id, claim)
+        release_events = await publish_releases(
+            board_id, changed["released"], principal, ctx
+        )
+        if "error" in changed:
+            return {"ok": False, "error": changed["error"], "release_events": release_events}
+        event = None
+        if changed["created"]:
+            event = await append_and_publish(
+                board_id,
+                changed["actor"],
+                "ticket_review_claimed",
+                resource_uri(board_id, "ticket", ticket_id),
+                changed["recipients"],
+                ctx,
+                ticket_id=ticket_id,
+                status_from="submitted",
+                status_to="submitted",
+                reviewer_agent_id=changed["lease"]["reviewer_agent_id"],
+                reviewer_agent_name=changed["lease"]["reviewer_agent_name"],
+                reviewer_principal_id=changed["lease"]["reviewer_principal_id"],
+                review_lease_expires_at=changed["lease"]["expires_at"],
+            )
+        return {
+            "ok": True,
+            "ticket": changed["ticket"],
+            "review_lease": changed["lease"],
+            "event": event,
+            "event_created": changed["created"],
+            "release_events": release_events,
+            "implicitly_renewed": changed["renewed"],
+        }
+
+    @tool()
+    async def ticket_review_release(
+        board_id: str,
+        agent_name: str,
+        ticket_id: str,
+        ctx: Context,
+        reason: str | None = None,
+        expected_generation: str | None = None,
+    ) -> dict[str, Any]:
+        """Release a review reservation held by the current reviewer seat."""
+        board_id = require_id("board_id", board_id)
+        ticket_id = require_id("ticket_id", ticket_id)
+        principal = current_principal()
+        require_scope(principal, "board:review")
+        now = time.time()
+
+        def release(document: dict[str, Any]) -> dict[str, Any]:
+            profile = board_scrub_profile(document)
+            allow_counts: dict[str, int] = {}
+            safe_reason = clean_text(
+                "reason", reason, required=reason is not None, max_length=2_000,
+                scrub_profile=profile, allow_counts=allow_counts,
+            )
+            actor, released, renewed = prepare_board_call(
+                document, principal, agent_name, now
+            )
+            ticket = document["tickets"].get(ticket_id)
+            if ticket is None:
+                raise ValueError("ticket not found")
+            lease = ticket.get("review_lease")
+            if not review_lease_is_live(ticket, now) or not isinstance(lease, dict):
+                raise PermissionError("review lease is not held by this reviewer")
+            if (
+                lease.get("reviewer_agent_id") != actor["agent_id"]
+                or lease.get("reviewer_principal_id") != principal.principal_id
+            ):
+                raise PermissionError("review lease is held by another reviewer")
+            released_lease = copy.deepcopy(ticket.pop("review_lease"))
+            ticket["updated_at"] = iso_at(now)
+            return {
+                "actor": actor,
+                "ticket": copy.deepcopy(ticket),
+                "lease": released_lease,
+                "reason": safe_reason,
+                "recipients": ticket_recipients(document, actor),
+                "released": released,
+                "renewed": renewed,
+                "scrub_audit": record_scrub_allows(document, actor, now, allow_counts),
+            }
+
+        changed = service.mutate(board_id, release)
+        release_events = await publish_releases(
+            board_id, changed["released"], principal, ctx
+        )
+        event = await append_and_publish(
+            board_id,
+            changed["actor"],
+            "review_lease_released",
+            resource_uri(board_id, "ticket", ticket_id),
+            changed["recipients"],
+            ctx,
+            ticket_id=ticket_id,
+            status_from="submitted",
+            status_to="submitted",
+            reviewer_agent_id=changed["lease"].get("reviewer_agent_id"),
+            reviewer_agent_name=changed["lease"].get("reviewer_agent_name"),
+            reviewer_principal_id=changed["lease"].get("reviewer_principal_id"),
+            release_reason=changed["reason"],
+        )
+        return {
+            "ok": True,
+            "ticket": changed["ticket"],
+            "event": event,
+            "release_events": release_events,
+            "implicitly_renewed": changed["renewed"],
+            "scrub_audit": changed["scrub_audit"],
+        }
+
+    @tool()
     async def ticket_review(
         board_id: str,
         agent_name: str,
@@ -4144,7 +4455,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             policy = board_review_policy(document)
             submitted_by_agent_id = ticket.get("submitted_by_agent_id")
             submitted_by_principal_id = ticket.get("submitted_by_principal_id")
-            if policy == "strict" and submitted_by_principal_id == principal.principal_id:
+            if submitted_by_principal_id == principal.principal_id:
                 raise PermissionError("self-review denied: authenticated principal submitted this work")
             if policy == "workflow":
                 if not submitted_by_agent_id or not submitted_by_principal_id:
@@ -4163,6 +4474,25 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 )
             if ticket.get("server_generated_id") and safe_notes is None:
                 raise ValueError("review_notes is required for generated-ID tickets")
+            lease = ticket.get("review_lease")
+            lease_claimed = False
+            if review_lease_is_live(ticket, now):
+                if (
+                    lease.get("reviewer_agent_id") != actor["agent_id"]
+                    or lease.get("reviewer_principal_id") != principal.principal_id
+                ):
+                    return {
+                        "error": (
+                            "review lease is held by "
+                            f"{lease.get('reviewer_agent_name') or 'another reviewer'} "
+                            f"until {lease.get('expires_at')}"
+                        ),
+                        "released": released,
+                    }
+            else:
+                lease = claim_review_lease(ticket, actor, principal, now)
+                lease_claimed = True
+            released_lease = copy.deepcopy(lease)
             retryable_rejection = verdict == "reject" and (
                 bool(ticket.get("server_generated_id")) or rich_review_requested
             )
@@ -4206,6 +4536,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 "status_to": new_status,
             }
             ticket.setdefault("review_history", []).append(review_record)
+            ticket.pop("review_lease", None)
             if retryable_rejection:
                 ticket["last_claimed_by_agent_id"] = ticket.get("claimed_by_agent_id")
                 ticket["last_claimed_by_principal_id"] = ticket.get("claimed_by_principal_id")
@@ -4234,6 +4565,8 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 "recipients": recipients,
                 "new_status": new_status,
                 "review_record": copy.deepcopy(review_record),
+                "review_lease": released_lease,
+                "review_lease_claimed": lease_claimed,
                 "retryable_rejection": retryable_rejection,
                 "released": released,
                 "renewed": renewed,
@@ -4242,7 +4575,20 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
 
         changed = service.mutate(board_id, review)
         release_events = await publish_releases(board_id, changed["released"], principal, ctx)
+        if "error" in changed:
+            raise PermissionError(changed["error"])
         uri = resource_uri(board_id, "ticket", ticket_id)
+        claim_event = None
+        if changed["review_lease_claimed"]:
+            claim_event = await append_and_publish(
+                board_id, changed["actor"], "ticket_review_claimed", uri,
+                changed["recipients"], ctx, ticket_id=ticket_id,
+                status_from="submitted", status_to="submitted",
+                reviewer_agent_id=changed["review_lease"].get("reviewer_agent_id"),
+                reviewer_agent_name=changed["review_lease"].get("reviewer_agent_name"),
+                reviewer_principal_id=changed["review_lease"].get("reviewer_principal_id"),
+                review_lease_expires_at=changed["review_lease"].get("expires_at"),
+            )
         event = await append_and_publish(
             board_id, changed["actor"], "ticket_status_changed", uri, changed["recipients"], ctx,
             ticket_id=ticket_id, status_from="submitted", status_to=changed["new_status"],
@@ -4263,10 +4609,21 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 if changed["ticket"].get("fix_instructions") else None
             ),
         )
+        review_release_event = await append_and_publish(
+            board_id, changed["actor"], "review_lease_released", uri,
+            changed["recipients"], ctx, ticket_id=ticket_id,
+            status_from="submitted", status_to=changed["new_status"],
+            reviewer_agent_id=changed["review_lease"].get("reviewer_agent_id"),
+            reviewer_agent_name=changed["review_lease"].get("reviewer_agent_name"),
+            reviewer_principal_id=changed["review_lease"].get("reviewer_principal_id"),
+            release_reason=f"verdict:{changed['review_record']['verdict']}",
+        )
         return {
             "ok": True,
             "ticket": changed["ticket"],
             "event": event,
+            "review_claim_event": claim_event,
+            "review_release_event": review_release_event,
             "release_events": release_events,
             "implicitly_renewed": changed["renewed"],
             "retryable_rejection": changed["retryable_rejection"],
@@ -4458,6 +4815,8 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         assigned_to: str | None = None,
         include_closed: bool = False,
         limit: int = 100,
+        agent_name: str | None = None,
+        review_unclaimed_only: bool = False,
     ) -> dict[str, Any]:
         """List authorized tickets with server-side status and assignee filters."""
         board_id = require_id("board_id", board_id)
@@ -4470,6 +4829,11 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         document = service.load(board_id)
         service.principal_members(document, principal.principal_id)
         tickets = list(document["tickets"].values())
+        now = time.time()
+        reviewer_agent_id = (
+            agent_id(board_id, principal.principal_id, agent_name)
+            if agent_name is not None else None
+        )
         if status is not None:
             tickets = [item for item in tickets if item.get("status") == status]
         elif not include_closed:
@@ -4493,6 +4857,12 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 if any(needle in value.casefold() for value in identity_ids | names):
                     filtered.append(item)
             tickets = filtered
+        if review_unclaimed_only:
+            tickets = [
+                item for item in tickets
+                if item.get("status") == "submitted"
+                and not review_lease_is_live(item, now)
+            ]
         priority_order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
         tickets.sort(
             key=lambda item: (
@@ -4500,7 +4870,30 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 item["ticket_id"],
             )
         )
-        projected = [project_ticket(board_id, item) for item in tickets[:limit]]
+        projected = []
+        for item in tickets[:limit]:
+            row = project_ticket(board_id, item)
+            lease = item.get("review_lease")
+            if item.get("status") != "submitted":
+                projected.append(row)
+                continue
+            if not review_lease_is_live(item, now) or not isinstance(lease, Mapping):
+                row["review_state"] = "unclaimed"
+            elif (
+                lease.get("reviewer_principal_id") == principal.principal_id
+                and (
+                    reviewer_agent_id is None
+                    or lease.get("reviewer_agent_id") == reviewer_agent_id
+                )
+            ):
+                row["review_state"] = "claimed_by_me"
+                row["review_claimed_by"] = lease.get("reviewer_agent_name")
+                row["review_lease_expires_at"] = lease.get("expires_at")
+            else:
+                row["review_state"] = "claimed_by_other"
+                row["review_claimed_by"] = lease.get("reviewer_agent_name")
+                row["review_lease_expires_at"] = lease.get("expires_at")
+            projected.append(row)
         return {
             "ok": True,
             "tickets": projected,
@@ -4510,6 +4903,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 "status": status,
                 "assigned_to": assigned_to,
                 "include_closed": include_closed,
+                "review_unclaimed_only": review_unclaimed_only,
             },
             "latest_seq": latest_seq(board_id),
         }

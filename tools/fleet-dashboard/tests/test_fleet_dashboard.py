@@ -285,7 +285,14 @@ def test_ticket_table_filters_before_bounding_and_includes_submitted() -> None:
     tickets.extend(
         [
             {"ticket_id": "TK-open", "status": "open"},
-            {"ticket_id": "TK-submitted", "status": "submitted"},
+            {
+                "ticket_id": "TK-submitted",
+                "status": "submitted",
+                "review_lease": {
+                    "reviewer_agent_name": "reviewer-a",
+                    "expires_at": "2030-01-02T13:00:00+00:00",
+                },
+            },
             {"ticket_id": "TK-claimed", "status": "claimed"},
         ]
     )
@@ -300,6 +307,7 @@ def test_ticket_table_filters_before_bounding_and_includes_submitted() -> None:
             }
         ],
         stale_seconds=300,
+        now=datetime(2030, 1, 2, 12, 0, tzinfo=timezone.utc),
     )
 
     rows = result["boards"][0]["tickets"]
@@ -308,6 +316,7 @@ def test_ticket_table_filters_before_bounding_and_includes_submitted() -> None:
         "TK-submitted",
         "TK-open",
     ]
+    assert rows[1]["status_label"] == "in review by reviewer-a"
 
 
 def test_fetcher_requests_central_max_snapshot_bounds() -> None:
