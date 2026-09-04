@@ -25,6 +25,10 @@ roles = ["frontend", "backend"] # optional role slugs; empty = generalist
 [review]
 max_reviews_per_hour = 12 # reviewer safety limit; default 12
 
+[wait]
+host_profile = "headless" # default for this runtime
+timeout_s = 21600         # runner deadline; bridge block is 21540s after margin
+
 [llm]
 base_url = "https://proxy.example/v1"
 api_key_env = "OPENAI_COMPATIBLE_API_KEY"
@@ -43,6 +47,17 @@ python tools/worker-runtime/pursers_worker.py /private/path/worker.toml
 Instead of `api_key_env`, use `api_key_file = "/private/path/proxy.key"`.
 Never put a key inline in the config. `boards` may be `"registry"` or a JSON
 array / TOML string array of board IDs.
+
+The runtime uses subscription-first waiting by default. Set
+`PURSERS_WAIT_MODE=poll` only as an explicit compatibility fallback. The
+`[wait]` section exposes the bridge host profile and runner deadline; both
+worker and reviewer default to the `headless` profile and a six-hour runner
+deadline. The runtime applies `PURSERS_HOST` and `PURSERS_HOST_TIMEOUT_S`
+before lazily importing the bridge, then passes `timeout_s` on every
+in-process wait. The bridge's public profile calculation therefore yields a
+21,540s block for the default 21,600s headless deadline.
+`SIGTERM` and `SIGINT` cancel an in-flight subscription promptly. A timeout is
+re-armed immediately without the former one-second guard sleep.
 
 The model receives the static worker directive first, then board context, then
 the dynamic ticket. `claim.roles` are optional role slugs (e.g. `frontend`,
@@ -76,7 +91,10 @@ worktrees without an active claim are removed and dirty ones are retained.
 
 For API review, provision a dedicated board reviewer seat with a different
 principal/token from every worker, then set `seat.role = "reviewer"`. The
-reviewer discovers submitted tickets across all configured boards and never
+reviewer scans submitted tickets across all configured boards once at startup
+and after a journal resync. Between those scans it waits for subscription cues
+and fetches only tickets whose cue transitions to `submitted`; unrelated cues
+do not trigger `ticket_list` or `ticket_get`. It never
 claims, renews, edits, releases, or submits ticket work. Its static
 `REVIEWER-DIRECTIVE-API.md` message is sent before board and ticket context for
 cache-friendly prompts. The model may only read jailed files, run allowlisted
