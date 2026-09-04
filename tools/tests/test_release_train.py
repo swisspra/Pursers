@@ -56,6 +56,9 @@ def test_explicit_bump_rewrites_fixture_consumers_without_touching_disk(
     assert "pursers-client==0.1.0a15" in planned[
         root / "tools/wait-bridge/pyproject.toml"
     ]
+    assert "pursers-client==0.1.0a15" in planned[
+        root / "packages/central/pyproject.toml"
+    ]
     assert 'VERSION = "0.1.0a7"' in planned[
         root / "tools/wait-bridge/pursers_wait_server.py"
     ]
@@ -70,7 +73,7 @@ def test_next_patch_alpha_advances_every_component() -> None:
     assert target.packages == {
         "pursers": "5.0.0a17",
         "central": "0.1.0a21",
-        "client": "0.1.0a15",
+        "client": "0.1.0a16",
         "personal": "5.0.0a17",
         "import": "5.0.0a4",
         "wait_bridge": "0.1.0a7",
@@ -83,14 +86,33 @@ def test_check_detects_fixture_dependency_drift(tmp_path: Path) -> None:
     pyproject = root / "tools/wait-bridge/pyproject.toml"
     pyproject.write_text(
         pyproject.read_text().replace(
+            "pursers-client==0.1.0a15",
             "pursers-client==0.1.0a14",
-            "pursers-client==0.1.0a13",
         )
     )
 
     errors = release_train.check(root, manifest)
 
-    assert any("missing pursers-client==0.1.0a14" in error for error in errors)
+    assert any("missing pursers-client==0.1.0a15" in error for error in errors)
+
+
+def test_check_detects_central_client_dependency_drift(tmp_path: Path) -> None:
+    root = _fixture_repository(tmp_path)
+    manifest = load_versions(root / "tools/release_versions.toml")
+    pyproject = root / "packages/central/pyproject.toml"
+    pyproject.write_text(
+        pyproject.read_text().replace(
+            "pursers-client==0.1.0a15",
+            "pursers-client==0.1.0a14",
+        )
+    )
+
+    errors = release_train.check(root, manifest)
+
+    assert any(
+        "packages/central/pyproject.toml: missing pursers-client==0.1.0a15" in error
+        for error in errors
+    )
 
 
 def test_real_tree_is_clean_and_current_bump_has_zero_diff() -> None:
