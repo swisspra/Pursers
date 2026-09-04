@@ -128,6 +128,98 @@ def test_codex_plan_apply_inspect_backup_and_idempotency(tmp_path: Path) -> None
     assert adapter.plan(target) == []
 
 
+def test_codex_worker_and_reviewer_connectors_coexist_and_match_independently(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text("[features]\nweb_search = true\n")
+    bridge = tmp_path / "bin" / "pursers-wait-bridge"
+    bridge.parent.mkdir()
+    bridge.write_text("#!/bin/sh\n")
+    bridge.chmod(0o755)
+    ca_file = tmp_path / "ca.pem"
+    ca_file.write_text("ca")
+    worker_token = "worker.part.token"
+    review_token = "review.part.token"
+    worker_file = tmp_path / "worker.jwt"
+    review_file = tmp_path / "review.jwt"
+    worker_file.write_text(worker_token)
+    review_file.write_text(review_token)
+    common = {
+        "config_path": str(config),
+        "bridge_command": str(bridge),
+        "ca_file": str(ca_file),
+    }
+    worker = desired(
+        tmp_path,
+        "codex",
+        name="pursers-codex-1",
+        token_file=str(worker_file),
+        token_env_var="PURSERS_WORKER_TOKEN",
+        bridge_name="pursers-wait-worker",
+        board_connector_name="pursers-dev",
+        **common,
+    )
+    reviewer = desired(
+        tmp_path,
+        "codex",
+        role="reviewer",
+        name="purser-reviewer-1",
+        token_file=str(review_file),
+        token_env_var="PURSERS_REVIEW_TOKEN",
+        bridge_name="pursers-wait-reviewer",
+        board_connector_name="pursers-review",
+        **common,
+    )
+    adapter = seat_config.CodexAdapter(config)
+    for target in (worker, reviewer, worker, reviewer):
+        adapter.apply(adapter.plan(target))
+
+    document = tomllib.loads(config.read_text())
+    servers = document["mcp_servers"]
+    assert {
+        "pursers-wait-worker", "pursers-dev",
+        "pursers-wait-reviewer", "pursers-review",
+    } <= servers.keys()
+    for target in (worker, reviewer):
+        wait = servers[target.connector_name]
+        board = servers[target.http_connector_name]
+        assert wait["env"]["ONBOARD_AGENT_NAME"] == target.name
+        assert wait["env"]["PURSERS_ROLE"] == target.role
+        assert wait["env"]["PURSERS_REQUIRE_TOKEN_MATCH"] == "1"
+        assert board["bearer_token_env_var"] == target.token_env_var
+        assert f"${{{target.token_env_var}-}}" in wait["args"][1]
+
+    doctor = seat_config.Doctor(
+        pypi_fetcher=lambda: "0.1.0a7",
+        live_probe=lambda _d, _t: {
+            "mode": "push", "registry_boards": ["pursers"], "skipped_boards": {}
+        },
+    )
+    monkeypatch.setenv("PURSERS_WORKER_TOKEN", worker_token)
+    monkeypatch.setenv("PURSERS_REVIEW_TOKEN", "wrong.review.token")
+    worker_row = next(
+        row for row in doctor.run(worker) if row.check == "split-identity"
+    )
+    reviewer_row = next(
+        row for row in doctor.run(reviewer) if row.check == "split-identity"
+    )
+    assert worker_row.status == "PASS"
+    assert reviewer_row.status == "FAIL"
+
+    monkeypatch.setenv("PURSERS_WORKER_TOKEN", "wrong.worker.token")
+    monkeypatch.setenv("PURSERS_REVIEW_TOKEN", review_token)
+    worker_row = next(
+        row for row in doctor.run(worker) if row.check == "split-identity"
+    )
+    reviewer_row = next(
+        row for row in doctor.run(reviewer) if row.check == "split-identity"
+    )
+    assert worker_row.status == "FAIL"
+    assert reviewer_row.status == "PASS"
+    assert adapter.inspect()["document"]["features"]["web_search"] is True
+
+
 def test_codex_replaces_uvx_and_wrong_timeout_under_private_ca(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

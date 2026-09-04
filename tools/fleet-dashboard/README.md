@@ -56,6 +56,10 @@ seat token. Doctor compares only SHA-256 digests and reports `split identity`
 as a failure when the token file and `bearer_token_env_var` resolve to different
 values. Apply the generated config, set the connector environment variable from
 the same seat token file, and restart Codex before rerunning Doctor.
+Worker seats target `pursers-dev` and reviewer seats target `pursers-review` by
+default; inventory/API input may set `board_connector_name` explicitly. Each
+apply replaces only that seat's wait/board pair, so both pairs coexist in one
+Codex config and repeated applies do not clobber the other seat.
 Generated role defaults are worker=`can_work`, reviewer=`can_review`, and no
 work/review capability for coordinator or orchestrator; incompatible hybrids
 are rejected before a host configuration is written.

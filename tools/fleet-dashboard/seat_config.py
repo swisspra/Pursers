@@ -606,6 +606,7 @@ class DesiredSeat:
     personal_command: str = "pursers-personal"
     token_env_var: str = "ONBOARD_CENTRAL_TOKEN"
     bridge_name: str | None = None
+    board_connector_name: str | None = None
     tier_max: int = 2
     skills: tuple[str, ...] = ()
     can_review: bool | None = None
@@ -626,6 +627,10 @@ class DesiredSeat:
             raise ValueError("home board must be a safe 1-80 character identifier")
         if not ENV_NAME.fullmatch(self.token_env_var):
             raise ValueError("token env var must be a safe identifier")
+        if self.board_connector_name is not None and not SAFE_NAME.fullmatch(
+            self.board_connector_name
+        ):
+            raise ValueError("board connector name must be a safe identifier")
         if isinstance(self.tier_max, bool) or self.tier_max not in {1, 2, 3}:
             raise ValueError("tier_max must be 1, 2, or 3")
         normalized_skills = tuple(
@@ -658,6 +663,12 @@ class DesiredSeat:
     @property
     def connector_name(self) -> str:
         return self.bridge_name or f"pursers-wait-{self.name}"
+
+    @property
+    def http_connector_name(self) -> str:
+        if self.board_connector_name is not None:
+            return self.board_connector_name
+        return "pursers-review" if self.role == "reviewer" else "pursers-dev"
 
     @property
     def profile(self) -> HostProfile:
@@ -853,9 +864,13 @@ def _remove_toml_tables(text: str, names: set[str]) -> str:
     return "".join(kept).rstrip() + "\n"
 
 
-def _bridge_shell_args() -> list[str]:
+def _bridge_shell_args(
+    token_env_var: str = "ONBOARD_CENTRAL_TOKEN",
+) -> list[str]:
+    if not ENV_NAME.fullmatch(token_env_var):
+        raise ValueError("token env var must be a safe identifier")
     script = (
-        'connector_token=${ONBOARD_CENTRAL_TOKEN-}; '
+        f'connector_token=${{{token_env_var}-}}; '
         'token=$(tr -d "\\r\\n" < "$ONBOARD_CENTRAL_TOKEN_FILE"); '
         'export PURSERS_BOARD_CONNECTOR_TOKEN="$connector_token"; '
         'export ONBOARD_CENTRAL_TOKEN="$token"; exec "$PURSERS_BRIDGE_COMMAND"'
@@ -878,14 +893,17 @@ class CodexAdapter(FileAdapter):
 
     def _render(self, desired: DesiredSeat) -> str:
         name = desired.connector_name
+        board_name = desired.http_connector_name
         if not SAFE_NAME.fullmatch(name):
             raise ValueError("bridge connector name is unsafe")
+        if name == board_name:
+            raise ValueError("bridge and board connector names must differ")
         current = self.path.read_text(encoding="utf-8") if self.path.exists() else ""
         tables = {
             f"mcp_servers.{name}",
             f"mcp_servers.{name}.env",
-            "mcp_servers.pursers-dev",
-            "mcp_servers.pursers-dev.env_http_headers",
+            f"mcp_servers.{board_name}",
+            f"mcp_servers.{board_name}.env_http_headers",
         }
         prefix = _remove_toml_tables(current, tables)
         prefix = "".join(
@@ -896,7 +914,7 @@ class CodexAdapter(FileAdapter):
         block = f"""
 [{f'mcp_servers.{name}'}]
 command = "/bin/sh"
-args = {_toml_array(_bridge_shell_args())}
+args = {_toml_array(_bridge_shell_args(desired.token_env_var))}
 tool_timeout_sec = {desired.profile.host_timeout_s}
 
 [{f'mcp_servers.{name}.env'}]
@@ -916,11 +934,11 @@ PURSERS_PROVIDER = {_toml_string(desired.provider or '')}
 PURSERS_REQUIRE_TOKEN_MATCH = "1"
 SSL_CERT_FILE = {_toml_string(desired.ca_file)}
 
-[mcp_servers.pursers-dev]
+[mcp_servers.{board_name}]
 url = {_toml_string(desired.central_url)}
 bearer_token_env_var = {_toml_string(desired.token_env_var)}
 
-[mcp_servers.pursers-dev.env_http_headers]
+[mcp_servers.{board_name}.env_http_headers]
 ONBOARD_BOARD_ID = {_toml_string(desired.home_board)}
 """
         result = prefix.rstrip() + "\n\n" + MANAGED_COMMENT + block
@@ -950,7 +968,10 @@ def _goose_block(desired: DesiredSeat) -> list[str]:
         f"    timeout: {desired.profile.host_timeout_s}\n",
         f"    cmd: {_yaml_quote('/bin/sh')}\n",
         "    args:\n",
-        *[f"      - {_yaml_quote(item)}\n" for item in _bridge_shell_args()],
+        *[
+            f"      - {_yaml_quote(item)}\n"
+            for item in _bridge_shell_args(desired.token_env_var)
+        ],
         "    envs:\n",
         f"      PURSERS_BRIDGE_COMMAND: {_yaml_quote(desired.bridge_command)}\n",
         f"      ONBOARD_CENTRAL_TOKEN_FILE: {_yaml_quote(desired.token_file)}\n",
@@ -1147,7 +1168,7 @@ def _bridge_json(desired: DesiredSeat) -> dict[str, Any]:
     }
     return {
         "command": "/bin/sh",
-        "args": _bridge_shell_args(),
+        "args": _bridge_shell_args(desired.token_env_var),
         "env": env,
     }
 
