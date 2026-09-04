@@ -29,6 +29,10 @@ dashboard = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = dashboard
 SPEC.loader.exec_module(dashboard)
 
+CENTRAL_SRC = MODULE_PATH.parents[2] / "packages" / "central" / "src" / "pursers_central"
+sys.path.insert(0, str(CENTRAL_SRC))
+import central  # noqa: E402
+
 
 def registry(projects: dict) -> dict:
     return {"state": {"value": json.dumps({"schema_version": 1, "projects": projects})}}
@@ -4107,7 +4111,8 @@ def test_dispatch_fetcher_projects_policy_gaps_offers_and_timeline() -> None:
                 ]
             }
 
-        async def board_catchup(self, **_kwargs: object) -> dict:
+        async def board_dispatch_events(self, **kwargs: object) -> dict:
+            assert kwargs == {"limit": 25}
             return {
                 "events": [
                     {
@@ -4138,6 +4143,184 @@ def test_dispatch_fetcher_projects_policy_gaps_offers_and_timeline() -> None:
         "skill:python",
     ]
     assert result["timeline"][0]["kind"] == "ticket_offered"
+
+
+def test_dispatch_timeline_reads_cross_seat_central_projection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    jwks_path = tmp_path / "jwks.json"
+    jwks_path.write_text('{"keys": []}', encoding="utf-8")
+    for key, value in {
+        "CENTRAL_AUTH_MODE": "jwt",
+        "CENTRAL_JWT_ISSUER": "https://issuer.example",
+        "CENTRAL_JWT_AUDIENCE": "http://localhost:8765/mcp",
+        "CENTRAL_JWKS_PATH": str(jwks_path),
+        "CENTRAL_ADMISSION": "invite",
+        "STORE_BACKEND": "sqlite",
+    }.items():
+        monkeypatch.setenv(key, value)
+    mcp, _service = central.build_server("localhost", 8765, tmp_path / "central")
+    review_scopes = frozenset({"board:read", "board:write", "board:review"})
+    work_scopes = frozenset({"board:read", "board:write"})
+    admin = central.Principal("PR-admin", "admin", review_scopes)
+    dashboard_principal = central.Principal(
+        "PR-dashboard", "dashboard", work_scopes
+    )
+    worker_a = central.Principal("PR-worker-a", "worker-a", work_scopes)
+    worker_b = central.Principal("PR-worker-b", "worker-b", work_scopes)
+    reviewer = central.Principal("PR-reviewer", "reviewer", review_scopes)
+    state: dict[str, object] = {"principal": admin, "now": 1000.0}
+    monkeypatch.setattr(central, "current_principal", lambda: state["principal"])
+    monkeypatch.setattr(central.time, "time", lambda: state["now"])
+
+    async def call(name: str, principal: central.Principal, **arguments: object) -> dict:
+        state["principal"] = principal
+        result = await mcp.call_tool(name, {"board_id": "pursers", **arguments})
+        return result.structured_content
+
+    async def add_seat(
+        principal: central.Principal,
+        name: str,
+        capabilities: dict[str, object],
+        *,
+        role: str = "member",
+    ) -> str:
+        await call(
+            "board_member_add",
+            admin,
+            agent_name="admin-agent",
+            principal_id=principal.principal_id,
+            role=role,
+        )
+        joined = await call(
+            "board_join", principal, agent_name=name, capabilities=capabilities
+        )
+        return joined["agent_id"]
+
+    async def scenario() -> None:
+        await call(
+            "board_join",
+            admin,
+            agent_name="admin-agent",
+            capabilities={"can_work": False, "can_review": False},
+        )
+        await add_seat(
+            dashboard_principal,
+            "dashboard-seat",
+            {"can_work": False, "can_review": False},
+        )
+        worker_a_id = await add_seat(
+            worker_a, "worker-a", {"tier_max": 2, "can_work": True}
+        )
+        worker_b_id = await add_seat(
+            worker_b, "worker-b", {"tier_max": 2, "can_work": True}
+        )
+        await add_seat(
+            reviewer,
+            "reviewer",
+            {"tier_max": 2, "can_work": False, "can_review": True},
+            role="reviewer",
+        )
+        await call(
+            "board_dispatch_policy_set",
+            admin,
+            agent_name="admin-agent",
+            offer_ttl_s=1,
+        )
+        created = await call(
+            "ticket_create",
+            admin,
+            agent_name="admin-agent",
+            title="expiry and revoke",
+            description="exercise dashboard dispatch history",
+            target_url="pursers/tools/fleet-dashboard",
+            scope="interactive-no-send",
+            required_fields=["test_output"],
+            prefer_agents=[worker_a_id],
+        )
+        await call(
+            "ticket_update",
+            admin,
+            agent_name="admin-agent",
+            ticket_id=created["ticket"]["ticket_id"],
+            exclude_agents=[worker_a_id],
+        )
+        state["now"] = 1002.0
+        await call("board_reap", admin)
+
+        state["now"] = 2000.0
+        review_target = await call(
+            "ticket_create",
+            admin,
+            agent_name="admin-agent",
+            title="review offer",
+            description="exercise dashboard review history",
+            target_url="pursers/tools/fleet-dashboard",
+            scope="interactive-no-send",
+            required_fields=["test_output"],
+            prefer_agents=[worker_a_id],
+        )
+        state["now"] = 2000.5
+        review_ticket_id = review_target["ticket"]["ticket_id"]
+        await call(
+            "ticket_claim",
+            worker_a,
+            agent_name="worker-a",
+            ticket_id=review_ticket_id,
+        )
+        await call(
+            "ticket_submit",
+            worker_a,
+            agent_name="worker-a",
+            ticket_id=review_ticket_id,
+            summary="ready",
+        )
+
+        class Client:
+            async def __aenter__(self) -> Self:
+                return self
+
+            async def __aexit__(self, *_args: object) -> None:
+                return None
+
+            async def board_status(self) -> dict:
+                return await call("board_status", dashboard_principal)
+
+            async def ticket_list(self, **arguments: object) -> dict:
+                return await call("ticket_list", dashboard_principal, **arguments)
+
+            async def board_dispatch_events(self, **arguments: object) -> dict:
+                return await call(
+                    "board_dispatch_events", dashboard_principal, **arguments
+                )
+
+        config = dashboard.Config(
+            url="https://127.0.0.1:8766/mcp",
+            token="token",
+            home_board="pursers",
+            agent_name="dashboard-seat",
+            stale_seconds=300,
+            cache_seconds=5,
+        )
+        fetcher = dashboard.FleetFetcher(
+            config, client_factory=lambda *_args, **_kwargs: Client()
+        )
+
+        async def boards() -> list[tuple[str, str]]:
+            return [("pursers", "pursers")]
+
+        fetcher._boards = boards
+        result = await fetcher.fetch_dispatch("pursers")
+        kinds = {event["kind"] for event in result["timeline"]}
+        assert {
+            "ticket_offered",
+            "review_offered",
+            "offer_expired",
+            "offer_revoked",
+        } <= kinds
+        assert worker_a_id != worker_b_id
+
+    asyncio.run(scenario())
 
 
 def test_dispatch_policy_save_validates_and_forwards_exact_contract() -> None:
@@ -4197,6 +4380,7 @@ def test_capability_and_dispatch_ui_contract_is_present() -> None:
     assert "/api/dispatch" in dashboard.HTML
     assert "Dispatch unavailable:" in dashboard.HTML
     assert "Current offer" in dashboard.HTML
+    assert "Runtime consumption requires Dispatch Part 2" in dashboard.HTML
 
 
 def test_dispatch_http_endpoints_use_same_origin_json_guard() -> None:

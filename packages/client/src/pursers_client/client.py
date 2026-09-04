@@ -717,6 +717,10 @@ class BoardClient:
     async def board_status(self) -> dict[str, Any]:
         return await self._call("board_status", {})
 
+    async def board_dispatch_events(self, *, limit: int = 25) -> dict[str, Any]:
+        """Read Central's member-authorized cross-seat dispatch projection."""
+        return await self._call("board_dispatch_events", {"limit": limit})
+
     async def board_review_policy_set(self, review_policy: str) -> dict[str, Any]:
         """Set the board review policy through Central's admin-gated tool."""
         return await self._call(
