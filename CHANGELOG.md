@@ -26,6 +26,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed
 
+- Generated reviewer seats now include a shared HARD-verify checklist, an
+  exact-SHA `board.sh verify` helper, evidence-gated approval, and mandatory
+  non-empty rejection fixes. Shipped leak rules are generic; operator-specific
+  regexes load from `~/.pursers/leak-markers.txt` (or
+  `PURSERS_LEAK_MARKERS_FILE`) without printing their values.
 - `a2a_wait(wait_for="auto")` now derives reviewer waits from the joined role,
   wakes reviewers only for submitted/review work, suppresses unchanged backlog
   cues after their first process-local return, and reports whether each return
