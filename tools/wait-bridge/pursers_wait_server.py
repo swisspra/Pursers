@@ -932,11 +932,14 @@ class _BoardView:
         capabilities: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         selected = self.agent_name if agent_name is None else agent_name
-        arguments = {"agent_name": selected}
+        arguments: dict[str, Any] = {"agent_name": selected}
         if task_focus is not None:
             arguments["task_focus"] = task_focus
-        if capabilities is not None:
-            arguments["capabilities"] = capabilities
+        caps = dict(capabilities or {})
+        if os.environ.get("PURSERS_LEGACY_TOOLS") == "1":
+            caps.setdefault("legacy_tools", True)
+        if caps or capabilities is not None:
+            arguments["capabilities"] = caps
         joined = await self._call(
             "board_join", arguments, refresh=True
         )
@@ -1884,8 +1887,27 @@ async def _lifespan(server: MCPServer) -> AsyncIterator[dict[str, Any]]:
         _GLOBAL_ENGINE = None
 
 
+BRIDGE_DEPRECATED_TOOLS: frozenset[str] = frozenset()
+
 mcp = MCPServer("Pursers Wait Bridge", version=VERSION, lifespan=_lifespan)
 mcp._lowlevel_server.middleware.append(SessionCaptureMiddleware(_get_orchestrator_engine))
+
+_original_bridge_list_tools = mcp.list_tools
+
+
+async def _custom_bridge_list_tools(
+    *args: Any, include_legacy: bool | None = None, **kwargs: Any
+) -> list[Any]:
+    tools = await _original_bridge_list_tools(*args, **kwargs)
+    legacy = include_legacy
+    if legacy is None:
+        legacy = os.environ.get("PURSERS_LEGACY_TOOLS") == "1"
+    if not legacy and BRIDGE_DEPRECATED_TOOLS:
+        tools = [t for t in tools if t.name not in BRIDGE_DEPRECATED_TOOLS]
+    return tools
+
+
+mcp.list_tools = _custom_bridge_list_tools
 
 
 async def _client_for_tool(ctx: Context) -> BoardClient:

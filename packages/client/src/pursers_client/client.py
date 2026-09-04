@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import os
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Callable, Iterable
@@ -35,7 +36,7 @@ DEFAULT_EVENT_KINDS = frozenset(
         "ticket_assigned",
     }
 ) | REVIEW_LEASE_KINDS | DISPATCH_KINDS
-KNOWN_EVENT_KINDS = DEFAULT_EVENT_KINDS | SUBMITTED_RELEVANT_KINDS | {"memory_written"}
+KNOWN_EVENT_KINDS = DEFAULT_EVENT_KINDS | SUBMITTED_RELEVANT_KINDS | {"memory_written", "deprecated_tool_warning"}
 GENERATION_META_KEY = "io.onboard/expected-generation"
 # Cleanup is best-effort after this bound so a broken transport cannot wedge a
 # host shutdown or mask the original __aenter__ failure indefinitely.
@@ -260,8 +261,11 @@ class BoardClient:
             arguments["agent_platform"] = agent_platform
         if task_focus is not None:
             arguments["task_focus"] = task_focus
-        if capabilities is not None:
-            arguments["capabilities"] = capabilities
+        caps = dict(capabilities or {})
+        if os.environ.get("PURSERS_LEGACY_TOOLS") == "1":
+            caps.setdefault("legacy_tools", True)
+        if caps or capabilities is not None:
+            arguments["capabilities"] = caps
         joined = await (
             self._call_refresh("board_join", arguments)
             if agent_name is None
@@ -294,6 +298,11 @@ class BoardClient:
             "agent_name": self.agent_name,
             "token_budget": token_budget,
         }
+        caps = dict(capabilities or {})
+        if os.environ.get("PURSERS_LEGACY_TOOLS") == "1":
+            caps.setdefault("legacy_tools", True)
+        if caps:
+            arguments["capabilities"] = caps
         optional = {
             "claim_ttl_s": claim_ttl_s,
             "agent_platform": agent_platform,

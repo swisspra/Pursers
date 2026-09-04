@@ -31,8 +31,16 @@ from mcp.server.context import HandlerResult, ServerRequestContext
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.shared.exceptions import MCPError
+from mcp import types
 from mcp_types import INTERNAL_ERROR, INVALID_REQUEST
 from pydantic import AnyHttpUrl
+from pydantic.fields import FieldInfo
+
+types.ToolAnnotations.model_fields["deprecated"] = FieldInfo(
+    annotation=bool | None, default=None
+)
+types.ToolAnnotations.model_rebuild(force=True)
+types.Tool.model_rebuild(force=True)
 from pursers_client import (
     DISPATCH_KINDS,
     OFFER_EXPIRED,
@@ -125,6 +133,39 @@ SCRUB_EVENT_FIELDS = frozenset(
 )
 REVIEW_POLICIES = frozenset({"strict", "workflow"})
 REVIEW_EVENT_KINDS = frozenset({"board_review_policy_changed"}) | REVIEW_LEASE_KINDS
+DEPRECATION_EVENT_KINDS = frozenset({"deprecated_tool_warning"})
+DEPRECATION_EVENT_FIELDS = frozenset(
+    {
+        "tool",
+        "message",
+        "caller_principal_id",
+        "caller_agent_name",
+        "fixture_provenance",
+        "recipient_identities",
+    }
+)
+DEPRECATION_WARNING_UNIQUE_FIELDS = (
+    "tool",
+    "caller_principal_id",
+    "caller_agent_name",
+)
+# Journal-local, oldest-sequence-first retention keeps compaction dedupe durable
+# without recreating an unbounded warning registry in the board document.
+DEPRECATION_WARNING_DEDUPE_MAX_ENTRIES = 4_096
+DEPRECATED_TOOLS = frozenset(
+    {
+        "agent_nudge",
+        "board_get_briefing",
+        "memory_checkpoint",
+        "memory_handoff",
+        "memory_links",
+        "memory_read",
+        "memory_search",
+        "memory_unpin",
+        "ticket_assign",
+        "ticket_terminate",
+    }
+)
 REVIEW_CORE_OVERRIDE_FIELDS = frozenset(
     {"review_policy_at_verdict", "review_label", "review_verdict"}
 )
@@ -286,6 +327,75 @@ def iso_at(epoch: float) -> str:
 class CentralJournal(Journal):
     """Extend the pinned core journal with sanitized board-control events."""
 
+    @staticmethod
+    def _deprecation_warning_key(event: Mapping[str, Any]) -> str:
+        return json.dumps(
+            [event.get(field) for field in DEPRECATION_WARNING_UNIQUE_FIELDS],
+            separators=(",", ":"),
+        )
+
+    @staticmethod
+    def _deprecation_warning_entries(
+        document: dict[str, Any],
+    ) -> dict[str, dict[str, Any]]:
+        idempotency = document.setdefault("idempotency", {})
+        if not isinstance(idempotency, dict):
+            raise ValueError("journal idempotency state is corrupt")
+        bucket = idempotency.setdefault(
+            "deprecated_tool_warning",
+            {
+                "max_entries": DEPRECATION_WARNING_DEDUPE_MAX_ENTRIES,
+                "eviction": "oldest-sequence-first",
+                "entries": {},
+            },
+        )
+        if not isinstance(bucket, dict):
+            raise ValueError("deprecated warning idempotency state is corrupt")
+        bucket["max_entries"] = DEPRECATION_WARNING_DEDUPE_MAX_ENTRIES
+        bucket["eviction"] = "oldest-sequence-first"
+        entries = bucket.setdefault("entries", {})
+        if not isinstance(entries, dict):
+            raise ValueError("deprecated warning idempotency entries are corrupt")
+        return entries
+
+    @classmethod
+    def _remember_deprecation_warning(
+        cls,
+        document: dict[str, Any],
+        event: Mapping[str, Any],
+        *,
+        trim: bool = True,
+    ) -> None:
+        if event.get("kind") != "deprecated_tool_warning":
+            return
+        if any(
+            not isinstance(event.get(field), str) or not event.get(field)
+            for field in DEPRECATION_WARNING_UNIQUE_FIELDS
+        ):
+            raise ValueError("deprecated warning identity is incomplete")
+        entries = cls._deprecation_warning_entries(document)
+        key = cls._deprecation_warning_key(event)
+        entries.setdefault(key, {"event": copy.deepcopy(dict(event))})
+        if not trim:
+            return
+        cls._trim_deprecation_warnings(entries)
+
+    @staticmethod
+    def _trim_deprecation_warnings(
+        entries: dict[str, dict[str, Any]],
+    ) -> None:
+        overflow = len(entries) - DEPRECATION_WARNING_DEDUPE_MAX_ENTRIES
+        if overflow > 0:
+            oldest = sorted(
+                entries,
+                key=lambda item: (
+                    int(entries[item].get("event", {}).get("seq", 0)),
+                    item,
+                ),
+            )[:overflow]
+            for item in oldest:
+                entries.pop(item, None)
+
     def append(self, board_id: str, event: dict[str, Any]) -> dict[str, Any]:
         kind = _require_text("kind", event.get("kind"))
         custom_core_fields = REVIEW_CORE_OVERRIDE_FIELDS | INTAKE_CORE_OVERRIDE_FIELDS
@@ -297,6 +407,7 @@ class CentralJournal(Journal):
             | SCRUB_EVENT_KINDS
             | REVIEW_EVENT_KINDS
             | DISPATCH_EVENT_KINDS
+            | DEPRECATION_EVENT_KINDS
         ):
             raise ValueError(f"unsupported event kind: {kind}")
         board_id = _require_text("board_id", board_id)
@@ -309,6 +420,7 @@ class CentralJournal(Journal):
             | REVIEW_EVENT_FIELDS
             | COORDINATOR_EVENT_FIELDS
             | DISPATCH_EVENT_FIELDS
+            | DEPRECATION_EVENT_FIELDS
         )
         semantic = {
             key: copy.deepcopy(event[key])
@@ -359,6 +471,7 @@ class CentralJournal(Journal):
             | SCRUB_EVENT_KINDS
             | REVIEW_EVENT_KINDS
             | DISPATCH_EVENT_KINDS
+            | DEPRECATION_EVENT_KINDS
         ):
             raise ValueError(f"unsupported event kind: {kind}")
         if not unique_fields:
@@ -373,6 +486,7 @@ class CentralJournal(Journal):
             | REVIEW_EVENT_FIELDS
             | COORDINATOR_EVENT_FIELDS
             | DISPATCH_EVENT_FIELDS
+            | DEPRECATION_EVENT_FIELDS
         )
         semantic = {
             key: copy.deepcopy(event[key])
@@ -389,11 +503,30 @@ class CentralJournal(Journal):
             nonlocal assigned, created
             self._check_document(document, board_id)
             rows = document.setdefault("rows", [])
+            warning_key = None
+            if (
+                kind == "deprecated_tool_warning"
+                and unique_fields == DEPRECATION_WARNING_UNIQUE_FIELDS
+            ):
+                warning_key = self._deprecation_warning_key(semantic)
+                prior = self._deprecation_warning_entries(document).get(
+                    warning_key
+                )
+                if prior is not None:
+                    prior_event = prior.get("event")
+                    if not isinstance(prior_event, dict):
+                        raise ValueError(
+                            "deprecated warning idempotency event is corrupt"
+                        )
+                    assigned = copy.deepcopy(prior_event)
+                    return
             for row in rows:
                 if row.get("kind") == kind and all(
                     row.get(field) == semantic[field] for field in unique_fields
                 ):
                     assigned = copy.deepcopy(row)
+                    if warning_key is not None:
+                        self._remember_deprecation_warning(document, row)
                     return
             seq = int(document["next_seq"])
             if seq <= int(document.get("compacted_through", 0)):
@@ -412,12 +545,58 @@ class CentralJournal(Journal):
                 raise ValueError("journal sequence is not increasing")
             rows.append(assigned)
             document["next_seq"] = seq + 1
+            if warning_key is not None:
+                self._remember_deprecation_warning(document, assigned)
             created = True
 
         self.store.read_modify_write(
             self._path(board_id), mutate, lambda: self._default(board_id)
         )
         return copy.deepcopy(assigned), created
+
+    def compact(self, board_id: str, retain_last: int) -> dict[str, int]:
+        """Compact rows while preserving bounded warning idempotency state."""
+        board_id = _require_text("board_id", board_id)
+        if (
+            type(retain_last) is not int
+            or retain_last < MIN_COMPACTION_RETAIN_LAST
+        ):
+            raise ValueError(
+                f"retain_last must be an integer of at least "
+                f"{MIN_COMPACTION_RETAIN_LAST}"
+            )
+        result: dict[str, int] = {}
+
+        def mutate(document: dict[str, Any]) -> None:
+            nonlocal result
+            self._check_document(document, board_id)
+            rows = document["rows"]
+            for row in rows:
+                self._remember_deprecation_warning(document, row, trim=False)
+            warning_entries = document.get("idempotency", {}).get(
+                "deprecated_tool_warning", {}
+            ).get("entries", {})
+            self._trim_deprecation_warnings(warning_entries)
+            remove_count = max(0, len(rows) - retain_last)
+            removed = rows[:remove_count]
+            if removed:
+                document["compacted_through"] = int(removed[-1]["seq"])
+                document["rows"] = rows[remove_count:]
+            result = {
+                "removed": len(removed),
+                "retained": len(document["rows"]),
+                "compacted_through": int(document.get("compacted_through", 0)),
+                "latest_cursor": int(document["next_seq"]) - 1,
+                "deprecation_dedupe_entries": len(warning_entries),
+                "deprecation_dedupe_limit": (
+                    DEPRECATION_WARNING_DEDUPE_MAX_ENTRIES
+                ),
+            }
+
+        self.store.read_modify_write(
+            self._path(board_id), mutate, lambda: self._default(board_id)
+        )
+        return result
 
 
 class CentralBoard:
@@ -441,6 +620,25 @@ class CentralBoard:
         self.expected_generation: contextvars.ContextVar[Any] = contextvars.ContextVar(
             "central_expected_generation", default=None
         )
+
+    def has_seat_legacy_capability(
+        self, principal_id: str | None, agent_name: str | None
+    ) -> bool:
+        if os.environ.get("PURSERS_LEGACY_TOOLS") == "1":
+            return True
+        if not principal_id or not agent_name:
+            return False
+        try:
+            for doc in self.store.iter_documents("boards"):
+                aid = agent_id(doc.get("board_id", ""), principal_id, agent_name)
+                member = doc.get("members", {}).get(aid)
+                if member is not None:
+                    caps = member.get("capabilities", {})
+                    if isinstance(caps, Mapping) and caps.get("legacy_tools") is True:
+                        return True
+        except Exception:
+            pass
+        return False
 
     def transaction(self):
         transaction = getattr(self.store, "transaction", None)
@@ -1250,10 +1448,13 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         """Register tools while preserving intentional client-facing failures."""
 
         def register(function: Any) -> Any:
+            tool_name = function.__name__
+            is_deprecated = tool_name in DEPRECATED_TOOLS
+
             @wraps(function)
             async def wrapped(*args: Any, **kwargs: Any) -> Any:
                 try:
-                    return await function(*args, **kwargs)
+                    result = await function(*args, **kwargs)
                 except (PermissionError, ValueError) as exc:
                     log_runtime_error(
                         service.diagnostics,
@@ -1273,6 +1474,68 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                     )
                     raise
 
+                if is_deprecated:
+                    if isinstance(result, dict):
+                        result.setdefault("_deprecated", True)
+                        result.setdefault("deprecated", True)
+
+                    board_id = kwargs.get("board_id")
+                    if not board_id and args:
+                        board_id = args[0] if isinstance(args[0], str) else None
+                    ctx = kwargs.get("ctx")
+                    if ctx is None:
+                        ctx = next(
+                            (value for value in args if isinstance(value, Context)),
+                            None,
+                        )
+                    agent_name = kwargs.get("agent_name")
+                    if not agent_name and ctx is not None:
+                        try:
+                            client_params = ctx.session.client_params
+                        except (AttributeError, ValueError):
+                            client_params = None
+                        client_info = (
+                            client_params.client_info
+                            if client_params is not None
+                            else None
+                        )
+                        agent_name = getattr(client_info, "name", None)
+
+                    if board_id and isinstance(board_id, str):
+                        principal = current_principal()
+                        caller_name = str(agent_name or "unknown")
+                        actor_agent = agent_id(
+                            board_id, principal.principal_id, caller_name
+                        )
+                        _warning, created = await append_once_and_publish(
+                            board_id,
+                            {"agent_id": actor_agent},
+                            "deprecated_tool_warning",
+                            f"board://{board_id}/tool/{tool_name}",
+                            [],
+                            ctx,
+                            unique_fields=DEPRECATION_WARNING_UNIQUE_FIELDS,
+                            tool=tool_name,
+                            caller_principal_id=principal.principal_id,
+                            caller_agent_name=caller_name,
+                            message=(
+                                f"Tool '{tool_name}' is deprecated in a18 and "
+                                "scheduled for removal in a19."
+                            ),
+                        )
+                        if created and isinstance(result, dict):
+                            cur_seq = latest_seq(board_id)
+                            if "latest_seq" in result:
+                                result["latest_seq"] = cur_seq
+                            if (
+                                "briefing" in result
+                                and isinstance(result["briefing"], dict)
+                                and "latest_seq" in result["briefing"]
+                            ):
+                                result["briefing"]["latest_seq"] = cur_seq
+
+                return result
+
             return mcp.tool()(wrapped)
 
         return register
@@ -1283,7 +1546,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         kind: str,
         payload_ref: str,
         recipients: list[str],
-        ctx: Context,
+        ctx: Context | None = None,
         **fields: Any,
     ) -> dict[str, Any]:
         try:
@@ -1305,22 +1568,23 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             # return value. MCPError must escape so SQLite's outer transaction
             # observes the failure and rolls the domain mutation back.
             raise MCPError(INTERNAL_ERROR, "Internal server error") from exc
-        pending = service.pending_notifications.get()
-        journal_uri = f"board://{board_id}/journal"
-        if pending is None:
-            await ctx.notify_resource_updated(payload_ref)
-            await ctx.notify_resource_updated(journal_uri)
-        else:
-            pending.append((ctx, payload_ref))
-            pending.append((ctx, journal_uri))
-        for agent_id in sorted(set(recipients)):
-            if not isinstance(agent_id, str) or not agent_id:
-                continue
-            seat_uri = f"board://{board_id}/agent/{agent_id}"
+        if ctx is not None:
+            pending = service.pending_notifications.get()
+            journal_uri = f"board://{board_id}/journal"
             if pending is None:
-                await ctx.notify_resource_updated(seat_uri)
+                await ctx.notify_resource_updated(payload_ref)
+                await ctx.notify_resource_updated(journal_uri)
             else:
-                pending.append((ctx, seat_uri))
+                pending.append((ctx, payload_ref))
+                pending.append((ctx, journal_uri))
+            for agent_id in sorted(set(recipients)):
+                if not isinstance(agent_id, str) or not agent_id:
+                    continue
+                seat_uri = f"board://{board_id}/agent/{agent_id}"
+                if pending is None:
+                    await ctx.notify_resource_updated(seat_uri)
+                else:
+                    pending.append((ctx, seat_uri))
         return event
 
     async def append_once_and_publish(
@@ -1329,7 +1593,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         kind: str,
         payload_ref: str,
         recipients: list[str],
-        ctx: Context,
+        ctx: Context | None,
         *,
         unique_fields: tuple[str, ...],
         **fields: Any,
@@ -1351,7 +1615,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             raise
         except Exception as exc:
             raise MCPError(INTERNAL_ERROR, "Internal server error") from exc
-        if created:
+        if created and ctx is not None:
             pending = service.pending_notifications.get()
             journal_uri = f"board://{board_id}/journal"
             if pending is None:
@@ -2485,7 +2749,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         raw = dict(value or {})
         allowed = {
             "model", "provider", "tier_max", "skills", "can_review",
-            "can_work", "host", "max_parallel",
+            "can_work", "host", "max_parallel", "legacy_tools",
         }
         unknown = sorted(set(raw) - allowed)
         if unknown:
@@ -2514,6 +2778,10 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         for field in ("can_review", "can_work"):
             if not isinstance(result[field], bool):
                 raise ValueError(f"capabilities.{field} must be boolean")
+        if "legacy_tools" in raw:
+            if not isinstance(raw["legacy_tools"], bool):
+                raise ValueError("capabilities.legacy_tools must be boolean")
+            result["legacy_tools"] = raw["legacy_tools"]
         for field in ("model", "provider", "host"):
             item = result[field]
             if item is not None and (not isinstance(item, str) or not item.strip()):
@@ -2577,6 +2845,8 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 None, default_can_review=role == "reviewer"
             )
             member["capabilities_explicit"] = False
+        if os.environ.get("PURSERS_LEGACY_TOOLS") == "1":
+            member["capabilities"]["legacy_tools"] = True
         document["members"][identity_id] = member
         if allow_workflow_side_effects and dispatch_enabled(document):
             released.extend(redispatch_queue(document, now))
@@ -2989,6 +3259,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 "admission_recipients": service.admitted_agent_ids(
                     document, member["agent_id"]
                 ),
+                "capabilities": member.get("capabilities", {}),
             }
 
         result = service.mutate(board_id, join, require_generation=False)
@@ -3102,6 +3373,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             "admission_event": admission_event,
             "snapshot": snapshot,
             "briefing": briefing,
+            "capabilities": result["actor"].get("capabilities", {}),
         }
 
     @tool()
@@ -6143,6 +6415,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
     async def memory_search(
         board_id: str,
         query: str,
+        ctx: Context,
         tag: str | None = None,
         author: str | None = None,
         include_archived: bool = False,
@@ -6203,6 +6476,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
     @tool()
     async def memory_links(
         board_id: str,
+        ctx: Context,
         memory_id: str | None = None,
         ticket_id: str | None = None,
         file: str | None = None,
@@ -6490,6 +6764,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
     @tool()
     async def board_get_briefing(
         board_id: str,
+        ctx: Context,
         token_budget: int = 4_000,
         ticket_id: str | None = None,
     ) -> dict[str, Any]:
@@ -7020,6 +7295,75 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             )
         return result
 
+    original_list_tools = mcp.list_tools
+
+    async def custom_handle_list_tools(
+        ctx: ServerRequestContext[Any], params: types.PaginatedRequestParams | None
+    ) -> types.ListToolsResult:
+        meta = ctx.meta if hasattr(ctx, "meta") and isinstance(ctx.meta, Mapping) else {}
+        client_info = meta.get("io.modelcontextprotocol/clientInfo") or {}
+        agent_name = client_info.get("name") if isinstance(client_info, Mapping) else None
+
+        legacy = False
+        if os.environ.get("PURSERS_LEGACY_TOOLS") == "1":
+            legacy = True
+        elif agent_name:
+            try:
+                p = current_principal()
+                legacy = service.has_seat_legacy_capability(p.principal_id, agent_name)
+            except Exception:
+                legacy = False
+
+        tools = await original_list_tools()
+        if not legacy:
+            tools = [t for t in tools if t.name not in DEPRECATED_TOOLS]
+        else:
+            tools = [
+                t.model_copy(
+                    update={
+                        "annotations": types.ToolAnnotations(
+                            title=f"[DEPRECATED] {t.name} is deprecated in a18 and scheduled for removal in a19"
+                        ),
+                        "meta": {"deprecated": True},
+                    }
+                )
+                if t.name in DEPRECATED_TOOLS
+                else t
+                for t in tools
+            ]
+        return types.ListToolsResult(tools=tools)
+
+    mcp._handle_list_tools = custom_handle_list_tools
+    mcp._lowlevel_server.add_request_handler(
+        "tools/list", types.PaginatedRequestParams, custom_handle_list_tools
+    )
+
+    async def custom_list_tools(
+        *args: Any, include_legacy: bool | None = None, **kwargs: Any
+    ) -> list[Any]:
+        tools = await original_list_tools(*args, **kwargs)
+        legacy = include_legacy
+        if legacy is None:
+            legacy = os.environ.get("PURSERS_LEGACY_TOOLS") == "1"
+        if not legacy:
+            tools = [t for t in tools if t.name not in DEPRECATED_TOOLS]
+        else:
+            tools = [
+                t.model_copy(
+                    update={
+                        "annotations": types.ToolAnnotations(
+                            title=f"[DEPRECATED] {t.name} is deprecated in a18 and scheduled for removal in a19"
+                        ),
+                        "meta": {"deprecated": True},
+                    }
+                )
+                if t.name in DEPRECATED_TOOLS
+                else t
+                for t in tools
+            ]
+        return tools
+
+    mcp.list_tools = custom_list_tools
     return mcp, service
 
 
