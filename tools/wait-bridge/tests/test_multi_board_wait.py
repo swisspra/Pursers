@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sys
+import tempfile
 import unittest
 from contextlib import AbstractAsyncContextManager
 from pathlib import Path
@@ -245,10 +247,12 @@ class MultiBoardWaitTests(unittest.IsolatedAsyncioTestCase):
                 "events",
                 "waited_s",
                 "timed_out",
+                "mode",
                 "reason",
                 "resynced",
             ],
         )
+        self.assertIn(result["mode"], {"push", "poll"})
         self.assertIsInstance(result["new_seq"], int)
         self.assertNotIn("board_id", result["events"][0])
 
@@ -408,6 +412,17 @@ class MultiBoardWaitTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(after_alpha, before_alpha)
         self.assertEqual(result["events"][0]["board_id"], "beta")
+        self.assertEqual(result["mode"], "mixed")
+        self.assertEqual(
+            result["mode_by_board"], {"alpha": "push", "beta": "poll"}
+        )
+
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            stats = wait_server.BridgeStats(Path(temporary) / "stats.json")
+            await stats.record_wait_return("alpha", "worker", result)
+            document = json.loads(stats.path.read_text(encoding="utf-8"))
+        sample = next(iter(document["model_wait"].values()))["returns"][0]
+        self.assertEqual(sample["mode"], "mixed")
 
     async def test_idle_push_wait_makes_no_central_calls_after_subscribe_drain(self) -> None:
         transport = FakeTransport(["alpha", "beta"])
@@ -439,6 +454,10 @@ class MultiBoardWaitTests(unittest.IsolatedAsyncioTestCase):
             result = await asyncio.wait_for(waiting, timeout=1.5)
 
         self.assertTrue(result["timed_out"])
+        self.assertEqual(result["mode"], "push")
+        self.assertEqual(
+            result["mode_by_board"], {"alpha": "push", "beta": "push"}
+        )
         self.assertEqual(len(transport.calls), calls_after_subscribe_drain)
         self.assertEqual(transport.renewed, [])
 

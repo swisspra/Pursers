@@ -158,6 +158,8 @@ class BridgeStatsTests(unittest.TestCase):
             "waited_s": 180.0,
             "timed_out": True,
             "resynced": False,
+            "mode": "push",
+            "reason": "timeout",
         }
         asyncio.run(
             self.stats.record_wait_return("board-one", "worker-one", result)
@@ -168,6 +170,34 @@ class BridgeStatsTests(unittest.TestCase):
         self.assertEqual(bucket["returns"], 1)
         self.assertEqual(bucket["outcomes"], {"timeout": 1})
         self.assertEqual(bucket["response_bytes"], wait_server._meter_bytes(result))
+        self.assertEqual(
+            seat["returns"],
+            [
+                {
+                    "at": "2030-01-01T12:00:00+00:00",
+                    "response_bytes": wait_server._meter_bytes(result),
+                    "outcome": "timeout",
+                    "mode": "push",
+                    "reason": "timeout",
+                }
+            ],
+        )
+
+    def test_model_wait_does_not_infer_configured_mode(self) -> None:
+        result = {
+            "new_seq": 7,
+            "events": [],
+            "waited_s": 180.0,
+            "timed_out": True,
+            "reason": "timeout",
+        }
+        asyncio.run(
+            self.stats.record_wait_return("board-one", "worker-one", result)
+        )
+
+        document = json.loads(self.path.read_text(encoding="utf-8"))
+        seat = next(iter(document["model_wait"].values()))
+        self.assertEqual(seat["returns"][0]["mode"], "unknown")
 
 
 if __name__ == "__main__":

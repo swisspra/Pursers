@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import copy
 import difflib
 import hashlib
 import hmac
@@ -17,6 +18,7 @@ import stat
 import statistics
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -57,6 +59,7 @@ DEFAULT_URL = "https://127.0.0.1:8766/mcp"
 DEFAULT_HOME_BOARD = "pursers"
 SNAPSHOT_LIMIT = 1_000
 DISPATCH_TICKET_LIMIT = 500
+TICKET_LIST_LIMIT = 500
 SNAPSHOT_MAX_BYTES = 300_000
 EVENT_SCAN_LIMIT = 50
 EVENT_MAX_BYTES = 100_000
@@ -81,6 +84,9 @@ MAX_OVERHEAD_FILE_BYTES = 2_000_000
 MAX_OVERHEAD_SEATS = 200
 MAX_OVERHEAD_TOOLS = 5
 OVERHEAD_DAYS = 7
+ATTENTION_RETENTION_DAYS = 7
+CONTEXT_ATTENTION_HOURS = 24
+CONTEXT_STATS_ANOMALY_TOKENS = 1_000_000
 WORKER_API_MAX_BYTES = 20_000
 CONFIG_API_MAX_BYTES = 40_000
 CONFIG_JOB_LIMIT = 100
@@ -203,6 +209,7 @@ class FleetClient(Protocol):
         second_opinion: bool,
         fallback_broadcast: bool,
     ) -> dict[str, Any]: ...
+    async def ticket_get(self, ticket_id: str) -> dict[str, Any]: ...
 
 
 def _state_value(raw: Any) -> tuple[dict[str, Any] | None, str | None]:
@@ -1221,6 +1228,8 @@ def read_overhead_stats(
     )
 
     model_wait_rows = []
+    push_sessions: list[dict[str, Any]] = []
+    recent_push_keys: set[tuple[str, str]] = set()
     raw_model_wait = document.get("model_wait")
     raw_model_wait = raw_model_wait if isinstance(raw_model_wait, dict) else {}
     current_hour = current.replace(minute=0, second=0, microsecond=0)
@@ -1244,12 +1253,28 @@ def read_overhead_stats(
         last_24h_returns = 0
         last_24h_bytes = 0
         outcomes: dict[str, int] = {}
+        latest_bucket_at: datetime | None = None
+        latest_bucket_returns = 0
+        latest_bucket_bytes = 0
+        latest_bucket_outcomes: dict[str, int] = {}
         for hour, bucket in hours.items():
             parsed = _parse_time(hour)
             if parsed is None or not isinstance(bucket, dict):
                 continue
             returns = _nonnegative_int(bucket.get("returns"))
             response_bytes = _nonnegative_int(bucket.get("response_bytes"))
+            if window_start <= parsed <= current and (
+                latest_bucket_at is None or parsed > latest_bucket_at
+            ):
+                latest_bucket_at = parsed
+                latest_bucket_returns = returns
+                latest_bucket_bytes = response_bytes
+                raw_latest_outcomes = bucket.get("outcomes")
+                latest_bucket_outcomes = (
+                    dict(raw_latest_outcomes)
+                    if isinstance(raw_latest_outcomes, dict)
+                    else {}
+                )
             if parsed == current_hour:
                 per_hour_returns += returns
                 per_hour_bytes += response_bytes
@@ -1273,6 +1298,72 @@ def read_overhead_stats(
                 "outcomes": outcomes,
             }
         )
+        samples = raw.get("returns")
+        samples = samples if isinstance(samples, list) else []
+        actual: list[tuple[datetime, dict[str, Any], int]] = []
+        for sample in samples:
+            if not isinstance(sample, dict):
+                continue
+            parsed = _parse_time(sample.get("at"))
+            response_bytes = sample.get("response_bytes")
+            if (
+                parsed is None
+                or parsed < window_start
+                or parsed > current
+                or type(response_bytes) is not int
+                or response_bytes < 0
+            ):
+                continue
+            actual.append((parsed, sample, (response_bytes + 3) // 4))
+        push_actual = [row for row in actual if row[1].get("mode") == "push"]
+        selected = push_actual or [row for row in actual if row[1].get("mode") != "digest"]
+        if push_actual:
+            recent_push_keys.add((board_id, agent_name))
+        if selected:
+            selected.sort(key=lambda row: row[0])
+            chosen = max(selected, key=lambda row: (row[2], row[0]))
+            sample_at, sample, tokens_per_return = chosen
+            pressure = (
+                "anomaly"
+                if tokens_per_return > CONTEXT_STATS_ANOMALY_TOKENS
+                else "compact"
+                if tokens_per_return
+                > pressure_thresholds["context_compact_tokens_per_poll"]
+                else "watch"
+                if tokens_per_return
+                >= pressure_thresholds["context_watch_tokens_per_poll"]
+                else "ok"
+            )
+            current_samples = [row for row in selected if row[0].replace(minute=0, second=0, microsecond=0) == current_hour]
+            hour_bytes = sum(row[1]["response_bytes"] for row in current_samples)
+            push_sessions.append(
+                {
+                    "board_id": _clip(board_id, MAX_LABEL_CHARS),
+                    "agent_name": _clip(agent_name, MAX_LABEL_CHARS),
+                    "latest_at": sample_at.isoformat(),
+                    "latest_response_bytes": sample["response_bytes"],
+                    "latest_estimated_tokens": tokens_per_return,
+                    "estimated_tokens_per_return": tokens_per_return,
+                    "estimated_tokens_per_hour": (hour_bytes + 3) // 4,
+                    "returns_per_hour": len(current_samples),
+                    "sample_count": len(selected),
+                    "median_estimated_tokens": round(statistics.median(row[2] for row in selected), 1),
+                    "trend_ratio": None,
+                    "trend": "→",
+                    "mode": _clip(sample.get("mode") or "unknown", 16),
+                    "reason": _clip(sample.get("reason") or "unknown", 32),
+                    "raw_record": copy.deepcopy(sample) if pressure == "anomaly" else None,
+                    "pressure": pressure,
+                    "pressure_rank": {"ok": 0, "watch": 1, "compact": 2, "anomaly": 3}[pressure],
+                    "next_action": (
+                        "Stats anomaly: inspect the raw wait-return record; do not compact from this value."
+                        if pressure == "anomaly"
+                        else "Compact only if a real wait return remains over threshold."
+                        if pressure == "compact"
+                        else "No compaction action is currently indicated."
+                    ),
+                }
+            )
     model_wait_rows.sort(
         key=lambda item: (
             -item["returns_per_hour"],
@@ -1282,7 +1373,7 @@ def read_overhead_stats(
         )
     )
 
-    sessions = []
+    sessions = list(push_sessions)
     raw_cycles = document.get("poll_cycles")
     raw_cycles = raw_cycles if isinstance(raw_cycles, dict) else {}
     for raw in raw_cycles.values():
@@ -1301,6 +1392,12 @@ def read_overhead_stats(
             or latest_bytes < 0
             or _parse_time(latest_at) is None
         ):
+            continue
+        parsed_latest = _parse_time(latest_at)
+        if parsed_latest is None or parsed_latest < window_start:
+            continue
+        mode = str(raw.get("mode") or "poll").lower()
+        if (board_id, agent_name) in recent_push_keys and mode == "poll":
             continue
         samples = raw.get("samples")
         sample_bytes = [
@@ -1330,7 +1427,8 @@ def read_overhead_stats(
             and trend_ratio >= pressure_thresholds["context_trend_compact_ratio"]
         )
         watch = latest_tokens >= pressure_thresholds["context_watch_tokens_per_poll"]
-        pressure = "compact" if compact else "watch" if watch else "ok"
+        anomaly = latest_tokens > CONTEXT_STATS_ANOMALY_TOKENS
+        pressure = "anomaly" if anomaly else "compact" if compact else "watch" if watch else "ok"
         sessions.append(
             {
                 "board_id": _clip(board_id, MAX_LABEL_CHARS),
@@ -1338,15 +1436,24 @@ def read_overhead_stats(
                 "latest_at": latest_at,
                 "latest_response_bytes": latest_bytes,
                 "latest_estimated_tokens": latest_tokens,
+                "estimated_tokens_per_return": latest_tokens,
+                "estimated_tokens_per_hour": None,
+                "returns_per_hour": None,
                 "sample_count": len(sample_bytes),
                 "median_estimated_tokens": median_tokens,
                 "trend_ratio": round(trend_ratio, 3)
                 if trend_ratio is not None
                 else None,
                 "trend": trend,
+                "mode": mode,
+                "reason": _clip(raw.get("reason") or "legacy", 32),
+                "raw_record": copy.deepcopy(raw) if anomaly else None,
                 "pressure": pressure,
-                "pressure_rank": {"ok": 0, "watch": 1, "compact": 2}[pressure],
+                "pressure_rank": {"ok": 0, "watch": 1, "compact": 2, "anomaly": 3}[pressure],
                 "next_action": (
+                    "Stats anomaly: inspect the raw wait-return record; do not compact from this value."
+                    if anomaly
+                    else
                     "Run guarded journal compaction on this board and/or archive old memories."
                     if pressure == "compact"
                     else "No compaction action is currently indicated."
@@ -1382,11 +1489,21 @@ def read_overhead_stats(
     return result
 
 
-def project_coordinator_findings(snapshot: dict[str, Any]) -> dict[str, Any] | None:
+def project_coordinator_findings(
+    snapshot: dict[str, Any], *, now: datetime | None = None
+) -> dict[str, Any] | None:
     state = snapshot.get("state")
     if not isinstance(state, dict) or "coordinator_findings" not in state:
         return None
     entry = state["coordinator_findings"]
+    if isinstance(entry, dict):
+        updated_at = _parse_time(entry.get("updated_at"))
+        current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        if (
+            updated_at is not None
+            and updated_at < current - timedelta(hours=CONTEXT_ATTENTION_HOURS)
+        ):
+            return None
     raw = entry.get("value") if isinstance(entry, dict) and "value" in entry else entry
     if isinstance(raw, str):
         try:
@@ -1411,6 +1528,11 @@ def project_coordinator_findings(snapshot: dict[str, Any]) -> dict[str, Any] | N
     if not isinstance(findings, list):
         return None
     items = []
+    emitted_board_verification_failure = False
+    verification = snapshot.get("_commit_verification")
+    verification = verification if isinstance(verification, dict) else {}
+    truncation = snapshot.get("_snapshot_truncation")
+    truncation = truncation if isinstance(truncation, dict) else {}
     for finding in findings[:MAX_FINDINGS]:
         if not isinstance(finding, dict):
             continue
@@ -1418,6 +1540,38 @@ def project_coordinator_findings(snapshot: dict[str, Any]) -> dict[str, Any] | N
         if level not in {"info", "warn", "critical"}:
             level = "info"
         kind = _clip(finding.get("kind") or "finding", MAX_LABEL_CHARS)
+        normalized_kind = kind.casefold().replace("_", "-")
+        if normalized_kind == "board-large":
+            hidden_active = _nonnegative_int(truncation.get("hidden_active"))
+            if hidden_active == 0:
+                continue
+            kind = "board-active-truncated"
+            finding = {
+                **finding,
+                "message": f"Snapshot truncation hides {hidden_active} open/submitted ticket(s).",
+            }
+        if normalized_kind == "unverifiable-commit":
+            ticket_id = finding.get("ticket_id")
+            outcome = verification.get(ticket_id) if isinstance(ticket_id, str) else None
+            if isinstance(outcome, dict):
+                status = outcome.get("status")
+                if status in {"verified", "stale_closed"}:
+                    continue
+                if status == "cannot_verify":
+                    if emitted_board_verification_failure:
+                        continue
+                    emitted_board_verification_failure = True
+                    kind = "cannot-verify-origin"
+                    finding = {
+                        **finding,
+                        "ticket_id": None,
+                        "message": f"Cannot verify origin: {outcome.get('reason', 'unknown reason')}",
+                    }
+                elif status == "mismatch":
+                    finding = {
+                        **finding,
+                        "message": f"Origin does not contain the submitted branch and commit for {ticket_id}.",
+                    }
         text = finding.get("message") or finding.get("summary") or finding.get("detail")
         if not isinstance(text, str):
             text = json.dumps(finding, ensure_ascii=False, sort_keys=True)
@@ -1443,6 +1597,107 @@ def project_coordinator_findings(snapshot: dict[str, Any]) -> dict[str, Any] | N
         "items": items,
         "truncated_count": reported_truncated + max(0, len(findings) - MAX_FINDINGS),
     }
+
+
+BRANCH_COMMIT_RE = re.compile(
+    r"branch_and_commit\s*:\s*([^\s@]+)\s*@\s*([0-9a-fA-F]{40})"
+)
+
+
+def ticket_branch_commit(ticket: dict[str, Any]) -> tuple[str, str] | None:
+    """Extract the submitted branch and full commit without guessing."""
+    for value in (
+        ticket.get("notes"),
+        *(entry.get("notes") for entry in ticket.get("submission_history", []) if isinstance(entry, dict)),
+    ):
+        if not isinstance(value, str):
+            continue
+        match = BRANCH_COMMIT_RE.search(value)
+        if match:
+            return match.group(1), match.group(2).lower()
+    return None
+
+
+def verify_ticket_commit_on_origin(
+    ticket: dict[str, Any],
+    work_dir: str | Path | None,
+    *,
+    now: datetime | None = None,
+    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+) -> dict[str, Any]:
+    """Verify branch@commit on origin, returning a bounded diagnostic."""
+    current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    updated = _parse_time(ticket.get("closed_at") or ticket.get("updated_at"))
+    if (
+        ticket.get("status") in TERMINAL_STATES
+        and updated is not None
+        and updated < current - timedelta(days=ATTENTION_RETENTION_DAYS)
+    ):
+        return {"status": "stale_closed"}
+    branch_commit = ticket_branch_commit(ticket)
+    if branch_commit is None:
+        return {"status": "cannot_verify", "reason": "branch_and_commit is missing"}
+    if work_dir is None:
+        return {"status": "cannot_verify", "reason": "registry work_dir is missing"}
+    source = Path(work_dir).expanduser()
+    if not source.is_dir():
+        return {"status": "cannot_verify", "reason": "registry work_dir does not exist"}
+    command = [
+        "git", "-C", str(source), "ls-remote", "--heads", "origin",
+        f"refs/heads/{branch_commit[0]}",
+    ]
+    try:
+        result = runner(
+            command, capture_output=True, text=True, timeout=10, check=False
+        )
+    except (OSError, subprocess.SubprocessError):
+        return {"status": "cannot_verify", "reason": "origin lookup failed"}
+    if result.returncode != 0:
+        return {"status": "cannot_verify", "reason": "origin lookup failed"}
+    refs = {
+        parts[0].lower()
+        for line in result.stdout.splitlines()
+        if len(parts := line.split()) == 2
+    }
+    return {
+        "status": "verified" if branch_commit[1] in refs else "mismatch",
+        "branch": branch_commit[0],
+        "commit": branch_commit[1],
+    }
+
+
+def reconcile_attention_state(
+    previous: dict[str, dict[str, Any]],
+    candidates: list[dict[str, Any]],
+    *,
+    now: datetime | None = None,
+) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
+    """Dedupe current conditions and auto-clear absent, acked, or snoozed items."""
+    current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    current_text = current.isoformat()
+    state: dict[str, dict[str, Any]] = {}
+    visible: list[dict[str, Any]] = []
+    for candidate in candidates:
+        key = str(candidate.get("key") or "")
+        fingerprint = str(candidate.get("fingerprint") or "")
+        if not key or key in state:
+            continue
+        old = previous.get(key) if isinstance(previous, dict) else None
+        unchanged = isinstance(old, dict) and old.get("fingerprint") == fingerprint
+        row = {
+            "fingerprint": fingerprint,
+            "first_seen": old.get("first_seen", current_text) if unchanged else current_text,
+            "last_seen": current_text,
+            "acknowledged": bool(old.get("acknowledged")) if unchanged else False,
+            "snooze_until": old.get("snooze_until") if unchanged else None,
+        }
+        state[key] = row
+        snooze_until = _parse_time(row.get("snooze_until"))
+        if not row["acknowledged"] and not (
+            snooze_until is not None and snooze_until > current
+        ):
+            visible.append(candidate)
+    return state, visible
 
 
 def board_id_from_api_path(path: str) -> str | None:
@@ -1495,6 +1750,57 @@ def parse_project_registry(
         if len(boards) >= MAX_BOARDS:
             break
     return boards
+
+
+def parse_project_work_dirs(
+    result: dict[str, Any], home_board: str
+) -> dict[str, str | None]:
+    """Return registry-authoritative work directories by active board ID."""
+    state = result.get("state")
+    if not isinstance(state, dict) or not isinstance(state.get("value"), str):
+        raise TypeError("project registry state is missing")
+    try:
+        document = json.loads(state["value"])
+    except json.JSONDecodeError as exc:
+        raise ValueError("project registry is not valid JSON") from exc
+    if not isinstance(document, dict) or document.get("schema_version") != 1:
+        raise ValueError("project registry schema is unsupported")
+    projects = document.get("projects")
+    if not isinstance(projects, dict):
+        raise TypeError("project registry projects are missing")
+    work_dirs: dict[str, str | None] = {home_board: None}
+    for project in projects.values():
+        if not isinstance(project, dict) or project.get("status") != "active":
+            continue
+        board_id = project.get("board_id")
+        if not isinstance(board_id, str) or not board_id:
+            continue
+        work_dir = project.get("work_dir")
+        work_dirs[board_id] = work_dir if isinstance(work_dir, str) and work_dir else None
+    return work_dirs
+
+
+def coordinator_finding_ticket_ids(snapshot: dict[str, Any], kind: str) -> list[str]:
+    """Return bounded ticket IDs named by one coordinator finding kind."""
+    state = snapshot.get("state")
+    entry = state.get("coordinator_findings") if isinstance(state, dict) else None
+    raw = entry.get("value") if isinstance(entry, dict) and "value" in entry else entry
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except json.JSONDecodeError:
+            return []
+    findings = raw if isinstance(raw, list) else raw.get("findings", raw.get("items", [])) if isinstance(raw, dict) else []
+    wanted = kind.casefold().replace("_", "-")
+    result: list[str] = []
+    for finding in findings[:MAX_FINDINGS] if isinstance(findings, list) else []:
+        if not isinstance(finding, dict):
+            continue
+        actual = str(finding.get("kind") or "").casefold().replace("_", "-")
+        ticket_id = finding.get("ticket_id")
+        if actual == wanted and isinstance(ticket_id, str) and ticket_id not in result:
+            result.append(ticket_id)
+    return result
 
 
 def _closed_today(ticket: dict[str, Any], today: datetime) -> bool:
@@ -2112,6 +2418,7 @@ def project_board_detail(
         "event_returned": len(events),
         "routes": routes,
         "coordinator_findings": project_coordinator_findings(snapshot),
+        "snapshot_truncation": snapshot.get("_snapshot_truncation"),
         "ticket_total": max(snapshot_ticket_total, len(source_tickets)),
         "ticket_returned": min(len(tickets), MAX_DETAIL_TICKET_ROWS),
         "ticket_omitted": 0,
@@ -2374,6 +2681,7 @@ def aggregate_fleet(
                     coordinator_seen_at.isoformat() if coordinator_seen_at else None
                 ),
                 "coordinator_findings": project_coordinator_findings(snapshot),
+                "snapshot_truncation": snapshot.get("_snapshot_truncation"),
                 "truncated": bool(
                     snapshot.get("truncated") or len(ticket_rows) > MAX_TICKET_ROWS
                 ),
@@ -2480,6 +2788,7 @@ class FleetFetcher:
         self.now_factory = now_factory or (lambda: datetime.now(timezone.utc))
         self._intake_write_lock = threading.Lock()
         self._intake_submissions: dict[str, list[tuple[str, datetime]]] = {}
+        self._board_work_dirs: dict[str, str | None] = {}
 
     def _client(self, board_id: str) -> Any:
         return self.client_factory(
@@ -2492,6 +2801,9 @@ class FleetFetcher:
     async def _boards(self) -> list[tuple[str, str]]:
         async with self._client(self.config.home_board) as client:
             registry = await client.board_state_get(key="project_registry")
+        self._board_work_dirs = parse_project_work_dirs(
+            registry, self.config.home_board
+        )
         return parse_project_registry(registry, self.config.home_board)
 
     async def _board_event_feed(
@@ -2515,17 +2827,132 @@ class FleetFetcher:
         label: str,
         board_id: str,
         event_limit: int = EVENT_SCAN_LIMIT,
+        work_dir: str | None = None,
     ) -> dict[str, Any]:
         try:
             async with self._client(board_id) as client:
                 snapshot = await client.board_snapshot(
                     limit=SNAPSHOT_LIMIT, max_bytes=SNAPSHOT_MAX_BYTES
                 )
+                snapshot_tickets = snapshot.get("tickets")
+                snapshot_tickets = (
+                    snapshot_tickets if isinstance(snapshot_tickets, list) else []
+                )
+                initial_ids = {
+                    item.get("ticket_id")
+                    for item in snapshot_tickets
+                    if isinstance(item, dict) and isinstance(item.get("ticket_id"), str)
+                }
+                total_counts = snapshot.get("total_counts")
+                ticket_total = (
+                    total_counts.get("tickets")
+                    if isinstance(total_counts, dict)
+                    and type(total_counts.get("tickets")) is int
+                    else len(snapshot_tickets)
+                )
+                omitted_counts = snapshot.get("omitted_counts")
+                ticket_omitted = (
+                    _nonnegative_int(omitted_counts.get("tickets"))
+                    if isinstance(omitted_counts, dict)
+                    else max(0, ticket_total - len(snapshot_tickets))
+                )
+                hidden_active = 0
                 events = await self._board_event_feed(
                     client,
                     int(snapshot.get("latest_seq", 0)),
                     event_limit,
                 )
+                if snapshot.get("truncated") or ticket_omitted:
+                    active_page = await client.ticket_list(
+                        include_closed=False, limit=TICKET_LIST_LIMIT
+                    )
+                    active_tickets = active_page.get("tickets")
+                    active_tickets = (
+                        active_tickets if isinstance(active_tickets, list) else []
+                    )
+                    active_total = _nonnegative_int(
+                        active_page.get("total_matching", len(active_tickets))
+                    )
+                    if active_total > len(active_tickets):
+                        for status in ("open", "claimed", "submitted"):
+                            page = await client.ticket_list(
+                                status=status,
+                                include_closed=False,
+                                limit=TICKET_LIST_LIMIT,
+                            )
+                            rows = page.get("tickets")
+                            if isinstance(rows, list):
+                                active_tickets.extend(rows)
+                    by_id = {
+                        item.get("ticket_id"): item
+                        for item in snapshot_tickets
+                        if isinstance(item, dict)
+                        and isinstance(item.get("ticket_id"), str)
+                    }
+                    for ticket in active_tickets:
+                        if not isinstance(ticket, dict):
+                            continue
+                        ticket_id = ticket.get("ticket_id")
+                        if not isinstance(ticket_id, str):
+                            continue
+                        by_id[ticket_id] = ticket
+                    active_ids = {
+                        ticket.get("ticket_id")
+                        for ticket in active_tickets
+                        if isinstance(ticket, dict)
+                        and isinstance(ticket.get("ticket_id"), str)
+                    }
+                    hidden_active = max(0, active_total - len(active_ids))
+                    event_ticket_ids = []
+                    for event in reversed(events):
+                        ticket_id = event.get("ticket_id") if isinstance(event, dict) else None
+                        if (
+                            isinstance(ticket_id, str)
+                            and ticket_id not in by_id
+                            and ticket_id not in event_ticket_ids
+                        ):
+                            event_ticket_ids.append(ticket_id)
+                    for ticket_id in event_ticket_ids[:TICKET_LIST_LIMIT]:
+                        try:
+                            exact = await client.ticket_get(ticket_id)
+                        except BoardClientError:
+                            continue
+                        ticket = exact.get("ticket")
+                        if isinstance(ticket, dict):
+                            by_id[ticket_id] = ticket
+                    snapshot["tickets"] = list(by_id.values())
+                snapshot["_snapshot_truncation"] = {
+                    "returned": len(snapshot_tickets),
+                    "total": max(ticket_total, len(snapshot_tickets)),
+                    "omitted": ticket_omitted,
+                    "hidden_active": hidden_active,
+                }
+
+                ticket_index = {
+                    item.get("ticket_id"): item
+                    for item in snapshot.get("tickets", [])
+                    if isinstance(item, dict)
+                    and isinstance(item.get("ticket_id"), str)
+                }
+                verification: dict[str, dict[str, Any]] = {}
+                for ticket_id in coordinator_finding_ticket_ids(
+                    snapshot, "unverifiable-commit"
+                ):
+                    ticket = ticket_index.get(ticket_id)
+                    if ticket is None:
+                        try:
+                            exact = await client.ticket_get(ticket_id)
+                        except BoardClientError:
+                            exact = {}
+                        candidate = exact.get("ticket")
+                        ticket = candidate if isinstance(candidate, dict) else {}
+                    verification[ticket_id] = await asyncio.to_thread(
+                        verify_ticket_commit_on_origin,
+                        ticket,
+                        work_dir,
+                        now=self.now_factory(),
+                    )
+                snapshot["_commit_verification"] = verification
                 latest_seq = int(snapshot.get("latest_seq", 0))
             return {
                 "label": label,
@@ -2544,7 +2971,14 @@ class FleetFetcher:
     async def fetch(self) -> dict[str, Any]:
         boards = await self._boards()
         rows = await asyncio.gather(
-            *(self._read_board(label, board_id) for label, board_id in boards)
+            *(
+                self._read_board(
+                    label,
+                    board_id,
+                    work_dir=self._board_work_dirs.get(board_id),
+                )
+                for label, board_id in boards
+            )
         )
         return aggregate_fleet(rows, stale_seconds=self.config.stale_seconds)
 
@@ -2556,7 +2990,10 @@ class FleetFetcher:
         if match is None:
             raise KeyError(board_id)
         row = await self._read_board(
-            match[0], match[1], event_limit=DETAIL_EVENT_SCAN_LIMIT
+            match[0],
+            match[1],
+            event_limit=DETAIL_EVENT_SCAN_LIMIT,
+            work_dir=self._board_work_dirs.get(match[1]),
         )
         if row.get("error"):
             raise RuntimeError(str(row["error"]))
@@ -3108,6 +3545,37 @@ class SeatConfigManager:
         descriptor = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
         with os.fdopen(descriptor, "a", encoding="utf-8") as stream:
             stream.write(json.dumps(record, sort_keys=True) + "\n")
+
+    def attention_state(self) -> dict[str, Any]:
+        path = self.state_dir / "attention-state.json"
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, OSError, UnicodeError, ValueError):
+            value = {}
+        return {"items": value if isinstance(value, dict) else {}}
+
+    def save_attention_state(self, value: Any) -> dict[str, Any]:
+        if not isinstance(value, dict) or len(value) > 500:
+            raise ValueError("attention state must be an object with at most 500 items")
+        encoded = json.dumps(value, sort_keys=True, separators=(",", ":"))
+        if len(encoded.encode("utf-8")) > 100_000:
+            raise ValueError("attention state is too large")
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        path = self.state_dir / "attention-state.json"
+        descriptor, temporary = tempfile.mkstemp(
+            dir=self.state_dir, prefix=".attention-state.", text=True
+        )
+        try:
+            os.fchmod(descriptor, 0o600)
+            with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+                stream.write(encoded + "\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, path)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+        return {"items": value}
 
     def _bridge_inspection(self) -> dict[str, Any]:
         status = dict(self.bridge_installer.inspect())
@@ -3695,6 +4163,29 @@ window.addEventListener('hashchange',syncWorkersRoute);syncWorkersRoute();setInt
 </script></body>""",
 )
 
+# Attention state is local dashboard state, durable across browser/process restarts.
+HTML = HTML.replace(
+    "</script></body>",
+    r"""
+</script><script>
+let attentionState={},attentionStateLoaded=false,attentionStateSaved='';
+function loadAttentionState(){return attentionState}
+async function saveAttentionState(value){attentionState=value;if(!attentionStateLoaded)return;const encoded=JSON.stringify(value);if(encoded===attentionStateSaved)return;const response=await fetch('/api/attention',{method:'POST',headers:{'Content-Type':'application/json'},body:encoded});if(!response.ok)throw new Error(`attention state HTTP ${response.status}`);attentionStateSaved=encoded}
+async function refreshAttentionState(){try{const result=await fetchJson('/api/attention');attentionState=result.items&&typeof result.items==='object'?result.items:{};attentionStateSaved=JSON.stringify(attentionState);attentionStateLoaded=true;if(navKind()==='overview')renderHub()}catch(_error){attentionStateLoaded=false}}
+function attentionCandidates(){const rows=[];for(const [central,d] of Object.entries(fleetData)){for(const b of d.boards||[]){for(const f of b.coordinator_findings?.items||[]){rows.push({key:`finding|${central}|${b.board_id}|${f.kind}|${f.ticket_id||''}`,fingerprint:`${f.level}|${f.kind}|${f.text}`,type:'finding',central,board:b,level:f.level||'info',title:f.kind,text:f.text,ticket_id:f.ticket_id})}for(const t of b.tickets||[]){const age=Date.now()-new Date(t.updated_at||Date.now()).getTime();if(t.status==='open'&&age>1800000)rows.push({key:`starved|${central}|${b.board_id}|${t.id}`,fingerprint:'open-over-30m',type:'starved',central,board:b,level:'warn',title:'Starved ticket',text:t.title,ticket_id:t.id,age})}}for(const p of hubOverhead[central]?.sessions||[]){if(p.pressure==='ok')continue;rows.push({key:`context|${central}|${p.board_id}|${p.agent_name}`,fingerprint:`${p.pressure}|${p.mode||'unknown'}|${p.reason||''}`,type:'context',central,board:{board_id:p.board_id,label:p.board_id},level:p.pressure==='compact'||p.pressure==='anomaly'?'critical':'warn',title:p.pressure==='anomaly'?'Context stats anomaly':`Context ${p.pressure}`,text:p.pressure==='anomaly'?`${p.agent_name} · raw wait-return record requires inspection`:`${p.agent_name} · ${p.estimated_tokens_per_return??p.latest_estimated_tokens} tokens / return · ${p.estimated_tokens_per_hour??'—'} / hour · ${p.mode||'unknown'}${p.reason?' · '+p.reason:''}`})}}return rows}
+function reconcileAttention(){const now=new Date(),before=loadAttentionState(),next={},visible=[];for(const item of attentionCandidates()){if(!item.key||next[item.key])continue;const old=before[item.key],same=old?.fingerprint===item.fingerprint;const row={fingerprint:item.fingerprint,first_seen:same&&old.first_seen?old.first_seen:now.toISOString(),last_seen:now.toISOString(),acknowledged:same&&old.acknowledged===true,snooze_until:same?old.snooze_until||null:null};next[item.key]=row;const snoozed=row.snooze_until&&new Date(row.snooze_until)>now;if(!row.acknowledged&&!snoozed)visible.push({...item,...row})}saveAttentionState(next).catch(()=>{});window.__fleetAttentionPanel={generated_at:now.toISOString(),items:visible.map(x=>({key:x.key,type:x.type,central:x.central,board_id:x.board.board_id,ticket_id:x.ticket_id||null,first_seen:x.first_seen,last_seen:x.last_seen}))};return visible}
+function attentionRow(x){const link=x.ticket_id?`<a class="id" href="${ticketHref(x.central,x.board.board_id,x.ticket_id)}">${esc(x.ticket_id)}</a>`:`<a href="${centralHref(x.central,'overhead')}">Inspect</a>`;return `<div class="finding-row"><span class="severity ${esc(x.level)}"></span><div><b>${esc(x.title)}</b><p>${esc(x.text)}</p><span class="meta">${esc(x.central)} · ${esc(x.board.label)} · first seen ${esc(fmt(x.first_seen))}</span><div class="attention-actions"><button type="button" data-attention-action="ack" data-attention-key="${esc(x.key)}">Acknowledge</button><button type="button" data-attention-action="snooze" data-attention-key="${esc(x.key)}">Snooze 24h</button></div></div>${link}</div>`}
+function renderAttentionOverview(){const centrals=centralLabels.map(label=>{const d=fleetData[label],error=fleetErrors[label];if(!d)return `<article class="health-card"><div class="signal"><span class="signal-dot bad"></span><b>${esc(label)}</b></div><p class="error">${esc(error||'Connecting…')}</p></article>`;const s=d.pool_summary||{},heartbeat=(d.boards||[]).map(b=>b.coordinator_heartbeat).filter(Boolean).sort().at(-1),tc={open:0,claimed:0,submitted:0,closed_today:0};for(const b of d.boards||[])for(const k in tc)tc[k]+=numberCount((b.counts||{})[k]);return `<article class="health-card"><div class="signal"><span class="signal-dot"></span><b>${esc(label)}</b><span class="status">central up</span></div><p class="meta">Coordinator heartbeat ${esc(heartbeat?fmt(heartbeat):'not observed')}</p><div class="health-metrics"><span>Busy<b>${esc(s.busy||0)}</b></span><span>Ready<b>${esc(s.available||0)}</b></span><span>Stale<b>${esc(s.stale||0)}</b></span></div><div class="health-metrics"><span>Open<b>${esc(tc.open)}</b></span><span>Claimed<b>${esc(tc.claimed)}</b></span><span>Submitted${tc.submitted?' ⚠':''}<b>${esc(tc.submitted)}</b></span><span>Closed today<b>${esc(tc.closed_today)}</b></span></div></article>`}).join('');const surfaced=reconcileAttention().sort((a,b)=>(b.level==='critical')-(a.level==='critical')||(b.age||0)-(a.age||0)),attention=surfaced.slice(0,10);return `${pageHead('Home','Fleet overview','Health and attention across every central.')}<section class="health-grid">${centrals||'<div class="skeleton"></div>'}</section><div class="section-title"><h3>Needs attention</h3><span class="status">${surfaced.length} surfaced</span></div><section class="attention-card">${attention.map(attentionRow).join('')||'<p class="empty">Nothing needs attention. The fleet is calm.</p>'}</section>`}
+function renderAttentionBoardsHub(){const cards=[];for(const [central,d] of Object.entries(fleetData))for(const b of d.boards||[]){const total=Object.values(b.counts||{}).reduce((sum,v)=>sum+numberCount(v),0),tr=b.snapshot_truncation,info=tr&&tr.total>tr.returned?`<span class="status">snapshot truncated to ${esc(tr.returned)} of ${esc(tr.total)} tickets</span>`:'';cards.push(`<article class="board-card"><div><p class="eyebrow">${esc(central)}</p><h3>${esc(b.label)}</h3><span class="meta">${esc(b.board_id)} · ${esc(total)} visible tickets</span> ${info}</div><div class="counts">${Object.entries(b.counts||{}).map(([k,v])=>`<span class="pill">${esc(k.replace('_',' '))} <b>${esc(v)}</b></span>`).join('')}</div><div class="card-actions"><a class="primary-action" href="${boardHref(central,b.board_id)}">Workspace</a><a href="${boardHref(central,b.board_id,'flow')}">Flow</a><a href="${boardHref(central,b.board_id,'timeline')}">Timeline</a><a href="${boardHref(central,b.board_id,'changes')}">Changes</a><a href="${boardHref(central,b.board_id,'routes')}">Routes</a></div></article>`)}return `${pageHead('Boards','Board workspaces','Open one board, then move through tickets, findings, intake, flow, timeline, changes, and routes.')}<section class="boards-list">${cards.join('')||'<div class="skeleton"></div>'}</section>`}
+refreshAttentionState();
+</script></body>""",
+    1,
+).replace(
+    "</style>",
+    ".attention-actions{display:flex;gap:6px;margin-top:6px}.attention-actions button{background:var(--panel2);border:1px solid var(--line);border-radius:7px;color:var(--text);padding:4px 7px}</style>",
+    1,
+)
+
 # v2 information architecture: one shell, four primary destinations, and
 # progressive detail. Existing board/config/worker routes stay addressable.
 HTML = HTML.replace(
@@ -3813,6 +4304,11 @@ const refreshCentralBeforeSeats=refreshCentral;refreshCentral=async function(...
 async function suggestSeatSkills(){const form=document.querySelector('#seat-wizard'),status=document.querySelector('#seat-suggestions');try{const result=await configPost('/api/config/suggestions',seatPayload(form)),input=form.elements.skills,current=String(input.value||'').split(',').map(x=>x.trim()).filter(Boolean);input.value=[...new Set([...current,...result.skills])].join(',');status.textContent=result.skills.length?`Suggested: ${result.skills.join(', ')}`:'No mapped connectors found.'}catch(e){status.textContent=`Suggestions failed: ${e.message}`}}
 async function saveDispatch(event){event.preventDefault();const form=event.target,central=centralLabels[0],board=form.dataset.board,status=form.querySelector('.dispatch-status')||form.nextElementSibling;try{dispatchData[board]=await configPost(`/api/dispatch?${apiCentral(central)}`,{board_id:board,policy:{offer_ttl_s:Number(form.elements.offer_ttl_s.value),second_opinion:form.elements.second_opinion.checked,fallback_broadcast:form.elements.fallback_broadcast.checked}});status.textContent='Policy saved.';await refreshSeats()}catch(e){status.textContent=`Save failed: ${e.message}`}}
 bindSeats=function(){const wizard=document.querySelector('#seat-wizard');wizard?.addEventListener('submit',seatSubmit);if(wizard){const review=wizard.elements.can_review,sync=()=>review.checked=wizard.elements.role.value==='reviewer'&&Number(wizard.elements.tier_max.value)>1;review.addEventListener('input',()=>review.dataset.touched='true');for(const name of ['role','tier_max'])wizard.elements[name].addEventListener('change',()=>{if(!review.dataset.touched)sync()})}document.querySelector('[data-seat-suggest]')?.addEventListener('click',suggestSeatSkills);document.querySelector('#seat-apply')?.addEventListener('click',applySeat);document.querySelector('#copy-session-prompt')?.addEventListener('click',async event=>{await navigator.clipboard.writeText(seatSessionPrompt);event.target.textContent='Copied'});document.querySelectorAll('.dispatch-form').forEach(form=>form.addEventListener('submit',saveDispatch));const host=document.querySelector('#central-sections');host.onclick=seatClick;host.querySelector('.page-head')?.addEventListener('click',seatGlobal)}
+renderOverview=renderAttentionOverview;
+renderBoardsHub=renderAttentionBoardsHub;
+const attentionHubClickV1=hubClick;
+hubClick=async function(event){const button=event.target.closest('[data-attention-action]');if(!button)return attentionHubClickV1(event);const state=loadAttentionState(),row=state[button.dataset.attentionKey];if(!row)return;if(button.dataset.attentionAction==='ack')row.acknowledged=true;else row.snooze_until=new Date(Date.now()+86400000).toISOString();await saveAttentionState(state);renderHub()};
+if(navKind()==='overview')renderHub();
 </script></body>""",
     1,
 ).replace(
@@ -3982,12 +4478,14 @@ def make_handler(
                 self._send(200, "application/json; charset=utf-8", body)
                 return
             config_job = re.fullmatch(r"/api/config/jobs/([a-f0-9]{32})", route)
-            if route in {"/api/config/seats", "/api/config/bridge"} or config_job:
+            if route in {"/api/config/seats", "/api/config/bridge", "/api/attention"} or config_job:
                 try:
                     if route == "/api/config/seats":
                         payload = seats.seats()
                     elif route == "/api/config/bridge":
                         payload = seats.bridge()
+                    elif route == "/api/attention":
+                        payload = seats.attention_state()
                     else:
                         payload = seats.job(config_job.group(1))
                 except KeyError:
@@ -4205,6 +4703,7 @@ def make_handler(
                 "/api/config/bridge/install",
                 "/api/config/bridge/upgrade-all",
                 "/api/dispatch",
+                "/api/attention",
             }
             worker_action = re.fullmatch(
                 r"/api/workers/([a-z0-9-]{2,32})/(test|start|stop|restart)", route
@@ -4299,6 +4798,8 @@ def make_handler(
                             central=central,
                         )
                     )
+                elif route == "/api/attention":
+                    body = _json_bytes(seats.save_attention_state(request))
                 elif route == "/api/workers":
                     body = _json_bytes(
                         {

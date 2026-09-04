@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import json
 import os
 import sys
 import tempfile
@@ -681,9 +682,46 @@ class PushWaitTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(signaling.listen_calls, 1)
             self.assertNotIn("falling back to poll", stderr.getvalue())
             self.assertTrue(result["timed_out"])
+            self.assertEqual(result["mode"], "push")
             self.assertEqual(result["events"], [])
             self.assertGreaterEqual(elapsed, 0.9)
             self.assertLess(elapsed, 1.5)
+
+    async def test_pre_handshake_subscription_stall_is_not_reported_as_push(
+        self,
+    ) -> None:
+        client = ScriptedBoardClient([([], 0)], transport=ForbiddenListenClient())
+
+        async def stalled_stream(*_args: object, **_kwargs: object) -> Any:
+            await asyncio.Event().wait()
+            if False:  # pragma: no cover - keep this an async generator
+                yield None
+
+        with (
+            patch.object(wait_server, "WAIT_MODE", "push"),
+            patch.object(wait_server, "clamp_timeout", return_value=0.03),
+            patch.object(wait_server, "_event_stream", stalled_stream),
+        ):
+            result = await wait_server._wait_for_work(
+                client,
+                since_seq=0,
+                timeout_s=1,
+                only_mine=False,
+            )
+
+        self.assertTrue(result["timed_out"])
+        self.assertEqual(result["new_seq"], 0)
+        self.assertEqual(result["events"], [])
+        self.assertEqual(result["mode"], "poll")
+        self.assertNotEqual(result["mode"], "push")
+
+        stats = wait_server.BridgeStats(self.root / "stalled-stats.json")
+        await stats.record_wait_return(
+            wait_server.BOARD_ID, "push-listener", result
+        )
+        document = json.loads(stats.path.read_text(encoding="utf-8"))
+        sample = next(iter(document["model_wait"].values()))["returns"][0]
+        self.assertEqual(sample["mode"], "poll")
 
     async def test_unavailable_listen_falls_back_to_poll(self) -> None:
         async with Client(self.mcp, mode="2026-07-28", cache=None) as raw:
@@ -712,6 +750,7 @@ class PushWaitTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(unavailable.listen_calls, 1)
             self.assertFalse(result["timed_out"])
+            self.assertEqual(result["mode"], "poll")
             self.assertTrue(
                 any(
                     event.get("ticket_id")
@@ -719,6 +758,14 @@ class PushWaitTests(unittest.IsolatedAsyncioTestCase):
                     for event in result["events"]
                 )
             )
+
+            stats = wait_server.BridgeStats(self.root / "fallback-stats.json")
+            await stats.record_wait_return(
+                wait_server.BOARD_ID, "push-listener", result
+            )
+            document = json.loads(stats.path.read_text(encoding="utf-8"))
+            sample = next(iter(document["model_wait"].values()))["returns"][0]
+            self.assertEqual(sample["mode"], "poll")
 
     async def test_poll_mode_never_opens_subscription(self) -> None:
         async with Client(self.mcp, mode="2026-07-28", cache=None) as raw:
@@ -746,6 +793,7 @@ class PushWaitTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(forbidden.listen_calls, 0)
             self.assertFalse(result["timed_out"])
+            self.assertEqual(result["mode"], "poll")
             self.assertTrue(
                 any(
                     event.get("ticket_id")
@@ -931,6 +979,7 @@ class PushWaitTests(unittest.IsolatedAsyncioTestCase):
                 "events": [event],
                 "waited_s": 0.25,
                 "timed_out": False,
+                "mode": "poll",
                 "reason": "journal",
                 "resynced": False,
             },
