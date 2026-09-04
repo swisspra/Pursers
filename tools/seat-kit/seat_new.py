@@ -13,6 +13,12 @@ from pathlib import Path
 
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
 BOARD_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
+CLIENT_PROFILES = {
+    "goose": (300, 270),
+    "codex": (620, 560),
+    "claude": (21_600, 21_540),
+    "generic": (180, 150),
+}
 
 
 def _repo_leaf(repo: str) -> str:
@@ -24,22 +30,24 @@ def _repo_leaf(repo: str) -> str:
     return leaf
 
 
-def _board_python(role: str, repo_leaf: str | None) -> str:
-    return f'''#!/usr/bin/env python3
+_BOARD_PYTHON = r'''#!/usr/bin/env python3
 """Generated Pursers seat CLI. Do not put credentials in this file."""
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import inspect
 import json
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
-ROLE = {role!r}
-REPO_LEAF = {repo_leaf!r}
+ROLE = '{role}'
+REPO_LEAF = {repo_leaf}
+DEFAULT_WAIT_S = {wait_timeout}
 
 
 def _load_client() -> type[Any]:
@@ -73,6 +81,12 @@ def _parser() -> argparse.ArgumentParser:
         submit.add_argument("summary")
         submit.add_argument("notes")
         submit.add_argument("files_csv")
+        wait = commands.add_parser("wait", help="block until work arrives (subscriptions/listen)")
+        wait.add_argument("--since", type=int, default=0, help="journal cursor to start from")
+        wait.add_argument("--timeout", type=int, default=DEFAULT_WAIT_S,
+                          help="max wait seconds")
+        wait.add_argument("--poll", action="store_true", default=False,
+                          help="enable poll fallback (explicit opt-in, not default)")
     else:
         commands.add_parser("list", help="list submitted tickets")
         commands.add_parser("list-all", help="list all non-closed tickets")
@@ -85,11 +99,108 @@ def _parser() -> argparse.ArgumentParser:
         reject.add_argument("ticket_id")
         reject.add_argument("notes")
         reject.add_argument("fix")
+        wait = commands.add_parser("wait", help="block until submitted tickets arrive")
+        wait.add_argument("--since", type=int, default=0, help="journal cursor")
+        wait.add_argument("--timeout", type=int, default=DEFAULT_WAIT_S,
+                          help="max wait seconds")
+        wait.add_argument("--submitted", action="store_true",
+                          help="wait for submitted tickets")
+        wait.add_argument("--poll", action="store_true", default=False,
+                          help="enable poll fallback (explicit opt-in, not default)")
     return parser
 
 
 def _print(value: Any) -> None:
     print(json.dumps(value, indent=2, ensure_ascii=False, sort_keys=True))
+
+
+async def _cmd_wait(
+    client: Any,
+    board_id: str,
+    since: int,
+    timeout_s: int,
+    *,
+    submitted: bool = False,
+    poll_fallback: bool = False,
+) -> None:
+    """Return one relevant event or a bounded timeout/re-arm response."""
+    if timeout_s < 1:
+        raise ValueError("--timeout must be at least 1 second")
+    if client.identity is None:
+        raise RuntimeError("wait requires a joined BoardClient identity")
+
+    started = time.monotonic()
+    events: list[dict[str, Any]] = []
+    cursor = since
+    journal_uri = f"board://{board_id}/journal"
+    seat_uri = f"board://{board_id}/agent/{client.identity.agent_id}"
+    kinds = (
+        frozenset({"ticket_status_changed"})
+        if submitted
+        else frozenset({"ticket_created", "ticket_status_changed"})
+    )
+
+    def remember_cursor(value: int) -> None:
+        nonlocal cursor
+        cursor = max(cursor, int(value))
+
+    if poll_fallback:
+        deadline = started + max(1, timeout_s)
+        while time.monotonic() < deadline and not events:
+            page = await client.board_catchup(
+                cursor=cursor, limit=50, ack=False, touch=False
+            )
+            remember_cursor(page.get("next_cursor", cursor))
+            for event in page.get("events", []):
+                if event.get("kind") not in kinds:
+                    continue
+                if submitted and event.get("status_to") != "submitted":
+                    continue
+                if not submitted and client.identity.agent_id not in event.get(
+                    "recipient_identities", []
+                ):
+                    continue
+                events.append(event)
+                break
+            if not events:
+                await asyncio.sleep(min(2.0, max(0, deadline - time.monotonic())))
+    else:
+        required_parameters = {
+            "resource_subscriptions", "acknowledge", "touch", "cursor_callback"
+        }
+        available_parameters = set(inspect.signature(client.events).parameters)
+        missing = sorted(required_parameters - available_parameters)
+        if missing:
+            raise RuntimeError(
+                "pursers_client lacks the approved pure subscription API: "
+                + ", ".join(missing)
+            )
+        try:
+            async with asyncio.timeout(timeout_s):
+                async for event in client.events(
+                    from_cursor=cursor,
+                    only_mine=not submitted,
+                    kinds=kinds,
+                    resource_subscriptions=(journal_uri, seat_uri),
+                    acknowledge=False,
+                    touch=False,
+                    cursor_callback=remember_cursor,
+                ):
+                    if submitted and event.get("status_to") != "submitted":
+                        continue
+                    events.append(event)
+                    remember_cursor(event.get("seq", cursor))
+                    break
+        except TimeoutError:
+            pass
+
+    timed_out = not events
+    _print({
+        "new_seq": cursor,
+        "events": events,
+        "waited_s": round(time.monotonic() - started, 2),
+        "timed_out": timed_out,
+    })
 
 
 async def _execute(args: argparse.Namespace) -> None:
@@ -102,19 +213,32 @@ async def _execute(args: argparse.Namespace) -> None:
         central_url, token, board_id, agent_name=agent_name
     ) as client:
         await client.board_join()
+        if args.command == "wait":
+            if ROLE != "worker" and not args.submitted:
+                raise ValueError("reviewer wait requires --submitted")
+            poll = getattr(args, "poll", False)
+            await _cmd_wait(
+                client,
+                board_id,
+                since=args.since,
+                timeout_s=args.timeout,
+                submitted=ROLE != "worker",
+                poll_fallback=poll,
+            )
+            return
         if ROLE == "worker":
             if args.command == "list":
                 open_result = await client.ticket_list(status="open", limit=100)
                 mine_result = await client.ticket_list(
                     assigned_to=agent_name, include_closed=False, limit=100
                 )
-                combined: dict[str, Any] = {{}}
+                combined: dict[str, Any] = {}
                 for result in (open_result, mine_result):
                     for ticket in result.get("tickets", []):
                         ticket_id = ticket.get("ticket_id")
                         if ticket_id:
                             combined[ticket_id] = ticket
-                _print({{"tickets": list(combined.values())}})
+                _print({"tickets": list(combined.values())})
                 return
             if args.command == "get":
                 _print(await client.ticket_get(args.ticket_id))
@@ -166,17 +290,17 @@ async def _execute(args: argparse.Namespace) -> None:
                     )
                 )
                 return
-        raise RuntimeError(f"unsupported command: {{args.command}}")
+        raise RuntimeError(f"unsupported command: {args.command}")
 
 
 def main() -> int:
     try:
         asyncio.run(_execute(_parser().parse_args()))
     except (KeyError, OSError, RuntimeError, ValueError) as exc:
-        print(f"board.sh: {{exc}}", file=sys.stderr)
+        print(f"board.sh: {exc}", file=sys.stderr)
         return 1
     except Exception as exc:  # Keep transport/client failures concise.
-        print(f"board.sh: {{type(exc).__name__}}: {{exc}}", file=sys.stderr)
+        print(f"board.sh: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
     return 0
 
@@ -184,6 +308,15 @@ def main() -> int:
 if __name__ == "__main__":
     raise SystemExit(main())
 '''
+
+
+def _board_python(role: str, repo_leaf: str | None, wait_timeout: int) -> str:
+    repo_leaf_val = repr(repo_leaf) if repo_leaf else "None"
+    # Substitute placeholders using simple replacement to avoid brace conflicts
+    result = _BOARD_PYTHON.replace("{role}", role, 1)
+    result = result.replace("{repo_leaf}", repo_leaf_val, 1)
+    result = result.replace("{wait_timeout}", str(wait_timeout), 1)
+    return result
 
 
 def _board_shell(
@@ -228,21 +361,65 @@ exec python3 "$SCRIPT_DIR/board.py" "$@"
 '''
 
 
+def _profile_guidance(client: str) -> str:
+    host_timeout, wait_timeout = CLIENT_PROFILES[client]
+    if client == "goose":
+        return (
+            f"Default host/wait profile: {host_timeout}s/{wait_timeout}s. "
+            "For an opt-in one-hour Goose profile, set the exact config.yaml "
+            "line `timeout: 3600`, then call `board.sh wait --timeout 3540`."
+        )
+    if client == "codex":
+        return (
+            f"Default host/wait profile: {host_timeout}s/{wait_timeout}s. "
+            "Codex MCP config must set `tool_timeout_sec = 620`."
+        )
+    if client == "claude":
+        return (
+            f"Default host/wait profile: {host_timeout}s/{wait_timeout}s. "
+            "Keep the MCP hard deadline above the generated wait duration."
+        )
+    return (
+        f"Conservative generic host/wait profile: {host_timeout}s/{wait_timeout}s. "
+        "Override `--timeout` only after verifying the host deadline."
+    )
+
+
 def _instructions(*, role: str, name: str, client: str) -> str:
     if role == "worker":
         commands = """bin/board.sh list
 bin/board.sh get <TK>
 bin/board.sh claim <TK>
 bin/board.sh renew <TK>
-bin/board.sh submit <TK> <summary> <notes> <files-csv>"""
-        loop = """Poll every board via `PURSERS_BOARD`. Claim an open ticket immediately. If nothing is open, sleep 90-120 seconds and poll again. Work one ticket through submission and review before taking another. Renew the lease about every 10 minutes. Submit honestly with all required fields and name the model in use in the notes. If rejected, follow the fix instructions, renew or reclaim as required, and resubmit; otherwise re-arm for the next ticket."""
+bin/board.sh submit <TK> <summary> <notes> <files-csv>
+bin/board.sh wait --since <cursor>"""
+        loop = """Run this loop continuously:
+
+1. **WAIT** -- `bin/board.sh wait --since <cursor>` blocks on Central's subscriptions/listen until claimable work arrives. Returns `{new_seq, events, timed_out}`. On `timed_out=true`, re-arm immediately: `bin/board.sh wait --since <new_seq>`.
+2. **CLAIM** -- `bin/board.sh claim <TK>`. If the claim fails (race lost), go back to WAIT.
+3. **UNDERSTAND** -- `bin/board.sh get <TK>` for full description + required_fields.
+4. **DO** -- Perform the work. Run `bin/board.sh renew <TK>` every ~10 minutes.
+5. **SUBMIT** -- `bin/board.sh submit <TK> <summary> <notes> <files-csv>`.
+6. **AWAIT REVIEW** -- Keep the same ticket slot occupied. WAIT, then GET that ticket after a cue. If rejected, follow fix instructions and resubmit; if approved/closed, release the slot.
+7. **RE-ARM** -- Return to WAIT for the next ticket only after approval/closure.
+
+Never poll `bin/board.sh list` in a loop. Polling exists only behind the explicit `wait --poll` fallback. The default wait blocks on Central's subscriptions/listen, using zero model turns except the re-arm."""
     else:
         commands = """bin/board.sh list
 bin/board.sh list-all
 bin/board.sh get <TK>
 bin/board.sh approve <TK> <notes>
-bin/board.sh reject <TK> <notes> <fix>"""
-        loop = """Poll every board via `PURSERS_BOARD`. Review a submitted ticket immediately. If nothing is submitted, sleep 90-120 seconds and poll again. Inspect the evidence, run relevant verification, and approve or reject honestly. Continue until stopped."""
+bin/board.sh reject <TK> <notes> <fix>
+bin/board.sh wait --submitted --since <cursor>"""
+        loop = """Run this loop continuously:
+
+1. **WAIT** -- `bin/board.sh wait --submitted --since <cursor>` blocks on Central's subscriptions/listen until submitted tickets arrive. Returns `{new_seq, events, timed_out}`. On `timed_out=true`, re-arm immediately with `<new_seq>`.
+2. **REVIEW** -- `bin/board.sh list` shows submitted tickets. `bin/board.sh get <TK>` for details.
+3. **APPROVE/REJECT** -- `bin/board.sh approve <TK> <notes>` or `bin/board.sh reject <TK> <notes> <fix>`.
+4. **RE-ARM** -- Return to WAIT.
+
+Never poll `bin/board.sh list` in a loop. Polling exists only behind the explicit `wait --submitted --poll` fallback. The default wait blocks on Central's subscriptions/listen, using zero model turns except the re-arm."""
+    profile = _profile_guidance(client)
     return f"""# Pursers seat: {name}
 
 this folder IS your identity: {name}
@@ -258,6 +435,8 @@ Client: `{client}`
 ```
 
 Set `PURSERS_BOARD=<board-id>` for each board in the pool. The generated default is used when the variable is absent.
+
+Wait profile: {profile}
 
 ## Relentless loop
 
@@ -317,7 +496,12 @@ def generate(args: argparse.Namespace) -> Path:
         ),
         0o755,
     )
-    _write(bin_dir / "board.py", _board_python(args.role, repo_leaf), 0o644)
+    wait_timeout = CLIENT_PROFILES[args.client][1]
+    _write(
+        bin_dir / "board.py",
+        _board_python(args.role, repo_leaf, wait_timeout),
+        0o644,
+    )
     instructions = _instructions(role=args.role, name=args.name, client=args.client)
     _write(dest / "AGENTS.md", instructions, 0o644)
     _write(dest / ".goosehints", instructions, 0o644)
@@ -341,12 +525,16 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
     try:
-        dest = generate(build_parser().parse_args(argv))
+        dest = generate(args)
     except (OSError, subprocess.CalledProcessError, ValueError) as exc:
         print(f"seat_new.py: {exc}", file=sys.stderr)
         return 1
     print(f"Seat folder: {dest}")
+    if args.client == "goose":
+        print("Goose one-hour profile config.yaml line: timeout: 3600")
+        print("Then use: bin/board.sh wait --timeout 3540 --since <cursor>")
     print("open your client here and type goal")
     return 0
 
