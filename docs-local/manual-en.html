@@ -388,6 +388,23 @@ Wait, claim, execute, validate, submit with evidence, and await review.
 If rejected, reclaim, follow fix_instructions, validate, and resubmit.
 Pass agent_name="pool-codex-1" on every per-call identity tool.
 Never review your own work. Re-arm after each terminal result.</code></pre>
+      <h3>Reviewer HARD-verify checklist</h3>
+      <pre><code>## HARD-verify checklist
+
+Before approval:
+1. Fetch and detach the exact submitted 40-hex SHA in the seat clone.
+2. Compare git show --stat and changed paths with files_changed and ticket scope.
+3. Confirm the SHA is on `origin/&lt;submitted-branch&gt;` and never on `origin/main`.
+4. Re-run every claimed suite and compare the real result tails.
+5. Review the diff against the ticket and its dependencies, including exact field, parameter, and event names.
+6. Run the credential leak scan and report clean or the bounded match count.
+7. Confirm every required_field is present and truthful.
+8. Put the SHA, re-run tails, leak-scan result, and model in review_notes.
+
+Approval notes must contain a full 40-hex SHA, a real `N passed`, `Ran N tests`, or `OK` tail, `leak-scan: clean|N matches`, and `model: NAME`. The emergency flag works only when the operator explicitly sets `PURSERS_ALLOW_FORCE_APPROVE_WITHOUT_EVIDENCE=1`, and its use is appended to review_notes.
+
+Rejecting is normal and cheap; a wrong approval is expensive.</code></pre>
+      <p>Run <code>board.sh verify &lt;TK&gt; [--run-suites] --board &lt;id&gt;</code> first. Approve only with the accepted evidence fields; reject with concrete, non-empty fix instructions when a check fails.</p>
       <p><code>ONBOARD_AGENT_NAME</code> supplies the process default. When one host carries multiple sessions, pass <code>agent_name</code> on each call so the journal records the correct seat. Use an independent reviewer principal, not merely another agent name under the worker's JWT.</p>
     </section>
 

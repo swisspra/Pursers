@@ -59,13 +59,41 @@ Reviewer seats:
 list [--board <id>]
 list-all [--board <id>]
 get <TK> [--board <id>]
-approve <TK> <notes> [--board <id>]
+verify <TK> [--run-suites] [--board <id>]
+approve <TK> <notes> [--force-approve-without-evidence] [--board <id>]
 reject <TK> <notes> <fix> [--board <id>]
 wait --submitted --since '<cursor-or-json-map>' [--timeout <seconds>] [--boards registry|home|<id,id>] [--poll]
 ```
 
 `submit` keeps the worker active for review/retry. Include the model used and
 real verification output in the notes required by the ticket.
+
+Reviewer `verify` fetches and detaches the submitted SHA, compares the commit
+stat and paths with `files_changed`, reports every remote branch containing the
+SHA, rejects a SHA already on `origin/main`, runs a bounded credential leak
+scan, and optionally re-runs allow-listed pytest/unittest commands found in the
+ticket evidence. Approval is refused before any board call unless notes contain
+a full 40-hex SHA, a recognizable test tail, `leak-scan: clean|N matches`, and
+`model: NAME`. The emergency `--force-approve-without-evidence` flag is enabled
+only when an operator explicitly sets
+`PURSERS_ALLOW_FORCE_APPROVE_WITHOUT_EVIDENCE=1`; its use is appended to the
+review notes. Rejection always requires non-empty fix instructions.
+
+## HARD-verify checklist
+
+Before approval:
+1. Fetch and detach the exact submitted 40-hex SHA in the seat clone.
+2. Compare git show --stat and changed paths with files_changed and ticket scope.
+3. Confirm the SHA is on `origin/<submitted-branch>` and never on `origin/main`.
+4. Re-run every claimed suite and compare the real result tails.
+5. Review the diff against the ticket and its dependencies, including exact field, parameter, and event names.
+6. Run the credential leak scan and report clean or the bounded match count.
+7. Confirm every required_field is present and truthful.
+8. Put the SHA, re-run tails, leak-scan result, and model in review_notes.
+
+Approval notes must contain a full 40-hex SHA, a real `N passed`, `Ran N tests`, or `OK` tail, `leak-scan: clean|N matches`, and `model: NAME`. The emergency flag works only when the operator explicitly sets `PURSERS_ALLOW_FORCE_APPROVE_WITHOUT_EVIDENCE=1`, and its use is appended to review_notes.
+
+Rejecting is normal and cheap; a wrong approval is expensive.
 
 ## Wait verb
 
