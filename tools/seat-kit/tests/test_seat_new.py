@@ -236,6 +236,46 @@ def test_approve_evidence_gate_refuses_before_any_board_call(tmp_path: Path) -> 
     assert loaded is False
 
 
+@pytest.mark.parametrize(
+    "test_tail",
+    [
+        "1 failed, 1 passed in 0.10s",
+        "Ran 2 tests in 0.01s\n\nFAILED (failures=1)",
+        "0 passed in 0.01s",
+        "no tests ran in 0.01s",
+        "collected 0 items",
+        "ERROR collecting test_sample.py",
+        "test_sample.py::test_ok ERROR at setup",
+        "1 error in 0.01s",
+        "Ran 1 test in 0.01s\n\nFAILED (failures=1)",
+        "!!!!!!!!!!!!!!!! Interrupted !!!!!!!!!!!!!!!!",
+    ],
+)
+def test_approve_rejects_unsuccessful_test_tails_before_board_access(
+    tmp_path: Path, test_tail: str
+) -> None:
+    generated = load_generated(
+        seat_new.generate(args(tmp_path, role="reviewer")) / "bin" / "board.py",
+        "board_approve_bad_tail",
+    )
+    loaded = False
+
+    def load_client():
+        nonlocal loaded
+        loaded = True
+        raise AssertionError("board client must not load")
+
+    generated._load_client = load_client
+    notes = "\n".join(
+        ["sha: " + "a" * 40, test_tail, "leak-scan: clean", "model: gpt-5"]
+    )
+    parsed = generated._parser().parse_args(["approve", "TK-review", notes])
+
+    with pytest.raises(ValueError, match="approve evidence missing: pytest/unittest tail"):
+        asyncio.run(generated._execute(parsed))
+    assert loaded is False
+
+
 def test_approve_gate_accepts_evidence_and_logs_explicit_override(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -262,6 +302,18 @@ def test_approve_gate_accepts_evidence_and_logs_explicit_override(
     assert "force-approve-without-evidence: operator override" in generated._approve_notes(
         valid, True
     )
+
+    unittest_valid = "\n".join(
+        [
+            "sha: " + "b" * 40,
+            "Ran 3 tests in 0.01s",
+            "",
+            "OK",
+            "leak-scan: clean",
+            "model: gpt-5",
+        ]
+    )
+    assert generated._approve_notes(unittest_valid, False) == unittest_valid
 
 
 def test_reject_requires_nonempty_fix_before_any_board_call(tmp_path: Path) -> None:
@@ -356,6 +408,73 @@ def test_verify_detaches_sha_checks_scope_origin_leaks_and_runs_suite(
     ).stdout.strip() == sha
 
 
+def _review_verification_fixture(
+    tmp_path: Path,
+) -> tuple[Path, Path, Any, dict[str, Any], str]:
+    origin = tmp_path / "origin.git"
+    author = tmp_path / "author"
+    clone = tmp_path / "seat-clone"
+    subprocess.run(["git", "init", "--bare", str(origin)], check=True, capture_output=True)
+    subprocess.run(["git", "init", "-b", "main", str(author)], check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Seat Test"], cwd=author, check=True)
+    subprocess.run(["git", "config", "user.email", "seat@example.test"], cwd=author, check=True)
+    (author / "base.txt").write_text("base\n", encoding="utf-8")
+    subprocess.run(["git", "add", "base.txt"], cwd=author, check=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=author, check=True, capture_output=True)
+    subprocess.run(["git", "remote", "add", "origin", str(origin)], cwd=author, check=True)
+    subprocess.run(["git", "push", "-u", "origin", "main"], cwd=author, check=True, capture_output=True)
+    branch = "codex/TK-review"
+    subprocess.run(["git", "switch", "-c", branch], cwd=author, check=True, capture_output=True)
+    (author / "change.txt").write_text("review target\n", encoding="utf-8")
+    subprocess.run(["git", "add", "change.txt"], cwd=author, check=True)
+    subprocess.run(["git", "commit", "-m", "review target"], cwd=author, check=True, capture_output=True)
+    sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=author, check=True,
+        capture_output=True, text=True,
+    ).stdout.strip()
+    subprocess.run(["git", "push", "-u", "origin", branch], cwd=author, check=True, capture_output=True)
+    subprocess.run(["git", "clone", str(origin), str(clone)], check=True, capture_output=True)
+    generated = load_generated(
+        seat_new.generate(args(tmp_path / "seat", role="reviewer")) / "bin" / "board.py",
+        "board_verify_remote_heads",
+    )
+    ticket = {
+        "ticket_id": "TK-review",
+        "submission_history": [
+            {
+                "files_changed": ["change.txt"],
+                "notes": f"branch_and_commit: {branch} @ {sha}",
+            }
+        ],
+    }
+    return author, clone, generated, ticket, sha
+
+
+@pytest.mark.parametrize(
+    ("remote_branch", "error"),
+    [
+        ("main", "already on origin/main"),
+        ("reviewer-copy", "other remote branches: origin/reviewer-copy"),
+    ],
+)
+def test_verify_refreshes_all_remote_heads_before_containment_checks(
+    tmp_path: Path, remote_branch: str, error: str
+) -> None:
+    author, clone, generated, ticket, sha = _review_verification_fixture(tmp_path)
+    subprocess.run(
+        ["git", "push", "origin", f"{sha}:refs/heads/{remote_branch}"],
+        cwd=author, check=True, capture_output=True,
+    )
+
+    with pytest.raises(ValueError, match=error):
+        generated._verify_ticket(ticket, clone)
+
+    assert subprocess.run(
+        ["git", "rev-parse", f"origin/{remote_branch}"], cwd=clone,
+        check=True, capture_output=True, text=True,
+    ).stdout.strip() == sha
+
+
 def test_submission_rejects_invalid_git_ref(tmp_path: Path) -> None:
     generated = load_generated(
         seat_new.generate(args(tmp_path, role="reviewer")) / "bin" / "board.py",
@@ -383,6 +502,9 @@ def test_submission_rejects_invalid_git_ref(tmp_path: Path) -> None:
         ("home-directory-path", "path=C:\\Users\\" + "fixture-user" + "\\project"),
         ("bearer-token", "Authorization: " + "Bearer" + " " + "A" * 24),
         ("api-key", "api_key=" + "Z" * 24),
+        ("api-key", "OPENAI_API_KEY=" + "Z" * 24),
+        ("api-key", "AWS_ACCESS_KEY_ID=" + "Z" * 24),
+        ("api-key", "MY_CLIENT_SECRET=" + "Z" * 24),
         ("private-key", "-----BEGIN " + "PRIVATE" + " KEY-----"),
     ],
 )

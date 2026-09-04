@@ -411,7 +411,7 @@ Before approval:
 
 Operator-specific leak regexes come from `~/.pursers/leak-markers.txt`, one per line; `PURSERS_LEAK_MARKERS_FILE` overrides that path. Record an empty marker file as a WARN in review_notes, not a blocker. Never print marker values.
 
-Approval notes must contain a full 40-hex SHA, a real `N passed`, `Ran N tests`, or `OK` tail, `leak-scan: clean|N matches`, and `model: NAME`. The emergency flag works only when the operator explicitly sets `PURSERS_ALLOW_FORCE_APPROVE_WITHOUT_EVIDENCE=1`, and its use is appended to review_notes.
+Approval notes must contain a full 40-hex SHA, an unambiguously successful pytest `N passed` tail or paired unittest `Ran N tests` plus `OK` tail, `leak-scan: clean|N matches`, and `model: NAME`. The emergency flag works only when the operator explicitly sets `PURSERS_ALLOW_FORCE_APPROVE_WITHOUT_EVIDENCE=1`, and its use is appended to review_notes.
 
 Rejecting is normal and cheap; a wrong approval is expensive.</code></pre>
       <p>Run <code>board.sh verify &lt;TK&gt; [--run-suites] --board &lt;id&gt;</code> first. Approve only with the accepted evidence fields; reject with concrete, non-empty fix instructions when a check fails.</p>

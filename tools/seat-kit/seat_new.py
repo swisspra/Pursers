@@ -33,7 +33,7 @@ Before approval:
 
 Operator-specific leak regexes come from `~/.pursers/leak-markers.txt`, one per line; `PURSERS_LEAK_MARKERS_FILE` overrides that path. Record an empty marker file as a WARN in review_notes, not a blocker. Never print marker values.
 
-Approval notes must contain a full 40-hex SHA, a real `N passed`, `Ran N tests`, or `OK` tail, `leak-scan: clean|N matches`, and `model: NAME`. The emergency flag works only when the operator explicitly sets `PURSERS_ALLOW_FORCE_APPROVE_WITHOUT_EVIDENCE=1`, and its use is appended to review_notes.
+Approval notes must contain a full 40-hex SHA, an unambiguously successful pytest `N passed` tail or paired unittest `Ran N tests` plus `OK` tail, `leak-scan: clean|N matches`, and `model: NAME`. The emergency flag works only when the operator explicitly sets `PURSERS_ALLOW_FORCE_APPROVE_WITHOUT_EVIDENCE=1`, and its use is appended to review_notes.
 
 Rejecting is normal and cheap; a wrong approval is expensive."""
 
@@ -71,8 +71,18 @@ REPO_LEAF = {repo_leaf}
 DEFAULT_WAIT_S = {wait_timeout}
 APPROVE_OVERRIDE_ENV = "PURSERS_ALLOW_FORCE_APPROVE_WITHOUT_EVIDENCE"
 SHA_RE = re.compile(r"(?<![0-9a-fA-F])[0-9a-fA-F]{40}(?![0-9a-fA-F])")
-TEST_TAIL_RE = re.compile(
-    r"(?im)(?:^|\n)(?:.*\b\d+ passed\b.*|.*\bRan \d+ tests?\b.*|\s*OK\s*)$"
+PYTEST_SUCCESS_RE = re.compile(
+    r"(?im)^(?:=+\s*)?[1-9]\d* passed"
+    r"(?:,\s*\d+\s+(?:skipped|deselected|xfailed|warnings?))*"
+    r"\s+in\s+\d+(?:\.\d+)?s(?:\s+\([^\n)]*\))?(?:\s*=+)?\s*$"
+)
+UNITTEST_SUCCESS_RE = re.compile(
+    r"(?im)^Ran [1-9]\d* tests? in [^\n]+\n(?:\n)?OK(?:\s+\([^\n)]*\))?\s*$"
+)
+TEST_FAILURE_RE = re.compile(
+    r"(?im)(?:\b(?:failed|failures?|errors?|interrupted)\b|"
+    r"\bERROR collecting\b|\bcollection errors?\b|"
+    r"\bno tests ran\b|\bcollected 0 items\b|\bRan 0 tests?\b)"
 )
 LEAK_SCAN_RE = re.compile(
     r"(?im)\bleak-scan:\s*(?:clean|\d+\s+matches?)(?:\s|$)"
@@ -113,7 +123,9 @@ LEAK_PATTERNS = {
         rf"bearer[ \t]+{SECRET_VALUE_PATTERN}"
     ),
     "api-key": re.compile(
-        rf"(?i)\b(?:api[_-]?key|access[_-]?key|client[_-]?secret)\s*[:=]\s*"
+        rf"(?i)\b(?:[A-Z0-9]+[_-])*"
+        rf"(?:api[_-]?key|access[_-]?key(?:[_-]?id)?|client[_-]?secret)"
+        rf"\s*[:=]\s*"
         rf"[\"']?{SECRET_VALUE_PATTERN}"
     ),
     "private-key": re.compile(
@@ -171,6 +183,12 @@ def _leak_rule_names(text: str) -> list[str]:
     return _leak_scan(text)[0]
 
 
+def _has_successful_test_tail(notes: str) -> bool:
+    return not TEST_FAILURE_RE.search(notes) and bool(
+        PYTEST_SUCCESS_RE.search(notes) or UNITTEST_SUCCESS_RE.search(notes)
+    )
+
+
 def _approve_notes(notes: str, force: bool) -> str:
     operator_patterns, _marker_path = _operator_marker_patterns()
     print(f"operator-markers-loaded: {len(operator_patterns)}")
@@ -188,7 +206,7 @@ def _approve_notes(notes: str, force: bool) -> str:
     missing = []
     if not SHA_RE.search(notes):
         missing.append("full 40-hex sha")
-    if not TEST_TAIL_RE.search(notes):
+    if not _has_successful_test_tail(notes):
         missing.append("pytest/unittest tail")
     if not LEAK_SCAN_RE.search(notes):
         missing.append("leak-scan: clean|N matches")
@@ -279,10 +297,7 @@ def _verify_ticket(
     if not (repo / ".git").exists():
         raise ValueError(f"verify requires a git seat clone: {repo}")
     submission, sha, branch = _submission(ticket)
-    _git(
-        repo, "fetch", "origin",
-        f"+refs/heads/{branch}:refs/remotes/origin/{branch}",
-    )
+    _git(repo, "fetch", "--prune", "origin", "+refs/heads/*:refs/remotes/origin/*")
     _git(repo, "cat-file", "-e", f"{sha}^{{commit}}")
     _git(repo, "switch", "--detach", sha)
     stat = _git(repo, "show", "--stat", "--oneline", "--no-renames", sha).stdout.rstrip()
