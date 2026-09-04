@@ -51,63 +51,102 @@ REPO_LEAF = {repo_leaf}
 DEFAULT_WAIT_S = {wait_timeout}
 
 
-def _load_client() -> type[Any]:
+def _load_client() -> tuple[Any, ...]:
     seat_root = Path(__file__).resolve().parents[1]
     if REPO_LEAF:
         source = seat_root / REPO_LEAF / "packages" / "client" / "src"
         if source.is_dir():
             sys.path.insert(0, str(source))
     try:
-        from pursers_client import BoardClient
+        from pursers_client import (
+            BoardClient,
+            PROJECT_REGISTRY_KEY,
+            active_registry_boards,
+            parse_project_registry,
+            registry_project_work_dirs,
+            registry_work_dirs,
+            wait_for_boards,
+        )
     except ImportError as exc:
         raise RuntimeError(
             "pursers_client is unavailable; generate with --repo or install pursers-client"
         ) from exc
-    return BoardClient
+    return (
+        BoardClient,
+        PROJECT_REGISTRY_KEY,
+        active_registry_boards,
+        parse_project_registry,
+        registry_project_work_dirs,
+        registry_work_dirs,
+        wait_for_boards,
+    )
+
+
+def _parse_since(value: str) -> int | dict[str, int]:
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise argparse.ArgumentTypeError("--since must be an integer or JSON cursor map") from exc
+    if type(parsed) is int:
+        return max(0, parsed)
+    if isinstance(parsed, dict) and all(
+        isinstance(key, str) and type(cursor) is int
+        for key, cursor in parsed.items()
+    ):
+        return {key: max(0, cursor) for key, cursor in parsed.items()}
+    raise argparse.ArgumentTypeError("--since must be an integer or JSON cursor map")
+
+
+def _target(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    parser.add_argument("--board", help="target board (defaults to the home board)")
+    return parser
+
+
+def _wait_args(wait: argparse.ArgumentParser) -> None:
+    wait.add_argument("--since", type=_parse_since, default=0,
+                      help="integer cursor or JSON board-to-cursor map")
+    wait.add_argument("--timeout", type=int, default=DEFAULT_WAIT_S,
+                      help="max wait seconds")
+    wait.add_argument("--boards", default="registry",
+                      help="registry (default), home, or comma-separated board IDs")
+    wait.add_argument("--poll", action="store_true", default=False,
+                      help="enable poll fallback (explicit opt-in, not default)")
 
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="board.sh")
     commands = parser.add_subparsers(dest="command", required=True)
     if ROLE == "worker":
-        commands.add_parser("list", help="list open tickets and this seat's claim")
-        get = commands.add_parser("get")
+        _target(commands.add_parser("list", help="list open tickets and this seat's claim"))
+        get = _target(commands.add_parser("get"))
         get.add_argument("ticket_id")
-        claim = commands.add_parser("claim")
+        claim = _target(commands.add_parser("claim"))
         claim.add_argument("ticket_id")
-        renew = commands.add_parser("renew")
+        renew = _target(commands.add_parser("renew"))
         renew.add_argument("ticket_id")
-        submit = commands.add_parser("submit")
+        submit = _target(commands.add_parser("submit"))
         submit.add_argument("ticket_id")
         submit.add_argument("summary")
         submit.add_argument("notes")
         submit.add_argument("files_csv")
         wait = commands.add_parser("wait", help="block until work arrives (subscriptions/listen)")
-        wait.add_argument("--since", type=int, default=0, help="journal cursor to start from")
-        wait.add_argument("--timeout", type=int, default=DEFAULT_WAIT_S,
-                          help="max wait seconds")
-        wait.add_argument("--poll", action="store_true", default=False,
-                          help="enable poll fallback (explicit opt-in, not default)")
+        _wait_args(wait)
     else:
-        commands.add_parser("list", help="list submitted tickets")
-        commands.add_parser("list-all", help="list all non-closed tickets")
-        get = commands.add_parser("get")
+        _target(commands.add_parser("list", help="list submitted tickets"))
+        _target(commands.add_parser("list-all", help="list all non-closed tickets"))
+        get = _target(commands.add_parser("get"))
         get.add_argument("ticket_id")
-        approve = commands.add_parser("approve")
+        approve = _target(commands.add_parser("approve"))
         approve.add_argument("ticket_id")
         approve.add_argument("notes")
-        reject = commands.add_parser("reject")
+        reject = _target(commands.add_parser("reject"))
         reject.add_argument("ticket_id")
         reject.add_argument("notes")
         reject.add_argument("fix")
         wait = commands.add_parser("wait", help="block until submitted tickets arrive")
-        wait.add_argument("--since", type=int, default=0, help="journal cursor")
-        wait.add_argument("--timeout", type=int, default=DEFAULT_WAIT_S,
-                          help="max wait seconds")
+        _wait_args(wait)
         wait.add_argument("--submitted", action="store_true",
                           help="wait for submitted tickets")
-        wait.add_argument("--poll", action="store_true", default=False,
-                          help="enable poll fallback (explicit opt-in, not default)")
     return parser
 
 
@@ -118,17 +157,55 @@ def _print(value: Any) -> None:
 async def _cmd_wait(
     client: Any,
     board_id: str,
-    since: int,
+    since: int | dict[str, int],
     timeout_s: int,
     *,
     submitted: bool = False,
     poll_fallback: bool = False,
+    boards: str = "home",
+    registry: dict[str, Any] | None = None,
+    active_registry_boards: Any = None,
+    registry_work_dirs: Any = None,
+    registry_project_work_dirs: Any = None,
+    wait_for_boards: Any = None,
 ) -> None:
     """Return one relevant event or a bounded timeout/re-arm response."""
     if timeout_s < 1:
         raise ValueError("--timeout must be at least 1 second")
     if client.identity is None:
         raise RuntimeError("wait requires a joined BoardClient identity")
+
+    if boards != "home":
+        if wait_for_boards is None:
+            raise RuntimeError("pursers_client lacks registry wait support")
+        if boards == "registry":
+            if registry is None:
+                raise RuntimeError("project_registry is unavailable")
+            selected = active_registry_boards(registry, board_id)
+        else:
+            selected = [item.strip() for item in boards.split(",") if item.strip()]
+            if not selected:
+                raise ValueError("--boards must select at least one board")
+        result = await wait_for_boards(
+            client,
+            selected,
+            since,
+            timeout_s,
+            kinds=(
+                frozenset({"ticket_status_changed"})
+                if submitted
+                else frozenset({"ticket_created", "ticket_status_changed"})
+            ),
+            submitted=submitted,
+            work_dirs=registry_work_dirs(registry) if registry else {},
+            project_work_dirs=registry_project_work_dirs(registry) if registry else {},
+            poll_fallback=poll_fallback,
+        )
+        _print(result)
+        return
+
+    if isinstance(since, dict):
+        since = int(since.get(board_id, 0))
 
     started = time.monotonic()
     events: list[dict[str, Any]] = []
@@ -209,7 +286,22 @@ async def _cmd_wait(
 
 
 async def _execute(args: argparse.Namespace) -> None:
-    BoardClient = _load_client()
+    loaded = _load_client()
+    legacy_client_only = not isinstance(loaded, tuple)
+    if legacy_client_only:
+        BoardClient = loaded
+        registry_key = active_boards = parse_registry = None
+        project_work_dirs_for_registry = work_dirs_for_registry = wait_many = None
+    else:
+        (
+            BoardClient,
+            registry_key,
+            active_boards,
+            parse_registry,
+            project_work_dirs_for_registry,
+            work_dirs_for_registry,
+            wait_many,
+        ) = loaded
     central_url = os.environ["ONBOARD_CENTRAL_URL"]
     token = os.environ["ONBOARD_CENTRAL_TOKEN"]
     board_id = os.environ["ONBOARD_BOARD_ID"]
@@ -218,6 +310,13 @@ async def _execute(args: argparse.Namespace) -> None:
         central_url, token, board_id, agent_name=agent_name
     ) as client:
         await client.board_join()
+        registry = None
+        if not legacy_client_only:
+            try:
+                registry = parse_registry(await client.board_state_get(key=registry_key))
+            except (RuntimeError, ValueError):
+                if args.command == "wait" and args.boards == "registry":
+                    raise RuntimeError("project_registry is unavailable")
         if args.command == "wait":
             if ROLE != "worker" and not args.submitted:
                 raise ValueError("reviewer wait requires --submitted")
@@ -229,73 +328,88 @@ async def _execute(args: argparse.Namespace) -> None:
                 timeout_s=args.timeout,
                 submitted=ROLE != "worker",
                 poll_fallback=poll,
+                boards="home" if legacy_client_only else args.boards,
+                registry=registry,
+                active_registry_boards=active_boards,
+                registry_work_dirs=work_dirs_for_registry,
+                registry_project_work_dirs=project_work_dirs_for_registry,
+                wait_for_boards=wait_many,
             )
             return
-        if ROLE == "worker":
-            if args.command == "list":
-                open_result = await client.ticket_list(status="open", limit=100)
-                mine_result = await client.ticket_list(
-                    assigned_to=agent_name, include_closed=False, limit=100
-                )
-                combined: dict[str, Any] = {}
-                for result in (open_result, mine_result):
-                    for ticket in result.get("tickets", []):
-                        ticket_id = ticket.get("ticket_id")
-                        if ticket_id:
-                            combined[ticket_id] = ticket
-                _print({"tickets": list(combined.values())})
-                return
-            if args.command == "get":
-                _print(await client.ticket_get(args.ticket_id))
-                return
-            if args.command == "claim":
-                _print(await client.ticket_claim(args.ticket_id))
-                return
-            if args.command == "renew":
-                _print(await client.lease_renew(args.ticket_id))
-                return
-            if args.command == "submit":
-                files = [item.strip() for item in args.files_csv.split(",") if item.strip()]
-                if not files:
-                    raise ValueError("files-csv must contain at least one path")
-                _print(
-                    await client.ticket_submit(
-                        args.ticket_id,
-                        summary=args.summary,
-                        notes=args.notes,
-                        files_changed=files,
-                        stay_active=True,
+        target_board = getattr(args, "board", None) or board_id
+        board_work_dirs = work_dirs_for_registry(registry) if registry else {}
+        project_work_dirs = project_work_dirs_for_registry(registry) if registry else {}
+
+        async def run(target: Any) -> None:
+            def emit(value: dict[str, Any]) -> None:
+                ticket = value.get("ticket", {})
+                project = str(ticket.get("target_url", "")).split("/", 1)[0].casefold()
+                work_dir = project_work_dirs.get(project, board_work_dirs.get(target_board))
+                _print({**value, "board_id": target_board, "work_dir": work_dir})
+
+            if ROLE == "worker":
+                if args.command == "list":
+                    open_result = await target.ticket_list(status="open", limit=100)
+                    mine_result = await target.ticket_list(
+                        assigned_to=agent_name, include_closed=False, limit=100
                     )
-                )
-                return
-        else:
-            if args.command == "list":
-                _print(await client.ticket_list(status="submitted", limit=100))
-                return
-            if args.command == "list-all":
-                _print(await client.ticket_list(include_closed=False, limit=100))
-                return
-            if args.command == "get":
-                _print(await client.ticket_get(args.ticket_id))
-                return
-            if args.command == "approve":
-                _print(
-                    await client.ticket_review(
+                    combined: dict[str, Any] = {}
+                    for result in (open_result, mine_result):
+                        for ticket in result.get("tickets", []):
+                            ticket_id = ticket.get("ticket_id")
+                            if ticket_id:
+                                combined[ticket_id] = ticket
+                    emit({"tickets": list(combined.values())})
+                    return
+                if args.command == "get":
+                    emit(await target.ticket_get(args.ticket_id))
+                    return
+                if args.command == "claim":
+                    emit(await target.ticket_claim(args.ticket_id))
+                    return
+                if args.command == "renew":
+                    emit(await target.lease_renew(args.ticket_id))
+                    return
+                if args.command == "submit":
+                    files = [item.strip() for item in args.files_csv.split(",") if item.strip()]
+                    if not files:
+                        raise ValueError("files-csv must contain at least one path")
+                    emit(await target.ticket_submit(
+                        args.ticket_id, summary=args.summary, notes=args.notes,
+                        files_changed=files, stay_active=True,
+                    ))
+                    return
+            else:
+                if args.command == "list":
+                    emit(await target.ticket_list(status="submitted", limit=100))
+                    return
+                if args.command == "list-all":
+                    emit(await target.ticket_list(include_closed=False, limit=100))
+                    return
+                if args.command == "get":
+                    emit(await target.ticket_get(args.ticket_id))
+                    return
+                if args.command == "approve":
+                    emit(await target.ticket_review(
                         args.ticket_id, "approve", review_notes=args.notes
-                    )
-                )
-                return
-            if args.command == "reject":
-                _print(
-                    await client.ticket_review(
-                        args.ticket_id,
-                        "reject",
-                        review_notes=args.notes,
+                    ))
+                    return
+                if args.command == "reject":
+                    emit(await target.ticket_review(
+                        args.ticket_id, "reject", review_notes=args.notes,
                         fix_instructions=args.fix,
-                    )
-                )
-                return
-        raise RuntimeError(f"unsupported command: {args.command}")
+                    ))
+                    return
+            raise RuntimeError(f"unsupported command: {args.command}")
+
+        if target_board == board_id:
+            await run(client)
+        else:
+            async with BoardClient(
+                central_url, token, target_board, agent_name=agent_name
+            ) as target:
+                await run(target)
+        return
 
 
 def main() -> int:
@@ -392,35 +506,35 @@ def _profile_guidance(client: str) -> str:
 
 def _instructions(*, role: str, name: str, client: str) -> str:
     if role == "worker":
-        commands = """bin/board.sh list
-bin/board.sh get <TK>
-bin/board.sh claim <TK>
-bin/board.sh renew <TK>
-bin/board.sh submit <TK> <summary> <notes> <files-csv>
-bin/board.sh wait --since <cursor>"""
+        commands = """bin/board.sh list [--board <id>]
+bin/board.sh get <TK> --board <id>
+bin/board.sh claim <TK> --board <id>
+bin/board.sh renew <TK> --board <id>
+bin/board.sh submit <TK> <summary> <notes> <files-csv> --board <id>
+bin/board.sh wait --since '<cursor-or-json-map>' [--boards registry|home|<id,id>]"""
         loop = """Run this loop continuously:
 
-1. **WAIT** -- `bin/board.sh wait --since <cursor>` blocks on Central's subscriptions/listen until claimable work arrives. Returns `{new_seq, events, timed_out}`. On `timed_out=true`, re-arm immediately: `bin/board.sh wait --since <new_seq>`.
-2. **CLAIM** -- `bin/board.sh claim <TK>`. If the claim fails (race lost), go back to WAIT.
-3. **UNDERSTAND** -- `bin/board.sh get <TK>` for full description + required_fields.
-4. **DO** -- Perform the work. Run `bin/board.sh renew <TK>` every ~10 minutes.
-5. **SUBMIT** -- `bin/board.sh submit <TK> <summary> <notes> <files-csv>`.
+1. **WAIT** -- `bin/board.sh wait --since '<cursor-or-json-map>'` subscribes to every active registry board. Returns `{new_seq, events, timed_out, boards, skipped_boards}`; each event carries `board_id` and `work_dir`. Re-arm with the entire returned `new_seq` map.
+2. **UNDERSTAND** -- `bin/board.sh get <TK> --board <id>` using the event's board. Its output repeats the registered `work_dir`; never guess or use another project tree.
+3. **CLAIM** -- `bin/board.sh claim <TK> --board <id>`. If the claim fails (race lost), go back to WAIT.
+4. **DO** -- Work only in the returned `work_dir`. Run `bin/board.sh renew <TK> --board <id>` every ~10 minutes.
+5. **SUBMIT** -- `bin/board.sh submit <TK> <summary> <notes> <files-csv> --board <id>`.
 6. **AWAIT REVIEW** -- Keep the same ticket slot occupied. WAIT, then GET that ticket after a cue. If rejected, follow fix instructions and resubmit; if approved/closed, release the slot.
 7. **RE-ARM** -- Return to WAIT for the next ticket only after approval/closure.
 
 Never poll `bin/board.sh list` in a loop. Polling exists only behind the explicit `wait --poll` fallback. The default wait blocks on Central's subscriptions/listen, using zero model turns except the re-arm."""
     else:
-        commands = """bin/board.sh list
-bin/board.sh list-all
-bin/board.sh get <TK>
-bin/board.sh approve <TK> <notes>
-bin/board.sh reject <TK> <notes> <fix>
-bin/board.sh wait --submitted --since <cursor>"""
+        commands = """bin/board.sh list [--board <id>]
+bin/board.sh list-all [--board <id>]
+bin/board.sh get <TK> --board <id>
+bin/board.sh approve <TK> <notes> --board <id>
+bin/board.sh reject <TK> <notes> <fix> --board <id>
+bin/board.sh wait --submitted --since '<cursor-or-json-map>' [--boards registry|home|<id,id>]"""
         loop = """Run this loop continuously:
 
-1. **WAIT** -- `bin/board.sh wait --submitted --since <cursor>` blocks on Central's subscriptions/listen until submitted tickets arrive. Returns `{new_seq, events, timed_out}`. On `timed_out=true`, re-arm immediately with `<new_seq>`.
-2. **REVIEW** -- `bin/board.sh list` shows submitted tickets. `bin/board.sh get <TK>` for details.
-3. **APPROVE/REJECT** -- `bin/board.sh approve <TK> <notes>` or `bin/board.sh reject <TK> <notes> <fix>`.
+1. **WAIT** -- `bin/board.sh wait --submitted --since '<cursor-or-json-map>'` fans out across every active registry board. Re-arm with the entire returned `new_seq` map.
+2. **REVIEW** -- Use the event's board: `bin/board.sh get <TK> --board <id>` for details and registered `work_dir`.
+3. **APPROVE/REJECT** -- `bin/board.sh approve <TK> <notes> --board <id>` or `bin/board.sh reject <TK> <notes> <fix> --board <id>`.
 4. **RE-ARM** -- Return to WAIT.
 
 Never poll `bin/board.sh list` in a loop. Polling exists only behind the explicit `wait --submitted --poll` fallback. The default wait blocks on Central's subscriptions/listen, using zero model turns except the re-arm."""
@@ -439,7 +553,7 @@ Client: `{client}`
 {commands}
 ```
 
-Set `PURSERS_BOARD=<board-id>` for each board in the pool. The generated default is used when the variable is absent.
+`PURSERS_BOARD` selects the home board. Registry wait is the default; use each event's `board_id` with `--board` for subsequent commands.
 
 Wait profile: {profile}
 

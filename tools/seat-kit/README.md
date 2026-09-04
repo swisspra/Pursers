@@ -37,23 +37,23 @@ paths with `PURSERS_TOKEN_FILE`, `PURSERS_CA_FILE`, and
 Worker seats:
 
 ```text
-list
-get <TK>
-claim <TK>
-renew <TK>
-submit <TK> <summary> <notes> <files-csv>
-wait --since <cursor> [--timeout <seconds>] [--poll]
+list [--board <id>]
+get <TK> [--board <id>]
+claim <TK> [--board <id>]
+renew <TK> [--board <id>]
+submit <TK> <summary> <notes> <files-csv> [--board <id>]
+wait --since '<cursor-or-json-map>' [--timeout <seconds>] [--boards registry|home|<id,id>] [--poll]
 ```
 
 Reviewer seats:
 
 ```text
-list
-list-all
-get <TK>
-approve <TK> <notes>
-reject <TK> <notes> <fix>
-wait --submitted --since <cursor> [--timeout <seconds>] [--poll]
+list [--board <id>]
+list-all [--board <id>]
+get <TK> [--board <id>]
+approve <TK> <notes> [--board <id>]
+reject <TK> <notes> <fix> [--board <id>]
+wait --submitted --since '<cursor-or-json-map>' [--timeout <seconds>] [--boards registry|home|<id,id>] [--poll]
 ```
 
 `submit` keeps the worker active for review/retry. Include the model used and
@@ -64,18 +64,19 @@ real verification output in the notes required by the ticket.
 Worker seats include:
 
 ```text
-wait --since <cursor> [--timeout <seconds>] [--poll]
+wait --since '<cursor-or-json-map>' [--timeout <seconds>] [--boards registry|home|<id,id>] [--poll]
 ```
 
 Reviewer seats use the explicit submitted-work filter:
 
 ```text
-wait --submitted --since <cursor> [--timeout <seconds>] [--poll]
+wait --submitted --since '<cursor-or-json-map>' [--timeout <seconds>] [--boards registry|home|<id,id>] [--poll]
 ```
 
-The default path performs one long MCP 2026-07-28 `subscriptions/listen` wait
-through `BoardClient.events()` on the board journal and the seat's exact agent
-URI. It passes `acknowledge=False` and `touch=False`, so refetch cannot touch
+The default `--boards registry` path reads the home board's `project_registry`,
+joins every active authorized board, and performs one MCP 2026-07-28
+`subscriptions/listen` call covering all journal cues. It passes
+`acknowledge=False` and `touch=False`, so refetch cannot touch
 activity, acknowledge a cursor, renew/reap leases, or otherwise mutate Central.
 It never calls `ticket_list` while idle. A generated seat fails closed with a
 clear error when its installed `pursers_client` predates this approved pure
@@ -83,10 +84,14 @@ subscription API.
 
 Returns a bounded JSON response:
 ```json
-{"new_seq": <int>, "events": [...], "timed_out": true|false, "waited_s": <float>}
+{"new_seq": {"board": 1}, "events": [...], "timed_out": true|false, "waited_s": <float>, "boards": [...], "skipped_boards": {}}
 ```
 
-On `timed_out=true`, re-arm immediately by passing `--since <new_seq>`.
+Each event carries `board_id` and registered `work_dir`. Route `get`, `claim`,
+`renew`, `submit`, and review verbs with `--board <id>`. On `timed_out=true`,
+re-arm immediately by passing the complete JSON `new_seq` map to `--since`.
+Use `--boards home` for the legacy one-board/scalar-cursor path; an explicit
+comma-separated list overrides registry selection.
 
 **Poll fallback:** Pass `--poll` to explicitly select a 2-second
 `board_catchup(..., touch=False)` loop. Push mode never falls back to polling

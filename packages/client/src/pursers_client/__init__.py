@@ -27,6 +27,14 @@ from .personal_profile import (
     rotate_personal_capability,
     select_personal_profile,
 )
+from .project_registry import (
+    PROJECT_REGISTRY_KEY,
+    active_registry_boards,
+    parse_project_registry,
+    registry_project_work_dirs,
+    registry_work_dirs,
+    wait_for_boards,
+)
 
 __all__ = [
     "BoardClient",
@@ -36,20 +44,26 @@ __all__ = [
     "JoinedIdentity",
     "PERSONAL_REVIEW_POLICY",
     "PROFILE_ENV",
+    "PROJECT_REGISTRY_KEY",
     "PersonalContext",
     "PersonalProfile",
     "PersonalProfileError",
     "ProfileSecurityError",
     "ScrubRejectedError",
+    "active_registry_boards",
     "bootstrap_personal_review_policy",
     "central_environment",
     "default_profiles_root",
     "doctor_identity_summary",
     "ensure_personal_profile",
     "load_personal_profile",
+    "parse_project_registry",
+    "registry_project_work_dirs",
     "profile_path_for_project",
     "read_capability",
     "resolve_personal_context",
+    "registry_work_dirs",
     "rotate_personal_capability",
     "select_personal_profile",
+    "wait_for_boards",
 ]

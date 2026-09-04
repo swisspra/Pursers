@@ -61,6 +61,7 @@ from pursers_client import (
     BoardClient,
     BoardClientError,
     JoinedIdentity,
+    parse_project_registry,
 )
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
@@ -94,8 +95,6 @@ RELEVANT_KINDS = frozenset({"ticket_created", "ticket_status_changed"})
 CLAIMED_STATES = frozenset({"claimed", "in_progress", "creating_report"})
 HANDOFF_REJOIN_MESSAGE = "call board_onboard or board_join before more work"
 PROJECT_REGISTRY_KEY = "project_registry"
-PROJECT_REGISTRY_SCHEMA_VERSION = 1
-PROJECT_STATUSES = frozenset({"active", "paused"})
 STATS_SCHEMA_VERSION = 3
 STATS_RETENTION_DAYS = 7
 POLL_SAMPLE_LIMIT = 24
@@ -994,67 +993,8 @@ async def _client_for_tool(ctx: Context) -> BoardClient:
 
 
 def _parse_project_registry(result: dict[str, Any]) -> dict[str, Any]:
-    """Validate and normalize Central's string-valued board-state entry."""
-    state = result.get("state")
-    if not isinstance(state, dict):
-        raise ValueError("project_registry state entry is missing")
-    raw_value = state.get("value")
-    if not isinstance(raw_value, str):
-        raise ValueError("project_registry state value must be a JSON string")
-    try:
-        registry = json.loads(raw_value)
-    except json.JSONDecodeError as exc:
-        raise ValueError("project_registry state value is not valid JSON") from exc
-    if not isinstance(registry, dict):
-        raise ValueError("project_registry must be a JSON object")
-    schema_version = registry.get("schema_version")
-    if (
-        type(schema_version) is not int
-        or schema_version != PROJECT_REGISTRY_SCHEMA_VERSION
-    ):
-        raise ValueError(
-            f"project_registry schema_version must be {PROJECT_REGISTRY_SCHEMA_VERSION}"
-        )
-    projects = registry.get("projects")
-    if not isinstance(projects, dict):
-        raise ValueError("project_registry projects must be an object")
-
-    normalized_projects: dict[str, dict[str, str]] = {}
-    for name, project in projects.items():
-        if not isinstance(name, str) or not name or name != name.strip():
-            raise ValueError(
-                "project_registry project names must be non-empty strings"
-            )
-        if not isinstance(project, dict):
-            raise ValueError(f"project_registry project {name!r} must be an object")
-        board_id = project.get("board_id")
-        work_dir = project.get("work_dir")
-        status = project.get("status")
-        if (
-            not isinstance(board_id, str)
-            or not board_id
-            or board_id != board_id.strip()
-        ):
-            raise ValueError(
-                f"project_registry project {name!r} has an invalid board_id"
-            )
-        if not isinstance(work_dir, str) or not os.path.isabs(work_dir):
-            raise ValueError(
-                f"project_registry project {name!r} work_dir must be absolute"
-            )
-        if status not in PROJECT_STATUSES:
-            raise ValueError(
-                f"project_registry project {name!r} status must be active or paused"
-            )
-        normalized_projects[name] = {
-            "board_id": board_id,
-            "work_dir": work_dir,
-            "status": status,
-        }
-    return {
-        "schema_version": PROJECT_REGISTRY_SCHEMA_VERSION,
-        "projects": normalized_projects,
-    }
+    """Compatibility wrapper around the client package's shared parser."""
+    return parse_project_registry(result)
 
 
 async def _read_project_registry(client: BoardClient) -> dict[str, Any]:

@@ -12,6 +12,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - `BoardClient.events()` now owns MCP listen scopes in a dedicated producer
   task, and generated seats close the event stream explicitly after one cue,
   preventing early-exit cancel-scope errors and false nonzero wait exits.
+- Generated seat-kit CLI waits now subscribe to every active project-registry
+  board with cursor maps and route follow-up verbs through `--board`.
 
 ## [5.0.0a16] - 2026-09-04
 
