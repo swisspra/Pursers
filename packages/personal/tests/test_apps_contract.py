@@ -141,8 +141,11 @@ async def test_discovery_envelope_partitions_app_and_model_surfaces(
             assert visibility("link_snapshot") == APP_ONLY
             assert all(visibility(name) == MODEL_ONLY for name in CHAT_TOOL_NAMES)
             catchup_description = tools["board_catchup"].description or ""
-            assert "even when ack is false" in catchup_description
-            assert "advances the durable cursor" in catchup_description
+            assert "touch=false" in catchup_description
+            assert "ignores ack" in catchup_description
+            assert "leases, or the durable cursor" in catchup_description
+            assert "With touch=true" in catchup_description
+            assert "ack=true advances it" in catchup_description
             assert all(
                 tool.meta["ui"]["resourceUri"] == UI_URI
                 for tool in tools.values()
@@ -216,7 +219,11 @@ async def test_discovery_envelope_partitions_app_and_model_surfaces(
             )
             assert result.is_error is False
             assert model_calls == [
-                ("board_catchup", (), {"cursor": 11, "limit": 25, "ack": False})
+                (
+                    "board_catchup",
+                    (),
+                    {"cursor": 11, "limit": 25, "ack": False, "touch": False},
+                )
             ]
 
             app_reads: list[str] = []
@@ -868,14 +875,188 @@ async def test_app_reads_use_only_the_non_joining_pure_reader() -> None:
     assert first["event_cursor"] == 7
     assert first["events"] == []
     assert first["activity_scope"] == "local-model-tools"
-    assert "does not read or acknowledge Central journal" in first["resync_notice"]
+    assert "side-effect-free Central journal cues" in first["resync_notice"]
     assert second["count"] == 0
     assert state._worker_task is None
     assert bootstrap_calls == []
     assert "model-client-created" not in calls
     assert all("catchup" not in call for call in calls)
-    assert calls.count("reader-enter") == 2
-    assert calls.count("reader-exit") == 2
+    assert calls.count("reader-enter") == 1
+    assert calls.count("reader-exit") == 1
+    await state.stop()
+
+
+@pytest.mark.anyio
+async def test_dashboard_idle_reads_cache_and_ticket_cue_refetches_once() -> None:
+    central_calls: list[str] = []
+    cues: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+
+    class CachedReader:
+        def __init__(self, config: DashboardConfig):
+            self.agent_name = config.agent_name
+
+        async def __aenter__(self) -> "CachedReader":
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+        async def board_snapshot(self) -> dict[str, Any]:
+            central_calls.append("board_snapshot")
+            return {
+                "board": {"board_id": "board-personal-test"},
+                "agents": [],
+                "latest_seq": 10,
+            }
+
+        async def board_status(self) -> dict[str, Any]:
+            central_calls.append("board_status")
+            return {"agents": [], "latest_seq": 10}
+
+        async def ticket_list(self, **_kwargs: Any) -> dict[str, Any]:
+            central_calls.append("ticket_list")
+            return {"tickets": [], "total_matching": 0, "latest_seq": 10}
+
+        async def board_get_briefing(self, **_kwargs: Any) -> dict[str, Any]:
+            central_calls.append("board_get_briefing")
+            return {"pinned_digest": [], "latest_handoff": None}
+
+        async def ticket_get(self, ticket_id: str) -> dict[str, Any]:
+            central_calls.append("ticket_get")
+            return {
+                "ticket": {
+                    "ticket_id": ticket_id,
+                    "title": "arrived by cue",
+                    "status": "open",
+                    "priority": "medium",
+                }
+            }
+
+        async def events(
+            self, from_cursor: int, cursor_callback: Any
+        ) -> Any:
+            assert from_cursor == 10
+            central_calls.append("board_catchup")
+            cursor_callback(10)
+            while True:
+                event = await cues.get()
+                central_calls.append("board_catchup")
+                cursor_callback(int(event["seq"]))
+                yield event
+
+    state = LiveDashboard(
+        fake_config(),
+        client_class=FakeClient,
+        client_error_class=FakeClientError,
+        read_client_factory=CachedReader,
+    )
+
+    async def healthy_probe() -> None:
+        return None
+
+    state._probe_central = healthy_probe  # type: ignore[method-assign]
+    try:
+        initial = await state.snapshot()
+        assert initial["data_mode"] == "live"
+        calls_before_idle = list(central_calls)
+        assert calls_before_idle == [
+            "board_snapshot",
+            "board_status",
+            "ticket_list",
+            "board_get_briefing",
+            "board_catchup",
+        ]
+
+        # Twelve five-second UI timer reads represent a 60-second idle window.
+        for _ in range(12):
+            cached = await state.feed()
+            assert cached["data_mode"] == "live"
+        assert central_calls == calls_before_idle
+
+        await cues.put(
+            {
+                "id": "EV-ticket-cue",
+                "seq": 11,
+                "kind": "ticket_created",
+                "ticket_id": "TK-cued",
+                "occurred_at": "2026-09-04T00:00:00+00:00",
+            }
+        )
+        async with asyncio.timeout(1):
+            while "ticket_get" not in central_calls:
+                await asyncio.sleep(0)
+        updated = await state.feed()
+        assert {ticket["id"] for ticket in updated["tickets"]} == {"TK-cued"}
+        assert central_calls == calls_before_idle + ["board_catchup", "ticket_get"]
+    finally:
+        await state.stop()
+
+
+@pytest.mark.anyio
+async def test_dashboard_subscription_loss_marks_cache_stale_and_logs(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    lose_subscription = asyncio.Event()
+
+    class LosingReader:
+        def __init__(self, config: DashboardConfig):
+            self.agent_name = config.agent_name
+
+        async def __aenter__(self) -> "LosingReader":
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+        async def board_snapshot(self) -> dict[str, Any]:
+            return {
+                "board": {"board_id": "board-personal-test"},
+                "agents": [],
+                "latest_seq": 3,
+            }
+
+        async def board_status(self) -> dict[str, Any]:
+            return {"agents": [], "latest_seq": 3}
+
+        async def ticket_list(self, **_kwargs: Any) -> dict[str, Any]:
+            return {"tickets": [], "total_matching": 0, "latest_seq": 3}
+
+        async def board_get_briefing(self, **_kwargs: Any) -> dict[str, Any]:
+            return {"pinned_digest": [], "latest_handoff": None}
+
+        async def events(
+            self, _from_cursor: int, cursor_callback: Any
+        ) -> Any:
+            cursor_callback(3)
+            await lose_subscription.wait()
+            raise ConnectionError("subscription closed")
+            yield  # pragma: no cover
+
+    state = LiveDashboard(
+        fake_config(),
+        client_class=FakeClient,
+        client_error_class=FakeClientError,
+        read_client_factory=LosingReader,
+    )
+
+    async def healthy_probe() -> None:
+        return None
+
+    state._probe_central = healthy_probe  # type: ignore[method-assign]
+    try:
+        assert (await state.snapshot())["data_mode"] == "live"
+        lose_subscription.set()
+        async with asyncio.timeout(1):
+            while state._view_connected:
+                await asyncio.sleep(0)
+        stale = await state.feed()
+        assert stale["data_mode"] == "stale"
+        assert stale["stale"] is True
+        assert stale["feed_error"] == "Central unavailable (ConnectionError)"
+        assert "dashboard subscription lost" in capsys.readouterr().err
+        assert (await state.snapshot())["data_mode"] == "live"
+    finally:
+        await state.stop()
 
 
 @pytest.mark.anyio
@@ -1822,6 +2003,157 @@ async def test_app_reads_leave_sqlite_domain_journal_and_cursor_unchanged(
         assert state._worker_task is None
         assert before == after
     finally:
+        if state is not None:
+            await state.stop()
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.communicate(timeout=5)
+
+
+@pytest.mark.anyio
+async def test_real_central_dashboard_is_idle_until_ticket_cue(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    try:
+        import pursers_client
+        importlib.metadata.version("pursers-central")
+    except (ImportError, importlib.metadata.PackageNotFoundError):
+        pytest.skip("requires installed pursers-client and pursers-central")
+
+    project = tmp_path / "subscription-project"
+    project.mkdir()
+    with socket.socket() as reservation:
+        reservation.bind(("127.0.0.1", 0))
+        port = int(reservation.getsockname()[1])
+    profile = pursers_client.ensure_personal_profile(
+        project,
+        profiles_root=tmp_path / "subscription-profiles",
+        port=port,
+    )
+    context = pursers_client.resolve_personal_context(
+        profile, host="pytest", session="subscription-view"
+    )
+    environment = os.environ.copy()
+    environment.update(pursers_client.central_environment(profile))
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "from pursers_central.pursers_central_runtime import main; main()",
+        ],
+        env=environment,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+    def wait_until_listening() -> None:
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                _stdout, stderr = process.communicate()
+                raise AssertionError(
+                    f"Central exited during startup: {stderr[-1000:]}"
+                )
+            try:
+                with socket.create_connection(("127.0.0.1", port), timeout=0.1):
+                    return
+            except OSError:
+                time.sleep(0.05)
+        raise AssertionError("Central did not start within 10 seconds")
+
+    state: LiveDashboard | None = None
+    creator: Any | None = None
+    try:
+        wait_until_listening()
+        async with pursers_client.BoardClient(
+            context.central_url,
+            context.capability_token,
+            context.board_id,
+            agent_name=context.agent_name,
+        ):
+            pass
+        creator = pursers_client.BoardClient(
+            context.central_url,
+            context.capability_token,
+            context.board_id,
+            agent_name="dashboard-cue-creator",
+        )
+        await creator.__aenter__()
+
+        central_calls: list[str] = []
+        original_reader_call = apps_server.RawBoardReader._call
+        original_client_call = pursers_client.BoardClient._call_with
+
+        async def counted_reader_call(
+            reader: Any, name: str, arguments: dict[str, Any]
+        ) -> dict[str, Any]:
+            if reader.config.agent_name == context.agent_name:
+                central_calls.append(name)
+            return await original_reader_call(reader, name, arguments)
+
+        async def counted_client_call(
+            client: Any,
+            transport: Any,
+            name: str,
+            arguments: dict[str, Any],
+        ) -> dict[str, Any]:
+            if client.agent_name == context.agent_name:
+                central_calls.append(name)
+            return await original_client_call(client, transport, name, arguments)
+
+        monkeypatch.setattr(
+            apps_server.RawBoardReader, "_call", counted_reader_call
+        )
+        monkeypatch.setattr(
+            pursers_client.BoardClient, "_call_with", counted_client_call
+        )
+        state = LiveDashboard(
+            config_from_personal_context(context),
+            client_class=pursers_client.BoardClient,
+            client_error_class=pursers_client.BoardClientError,
+        )
+        initial = await state.snapshot()
+        assert initial["data_mode"] == "live"
+        calls_before_idle = list(central_calls)
+        assert calls_before_idle == [
+            "board_snapshot",
+            "board_status",
+            "ticket_list",
+            "board_get_briefing",
+            "board_catchup",
+        ]
+
+        for _ in range(12):
+            assert (await state.feed())["data_mode"] == "live"
+        assert central_calls == calls_before_idle
+
+        await creator.ticket_create(
+            "TK-DASHBOARD-CUE",
+            "dashboard subscription cue",
+            unassigned=True,
+        )
+        async with asyncio.timeout(2):
+            while True:
+                cached = await state.feed()
+                if any(
+                    ticket["id"] == "TK-DASHBOARD-CUE"
+                    for ticket in cached["tickets"]
+                ):
+                    break
+                await asyncio.sleep(0)
+        assert central_calls == calls_before_idle + [
+            "board_catchup",
+            "ticket_get",
+        ]
+    finally:
+        if creator is not None:
+            await creator.__aexit__(None, None, None)
         if state is not None:
             await state.stop()
         if process.poll() is None:

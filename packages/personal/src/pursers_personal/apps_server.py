@@ -21,7 +21,8 @@ from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Protocol
+from types import SimpleNamespace
+from typing import Any, AsyncIterator, Awaitable, Callable, Protocol
 from urllib.parse import urlsplit
 
 from mcp.server.apps import Apps, ResourceCsp
@@ -347,9 +348,9 @@ class RawBoardReader:
 
     The transport and decoder come from the already verified pursers-client
     module, but its ``BoardClient.__aenter__`` is deliberately never invoked.
-    In particular, this reader does not expose ``board_catchup``: Central a9's
-    compatibility heartbeat mutates a board for write-scoped principals even
-    when ``ack=False``.
+    Direct model-style ``board_catchup`` remains unavailable here. The App's
+    journal stream instead delegates to public ``BoardClient.events()`` with
+    ``acknowledge=False`` and ``touch=False``.
     """
 
     def __init__(
@@ -369,6 +370,7 @@ class RawBoardReader:
             raise RuntimeError("verified pursers-client read primitives are unavailable") from exc
         self.config = config
         self.agent_name = config.agent_name
+        self._board_client_class = board_client_class
         self._stack: AsyncExitStack | None = None
         self._client: Any | None = None
 
@@ -416,6 +418,7 @@ class RawBoardReader:
         if name not in {
             "board_snapshot",
             "board_status",
+            "ticket_get",
             "ticket_list",
             "board_get_briefing",
             "board_state_get",
@@ -460,6 +463,36 @@ class RawBoardReader:
         if assigned_to is not None:
             arguments["assigned_to"] = assigned_to
         return await self._call("ticket_list", arguments)
+
+    async def ticket_get(self, ticket_id: str) -> dict[str, Any]:
+        return await self._call("ticket_get", {"ticket_id": ticket_id})
+
+    async def events(
+        self,
+        from_cursor: int,
+        cursor_callback: Callable[[int], None],
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Stream journal cues through the verified public client API."""
+        client = self._board_client_class(
+            self.config.central_url,
+            self.config.token,
+            self.config.board_id,
+            agent_name=self.config.agent_name,
+        )
+        # Journal-only reads need a non-null identity for client filtering but
+        # deliberately do not join or create a dashboard board member.
+        client.identity = SimpleNamespace(agent_id="dashboard-read-only")
+        async for event in client.events(
+            from_cursor=from_cursor,
+            only_mine=False,
+            resource_subscriptions=[
+                f"board://{self.config.board_id}/journal"
+            ],
+            acknowledge=False,
+            touch=False,
+            cursor_callback=cursor_callback,
+        ):
+            yield event
 
     async def board_get_briefing(
         self, *, token_budget: int = 4_000, ticket_id: str | None = None
@@ -509,9 +542,12 @@ class LiveDashboard:
         )
         self._commands: asyncio.Queue = asyncio.Queue(maxsize=32)
         self._start_lock = asyncio.Lock()
+        self._view_start_lock = asyncio.Lock()
         self._read_lock = asyncio.Lock()
         self._first_attempt: asyncio.Event | None = None
+        self._view_first_attempt: asyncio.Event | None = None
         self._worker_task: asyncio.Task | None = None
+        self._view_task: asyncio.Task | None = None
         self._client: Any | None = None
         self._stopping = False
         self._connected = False
@@ -551,15 +587,25 @@ class LiveDashboard:
 
     async def stop(self) -> None:
         self._stopping = True
-        task = self._worker_task
-        if task is not None and not task.done():
-            task.cancel()
+        tasks = [
+            task
+            for task in (self._worker_task, self._view_task)
+            if task is not None
+        ]
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        for task in tasks:
+            if task.done():
+                continue
             done, _pending = await asyncio.wait(
                 {task}, timeout=min(1.0, self.config.request_timeout_s)
             )
             if task not in done:
                 self._feed_error = "Central unavailable (TimeoutError)"
-        if task is not None and task.done():
+        for task in tasks:
+            if not task.done():
+                continue
             with suppress(asyncio.CancelledError):
                 await task
         self._connected = False
@@ -1329,8 +1375,8 @@ class LiveDashboard:
                 self._event_cursor = int(self._projection.get("latest_seq", 0))
                 self._has_more = False
                 self._resync_notice = (
-                    "Activity includes only events observed from model tools in this "
-                    "MCP process; the App does not read or acknowledge Central journal."
+                    "Activity follows side-effect-free Central journal cues; "
+                    "the UI reads the cached projection."
                 )
                 self._view_connected = True
                 self._view_error = None
@@ -1339,6 +1385,133 @@ class LiveDashboard:
             except BaseException as exc:
                 self._view_connected = False
                 self._view_error = self._safe_connection_error(exc)
+
+    async def _ensure_view(self) -> None:
+        async with self._view_start_lock:
+            if self._view_task is None or self._view_task.done():
+                self._stopping = False
+                self._view_first_attempt = asyncio.Event()
+                self._view_task = asyncio.create_task(
+                    self._view_worker(), name="dashboard-view-subscription"
+                )
+            first_attempt = self._view_first_attempt
+        assert first_attempt is not None
+        try:
+            async with asyncio.timeout(
+                self.config.request_timeout_s
+                + min(1.0, self.config.request_timeout_s)
+            ):
+                await first_attempt.wait()
+        except TimeoutError:
+            self._view_connected = False
+            self._view_error = "Central unavailable (TimeoutError)"
+            task = self._view_task
+            if task is not None and not task.done():
+                task.cancel()
+
+    async def _apply_view_cue(self, event: dict[str, Any]) -> None:
+        self._observe_event(event)
+        ticket_id = event.get("ticket_id")
+        if isinstance(ticket_id, str) and ticket_id:
+            async with self._read_lock:
+                await self._probe_central()
+                connection = self._read_client_factory(self.config)
+                async with asyncio.timeout(self.config.request_timeout_s):
+                    async with AsyncExitStack() as connection_stack:
+                        reader = await connection_stack.enter_async_context(connection)
+                        self._observe_result(await reader.ticket_get(ticket_id))
+            return
+        # Non-ticket cues have no narrower public projection read. Refresh the
+        # snapshot only on that cue, never from the UI timer.
+        await self._refresh_view()
+
+    async def _consume_view_events(self, reader: Any) -> None:
+        events_method = getattr(reader, "events", None)
+        if not callable(events_method):
+            # Test and compatibility readers without the public events API keep
+            # their initial cached projection without starting the model client.
+            self._view_connected = True
+            self._view_error = None
+            assert self._view_first_attempt is not None
+            self._view_first_attempt.set()
+            await asyncio.Event().wait()
+            return
+
+        ready = asyncio.Event()
+
+        def advance(cursor: int) -> None:
+            self._event_cursor = int(cursor)
+            ready.set()
+
+        stream = events_method(int(self._event_cursor or 0), advance)
+        next_event = asyncio.create_task(anext(stream))
+        ready_wait = asyncio.create_task(ready.wait())
+        try:
+            while not ready.is_set():
+                done, _pending = await asyncio.wait(
+                    {next_event, ready_wait}, return_when=asyncio.FIRST_COMPLETED
+                )
+                if ready_wait in done:
+                    break
+                if next_event in done:
+                    await self._apply_view_cue(next_event.result())
+                    next_event = asyncio.create_task(anext(stream))
+            self._view_connected = True
+            self._view_error = None
+            assert self._view_first_attempt is not None
+            self._view_first_attempt.set()
+            while not self._stopping:
+                event = await next_event
+                await self._apply_view_cue(event)
+                next_event = asyncio.create_task(anext(stream))
+        finally:
+            for task in (next_event, ready_wait):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(next_event, ready_wait, return_exceptions=True)
+            close = getattr(stream, "aclose", None)
+            if callable(close):
+                await close()
+
+    async def _view_worker(self) -> None:
+        assert self._view_first_attempt is not None
+        retry_delay = self.config.reconnect_min_s
+        try:
+            while not self._stopping:
+                try:
+                    await self._refresh_view()
+                    if not self._view_connected:
+                        self._view_first_attempt.set()
+                        if not self._stopping:
+                            await asyncio.sleep(retry_delay)
+                            retry_delay = min(
+                                self.config.reconnect_max_s, retry_delay * 2
+                            )
+                        continue
+                    self._view_connected = False
+                    reader = self._read_client_factory(self.config)
+                    await self._consume_view_events(reader)
+                except asyncio.CancelledError:
+                    raise
+                except BaseException as exc:
+                    self._view_connected = False
+                    self._view_error = self._safe_connection_error(exc)
+                    print(
+                        "Personal dashboard subscription lost; cached view is stale "
+                        f"({type(exc).__name__})",
+                        file=sys.stderr,
+                    )
+                    self._view_first_attempt.set()
+                    if not self._stopping:
+                        await asyncio.sleep(retry_delay)
+                        retry_delay = min(
+                            self.config.reconnect_max_s, retry_delay * 2
+                        )
+                else:
+                    retry_delay = self.config.reconnect_min_s
+        finally:
+            self._view_connected = False
+            self._view_first_attempt.set()
 
     async def _rpc(self, method: str, *args: Any, **kwargs: Any) -> Any:
         await self.start()
@@ -1649,11 +1822,13 @@ class LiveDashboard:
         return await self._rpc("ticket_submit", ticket_id)
 
     async def snapshot(self) -> dict[str, Any]:
-        await self._refresh_view()
+        await self._ensure_view()
+        if self._projection is not None and not self._view_connected:
+            await self._refresh_view()
         return self._snapshot_payload()
 
     async def feed(self) -> dict[str, Any]:
-        await self._refresh_view()
+        await self._ensure_view()
         payload = self._snapshot_payload()
         payload["count"] = len(payload["events"])
         payload["error"] = payload.get("feed_error")
@@ -1718,8 +1893,8 @@ def build_dashboard_server(
     @apps.tool(
         resource_uri=UI_URI,
         description=(
-            "Refresh the non-mutating live projection and return bounded events "
-            "observed from model tools in this MCP process."
+            "Read the in-process subscription-backed projection cache and return "
+            "bounded observed events without polling Central."
         ),
         visibility=APP_ONLY,
     )
@@ -1771,9 +1946,10 @@ def build_dashboard_server(
     @apps.tool(
         resource_uri=UI_URI,
         description=(
-            "Read a bounded Central journal page for the model. With the personal "
-            "write-scoped capability this may renew activity or leases even when "
-            "ack is false; ack=true also advances the durable cursor."
+            "Read a bounded Central journal page for the model. touch=false is the "
+            "default side-effect-free read and ignores ack without updating activity, "
+            "leases, or the durable cursor. With touch=true, ack=false leaves the "
+            "cursor unchanged and ack=true advances it."
         ),
         visibility=MODEL_ONLY,
     )
@@ -1781,9 +1957,10 @@ def build_dashboard_server(
         cursor: int | None = None,
         limit: int = 100,
         ack: bool = True,
+        touch: bool = False,
     ) -> dict[str, Any]:
         return await state._rpc(
-            "board_catchup", cursor=cursor, limit=limit, ack=ack
+            "board_catchup", cursor=cursor, limit=limit, ack=ack, touch=touch
         )
 
     @apps.tool(
