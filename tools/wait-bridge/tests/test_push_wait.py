@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import os
 import sys
 import tempfile
 import time
 import unittest
-from contextlib import AbstractAsyncContextManager
+from contextlib import AbstractAsyncContextManager, redirect_stderr
 from pathlib import Path
 from types import SimpleNamespace, TracebackType
 from typing import Any
@@ -23,7 +24,7 @@ sys.path.insert(0, str(ROOT))
 os.environ.setdefault("ONBOARD_CENTRAL_TOKEN", "TOKEN_PLACEHOLDER")
 
 from mcp import Client  # noqa: E402
-from pursers_client import BoardClient, JoinedIdentity  # noqa: E402
+from pursers_client import BoardClient, BoardClientError, JoinedIdentity  # noqa: E402
 import central  # noqa: E402
 import pursers_wait_server as wait_server  # noqa: E402
 
@@ -402,7 +403,9 @@ class PushWaitTests(unittest.IsolatedAsyncioTestCase):
             signaling = SignalingListenClient(raw, ready)
             client._client = signaling
 
+            stderr = io.StringIO()
             with (
+                redirect_stderr(stderr),
                 patch.object(wait_server, "WAIT_MODE", "push"),
                 patch.object(wait_server, "DEFAULT_POLL_INTERVAL_S", 10.0),
             ):
@@ -421,6 +424,7 @@ class PushWaitTests(unittest.IsolatedAsyncioTestCase):
                 result = await asyncio.wait_for(waiting, timeout=1)
 
             self.assertEqual(signaling.listen_calls, 1)
+            self.assertNotIn("falling back to poll", stderr.getvalue())
             self.assertFalse(result["timed_out"])
             self.assertLess(time.monotonic() - started, 1.0)
             self.assertTrue(
@@ -438,7 +442,11 @@ class PushWaitTests(unittest.IsolatedAsyncioTestCase):
             signaling = SignalingListenClient(raw, ready)
             client._client = signaling
 
-            with patch.object(wait_server, "WAIT_MODE", "push"):
+            stderr = io.StringIO()
+            with (
+                redirect_stderr(stderr),
+                patch.object(wait_server, "WAIT_MODE", "push"),
+            ):
                 started = time.monotonic()
                 waiting = asyncio.create_task(
                     wait_server._wait_for_work(
@@ -454,6 +462,7 @@ class PushWaitTests(unittest.IsolatedAsyncioTestCase):
                 elapsed = time.monotonic() - started
 
             self.assertEqual(signaling.listen_calls, 1)
+            self.assertNotIn("falling back to poll", stderr.getvalue())
             self.assertTrue(result["timed_out"])
             self.assertEqual(result["events"], [])
             self.assertGreaterEqual(elapsed, 0.9)
@@ -568,6 +577,61 @@ class PushWaitTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertGreaterEqual(subscription.yielded, 1)
         self.assertGreaterEqual(client.catchup_calls, 3)
+
+    async def test_seat_denial_retries_journal_only_before_poll(self) -> None:
+        journal_uri = f"board://{wait_server.BOARD_ID}/journal"
+        seat_uri = "board://pursers/agent/AI-listener"
+        calls: list[list[str]] = []
+        event = {"seq": 61, "kind": "ticket_created", "ticket_id": "TK-journal"}
+
+        class RetryEventClient:
+            def __init__(self, *_args: object, **_kwargs: object) -> None:
+                self.identity: JoinedIdentity | None = None
+                self.generation_token: str | None = None
+
+            async def events(self, **arguments: Any) -> Any:
+                resources = list(arguments["resource_subscriptions"])
+                calls.append(resources)
+                if len(resources) > 1:
+                    raise BoardClientError(
+                        "subscription denied: principal is not a board member"
+                    )
+                yield event
+
+        parent = SimpleNamespace(
+            url="http://central.invalid/mcp",
+            token="test-token",
+            reconnect_delay_s=0.01,
+        )
+        identity = JoinedIdentity(
+            wait_server.BOARD_ID,
+            "AI-listener",
+            "PR-listener",
+            "push-listener",
+            "worker",
+        )
+        stderr = io.StringIO()
+        with (
+            redirect_stderr(stderr),
+            patch.object(wait_server, "BoardClient", RetryEventClient),
+        ):
+            found = [
+                item
+                async for item in wait_server._event_stream(
+                    parent,
+                    wait_server.BOARD_ID,
+                    identity,
+                    None,
+                    60,
+                    lambda _cursor: None,
+                    pure_catchup=True,
+                )
+            ]
+
+        self.assertEqual(calls, [[journal_uri, seat_uri], [journal_uri]])
+        self.assertEqual(found, [event])
+        self.assertIn("retrying journal-only", stderr.getvalue())
+        self.assertNotIn("falling back to poll", stderr.getvalue())
 
     async def test_push_backlog_scan_precedes_subscription(self) -> None:
         ticket = {
