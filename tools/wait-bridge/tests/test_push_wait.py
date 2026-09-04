@@ -28,7 +28,15 @@ sys.path.insert(0, str(ROOT))
 os.environ.setdefault("ONBOARD_CENTRAL_TOKEN", "TOKEN_PLACEHOLDER")
 
 from mcp import Client  # noqa: E402
-from pursers_client import BoardClient, BoardClientError, JoinedIdentity  # noqa: E402
+from pursers_client import (  # noqa: E402
+    REVIEW_LEASE_EXPIRED,
+    REVIEW_LEASE_KINDS,
+    REVIEW_LEASE_RELEASED,
+    SUBMITTED_RELEVANT_KINDS,
+    BoardClient,
+    BoardClientError,
+    JoinedIdentity,
+)
 import central  # noqa: E402
 import pursers_wait_server as wait_server  # noqa: E402
 
@@ -345,14 +353,46 @@ class ManualClock:
 
 class PushWaitTests(unittest.IsolatedAsyncioTestCase):
     def test_review_lease_events_are_push_wait_cues(self) -> None:
-        self.assertLessEqual(
-            {
-                "ticket_review_claimed",
-                "review_lease_expired",
-                "review_lease_released",
-            },
-            wait_server.RELEVANT_KINDS,
+        self.assertEqual(
+            wait_server.SUBMITTED_RELEVANT_KINDS, SUBMITTED_RELEVANT_KINDS
         )
+        self.assertLessEqual(REVIEW_LEASE_KINDS, wait_server.RELEVANT_KINDS)
+
+    async def test_release_and_expiry_wake_blocked_push_reviewer(self) -> None:
+        for sequence, kind in enumerate(
+            (REVIEW_LEASE_RELEASED, REVIEW_LEASE_EXPIRED), start=1
+        ):
+            with self.subTest(kind=kind):
+                subscription = StubSubscription(
+                    [object()], "board://pursers/journal"
+                )
+                client = ScriptedBoardClient(
+                    [
+                        ([], 0),
+                        ([], 0),
+                        ([{"kind": kind, "ticket_id": "TK-review"}], sequence),
+                    ],
+                    transport=StubListenClient(subscription),
+                )
+                client.identity = JoinedIdentity(
+                    wait_server.BOARD_ID,
+                    "AI-reviewer",
+                    "PR-reviewer",
+                    "reviewer-a",
+                    "reviewer",
+                )
+
+                with patch.object(wait_server, "WAIT_MODE", "push"):
+                    result = await wait_server._wait_for_work(
+                        client,
+                        since_seq=0,
+                        timeout_s=1,
+                        only_mine=False,
+                    )
+
+                self.assertFalse(result["timed_out"])
+                self.assertEqual(result["reason"], "journal")
+                self.assertEqual(result["events"][0]["kind"], kind)
 
     def setUp(self) -> None:
         wait_server._BACKLOG_SEEN.clear()

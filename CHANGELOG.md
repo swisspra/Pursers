@@ -31,6 +31,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   non-empty rejection fixes. Shipped leak rules are generic; operator-specific
   regexes load from `~/.pursers/leak-markers.txt` (or
   `PURSERS_LEAK_MARKERS_FILE`) without printing their values.
+- Review-lease journal kinds now come from one `pursers_client` contract used
+  by Central, the wait bridge, and generated seats. Reviewer backlog cues now
+  exclude submissions reserved by another live reviewer.
 - `a2a_wait(wait_for="auto")` now derives reviewer waits from the joined role,
   wakes reviewers only for submitted/review work, suppresses unchanged backlog
   cues after their first process-local return, and reports whether each return

@@ -4,12 +4,21 @@ import asyncio
 import importlib.util
 import io
 import json
+import sys
 from contextlib import redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 
 
 ROOT = Path(__file__).resolve().parents[1]
+CLIENT_SRC = ROOT.parents[1] / "packages" / "client" / "src"
+sys.path.insert(0, str(CLIENT_SRC))
+from pursers_client import (  # noqa: E402
+    REVIEW_LEASE_EXPIRED,
+    REVIEW_LEASE_RELEASED,
+    SUBMITTED_RELEVANT_KINDS,
+)
+
 SPEC = importlib.util.spec_from_file_location("seat_registry", ROOT / "seat_new.py")
 assert SPEC and SPEC.loader
 seat_new = importlib.util.module_from_spec(SPEC)
@@ -129,17 +138,47 @@ def test_reviewer_submitted_wait_fans_out_registry() -> None:
                 registry_work_dirs=lambda _registry: {},
                 registry_project_work_dirs=lambda _registry: {},
                 wait_for_boards=fake_wait,
+                submitted_relevant_kinds=SUBMITTED_RELEVANT_KINDS,
             )
         )
     assert observed["submitted"] is True
-    assert observed["kinds"] == frozenset(
-        {
-            "ticket_status_changed",
-            "ticket_review_claimed",
-            "review_lease_expired",
-            "review_lease_released",
-        }
-    )
+    assert observed["kinds"] == SUBMITTED_RELEVANT_KINDS
+
+
+def test_reviewer_home_wait_wakes_on_release_and_expiry() -> None:
+    for sequence, kind in enumerate(
+        (REVIEW_LEASE_RELEASED, REVIEW_LEASE_EXPIRED), start=10
+    ):
+        module = generated("reviewer")
+
+        class HomeClient:
+            identity = SimpleNamespace(agent_id="AI-reviewer")
+
+            async def events(
+                self, from_cursor=None, *, only_mine=True, kinds=None,
+                resource_subscriptions=None, acknowledge=True, touch=None,
+                cursor_callback=None,
+            ):
+                yield {
+                    "id": f"EV-{sequence}",
+                    "seq": sequence,
+                    "kind": kind,
+                    "ticket_id": "TK-review",
+                    "status_to": "submitted",
+                }
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            asyncio.run(
+                module._cmd_wait(
+                    HomeClient(), "pursers", sequence - 1, 1,
+                    submitted=True,
+                    submitted_relevant_kinds=SUBMITTED_RELEVANT_KINDS,
+                )
+            )
+        result = json.loads(output.getvalue())
+        assert result["timed_out"] is False
+        assert result["events"][0]["kind"] == kind
 
 
 def test_all_routed_verbs_accept_board_flag() -> None:

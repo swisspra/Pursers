@@ -12,6 +12,7 @@ from pathlib import Path
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 REPOSITORY_ROOT = PACKAGE_ROOT.parents[1]
+CLIENT_SOURCE = REPOSITORY_ROOT / "packages" / "client" / "src"
 sys.path.insert(0, str(REPOSITORY_ROOT / "tools" / "board_move"))
 sys.path.insert(0, str(PACKAGE_ROOT / "src" / "pursers_central"))
 
@@ -137,6 +138,7 @@ class BoardMoveTests(unittest.TestCase):
                 "-c",
                 (
                     "import sys; "
+                    f"sys.path.insert(0, {str(CLIENT_SOURCE)!r}); "
                     f"sys.path.insert(0, {str(PACKAGE_ROOT / 'src')!r}); "
                     "import pursers_central; "
                     "from pursers_central import central; "

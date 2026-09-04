@@ -33,6 +33,12 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp.shared.exceptions import MCPError
 from mcp_types import INTERNAL_ERROR, INVALID_REQUEST
 from pydantic import AnyHttpUrl
+from pursers_client import (
+    REVIEW_LEASE_EXPIRED,
+    REVIEW_LEASE_KINDS,
+    REVIEW_LEASE_RELEASED,
+    TICKET_REVIEW_CLAIMED,
+)
 
 from cursor import CursorStore
 from instance_lock import CentralDataLock
@@ -113,14 +119,7 @@ SCRUB_EVENT_FIELDS = frozenset(
     }
 )
 REVIEW_POLICIES = frozenset({"strict", "workflow"})
-REVIEW_EVENT_KINDS = frozenset(
-    {
-        "board_review_policy_changed",
-        "ticket_review_claimed",
-        "review_lease_expired",
-        "review_lease_released",
-    }
-)
+REVIEW_EVENT_KINDS = frozenset({"board_review_policy_changed"}) | REVIEW_LEASE_KINDS
 REVIEW_CORE_OVERRIDE_FIELDS = frozenset(
     {"review_policy_at_verdict", "review_label", "review_verdict"}
 )
@@ -1473,7 +1472,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                     await append_and_publish(
                         board_id,
                         reaper,
-                        "review_lease_expired",
+                        REVIEW_LEASE_EXPIRED,
                         resource_uri(board_id, "ticket", item["ticket_id"]),
                         item["recipients"],
                         ctx,
@@ -4309,7 +4308,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             event = await append_and_publish(
                 board_id,
                 changed["actor"],
-                "ticket_review_claimed",
+                TICKET_REVIEW_CLAIMED,
                 resource_uri(board_id, "ticket", ticket_id),
                 changed["recipients"],
                 ctx,
@@ -4388,7 +4387,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         event = await append_and_publish(
             board_id,
             changed["actor"],
-            "review_lease_released",
+            REVIEW_LEASE_RELEASED,
             resource_uri(board_id, "ticket", ticket_id),
             changed["recipients"],
             ctx,
@@ -4585,7 +4584,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         claim_event = None
         if changed["review_lease_claimed"]:
             claim_event = await append_and_publish(
-                board_id, changed["actor"], "ticket_review_claimed", uri,
+                board_id, changed["actor"], TICKET_REVIEW_CLAIMED, uri,
                 changed["recipients"], ctx, ticket_id=ticket_id,
                 status_from="submitted", status_to="submitted",
                 reviewer_agent_id=changed["review_lease"].get("reviewer_agent_id"),
@@ -4614,7 +4613,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             ),
         )
         review_release_event = await append_and_publish(
-            board_id, changed["actor"], "review_lease_released", uri,
+            board_id, changed["actor"], REVIEW_LEASE_RELEASED, uri,
             changed["recipients"], ctx, ticket_id=ticket_id,
             status_from="submitted", status_to=changed["new_status"],
             reviewer_agent_id=changed["review_lease"].get("reviewer_agent_id"),

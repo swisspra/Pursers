@@ -21,6 +21,10 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
+CLIENT_SRC = ROOT.parents[1] / "packages" / "client" / "src"
+sys.path.insert(0, str(CLIENT_SRC))
+from pursers_client import SUBMITTED_RELEVANT_KINDS  # noqa: E402
+
 SPEC = importlib.util.spec_from_file_location("seat_new", ROOT / "seat_new.py")
 assert SPEC and SPEC.loader
 seat_new = importlib.util.module_from_spec(SPEC)
@@ -1138,6 +1142,7 @@ def test_reviewer_wait_submitted_wakes_on_real_central_event(
                             parsed.timeout,
                             submitted=parsed.submitted,
                             poll_fallback=False,
+                            submitted_relevant_kinds=SUBMITTED_RELEVANT_KINDS,
                         )
 
                 waiting = asyncio.create_task(run_wait())
@@ -1165,6 +1170,7 @@ def test_reviewer_wait_submitted_wakes_on_real_central_event(
                 assert adapter.catchup_calls == 0
                 assert adapter.events_calls[0]["only_mine"] is False
                 assert adapter.events_calls[0]["touch"] is False
+                assert adapter.events_calls[0]["kinds"] == SUBMITTED_RELEVANT_KINDS
         finally:
             central.current_principal = original_current_principal
 
