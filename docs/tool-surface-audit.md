@@ -176,11 +176,11 @@ In a18, exactly 10 deprecated tools remain fully callable at runtime for backwar
    `Tool.annotations = ToolAnnotations(title="[DEPRECATED] <name> is deprecated in a18 and scheduled for removal in a19")`
    along with `Tool.meta = {"deprecated": True}`.
 
-### 5.2. Post-Authorization Deprecation Warnings & Durable Restart Dedupe
+### 5.2. Post-Authorization Deprecation Warnings & Durable Dedupe
 When a deprecated tool is called at runtime:
 1. **Post-Authorization Execution:** The tool function executes first. If the caller lacks authorization (e.g. outsider on unjoined board), `PermissionError` is raised before any warning logic is reached. Denied calls produce **zero** mutations and **zero** journal events.
-2. **Durable One-Time Deduplication:** If the call succeeds, Central computes `full_caller_id = f"{board_id}:{principal_id}:{agent_name}:{tool_name}"` and mutates `document["deprecated_warned_callers"]` in SQLite.
-3. **Normal Sequenced Journal Path:** If not previously warned, Central appends a `deprecated_tool_warning` event to the normal durable sequenced journal via `append_and_publish`. It advances `latest_seq`, receives a unique event ID, and is fully durable across service restarts without duplicate warnings.
+2. **Durable One-Time Deduplication:** If the call succeeds, Central atomically keys the warning by `tool + caller_principal_id + caller_agent_name` in the journal transaction. The journal keeps at most 4,096 identities and evicts the oldest sequence first, an explicit bound that prevents unbounded state growth.
+3. **Normal Sequenced Journal Path:** If not previously warned, Central appends a `deprecated_tool_warning` event to the normal durable sequenced journal via `append_once_and_publish`. It advances `latest_seq` and receives a unique event ID. The bounded journal-local idempotency summary survives both service restart and `journal_compact`; compaction also migrates older warning rows into that summary before removing them.
 4. **Result Metadata:** The returned dictionary carries `_deprecated: True` and `deprecated: True` as an additional compatibility signal.
 
 ---

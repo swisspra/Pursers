@@ -139,6 +139,14 @@ DEPRECATION_EVENT_FIELDS = frozenset(
         "recipient_identities",
     }
 )
+DEPRECATION_WARNING_UNIQUE_FIELDS = (
+    "tool",
+    "caller_principal_id",
+    "caller_agent_name",
+)
+# Journal-local, oldest-sequence-first retention keeps compaction dedupe durable
+# without recreating an unbounded warning registry in the board document.
+DEPRECATION_WARNING_DEDUPE_MAX_ENTRIES = 4_096
 DEPRECATED_TOOLS = frozenset(
     {
         "agent_nudge",
@@ -282,6 +290,75 @@ def iso_at(epoch: float) -> str:
 class CentralJournal(Journal):
     """Extend the pinned core journal with sanitized board-control events."""
 
+    @staticmethod
+    def _deprecation_warning_key(event: Mapping[str, Any]) -> str:
+        return json.dumps(
+            [event.get(field) for field in DEPRECATION_WARNING_UNIQUE_FIELDS],
+            separators=(",", ":"),
+        )
+
+    @staticmethod
+    def _deprecation_warning_entries(
+        document: dict[str, Any],
+    ) -> dict[str, dict[str, Any]]:
+        idempotency = document.setdefault("idempotency", {})
+        if not isinstance(idempotency, dict):
+            raise ValueError("journal idempotency state is corrupt")
+        bucket = idempotency.setdefault(
+            "deprecated_tool_warning",
+            {
+                "max_entries": DEPRECATION_WARNING_DEDUPE_MAX_ENTRIES,
+                "eviction": "oldest-sequence-first",
+                "entries": {},
+            },
+        )
+        if not isinstance(bucket, dict):
+            raise ValueError("deprecated warning idempotency state is corrupt")
+        bucket["max_entries"] = DEPRECATION_WARNING_DEDUPE_MAX_ENTRIES
+        bucket["eviction"] = "oldest-sequence-first"
+        entries = bucket.setdefault("entries", {})
+        if not isinstance(entries, dict):
+            raise ValueError("deprecated warning idempotency entries are corrupt")
+        return entries
+
+    @classmethod
+    def _remember_deprecation_warning(
+        cls,
+        document: dict[str, Any],
+        event: Mapping[str, Any],
+        *,
+        trim: bool = True,
+    ) -> None:
+        if event.get("kind") != "deprecated_tool_warning":
+            return
+        if any(
+            not isinstance(event.get(field), str) or not event.get(field)
+            for field in DEPRECATION_WARNING_UNIQUE_FIELDS
+        ):
+            raise ValueError("deprecated warning identity is incomplete")
+        entries = cls._deprecation_warning_entries(document)
+        key = cls._deprecation_warning_key(event)
+        entries.setdefault(key, {"event": copy.deepcopy(dict(event))})
+        if not trim:
+            return
+        cls._trim_deprecation_warnings(entries)
+
+    @staticmethod
+    def _trim_deprecation_warnings(
+        entries: dict[str, dict[str, Any]],
+    ) -> None:
+        overflow = len(entries) - DEPRECATION_WARNING_DEDUPE_MAX_ENTRIES
+        if overflow > 0:
+            oldest = sorted(
+                entries,
+                key=lambda item: (
+                    int(entries[item].get("event", {}).get("seq", 0)),
+                    item,
+                ),
+            )[:overflow]
+            for item in oldest:
+                entries.pop(item, None)
+
     def append(self, board_id: str, event: dict[str, Any]) -> dict[str, Any]:
         kind = _require_text("kind", event.get("kind"))
         custom_core_fields = REVIEW_CORE_OVERRIDE_FIELDS | INTAKE_CORE_OVERRIDE_FIELDS
@@ -385,11 +462,30 @@ class CentralJournal(Journal):
             nonlocal assigned, created
             self._check_document(document, board_id)
             rows = document.setdefault("rows", [])
+            warning_key = None
+            if (
+                kind == "deprecated_tool_warning"
+                and unique_fields == DEPRECATION_WARNING_UNIQUE_FIELDS
+            ):
+                warning_key = self._deprecation_warning_key(semantic)
+                prior = self._deprecation_warning_entries(document).get(
+                    warning_key
+                )
+                if prior is not None:
+                    prior_event = prior.get("event")
+                    if not isinstance(prior_event, dict):
+                        raise ValueError(
+                            "deprecated warning idempotency event is corrupt"
+                        )
+                    assigned = copy.deepcopy(prior_event)
+                    return
             for row in rows:
                 if row.get("kind") == kind and all(
                     row.get(field) == semantic[field] for field in unique_fields
                 ):
                     assigned = copy.deepcopy(row)
+                    if warning_key is not None:
+                        self._remember_deprecation_warning(document, row)
                     return
             seq = int(document["next_seq"])
             if seq <= int(document.get("compacted_through", 0)):
@@ -408,12 +504,58 @@ class CentralJournal(Journal):
                 raise ValueError("journal sequence is not increasing")
             rows.append(assigned)
             document["next_seq"] = seq + 1
+            if warning_key is not None:
+                self._remember_deprecation_warning(document, assigned)
             created = True
 
         self.store.read_modify_write(
             self._path(board_id), mutate, lambda: self._default(board_id)
         )
         return copy.deepcopy(assigned), created
+
+    def compact(self, board_id: str, retain_last: int) -> dict[str, int]:
+        """Compact rows while preserving bounded warning idempotency state."""
+        board_id = _require_text("board_id", board_id)
+        if (
+            type(retain_last) is not int
+            or retain_last < MIN_COMPACTION_RETAIN_LAST
+        ):
+            raise ValueError(
+                f"retain_last must be an integer of at least "
+                f"{MIN_COMPACTION_RETAIN_LAST}"
+            )
+        result: dict[str, int] = {}
+
+        def mutate(document: dict[str, Any]) -> None:
+            nonlocal result
+            self._check_document(document, board_id)
+            rows = document["rows"]
+            for row in rows:
+                self._remember_deprecation_warning(document, row, trim=False)
+            warning_entries = document.get("idempotency", {}).get(
+                "deprecated_tool_warning", {}
+            ).get("entries", {})
+            self._trim_deprecation_warnings(warning_entries)
+            remove_count = max(0, len(rows) - retain_last)
+            removed = rows[:remove_count]
+            if removed:
+                document["compacted_through"] = int(removed[-1]["seq"])
+                document["rows"] = rows[remove_count:]
+            result = {
+                "removed": len(removed),
+                "retained": len(document["rows"]),
+                "compacted_through": int(document.get("compacted_through", 0)),
+                "latest_cursor": int(document["next_seq"]) - 1,
+                "deprecation_dedupe_entries": len(warning_entries),
+                "deprecation_dedupe_limit": (
+                    DEPRECATION_WARNING_DEDUPE_MAX_ENTRIES
+                ),
+            }
+
+        self.store.read_modify_write(
+            self._path(board_id), mutate, lambda: self._default(board_id)
+        )
+        return result
 
 
 class CentralBoard:
@@ -1302,11 +1444,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                             f"board://{board_id}/tool/{tool_name}",
                             [],
                             ctx,
-                            unique_fields=(
-                                "tool",
-                                "caller_principal_id",
-                                "caller_agent_name",
-                            ),
+                            unique_fields=DEPRECATION_WARNING_UNIQUE_FIELDS,
                             tool=tool_name,
                             caller_principal_id=principal.principal_id,
                             caller_agent_name=caller_name,

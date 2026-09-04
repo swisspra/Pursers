@@ -298,6 +298,134 @@ class LegacyToolsTests(unittest.IsolatedAsyncioTestCase):
             restart_cursor,
         )
 
+    async def test_warning_dedupe_survives_compaction_and_restart(self) -> None:
+        client_info = types.Implementation(name="admin-agent", version="1.0")
+        async with Client(
+            self.mcp,
+            client_info=client_info,
+            mode="2026-07-28",
+            cache=None,
+        ) as client:
+            original = await client.call_tool(
+                "board_get_briefing", {"board_id": "pursers"}
+            )
+        self.assertFalse(original.is_error)
+        original_warning = [
+            event
+            for event in self.service.journal.read_after(
+                "pursers", 0, 100
+            )["events"]
+            if event.get("kind") == "deprecated_tool_warning"
+        ][0]
+
+        for index in range(central.MIN_COMPACTION_RETAIN_LAST + 1):
+            self.service.journal.append(
+                "pursers",
+                {
+                    "kind": "memory_written",
+                    "actor": "AI-compaction-fixture",
+                    "payload_ref": f"board://pursers/memory/MEM-{index}",
+                    "memory_id": f"MEM-{index}",
+                    "fixture_provenance": "deprecated warning compaction test",
+                },
+            )
+
+        compacted = await self.call(
+            "journal_compact",
+            retain_last=central.MIN_COMPACTION_RETAIN_LAST,
+        )
+        self.assertFalse(compacted.is_error)
+        self.assertGreaterEqual(
+            compacted.structured_content["compacted_through"],
+            original_warning["seq"],
+        )
+        self.assertEqual(
+            compacted.structured_content["deprecation_dedupe_entries"], 1
+        )
+        self.assertEqual(
+            compacted.structured_content["deprecation_dedupe_limit"],
+            central.DEPRECATION_WARNING_DEDUPE_MAX_ENTRIES,
+        )
+
+        restarted_mcp, restarted_service = central.build_server(
+            "localhost", 8765, self.root / "data"
+        )
+        self.mcp = restarted_mcp
+        self.service = restarted_service
+        restart_cursor = self.service.journal.read_after("pursers", 0, 1)[
+            "latest_cursor"
+        ]
+        async with Client(
+            self.mcp,
+            client_info=client_info,
+            mode="2026-07-28",
+            cache=None,
+        ) as client:
+            duplicate = await client.call_tool(
+                "board_get_briefing", {"board_id": "pursers"}
+            )
+        self.assertFalse(duplicate.is_error)
+        self.assertEqual(
+            self.service.journal.read_after("pursers", 0, 1)[
+                "latest_cursor"
+            ],
+            restart_cursor,
+        )
+
+        async with Client(
+            self.mcp,
+            client_info=types.Implementation(
+                name="other-admin", version="1.0"
+            ),
+            mode="2026-07-28",
+            cache=None,
+        ) as client:
+            distinct = await client.call_tool(
+                "board_get_briefing", {"board_id": "pursers"}
+            )
+        self.assertFalse(distinct.is_error)
+        new_page = self.service.journal.read_after(
+            "pursers", restart_cursor, 10
+        )
+        self.assertEqual(new_page["latest_cursor"], restart_cursor + 1)
+        self.assertEqual(len(new_page["events"]), 1)
+        self.assertEqual(
+            new_page["events"][0]["caller_agent_name"], "other-admin"
+        )
+
+    def test_warning_dedupe_summary_evicts_oldest_at_bound(self) -> None:
+        with patch.object(
+            central, "DEPRECATION_WARNING_DEDUPE_MAX_ENTRIES", 2
+        ):
+            for index in range(3):
+                _event, created = self.service.journal.append_once(
+                    "pursers",
+                    {
+                        "kind": "deprecated_tool_warning",
+                        "actor": f"AI-caller-{index}",
+                        "payload_ref": "board://pursers/tool/board_get_briefing",
+                        "tool": "board_get_briefing",
+                        "caller_principal_id": f"PR-caller-{index}",
+                        "caller_agent_name": f"caller-{index}",
+                        "message": "deprecated",
+                    },
+                    unique_fields=central.DEPRECATION_WARNING_UNIQUE_FIELDS,
+                )
+                self.assertTrue(created)
+
+            document = self.service.store.load(
+                self.service.journal._path("pursers"),
+                lambda: self.service.journal._default("pursers"),
+            )
+            bucket = document["idempotency"]["deprecated_tool_warning"]
+            self.assertEqual(bucket["max_entries"], 2)
+            self.assertEqual(bucket["eviction"], "oldest-sequence-first")
+            retained = {
+                entry["event"]["caller_agent_name"]
+                for entry in bucket["entries"].values()
+            }
+            self.assertEqual(retained, {"caller-1", "caller-2"})
+
     async def test_calling_deprecated_tool_post_authorization_durable_dedupe_and_restart(self) -> None:
         """Denials cause zero mutation/events; authorized calls emit sequenced journal warning and dedupe survives restart."""
         # 1. Adversarial test: unjoined outsider calling ticket_terminate against pursers board
