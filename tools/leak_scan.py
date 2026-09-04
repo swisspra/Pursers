@@ -41,11 +41,6 @@ class LeakViolation:
 EXEMPT_HOME_USERS = frozenset(
     {
         "synthetic-user",
-        "synthetic-account",
-        "synthetic-a",
-        "synthetic-b",
-        "example",
-        "private-account",
     }
 )
 
@@ -74,6 +69,25 @@ EXEMPT_JWT_FIXTURES = (
 
 RULE_EXEMPTION_PATTERN = re.compile(
     r"#\s*(?:pragma:\s*allowlist|leak-scan:\s*exempt|noqa:\s*leak)\s+([A-Za-z0-9_-]+)"
+)
+
+# Only specific generic rules can be exempted by name.
+# 'secret' alias is NOT permitted.
+# 'operator_marker' is NEVER exemptable.
+EXEMPTABLE_RULES = frozenset(
+    {
+        "posix_home",
+        "linux_home",
+        "windows_home",
+        "jwt",
+        "bearer_token",
+        "aws_access_key_id",
+        "aws_secret_access_key",
+        "gcp_api_key",
+        "gcp_oauth_token",
+        "azure_client_secret",
+        "pem_private_key",
+    }
 )
 
 # Pattern fragments prevent the scanner source from matching its own rules
@@ -137,15 +151,13 @@ def scan_line(
     rules: Sequence[Rule] = GENERIC_RULES,
 ) -> list[str]:
     """Scan a single line for violations with match-scoped and rule-specific exemptions."""
-    exempt_rules = set(RULE_EXEMPTION_PATTERN.findall(line))
+    available_exemptions: dict[str, int] = {}
+    for marker in RULE_EXEMPTION_PATTERN.findall(line):
+        if marker in EXEMPTABLE_RULES:
+            available_exemptions[marker] = available_exemptions.get(marker, 0) + 1
 
     hits: list[str] = []
     for rule in rules:
-        if rule.name in exempt_rules:
-            continue
-        if "secret" in exempt_rules and rule.name not in ("posix_home", "linux_home", "windows_home"):
-            continue
-
         for match in rule.compiled().finditer(line):
             matched_text = match.group(0)
 
@@ -166,6 +178,11 @@ def scan_line(
             elif rule.name == "jwt":
                 if any(fixture in matched_text for fixture in EXEMPT_JWT_FIXTURES):
                     continue
+
+            # Check match-scoped inline exemption: consumes at most ONE match per marker
+            if available_exemptions.get(rule.name, 0) > 0:
+                available_exemptions[rule.name] -= 1
+                continue
 
             hits.append(rule.name)
     return hits

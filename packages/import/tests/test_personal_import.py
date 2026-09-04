@@ -204,11 +204,11 @@ def test_archive_backfill_internal_counts_home_paths_per_record_byte_exact(
     records = [
         {
             "id": "home-path-a",
-            "content": "workspace=/Users/synthetic-a/project\n",
+            "content": "workspace=/Users/synthetic-user/project-a\n",
         },
         {
             "id": "home-path-b",
-            "content": "workspace=/Users/synthetic-b/project\n",
+            "content": "workspace=/Users/synthetic-user/project-b\n",
         },
     ]
     archive_file = source / "archive.json"
@@ -296,7 +296,7 @@ def test_archive_backfill_explicit_secret_redaction_is_provenanced_and_idempoten
     raw = {
         "id": "redacted-secret",
         "content": (
-            "workspace=/Users/synthetic-account/project; "
+            "workspace=/Users/synthetic-user/project; "
             "authorization: Bearer TESTTOKEN_123456"
         ),
     }
@@ -340,7 +340,7 @@ def test_archive_backfill_explicit_secret_redaction_is_provenanced_and_idempoten
     )
 
     assert inserted["content"] == (
-        "workspace=/Users/synthetic-account/project; "
+        "workspace=/Users/synthetic-user/project; "
         "authorization: Bearer [REDACTED:BEARER_TOKEN]"
     )
     assert inserted["content"].count("[REDACTED:BEARER_TOKEN]") == 1
@@ -1519,7 +1519,7 @@ def test_quarantine_restored_agent_requires_explicit_record_binding(
 
 @pytest.mark.parametrize(
     "secret_record_id",
-    ["private-agent@example.invalid", "/Users/private-account/agent"],
+    ["private-agent@example.invalid", "/Users/synthetic-user/agent"],
 )
 def test_secret_bearing_agent_record_id_with_clean_body_is_masked_and_reviewed(
     tmp_path: Path, secret_record_id: str
@@ -1622,7 +1622,7 @@ def test_quarantine_scans_all_sibling_fields_before_review_and_redacts_all(
             "id": "M-multi-rule",
             "agent_name": "legacy-main",
             "memory_type": "context",
-            "title": "synthetic /Users/private-account/project",
+            "title": "synthetic /Users/synthetic-user/project",
             "content": "synthetic AKIAABCDEFGHIJKLMNOP",
             "pinned": False,
         },
@@ -1722,7 +1722,7 @@ def test_quarantine_scans_all_sibling_fields_before_review_and_redacts_all(
         item for item in board["memories"] if item.get("legacy_memory_id") == "M-multi-rule"
     )
     rendered = json.dumps(restored)
-    assert "/Users/private-account" not in rendered
+    assert "/Users/synthetic-user" not in rendered
     assert "AKIAABCDEFGHIJKLMNOP" not in rendered
 
 
@@ -2023,7 +2023,7 @@ def test_cli_success_and_errors_never_emit_paths_or_input_secrets(
             "status",
             str(run),
             "--unknown-secret",
-            "/Users/private-account/Bearer-SECRET-INPUT-VALUE",
+            "/Users/synthetic-user/Bearer-SECRET-INPUT-VALUE",
         ],
         cwd=tempfile.gettempdir(),
         env=environment,
@@ -2081,7 +2081,7 @@ def test_cli_success_and_errors_never_emit_paths_or_input_secrets(
 
     state_path = run / "state.json"
     corrupt = json.loads(state_path.read_text())
-    corrupt["run_root"] = "/Users/private-account/secret-run"
+    corrupt["run_root"] = "/Users/synthetic-user/secret-run"
     state_path.write_text(json.dumps(corrupt), encoding="utf-8")
     os.chmod(state_path, 0o600)
     corrupted = subprocess.run(
@@ -2148,7 +2148,7 @@ def test_cli_sanitizes_value_error_reason(
 ) -> None:
     def fail(*_args, **_kwargs):
         raise ValueError(
-            "invalid input at /Users/private-account/secret-run; "
+            "invalid input at /Users/synthetic-user/secret-run; "
             "Bearer ABCDEFGHIJKLMNOPQRSTUVWXYZ"
         )
 
@@ -2180,7 +2180,7 @@ def test_cli_unexpected_exception_stays_generic(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     def fail(*_args, **_kwargs):
-        raise RuntimeError("unexpected /Users/private-account/secret-run")
+        raise RuntimeError("unexpected /Users/synthetic-user/secret-run")
 
     monkeypatch.setattr(personal_import_module, "status_import", fail)
     monkeypatch.setattr(

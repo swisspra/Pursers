@@ -32,13 +32,8 @@ def test_generic_home_patterns_and_exemptions() -> None:
     assert "linux_home" in leak_scan.scan_line(LINUX_HOME_CANDIDATE)
     assert "windows_home" in leak_scan.scan_line(WINDOWS_HOME_CANDIDATE)
 
-    # Documented synthetic fixtures are exempt
+    # Documented synthetic fixture is exempt (synthetic-user only)
     assert leak_scan.scan_line("path=/Users/synthetic-user/work") == []
-    assert leak_scan.scan_line("path=/Users/synthetic-account/work") == []
-    assert leak_scan.scan_line("path=/Users/synthetic-a/work") == []
-    assert leak_scan.scan_line("path=/Users/synthetic-b/work") == []
-    assert leak_scan.scan_line("path=/Users/example/work") == []
-    assert leak_scan.scan_line("path=/Users/private-account/work") == []
     assert leak_scan.scan_line("/home/synthetic-user/secret") == []
     assert leak_scan.scan_line(r"C:\Users\synthetic-user\secret") == []
 
@@ -121,6 +116,32 @@ def test_inline_exemptions() -> None:
     assert leak_scan.scan_line(secret_line + " # pragma: allowlist posix_home") == []
     assert leak_scan.scan_line(secret_line + " # leak-scan: exempt posix_home") == []
     assert leak_scan.scan_line(secret_line + " # noqa: leak posix_home") == []
+
+
+def test_two_home_matches_with_one_exemption_fails() -> None:
+    # Two home paths on the same line, one exemption marker
+    second_candidate = "/Us" + f"ers/second_{CANDIDATE_USER}/work"
+    line = f"{POSIX_HOME_CANDIDATE} and {second_candidate} # pragma: allowlist posix_home"
+    hits = leak_scan.scan_line(line)
+    assert hits == ["posix_home"]
+
+
+def test_two_credential_matches_with_former_secret_marker_fails() -> None:
+    # Two credential matches with the former 'secret' marker: both must still be detected
+    line = f"token = {RAW_JWT_CANDIDATE}; auth = {BEARER_CANDIDATE} # pragma: allowlist secret"
+    hits = leak_scan.scan_line(line)
+    assert set(hits) == {"jwt", "bearer_token"}
+
+
+def test_operator_marker_cannot_be_exempted(tmp_path: Path) -> None:
+    # An operator marker plus attempted exemption marker: operator_marker cannot be exempted
+    markers = tmp_path / "op_markers.txt"
+    marker_name = "custom" + "_operator_ident"
+    markers.write_text(f"{marker_name}\n", encoding="utf-8")
+    custom_rules = leak_scan._load_operator_markers(markers)
+    line = f"found {marker_name} # pragma: allowlist operator_marker"
+    hits = leak_scan.scan_line(line, rules=custom_rules)
+    assert hits == ["operator_marker"]
 
 
 def test_two_rule_same_line_exemption_does_not_suppress_second_violation() -> None:
