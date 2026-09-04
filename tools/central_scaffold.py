@@ -439,7 +439,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         if args.command == "init":
             root = init_instance(args.root, args.name, args.port)
-            print(f"created={root}")
+            print("created=<CENTRAL_ROOT>")
             _print_runbook(args.name)
             return 0
         return check_instance(args.root)

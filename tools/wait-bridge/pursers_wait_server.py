@@ -66,6 +66,7 @@ from pursers_client import (
     BoardClient,
     BoardClientError,
     JoinedIdentity,
+    SUBMITTED_RELEVANT_KINDS,
     parse_project_registry,
 )
 from mcp.server.mcpserver import Context, MCPServer
@@ -78,7 +79,7 @@ from backlog import (
     ticket_is_relevant,
 )
 
-SOURCE_VERSION = "0.1.0a6"
+SOURCE_VERSION = "0.1.0a7"
 
 
 def _source_version() -> str:
@@ -138,17 +139,6 @@ CATCHUP_PAGE_LIMIT = 100
 BACKLOG_SCAN_LIMIT = 100
 CLAIMABLE_RELEVANT_KINDS = frozenset(
     {"ticket_created", "ticket_status_changed"}
-)
-SUBMITTED_RELEVANT_KINDS = frozenset(
-    {
-        "ticket_status_changed",
-        "ticket_submitted",
-        "ticket_resubmitted",
-        "review_lease_changed",
-        "ticket_review_claimed",
-        "review_lease_released",
-        "review_lease_expired",
-    }
 )
 RELEVANT_KINDS = CLAIMABLE_RELEVANT_KINDS | SUBMITTED_RELEVANT_KINDS
 WAIT_FOR_AUTO = "auto"
@@ -1294,6 +1284,7 @@ async def _scan_open_backlog(
         }
         if wait_for == WAIT_FOR_SUBMITTED:
             arguments["status"] = "submitted"
+            arguments["review_unclaimed_only"] = True
         listed = await client.ticket_list(**arguments)
     except Exception as exc:
         _log(f"backlog scan: ticket_list failed: {exc}")

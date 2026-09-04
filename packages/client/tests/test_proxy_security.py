@@ -9,13 +9,31 @@ from typing import Any
 
 import pytest
 
-from pursers_client import DEFAULT_EVENT_KINDS, GENERATION_META_KEY, BoardClient
+from pursers_client import (
+    DEFAULT_EVENT_KINDS,
+    GENERATION_META_KEY,
+    REVIEW_LEASE_EXPIRED,
+    REVIEW_LEASE_KINDS,
+    REVIEW_LEASE_RELEASED,
+    SUBMITTED_RELEVANT_KINDS,
+    TICKET_REVIEW_CLAIMED,
+    BoardClient,
+)
 from pursers_client import client as client_module
 
 
 def test_generation_constants_remain_public() -> None:
     assert DEFAULT_EVENT_KINDS == client_module.DEFAULT_EVENT_KINDS
     assert GENERATION_META_KEY == client_module.GENERATION_META_KEY
+
+
+def test_review_event_kind_contract_is_public_and_exact() -> None:
+    assert REVIEW_LEASE_KINDS == frozenset(
+        {TICKET_REVIEW_CLAIMED, REVIEW_LEASE_EXPIRED, REVIEW_LEASE_RELEASED}
+    )
+    assert REVIEW_LEASE_KINDS <= DEFAULT_EVENT_KINDS
+    assert REVIEW_LEASE_KINDS <= SUBMITTED_RELEVANT_KINDS
+    assert "review_lease_changed" not in SUBMITTED_RELEVANT_KINDS
 
 
 def test_board_client_disables_environment_proxy_inheritance(monkeypatch) -> None:

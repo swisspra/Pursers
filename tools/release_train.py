@@ -64,6 +64,7 @@ VERSION_FILES: dict[str, tuple[str, ...]] = {
         "docs-local/architecture-th.html",
         "docs-local/manual-en.html",
         "docs-local/manual-th.html",
+        "packages/central/pyproject.toml",
         "packages/client/pyproject.toml",
         "packages/personal/pyproject.toml",
         "packages/personal/src/pursers_personal/apps_server.py",
@@ -87,6 +88,8 @@ VERSION_FILES: dict[str, tuple[str, ...]] = {
         "docs-local/architecture-th.html",
         "docs-local/manual-en.html",
         "docs-local/manual-th.html",
+        "tools/fleet-dashboard/tests/test_fleet_dashboard.py",
+        "tools/fleet-dashboard/tests/test_seat_config.py",
         "tools/seat-kit/README.md",
         "tools/wait-bridge/pursers_wait_server.py",
         "tools/wait-bridge/pyproject.toml",
@@ -307,6 +310,7 @@ def check(root: Path, versions: ReleaseVersions) -> list[str]:
             errors.append(f"{relative}: expected {name}=={package[key]}, found {actual}")
     dependencies = {
         "packages/pursers/pyproject.toml": ("central", "client", "personal", "import"),
+        "packages/central/pyproject.toml": ("client",),
         "packages/personal/pyproject.toml": ("central", "client"),
         "tools/wait-bridge/pyproject.toml": ("client",),
     }

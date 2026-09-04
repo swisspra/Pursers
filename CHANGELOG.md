@@ -7,6 +7,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [5.0.0a17] - 2026-09-04
+
+This release includes `pursers-central==0.1.0a21`,
+`pursers-client==0.1.0a15`, `pursers-personal-import==5.0.0a3`,
+`pursers-personal==5.0.0a17`, `pursers==5.0.0a17`, and
+`pursers-wait-bridge==0.1.0a7`.
+
 ### Added
 
 - Atomic review leases use the board's configured work-lease TTL (900 seconds
@@ -26,11 +33,26 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed
 
+- Repository hygiene (`TK-2266327730b6`) now runs the generic leak scanner in
+  CI and scrubs identifying local paths without exposing operator markers.
+- Wait-bridge version and discovery repair (`TK-3b94ad0eedeb`) derives CLI and
+  MCP server versions from package metadata, resolves configured and uv-tool
+  shims outside `PATH`, and shows stale version strings as a Config-page WARN.
 - Generated reviewer seats now include a shared HARD-verify checklist, an
   exact-SHA `board.sh verify` helper, evidence-gated approval, and mandatory
   non-empty rejection fixes. Shipped leak rules are generic; operator-specific
   regexes load from `~/.pursers/leak-markers.txt` (or
   `PURSERS_LEAK_MARKERS_FILE`) without printing their values.
+- Review-lease journal kinds now come from one `pursers_client` contract used
+  by Central, the wait bridge, and generated seats. Reviewer backlog cues now
+  exclude submissions reserved by another live reviewer.
+- The Config doctor distinguishes installed, pinned, and PyPI bridge versions,
+  validates bearer-token and token-file setup, and reports private-CA and dead
+  `nvm` connector hazards accurately.
+- The wait bridge derives its CLI and MCP server version from installed package
+  metadata, with a release-checked source-tree fallback.
+- Headless worker and reviewer runtimes select claimable versus submitted waits
+  from their configured runtime role, independent of broader token scopes.
 - `a2a_wait(wait_for="auto")` now derives reviewer waits from the joined role,
   wakes reviewers only for submitted/review work, suppresses unchanged backlog
   cues after their first process-local return, and reports whether each return

@@ -15,7 +15,12 @@ sys.path.insert(0, str(CLIENT_SRC))
 sys.path.insert(0, str(ROOT))
 os.environ.setdefault("ONBOARD_CENTRAL_TOKEN", "TOKEN_PLACEHOLDER")
 
-from pursers_client import BoardClientError, JoinedIdentity  # noqa: E402
+from pursers_client import (  # noqa: E402
+    REVIEW_LEASE_EXPIRED,
+    REVIEW_LEASE_RELEASED,
+    BoardClientError,
+    JoinedIdentity,
+)
 import pursers_wait_server as wait_server  # noqa: E402
 
 
@@ -280,6 +285,7 @@ class PerCallWaitTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_submitted_backlog_wakes_reviewer(self) -> None:
         client = FakeClient(role="reviewer")
+        list_calls: list[dict[str, Any]] = []
 
         async def empty_catchup(**arguments: Any):
             return {
@@ -289,7 +295,8 @@ class PerCallWaitTests(unittest.IsolatedAsyncioTestCase):
                 "resync_required": False,
             }
 
-        async def submitted_backlog(**_arguments: Any):
+        async def submitted_backlog(**arguments: Any):
+            list_calls.append(arguments)
             return {
                 "tickets": [
                     {
@@ -309,6 +316,41 @@ class PerCallWaitTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result["timed_out"])
         self.assertEqual(result["reason"], "backlog")
         self.assertEqual(result["events"][0]["ticket_id"], "TK-submitted")
+        self.assertEqual(
+            list_calls,
+            [{"include_closed": False, "limit": 100, "status": "submitted",
+              "review_unclaimed_only": True}],
+        )
+
+    async def test_release_and_expiry_events_wake_waiting_reviewer(self) -> None:
+        for index, kind in enumerate(
+            (REVIEW_LEASE_RELEASED, REVIEW_LEASE_EXPIRED), start=1
+        ):
+            with self.subTest(kind=kind):
+                client = FakeClient(role="reviewer")
+
+                async def lease_event_catchup(
+                    **arguments: Any,
+                ) -> dict[str, Any]:
+                    return {
+                        "events": [{"kind": kind, "ticket_id": "TK-review"}],
+                        "next_cursor": int(arguments["cursor"]) + index,
+                        "has_more": False,
+                        "resync_required": False,
+                    }
+
+                async def no_backlog(**_arguments: Any) -> dict[str, Any]:
+                    return {"tickets": []}
+
+                client.board_catchup = lease_event_catchup  # type: ignore[method-assign]
+                client.ticket_list = no_backlog  # type: ignore[method-assign]
+                result = await wait_server._wait_for_work(
+                    client, timeout_s=1, only_mine=False
+                )
+
+                self.assertFalse(result["timed_out"])
+                self.assertEqual(result["reason"], "journal")
+                self.assertEqual(result["events"][0]["kind"], kind)
 
     async def test_wait_for_override_requires_reviewer_authorization(self) -> None:
         worker = FakeClient()
