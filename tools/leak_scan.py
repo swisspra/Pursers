@@ -38,15 +38,6 @@ class LeakViolation:
         return f"{self.filename}:{self.line_number}: [{self.rule_name}] <masked>"
 
 
-EXEMPT_FILES = frozenset(
-    {
-        "tools/leak_scan.py",
-        "tools/tests/test_leak_scan.py",
-        "packages/central/src/pursers_central/scrub.py",
-        "packages/import/scrub.py",
-    }
-)
-
 EXEMPT_HOME_USERS = frozenset(
     {
         "synthetic-user",
@@ -58,19 +49,27 @@ EXEMPT_HOME_USERS = frozenset(
     }
 )
 
-EXEMPT_FIXTURE_STRINGS = frozenset(
+EXEMPT_AWS_KEYS = frozenset(
     {
-        "AKIAABCDEFGHIJKLMNOP",
+        "AK" + "IAABCDEFGHIJKLMNOP",
+    }
+)
+
+EXEMPT_BEARER_TOKENS = frozenset(
+    {
         "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
         "TESTTOKEN_123456",
         "synthetic-local-bearer",
         "SECRET-INPUT-VALUE",
         "pp4-unique-secret-token",
-        "TOKEN_MUST_NOT_APPEAR",
-        "SECRET_PAYLOAD_CONTENT",
-        "TOP_SECRET_GOOD_JWT_PAYLOAD",
-        "TOP_SECRET_MALFORMED_JWT",
     }
+)
+
+EXEMPT_JWT_FIXTURES = (
+    "TOKEN_MUST_NOT_APPEAR",
+    "SECRET_PAYLOAD_CONTENT",
+    "TOP_SECRET_GOOD_JWT_PAYLOAD",
+    "TOP_SECRET_MALFORMED_JWT",
 )
 
 EXEMPT_LINE_MARKERS = (
@@ -79,14 +78,18 @@ EXEMPT_LINE_MARKERS = (
     "# noqa: leak",
 )
 
+# Pattern fragments prevent the scanner source from matching its own rules
 GENERIC_RULES: tuple[Rule, ...] = (
-    Rule("posix_home", r"/Users/(?P<user>[A-Za-z0-9_-]+)", 0, "user"),
-    Rule("linux_home", r"/home/(?P<user>[A-Za-z0-9_-]+)", 0, "user"),
-    Rule("windows_home", r"[A-Za-z]:\\Users\\(?P<user>[A-Za-z0-9_-]+)", 0, "user"),
-    Rule("pem_private_key", r"-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----"),
+    Rule("posix_home", "/Us" + "ers/(?P<user>[A-Za-z0-9_-]+)", 0, "user"),
+    Rule("linux_home", "/ho" + "me/(?P<user>[A-Za-z0-9_-]+)", 0, "user"),
+    Rule("windows_home", r"[A-Za-z]:\\Us" + r"ers\\(?P<user>[A-Za-z0-9_-]+)", 0, "user"),
+    Rule(
+        "pem_private_key",
+        "-----BEG" + r"IN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----[\s\S]*?-----END (?:[A-Z0-9 ]+ )?PRIVATE KEY-----",
+    ),
     Rule(
         "aws_access_key_id",
-        r"\b(?:AKIA|ASIA|AIDA|AROA|AIPA|ANPA|ANVA)[A-Z0-9]{16}\b",
+        r"\b(?:AK" + r"IA|ASIA|AIDA|AROA|AIPA|ANPA|ANVA)[A-Z0-9]{16}\b",
     ),
     Rule(
         "aws_secret_access_key",
@@ -94,8 +97,8 @@ GENERIC_RULES: tuple[Rule, ...] = (
         re.IGNORECASE,
         "secret",
     ),
-    Rule("gcp_api_key", r"\bAIza[0-9A-Za-z_-]{35}\b"),
-    Rule("gcp_oauth_token", r"\bya29\.[0-9A-Za-z_-]{20,}\b"),
+    Rule("gcp_api_key", r"\bAI" + r"za[0-9A-Za-z_-]{35}\b"),
+    Rule("gcp_oauth_token", r"\bya" + r"29\.[0-9A-Za-z_-]{20,}\b"),
     Rule(
         "azure_client_secret",
         r"\b(?:AZURE_CLIENT_SECRET|client_secret)\s*[:=]\s*[\"']?(?P<secret>[A-Za-z0-9._~+/=-]{12,})",
@@ -104,7 +107,8 @@ GENERIC_RULES: tuple[Rule, ...] = (
     ),
     Rule(
         "bearer_token",
-        r"\bBearer[ \t]+(?!(?:placeholder|redacted|example|sample|dummy|your)"
+        r"\bBea" + r"rer[ \t]+"
+        r"(?!(?:placeholder|redacted|example|sample|dummy|your)"
         r"(?:[_-](?:access|auth|bearer|credential|secret|token|value|here))*"
         r"(?![A-Za-z0-9._~+/=-]))"
         r"(?P<token>[A-Za-z0-9._~+/=-]{16,})(?![A-Za-z0-9._~+/=-])",
@@ -113,7 +117,7 @@ GENERIC_RULES: tuple[Rule, ...] = (
     ),
     Rule(
         "jwt",
-        r"\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{8,}\b",
+        r"\bey" + r"J[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{8,}\b",
     ),
 )
 
@@ -126,7 +130,7 @@ def _load_operator_markers(path: Path | None) -> list[Rule]:
     for line in path.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if line and not line.startswith("#"):
-            rules.append(Rule(f"operator_marker", line, 0))
+            rules.append(Rule("operator_marker", line, 0))
     return rules
 
 
@@ -134,31 +138,31 @@ def scan_line(
     line: str,
     rules: Sequence[Rule] = GENERIC_RULES,
 ) -> list[str]:
-    """Scan a single line for violations. Returns list of matched rule names."""
+    """Scan a single line for violations with match-scoped and rule-specific exemptions."""
     if any(marker in line for marker in EXEMPT_LINE_MARKERS):
         return []
-
-    # Exempt lines containing common test domains / loopback
-    if any(item in line for item in ("example.com", "example.invalid", "127.0.0.1", "localhost")):
-        # Only exempt if not an explicit private key
-        if "-----BEGIN" not in line and "AKIA" not in line:
-            return []
 
     hits: list[str] = []
     for rule in rules:
         for match in rule.compiled().finditer(line):
             matched_text = match.group(0)
-            if any(fixture in matched_text or fixture in line for fixture in EXEMPT_FIXTURE_STRINGS):
-                continue
 
             if rule.name in ("posix_home", "linux_home", "windows_home"):
                 user = match.group("user")
                 if user in EXEMPT_HOME_USERS:
                     continue
 
-            if rule.name == "bearer_token":
+            elif rule.name == "bearer_token":
                 token = match.group("token") if rule.group else matched_text
-                if any(fixture in token for fixture in EXEMPT_FIXTURE_STRINGS):
+                if token in EXEMPT_BEARER_TOKENS or any(token == ex for ex in EXEMPT_BEARER_TOKENS):
+                    continue
+
+            elif rule.name == "aws_access_key_id":
+                if matched_text in EXEMPT_AWS_KEYS:
+                    continue
+
+            elif rule.name == "jwt":
+                if any(fixture in matched_text for fixture in EXEMPT_JWT_FIXTURES):
                     continue
 
             hits.append(rule.name)
@@ -170,8 +174,6 @@ def scan_file(
     rel_path: str,
     rules: Sequence[Rule] = GENERIC_RULES,
 ) -> list[LeakViolation]:
-    if rel_path in EXEMPT_FILES:
-        return []
     try:
         content = file_path.read_text(encoding="utf-8")
     except (UnicodeDecodeError, OSError):

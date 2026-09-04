@@ -150,7 +150,7 @@ def _parser() -> argparse.ArgumentParser:
         reject.add_argument("ticket_id")
         reject.add_argument("notes")
         reject.add_argument("fix")
-        # TODO: wire tools/leak_scan.py into reviewer board.sh verify when verify ticket merges
+        # TODO: wire tools/leak_scan.py into reviewer board.sh verify when TK-3be206d5ceb9 merges
         wait = commands.add_parser("wait", help="block until submitted tickets arrive")
         _wait_args(wait)
         wait.add_argument("--submitted", action="store_true",
