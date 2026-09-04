@@ -48,17 +48,14 @@ Instead of `api_key_env`, use `api_key_file = "/private/path/proxy.key"`.
 Never put a key inline in the config. `boards` may be `"registry"` or a JSON
 array / TOML string array of board IDs.
 
-The runtime is wired for subscription-first waiting by default. That default
-requires the Central/client pure-catchup foundation and the subscription-first
-wait bridge to be present in the same checkout. Until both dependencies are
-merged, the first default wait fails closed instead of silently entering the
-legacy polling loop. Set `PURSERS_WAIT_MODE=poll` only as an explicit
-compatibility fallback. The `[wait]` section exposes the bridge host profile
-and runner deadline; both worker and reviewer default to the `headless` profile
-and a six-hour runner deadline. With the subscription bridge present, its
-profile safety margin yields a 21,540s block for the default 21,600s deadline.
-The runtime forwards those values to the bridge as `PURSERS_HOST` and
-`PURSERS_HOST_TIMEOUT_S` and also passes `timeout_s` on each in-process wait.
+The runtime uses subscription-first waiting by default. Set
+`PURSERS_WAIT_MODE=poll` only as an explicit compatibility fallback. The
+`[wait]` section exposes the bridge host profile and runner deadline; both
+worker and reviewer default to the `headless` profile and a six-hour runner
+deadline. The runtime applies `PURSERS_HOST` and `PURSERS_HOST_TIMEOUT_S`
+before lazily importing the bridge, then passes `timeout_s` on every
+in-process wait. The bridge's public profile calculation therefore yields a
+21,540s block for the default 21,600s headless deadline.
 `SIGTERM` and `SIGINT` cancel an in-flight subscription promptly. A timeout is
 re-armed immediately without the former one-second guard sleep.
 

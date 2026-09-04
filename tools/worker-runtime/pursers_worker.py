@@ -7,7 +7,7 @@ import argparse
 import asyncio
 import datetime
 import hashlib
-import inspect
+import importlib
 import json
 import os
 import re
@@ -40,8 +40,9 @@ for import_root in (CLIENT_SRC, WAIT_ROOT):
     if str(import_root) not in sys.path:
         sys.path.insert(0, str(import_root))
 
-import pursers_wait_server as wait_bridge  # noqa: E402
 from pursers_client import BoardClient  # noqa: E402
+
+wait_bridge: Any | None = None
 
 DIRECTIVE_PATH = WAIT_ROOT / "WORKER-DIRECTIVE.md"
 REVIEWER_DIRECTIVE_PATH = (
@@ -64,11 +65,6 @@ WAIT_HOST_PROFILES = frozenset(
         "claude-desktop",
         "headless",
     }
-)
-PUSH_WAIT_DEPENDENCY_ERROR = (
-    "subscription-first wait requires the merged Central/client and wait-bridge "
-    "push-wait foundations; set PURSERS_WAIT_MODE=poll only as an explicit "
-    "compatibility fallback"
 )
 TIER_ORDER = {"light": 0, "standard": 1, "heavy": 2}
 ROLE_SLUG_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
@@ -723,35 +719,21 @@ class BoardAPI(Protocol):
 
 class PursersBoardAPI:
     def __init__(self, config: Config, token: str) -> None:
+        global wait_bridge
         self.config = config
         os.environ["PURSERS_HOST"] = config.wait_host_profile
         os.environ["PURSERS_HOST_TIMEOUT_S"] = str(config.wait_timeout_s)
+        if wait_bridge is None:
+            wait_bridge = importlib.import_module("pursers_wait_server")
+        self.wait_bridge = wait_bridge
         self.client = BoardClient(
             config.central_url,
             token,
-            wait_bridge.BOARD_ID,
+            self.wait_bridge.BOARD_ID,
             agent_name=config.agent_name,
         )
         self.registry: dict[str, Any] | None = None
         self.views: dict[str, Any] = {}
-
-    @staticmethod
-    def _push_wait_ready() -> bool:
-        """Require the public, side-effect-free client/bridge foundation."""
-        try:
-            event_parameters = inspect.signature(BoardClient.events).parameters
-        except (TypeError, ValueError):
-            return False
-        return (
-            wait_bridge.WAIT_MODE == "push"
-            and callable(getattr(wait_bridge, "host_block_limit_s", None))
-            and {
-                "resource_subscriptions",
-                "acknowledge",
-                "touch",
-                "cursor_callback",
-            }.issubset(event_parameters)
-        )
 
     async def __aenter__(self) -> PursersBoardAPI:
         await self.client.__aenter__()
@@ -762,14 +744,14 @@ class PursersBoardAPI:
 
     async def _boards(self) -> list[str]:
         if self.config.boards == "registry":
-            self.registry = await wait_bridge._read_project_registry(self.client)
-            return wait_bridge._registry_boards(self.registry)
+            self.registry = await self.wait_bridge._read_project_registry(self.client)
+            return self.wait_bridge._registry_boards(self.registry)
         return list(self.config.boards)
 
     async def _view(self, board_id: str) -> Any:
         view = self.views.get(board_id)
         if view is None:
-            view = wait_bridge._BoardView(self.client, board_id)
+            view = self.wait_bridge._BoardView(self.client, board_id)
             await view.board_join(
                 agent_name=self.config.agent_name,
                 task_focus=(
@@ -787,10 +769,7 @@ class PursersBoardAPI:
         return view
 
     async def wait(self, cursors: dict[str, int]) -> dict[str, Any]:
-        if os.environ.get("PURSERS_WAIT_MODE", "").strip().lower() != "poll":
-            if not self._push_wait_ready():
-                raise RuntimeError(PUSH_WAIT_DEPENDENCY_ERROR)
-        return await wait_bridge._wait_for_work_many(
+        return await self.wait_bridge._wait_for_work_many(
             self.client,
             boards=await self._boards(),
             since_seq=cursors,
@@ -831,7 +810,7 @@ class PursersBoardAPI:
         return str(view.identity.principal_id)
 
     async def work_dir(self, board_id: str) -> Path:
-        self.registry = self.registry or await wait_bridge._read_project_registry(
+        self.registry = self.registry or await self.wait_bridge._read_project_registry(
             self.client
         )
         for project in self.registry["projects"].values():
@@ -894,7 +873,7 @@ class PursersBoardAPI:
         return await self._boards()
 
     async def integration_ref(self, board_id: str) -> str:
-        self.registry = self.registry or await wait_bridge._read_project_registry(
+        self.registry = self.registry or await self.wait_bridge._read_project_registry(
             self.client
         )
         for project in self.registry['projects'].values():
@@ -903,7 +882,7 @@ class PursersBoardAPI:
         raise ValueError(f'no active project registry entry for board {board_id}')
 
     async def work_specs(self) -> list[tuple[Path, str]]:
-        self.registry = self.registry or await wait_bridge._read_project_registry(
+        self.registry = self.registry or await self.wait_bridge._read_project_registry(
             self.client
         )
         specs: list[tuple[Path, str]] = []
