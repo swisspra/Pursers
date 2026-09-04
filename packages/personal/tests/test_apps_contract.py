@@ -1985,6 +1985,12 @@ async def test_app_reads_leave_sqlite_domain_journal_and_cursor_unchanged(
             pytest.skip(f"{distribution} is not installed")
         if installed != version:
             pytest.skip(f"requires {distribution}=={version}, found {installed}")
+    import pursers_personal.artifacts
+
+    try:
+        pursers_personal.artifacts.verify_component_artifacts(set(required))
+    except pursers_personal.artifacts.ArtifactVerificationError as exc:
+        pytest.skip(f"locked artifacts not installed: {exc}")
 
     client_class, client_error_class = apps_server._load_board_client()
     package = sys.modules["pursers_client"]
