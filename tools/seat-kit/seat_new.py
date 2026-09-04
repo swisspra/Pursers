@@ -42,6 +42,7 @@ import json
 import os
 import sys
 import time
+from contextlib import aclosing
 from pathlib import Path
 from typing import Any
 
@@ -177,7 +178,7 @@ async def _cmd_wait(
             )
         try:
             async with asyncio.timeout(timeout_s):
-                async for event in client.events(
+                event_stream = client.events(
                     from_cursor=cursor,
                     only_mine=not submitted,
                     kinds=kinds,
@@ -185,12 +186,16 @@ async def _cmd_wait(
                     acknowledge=False,
                     touch=False,
                     cursor_callback=remember_cursor,
-                ):
-                    if submitted and event.get("status_to") != "submitted":
-                        continue
-                    events.append(event)
-                    remember_cursor(event.get("seq", cursor))
-                    break
+                )
+                async with aclosing(event_stream):
+                    async for event in event_stream:
+                        if submitted and event.get("status_to") != "submitted":
+                            continue
+                        events.append(event)
+                        remember_cursor(event.get("seq", cursor))
+                        # One cue is intentional: callers refetch authoritative
+                        # state, then re-arm from the returned cursor.
+                        break
         except TimeoutError:
             pass
 

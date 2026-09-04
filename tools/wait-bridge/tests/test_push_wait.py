@@ -7,7 +7,11 @@ import sys
 import tempfile
 import time
 import unittest
-from contextlib import AbstractAsyncContextManager, redirect_stderr
+from contextlib import (
+    AbstractAsyncContextManager,
+    asynccontextmanager,
+    redirect_stderr,
+)
 from pathlib import Path
 from types import SimpleNamespace, TracebackType
 from typing import Any
@@ -365,6 +369,117 @@ class PushWaitTests(unittest.IsolatedAsyncioTestCase):
         await client.board_join()
         await client.board_join(agent_name="push-actor")
         return client
+
+    async def test_push_task_stops_after_first_real_cue_without_cleanup_error(
+        self,
+    ) -> None:
+        loop = asyncio.get_running_loop()
+        cleanup_errors: list[dict[str, Any]] = []
+        previous_handler = loop.get_exception_handler()
+        loop.set_exception_handler(
+            lambda _loop, context: cleanup_errors.append(context)
+        )
+        try:
+            async with Client(self.mcp, mode="2026-07-28", cache=None) as raw_client:
+                client = await self._joined_client(raw_client)
+                created = await client.create_ticket("early exit cleanup")
+                ticket_id = created["ticket"]["ticket_id"]
+                assert client.identity is not None
+                view = SimpleNamespace(
+                    _parent=client,
+                    identity=client.identity,
+                    generation_token=None,
+                    _pursers_pure_catchup=True,
+                )
+                queue: asyncio.Queue[
+                    tuple[str, str, dict[str, Any] | str | None]
+                ] = asyncio.Queue()
+                running = asyncio.create_task(
+                    wait_server._push_cues(
+                        wait_server.BOARD_ID, view, 0, queue
+                    )
+                )
+                event: dict[str, Any] | None = None
+                while event is None:
+                    _board_id, kind, detail = await asyncio.wait_for(
+                        queue.get(), timeout=2
+                    )
+                    if kind == "event" and isinstance(detail, dict):
+                        event = detail
+                self.assertEqual(event["ticket_id"], ticket_id)
+
+                running.cancel()
+                await asyncio.gather(running, return_exceptions=True)
+                await asyncio.sleep(0)
+        finally:
+            loop.set_exception_handler(previous_handler)
+
+        self.assertEqual(cleanup_errors, [])
+
+    async def test_real_board_client_early_close_uses_same_task_for_listen_exit(
+        self,
+    ) -> None:
+        import pursers_client.client as client_module
+
+        @asynccontextmanager
+        async def http_context():
+            yield object()
+
+        board = BoardClient(
+            "http://central.invalid/mcp",
+            "test-token",
+            wait_server.BOARD_ID,
+            agent_name="push-listener",
+        )
+        board._http = http_context  # type: ignore[method-assign]
+        with patch.object(
+            client_module, "streamable_http_client", return_value=self.mcp
+        ):
+            async with board:
+                await board.board_join()
+                async with Client(
+                    self.mcp, mode="2026-07-28", cache=None
+                ) as actor:
+                    await actor.call_tool(
+                        "board_join",
+                        {
+                            "board_id": wait_server.BOARD_ID,
+                            "agent_name": "push-actor",
+                        },
+                    )
+                    created = BoardClient._decode(
+                        await actor.call_tool(
+                            "ticket_create",
+                            {
+                                "board_id": wait_server.BOARD_ID,
+                                "agent_name": "push-actor",
+                                "title": "real listen early exit",
+                                "description": "exercise production BoardClient.events",
+                                "target_url": "pursers/tools/wait-bridge",
+                                "scope": "interactive-no-send",
+                                "required_fields": ["test_output"],
+                            },
+                        )
+                    )
+
+                events = board.events(
+                    from_cursor=0,
+                    only_mine=False,
+                    resource_subscriptions=(
+                        f"board://{wait_server.BOARD_ID}/journal",
+                    ),
+                    acknowledge=False,
+                    touch=False,
+                )
+                event = await asyncio.wait_for(anext(events), timeout=2)
+                self.assertEqual(
+                    event["ticket_id"], created["ticket"]["ticket_id"]
+                )
+                close_result = await asyncio.gather(
+                    asyncio.create_task(events.aclose()),
+                    return_exceptions=True,
+                )
+                self.assertEqual(close_result, [None])
 
     def test_host_profiles_apply_timeout_minus_margin(self) -> None:
         cases = {

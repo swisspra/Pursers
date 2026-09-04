@@ -60,14 +60,6 @@ def _subscription_loss(exc: BaseException) -> SubscriptionLost | None:
     return None
 
 
-def _contains_exception(exc: BaseException, expected: type[BaseException]) -> bool:
-    if isinstance(exc, expected):
-        return True
-    if isinstance(exc, BaseExceptionGroup):
-        return any(_contains_exception(item, expected) for item in exc.exceptions)
-    return False
-
-
 def _retryable_connection_error(exc: BaseException) -> bool:
     if _subscription_loss(exc):
         return True
@@ -884,6 +876,9 @@ class BoardClient:
         side-effect-free catchup contract. ``subscription_callback`` runs after
         every successful listen handshake, including reconnects.
         """
+        queue: asyncio.Queue[tuple[str, dict[str, Any] | BaseException]] = (
+            asyncio.Queue(maxsize=1)
+        )
         seen: set[str] = set()
         initial_cursor = from_cursor
         cursor_state = [from_cursor]
@@ -902,58 +897,98 @@ class BoardClient:
             self.watch_resource(str(uri))
         if not self._watched_uris:
             await self.cold_discover()
-        while True:
+
+        async def publish_events() -> None:
+            nonlocal initial_cursor
             try:
-                async with self._http() as http:
-                    transport = streamable_http_client(self.url, http_client=http)
-                    async with Client(transport, mode="2026-07-28", cache=None) as event_client:
-                        uris = sorted(self._watched_uris)
-                        if not uris:
-                            raise BoardClientError("events() requires a known ticket/memory URI")
-                        async with event_client.listen(resource_subscriptions=uris) as subscription:
-                            honored = {
-                                str(uri)
-                                for uri in (subscription.honored.resource_subscriptions or ())
-                            }
-                            missing = set(uris) - honored
-                            if missing:
-                                raise BoardClientError(
-                                    f"server did not honor subscriptions: {sorted(missing)}"
-                                )
-                            if subscription_callback is not None:
-                                subscription_callback()
-                            while self._local_events:
-                                event = self._local_events.pop(0)
-                                seen.add(event["id"])
-                            async for event in self._drain(
-                                event_client,
-                                seen,
-                                initial_cursor,
-                                kinds=selected_kinds,
-                                only_mine=only_mine,
-                                acknowledge=acknowledge,
-                                touch=touch,
-                                cursor_callback=remember_cursor,
-                            ):
-                                yield event
-                            initial_cursor = None if acknowledge else cursor_state[0]
-                            async for _cue in subscription:
-                                while self._local_events:
-                                    local = self._local_events.pop(0)
-                                    seen.add(local["id"])
-                                async for event in self._drain(
-                                    event_client,
-                                    seen,
-                                    kinds=selected_kinds,
-                                    only_mine=only_mine,
-                                    acknowledge=acknowledge,
-                                    touch=touch,
-                                    cursor_callback=remember_cursor,
-                                ):
-                                    yield event
+                while True:
+                    try:
+                        async with self._http() as http:
+                            transport = streamable_http_client(
+                                self.url, http_client=http
+                            )
+                            async with Client(
+                                transport, mode="2026-07-28", cache=None
+                            ) as event_client:
+                                uris = sorted(self._watched_uris)
+                                if not uris:
+                                    raise BoardClientError(
+                                        "events() requires a known ticket/memory URI"
+                                    )
+                                async with event_client.listen(
+                                    resource_subscriptions=uris
+                                ) as subscription:
+                                    honored = {
+                                        str(uri)
+                                        for uri in (
+                                            subscription.honored.resource_subscriptions
+                                            or ()
+                                        )
+                                    }
+                                    missing = set(uris) - honored
+                                    if missing:
+                                        raise BoardClientError(
+                                            "server did not honor subscriptions: "
+                                            f"{sorted(missing)}"
+                                        )
+                                    if subscription_callback is not None:
+                                        subscription_callback()
+                                    while self._local_events:
+                                        event = self._local_events.pop(0)
+                                        seen.add(event["id"])
+                                    async for event in self._drain(
+                                        event_client,
+                                        seen,
+                                        initial_cursor,
+                                        kinds=selected_kinds,
+                                        only_mine=only_mine,
+                                        acknowledge=acknowledge,
+                                        touch=touch,
+                                        cursor_callback=remember_cursor,
+                                    ):
+                                        await queue.put(("event", event))
+                                    initial_cursor = (
+                                        None if acknowledge else cursor_state[0]
+                                    )
+                                    async for _cue in subscription:
+                                        while self._local_events:
+                                            local = self._local_events.pop(0)
+                                            seen.add(local["id"])
+                                        async for event in self._drain(
+                                            event_client,
+                                            seen,
+                                            kinds=selected_kinds,
+                                            only_mine=only_mine,
+                                            acknowledge=acknowledge,
+                                            touch=touch,
+                                            cursor_callback=remember_cursor,
+                                        ):
+                                            await queue.put(("event", event))
+                    except asyncio.CancelledError:
+                        raise
+                    except BaseException as exc:
+                        if not _retryable_connection_error(exc):
+                            await queue.put(("error", exc))
+                            return
+                        await asyncio.sleep(self.reconnect_delay_s)
+            except asyncio.CancelledError:
+                raise
             except BaseException as exc:
-                if _contains_exception(exc, GeneratorExit):
-                    return
-                if not _retryable_connection_error(exc):
-                    raise
-                await asyncio.sleep(self.reconnect_delay_s)
+                await queue.put(("error", exc))
+
+        # The producer owns every MCP/anyio context and therefore enters and
+        # exits each cancel scope in the same asyncio task.  The public async
+        # generator only relays queue items, so early consumer exit cannot
+        # finalize an MCP listen context from an async-generator cleanup task.
+        producer = asyncio.create_task(publish_events())
+        try:
+            while True:
+                kind, item = await queue.get()
+                if kind == "error":
+                    assert isinstance(item, BaseException)
+                    raise item
+                assert isinstance(item, dict)
+                yield item
+        finally:
+            producer.cancel()
+            await asyncio.gather(producer, return_exceptions=True)
