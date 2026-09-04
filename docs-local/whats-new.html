@@ -63,6 +63,7 @@
       </div>
       <ul>
         <li><strong>Unreleased:</strong> reviewer identities now wait for submissions by default, unchanged backlog cues are surfaced once per bridge process, and each return reports <code>reason=journal|backlog|timeout</code>.</li>
+        <li><strong>Orchestrator mode (TK-55b6bc8985fc):</strong> wait bridge background subscription with instant <code>board_digest</code>, <code>board_digest_ack</code>, <code>board_watch</code>, and <code>board_unwatch</code> tools for Claude Desktop leaders. Eliminates blocking wait and polling; buffers events in a persistent ring buffer, fetches with <code>touch=false</code> (zero board writes while idle), and emits MCP resource notifications on <code>board://&lt;board&gt;/digest</code>.</li>
         <li><strong>Reviewer hardening:</strong> generated seats now carry one HARD-verify checklist, an exact-SHA <code>board.sh verify</code> helper, approval evidence gates, and non-empty rejection fixes. Generic leak rules ship in-repo; operator regexes load locally from <code>~/.pursers/leak-markers.txt</code> or <code>PURSERS_LEAK_MARKERS_FILE</code> and only their count is printed.</li>
       </ul>
     </section>
@@ -112,6 +113,7 @@ PURSERS_HOST = "codex"</code></pre>
         <li><code>TK-d08152560570</code> — generated CLI/Goose <code>board.sh wait</code> subscription path.</li>
         <li><code>TK-011d4336785a</code> — follow-up for merged per-seat cue authorization.</li>
         <li><code>TK-a6cd4fc8d082</code> — worker-runtime worker/reviewer cue-driven redo.</li>
+        <li><code>TK-55b6bc8985fc</code> — wait-bridge orchestrator mode: background subscription + instant board_digest/ack tools for Claude Desktop leaders.</li>
       </ul>
       <p>This page documents the a16 release as a coherent program. A follow-up ticket that is still open or claimed is not represented as released or complete.</p>
     </section>

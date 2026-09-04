@@ -7,6 +7,14 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added
+
+- Orchestrator mode for the wait bridge (`PURSERS_ROLE=orchestrator`): runs a continuous background subscription across all active registry boards, buffering journal events in a bounded ring buffer (5000 events) and refetching changed tickets via side-effect-free (`touch=false`) catchup with zero board writes while idle.
+- Instant non-blocking MCP tools for leaders/orchestrators (Claude Desktop, Claude Code): `board_digest` (returns tickets, new tickets, status transitions, review details, and `branch_and_commit` note on close), `board_digest_ack` (advances the acknowledged cursor), `board_watch`, and `board_unwatch`.
+- Best-effort MCP resource updates (`board://<home_board_id>/digest`) emitted whenever new events arrive in the digest buffer.
+- Persistent orchestrator state file (`~/.pursers/wait-bridge/orchestrator_state_<board>.json`) preserving cursors and event buffer across bridge restarts.
+- Seat config and Fleet Dashboard UI support for role `orchestrator` with custom prompt renderer preventing `a2a_wait` and ticket claims.
+
 ## [5.0.0a17] - 2026-09-04
 
 This release includes `pursers-central==0.1.0a21`,
