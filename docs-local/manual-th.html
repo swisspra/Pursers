@@ -467,6 +467,26 @@ Renew the review lease every 5 minutes while verifying.
 Approve or reject only while holding the lease, then re-arm WAIT.
 Pass agent_name="pool-reviewer-1" on every per-call identity tool.</code></pre>
       <p>Review lease ใช้ TTL เดียวกับ work lease ที่ตั้งไว้สำหรับบอร์ด (ค่าเริ่มต้น 900 วินาที) ใช้ <code>ticket_list(review_unclaimed_only=true)</code> เพื่อดูเฉพาะงานที่ยังไม่มีผู้ตรวจและอ่าน <code>review_state</code>; <code>ticket_get</code> แสดง <code>review_lease</code> เต็ม เมื่อ approve/reject ระบบจะคืน lease ทันที ส่วน lease หมดอายุจะ claim ใหม่ได้และส่ง push-wait cue โดยไม่ต้อง poll list</p>
+      <h3>Reviewer HARD-verify checklist</h3>
+      <pre><code>## HARD-verify checklist
+
+Before approval:
+1. Fetch and detach the exact submitted 40-hex SHA in the seat clone.
+2. Compare git show --stat and changed paths with files_changed and ticket scope.
+3. Confirm the SHA is on `origin/&lt;submitted-branch&gt;` and never on `origin/main`.
+4. Re-run every claimed suite and compare the real result tails.
+5. Review the diff against the ticket and its dependencies, including exact field, parameter, and event names.
+6. Run the credential leak scan and report clean or the bounded match count.
+7. Confirm every required_field is present and truthful.
+8. Put the SHA, re-run tails, leak-scan result, and model in review_notes.
+
+Operator-specific leak regexes come from `~/.pursers/leak-markers.txt`, one per line; `PURSERS_LEAK_MARKERS_FILE` overrides that path. Record an empty marker file as a WARN in review_notes, not a blocker. Never print marker values.
+
+Approval notes must contain a full 40-hex SHA, a real `N passed`, `Ran N tests`, or `OK` tail, `leak-scan: clean|N matches`, and `model: NAME`. The emergency flag works only when the operator explicitly sets `PURSERS_ALLOW_FORCE_APPROVE_WITHOUT_EVIDENCE=1`, and its use is appended to review_notes.
+
+Rejecting is normal and cheap; a wrong approval is expensive.</code></pre>
+      <p>ให้ reviewer รัน <code>board.sh verify &lt;TK&gt; [--run-suites] --board &lt;id&gt;</code> ก่อน approve ทุกครั้ง ถ้าหลักฐานไม่ครบให้ reject พร้อม fix instructions ที่ชัดเจนและไม่เป็นค่าว่าง</p>
+      <p>Generic leak rules ครอบคลุม JWT, bearer token, private-key header, API-key shape และ home-directory path ของ macOS/Linux/Windows ส่วน regex เฉพาะ operator โหลดจาก <code>~/.pursers/leak-markers.txt</code> ทีละบรรทัด หรือจาก <code>PURSERS_LEAK_MARKERS_FILE</code> โดย verify/approve พิมพ์เฉพาะจำนวนที่โหลด ถ้าไฟล์ว่างให้บันทึก WARN ใน <code>review_notes</code> แต่ไม่บล็อก approval โดยยกเว้น fixture ที่ระบุไว้คือ <code>/Users/synthetic-user</code>, <code>example.com</code> และ <code>127.0.0.1</code></p>
       <p>ชื่อ process-level จาก <code>ONBOARD_AGENT_NAME</code> ยังใช้เป็นค่า default ได้ แต่สำหรับหลาย session ใน Host เดียวกัน ให้ส่ง <code>agent_name</code> ในแต่ละ call เพื่อความชัดเจน หนึ่งชื่อภายใต้ principal เดียวกันอาจมีหลาย <strong>worker seats</strong> บนหลายบอร์ด; fleet รวม seats เหล่านี้ด้วยคู่ <code>principal_id + agent_name</code> แต่ authorization และ lease ยังตรวจแยกต่อบอร์ด</p>
     </section>
 

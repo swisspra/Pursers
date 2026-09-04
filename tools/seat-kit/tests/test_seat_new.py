@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import importlib.util
 import io
 import json
 import os
+import re
 import sqlite3
 import stat
 import subprocess
@@ -63,6 +65,16 @@ def load_generated(path: Path, name: str) -> Any:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+@pytest.fixture(autouse=True)
+def isolated_operator_markers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Path:
+    marker_file = tmp_path / "leak-markers.txt"
+    marker_file.write_text("", encoding="utf-8")
+    monkeypatch.setenv("PURSERS_LEAK_MARKERS_FILE", str(marker_file))
+    return marker_file
 
 
 class LocalSubscriptionAdapter:
@@ -186,6 +198,299 @@ def test_worker_and_reviewer_variants_have_only_their_commands(tmp_path: Path) -
     assert "reviewers never work-claim/submit/write code/push" in (
         reviewer / "AGENTS.md"
     ).read_text()
+    assert seat_new.HARD_VERIFY_CHECKLIST in (reviewer / "AGENTS.md").read_text()
+    assert seat_new.HARD_VERIFY_CHECKLIST not in (worker / "AGENTS.md").read_text()
+    assert 'commands.add_parser("verify")' in reviewer_py
+
+
+def test_reviewer_checklist_matches_both_generated_hints_and_docs(tmp_path: Path) -> None:
+    reviewer = seat_new.generate(args(tmp_path, role="reviewer"))
+    checklist = seat_new.HARD_VERIFY_CHECKLIST
+
+    assert checklist in (reviewer / "AGENTS.md").read_text(encoding="utf-8")
+    assert checklist in (reviewer / ".goosehints").read_text(encoding="utf-8")
+    for name in ("manual-en.html", "manual-th.html"):
+        rendered_source = html.unescape(
+            (ROOT.parents[1] / "docs-local" / name).read_text(encoding="utf-8")
+        )
+        assert checklist in rendered_source
+
+
+def test_approve_evidence_gate_refuses_before_any_board_call(tmp_path: Path) -> None:
+    dest = seat_new.generate(args(tmp_path, role="reviewer"))
+    generated = load_generated(dest / "bin" / "board.py", "board_approve_gate")
+    loaded = False
+
+    def load_client():
+        nonlocal loaded
+        loaded = True
+        raise AssertionError("board client must not load")
+
+    generated._load_client = load_client
+    parsed = generated._parser().parse_args(
+        ["approve", "TK-review", "looks good"]
+    )
+
+    with pytest.raises(ValueError, match="approve evidence missing"):
+        asyncio.run(generated._execute(parsed))
+    assert loaded is False
+
+
+def test_approve_gate_accepts_evidence_and_logs_explicit_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dest = seat_new.generate(args(tmp_path, role="reviewer"))
+    generated = load_generated(dest / "bin" / "board.py", "board_approve_evidence")
+    valid = "\n".join(
+        [
+            "sha: " + "a" * 40,
+            "12 passed in 1.23s",
+            "leak-scan: clean",
+            "model: gpt-5",
+        ]
+    )
+
+    assert generated._approve_notes(valid, False) == valid
+    with pytest.raises(ValueError, match=generated.APPROVE_OVERRIDE_ENV):
+        generated._approve_notes("insufficient", True)
+    with pytest.raises(ValueError, match=generated.APPROVE_OVERRIDE_ENV):
+        generated._approve_notes(valid, True)
+    monkeypatch.setenv(generated.APPROVE_OVERRIDE_ENV, "1")
+    forced = generated._approve_notes("insufficient", True)
+    assert "force-approve-without-evidence: operator override" in forced
+    assert generated.APPROVE_OVERRIDE_ENV + "=1" in forced
+    assert "force-approve-without-evidence: operator override" in generated._approve_notes(
+        valid, True
+    )
+
+
+def test_reject_requires_nonempty_fix_before_any_board_call(tmp_path: Path) -> None:
+    dest = seat_new.generate(args(tmp_path, role="reviewer"))
+    generated = load_generated(dest / "bin" / "board.py", "board_reject_gate")
+    loaded = False
+
+    def load_client():
+        nonlocal loaded
+        loaded = True
+        raise AssertionError("board client must not load")
+
+    generated._load_client = load_client
+    parsed = generated._parser().parse_args(["reject", "TK-review", "bad", " "])
+
+    with pytest.raises(ValueError, match="fix_instructions must be non-empty"):
+        asyncio.run(generated._execute(parsed))
+    assert loaded is False
+
+
+@pytest.mark.parametrize(
+    "platform", ["codex", "goose", "claude", "api", "vendor", "generic"]
+)
+def test_verify_detaches_sha_checks_scope_origin_leaks_and_runs_suite(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], platform: str
+) -> None:
+    origin = tmp_path / "origin.git"
+    author = tmp_path / "author"
+    clone = tmp_path / "seat-clone"
+    subprocess.run(["git", "init", "--bare", str(origin)], check=True, capture_output=True)
+    subprocess.run(["git", "init", "-b", "main", str(author)], check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Seat Test"], cwd=author, check=True)
+    subprocess.run(["git", "config", "user.email", "seat@example.test"], cwd=author, check=True)
+    (author / "base.txt").write_text("base\n", encoding="utf-8")
+    subprocess.run(["git", "add", "base.txt"], cwd=author, check=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=author, check=True, capture_output=True)
+    subprocess.run(["git", "remote", "add", "origin", str(origin)], cwd=author, check=True)
+    subprocess.run(["git", "push", "-u", "origin", "main"], cwd=author, check=True, capture_output=True)
+    branch = f"{platform}/TK-review"
+    subprocess.run(["git", "switch", "-c", branch], cwd=author, check=True, capture_output=True)
+    (author / "change.txt").write_text("verified change\n", encoding="utf-8")
+    (author / "test_sample.py").write_text(
+        "import unittest\n\nclass Sample(unittest.TestCase):\n"
+        "    def test_ok(self):\n        self.assertTrue(True)\n",
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "change.txt", "test_sample.py"], cwd=author, check=True)
+    subprocess.run(["git", "commit", "-m", "review target"], cwd=author, check=True, capture_output=True)
+    sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=author, check=True,
+        capture_output=True, text=True,
+    ).stdout.strip()
+    subprocess.run(
+        ["git", "push", "-u", "origin", branch],
+        cwd=author, check=True, capture_output=True,
+    )
+    subprocess.run(["git", "clone", str(origin), str(clone)], check=True, capture_output=True)
+    generated = load_generated(
+        seat_new.generate(args(tmp_path / "seat", role="reviewer")) / "bin" / "board.py",
+        f"board_verify_{platform}",
+    )
+    ticket = {
+        "ticket_id": "TK-review",
+        "target_url": "sample/path",
+        "required_fields": ["branch_and_commit", "test_output"],
+        "tests": ["test-command: python3 -m unittest discover -s . -p test_sample.py"],
+        "submission_history": [
+            {
+                "files_changed": ["change.txt", "test_sample.py"],
+                "notes": f"branch_and_commit: {branch} @ {sha}",
+            }
+        ],
+    }
+
+    result = generated._verify_ticket(ticket, clone, run_suites=True)
+
+    output = capsys.readouterr().out
+    assert result["sha"] == sha
+    assert result["files_changed_match"] is True
+    assert result["origin_main_contains"] is False
+    assert result["leak_scan"] == "clean"
+    assert result["suites"][0]["returncode"] == 0
+    assert "files-changed-diff:" in output
+    assert "remote-branches-containing-sha:" in output
+    assert "Ran 1 test" in output
+    assert "OK" in output
+    assert "operator-markers-loaded: 0" in output
+    assert "leak-scan: clean" in output
+    assert subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=clone, check=True,
+        capture_output=True, text=True,
+    ).stdout.strip() == sha
+
+
+def test_submission_rejects_invalid_git_ref(tmp_path: Path) -> None:
+    generated = load_generated(
+        seat_new.generate(args(tmp_path, role="reviewer")) / "bin" / "board.py",
+        "board_verify_invalid_ref",
+    )
+    ticket = {
+        "submission_history": [{
+            "notes": "branch_and_commit: goose/TK-review.lock @ " + "a" * 40,
+        }]
+    }
+
+    with pytest.raises(ValueError, match="valid platform/branch"):
+        generated._submission(ticket)
+
+
+@pytest.mark.parametrize(
+    ("rule", "sample"),
+    [
+        (
+            "jwt",
+            "token=" + "e" + "yJabcde.abcdefghijkl.abcdefghijklmnop",
+        ),
+        ("home-directory-path", "path=/Users/" + "fixture-user/project"),
+        ("home-directory-path", "path=/home/" + "fixture-user/project"),
+        ("home-directory-path", "path=C:\\Users\\" + "fixture-user" + "\\project"),
+        ("bearer-token", "Authorization: " + "Bearer" + " " + "A" * 24),
+        ("api-key", "api_key=" + "Z" * 24),
+        ("private-key", "-----BEGIN " + "PRIVATE" + " KEY-----"),
+    ],
+)
+def test_verify_leak_rules_cover_mandatory_categories(
+    tmp_path: Path, rule: str, sample: str
+) -> None:
+    generated = load_generated(
+        seat_new.generate(args(tmp_path, role="reviewer")) / "bin" / "board.py",
+        "board_verify_leak_" + rule.replace("-", "_"),
+    )
+
+    assert rule in generated._leak_rule_names(sample)
+
+
+def test_verify_leak_rules_allow_documented_synthetic_fixtures(tmp_path: Path) -> None:
+    generated = load_generated(
+        seat_new.generate(args(tmp_path, role="reviewer")) / "bin" / "board.py",
+        "board_verify_synthetic_leaks",
+    )
+    fixtures = "\n".join(
+        [
+            "Authorization: " + "Bearer" + " synthetic-local-bearer",
+            "api_key=placeholder_value",
+            "/Users/" + "synthetic-user/project",
+            "documented `/Users/" + "synthetic-user` fixture",
+            "/home/" + "synthetic-user/project",
+            "C:\\Users\\" + "synthetic-user\\project",
+            "https://example.com/path",
+            "http://127.0.0.1:8080/healthz",
+            "-----BEGIN SYNTHETIC " + "PRIVATE" + " KEY-----",
+            "ey" + "J.synthetic.fixture",
+        ]
+    )
+
+    assert generated._leak_rule_names(fixtures) == []
+
+
+def test_operator_marker_file_is_loaded_without_printing_values(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    marker = "zz-" + "fixture-identity"
+    marker_file = tmp_path / "custom-markers.txt"
+    marker_file.write_text(re.escape(marker) + "\n", encoding="utf-8")
+    monkeypatch.setenv("PURSERS_LEAK_MARKERS_FILE", str(marker_file))
+    generated = load_generated(
+        seat_new.generate(args(tmp_path / "seat", role="reviewer")) / "bin" / "board.py",
+        "board_operator_markers",
+    )
+
+    rules, count = generated._leak_scan("owner=" + marker)
+    notes = "\n".join([
+        "sha: " + "a" * 40,
+        "1 passed in 0.01s",
+        "leak-scan: clean",
+        "model: fixture-model",
+    ])
+    assert generated._approve_notes(notes, False) == notes
+
+    output = capsys.readouterr().out
+    assert rules == ["operator-marker"]
+    assert count == 1
+    assert "operator-markers-loaded: 1" in output
+    assert marker not in output
+
+
+def test_operator_marker_regex_error_never_echoes_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    marker = "[" + "zz-secret-fixture"
+    marker_file = tmp_path / "invalid-markers.txt"
+    marker_file.write_text(marker + "\n", encoding="utf-8")
+    monkeypatch.setenv("PURSERS_LEAK_MARKERS_FILE", str(marker_file))
+    generated = load_generated(
+        seat_new.generate(args(tmp_path / "seat", role="reviewer")) / "bin" / "board.py",
+        "board_invalid_operator_marker",
+    )
+
+    with pytest.raises(ValueError) as error:
+        generated._leak_scan("safe text")
+    assert marker not in str(error.value)
+    assert ":1" in str(error.value)
+
+
+def test_seat_kit_repo_text_obeys_operator_marker_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    marker_regex = "zz-" + "[a-z]+" + "-identity"
+    marker_file = tmp_path / "repo-invariant-markers.txt"
+    marker_file.write_text(marker_regex + "\n", encoding="utf-8")
+    monkeypatch.setenv("PURSERS_LEAK_MARKERS_FILE", str(marker_file))
+    generated = load_generated(
+        seat_new.generate(args(tmp_path / "seat", role="reviewer")) / "bin" / "board.py",
+        "board_repo_marker_invariant",
+    )
+    source_text = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in sorted(ROOT.rglob("*"))
+        if path.is_file() and path.suffix in {".md", ".py", ".sh"}
+    )
+
+    rules, count = generated._leak_scan(source_text)
+    assert set(generated.LEAK_PATTERNS) == {
+        "api-key", "bearer-token", "home-directory-path", "jwt", "private-key",
+    }
+    assert generated.DEFAULT_LEAK_MARKERS_FILE == "~/.pursers/leak-markers.txt"
+    assert count == 1
+    assert "operator-marker" not in rules
 
 
 def test_repo_clone_uses_repo_basename(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
