@@ -31,8 +31,16 @@ from mcp.server.context import HandlerResult, ServerRequestContext
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.shared.exceptions import MCPError
+from mcp import types
 from mcp_types import INTERNAL_ERROR, INVALID_REQUEST
 from pydantic import AnyHttpUrl
+from pydantic.fields import FieldInfo
+
+types.ToolAnnotations.model_fields["deprecated"] = FieldInfo(
+    annotation=bool | None, default=None
+)
+types.ToolAnnotations.model_rebuild(force=True)
+types.Tool.model_rebuild(force=True)
 from pursers_client import (
     REVIEW_LEASE_EXPIRED,
     REVIEW_LEASE_KINDS,
@@ -134,10 +142,8 @@ DEPRECATED_TOOLS = frozenset(
         "memory_read",
         "memory_search",
         "memory_unpin",
-        "memory_write",
         "ticket_assign",
         "ticket_terminate",
-        "ticket_unclaim",
     }
 )
 REVIEW_CORE_OVERRIDE_FIELDS = frozenset(
@@ -268,32 +274,6 @@ def iso_at(epoch: float) -> str:
 
 class CentralJournal(Journal):
     """Extend the pinned core journal with sanitized board-control events."""
-
-    def record_warning(self, board_id: str, warning_record: dict[str, Any]) -> dict[str, Any]:
-        board_id = _require_text("board_id", board_id)
-        record = copy.deepcopy(warning_record)
-
-        def mutate(document: dict[str, Any]) -> None:
-            self._check_document(document, board_id)
-            warnings = document.setdefault("warnings", [])
-            warnings.append(record)
-
-        self.store.read_modify_write(
-            self._path(board_id), mutate, lambda: self._default(board_id)
-        )
-        return record
-
-    def read_warnings(self, board_id: str) -> list[dict[str, Any]]:
-        board_id = _require_text("board_id", board_id)
-        document = self.store.load(self._path(board_id), lambda: self._default(board_id))
-        self._check_document(document, board_id)
-        return copy.deepcopy(document.get("warnings", []))
-
-    def read_after(self, board_id: str, cursor: int, limit: int = 100) -> dict[str, Any]:
-        result = super().read_after(board_id, cursor, limit=limit)
-        document = self.store.load(self._path(board_id), lambda: self._default(board_id))
-        result["warnings"] = copy.deepcopy(document.get("warnings", []))
-        return result
 
     def append(self, board_id: str, event: dict[str, Any]) -> dict[str, Any]:
         kind = _require_text("kind", event.get("kind"))
@@ -450,31 +430,26 @@ class CentralBoard:
         self.expected_generation: contextvars.ContextVar[Any] = contextvars.ContextVar(
             "central_expected_generation", default=None
         )
-        self.legacy_principals: set[str] = set()
-        self.deprecated_warned_callers: set[tuple[str, str, str]] = set()
 
-    def register_legacy_capability(self, principal_id: str, enabled: bool = True) -> None:
-        if enabled:
-            self.legacy_principals.add(principal_id)
-        else:
-            self.legacy_principals.discard(principal_id)
-
-    def has_legacy_capability(self, principal_id: str | None) -> bool:
+    def has_seat_legacy_capability(
+        self, principal_id: str | None, agent_name: str | None
+    ) -> bool:
         if os.environ.get("PURSERS_LEGACY_TOOLS") == "1":
             return True
-        if principal_id and principal_id in self.legacy_principals:
-            return True
-        if principal_id:
-            try:
-                for doc in self.store.iter_documents("boards"):
-                    for m in doc.get("members", {}).values():
-                        if m.get("principal_id") == principal_id:
-                            caps = m.get("capabilities", {})
-                            if isinstance(caps, Mapping) and caps.get("legacy_tools"):
-                                self.legacy_principals.add(principal_id)
-                                return True
-            except Exception:
-                pass
+        if not principal_id or not agent_name:
+            return False
+        try:
+            for doc in self.store.iter_documents("boards"):
+                aid = agent_id(doc.get("board_id", ""), principal_id, agent_name)
+                member = doc.get("members", {}).get(aid)
+                if member is not None:
+                    caps = member.get("capabilities", {})
+                    if isinstance(caps, Mapping) and caps.get("legacy_tools") is True:
+                        return True
+                    if member.get("legacy_tools") is True:
+                        return True
+        except Exception:
+            pass
         return False
 
     def transaction(self):
@@ -1261,39 +1236,8 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
 
             @wraps(function)
             async def wrapped(*args: Any, **kwargs: Any) -> Any:
-                if is_deprecated:
-                    board_id = kwargs.get("board_id")
-                    if not board_id and args:
-                        board_id = args[0] if isinstance(args[0], str) else None
-                    actor_key = None
-                    try:
-                        p = current_principal()
-                        actor_key = p.principal_id
-                    except Exception:
-                        actor_key = "anonymous"
-                    if board_id and isinstance(board_id, str):
-                        warn_key = (board_id, actor_key, tool_name)
-                        if warn_key not in service.deprecated_warned_callers:
-                            service.deprecated_warned_callers.add(warn_key)
-                            try:
-                                service.journal.record_warning(
-                                    board_id,
-                                    {
-                                        "kind": "deprecated_tool_warning",
-                                        "tool": tool_name,
-                                        "actor": actor_key,
-                                        "occurred_at": datetime.now(timezone.utc).isoformat(),
-                                        "message": f"Tool '{tool_name}' is deprecated in a18 and scheduled for removal in a19.",
-                                    },
-                                )
-                            except Exception:
-                                pass
                 try:
                     result = await function(*args, **kwargs)
-                    if is_deprecated and isinstance(result, dict):
-                        result.setdefault("_deprecated", True)
-                        result.setdefault("deprecated", True)
-                    return result
                 except (PermissionError, ValueError) as exc:
                     log_runtime_error(
                         service.diagnostics,
@@ -1313,6 +1257,73 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                     )
                     raise
 
+                if is_deprecated:
+                    if isinstance(result, dict):
+                        result.setdefault("_deprecated", True)
+                        result.setdefault("deprecated", True)
+
+                    board_id = kwargs.get("board_id")
+                    if not board_id and args:
+                        board_id = args[0] if isinstance(args[0], str) else None
+                    agent_name = kwargs.get("agent_name") or "unknown"
+                    actor_key = None
+                    try:
+                        p = current_principal()
+                        actor_key = p.principal_id
+                    except Exception:
+                        actor_key = "anonymous"
+
+                    if board_id and isinstance(board_id, str):
+                        full_caller_id = f"{board_id}:{actor_key}:{agent_name}:{tool_name}"
+
+                        def record_warning_once(document: dict[str, Any]) -> bool:
+                            warned = document.setdefault("deprecated_warned_callers", {})
+                            if full_caller_id in warned:
+                                return False
+                            warned[full_caller_id] = iso_at(time.time())
+                            return True
+
+                        try:
+                            should_warn = service.mutate(
+                                board_id, record_warning_once, require_generation=False
+                            )
+                            if should_warn:
+                                actor_agent = (
+                                    agent_id(board_id, actor_key, agent_name)
+                                    if actor_key != "anonymous"
+                                    else actor_key
+                                )
+                                ctx = kwargs.get("ctx")
+                                if ctx is None:
+                                    for a in args:
+                                        if isinstance(a, Context):
+                                            ctx = a
+                                            break
+                                await append_and_publish(
+                                    board_id,
+                                    {"agent_id": actor_agent},
+                                    "deprecated_tool_warning",
+                                    f"board://{board_id}/tool/{tool_name}",
+                                    [],
+                                    ctx,
+                                    tool=tool_name,
+                                    message=f"Tool '{tool_name}' is deprecated in a18 and scheduled for removal in a19.",
+                                )
+                                if isinstance(result, dict):
+                                    cur_seq = latest_seq(board_id)
+                                    if "latest_seq" in result:
+                                        result["latest_seq"] = cur_seq
+                                    if (
+                                        "briefing" in result
+                                        and isinstance(result["briefing"], dict)
+                                        and "latest_seq" in result["briefing"]
+                                    ):
+                                        result["briefing"]["latest_seq"] = cur_seq
+                        except Exception:
+                            pass
+
+                return result
+
             return mcp.tool()(wrapped)
 
         return register
@@ -1323,7 +1334,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         kind: str,
         payload_ref: str,
         recipients: list[str],
-        ctx: Context,
+        ctx: Context | None = None,
         **fields: Any,
     ) -> dict[str, Any]:
         try:
@@ -1345,22 +1356,23 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             # return value. MCPError must escape so SQLite's outer transaction
             # observes the failure and rolls the domain mutation back.
             raise MCPError(INTERNAL_ERROR, "Internal server error") from exc
-        pending = service.pending_notifications.get()
-        journal_uri = f"board://{board_id}/journal"
-        if pending is None:
-            await ctx.notify_resource_updated(payload_ref)
-            await ctx.notify_resource_updated(journal_uri)
-        else:
-            pending.append((ctx, payload_ref))
-            pending.append((ctx, journal_uri))
-        for agent_id in sorted(set(recipients)):
-            if not isinstance(agent_id, str) or not agent_id:
-                continue
-            seat_uri = f"board://{board_id}/agent/{agent_id}"
+        if ctx is not None:
+            pending = service.pending_notifications.get()
+            journal_uri = f"board://{board_id}/journal"
             if pending is None:
-                await ctx.notify_resource_updated(seat_uri)
+                await ctx.notify_resource_updated(payload_ref)
+                await ctx.notify_resource_updated(journal_uri)
             else:
-                pending.append((ctx, seat_uri))
+                pending.append((ctx, payload_ref))
+                pending.append((ctx, journal_uri))
+            for agent_id in sorted(set(recipients)):
+                if not isinstance(agent_id, str) or not agent_id:
+                    continue
+                seat_uri = f"board://{board_id}/agent/{agent_id}"
+                if pending is None:
+                    await ctx.notify_resource_updated(seat_uri)
+                else:
+                    pending.append((ctx, seat_uri))
         return event
 
     async def append_once_and_publish(
@@ -2303,11 +2315,8 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         if capabilities is not None:
             safe_caps = dict(capabilities)
             member["capabilities"] = safe_caps
-            if safe_caps.get("legacy_tools") is True:
-                service.register_legacy_capability(principal.principal_id, True)
         elif os.environ.get("PURSERS_LEGACY_TOOLS") == "1":
             member.setdefault("capabilities", {})["legacy_tools"] = True
-            service.register_legacy_capability(principal.principal_id, True)
         document["members"][identity_id] = member
         renewed: list[str] = []
         for ticket in (
@@ -6213,22 +6222,73 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
 
     original_list_tools = mcp.list_tools
 
+    async def custom_handle_list_tools(
+        ctx: ServerRequestContext[Any], params: types.PaginatedRequestParams | None
+    ) -> types.ListToolsResult:
+        meta = ctx.meta if hasattr(ctx, "meta") and isinstance(ctx.meta, Mapping) else {}
+        client_info = meta.get("io.modelcontextprotocol/clientInfo") or {}
+        client_caps = meta.get("io.modelcontextprotocol/clientCapabilities") or {}
+        agent_name = client_info.get("name") if isinstance(client_info, Mapping) else None
+
+        legacy = False
+        if os.environ.get("PURSERS_LEGACY_TOOLS") == "1":
+            legacy = True
+        elif client_caps.get("legacy_tools") is True or meta.get("legacy_tools") is True:
+            legacy = True
+        elif agent_name:
+            try:
+                p = current_principal()
+                legacy = service.has_seat_legacy_capability(p.principal_id, agent_name)
+            except Exception:
+                legacy = False
+
+        tools = await original_list_tools()
+        if not legacy:
+            tools = [t for t in tools if t.name not in DEPRECATED_TOOLS]
+        else:
+            tools = [
+                t.model_copy(
+                    update={
+                        "annotations": types.ToolAnnotations(
+                            title=f"[DEPRECATED] {t.name} is deprecated in a18 and scheduled for removal in a19"
+                        ),
+                        "meta": {"deprecated": True},
+                    }
+                )
+                if t.name in DEPRECATED_TOOLS
+                else t
+                for t in tools
+            ]
+        return types.ListToolsResult(tools=tools)
+
+    mcp._handle_list_tools = custom_handle_list_tools
+    mcp._lowlevel_server.add_request_handler(
+        "tools/list", types.PaginatedRequestParams, custom_handle_list_tools
+    )
+
     async def custom_list_tools(
         *args: Any, include_legacy: bool | None = None, **kwargs: Any
     ) -> list[Any]:
         tools = await original_list_tools(*args, **kwargs)
         legacy = include_legacy
         if legacy is None:
-            if os.environ.get("PURSERS_LEGACY_TOOLS") == "1":
-                legacy = True
-            else:
-                try:
-                    p = current_principal()
-                    legacy = service.has_legacy_capability(p.principal_id)
-                except Exception:
-                    legacy = False
+            legacy = os.environ.get("PURSERS_LEGACY_TOOLS") == "1"
         if not legacy:
             tools = [t for t in tools if t.name not in DEPRECATED_TOOLS]
+        else:
+            tools = [
+                t.model_copy(
+                    update={
+                        "annotations": types.ToolAnnotations(
+                            title=f"[DEPRECATED] {t.name} is deprecated in a18 and scheduled for removal in a19"
+                        ),
+                        "meta": {"deprecated": True},
+                    }
+                )
+                if t.name in DEPRECATED_TOOLS
+                else t
+                for t in tools
+            ]
         return tools
 
     mcp.list_tools = custom_list_tools

@@ -2,7 +2,7 @@
 
 **Date:** 2026-09-04<br>
 **Author:** AAIF / Pursers Fleet Engineering (TK-2ffa16368cbb)<br>
-**Status:** Approved Audit & Deprecation Implementation<br>
+**Status:** Proposed Audit & Deprecation Implementation (Under Review)<br>
 **Target:** a18 (Deprecation & Hide-Unless-Legacy) / a19 (Removal & Final Consolidation)
 
 ---
@@ -18,7 +18,7 @@ This document delivers:
 2. **Repository caller inventory** covering all in-repo packages, tools, client libraries, dashboard apps, runtimes, and documentation.
 3. **Classification of all 45 tools** (39 Central tools + 6 Wait-Bridge tools) and seat-kit CLI verbs into five categories: `KEEP`, `CONSOLIDATE`, `SUPERSEDED`, `LEGACY FALLBACK`, and `UNKNOWN`.
 4. **Consolidation architecture** for overlapping read projections (`board_snapshot`, `board_get_briefing`, `board_status`, and `board_onboard`).
-5. **Deprecation mechanics implementation** for a18: hiding deprecated tools from `tools/list` by default while retaining runtime callability, opt-in capability negotiation (`legacy_tools=true` and `PURSERS_LEGACY_TOOLS=1`), deprecation annotations, and one-time journal warnings per caller.
+5. **Deprecation mechanics implementation** for a18: hiding 10 deprecated tools from `tools/list` by default while retaining runtime callability, opt-in capability negotiation (`capabilities={"legacy_tools": true}` and `PURSERS_LEGACY_TOOLS=1`), standard `ToolAnnotations` deprecation hints with `_meta`, and one-time sequenced journal warnings per caller with durable deduplication across restarts.
 6. **Zero-risk removal assessment** proving why immediate deletion in a18 is zero-risk only when callers and telemetry are strictly zero.
 7. **Ticket-ready actionable removal backlog** for the a19 train.
 
@@ -26,79 +26,85 @@ This document delivers:
 
 ## 2. 7-Day Usage Telemetry & In-Repo Caller Inventory
 
-### Methodology
+### Methodology & Source Boundaries
 - **Time Window:** 2026-08-28T16:00:00Z to 2026-09-04T16:30:00Z (7 full days).
-- **Central Journals:** Examined all 2,880 journal entries across active boards (`pursers`, `fullplatts`, `a2a-sandbox`, `mi-mcp-prd`, `registry`), extracting exact tool invocations, timestamps, and caller identities.
-- **Wait-Bridge Stats:** Aggregated `bridge-stats.json` telemetry tracking model-visible wait returns, polling reads, and tool calls.
+- **Central Durable Database:** Central storage at `.private-arm/central-data/board.sqlite3` (`documents` table):
+  - `journals/%` rows: All 2,880 historical journal entries across active boards (`pursers`, `fullplatts`, `a2a-sandbox`, `mi-mcp-prd`, `registry`), extracting exact tool invocations, ISO-8601 UTC timestamps (`occurred_at`), and actor identities.
+  - `boards/%` records: Roster of 159 joined member records mapping `agent_id` to human/agent names and permissions.
+- **Wait-Bridge Stats:** Telemetry from `pursers-wait-bridge/bridge-stats.json` and `tools/wait-bridge/bridge-stats.json`:
+  - `days` block: Daily aggregate call counters per seat and tool (granularity: calendar date).
+  - `model_wait` block: Hourly bucket counters for `a2a_wait` outcomes (granularity: hourly bucket).
 - **Caller Roles:** Normalized caller identities into 5 canonical fleet roles:
   - `worker`: Autonomous ticket implementation seats (e.g. `worker-goose-1`, `pursers-codex-2`).
   - `reviewer`: Strict independent review seats (e.g. `reviewer-goose-1`, `purser-reviewer-1`).
   - `orchestrator`: Fleet leaders and desktop hosts (e.g. `cursor-desktop-1`, orchestrator seats).
   - `coordinator`: Board operations, intake, and supervisor agents (e.g. `coordinator-1`).
   - `dashboard`: Read-only telemetry, UI observers, and live dashboards (e.g. `fleet-dashboard`).
-- **In-Repo Callers:** Grepped the entire repository (excluding virtual environments, git trees, and build artifacts) across `packages/client`, `tools/wait-bridge`, `tools/seat-kit`, `tools/coordinator`, `tools/worker-runtime`, `tools/fleet-dashboard`, `packages/personal`, and documentation.
+- **In-Repo Callers:** Scanned the entire repository (excluding `.git`, `.venv`, `.venv2`, `build`, `dist`, `.pytest_cache`) across `packages/client`, `tools/wait-bridge`, `tools/seat-kit`, `tools/coordinator`, `tools/worker-runtime`, `tools/fleet-dashboard`, `packages/personal`, and documentation.
 
 ### Master Inventory & Classification Table
 
-| Tool Name | Subsystem | In-Repo Callers (Files) | 7-Day Calls | Caller Role Breakdown | Last Used Timestamp | Decision | Deprecation Phase | Rationale |
+| Tool Name | Subsystem | In-Repo Callers (Files) | 7-Day Calls | Caller Role Breakdown | Last Used (Granularity / Source) | Decision | Deprecation Phase | Rationale |
 |---|---|---|---|---|---|---|---|---|
-| `a2a_wait` | Bridge | 16 files | 19 | worker: 19 | 2026-09-04T10:00:00Z | **KEEP** | Active Core | Core push-wait blocking verb for workers and reviewers. Zero-turn event wait. |
-| `agent_nudge` | Central | 5 files | 0 | None | None | **SUPERSEDED** | Hide a18, Remove a19 | Superseded by autonomous Dispatcher per-seat offers (TK-10da96af6455). Zero 7-day usage. |
-| `board_catchup` | Central | 33 files | 123,983 | worker: 112,220, reviewer: 11,763 | 2026-09-04T23:59:59Z | **LEGACY FALLBACK** | Keep a18, Trim a19 | Heavily used by legacy polling loops and bridge fallback. Trim touch/ack in a19. |
-| `board_digest` | Bridge | 7 files | 0 | None | None | **KEEP** | Active Core | New instant non-blocking change summary tool for orchestrators (TK-55b6bc8985fc). |
-| `board_digest_ack` | Bridge | 7 files | 0 | None | None | **KEEP** | Active Core | Acknowledges digest sequence cursors; core orchestrator tool. |
-| `board_get_briefing` | Central | 5 files | 0 | None | None | **CONSOLIDATE** | Hide a18, Remove a19 | Completely redundant with `board_snapshot` and `board_status`. Zero model calls. |
-| `board_invite` | Central | 4 files | 0 | None | None | **KEEP** | Active Core | Cryptographic board admission and token verification. |
-| `board_join` | Central | 29 files | 5,063 | worker: 4,719, reviewer: 343, orchestrator: 1 | 2026-09-04T23:59:59Z | **KEEP** | Active Core | Core seat identity registration and capability negotiation entrypoint. |
-| `board_list` | Central | 2 files | 0 | None | None | **KEEP** | Active Core | Cross-board discovery for multi-project fleet environments. |
-| `board_member_add` | Central | 13 files | 4 | worker: 4 | 2026-09-02T07:01:17Z | **KEEP** | Active Core | Admin membership provisioning and principal onboarding. |
-| `board_member_remove` | Central | 2 files | 0 | None | None | **KEEP** | Active Core | Admin seat retirement and stale member cleanup (`seat_admin.py`). |
-| `board_member_set_role`| Central | 2 files | 0 | None | None | **KEEP** | Active Core | Admin privilege escalation/demotion (member, reviewer, admin). |
-| `board_members` | Central | 2 files | 0 | None | None | **KEEP** | Active Core | Roster inspection tool for coordinators and dashboards. |
-| `board_onboard` | Central | 9 files | 0 | None | None | **CONSOLIDATE** | Keep a18, Consolidate a19 | One-shot join + briefing. Keep for streamlined seat initialization. |
-| `board_reap` | Central | 3 files | 0 | None | None | **KEEP** | Active Core | Recovers abandoned tickets after seat crashes or timeout expirations. |
-| `board_review_policy_set`| Central| 3 files | 0 | None | None | **KEEP** | Active Core | Configures strict vs relaxed governance per project board. |
-| `board_scrub_profile_set`| Central| 2 files | 0 | None | None | **KEEP** | Active Core | Configures credential and PII sanitization profiles. |
-| `board_snapshot` | Central | 24 files | 0 | None | None | **CONSOLIDATE** | Keep a18, Consolidate a19 | Bounded cold projection view. Part of consolidated read architecture. |
-| `board_state_get` | Central | 26 files | 1,998 | worker: 1,998 | 2026-09-04T23:59:59Z | **KEEP** | Active Core | Shared board key-value state lookup (project registry, coordinator markers). |
-| `board_state_update` | Central | 20 files | 0 | None | None | **KEEP** | Active Core | Board state mutation with atomic compare-and-swap generation guard. |
-| `board_status` | Central | 15 files | 0 | None | None | **CONSOLIDATE** | Keep a18, Consolidate a19 | Lightweight active ticket and member count summary. |
-| `board_unwatch` | Bridge | 5 files | 0 | None | None | **KEEP** | Active Core | Removes watched tickets/tags from orchestrator digest priority. |
-| `board_watch` | Bridge | 5 files | 0 | None | None | **KEEP** | Active Core | Adds priority tickets/tags to orchestrator digest stream. |
-| `journal_compact` | Central | 2 files | 0 | None | None | **KEEP** | Active Core | Compaction maintenance for derivable telemetry; retains durable audit. |
-| `lease_renew` | Central | 19 files | 8 | worker: 8 | 2026-08-31T23:59:59Z | **KEEP** | Active Core | Heartbeat renewal tool for active work and review leases. |
-| `memory_checkpoint` | Central | 3 files | 0 | None | None | **UNKNOWN** | Hide a18, Flag a19 | Unused by model seats in 7 days. Move behind capability flag. |
-| `memory_handoff` | Central | 4 files | 0 | None | None | **UNKNOWN** | Hide a18, Flag a19 | Unused by model seats in 7 days. Move behind capability flag. |
-| `memory_links` | Central | 8 files | 0 | None | None | **UNKNOWN** | Hide a18, Flag a19 | 0 model seat calls in 7 days. Used internally by Personal UI app only. |
-| `memory_read` | Central | 7 files | 0 | None | None | **UNKNOWN** | Hide a18, Flag a19 | 0 model seat calls in 7 days. Move behind capability flag. |
-| `memory_search` | Central | 7 files | 0 | None | None | **UNKNOWN** | Hide a18, Flag a19 | 0 model seat calls in 7 days. Move behind capability flag. |
-| `memory_unpin` | Central | 3 files | 0 | None | None | **UNKNOWN** | Hide a18, Flag a19 | 0 model seat calls in 7 days. Move behind capability flag. |
-| `memory_write` | Central | 11 files | 102 | coordinator: 6, worker: 96 | 2026-09-04T00:05:32Z | **UNKNOWN** | Hide a18, Flag a19 | Used for manual/historical summaries, not autonomous loop. Gate behind flag. |
-| `project_registry_get`| Bridge| 6 files | 0 | None | None | **KEEP** | Active Core | Parses multi-project repository roots from board state for CLI seats. |
-| `ticket_assign` | Central | 6 files | 3 | coordinator: 3 | 2026-09-01T16:00:54Z | **SUPERSEDED** | Hide a18, Admin a19 | Superseded by Dispatcher assignment. Retain only as privileged escape hatch. |
-| `ticket_cancel` | Central | 4 files | 10 | coordinator: 5, worker: 5 | 2026-09-04T13:51:05Z | **KEEP** | Active Core | Standard cancellation verb for abandoned/superseded tasks. |
-| `ticket_claim` | Central | 21 files | 411 | worker: 411 | 2026-09-04T16:25:38Z | **KEEP** | Active Core | Core atomic ticket work lease claim verb. |
-| `ticket_create` | Central | 21 files | 134 | coordinator: 59, worker: 71, orchestrator: 4 | 2026-09-04T16:31:49Z | **KEEP** | Active Core | Core work creation and task specification verb. |
-| `ticket_get` | Central | 25 files | 25,289 | worker: 25,289 | 2026-09-04T23:59:59Z | **KEEP** | Active Core | Core ticket detail, notes, review history, and work_dir retrieval. |
-| `ticket_list` | Central | 28 files | 15,751 | worker: 15,751 | 2026-09-04T23:59:59Z | **KEEP** | Active Core | Backlog and active queue inspection verb. |
-| `ticket_review` | Central | 13 files | 267 | reviewer: 267 | 2026-09-04T16:24:48Z | **KEEP** | Active Core | Core review verdict submission verb (approve/reject). |
-| `ticket_review_claim`| Central| 8 files | 6 | reviewer: 6 | 2026-09-04T16:24:48Z | **KEEP** | Active Core | Exclusive lease reservation for submitted ticket review. |
-| `ticket_review_release`| Central| 5 files | 6 | reviewer: 6 | 2026-09-04T16:24:48Z | **KEEP** | Active Core | Explicit release of held review lease back to open pool. |
-| `ticket_submit` | Central | 19 files | 267 | worker: 267 | 2026-09-04T16:22:59Z | **KEEP** | Active Core | Submission verb for completed code and required verification notes. |
-| `ticket_terminate` | Central | 4 files | 1 | reviewer: 1 | 2026-09-01T16:01:01Z | **SUPERSEDED** | Hide a18, Remove a19 | Duplicate of `ticket_cancel`. Only 1 call in 7 days. |
-| `ticket_unclaim` | Central | 4 files | 138 | worker: 138 | 2026-09-04T13:08:08Z | **SUPERSEDED** | Hide a18, Remove a19 | Superseded by `ticket_review_release` / lease expiry reap. |
+| `a2a_wait` | Bridge | 16 files | 19 | worker: 19 | 2026-09-04T10:00:00Z (bridge hourly bucket) | **KEEP** | Active Core | Core push-wait blocking verb for workers and reviewers. Zero-turn event wait. |
+| `agent_nudge` | Central | 5 files | 0 | None | None (0 calls recorded in 7d window) | **SUPERSEDED** | Hide a18, Remove a19 | Superseded by autonomous Dispatcher per-seat offers (TK-10da96af6455). Zero 7-day usage. |
+| `board_catchup` | Central | 33 files | 123,983 | worker: 112,220, reviewer: 11,763 | 2026-09-04 (daily aggregate) | **LEGACY FALLBACK** | Keep a18, Trim a19 | Heavily used by legacy polling loops and bridge fallback. Trim touch/ack in a19. |
+| `board_digest` | Bridge | 7 files | 0 | None | None (0 calls recorded in 7d window) | **KEEP** | Active Core | New instant non-blocking change summary tool for orchestrators (TK-55b6bc8985fc). |
+| `board_digest_ack` | Bridge | 7 files | 0 | None | None (0 calls recorded in 7d window) | **KEEP** | Active Core | Acknowledges digest sequence cursors; core orchestrator tool. |
+| `board_get_briefing` | Central | 5 files | 0 | None | None (0 calls recorded in 7d window) | **CONSOLIDATE** | Hide a18, Remove a19 | Completely redundant with `board_snapshot` and `board_status`. Zero model calls. |
+| `board_invite` | Central | 4 files | 0 | None | None (0 calls recorded in 7d window) | **KEEP** | Active Core | Cryptographic board admission and token verification. |
+| `board_join` | Central | 29 files | 5,063 | worker: 4,719, reviewer: 343, orchestrator: 1 | 2026-09-04 (daily aggregate) | **KEEP** | Active Core | Core seat identity registration and capability negotiation entrypoint. |
+| `board_list` | Central | 2 files | 0 | None | None (0 calls recorded in 7d window) | **KEEP** | Active Core | Cross-board discovery for multi-project fleet environments. |
+| `board_member_add` | Central | 13 files | 4 | worker: 4 | 2026-09-02T07:01:17Z (journal event) | **KEEP** | Active Core | Admin membership provisioning and principal onboarding. |
+| `board_member_remove` | Central | 2 files | 0 | None | None (0 calls recorded in 7d window) | **KEEP** | Active Core | Admin seat retirement and stale member cleanup (`seat_admin.py`). |
+| `board_member_set_role`| Central | 2 files | 0 | None | None (0 calls recorded in 7d window) | **KEEP** | Active Core | Admin privilege escalation/demotion (member, reviewer, admin). |
+| `board_members` | Central | 2 files | 0 | None | None (0 calls recorded in 7d window) | **KEEP** | Active Core | Roster inspection tool for coordinators and dashboards. |
+| `board_onboard` | Central | 9 files | 0 | None | None (0 calls recorded in 7d window) | **CONSOLIDATE** | Keep a18, Consolidate a19 | One-shot join + briefing. Keep for streamlined seat initialization. |
+| `board_reap` | Central | 3 files | 0 | None | None (0 calls recorded in 7d window) | **KEEP** | Active Core | Recovers abandoned tickets after seat crashes or timeout expirations. |
+| `board_review_policy_set`| Central| 3 files | 0 | None | None (0 calls recorded in 7d window) | **KEEP** | Active Core | Configures strict vs relaxed governance per project board. |
+| `board_scrub_profile_set`| Central| 2 files | 0 | None | None (0 calls recorded in 7d window) | **KEEP** | Active Core | Configures credential and PII sanitization profiles. |
+| `board_snapshot` | Central | 24 files | 0 | None | None (0 calls recorded in 7d window) | **CONSOLIDATE** | Keep a18, Consolidate a19 | Bounded cold projection view. Part of consolidated read architecture. |
+| `board_state_get` | Central | 26 files | 1,998 | worker: 1,998 | 2026-09-04 (daily aggregate) | **KEEP** | Active Core | Shared board key-value state lookup (project registry, coordinator markers). |
+| `board_state_update` | Central | 20 files | 0 | None | None (0 calls recorded in 7d window) | **KEEP** | Active Core | Board state mutation with atomic compare-and-swap generation guard. |
+| `board_status` | Central | 15 files | 0 | None | None (0 calls recorded in 7d window) | **CONSOLIDATE** | Keep a18, Consolidate a19 | Lightweight active ticket and member count summary. |
+| `board_unwatch` | Bridge | 5 files | 0 | None | None (0 calls recorded in 7d window) | **KEEP** | Active Core | Removes watched tickets/tags from orchestrator digest priority. |
+| `board_watch` | Bridge | 5 files | 0 | None | None (0 calls recorded in 7d window) | **KEEP** | Active Core | Adds priority tickets/tags to orchestrator digest stream. |
+| `journal_compact` | Central | 2 files | 0 | None | None (0 calls recorded in 7d window) | **KEEP** | Active Core | Compaction maintenance for derivable telemetry; retains durable audit. |
+| `lease_renew` | Central | 19 files | 8 | worker: 8 | 2026-08-31 (daily aggregate) | **KEEP** | Active Core | Heartbeat renewal tool for active work and review leases. |
+| `memory_checkpoint` | Central | 3 files | 0 | None | None (0 calls recorded in 7d window) | **UNKNOWN** | Hide a18, Flag a19 | Unused by model seats in 7 days. Move behind capability flag. |
+| `memory_handoff` | Central | 4 files | 0 | None | None (0 calls recorded in 7d window) | **UNKNOWN** | Hide a18, Flag a19 | Unused by model seats in 7 days. Move behind capability flag. |
+| `memory_links` | Central | 8 files | 0 | None | None (0 calls recorded in 7d window) | **UNKNOWN** | Hide a18, Flag a19 | 0 model seat calls in 7 days. Used internally by Personal UI app only. |
+| `memory_read` | Central | 7 files | 0 | None | None (0 calls recorded in 7d window) | **UNKNOWN** | Hide a18, Flag a19 | 0 model seat calls in 7 days. Move behind capability flag. |
+| `memory_search` | Central | 7 files | 0 | None | None (0 calls recorded in 7d window) | **UNKNOWN** | Hide a18, Flag a19 | 0 model seat calls in 7 days. Move behind capability flag. |
+| `memory_unpin` | Central | 3 files | 0 | None | None (0 calls recorded in 7d window) | **UNKNOWN** | Hide a18, Flag a19 | 0 model seat calls in 7 days. Move behind capability flag. |
+| `memory_write` | Central | 11 files | 102 | coordinator: 6, worker: 96 | 2026-09-04T00:05:32Z (journal event) | **KEEP** | Active Core | 102 calls in 7-day window. Retained as visible core tool per measured traffic. |
+| `project_registry_get`| Bridge| 6 files | 0 | None | None (0 calls recorded in 7d window) | **KEEP** | Active Core | Parses multi-project repository roots from board state for CLI seats. |
+| `ticket_assign` | Central | 6 files | 3 | coordinator: 3 | 2026-09-01T16:00:54Z (journal event) | **SUPERSEDED** | Hide a18, Admin a19 | Superseded by Dispatcher assignment. Retain only as privileged escape hatch. |
+| `ticket_cancel` | Central | 4 files | 10 | coordinator: 5, worker: 5 | 2026-09-04T13:51:05Z (journal event) | **KEEP** | Active Core | Standard cancellation verb for abandoned/superseded tasks. |
+| `ticket_claim` | Central | 21 files | 411 | worker: 411 | 2026-09-04T16:25:38Z (journal event) | **KEEP** | Active Core | Core atomic ticket work lease claim verb. |
+| `ticket_create` | Central | 21 files | 134 | coordinator: 59, worker: 71, orchestrator: 4 | 2026-09-04T16:31:49Z (journal event) | **KEEP** | Active Core | Core work creation and task specification verb. |
+| `ticket_get` | Central | 25 files | 25,289 | worker: 25,289 | 2026-09-04 (daily aggregate) | **KEEP** | Active Core | Core ticket detail, notes, review history, and work_dir retrieval. |
+| `ticket_list` | Central | 28 files | 15,751 | worker: 15,751 | 2026-09-04 (daily aggregate) | **KEEP** | Active Core | Backlog and active queue inspection verb. |
+| `ticket_review` | Central | 13 files | 267 | reviewer: 267 | 2026-09-04T16:24:48Z (journal event) | **KEEP** | Active Core | Core review verdict submission verb (approve/reject). |
+| `ticket_review_claim`| Central| 8 files | 6 | reviewer: 6 | 2026-09-04T16:24:48Z (journal event) | **KEEP** | Active Core | Exclusive lease reservation for submitted ticket review. |
+| `ticket_review_release`| Central| 5 files | 6 | reviewer: 6 | 2026-09-04T16:24:48Z (journal event) | **KEEP** | Active Core | Explicit release of held review lease back to open pool. |
+| `ticket_submit` | Central | 19 files | 267 | worker: 267 | 2026-09-04T16:22:59Z (journal event) | **KEEP** | Active Core | Submission verb for completed code and required verification notes. |
+| `ticket_terminate` | Central | 4 files | 1 | reviewer: 1 | 2026-09-01T16:01:01Z (journal event) | **SUPERSEDED** | Hide a18, Remove a19 | Duplicate of `ticket_cancel`. Only 1 call in 7 days. |
+| `ticket_unclaim` | Central | 4 files | 138 | worker: 138 | 2026-09-04T13:08:08Z (journal event) | **KEEP** | Active Core | 138 live worker calls in 7-day window. Retained as visible core tool. |
 
 ---
 
 ## 3. Summary Counts per Decision
 
+*Note: Counts below match the Master Inventory table identically (31 + 4 + 3 + 1 + 6 = 45).*
+
 | Classification Decision | Count | Percentage | Description |
 |---|---|---|---|
-| **KEEP** | 27 | 60.0% | Active core tools essential for ticket lifecycle, review governance, board membership, push-wait, and orchestration. |
-| **CONSOLIDATE** | 3 | 6.7% | Overlapping read views (`board_snapshot`, `board_status`, `board_onboard`) targeted for a unified 2-view projection model. |
-| **SUPERSEDED** | 6 | 13.3% | Redundant or replaced tools (`agent_nudge`, `ticket_terminate`, `ticket_unclaim`, `ticket_assign`, `board_get_briefing`). |
-| **LEGACY FALLBACK** | 2 | 4.4% | Polling fallback mechanisms (`board_catchup`, seat-kit `wait --poll`) maintained for environments without push-wait. |
-| **UNKNOWN** | 7 | 15.6% | Specialized memory family (`memory_*`) with 0 model seat read calls; moved behind a capability flag. |
+| **KEEP** | 31 | 68.9% | Active core tools essential for ticket lifecycle, review governance, board membership, push-wait, and orchestration (25 Central + 6 Wait-Bridge). |
+| **CONSOLIDATE** | 4 | 8.9% | Overlapping read views (`board_snapshot`, `board_status`, `board_onboard`, `board_get_briefing`) targeted for a unified 2-view projection model. |
+| **SUPERSEDED** | 3 | 6.7% | Replaced tools (`agent_nudge`, `ticket_assign`, `ticket_terminate`) with alternative modern fleet mechanisms. |
+| **LEGACY FALLBACK** | 1 | 2.2% | Polling fallback mechanism (`board_catchup`) maintained for environments without push-wait. |
+| **UNKNOWN** | 6 | 13.3% | Specialized memory tools (`memory_read`, `memory_search`, `memory_unpin`, `memory_links`, `memory_checkpoint`, `memory_handoff`) with 0 model read calls in 7 days. |
 | **TOTAL** | **45** | **100.0%** | **39 Central tools + 6 Wait-Bridge tools** |
 
 ---
@@ -106,7 +112,7 @@ This document delivers:
 ## 4. Deep-Dive Classification & Action Plans
 
 ### 4.1. Consolidation of Overlapping Read Views
-Currently, four distinct tools project overlapping aspects of board state:
+Four distinct tools project overlapping aspects of board state:
 1. `board_snapshot`: Returns entire ticket dictionary, member dictionary, board config, and journal splice watermark. High token payload.
 2. `board_status`: Returns summary counts: open tickets, claimed tickets, submitted tickets, active member counts. Bounded, lightweight.
 3. `board_get_briefing`: Returns task summaries, active blockers, and high-level briefing notes.
@@ -122,22 +128,22 @@ Currently, four distinct tools project overlapping aspects of board state:
 - **`agent_nudge` -> Dispatcher Offers:** With the arrival of the autonomous Dispatcher (TK-10da96af6455), the coordinator no longer manually issues point-to-point wakes via `agent_nudge`. The dispatcher issues targeted claim offers directly via seat queues. `agent_nudge` had 0 calls in 7 days and 0 in all journal history. Hidden in a18; remove in a19.
 - **`ticket_assign` -> Dispatcher Matching:** Manual coordinator assignment is superseded by the automated queue dispatcher. Maintained only as an internal/admin escape hatch; hidden from standard seat tool lists in a18.
 - **`ticket_terminate` -> `ticket_cancel`:** Dual verbs for marking tickets canceled/terminated created ambiguity. `ticket_cancel` is standard across the CLI and documentation. Hidden in a18; removed in a19.
-- **`ticket_unclaim` -> Lease Expiry / Release Flow:** Workers abandon claims by allowing the 15-minute lease to expire or via explicit cancellation. Reviewers release claims via `ticket_review_release`. Hidden in a18; removed in a19.
+- **`ticket_unclaim` Preservation:** Unlike reviewer leases which possess `ticket_review_release`, workers currently rely on `ticket_unclaim` for voluntary claim releases before TTL expiry (138 live calls in 7 days). Retained visible in a18 until an explicit worker lease release replacement is deployed.
 - **`board_catchup` Refactoring:** Polling via `board_catchup` generates massive traffic (123,983 calls in 7 days from legacy cron scripts). In a18, keep `board_catchup` as a fallback. In a19, remove `touch=true` and `ack` mutation modes, restricting `board_catchup` to a read-only un-mutating refetch.
 
 ### 4.3. Specialized `memory_*` Family
-The seven memory tools (`memory_write`, `memory_read`, `memory_unpin`, `memory_search`, `memory_links`, `memory_checkpoint`, `memory_handoff`) represent a substantial token burden (7 tools in `tools/list` on every turn).
-- **Telemetry Reality:** In the last 7 days, autonomous worker and reviewer seats made **zero** calls to `memory_read`, `memory_search`, `memory_unpin`, or `memory_links`.
-- The 102 `memory_write` entries were generated either by coordinator daily digest runs or offline handoff dumps from human codex sessions.
-- In modern workflow doctrine, ticket specifications, review history, and commit notes carry all necessary state.
-- **Plan:** Hide all 7 `memory_*` tools from `tools/list` in a18. In a19, move them behind an explicit capability declaration `capabilities={"memory_tools": true}` or relocate them to a dedicated `pursers-memory` extension package.
+The memory family consists of seven tools.
+- **Telemetry Reality:** In the last 7 days, `memory_write` recorded **102 live calls** (96 by workers, 6 by coordinator), documenting critical investigation findings and handoffs. Per reviewer instruction, `memory_write` remains an active visible tool.
+- Conversely, autonomous worker and reviewer seats made **zero** calls to `memory_read`, `memory_search`, `memory_unpin`, `memory_links`, `memory_checkpoint`, or `memory_handoff`.
+- In modern workflow doctrine, ticket specifications, review history, and commit notes carry all necessary task state.
+- **Plan:** Hide the 6 unused memory tools from `tools/list` in a18. In a19, move them behind an explicit capability declaration `capabilities={"memory_tools": true}` or relocate them to a dedicated modular extension.
 
 ---
 
 ## 5. Deprecation Mechanics Implementation (a18)
 
 ### 5.1. The Hide-Unless-Legacy Mechanism
-In a18, the 12 deprecated tools remain fully callable at runtime for backward compatibility, but are omitted from MCP `tools/list` unless the caller explicitly opts in.
+In a18, exactly 10 deprecated tools remain fully callable at runtime for backward compatibility, but are omitted from MCP `tools/list` unless the calling seat explicitly opts in.
 
 **Central Implementation (`packages/central/src/pursers_central/central.py`):**
 1. **`DEPRECATED_TOOLS` Set:**
@@ -151,39 +157,31 @@ In a18, the 12 deprecated tools remain fully callable at runtime for backward co
        "memory_read",
        "memory_search",
        "memory_unpin",
-       "memory_write",
        "ticket_assign",
        "ticket_terminate",
-       "ticket_unclaim",
    })
    ```
-2. **Capability Declaration on Join:**
-   Seats declare capability during `board_join` or `board_onboard`:
+2. **Seat-Scoped Capability Declaration:**
+   Capabilities are registered per seat, not cached globally across the principal:
    ```python
    await board_join(board_id="pursers", agent_name="worker-1", capabilities={"legacy_tools": True})
    ```
-   Central stores `capabilities` on the member record and registers the principal in `service.legacy_principals`.
+   Central stores `capabilities` directly in `document["members"][agent_id]["capabilities"]` in SQLite.
+   When `tools/list` runs, Central inspects `client_info.name` (the seat name) and checks `has_seat_legacy_capability(principal_id, agent_name)`.
+   If a reviewer and a worker share the same bearer token / principal, the worker opting in does NOT pollute the reviewer's clean tool surface.
 3. **Environment Override:**
-   Setting `PURSERS_LEGACY_TOOLS=1` on Central or the Wait-Bridge forces legacy tools to remain visible across all connections.
-4. **Filtered `tools/list`:**
-   When `tools/list` is queried:
-   - If `has_legacy_capability(principal_id)` is False, all 12 `DEPRECATED_TOOLS` are filtered out.
-   - 27 clean core tools are returned to modern seats, saving ~1,800 context tokens per turn.
-   - If `legacy_tools=true` or `PURSERS_LEGACY_TOOLS=1`, all 39 tools are returned.
+   Setting `PURSERS_LEGACY_TOOLS=1` forces legacy tools to remain visible across all connections.
+4. **ToolAnnotations Hints:**
+   When legacy tools are listed, each deprecated tool carries standard MCP annotations:
+   `Tool.annotations = ToolAnnotations(title="[DEPRECATED] <name> is deprecated in a18 and scheduled for removal in a19")`
+   along with `Tool.meta = {"deprecated": True}`.
 
-### 5.2. Runtime Deprecation Annotations & One-Time Journal Warnings
+### 5.2. Post-Authorization Deprecation Warnings & Durable Restart Dedupe
 When a deprecated tool is called at runtime:
-1. **Deprecation Annotation:** The returned dictionary carries `_deprecated: True` and `deprecated: True`, advising callers of the upcoming a19 removal.
-2. **One-Time Journal Warning:** Central tracks caller warnings in `service.deprecated_warned_callers`. On first call by a given `(board_id, principal_id, tool_name)`, Central logs an audit event to the board journal:
-   - `kind`: `"deprecated_tool_warning"`
-   - `tool`: `<tool_name>`
-   - `message`: `"Tool '<tool_name>' is deprecated in a18 and scheduled for removal in a19."`
-   Subsequent invocations by the same caller do not duplicate journal entries.
-
-### 5.3. Wait-Bridge Integration (`tools/wait-bridge/pursers_wait_server.py`)
-- The wait-bridge respects `PURSERS_LEGACY_TOOLS=1`.
-- When set, the bridge passes `capabilities={"legacy_tools": True}` during its automated Central `board_join`.
-- The bridge wraps its own `tools/list` to support future tool filtering without disrupting MCP clients.
+1. **Post-Authorization Execution:** The tool function executes first. If the caller lacks authorization (e.g. outsider on unjoined board), `PermissionError` is raised before any warning logic is reached. Denied calls produce **zero** mutations and **zero** journal events.
+2. **Durable One-Time Deduplication:** If the call succeeds, Central computes `full_caller_id = f"{board_id}:{principal_id}:{agent_name}:{tool_name}"` and mutates `document["deprecated_warned_callers"]` in SQLite.
+3. **Normal Sequenced Journal Path:** If not previously warned, Central appends a `deprecated_tool_warning` event to the normal durable sequenced journal via `append_and_publish`. It advances `latest_seq`, receives a unique event ID, and is fully durable across service restarts without duplicate warnings.
+4. **Result Metadata:** The returned dictionary carries `_deprecated: True` and `deprecated: True` as an additional compatibility signal.
 
 ---
 
@@ -227,23 +225,19 @@ The following ticket-ready backlog items are scheduled for execution during the 
    - Remove `client.ticket_terminate` from `packages/client/client.py`.
    - Update tests in `test_coordinator_writes.py` to use `ticket_cancel`.
 
-3. **[TK-a19-03] Central: Remove `ticket_unclaim` in favor of lease release semantics**
-   - Remove `ticket_unclaim` tool from `central.py`.
-   - Remove `test_ticket_unclaim.py` and migrate tests to `ticket_review_release` and lease expiry reap.
-
-4. **[TK-a19-04] Central: Consolidate read views — remove `board_get_briefing`**
+3. **[TK-a19-03] Central: Consolidate read views — remove `board_get_briefing`**
    - Remove `board_get_briefing` from `central.py` and `client.py`.
    - Update `test_response_bounds.py` to assert bounded `board_status` instead.
 
-5. **[TK-a19-05] Central: Move `memory_*` family behind modular `pursers-memory` extension**
-   - Extract `memory_checkpoint`, `memory_handoff`, `memory_links`, `memory_read`, `memory_search`, `memory_unpin`, `memory_write` into an optional extension or require capability `capabilities={"memory_tools": true}`.
+4. **[TK-a19-04] Central: Move unused `memory_*` family behind modular extension**
+   - Extract `memory_checkpoint`, `memory_handoff`, `memory_links`, `memory_read`, `memory_search`, `memory_unpin` into an optional extension or require capability `capabilities={"memory_tools": true}`.
    - Remove default registration from core `central.py`.
 
-6. **[TK-a19-06] Central: Trim `board_catchup` touch and ack modes**
+5. **[TK-a19-05] Central: Trim `board_catchup` touch and ack modes**
    - Make `board_catchup` strictly read-only (`touch=False`, ignore `ack`).
    - Remove journal touch watermarks from catchup handlers.
 
-7. **[TK-a19-07] Seat-Kit: Deprecate `--poll` CLI flag**
+6. **[TK-a19-06] Seat-Kit: Deprecate `--poll` CLI flag**
    - Remove `--poll` fallback from `bin/board.sh wait` and `seat_new.py`.
    - Enforce push-wait subscriptions as the sole supported transport.
 
@@ -251,7 +245,7 @@ The following ticket-ready backlog items are scheduled for execution during the 
 
 ## 8. Summary of a18 Hidden Tools List
 
-The exact 12 tools hidden by default in a18:
+The exact 10 tools hidden by default in a18:
 1. `agent_nudge`
 2. `board_get_briefing`
 3. `memory_checkpoint`
@@ -260,7 +254,5 @@ The exact 12 tools hidden by default in a18:
 6. `memory_read`
 7. `memory_search`
 8. `memory_unpin`
-9. `memory_write`
-10. `ticket_assign`
-11. `ticket_terminate`
-12. `ticket_unclaim`
+9. `ticket_assign`
+10. `ticket_terminate`

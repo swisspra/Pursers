@@ -19,13 +19,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Deprecated
 
-- **Tool Surface Audit & Deprecation (a18, TK-2ffa16368cbb):** 12 superseded, redundant, or unused Central tools are deprecated in a18 and hidden from `tools/list` by default, saving ~1,800 context tokens per turn across all seats:
+- **Tool Surface Audit & Deprecation (a18, TK-2ffa16368cbb):** 10 superseded, redundant, or unused Central tools are deprecated in a18 and hidden from `tools/list` by default, saving ~1,500 context tokens per turn across all seats:
   - `agent_nudge`: superseded by autonomous Dispatcher offers (TK-10da96af6455).
   - `board_get_briefing`: redundant with `board_snapshot` and `board_status`.
   - `ticket_terminate`: superseded by `ticket_cancel`.
-  - `ticket_unclaim`: superseded by `ticket_review_release` and lease expiry flow.
   - `ticket_assign`: superseded by autonomous Dispatcher assignment; preserved for admin escape hatch.
-  - `memory_checkpoint`, `memory_handoff`, `memory_links`, `memory_read`, `memory_search`, `memory_unpin`, `memory_write`: specialized memory family with 0 model seat read calls in 7 days; moved behind capability negotiation.
+  - `memory_checkpoint`, `memory_handoff`, `memory_links`, `memory_read`, `memory_search`, `memory_unpin`: specialized memory family with 0 model seat read calls in 7 days; moved behind capability negotiation. (Note: `memory_write` with 102 calls and `ticket_unclaim` with 138 calls remain visible core tools).
   - Deprecated tools remain callable for backward compatibility in a18. Invocations emit a `_deprecated: true` annotation and a one-time journal warning per caller (`deprecated_tool_warning`). Physical removal is scheduled for a19.
 
 ## [5.0.0a17] - 2026-09-04
