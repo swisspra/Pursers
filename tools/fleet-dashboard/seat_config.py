@@ -17,6 +17,7 @@ import os
 import re
 import shlex
 import shutil
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -213,6 +214,76 @@ def _is_env_var_defined(
     return False
 
 
+CAT_TOKEN_PATTERN = re.compile(
+    r'\$\(cat\s+(?:(["\'])(?P<quoted>.*?)\1|(?P<unquoted>[^)\n]+))\)'
+)
+
+SYSTEM_CA_DIRECTORIES = (
+    Path("/etc/ssl"),
+    Path("/private/etc/ssl"),
+    Path("/etc/pki/tls"),
+    Path("/etc/pki/ca-trust"),
+    Path("/etc/ca-certificates"),
+    Path("/usr/share/ca-certificates"),
+    Path("/usr/local/etc/openssl"),
+    Path("/opt/homebrew/etc/openssl"),
+    Path("/opt/homebrew/etc/openssl@3"),
+    Path("/System/Library/OpenSSL"),
+)
+
+
+def _is_private_ca(ca_raw: str | Path | None) -> bool:
+    """Determine whether a CA path points to a private CA rather than a system trust path."""
+    if not ca_raw:
+        return False
+    path = Path(ca_raw).expanduser()
+    try:
+        resolved = path.resolve() if path.exists() else path
+    except Exception:
+        resolved = path
+
+    verify_paths = ssl.get_default_verify_paths()
+    for sys_ca in (verify_paths.openssl_cafile,):
+        if sys_ca:
+            try:
+                sys_path = Path(sys_ca).expanduser()
+                sys_resolved = sys_path.resolve() if sys_path.exists() else sys_path
+                if resolved == sys_resolved or path == sys_path:
+                    return False
+            except Exception:
+                pass
+
+    for sys_dir in (verify_paths.openssl_capath,):
+        if sys_dir:
+            try:
+                sys_dpath = Path(sys_dir).expanduser()
+                sys_dresolved = sys_dpath.resolve() if sys_dpath.exists() else sys_dpath
+                if (
+                    resolved == sys_dresolved
+                    or sys_dresolved in resolved.parents
+                    or path == sys_dpath
+                    or sys_dpath in path.parents
+                ):
+                    return False
+            except Exception:
+                pass
+
+    for base in SYSTEM_CA_DIRECTORIES:
+        try:
+            base_resolved = base.resolve() if base.exists() else base
+            if (
+                resolved == base_resolved
+                or base_resolved in resolved.parents
+                or path == base
+                or base in path.parents
+            ):
+                return False
+        except Exception:
+            pass
+
+    return True
+
+
 def _extract_token_file_references(
     desired: DesiredSeat, inspection: dict[str, Any]
 ) -> list[str]:
@@ -220,34 +291,51 @@ def _extract_token_file_references(
     if desired.token_file:
         files.append(desired.token_file)
 
+    def scan_for_cat(text: str) -> None:
+        if not text:
+            return
+        cleaned = text.replace('\\"', '"').replace("\\'", "'")
+        for m in CAT_TOKEN_PATTERN.finditer(cleaned):
+            p = (m.group("quoted") or m.group("unquoted")).strip().strip('"\'')
+            if p:
+                files.append(p)
+
     doc = inspection.get("document", {})
     if isinstance(doc, dict):
         for srv in doc.get("mcp_servers", {}).values():
             if isinstance(srv, dict):
                 env = srv.get("env", {})
-                if isinstance(env, dict) and "ONBOARD_CENTRAL_TOKEN_FILE" in env:
-                    files.append(str(env["ONBOARD_CENTRAL_TOKEN_FILE"]))
+                if isinstance(env, dict):
+                    if "ONBOARD_CENTRAL_TOKEN_FILE" in env:
+                        files.append(str(env["ONBOARD_CENTRAL_TOKEN_FILE"]))
+                    for v in env.values():
+                        if isinstance(v, str):
+                            scan_for_cat(v)
                 raw_args = srv.get("args", [])
                 if isinstance(raw_args, list):
                     for arg in raw_args:
                         if isinstance(arg, str):
-                            files.extend(re.findall(r"\$\(cat\s+([^\)\"']+)\)", arg))
+                            scan_for_cat(arg)
                 cmd = srv.get("command", "")
                 if isinstance(cmd, str):
-                    files.extend(re.findall(r"\$\(cat\s+([^\)\"']+)\)", cmd))
+                    scan_for_cat(cmd)
         for srv in doc.get("mcpServers", {}).values():
             if isinstance(srv, dict):
                 env = srv.get("env", {})
-                if isinstance(env, dict) and "ONBOARD_CENTRAL_TOKEN_FILE" in env:
-                    files.append(str(env["ONBOARD_CENTRAL_TOKEN_FILE"]))
+                if isinstance(env, dict):
+                    if "ONBOARD_CENTRAL_TOKEN_FILE" in env:
+                        files.append(str(env["ONBOARD_CENTRAL_TOKEN_FILE"]))
+                    for v in env.values():
+                        if isinstance(v, str):
+                            scan_for_cat(v)
                 raw_args = srv.get("args", [])
                 if isinstance(raw_args, list):
                     for arg in raw_args:
                         if isinstance(arg, str):
-                            files.extend(re.findall(r"\$\(cat\s+([^\)\"']+)\)", arg))
+                            scan_for_cat(arg)
                 cmd = srv.get("command", "")
                 if isinstance(cmd, str):
-                    files.extend(re.findall(r"\$\(cat\s+([^\)\"']+)\)", cmd))
+                    scan_for_cat(cmd)
 
     text = inspection.get("text", "")
     if isinstance(text, str) and text:
@@ -255,8 +343,7 @@ def _extract_token_file_references(
             r"ONBOARD_CENTRAL_TOKEN_FILE:\s*[\"']?([^\"'\n]+)[\"']?", text
         ):
             files.append(m.group(1).strip())
-        for m in re.finditer(r"\$\(cat\s+([^\)\"'\n]+)\)", text):
-            files.append(m.group(1).strip())
+        scan_for_cat(text)
 
     seen: set[str] = set()
     result: list[str] = []
@@ -943,7 +1030,7 @@ class BridgeInstaller:
             "version": installed_version or pinned_version,
             "status": status,
             "message": message,
-            "private_ca_active": bool(os.environ.get("SSL_CERT_FILE")),
+            "private_ca_active": _is_private_ca(os.environ.get("SSL_CERT_FILE")),
         }
 
     def install(self) -> str:
@@ -1287,8 +1374,9 @@ class Doctor:
 
         bridge_cmd = desired.bridge_command
         has_uvx_from = "uvx" in bridge_cmd and "--from" in bridge_cmd
-        private_ca = bool(os.environ.get("SSL_CERT_FILE") or desired.ca_file)
-        if has_uvx_from and private_ca:
+        effective_ca = os.environ.get("SSL_CERT_FILE") or desired.ca_file
+        is_private = _is_private_ca(effective_ca)
+        if has_uvx_from and is_private:
             rows.append(
                 self._check(
                     desired,

@@ -611,14 +611,74 @@ def test_doctor_token_file_validation_and_redaction(
 def test_doctor_uvx_under_private_ca_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    target = desired(
+    # 1. Unset SSL_CERT_FILE + system CA: must NOT produce the private-CA FAIL
+    monkeypatch.delenv("SSL_CERT_FILE", raising=False)
+    monkeypatch.setenv("ONBOARD_CENTRAL_TOKEN", "valid.mock.token")
+    system_ca = "/etc/ssl/cert.pem"
+    target_sys = desired(
         tmp_path,
         "codex",
         bridge_command="uvx pursers-wait-bridge --from git+https://github.com/swisspra/Pursers.git",
+        ca_file=system_ca,
     )
-    Path(target.token_file).write_text("part1.part2.part3")
-    Path(target.ca_file).write_text("synthetic private CA")
-    monkeypatch.setenv("SSL_CERT_FILE", str(tmp_path / "private-ca.pem"))
+    Path(target_sys.token_file).write_text("part1.part2.part3")
+
+    def run_bridge(command, **_kwargs):
+        if command[0] == "ps":
+            return subprocess.CompletedProcess(command, 0, "", "")
+        return subprocess.CompletedProcess(command, 0, "0.1.0a6\n", "")
+
+    doc = seat_config.Doctor(
+        runner=run_bridge,
+        pypi_fetcher=lambda: "0.1.0a6",
+        live_probe=lambda _d, _t: {"mode": "push", "registry_boards": ["pursers"], "skipped_boards": {}},
+    )
+    rows_sys = doc.run(target_sys)
+    bridge_check_sys = next(r for r in rows_sys if r.check == "bridge")
+    # Must NOT produce the private-CA FAIL
+    assert "uvx --from fails under private CA" not in bridge_check_sys.message
+
+    # 2. Actual non-system SSL_CERT_FILE: must FAIL
+    private_ca = tmp_path / "private-ca.pem"
+    private_ca.write_text("synthetic private CA")
+    monkeypatch.setenv("SSL_CERT_FILE", str(private_ca))
+    target_priv = desired(
+        tmp_path,
+        "codex",
+        bridge_command="uvx pursers-wait-bridge --from git+https://github.com/swisspra/Pursers.git",
+        ca_file=str(private_ca),
+    )
+    Path(target_priv.token_file).write_text("part1.part2.part3")
+
+    rows_priv = doc.run(target_priv)
+    bridge_check_priv = next(r for r in rows_priv if r.check == "bridge")
+    assert bridge_check_priv.status == "FAIL"
+    assert "uvx --from fails under private CA" in bridge_check_priv.message
+
+
+def test_doctor_cat_token_file_reference_validation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    token_dir = tmp_path / "dir with spaces"
+    token_dir.mkdir(parents=True)
+    cat_token_file = token_dir / "referenced token.jwt"
+
+    config = tmp_path / "config.toml"
+    # Codex config referencing quoted $(cat "...") with spaces in args
+    config.write_text(
+        f'[mcp_servers.codex-worker]\n'
+        f'command = "/bin/sh"\n'
+        f'args = ["-c", \'token=$(cat "{cat_token_file}"); exec pursers-wait-bridge\']\n'
+        f'tool_timeout_sec = 620\n'
+    )
+    target = desired(tmp_path, "codex", config_path=str(config))
+    # Leave desired.token_file pointing to a valid JWT so failures isolate to cat_token_file
+    Path(target.token_file).write_text("header.valid.sig")
+    Path(target.ca_file).write_text("ca")
+    command = Path(target.bridge_command)
+    command.parent.mkdir(parents=True)
+    command.write_text("#!/bin/sh\n")
+    command.chmod(0o755)
     monkeypatch.setenv("ONBOARD_CENTRAL_TOKEN", "valid.mock.token")
 
     def run_ok(command, **_kwargs):
@@ -631,10 +691,37 @@ def test_doctor_uvx_under_private_ca_fails(
         pypi_fetcher=lambda: "0.1.0a6",
         live_probe=lambda _d, _t: {"mode": "push", "registry_boards": ["pursers"], "skipped_boards": {}},
     )
-    rows = doc.run(target)
-    bridge_check = next(r for r in rows if r.check == "bridge")
-    assert bridge_check.status == "FAIL"
-    assert "uvx --from fails under private CA" in bridge_check.message
+
+    # 1. Missing referenced file -> FAIL
+    if cat_token_file.exists():
+        cat_token_file.unlink()
+    row_missing = next(r for r in doc.run(target) if r.check == "token-file")
+    assert row_missing.status == "FAIL"
+    assert row_missing.message == "missing or unreadable"
+
+    # 2. Empty referenced file -> FAIL
+    cat_token_file.write_text("   \n")
+    row_empty = next(r for r in doc.run(target) if r.check == "token-file")
+    assert row_empty.status == "FAIL"
+    assert row_empty.message == "token file is empty"
+
+    # 3. Malformed referenced file -> FAIL
+    bad_secret = "TOP_SECRET_MALFORMED_JWT"
+    cat_token_file.write_text(bad_secret)
+    report_bad = seat_config._doctor_document(doc.run(target))
+    row_bad = next(r for r in report_bad["checks"] if r["check"] == "token-file")
+    assert row_bad["status"] == "FAIL"
+    assert "invalid JWT format" in row_bad["message"]
+    assert bad_secret not in json.dumps(report_bad)
+
+    # 4. Valid JWT referenced file -> PASS
+    good_secret = "TOP_SECRET_GOOD_JWT_PAYLOAD"
+    cat_token_file.write_text(f"eyJhbGciOi.{good_secret}.signature_123")
+    report_good = seat_config._doctor_document(doc.run(target))
+    row_good = next(r for r in report_good["checks"] if r["check"] == "token-file")
+    assert row_good["status"] == "PASS"
+    assert "valid JWT" in row_good["message"]
+    assert good_secret not in json.dumps(report_good)
 
 
 def test_doctor_dead_nvm_npx_path_warns(
