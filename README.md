@@ -63,6 +63,10 @@ Authentication is JWT-only (RS256/JWKS); legacy dev-token mode has been removed.
 
 **No supported MCP Apps host claim yet.** Our release gate requires a host build to pass three live checks (rendered View, hostile-App negative control, text fallback) on the packaged candidate. The read-only dashboard renders on current Claude Desktop builds, but no host build passes the full gate today, so the product remains driven from agent chat with the dashboard as a read-only view.
 
+## No identifying data in the repo
+
+Repo text must never contain local paths, usernames, real tokens, or personal identifiers. Use placeholders only: `/Users/synthetic-user` (or `<work_dir>`), `example.com`, `example.invalid`, and loopback `127.0.0.1` / `localhost`. All commits are scanned automatically in CI by `tools/leak_scan.py` to ensure credentials and identifying data never enter the repository.
+
 ## Relationship to On Board v4 (`onboard-memory-mcp` 4.0.4)
 
 Pursers is the successor line to On Board, on a new Central/MCP-Apps/data architecture. It is published separately and **does not touch** any existing v4 installation:
