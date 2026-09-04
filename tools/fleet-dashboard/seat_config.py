@@ -108,7 +108,7 @@ def _package_version(project: str) -> str:
 
 JWT_PATTERN = re.compile(r"^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$")
 NVM_NPX_PATTERN = re.compile(
-    r"(/[^\s\"\'\)]*?\.nvm/versions/node/[^/\s\"\'\)]+/bin/npx\b)"
+    r"(/[^\"\'\n\)]*?\.nvm/versions/node/[^/\"\'\n\)]+/bin/npx\b)"
 )
 
 
@@ -147,6 +147,67 @@ def _resolve_command_executable(command: str | Path | None) -> Path | None:
     return None
 
 
+def _default_bridge_configs() -> tuple[tuple[str, Path], ...]:
+    return (
+        ("codex", Path("~/.codex/config.toml").expanduser()),
+        ("goose", Path("~/.config/goose/config.yaml").expanduser()),
+        (
+            "claude-desktop",
+            Path(
+                "~/Library/Application Support/Claude/claude_desktop_config.json"
+            ).expanduser(),
+        ),
+    )
+
+
+def _bridge_candidates_from_config(path: Path) -> list[str]:
+    if not path.is_file():
+        return []
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    values: list[str] = []
+
+    def visit(value: Any, key: str = "") -> None:
+        if isinstance(value, dict):
+            for child_key, child in value.items():
+                visit(child, str(child_key))
+        elif isinstance(value, list):
+            for child in value:
+                visit(child, key)
+        elif isinstance(value, str):
+            if key.casefold() in {"command", "cmd", "pursers_bridge_command"}:
+                values.append(value)
+            values.extend(
+                token.strip("\"'")
+                for token in shlex.split(value, posix=True)
+                if "pursers-wait-bridge" in token
+            )
+
+    try:
+        if path.suffix == ".toml":
+            visit(tomllib.loads(text))
+        elif path.suffix == ".json":
+            visit(json.loads(text))
+    except (ValueError, tomllib.TOMLDecodeError):
+        pass
+    for match in re.finditer(
+        r"(?im)^\s*(?:command|cmd|PURSERS_BRIDGE_COMMAND)\s*[:=]\s*"
+        r"(?:[\"']([^\"']+)[\"']|([^\s#,]+))",
+        text,
+    ):
+        values.append(match.group(1) or match.group(2))
+    candidates: list[str] = []
+    for value in values:
+        candidate = value.strip()
+        if candidate and Path(candidate).name == "pursers-wait-bridge":
+            expanded = str(Path(candidate).expanduser())
+            if expanded not in candidates:
+                candidates.append(expanded)
+    return candidates
+
+
 def _query_bridge_version(
     executable: Path,
     runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
@@ -164,6 +225,47 @@ def _query_bridge_version(
             return result.stdout.strip().splitlines()[0].strip().split()[-1]
     except Exception:
         pass
+    return None
+
+
+def _query_bridge_distribution_version(
+    executable: Path,
+    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+) -> str | None:
+    interpreters: list[Path] = []
+    try:
+        first_line = executable.read_text(encoding="utf-8").splitlines()[0]
+        if first_line.startswith("#!"):
+            shebang = first_line[2:].strip()
+            if shebang and " " not in shebang:
+                interpreters.append(Path(shebang))
+    except (OSError, UnicodeError, IndexError):
+        pass
+    interpreters.extend((executable.parent / "python", executable.parent / "python3"))
+    seen: set[Path] = set()
+    for interpreter in interpreters:
+        if interpreter in seen or not interpreter.is_file():
+            continue
+        seen.add(interpreter)
+        try:
+            result = runner(
+                [
+                    str(interpreter),
+                    "-c",
+                    (
+                        "from importlib.metadata import version; "
+                        "print(version('pursers-wait-bridge'))"
+                    ),
+                ],
+                check=False,
+                text=True,
+                capture_output=True,
+                timeout=5,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                return result.stdout.strip().splitlines()[0]
+        except Exception:
+            pass
     return None
 
 
@@ -954,8 +1056,8 @@ class BridgeInstaller:
     """Installs, upgrades, and inspects the pursers-wait-bridge tool.
 
     Bridge version inspection deterministically executes the resolved bridge
-    shim or binary with `--version`. The wait bridge server emits its VERSION
-    constant to stdout on `--version`.
+    shim or binary with `--version` and, when possible, reads the distribution
+    metadata from that shim's interpreter.
     """
 
     def __init__(
@@ -964,18 +1066,93 @@ class BridgeInstaller:
         runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
         command: str | Path | None = None,
         pypi_fetcher: Callable[[], str | None] | None = None,
+        discovered_configs: Sequence[tuple[str, str | Path]] | None = None,
+        home: str | Path | None = None,
     ) -> None:
         self.version = version or _pinned_bridge_version()
         self.runner = runner
         self.command = command
         self.pypi_fetcher = pypi_fetcher
+        self.home = Path(home).expanduser() if home is not None else Path.home()
+        self.discovered_configs = tuple(
+            (host, Path(path).expanduser())
+            for host, path in (
+                _default_bridge_configs()
+                if discovered_configs is None
+                else discovered_configs
+            )
+        )
+
+    def _resolve(
+        self, command: str | Path | None = None
+    ) -> tuple[Path | None, str | None, list[str]]:
+        searched: list[str] = []
+
+        def resolve(candidate: str | Path | None, source: str) -> tuple[Path, str] | None:
+            if not candidate:
+                return None
+            searched.append(f"{source}:{candidate}")
+            executable = _resolve_command_executable(candidate)
+            return (executable, source) if executable else None
+
+        explicit = command or self.command
+        found = resolve(explicit, "explicit")
+        if found:
+            return found[0], found[1], searched
+        for host, config_path in self.discovered_configs:
+            searched.append(f"config:{host}:{config_path}")
+            for candidate in _bridge_candidates_from_config(config_path):
+                found = resolve(candidate, f"config:{host}")
+                if found:
+                    return found[0], found[1], searched
+        found = resolve("pursers-wait-bridge", "PATH")
+        if found:
+            return found[0], found[1], searched
+        for label, candidate in (
+            ("well-known:uv-bin", self.home / ".local/bin/pursers-wait-bridge"),
+            (
+                "well-known:uv-tool",
+                self.home
+                / ".local/share/uv/tools/pursers-wait-bridge/bin/"
+                "pursers-wait-bridge",
+            ),
+        ):
+            found = resolve(candidate, label)
+            if found:
+                return found[0], found[1], searched
+        uv = shutil.which("uv")
+        if uv:
+            searched.append("uv-tool-dir")
+            try:
+                result = self.runner(
+                    [uv, "tool", "dir"],
+                    check=False,
+                    text=True,
+                    capture_output=True,
+                    timeout=5,
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    candidate = (
+                        Path(result.stdout.strip())
+                        / "pursers-wait-bridge/bin/pursers-wait-bridge"
+                    )
+                    found = resolve(candidate, "uv-tool-dir")
+                    if found:
+                        return found[0], found[1], searched
+            except Exception:
+                pass
+        return None, None, searched
 
     def inspect(self, command: str | Path | None = None) -> dict[str, Any]:
-        target = command or self.command or shutil.which("pursers-wait-bridge")
-        resolved = _resolve_command_executable(target)
-        installed_version = (
+        resolved, resolution_source, searched = self._resolve(command)
+        reported_version = (
             _query_bridge_version(resolved, self.runner) if resolved else None
         )
+        metadata_version = (
+            _query_bridge_distribution_version(resolved, self.runner)
+            if resolved else None
+        )
+        installed_version = metadata_version or reported_version
         pinned_version = self.version
 
         pypi_version = (
@@ -984,12 +1161,20 @@ class BridgeInstaller:
             else _fetch_latest_pypi_version()
         )
 
-        if installed_version is None or installed_version != pinned_version:
+        if resolved is None or reported_version is None:
             status = "FAIL"
-            if installed_version is None:
-                message = "bridge command does not resolve or failed to report version"
-            else:
-                message = f"installed={installed_version}; pinned={pinned_version}"
+            message = "bridge command does not resolve or failed to report version"
+            if resolved is None:
+                message += "; searched " + ", ".join(searched)
+        elif installed_version != pinned_version:
+            status = "FAIL"
+            message = f"installed={installed_version}; pinned={pinned_version}"
+        elif metadata_version and reported_version != metadata_version:
+            status = "WARN"
+            message = (
+                "version string stale; "
+                f"reported={reported_version}; package={metadata_version}"
+            )
         elif pypi_version is None:
             status = "WARN"
             message = (
@@ -1000,11 +1185,15 @@ class BridgeInstaller:
             message = f"version {installed_version}"
 
         return {
-            "command": str(resolved) if resolved else (str(target) if target else None),
+            "command": str(resolved) if resolved else None,
             "installed": installed_version is not None,
             "installed_version": installed_version,
+            "reported_version": reported_version,
+            "package_metadata_version": metadata_version,
             "pinned_version": pinned_version,
             "latest_pypi_version": pypi_version,
+            "resolution_source": resolution_source,
+            "searched": searched,
             "version": installed_version or pinned_version,
             "status": status,
             "message": message,
@@ -1030,10 +1219,13 @@ class BridgeInstaller:
             text=True,
             capture_output=True,
         )
-        command = shutil.which("pursers-wait-bridge")
+        command, _source, searched = self._resolve()
         if command is None:
-            raise RuntimeError("bridge installed but its shim is not on PATH")
-        return command
+            raise RuntimeError(
+                "bridge installed but its shim does not resolve; searched "
+                + ", ".join(searched)
+            )
+        return str(command)
 
 
 class PromptRenderer:

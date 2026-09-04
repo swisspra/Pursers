@@ -3217,6 +3217,11 @@ def test_seat_config_manager_plan_apply_backup_restart_and_no_token_leak(
         def inspect(self) -> dict:
             return {
                 "version": self.version,
+                "installed_version": self.version,
+                "reported_version": "0.1.0a1",
+                "pinned_version": self.version,
+                "latest_pypi_version": self.version,
+                "resolution_source": "well-known:uv-tool",
                 "command": None,
                 "installed": False,
                 "private_ca_active": False,
@@ -3274,6 +3279,12 @@ def test_seat_config_manager_plan_apply_backup_restart_and_no_token_leak(
     row = manager.seats()["seats"][0]
     assert row["principal_label"] == "worker"
     assert row["needs_restart"] is True
+    bridge = manager.bridge()
+    assert bridge["installed_version"] == "0.1.0a6"
+    assert bridge["reported_version"] == "0.1.0a1"
+    assert bridge["pinned_version"] == "0.1.0a6"
+    assert bridge["latest_pypi_version"] == "0.1.0a7"
+    assert bridge["resolution_source"] == "well-known:uv-tool"
     journal = (tmp_path / "state/config-actions.jsonl").read_text()
     assert secret not in journal
 
@@ -3344,7 +3355,12 @@ def test_config_api_and_ui_contract_are_separate_from_coordinator_config() -> No
             return {"seats": [], "discovered_configs": []}
 
         def bridge(self) -> dict:
-            return {"installed_version": None, "pinned_version": "0.1.0a6"}
+            return {
+                "installed_version": "0.1.0a6",
+                "pinned_version": "0.1.0a6",
+                "latest_pypi_version": "0.1.0a6",
+                "resolution_source": "config:codex",
+            }
 
         def registry(self, fleet: dict) -> dict:
             return {"boards": [], "read_only": True}
@@ -3398,7 +3414,13 @@ def test_config_api_and_ui_contract_are_separate_from_coordinator_config() -> No
         with urllib.request.urlopen(base + "/api/config/seats") as response:
             assert json.load(response)["seats"] == []
         with urllib.request.urlopen(base + "/api/config/bridge") as response:
-            assert json.load(response)["pinned_version"] == "0.1.0a6"
+            bridge = json.load(response)
+            assert bridge == {
+                "installed_version": "0.1.0a6",
+                "pinned_version": "0.1.0a6",
+                "latest_pypi_version": "0.1.0a6",
+                "resolution_source": "config:codex",
+            }
         with urllib.request.urlopen(base + "/api/config/registry") as response:
             assert json.load(response)["read_only"] is True
         assert post("/api/config/plan", {"name": "fixture"})["plan_id"] == "a" * 32
@@ -3427,6 +3449,9 @@ def test_config_api_and_ui_contract_are_separate_from_coordinator_config() -> No
     assert "Preview exact changes" in dashboard.HTML
     assert "Copy session prompt" in dashboard.HTML
     assert "Token file path · token never enters this page" in dashboard.HTML
+    assert "latest_pypi_version" in dashboard.HTML
+    assert "resolution_source" in dashboard.HTML
+    assert "Resolved via" in dashboard.HTML
     assert "setInterval(async()=>" in dashboard.HTML
     assert ",1000)" in dashboard.HTML
     assert "/api/config" in dashboard.HTML  # original coordinator route remains.

@@ -206,15 +206,16 @@ def test_claude_code_emits_command_and_writes_only_with_path(tmp_path: Path) -> 
 
 
 def test_bridge_installer_unsets_private_ca_and_never_uses_uvx(
-    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls = []
+    installed = _executable(tmp_path / "tool/pursers-wait-bridge")
 
     def which(name: str):
         if name == "uv":
             return "/tool/uv"
         if name == "pursers-wait-bridge" and calls:
-            return "/tool/pursers-wait-bridge"
+            return str(installed)
         return None
 
     def run(command, **kwargs):
@@ -223,9 +224,14 @@ def test_bridge_installer_unsets_private_ca_and_never_uses_uvx(
 
     monkeypatch.setattr(seat_config.shutil, "which", which)
     monkeypatch.setenv("SSL_CERT_FILE", "/private/ca.pem")
-    command = seat_config.BridgeInstaller("0.1.0a6", runner=run).install()
+    command = seat_config.BridgeInstaller(
+        "0.1.0a6",
+        runner=run,
+        discovered_configs=(),
+        home=tmp_path,
+    ).install()
 
-    assert command == "/tool/pursers-wait-bridge"
+    assert command == str(installed)
     assert calls[0][0] == [
         "/tool/uv",
         "tool",
@@ -235,6 +241,206 @@ def test_bridge_installer_unsets_private_ca_and_never_uses_uvx(
     ]
     assert "SSL_CERT_FILE" not in calls[0][1]["env"]
     assert "uvx" not in calls[0][0]
+
+
+def _executable(path: Path, shebang: str = "#!/bin/sh") -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"{shebang}\nexit 0\n")
+    path.chmod(0o755)
+    return path
+
+
+@pytest.mark.parametrize(
+    ("host", "filename", "render"),
+    [
+        (
+            "codex",
+            "config.toml",
+            lambda command: (
+                '[mcp_servers.wait]\ncommand = "/bin/sh"\n'
+                "args = [\"-c\", \"exec $PURSERS_BRIDGE_COMMAND\"]\n"
+                "[mcp_servers.wait.env]\n"
+                f"PURSERS_BRIDGE_COMMAND = {json.dumps(str(command))}\n"
+            ),
+        ),
+        (
+            "goose",
+            "config.yaml",
+            lambda command: (
+                "extensions:\n  wait:\n    cmd: /bin/sh\n"
+                f"    PURSERS_BRIDGE_COMMAND: {json.dumps(str(command))}\n"
+            ),
+        ),
+        (
+            "claude-desktop",
+            "claude_desktop_config.json",
+            lambda command: json.dumps(
+                {"mcpServers": {"wait": {"command": str(command)}}}
+            ),
+        ),
+    ],
+)
+def test_bridge_resolves_discovered_host_configs_before_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    host: str,
+    filename: str,
+    render,
+) -> None:
+    bridge = _executable(tmp_path / host / "pursers-wait-bridge")
+    config = tmp_path / filename
+    config.write_text(render(bridge))
+    monkeypatch.setattr(seat_config.shutil, "which", lambda _name: None)
+
+    info = seat_config.BridgeInstaller(
+        "0.1.0a6",
+        command=tmp_path / "missing",
+        runner=lambda command, **_kwargs: subprocess.CompletedProcess(
+            command, 0, "0.1.0a6\n", ""
+        ),
+        pypi_fetcher=lambda: "0.1.0a6",
+        discovered_configs=((host, config),),
+        home=tmp_path,
+    ).inspect()
+
+    assert info["command"] == str(bridge)
+    assert info["resolution_source"] == f"config:{host}"
+    assert info["status"] == "PASS"
+
+
+def test_bridge_resolution_order_explicit_path_and_well_known(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    explicit = _executable(tmp_path / "explicit/pursers-wait-bridge")
+    path_bridge = _executable(tmp_path / "path/pursers-wait-bridge")
+    known = _executable(tmp_path / ".local/bin/pursers-wait-bridge")
+    monkeypatch.setattr(
+        seat_config.shutil,
+        "which",
+        lambda name: str(path_bridge) if name == "pursers-wait-bridge" else None,
+    )
+    run = lambda command, **_kwargs: subprocess.CompletedProcess(
+        command, 0, "0.1.0a6\n", ""
+    )
+
+    explicit_info = seat_config.BridgeInstaller(
+        "0.1.0a6",
+        command=explicit,
+        runner=run,
+        pypi_fetcher=lambda: "0.1.0a6",
+        discovered_configs=(),
+        home=tmp_path,
+    ).inspect()
+    assert explicit_info["resolution_source"] == "explicit"
+
+    path_info = seat_config.BridgeInstaller(
+        "0.1.0a6",
+        runner=run,
+        pypi_fetcher=lambda: "0.1.0a6",
+        discovered_configs=(),
+        home=tmp_path,
+    ).inspect()
+    assert path_info["command"] == str(path_bridge)
+    assert path_info["resolution_source"] == "PATH"
+
+    monkeypatch.setattr(seat_config.shutil, "which", lambda _name: None)
+    known_info = seat_config.BridgeInstaller(
+        "0.1.0a6",
+        runner=run,
+        pypi_fetcher=lambda: "0.1.0a6",
+        discovered_configs=(),
+        home=tmp_path,
+    ).inspect()
+    assert known_info["command"] == str(known)
+    assert known_info["resolution_source"] == "well-known:uv-bin"
+
+    known.unlink()
+    uv_tool = _executable(
+        tmp_path
+        / ".local/share/uv/tools/pursers-wait-bridge/bin/pursers-wait-bridge"
+    )
+    uv_tool_info = seat_config.BridgeInstaller(
+        "0.1.0a6",
+        runner=run,
+        pypi_fetcher=lambda: "0.1.0a6",
+        discovered_configs=(),
+        home=tmp_path,
+    ).inspect()
+    assert uv_tool_info["command"] == str(uv_tool)
+    assert uv_tool_info["resolution_source"] == "well-known:uv-tool"
+
+
+def test_bridge_resolves_uv_tool_dir_and_reports_unresolved_search(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tool_dir = tmp_path / "uv-tools"
+    bridge = _executable(
+        tool_dir / "pursers-wait-bridge/bin/pursers-wait-bridge"
+    )
+    monkeypatch.setattr(
+        seat_config.shutil,
+        "which",
+        lambda name: "/tool/uv" if name == "uv" else None,
+    )
+
+    def run(command, **_kwargs):
+        stdout = (
+            str(tool_dir)
+            if command[:3] == ["/tool/uv", "tool", "dir"]
+            else "0.1.0a6"
+        )
+        return subprocess.CompletedProcess(command, 0, stdout + "\n", "")
+
+    info = seat_config.BridgeInstaller(
+        "0.1.0a6",
+        runner=run,
+        pypi_fetcher=lambda: "0.1.0a6",
+        discovered_configs=(),
+        home=tmp_path,
+    ).inspect()
+    assert info["command"] == str(bridge)
+    assert info["resolution_source"] == "uv-tool-dir"
+
+    bridge.unlink()
+    missing = seat_config.BridgeInstaller(
+        "0.1.0a6",
+        runner=run,
+        pypi_fetcher=lambda: "0.1.0a6",
+        discovered_configs=(),
+        home=tmp_path,
+    ).inspect()
+    assert missing["status"] == "FAIL"
+    assert missing["resolution_source"] is None
+    assert "searched" in missing["message"]
+    assert "uv-tool-dir" in missing["message"]
+
+
+def test_bridge_stale_cli_version_warns_when_metadata_is_current(
+    tmp_path: Path,
+) -> None:
+    python = _executable(tmp_path / "tool/bin/python")
+    bridge = _executable(
+        tmp_path / "tool/bin/pursers-wait-bridge", f"#!{python}"
+    )
+
+    def run(command, **_kwargs):
+        stdout = "0.1.0a6" if command[0] == str(python) else "0.1.0a1"
+        return subprocess.CompletedProcess(command, 0, stdout + "\n", "")
+
+    info = seat_config.BridgeInstaller(
+        "0.1.0a6",
+        command=bridge,
+        runner=run,
+        pypi_fetcher=lambda: "0.1.0a6",
+        discovered_configs=(),
+        home=tmp_path,
+    ).inspect()
+
+    assert info["installed_version"] == "0.1.0a6"
+    assert info["reported_version"] == "0.1.0a1"
+    assert info["package_metadata_version"] == "0.1.0a6"
+    assert info["status"] == "WARN"
+    assert info["message"].startswith("version string stale")
 
 
 def test_goose_clean_clone_plans_and_applies_fast_forward(
