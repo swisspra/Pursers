@@ -65,7 +65,7 @@ def test_jwt_pattern_and_synthetic_fixtures() -> None:
     assert "jwt" in hits
 
     # Inline exemption suppresses
-    assert leak_scan.scan_line(f"token = {RAW_JWT_CANDIDATE} # pragma: allowlist secret") == []
+    assert leak_scan.scan_line(f"token = {RAW_JWT_CANDIDATE} # pragma: allowlist jwt") == []
 
     # Documented synthetic fixture token lines are exempt
     assert leak_scan.scan_line('target = "eyJhbGciOi.TOKEN_MUST_NOT_APPEAR.sig"') == []
@@ -117,9 +117,49 @@ def test_inline_exemptions() -> None:
     secret_line = f"path = {POSIX_HOME_CANDIDATE}"
     assert "posix_home" in leak_scan.scan_line(secret_line)
 
-    assert leak_scan.scan_line(secret_line + " # pragma: allowlist secret") == []
-    assert leak_scan.scan_line(secret_line + " # leak-scan: exempt") == []
-    assert leak_scan.scan_line(secret_line + " # noqa: leak") == []
+    # Rule-scoped exemption suppresses only the named rule
+    assert leak_scan.scan_line(secret_line + " # pragma: allowlist posix_home") == []
+    assert leak_scan.scan_line(secret_line + " # leak-scan: exempt posix_home") == []
+    assert leak_scan.scan_line(secret_line + " # noqa: leak posix_home") == []
+
+
+def test_two_rule_same_line_exemption_does_not_suppress_second_violation() -> None:
+    # A line with both a home path and a raw JWT
+    line_with_two_violations = (
+        f"dir = '{POSIX_HOME_CANDIDATE}'; token = '{RAW_JWT_CANDIDATE}'"
+    )
+    both_hits = leak_scan.scan_line(line_with_two_violations)
+    assert set(both_hits) == {"posix_home", "jwt"}
+
+    # Marking posix_home exempt still flags jwt
+    line_posix_exempt = line_with_two_violations + " # pragma: allowlist posix_home"
+    hits_posix_exempt = leak_scan.scan_line(line_posix_exempt)
+    assert hits_posix_exempt == ["jwt"]
+
+    # Marking jwt exempt still flags posix_home
+    line_jwt_exempt = line_with_two_violations + " # leak-scan: exempt jwt"
+    hits_jwt_exempt = leak_scan.scan_line(line_jwt_exempt)
+    assert hits_jwt_exempt == ["posix_home"]
+
+
+def test_multiline_private_key_file_and_cli_detection(tmp_path: Path) -> None:
+    pem_file = tmp_path / "private_key.pem"
+    # Construct conventional multi-line PEM block dynamically
+    pem_block = (
+        "-----BEG" + "IN PRIVATE KEY-----\n"
+        "MIGHAgEAMBMGByqGSM49AgEGBSskZQQPOw==\n"
+        "-----END PRIVATE KEY-----\n"
+    )
+    pem_file.write_text(pem_block, encoding="utf-8")
+
+    violations = leak_scan.scan_file(pem_file, "private_key.pem")
+    assert len(violations) >= 1
+    assert violations[0].filename == "private_key.pem"
+    assert violations[0].line_number == 1
+    assert violations[0].rule_name == "pem_private_key"
+    assert violations[0].format_finding() == "private_key.pem:1: [pem_private_key] <masked>"
+
+    assert leak_scan.main([str(pem_file)]) != 0
 
 
 @pytest.mark.parametrize(

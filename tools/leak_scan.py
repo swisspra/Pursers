@@ -72,10 +72,8 @@ EXEMPT_JWT_FIXTURES = (
     "TOP_SECRET_MALFORMED_JWT",
 )
 
-EXEMPT_LINE_MARKERS = (
-    "# pragma: allowlist secret",
-    "# leak-scan: exempt",
-    "# noqa: leak",
+RULE_EXEMPTION_PATTERN = re.compile(
+    r"#\s*(?:pragma:\s*allowlist|leak-scan:\s*exempt|noqa:\s*leak)\s+([A-Za-z0-9_-]+)"
 )
 
 # Pattern fragments prevent the scanner source from matching its own rules
@@ -85,7 +83,7 @@ GENERIC_RULES: tuple[Rule, ...] = (
     Rule("windows_home", r"[A-Za-z]:\\Us" + r"ers\\(?P<user>[A-Za-z0-9_-]+)", 0, "user"),
     Rule(
         "pem_private_key",
-        "-----BEG" + r"IN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----[\s\S]*?-----END (?:[A-Z0-9 ]+ )?PRIVATE KEY-----",
+        "-----BEG" + r"IN (?:[A-Z0-9_-]+ )?PRIVATE KEY-----",
     ),
     Rule(
         "aws_access_key_id",
@@ -139,11 +137,15 @@ def scan_line(
     rules: Sequence[Rule] = GENERIC_RULES,
 ) -> list[str]:
     """Scan a single line for violations with match-scoped and rule-specific exemptions."""
-    if any(marker in line for marker in EXEMPT_LINE_MARKERS):
-        return []
+    exempt_rules = set(RULE_EXEMPTION_PATTERN.findall(line))
 
     hits: list[str] = []
     for rule in rules:
+        if rule.name in exempt_rules:
+            continue
+        if "secret" in exempt_rules and rule.name not in ("posix_home", "linux_home", "windows_home"):
+            continue
+
         for match in rule.compiled().finditer(line):
             matched_text = match.group(0)
 
