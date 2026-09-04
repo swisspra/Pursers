@@ -14,27 +14,26 @@ import tempfile
 import zipfile
 from pathlib import Path
 
+try:
+    from .release_versions import VERSIONS
+except ImportError:  # Direct execution: ``python tools/regenerate_component_lock.py``.
+    from release_versions import VERSIONS
 
-SOURCE_DATE_EPOCH = "315532800"
-PRODUCT_VERSION = "5.0.0a16"
+
+SOURCE_DATE_EPOCH = VERSIONS.source_date_epoch
+PRODUCT_VERSION = VERSIONS.product
 EXPECTED_VIEW_SHA256 = (
     "03d6807dc5ce87a3fce96e06ae67eb5fd3afdd2a1b27771f7e8fb2b600e34ac2"
 )
 EXPECTED_VIEW_SIZE = 404280
 PROJECTS = (
-    ("central", "pursers-central", "0.1.0a20"),
-    ("client", "pursers-client", "0.1.0a14"),
-    ("import", "pursers-personal-import", "5.0.0a3"),
-    ("personal", "pursers-personal", PRODUCT_VERSION),
+    ("central", "pursers-central", VERSIONS.packages["central"]),
+    ("client", "pursers-client", VERSIONS.packages["client"]),
+    ("import", "pursers-personal-import", VERSIONS.packages["import"]),
+    ("personal", "pursers-personal", VERSIONS.packages["personal"]),
 )
 LOCKED_COMPONENTS = ("pursers-central", "pursers-client")
-BUILD_TOOLCHAIN = (
-    ("build", "1.3.0"),
-    ("setuptools", "80.9.0"),
-    ("wheel", "0.45.1"),
-    ("packaging", "25.0"),
-    ("pyproject-hooks", "1.2.0"),
-)
+BUILD_TOOLCHAIN = tuple(VERSIONS.build_toolchain.items())
 
 
 def _sha256(payload: bytes) -> str:

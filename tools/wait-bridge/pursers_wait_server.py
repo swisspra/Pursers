@@ -67,7 +67,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from agent_naming import resolve_agent_name
 from backlog import backlog_events, ticket_is_relevant
 
-VERSION = "0.1.0a1"
+VERSION = "0.1.0a6"
 
 # --- config from env -------------------------------------------------------
 
