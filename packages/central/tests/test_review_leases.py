@@ -11,13 +11,27 @@ from unittest.mock import patch
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
+CLIENT_SRC = PACKAGE_ROOT.parents[1] / "packages" / "client" / "src"
+sys.path.insert(0, str(CLIENT_SRC))
 sys.path.insert(0, str(PACKAGE_ROOT / "src" / "pursers_central"))
 
 import central  # noqa: E402
 from mcp.server.mcpserver.exceptions import ToolError  # noqa: E402
+from pursers_client import (  # noqa: E402
+    REVIEW_LEASE_EXPIRED,
+    REVIEW_LEASE_KINDS,
+    REVIEW_LEASE_RELEASED,
+    TICKET_REVIEW_CLAIMED,
+)
 
 
 class ReviewLeaseTests(unittest.IsolatedAsyncioTestCase):
+    def test_central_review_event_contract_matches_client_constant(self) -> None:
+        self.assertEqual(
+            central.REVIEW_EVENT_KINDS,
+            frozenset({"board_review_policy_changed"}) | REVIEW_LEASE_KINDS,
+        )
+
     async def asyncSetUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory(dir=PACKAGE_ROOT)
         self.root = Path(self.temp_dir.name)
@@ -153,7 +167,9 @@ class ReviewLeaseTests(unittest.IsolatedAsyncioTestCase):
         self.principal = self.admin
         snapshot = await self.call("board_snapshot")
 
-        self.assertEqual(winner.structured_content["event"]["kind"], "ticket_review_claimed")
+        self.assertEqual(
+            winner.structured_content["event"]["kind"], TICKET_REVIEW_CLAIMED
+        )
         self.assertEqual(
             loser.structured_content["error"],
             {
@@ -250,7 +266,7 @@ class ReviewLeaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(claimed.structured_content["ok"])
         self.assertEqual(
             [event["kind"] for event in claimed.structured_content["release_events"]],
-            ["review_lease_expired"],
+            [REVIEW_LEASE_EXPIRED],
         )
 
     async def test_verdict_auto_claims_when_free_and_rejects_other_holder(self) -> None:
@@ -268,11 +284,11 @@ class ReviewLeaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("review_lease", approved.structured_content["ticket"])
         self.assertEqual(
             approved.structured_content["review_claim_event"]["kind"],
-            "ticket_review_claimed",
+            TICKET_REVIEW_CLAIMED,
         )
         self.assertEqual(
             approved.structured_content["review_release_event"]["kind"],
-            "review_lease_released",
+            REVIEW_LEASE_RELEASED,
         )
 
         second_id = await self.submitted_ticket()
@@ -333,7 +349,10 @@ class ReviewLeaseTests(unittest.IsolatedAsyncioTestCase):
                 ticket_id=ticket_id,
                 reason="handoff",
             )
-        self.assertEqual(released.structured_content["event"]["kind"], "review_lease_released")
+        self.assertEqual(
+            released.structured_content["event"]["kind"], REVIEW_LEASE_RELEASED
+        )
+        self.assertIn(released.structured_content["event"]["kind"], REVIEW_LEASE_KINDS)
         self.assertNotIn("review_lease", released.structured_content["ticket"])
 
 

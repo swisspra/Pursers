@@ -61,6 +61,7 @@ def _load_client() -> tuple[Any, ...]:
         from pursers_client import (
             BoardClient,
             PROJECT_REGISTRY_KEY,
+            SUBMITTED_RELEVANT_KINDS,
             active_registry_boards,
             parse_project_registry,
             registry_project_work_dirs,
@@ -74,6 +75,7 @@ def _load_client() -> tuple[Any, ...]:
     return (
         BoardClient,
         PROJECT_REGISTRY_KEY,
+        SUBMITTED_RELEVANT_KINDS,
         active_registry_boards,
         parse_project_registry,
         registry_project_work_dirs,
@@ -175,12 +177,22 @@ async def _cmd_wait(
     registry_work_dirs: Any = None,
     registry_project_work_dirs: Any = None,
     wait_for_boards: Any = None,
+    submitted_relevant_kinds: frozenset[str] | None = None,
 ) -> None:
     """Return one relevant event or a bounded timeout/re-arm response."""
     if timeout_s < 1:
         raise ValueError("--timeout must be at least 1 second")
     if client.identity is None:
         raise RuntimeError("wait requires a joined BoardClient identity")
+    if submitted and submitted_relevant_kinds is None:
+        raise RuntimeError(
+            "pursers_client lacks the shared submitted-event kind contract"
+        )
+    selected_kinds = (
+        frozenset(submitted_relevant_kinds or ())
+        if submitted
+        else frozenset({"ticket_created", "ticket_status_changed"})
+    )
 
     if boards != "home":
         if wait_for_boards is None:
@@ -198,14 +210,7 @@ async def _cmd_wait(
             selected,
             since,
             timeout_s,
-            kinds=(
-                frozenset({
-                    "ticket_status_changed", "ticket_review_claimed",
-                    "review_lease_expired", "review_lease_released",
-                })
-                if submitted
-                else frozenset({"ticket_created", "ticket_status_changed"})
-            ),
+            kinds=selected_kinds,
             submitted=submitted,
             work_dirs=registry_work_dirs(registry) if registry else {},
             project_work_dirs=registry_project_work_dirs(registry) if registry else {},
@@ -222,14 +227,7 @@ async def _cmd_wait(
     cursor = since
     journal_uri = f"board://{board_id}/journal"
     seat_uri = f"board://{board_id}/agent/{client.identity.agent_id}"
-    kinds = (
-        frozenset({
-            "ticket_status_changed", "ticket_review_claimed",
-            "review_lease_expired", "review_lease_released",
-        })
-        if submitted
-        else frozenset({"ticket_created", "ticket_status_changed"})
-    )
+    kinds = selected_kinds
 
     def remember_cursor(value: int) -> None:
         nonlocal cursor
@@ -245,7 +243,11 @@ async def _cmd_wait(
             for event in page.get("events", []):
                 if event.get("kind") not in kinds:
                     continue
-                if submitted and event.get("status_to") != "submitted":
+                if (
+                    submitted
+                    and event.get("kind") == "ticket_status_changed"
+                    and event.get("status_to") != "submitted"
+                ):
                     continue
                 if not submitted and client.identity.agent_id not in event.get(
                     "recipient_identities", []
@@ -279,7 +281,11 @@ async def _cmd_wait(
                 )
                 async with aclosing(event_stream):
                     async for event in event_stream:
-                        if submitted and event.get("status_to") != "submitted":
+                        if (
+                            submitted
+                            and event.get("kind") == "ticket_status_changed"
+                            and event.get("status_to") != "submitted"
+                        ):
                             continue
                         events.append(event)
                         remember_cursor(event.get("seq", cursor))
@@ -305,10 +311,12 @@ async def _execute(args: argparse.Namespace) -> None:
         BoardClient = loaded
         registry_key = active_boards = parse_registry = None
         project_work_dirs_for_registry = work_dirs_for_registry = wait_many = None
+        submitted_kinds = None
     else:
         (
             BoardClient,
             registry_key,
+            submitted_kinds,
             active_boards,
             parse_registry,
             project_work_dirs_for_registry,
@@ -347,6 +355,7 @@ async def _execute(args: argparse.Namespace) -> None:
                 registry_work_dirs=work_dirs_for_registry,
                 registry_project_work_dirs=project_work_dirs_for_registry,
                 wait_for_boards=wait_many,
+                submitted_relevant_kinds=submitted_kinds,
             )
             return
         target_board = getattr(args, "board", None) or board_id

@@ -13,12 +13,12 @@ WAIT_FOR_SUBMITTED = "submitted"
 def _review_is_available(
     ticket: dict[str, Any], _my_agent_id: str | None
 ) -> bool:
-    """Accept current tickets and the future structured review-state shape."""
+    """Accept unclaimed/expired state, inferring unclaimed from no live lease."""
     state = ticket.get("review_state")
     if state is None:
-        return True
+        return not isinstance(ticket.get("review_lease"), dict)
     if isinstance(state, str):
-        return state.strip().lower() in {"unclaimed", "open", "available", "pending"}
+        return state.strip().lower() in {"unclaimed", "expired"}
     if not isinstance(state, dict):
         return False
     holder = (
@@ -27,12 +27,7 @@ def _review_is_available(
         or state.get("holder_agent_id")
     )
     status = str(state.get("status") or "unclaimed").strip().lower()
-    return holder is None and status in {
-        "unclaimed",
-        "open",
-        "available",
-        "pending",
-    }
+    return status == "expired" or (holder is None and status == "unclaimed")
 
 
 def ticket_project(ticket: dict[str, Any]) -> str | None:
