@@ -3212,7 +3212,7 @@ def test_seat_config_manager_plan_apply_backup_restart_and_no_token_leak(
     ca.write_text("CA")
 
     class Bridge:
-        version = "0.1.0a6"
+        version = "0.1.0a7"
 
         def inspect(self) -> dict:
             return {
@@ -3263,7 +3263,7 @@ def test_seat_config_manager_plan_apply_backup_restart_and_no_token_leak(
     assert Path(result["backup_path"]).read_text() == f'api_token = "{secret}"\n'
     manager.inventory.upsert(
         dashboard.DesiredSeat.from_dict(desired),
-        bridge_version="0.1.0a6",
+        bridge_version="0.1.0a7",
         doctor={
             "overall": "WARN",
             "checks": [
@@ -3291,7 +3291,7 @@ def test_seat_config_manager_plan_apply_backup_restart_and_no_token_leak(
 
 def test_seat_config_registry_coverage_uses_live_fleet_seats(tmp_path: Path) -> None:
     class Bridge:
-        version = "0.1.0a6"
+        version = "0.1.0a7"
 
         def inspect(self) -> dict:
             return {"version": self.version, "command": None}
@@ -3313,7 +3313,7 @@ def test_seat_config_registry_coverage_uses_live_fleet_seats(tmp_path: Path) -> 
         bridge_command="/tmp/pursers-wait-bridge",
         config_path=str(tmp_path / "config.toml"),
     )
-    manager.inventory.upsert(desired, bridge_version="0.1.0a6")
+    manager.inventory.upsert(desired, bridge_version="0.1.0a7")
 
     result = manager.registry(
         {
@@ -3356,15 +3356,15 @@ def test_config_api_and_ui_contract_are_separate_from_coordinator_config() -> No
 
         def bridge(self) -> dict:
             return {
-                "installed_version": "0.1.0a6",
-                "reported_version": "0.1.0a1",
-                "package_metadata_version": "0.1.0a6",
-                "pinned_version": "0.1.0a6",
-                "latest_pypi_version": "0.1.0a6",
+                "installed_version": "0.1.0a7",
+                "reported_version": "0.1.0a6",
+                "package_metadata_version": "0.1.0a7",
+                "pinned_version": "0.1.0a7",
+                "latest_pypi_version": "0.1.0a7",
                 "resolution_source": "config:codex",
                 "status": "WARN",
                 "message": (
-                    "version string stale; reported=0.1.0a1; package=0.1.0a6"
+                    "version string stale; reported=0.1.0a6; package=0.1.0a7"
                 ),
             }
 
@@ -3422,15 +3422,15 @@ def test_config_api_and_ui_contract_are_separate_from_coordinator_config() -> No
         with urllib.request.urlopen(base + "/api/config/bridge") as response:
             bridge = json.load(response)
             assert bridge == {
-                "installed_version": "0.1.0a6",
-                "reported_version": "0.1.0a1",
-                "package_metadata_version": "0.1.0a6",
-                "pinned_version": "0.1.0a6",
-                "latest_pypi_version": "0.1.0a6",
+                "installed_version": "0.1.0a7",
+                "reported_version": "0.1.0a6",
+                "package_metadata_version": "0.1.0a7",
+                "pinned_version": "0.1.0a7",
+                "latest_pypi_version": "0.1.0a7",
                 "resolution_source": "config:codex",
                 "status": "WARN",
                 "message": (
-                    "version string stale; reported=0.1.0a1; package=0.1.0a6"
+                    "version string stale; reported=0.1.0a6; package=0.1.0a7"
                 ),
             }
         with urllib.request.urlopen(base + "/api/config/registry") as response:

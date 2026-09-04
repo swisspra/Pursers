@@ -88,6 +88,8 @@ VERSION_FILES: dict[str, tuple[str, ...]] = {
         "docs-local/architecture-th.html",
         "docs-local/manual-en.html",
         "docs-local/manual-th.html",
+        "tools/fleet-dashboard/tests/test_fleet_dashboard.py",
+        "tools/fleet-dashboard/tests/test_seat_config.py",
         "tools/seat-kit/README.md",
         "tools/wait-bridge/pursers_wait_server.py",
         "tools/wait-bridge/pyproject.toml",
