@@ -13,7 +13,7 @@ from mcp import Client
 from mcp.client.streamable_http import streamable_http_client
 from mcp.client.subscriptions import SubscriptionLost
 
-from .events import REVIEW_LEASE_KINDS, SUBMITTED_RELEVANT_KINDS
+from .events import DISPATCH_KINDS, REVIEW_LEASE_KINDS, SUBMITTED_RELEVANT_KINDS
 
 
 class BoardClientError(RuntimeError):
@@ -33,7 +33,7 @@ DEFAULT_EVENT_KINDS = frozenset(
         "ticket_status_changed",
         "ticket_assigned",
     }
-) | REVIEW_LEASE_KINDS
+) | REVIEW_LEASE_KINDS | DISPATCH_KINDS
 KNOWN_EVENT_KINDS = DEFAULT_EVENT_KINDS | SUBMITTED_RELEVANT_KINDS | {"memory_written"}
 GENERATION_META_KEY = "io.onboard/expected-generation"
 # Cleanup is best-effort after this bound so a broken transport cannot wedge a
@@ -249,6 +249,7 @@ class BoardClient:
         agent_platform: str | None = None,
         task_focus: str | None = None,
         agent_name: str | None = None,
+        capabilities: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         selected_name = self.agent_name if agent_name is None else agent_name
         arguments: dict[str, Any] = {"agent_name": selected_name}
@@ -258,6 +259,8 @@ class BoardClient:
             arguments["agent_platform"] = agent_platform
         if task_focus is not None:
             arguments["task_focus"] = task_focus
+        if capabilities is not None:
+            arguments["capabilities"] = capabilities
         joined = await (
             self._call_refresh("board_join", arguments)
             if agent_name is None
@@ -284,6 +287,7 @@ class BoardClient:
         task_focus: str | None = None,
         token_budget: int = 4_000,
         ticket_id: str | None = None,
+        capabilities: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         arguments: dict[str, Any] = {
             "agent_name": self.agent_name,
@@ -294,6 +298,7 @@ class BoardClient:
             "agent_platform": agent_platform,
             "task_focus": task_focus,
             "ticket_id": ticket_id,
+            "capabilities": capabilities,
         }
         arguments.update({key: value for key, value in optional.items() if value is not None})
         result = await self._call_refresh("board_onboard", arguments)
@@ -305,6 +310,31 @@ class BoardClient:
             result["role"],
         )
         return result
+
+    async def agent_capabilities_set(
+        self, capabilities: dict[str, Any]
+    ) -> dict[str, Any]:
+        return await self._call(
+            "agent_capabilities_set",
+            {"agent_name": self.agent_name, "capabilities": capabilities},
+        )
+
+    async def board_dispatch_policy_set(
+        self,
+        *,
+        offer_ttl_s: int = 120,
+        second_opinion: bool = True,
+        fallback_broadcast: bool = True,
+    ) -> dict[str, Any]:
+        return await self._call(
+            "board_dispatch_policy_set",
+            {
+                "agent_name": self.agent_name,
+                "offer_ttl_s": offer_ttl_s,
+                "second_opinion": second_opinion,
+                "fallback_broadcast": fallback_broadcast,
+            },
+        )
 
     async def board_snapshot(
         self,
@@ -349,12 +379,17 @@ class BoardClient:
         target_url: str | None = None,
         assigned_to: str | None = None,
         unassigned: bool = False,
+        tier: int = 2,
+        skills_required: list[str] | None = None,
+        exclude_agents: list[str] | None = None,
+        prefer_agents: list[str] | None = None,
     ) -> dict[str, Any]:
         arguments: dict[str, Any] = {
             "agent_name": self.agent_name,
             "title": title,
             "priority": priority,
             "unassigned": unassigned,
+            "tier": tier,
         }
         optional = {
             "ticket_id": ticket_id,
@@ -366,6 +401,9 @@ class BoardClient:
             "related_files": related_files,
             "target_url": target_url,
             "assigned_to": assigned_to,
+            "skills_required": skills_required,
+            "exclude_agents": exclude_agents,
+            "prefer_agents": prefer_agents,
         }
         arguments.update({key: value for key, value in optional.items() if value is not None})
         result = await self._call("ticket_create", arguments)
@@ -375,6 +413,30 @@ class BoardClient:
     async def ticket_claim(self, ticket_id: str) -> dict[str, Any]:
         self._watched_uris.add(f"board://{self.board_id}/ticket/{ticket_id}")
         result = await self._call("ticket_claim", {"agent_name": self.agent_name, "ticket_id": ticket_id})
+        self._remember_event(result)
+        return result
+
+    async def ticket_update(
+        self,
+        ticket_id: str,
+        *,
+        tier: int | None = None,
+        skills_required: list[str] | None = None,
+        exclude_agents: list[str] | None = None,
+        prefer_agents: list[str] | None = None,
+    ) -> dict[str, Any]:
+        arguments: dict[str, Any] = {
+            "agent_name": self.agent_name,
+            "ticket_id": ticket_id,
+        }
+        optional = {
+            "tier": tier,
+            "skills_required": skills_required,
+            "exclude_agents": exclude_agents,
+            "prefer_agents": prefer_agents,
+        }
+        arguments.update({key: value for key, value in optional.items() if value is not None})
+        result = await self._call("ticket_update", arguments)
         self._remember_event(result)
         return result
 
