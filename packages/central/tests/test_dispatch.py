@@ -456,6 +456,110 @@ class DispatchTests(unittest.IsolatedAsyncioTestCase):
             "no_eligible_reviewer",
         )
 
+    async def test_dispatch_projection_is_cross_seat_but_catchup_stays_scoped(
+        self,
+    ) -> None:
+        dashboard_principal = central.Principal(
+            "PR-dashboard", "dashboard", frozenset({"board:read", "board:write"})
+        )
+        await self.add_seat(
+            dashboard_principal,
+            "dashboard-seat",
+            {"can_work": False, "can_review": False},
+        )
+        worker_a = await self.add_seat(
+            self.worker_a, "worker-a", {"tier_max": 2, "can_work": True}
+        )
+        worker_b = await self.add_seat(
+            self.worker_b, "worker-b", {"tier_max": 2, "can_work": True}
+        )
+        reviewer = await self.add_seat(
+            self.reviewer_a,
+            "reviewer-a",
+            {"tier_max": 2, "can_work": False, "can_review": True},
+            role="reviewer",
+        )
+        self.principal = self.admin
+        await self.call(
+            "board_dispatch_policy_set", agent_name="admin-agent", offer_ttl_s=1
+        )
+        with patch.object(central.time, "time", return_value=1000.0):
+            created = await self.create(prefer_agents=[worker_a])
+            ticket_id = created.structured_content["ticket"]["ticket_id"]
+            updated = await self.call(
+                "ticket_update",
+                agent_name="admin-agent",
+                ticket_id=ticket_id,
+                exclude_agents=[worker_a],
+            )
+        self.assertEqual(
+            updated.structured_content["ticket"]["work_offer"]["agent_id"], worker_b
+        )
+        with patch.object(central.time, "time", return_value=1002.0):
+            await self.call("board_reap")
+
+        with patch.object(central.time, "time", return_value=2000.0):
+            review_target = await self.create(prefer_agents=[worker_a])
+        review_ticket_id = review_target.structured_content["ticket"]["ticket_id"]
+        self.principal = self.worker_a
+        with patch.object(central.time, "time", return_value=2000.5):
+            await self.call(
+                "ticket_claim", agent_name="worker-a", ticket_id=review_ticket_id
+            )
+            submitted = await self.call(
+                "ticket_submit",
+                agent_name="worker-a",
+                ticket_id=review_ticket_id,
+                summary="ready",
+            )
+        self.assertEqual(
+            submitted.structured_content["ticket"]["review_offer"]["agent_id"],
+            reviewer,
+        )
+
+        self.principal = dashboard_principal
+        projection = await self.call("board_dispatch_events", limit=100)
+        events = projection.structured_content["events"]
+        kinds = {event["kind"] for event in events}
+        self.assertTrue(
+            {TICKET_OFFERED, REVIEW_OFFERED, OFFER_REVOKED, OFFER_EXPIRED}
+            <= kinds
+        )
+        offered_names = {
+            event.get("offered_agent_name")
+            for event in events
+            if event.get("kind") in {TICKET_OFFERED, REVIEW_OFFERED}
+        }
+        self.assertNotIn("dashboard-seat", offered_names)
+        self.assertTrue(
+            {"worker-a", "worker-b", "reviewer-a"} <= offered_names
+        )
+        for event in events:
+            self.assertNotIn("recipient_identities", event)
+            self.assertNotIn("offered_agent_id", event)
+            self.assertNotIn("payload_ref", event)
+            self.assertNotIn("actor", event)
+
+        scoped = await self.call(
+            "board_catchup",
+            agent_name="dashboard-seat",
+            cursor=0,
+            limit=1000,
+            ack=False,
+            touch=False,
+            max_events=1000,
+        )
+        scoped_kinds = {
+            event["kind"] for event in scoped.structured_content["events"]
+        }
+        self.assertFalse(scoped_kinds & central.DISPATCH_EVENT_KINDS)
+
+        self.principal = central.Principal(
+            "PR-outsider", "outsider", frozenset({"board:read"})
+        )
+        with self.assertRaises(ToolError):
+            await self.call("board_dispatch_events")
+
     async def test_legacy_fleet_keeps_broadcast_claim_behavior(self) -> None:
         root = self.root / "legacy-data"
         mcp, _ = central.build_server("localhost", 8766, root)

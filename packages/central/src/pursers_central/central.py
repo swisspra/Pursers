@@ -163,6 +163,18 @@ DISPATCH_EVENT_FIELDS = frozenset(
         "recipient_identities",
     }
 )
+DISPATCH_PROJECTION_FIELDS = frozenset(
+    {
+        "seq",
+        "kind",
+        "ticket_id",
+        "offer_kind",
+        "offered_agent_name",
+        "offer_expires_at",
+        "dispatch_reason",
+        "occurred_at",
+    }
+)
 DEFAULT_OFFER_TTL_S = 120
 MIN_OFFER_TTL_S = 1
 MAX_OFFER_TTL_S = 86_400
@@ -203,6 +215,9 @@ DEFAULT_CATCHUP_MAX_EVENTS = 200
 MAX_CATCHUP_MAX_EVENTS = 1_000
 DEFAULT_CATCHUP_MAX_BYTES = DEFAULT_SNAPSHOT_MAX_BYTES
 MIN_CATCHUP_MAX_BYTES = MIN_SNAPSHOT_MAX_BYTES
+DEFAULT_DISPATCH_PROJECTION_LIMIT = 25
+MAX_DISPATCH_PROJECTION_LIMIT = 100
+MAX_DISPATCH_PROJECTION_SCAN_EVENTS = 10_000
 MAX_CATCHUP_MAX_BYTES = MAX_SNAPSHOT_MAX_BYTES
 BRIEFING_OPEN_TICKET_LIMIT = 20
 BRIEFING_PINNED_DIGEST_LIMIT = 8
@@ -6724,6 +6739,77 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             "board_id": board_id,
             **compacted,
             "durable_records_untouched": True,
+        }
+
+    @tool()
+    async def board_dispatch_events(
+        board_id: str,
+        limit: int = DEFAULT_DISPATCH_PROJECTION_LIMIT,
+    ) -> dict[str, Any]:
+        """Return a bounded cross-seat projection of recent dispatch events.
+
+        This member-authorized view intentionally omits event actors, recipient
+        identities, agent IDs, and payload references. ``board_catchup`` keeps
+        its recipient-scoped visibility contract.
+        """
+        board_id = require_id("board_id", board_id)
+        if (
+            type(limit) is not int
+            or not 1 <= limit <= MAX_DISPATCH_PROJECTION_LIMIT
+        ):
+            raise ValueError(
+                f"limit must be between 1 and {MAX_DISPATCH_PROJECTION_LIMIT}"
+            )
+        principal = current_principal()
+        require_scope(principal, "board:read")
+        document = service.load(board_id)
+        service.principal_members(document, principal.principal_id)
+
+        latest_cursor = latest_seq(board_id)
+        start = max(0, latest_cursor - MAX_DISPATCH_PROJECTION_SCAN_EVENTS)
+        probe = service.journal.read_after(board_id, start, 1)
+        compacted_through = int(probe["compacted_through"])
+        if probe["resync_required"]:
+            start = compacted_through
+        scan_truncated = compacted_through > 0 or start > compacted_through
+        cursor = start
+        scanned = 0
+        projected: list[dict[str, Any]] = []
+        while (
+            cursor < latest_cursor
+            and scanned < MAX_DISPATCH_PROJECTION_SCAN_EVENTS
+        ):
+            page_limit = min(
+                1_000,
+                latest_cursor - cursor,
+                MAX_DISPATCH_PROJECTION_SCAN_EVENTS - scanned,
+            )
+            page = service.journal.read_after(board_id, cursor, page_limit)
+            if page["resync_required"]:
+                cursor = int(page["compacted_through"])
+                continue
+            rows = page["events"]
+            if not rows:
+                break
+            scanned += len(rows)
+            cursor = int(page["next_cursor"])
+            projected.extend(
+                {
+                    key: copy.deepcopy(event[key])
+                    for key in sorted(DISPATCH_PROJECTION_FIELDS)
+                    if key in event
+                }
+                for event in rows
+                if event.get("kind") in DISPATCH_EVENT_KINDS
+            )
+
+        return {
+            "ok": True,
+            "board_id": board_id,
+            "events": projected[-limit:],
+            "latest_seq": latest_cursor,
+            "scan_count": scanned,
+            "scan_truncated": scan_truncated,
         }
 
     @tool()

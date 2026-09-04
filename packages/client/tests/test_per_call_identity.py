@@ -117,6 +117,7 @@ async def test_bounded_read_parameters_are_forwarded(monkeypatch) -> None:
     monkeypatch.setattr(board, "_call", call)
 
     await board.board_snapshot(limit=50, max_bytes=200_000)
+    await board.board_dispatch_events(limit=25)
     await board.board_catchup(
         cursor=4,
         limit=20,
@@ -128,6 +129,7 @@ async def test_bounded_read_parameters_are_forwarded(monkeypatch) -> None:
 
     assert calls == [
         ("board_snapshot", {"limit": 50, "max_bytes": 200_000}),
+        ("board_dispatch_events", {"limit": 25}),
         (
             "board_catchup",
             {

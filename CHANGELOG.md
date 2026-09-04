@@ -9,6 +9,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
+- Fleet Dashboard seat capability controls (`tier_max`, skills, work/review gates,
+  model, and provider), connector-derived skill suggestions, Central drift checks,
+  and per-board dispatch policy, capability-gap, current-offer, and offer-timeline
+  panels. This part generates capability environment values; automatic runtime
+  consumption remains dependent on unmerged Dispatch Part 2 (`TK-dae93d61ff3d`).
 - Orchestrator mode for the wait bridge (`PURSERS_ROLE=orchestrator`): runs a continuous background subscription across all active registry boards, buffering journal events in a bounded ring buffer (5000 events) and refetching changed tickets via side-effect-free (`touch=false`) catchup with zero board writes while idle.
 - Instant non-blocking MCP tools for leaders/orchestrators (Claude Desktop, Claude Code): `board_digest` (returns tickets, new tickets, status transitions, review details, and `branch_and_commit` note on close), `board_digest_ack` (advances the acknowledged cursor), `board_watch`, and `board_unwatch`.
 - Best-effort MCP resource updates (`board://<home_board_id>/digest`) emitted whenever new events arrive in the digest buffer.
