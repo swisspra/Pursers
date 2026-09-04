@@ -363,6 +363,85 @@ class PerCallWaitTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(result["events"][0]["status_to"], "open")
 
+    async def test_dispatch_offer_sets_offer_reason_and_payload(self) -> None:
+        client = FakeClient()
+        mine = client.identity.agent_id
+        client.tickets["TK-offer"] = {
+            "ticket_id": "TK-offer",
+            "status": "open",
+            "target_url": "pursers/tools/wait-bridge",
+            "dispatch_state": {"state": "offered"},
+            "work_offer": {"agent_id": mine, "expires_at": "later"},
+            "tier": 1,
+            "skills_required": ["python"],
+        }
+
+        async def offered(**arguments: Any) -> dict[str, Any]:
+            return {
+                "events": [
+                    {
+                        "kind": "ticket_created",
+                        "ticket_id": "TK-offer",
+                        "status_to": "open",
+                    },
+                    {"kind": "ticket_offered", "ticket_id": "TK-offer"},
+                ],
+                "next_cursor": int(arguments["cursor"]) + 2,
+                "has_more": False,
+                "resync_required": False,
+            }
+
+        client.board_catchup = offered  # type: ignore[method-assign]
+        result = await wait_server._wait_for_work(
+            client, timeout_s=1, only_mine=False
+        )
+
+        self.assertEqual(result["reason"], "offer")
+        self.assertEqual(
+            result["events"][0]["offer"],
+            {
+                "ticket_id": "TK-offer",
+                "board_id": "pursers",
+                "expires_at": "later",
+                "tier": 1,
+                "skills_required": ["python"],
+            },
+        )
+
+    def test_capability_environment_is_explicit_and_legacy_is_absent(self) -> None:
+        names = (
+            "PURSERS_TIER_MAX", "PURSERS_SKILLS", "PURSERS_CAN_REVIEW",
+            "PURSERS_CAN_WORK", "PURSERS_MODEL", "PURSERS_PROVIDER",
+        )
+        with patch.dict(os.environ, {name: "" for name in names}, clear=False):
+            self.assertIsNone(wait_server._seat_capabilities())
+        with patch.dict(
+            os.environ,
+            {
+                "PURSERS_TIER_MAX": "1",
+                "PURSERS_SKILLS": "docs,python,docs",
+                "PURSERS_CAN_REVIEW": "false",
+                "PURSERS_CAN_WORK": "true",
+                "PURSERS_MODEL": "gpt-test",
+                "PURSERS_PROVIDER": "openai",
+                "PURSERS_HOST": "codex",
+            },
+            clear=False,
+        ):
+            self.assertEqual(
+                wait_server._seat_capabilities(),
+                {
+                    "host": "codex",
+                    "max_parallel": 1,
+                    "tier_max": 1,
+                    "skills": ["docs", "python"],
+                    "can_review": False,
+                    "can_work": True,
+                    "model": "gpt-test",
+                    "provider": "openai",
+                },
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

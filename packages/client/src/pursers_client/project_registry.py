@@ -13,6 +13,13 @@ from mcp import Client
 from mcp.client.streamable_http import streamable_http_client
 
 from .client import GENERATION_META_KEY, BoardClient, BoardClientError
+from .events import (
+    OFFER_EXPIRED,
+    OFFER_REVOKED,
+    REVIEW_LEASE_KINDS,
+    REVIEW_OFFERED,
+    TICKET_OFFERED,
+)
 
 
 PROJECT_REGISTRY_KEY = "project_registry"
@@ -125,6 +132,7 @@ async def wait_for_boards(
     work_dirs: dict[str, str] | None = None,
     project_work_dirs: dict[str, str] | None = None,
     poll_fallback: bool = False,
+    capabilities: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Wait on all authorized board journals in one listen subscription."""
     board_ids = sorted({str(board).strip() for board in boards if str(board).strip()})
@@ -136,10 +144,16 @@ async def wait_for_boards(
         raise RuntimeError("BoardClient is not entered")
     for board_id in board_ids:
         try:
+            join_arguments: dict[str, Any] = {
+                "board_id": board_id,
+                "agent_name": client.agent_name,
+            }
+            if capabilities is not None:
+                join_arguments["capabilities"] = capabilities
             joined = BoardClient._decode(
                 await client._client.call_tool(
                     "board_join",
-                    {"board_id": board_id, "agent_name": client.agent_name},
+                    join_arguments,
                 )
             )
             identities[board_id] = joined["agent_id"]
@@ -178,20 +192,10 @@ async def wait_for_boards(
                 event_seq = event.get("seq")
                 if type(event_seq) is not int:
                     raise RuntimeError("board_catchup event is missing an integer seq")
-                relevant = event.get("kind") in selected_kinds
-                if submitted:
-                    relevant = relevant and event.get("status_to") == "submitted"
-                else:
-                    relevant = relevant and identities[board_id] in event.get(
-                        "recipient_identities", []
-                    )
-                if not relevant:
-                    cursors[board_id] = max(cursors[board_id], event_seq)
-                    continue
-
                 work_dir = work_dirs.get(board_id)
                 enriched = {**event, "board_id": board_id, "work_dir": work_dir}
                 ticket_id = event.get("ticket_id")
+                ticket: dict[str, Any] = {}
                 if ticket_id:
                     try:
                         ticket_result = BoardClient._decode(
@@ -203,10 +207,94 @@ async def wait_for_boards(
                         target = str(
                             ticket_result.get("ticket", {}).get("target_url", "")
                         )
+                        ticket = ticket_result.get("ticket", {})
                         project = target.split("/", 1)[0].casefold()
                         enriched["work_dir"] = project_work_dirs.get(project, work_dir)
                     except BoardClientError:
                         pass
+                kind = event.get("kind")
+                relevant = kind in selected_kinds
+                if submitted and kind == TICKET_OFFERED:
+                    relevant = False
+                elif not submitted and kind == REVIEW_OFFERED:
+                    relevant = False
+                elif kind in {OFFER_EXPIRED, OFFER_REVOKED}:
+                    relevant = event.get("offer_kind") == (
+                        "review" if submitted else "work"
+                    )
+                dispatch_state = ticket.get("dispatch_state")
+                if relevant and isinstance(dispatch_state, dict):
+                    state = dispatch_state.get("state")
+                    offer_kind = "review" if submitted else "work"
+                    offer = ticket.get(f"{offer_kind}_offer")
+                    lifecycle = event.get("kind") in {OFFER_EXPIRED, OFFER_REVOKED}
+                    if lifecycle:
+                        relevant = (
+                            event.get("offer_kind") == offer_kind
+                            and event.get("offered_agent_id") == identities[board_id]
+                        )
+                    elif submitted:
+                        lease = ticket.get("review_lease")
+                        relevant = bool(
+                            (
+                                event.get("kind") == REVIEW_OFFERED
+                                and isinstance(offer, dict)
+                                and offer.get("agent_id") == identities[board_id]
+                            )
+                            or (
+                                event.get("kind") in REVIEW_LEASE_KINDS
+                                and (
+                                    event.get("reviewer_agent_id")
+                                    == identities[board_id]
+                                    or (
+                                        isinstance(lease, dict)
+                                        and lease.get("reviewer_agent_id")
+                                        == identities[board_id]
+                                    )
+                                )
+                            )
+                            or (
+                                state == "broadcast"
+                                and event.get("kind")
+                                in {"ticket_status_changed", "ticket_submitted", "ticket_resubmitted"}
+                                and event.get("status_to") == "submitted"
+                            )
+                        )
+                    else:
+                        relevant = bool(
+                            (
+                                event.get("kind") == TICKET_OFFERED
+                                and isinstance(offer, dict)
+                                and offer.get("agent_id") == identities[board_id]
+                            )
+                            or ticket.get("claimed_by_agent_id") == identities[board_id]
+                            or (state == "broadcast" and ticket.get("status") == "open")
+                        )
+                    expected_offer_kind = (
+                        REVIEW_OFFERED if submitted else TICKET_OFFERED
+                    )
+                    if (
+                        relevant
+                        and event.get("kind") == expected_offer_kind
+                        and isinstance(offer, dict)
+                    ):
+                        enriched["offer"] = {
+                            "ticket_id": ticket_id,
+                            "board_id": board_id,
+                            "expires_at": offer.get("expires_at"),
+                            "tier": ticket.get("tier", 2),
+                            "skills_required": list(ticket.get("skills_required") or []),
+                        }
+                elif relevant:
+                    if submitted:
+                        relevant = event.get("status_to") == "submitted"
+                    else:
+                        relevant = identities[board_id] in event.get(
+                            "recipient_identities", []
+                        )
+                if not relevant:
+                    cursors[board_id] = max(cursors[board_id], event_seq)
+                    continue
                 cursors[board_id] = max(cursors[board_id], event_seq)
                 found.append(enriched)
                 pending = index + 1 < len(page) or bool(result.get("has_more"))
@@ -223,6 +311,16 @@ async def wait_for_boards(
         return [], True
 
     def response(events: list[dict[str, Any]]) -> dict[str, Any]:
+        reason = "timeout"
+        if events:
+            reason = (
+                "offer"
+                if any(
+                    event.get("kind") in {TICKET_OFFERED, REVIEW_OFFERED}
+                    for event in events
+                )
+                else "journal"
+            )
         return {
             "new_seq": dict(cursors),
             "events": events,
@@ -230,6 +328,7 @@ async def wait_for_boards(
             "waited_s": round(time.monotonic() - started, 2),
             "boards": active,
             "skipped_boards": skipped,
+            "reason": reason,
         }
 
     if not active:
@@ -255,7 +354,14 @@ async def wait_for_boards(
             await asyncio.sleep(min(2.0, max(0.0, deadline - time.monotonic())))
         return response([])
 
-    resources = [f"board://{board}/journal" for board in active]
+    resources = [
+        uri
+        for board in active
+        for uri in (
+            f"board://{board}/journal",
+            f"board://{board}/agent/{identities[board]}",
+        )
+    ]
     events: list[dict[str, Any]] = []
     try:
         async with asyncio.timeout(timeout_s):

@@ -140,6 +140,46 @@ LEAK_PATTERNS = {
 }
 
 
+def _capability_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name, "").strip().lower()
+    if not raw:
+        return default
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be true or false")
+
+
+def _seat_capabilities() -> dict[str, Any]:
+    try:
+        tier_max = int(os.environ.get("PURSERS_TIER_MAX", "2"))
+    except ValueError as exc:
+        raise ValueError("PURSERS_TIER_MAX must be 1, 2, or 3") from exc
+    if tier_max not in {1, 2, 3}:
+        raise ValueError("PURSERS_TIER_MAX must be 1, 2, or 3")
+    capabilities: dict[str, Any] = {
+        "tier_max": tier_max,
+        "skills": sorted({
+            item.strip()
+            for item in os.environ.get("PURSERS_SKILLS", "").split(",")
+            if item.strip()
+        }),
+        "can_review": _capability_bool("PURSERS_CAN_REVIEW", ROLE == "reviewer"),
+        "can_work": _capability_bool("PURSERS_CAN_WORK", ROLE == "worker"),
+        "host": os.environ.get("PURSERS_HOST", "headless").strip() or "headless",
+        "max_parallel": 1,
+    }
+    for env_name, field in (
+        ("PURSERS_MODEL", "model"),
+        ("PURSERS_PROVIDER", "provider"),
+    ):
+        value = os.environ.get(env_name, "").strip()
+        if value:
+            capabilities[field] = value
+    return capabilities
+
+
 def _operator_marker_patterns() -> tuple[list[re.Pattern[str]], Path]:
     marker_path = Path(
         os.environ.get(LEAK_MARKERS_ENV, DEFAULT_LEAK_MARKERS_FILE)
@@ -384,6 +424,7 @@ def _load_client() -> tuple[Any, ...]:
     try:
         from pursers_client import (
             BoardClient,
+            DISPATCH_KINDS,
             PROJECT_REGISTRY_KEY,
             SUBMITTED_RELEVANT_KINDS,
             active_registry_boards,
@@ -398,6 +439,7 @@ def _load_client() -> tuple[Any, ...]:
         ) from exc
     return (
         BoardClient,
+        DISPATCH_KINDS,
         PROJECT_REGISTRY_KEY,
         SUBMITTED_RELEVANT_KINDS,
         active_registry_boards,
@@ -498,6 +540,99 @@ def _print(value: Any) -> None:
     print(json.dumps(value, indent=2, ensure_ascii=False, sort_keys=True))
 
 
+async def _event_for_seat(
+    client: Any, event: dict[str, Any], *, submitted: bool, board_id: str
+) -> dict[str, Any] | None:
+    ticket_id = event.get("ticket_id")
+    if not ticket_id:
+        return None
+    kind = event.get("kind")
+    if submitted and kind == "ticket_offered":
+        return None
+    if not submitted and kind == "review_offered":
+        return None
+    if kind in {"offer_expired", "offer_revoked"}:
+        return event if (
+            event.get("offer_kind") == ("review" if submitted else "work")
+            and event.get("offered_agent_id") == client.identity.agent_id
+        ) else None
+    try:
+        ticket = (await client.ticket_get(ticket_id)).get("ticket", {})
+    except AttributeError:
+        return event
+    except Exception:
+        return None
+    state = ticket.get("dispatch_state")
+    if not isinstance(state, dict):
+        if submitted:
+            return event if event.get("status_to") == "submitted" else None
+        return (
+            event
+            if client.identity.agent_id in event.get("recipient_identities", [])
+            else None
+        )
+    offer_kind = "review" if submitted else "work"
+    offer = ticket.get(f"{offer_kind}_offer")
+    expected = "review_offered" if submitted else "ticket_offered"
+    if submitted:
+        lease = ticket.get("review_lease")
+        relevant = bool(
+            (
+                kind == expected
+                and isinstance(offer, dict)
+                and offer.get("agent_id") == client.identity.agent_id
+            )
+            or (
+                kind
+                in {
+                    "ticket_review_claimed",
+                    "review_lease_expired",
+                    "review_lease_released",
+                }
+                and (
+                    event.get("reviewer_agent_id") == client.identity.agent_id
+                    or (
+                        isinstance(lease, dict)
+                        and lease.get("reviewer_agent_id")
+                        == client.identity.agent_id
+                    )
+                )
+            )
+            or (
+                state.get("state") == "broadcast"
+                and kind
+                in {
+                    "ticket_status_changed",
+                    "ticket_submitted",
+                    "ticket_resubmitted",
+                }
+                and event.get("status_to") == "submitted"
+            )
+        )
+    else:
+        relevant = bool(
+            (
+                kind == expected
+                and isinstance(offer, dict)
+                and offer.get("agent_id") == client.identity.agent_id
+            )
+            or ticket.get("claimed_by_agent_id") == client.identity.agent_id
+            or (state.get("state") == "broadcast" and ticket.get("status") == "open")
+        )
+    if not relevant:
+        return None
+    selected = dict(event)
+    if kind == expected and isinstance(offer, dict):
+        selected["offer"] = {
+            "ticket_id": ticket_id,
+            "board_id": board_id,
+            "expires_at": offer.get("expires_at"),
+            "tier": ticket.get("tier", 2),
+            "skills_required": list(ticket.get("skills_required") or []),
+        }
+    return selected
+
+
 async def _cmd_wait(
     client: Any,
     board_id: str,
@@ -513,6 +648,7 @@ async def _cmd_wait(
     registry_project_work_dirs: Any = None,
     wait_for_boards: Any = None,
     submitted_relevant_kinds: frozenset[str] | None = None,
+    dispatch_kinds: frozenset[str] | None = None,
 ) -> None:
     """Return one relevant event or a bounded timeout/re-arm response."""
     if timeout_s < 1:
@@ -527,7 +663,7 @@ async def _cmd_wait(
         frozenset(submitted_relevant_kinds or ())
         if submitted
         else frozenset({"ticket_created", "ticket_status_changed"})
-    )
+    ) | frozenset(dispatch_kinds or ())
 
     if boards != "home":
         if wait_for_boards is None:
@@ -550,6 +686,7 @@ async def _cmd_wait(
             work_dirs=registry_work_dirs(registry) if registry else {},
             project_work_dirs=registry_project_work_dirs(registry) if registry else {},
             poll_fallback=poll_fallback,
+            capabilities=_seat_capabilities(),
         )
         _print(result)
         return
@@ -578,18 +715,12 @@ async def _cmd_wait(
             for event in page.get("events", []):
                 if event.get("kind") not in kinds:
                     continue
-                if (
-                    submitted
-                    and event.get("kind") == "ticket_status_changed"
-                    and event.get("status_to") != "submitted"
-                ):
-                    continue
-                if not submitted and client.identity.agent_id not in event.get(
-                    "recipient_identities", []
-                ):
-                    continue
-                events.append(event)
-                break
+                selected = await _event_for_seat(
+                    client, event, submitted=submitted, board_id=board_id
+                )
+                if selected is not None:
+                    events.append(selected)
+                    break
             if not events:
                 await asyncio.sleep(min(2.0, max(0, deadline - time.monotonic())))
     else:
@@ -616,13 +747,12 @@ async def _cmd_wait(
                 )
                 async with aclosing(event_stream):
                     async for event in event_stream:
-                        if (
-                            submitted
-                            and event.get("kind") == "ticket_status_changed"
-                            and event.get("status_to") != "submitted"
-                        ):
+                        selected = await _event_for_seat(
+                            client, event, submitted=submitted, board_id=board_id
+                        )
+                        if selected is None:
                             continue
-                        events.append(event)
+                        events.append(selected)
                         remember_cursor(event.get("seq", cursor))
                         # One cue is intentional: callers refetch authoritative
                         # state, then re-arm from the returned cursor.
@@ -631,11 +761,20 @@ async def _cmd_wait(
             pass
 
     timed_out = not events
+    reason = (
+        "offer"
+        if any(
+            event.get("kind") in {"ticket_offered", "review_offered"}
+            for event in events
+        )
+        else "journal" if events else "timeout"
+    )
     _print({
         "new_seq": cursor,
         "events": events,
         "waited_s": round(time.monotonic() - started, 2),
         "timed_out": timed_out,
+        "reason": reason,
     })
 
 
@@ -653,7 +792,9 @@ async def _execute(args: argparse.Namespace) -> None:
         registry_key = active_boards = parse_registry = None
         project_work_dirs_for_registry = work_dirs_for_registry = wait_many = None
         submitted_kinds = None
-    else:
+        dispatch_kinds = frozenset()
+        supports_capabilities = False
+    elif len(loaded) == 8:
         (
             BoardClient,
             registry_key,
@@ -664,6 +805,21 @@ async def _execute(args: argparse.Namespace) -> None:
             work_dirs_for_registry,
             wait_many,
         ) = loaded
+        dispatch_kinds = frozenset()
+        supports_capabilities = False
+    else:
+        (
+            BoardClient,
+            dispatch_kinds,
+            registry_key,
+            submitted_kinds,
+            active_boards,
+            parse_registry,
+            project_work_dirs_for_registry,
+            work_dirs_for_registry,
+            wait_many,
+        ) = loaded
+        supports_capabilities = True
     central_url = os.environ["ONBOARD_CENTRAL_URL"]
     token = os.environ["ONBOARD_CENTRAL_TOKEN"]
     board_id = os.environ["ONBOARD_BOARD_ID"]
@@ -671,7 +827,10 @@ async def _execute(args: argparse.Namespace) -> None:
     async with BoardClient(
         central_url, token, board_id, agent_name=agent_name
     ) as client:
-        await client.board_join()
+        if supports_capabilities:
+            await client.board_join(capabilities=_seat_capabilities())
+        else:
+            await client.board_join()
         registry = None
         if not legacy_client_only:
             try:
@@ -697,6 +856,7 @@ async def _execute(args: argparse.Namespace) -> None:
                 registry_project_work_dirs=project_work_dirs_for_registry,
                 wait_for_boards=wait_many,
                 submitted_relevant_kinds=submitted_kinds,
+                dispatch_kinds=dispatch_kinds,
             )
             return
         target_board = getattr(args, "board", None) or board_id
@@ -728,7 +888,14 @@ async def _execute(args: argparse.Namespace) -> None:
                     emit(await target.ticket_get(args.ticket_id))
                     return
                 if args.command == "claim":
-                    emit(await target.ticket_claim(args.ticket_id))
+                    result = await target.ticket_claim(args.ticket_id)
+                    error = result.get("error", {})
+                    if error.get("code") == "claim_not_offered":
+                        result = {
+                            **result,
+                            "message": "this ticket was offered to another seat; wait for your own offer",
+                        }
+                    emit(result)
                     return
                 if args.command == "renew":
                     emit(await target.lease_renew(args.ticket_id))
@@ -755,7 +922,14 @@ async def _execute(args: argparse.Namespace) -> None:
                     emit(await target.ticket_get(args.ticket_id))
                     return
                 if args.command == "review-claim":
-                    emit(await target.ticket_review_claim(args.ticket_id))
+                    result = await target.ticket_review_claim(args.ticket_id)
+                    error = result.get("error", {})
+                    if error.get("code") == "review_not_offered":
+                        result = {
+                            **result,
+                            "message": "this ticket was offered to another seat; wait for your own offer",
+                        }
+                    emit(result)
                     return
                 if args.command == "renew":
                     emit(await target.lease_renew(args.ticket_id))
@@ -831,6 +1005,10 @@ async def _execute(args: argparse.Namespace) -> None:
             async with BoardClient(
                 central_url, token, target_board, agent_name=agent_name
             ) as target:
+                if supports_capabilities:
+                    await target.board_join(capabilities=_seat_capabilities())
+                else:
+                    await target.board_join()
                 await run(target)
         return
 
@@ -869,6 +1047,13 @@ def _board_shell(
     token_file: Path,
     ca_file: Path,
     python: Path,
+    tier_max: int,
+    skills: str,
+    can_review: bool,
+    can_work: bool,
+    host: str,
+    model: str | None = None,
+    provider: str | None = None,
 ) -> str:
     values = {
         "agent": shlex.quote(name),
@@ -877,6 +1062,10 @@ def _board_shell(
         "token": shlex.quote(str(token_file)),
         "ca": shlex.quote(str(ca_file)),
         "python": shlex.quote(str(python)),
+        "skills": shlex.quote(skills),
+        "host": shlex.quote(host),
+        "model": shlex.quote(model or ""),
+        "provider": shlex.quote(provider or ""),
     }
     return f'''#!/bin/sh
 set -eu
@@ -904,6 +1093,13 @@ export ONBOARD_CENTRAL_TOKEN
 export ONBOARD_CENTRAL_URL=${{PURSERS_CENTRAL_URL:-{values["url"]}}}
 export ONBOARD_BOARD_ID=${{PURSERS_BOARD:-{values["board"]}}}
 export ONBOARD_AGENT_NAME={values["agent"]}
+export PURSERS_TIER_MAX={tier_max}
+export PURSERS_SKILLS={values["skills"]}
+export PURSERS_CAN_REVIEW={str(can_review).lower()}
+export PURSERS_CAN_WORK={str(can_work).lower()}
+export PURSERS_HOST={values["host"]}
+export PURSERS_MODEL={values["model"]}
+export PURSERS_PROVIDER={values["provider"]}
 export SSL_CERT_FILE="$CA_FILE"
 
 exec {values["python"]} "$SCRIPT_DIR/board.py" "$@"
@@ -945,9 +1141,9 @@ bin/board.sh submit <TK> <summary> <notes> <files-csv> --board <id>
 bin/board.sh wait --since '<cursor-or-json-map>' [--boards registry|home|<id,id>]"""
         loop = """Run this loop continuously:
 
-1. **WAIT** -- `bin/board.sh wait --since '<cursor-or-json-map>'` subscribes to every active registry board. Returns `{new_seq, events, timed_out, boards, skipped_boards}`; each event carries `board_id` and `work_dir`. Re-arm with the entire returned `new_seq` map.
-2. **UNDERSTAND** -- `bin/board.sh get <TK> --board <id>` using the event's board. Its output repeats the registered `work_dir`; never guess or use another project tree.
-3. **CLAIM** -- `bin/board.sh claim <TK> --board <id>`. If the claim fails (race lost), go back to WAIT.
+1. **WAIT** -- `bin/board.sh wait --since '<cursor-or-json-map>'` subscribes to every active registry board and returns only this seat's offer, held-ticket events, or legacy fallback broadcast. Re-arm with the entire returned `new_seq` map.
+2. **UNDERSTAND** -- Use the offer's `ticket_id`, `board_id`, and registered `work_dir`; never guess or use another project tree.
+3. **CLAIM** -- Claim only a ticket offered to this seat. Never claim an unoffered ticket. If the offer expired, was revoked, or belongs to another seat, go back to WAIT.
 4. **DO** -- Work only in the returned `work_dir`. Run `bin/board.sh renew <TK> --board <id>` every ~10 minutes.
 5. **SUBMIT** -- `bin/board.sh submit <TK> <summary> <notes> <files-csv> --board <id>`.
 6. **AWAIT REVIEW** -- Keep the same ticket slot occupied. WAIT, then GET that ticket after a cue. If rejected, follow fix instructions and resubmit; if approved/closed, release the slot.
@@ -967,9 +1163,9 @@ bin/board.sh reject <TK> <notes> <fix> --board <id>
 bin/board.sh wait --submitted --since '<cursor-or-json-map>' [--boards registry|home|<id,id>]"""
         loop = """Run this loop continuously:
 
-1. **WAIT** -- `bin/board.sh wait --submitted --since '<cursor-or-json-map>'` fans out across every active registry board. Re-arm with the entire returned `new_seq` map.
-2. **LIST** -- `bin/board.sh list --board <id>` returns only unclaimed submitted tickets and shows each ticket's `review_state`.
-3. **CLAIM** -- `bin/board.sh review-claim <TK> --board <id>` before verification. If another reviewer won, return directly to WAIT.
+1. **WAIT** -- `bin/board.sh wait --submitted --since '<cursor-or-json-map>'` returns only this reviewer's offer, held-review events, or legacy fallback broadcast. Re-arm with the entire returned `new_seq` map.
+2. **UNDERSTAND** -- Use the review offer's `ticket_id`, `board_id`, and registered `work_dir`.
+3. **CLAIM** -- Review-claim only a ticket offered to this seat. Never claim an unoffered review. If the offer expired, was revoked, or belongs to another reviewer, return directly to WAIT.
 4. **VERIFY** -- Use the event's board: `bin/board.sh get <TK> --board <id>`, then `bin/board.sh verify <TK> --board <id>`. Add `--run-suites` only when the ticket carries allow-listed pytest/unittest commands. Renew every ~5 minutes with `bin/board.sh renew <TK> --board <id>`.
 5. **HARD REVIEW** -- Complete every item in the checklist below against the exact submitted SHA and ticket dependencies.
 6. **APPROVE/REJECT** -- Approve only with mechanically accepted evidence notes. Reject with concrete non-empty fix instructions when any check fails; both verdict commands ensure the lease is held.
@@ -1030,6 +1226,17 @@ def generate(args: argparse.Namespace) -> Path:
     ca_file = Path(args.ca_file).expanduser().resolve()
     repo_leaf = _repo_leaf(args.repo) if args.repo else None
     python = Path(args.python).expanduser().resolve()
+    skills = ",".join(
+        sorted({item.strip() for item in args.skills.split(",") if item.strip()})
+    )
+    can_review = args.can_review if args.can_review is not None else args.role == "reviewer"
+    can_work = args.role == "worker"
+    host = {
+        "codex": "codex",
+        "goose": "goose",
+        "claude": "claude-code",
+        "generic": "headless",
+    }[args.client]
 
     if dest.exists() and any(dest.iterdir()) and not args.upgrade:
         raise ValueError(f"destination is not empty: {dest}")
@@ -1070,6 +1277,13 @@ def generate(args: argparse.Namespace) -> Path:
             token_file=token_file,
             ca_file=ca_file,
             python=python,
+            tier_max=args.tier_max,
+            skills=skills,
+            can_review=can_review,
+            can_work=can_work,
+            host=host,
+            model=args.model,
+            provider=args.provider,
         ),
         0o755,
     )
@@ -1105,6 +1319,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--repo")
     parser.add_argument("--board", default="pursers")
+    parser.add_argument("--tier-max", type=int, choices=(1, 2, 3), default=2)
+    parser.add_argument("--skills", default="", help="comma-separated dispatch skills")
+    parser.add_argument(
+        "--can-review",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="declare review capability (defaults true for reviewer seats)",
+    )
+    parser.add_argument("--model")
+    parser.add_argument("--provider")
     parser.add_argument(
         "--client", choices=("goose", "codex", "claude", "generic"), default="generic"
     )

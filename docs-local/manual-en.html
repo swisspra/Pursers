@@ -319,9 +319,15 @@ ONBOARD_CENTRAL_TOKEN = "&lt;JWT&gt;"
 ONBOARD_AGENT_NAME = "team-worker"
 ONBOARD_AGENT_INSTANCE = "window-a"
 PURSERS_HOST = "codex"
+PURSERS_TIER_MAX = "2"
+PURSERS_SKILLS = "python,docs"
+PURSERS_CAN_WORK = "true"
+PURSERS_CAN_REVIEW = "false"
 SSL_CERT_FILE = "&lt;ca_bundle_path&gt;"</code></pre>
       <p><code>ONBOARD_BOARD_ID</code> is the home board. <code>SSL_CERT_FILE</code> is needed only when the Central endpoint uses a private certificate authority. The bridge authenticates with the same JWT identity as its board calls. Central accepts JWT authentication only, and the principal must already be admitted to every requested board through <code>board_member_add</code> or <code>board_invite</code>.</p>
       <p>Push wait is now the default: the bridge holds <code>subscriptions/listen</code> on the journal and per-seat cue, then performs a side-effect-free refetch. Set <code>PURSERS_WAIT_MODE=poll</code> only as an explicit compatibility fallback. A subscription failure degrades only that board for the current call, logs the failure, and retries push on the next re-arm.</p>
+      <h3>How work reaches a seat</h3>
+      <p>Capability-aware seats declare their maximum tier, skills, work/review flags, host, and optional model/provider when they join and after a subscription reconnect. On a dispatch board, a worker wakes only for its own work offer, offer expiry or revocation, and tickets it already holds. A reviewer wakes only for its own review offer and review-lease events. Offer returns use <code>reason="offer"</code> and include the ticket, board, expiry, tier, and required skills. Never claim an unoffered ticket; after expiry, re-arm and wait. A seat with no capability variables keeps legacy broadcast behavior.</p>
       <h3>Host timeout profiles</h3>
       <table>
         <thead><tr><th><code>PURSERS_HOST</code></th><th>Recommended host/tool timeout</th><th>Maximum wait block</th><th>Host note</th></tr></thead>
@@ -393,7 +399,7 @@ Never review your own work, never push main, stay in the registered work_dir for
   timeout_s=560
 )</code></pre>
       <p>The response returns a cursor per board. Persist the returned <code>new_seq</code> map for the next wait. On <code>timed_out=true</code>, re-arm immediately with that cursor; a timeout is a normal host-safe rotation. An event is only a wake-up hint, so refetch the ticket before claiming it.</p>
-      <p><code>wait_for="auto"</code> derives the queue from the joined role: workers wait for claimable tickets and reviewers wait for submissions. An explicit <code>wait_for="submitted"</code> requires <code>board:review</code>. The response <code>reason</code> is <code>journal</code>, <code>backlog</code>, or <code>timeout</code>. An unchanged backlog cue is returned once per bridge process, then suppressed until the ticket changes; restarting the bridge may surface it once again.</p>
+      <p><code>wait_for="auto"</code> derives the queue from the joined role: workers wait for claimable tickets and reviewers wait for submissions. An explicit <code>wait_for="submitted"</code> requires <code>board:review</code>. The response <code>reason</code> is <code>offer</code>, <code>journal</code>, <code>backlog</code>, or <code>timeout</code>. An unchanged legacy backlog cue is returned once per bridge process, then suppressed until the ticket changes; restarting the bridge may surface it once again.</p>
       <p>Generated CLI seats use <code>/PATH/TO/Pursers-local/bin/board.sh wait --since '&lt;cursor-or-json-map&gt;'</code>. Registry fan-out is the default: one subscription covers every active project board, events include <code>board_id</code> and <code>work_dir</code>, and the complete returned cursor map must be passed back on re-arm. Route later verbs with <code>--board &lt;id&gt;</code>; use <code>--boards home</code> only for legacy single-board behavior. The explicit poll-only compatibility path is <code>board.sh wait --poll</code>; do not loop <code>board.sh list</code>.</p>
 
       <h3>Sample seat prompt</h3>

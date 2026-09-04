@@ -945,6 +945,21 @@ class OrchestratorModeTests(unittest.IsolatedAsyncioTestCase):
                     "status_to": "open",
                 })
                 engine.seen_event_ids.add(f"EV-uncached-{i}")
+            engine.ticket_cache[f"{wait_server.BOARD_ID}:TK-uncached-0"] = {
+                "ticket_id": "TK-uncached-0",
+                "status": "open",
+                "dispatch_state": {"state": "offered", "kind": "work"},
+                "work_offer": {"agent_id": "AI-worker", "expires_at": "later"},
+            }
+            engine.ticket_cache[f"{wait_server.BOARD_ID}:TK-uncached-1"] = {
+                "ticket_id": "TK-uncached-1",
+                "status": "open",
+                "dispatch_state": {
+                    "state": "unassignable",
+                    "kind": "work",
+                    "reason": "no_eligible_worker",
+                },
+            }
 
             class UnreachableClient:
                 def __getattr__(self, name):
@@ -979,3 +994,18 @@ class OrchestratorModeTests(unittest.IsolatedAsyncioTestCase):
             # All 12 uncached tickets present and properly constructed
             self.assertEqual(len(digest["tickets"]), 12)
             self.assertTrue(all(t["status_now"] == "open" for t in digest["tickets"]))
+            offered = next(
+                ticket for ticket in digest["tickets"]
+                if ticket["ticket_id"] == "TK-uncached-0"
+            )
+            self.assertEqual(offered["dispatch_state"]["state"], "offered")
+            self.assertEqual(offered["offers"]["work_offer"]["agent_id"], "AI-worker")
+            self.assertEqual(
+                digest["unassignable_tickets"],
+                [{
+                    "board_id": wait_server.BOARD_ID,
+                    "ticket_id": "TK-uncached-1",
+                    "reason": "no_eligible_worker",
+                    "kind": "work",
+                }],
+            )

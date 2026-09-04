@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
@@ -968,7 +969,7 @@ class BoardClient:
         acknowledge: bool = True,
         touch: bool | None = None,
         cursor_callback: Callable[[int], None] | None = None,
-        subscription_callback: Callable[[], None] | None = None,
+        subscription_callback: Callable[[], Any] | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         """Open live first, drain/dedup, then reconnect and drain after stream loss.
 
@@ -1034,7 +1035,9 @@ class BoardClient:
                                             f"{sorted(missing)}"
                                         )
                                     if subscription_callback is not None:
-                                        subscription_callback()
+                                        callback_result = subscription_callback()
+                                        if inspect.isawaitable(callback_result):
+                                            await callback_result
                                     while self._local_events:
                                         event = self._local_events.pop(0)
                                         seen.add(event["id"])

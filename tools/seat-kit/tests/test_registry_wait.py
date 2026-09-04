@@ -181,6 +181,86 @@ def test_reviewer_home_wait_wakes_on_release_and_expiry() -> None:
         assert result["events"][0]["kind"] == kind
 
 
+def test_worker_home_wait_returns_only_its_dispatch_offer() -> None:
+    module = generated("worker")
+
+    class HomeClient:
+        identity = SimpleNamespace(agent_id="AI-worker-b")
+
+        async def ticket_get(self, ticket_id):
+            offered_to = "AI-worker-a" if ticket_id == "TK-other" else "AI-worker-b"
+            return {"ticket": {
+                "ticket_id": ticket_id,
+                "status": "open",
+                "dispatch_state": {"state": "offered"},
+                "work_offer": {"agent_id": offered_to, "expires_at": "later"},
+                "tier": 1 if ticket_id == "TK-mine" else 3,
+                "skills_required": ["python"],
+            }}
+
+        async def events(
+            self, from_cursor=None, *, only_mine=True, kinds=None,
+            resource_subscriptions=None, acknowledge=True, touch=None,
+            cursor_callback=None,
+        ):
+            yield {"seq": 1, "kind": "ticket_created", "ticket_id": "TK-mine"}
+            yield {"seq": 2, "kind": "ticket_offered", "ticket_id": "TK-other"}
+            yield {"seq": 3, "kind": "ticket_offered", "ticket_id": "TK-mine"}
+
+    output = io.StringIO()
+    with redirect_stdout(output):
+        asyncio.run(module._cmd_wait(
+            HomeClient(), "pursers", 0, 1,
+            dispatch_kinds=frozenset({"ticket_offered"}),
+        ))
+
+    result = json.loads(output.getvalue())
+    assert result["reason"] == "offer"
+    assert [event["ticket_id"] for event in result["events"]] == ["TK-mine"]
+    assert result["events"][0]["offer"]["skills_required"] == ["python"]
+
+
+def test_reviewer_home_wait_suppresses_another_reviewers_offer() -> None:
+    module = generated("reviewer")
+
+    class HomeClient:
+        identity = SimpleNamespace(agent_id="AI-reviewer-b")
+
+        async def ticket_get(self, ticket_id):
+            offered_to = (
+                "AI-reviewer-a" if ticket_id == "TK-other" else "AI-reviewer-b"
+            )
+            return {"ticket": {
+                "ticket_id": ticket_id,
+                "status": "submitted",
+                "dispatch_state": {"state": "offered"},
+                "review_offer": {"agent_id": offered_to, "expires_at": "later"},
+            }}
+
+        async def events(
+            self, from_cursor=None, *, only_mine=True, kinds=None,
+            resource_subscriptions=None, acknowledge=True, touch=None,
+            cursor_callback=None,
+        ):
+            yield {
+                "seq": 1, "kind": "ticket_status_changed",
+                "status_to": "submitted", "ticket_id": "TK-mine",
+            }
+            yield {"seq": 2, "kind": "review_offered", "ticket_id": "TK-other"}
+            yield {"seq": 3, "kind": "review_offered", "ticket_id": "TK-mine"}
+
+    output = io.StringIO()
+    with redirect_stdout(output):
+        asyncio.run(module._cmd_wait(
+            HomeClient(), "pursers", 0, 1, submitted=True,
+            submitted_relevant_kinds=SUBMITTED_RELEVANT_KINDS,
+        ))
+
+    result = json.loads(output.getvalue())
+    assert result["reason"] == "offer"
+    assert [event["ticket_id"] for event in result["events"]] == ["TK-mine"]
+
+
 def test_all_routed_verbs_accept_board_flag() -> None:
     for role, commands in {
         "worker": [["list"], ["get", "TK-x"], ["claim", "TK-x"],

@@ -14,12 +14,20 @@ python tools/seat-kit/seat_new.py \
   --ca-file /path/to/central-ca.pem \
   --repo https://github.com/example/Pursers.git \
   --board pursers \
-  --client codex
+  --client codex \
+  --tier-max 2 \
+  --skills python,docs \
+  --no-can-review
 ```
 
 `--repo` is optional. When supplied, the repository is cloned beneath the seat
 using its repository basename. Without it, install `pursers-client` in the
 Python environment used by the seat.
+
+`--tier-max`, `--skills`, and `--can-review`/`--no-can-review` write the
+dispatch capability environment into `bin/board.sh`. The generated seat also
+declares whether it can work, plus its host and optional `--model` and
+`--provider`, on every board join.
 
 The destination must be new or empty. The generator creates:
 
@@ -115,6 +123,16 @@ Approval notes must contain a full 40-hex SHA, a real `N passed`, `Ran N tests`,
 Rejecting is normal and cheap; a wrong approval is expensive.
 
 ## Wait verb
+
+### How work reaches a seat
+
+On dispatch-enabled boards, a generated worker wakes only for its own work
+offer, an expiry or revocation of that offer, or events for a ticket it already
+holds. A reviewer wakes only for its own review offer and review-lease events.
+The event contains the offer expiry, tier, and required skills. Claim only the
+ticket offered to this seat; if it expires, re-arm and wait. Claiming a ticket
+offered to another seat prints: `this ticket was offered to another seat; wait
+for your own offer`. Boards without dispatch keep legacy broadcast behavior.
 
 Worker seats include:
 

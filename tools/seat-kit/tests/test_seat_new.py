@@ -207,6 +207,29 @@ def test_worker_and_reviewer_variants_have_only_their_commands(tmp_path: Path) -
     assert 'commands.add_parser("verify")' in reviewer_py
 
 
+def test_generator_writes_dispatch_capabilities_and_offer_guidance(tmp_path: Path) -> None:
+    parsed = args(tmp_path, role="worker", client="codex")
+    parsed.tier_max = 1
+    parsed.skills = "python, docs,python"
+    parsed.can_review = False
+    parsed.model = "gpt-test"
+    parsed.provider = "openai"
+    dest = seat_new.generate(parsed)
+
+    shell = (dest / "bin" / "board.sh").read_text(encoding="utf-8")
+    guidance = (dest / "AGENTS.md").read_text(encoding="utf-8")
+    generated_py = (dest / "bin" / "board.py").read_text(encoding="utf-8")
+    assert "export PURSERS_TIER_MAX=1" in shell
+    assert "export PURSERS_SKILLS=docs,python" in shell
+    assert "export PURSERS_CAN_REVIEW=false" in shell
+    assert "export PURSERS_CAN_WORK=true" in shell
+    assert "export PURSERS_HOST=codex" in shell
+    assert "export PURSERS_MODEL=gpt-test" in shell
+    assert "export PURSERS_PROVIDER=openai" in shell
+    assert "Claim only a ticket offered to this seat" in guidance
+    assert "this ticket was offered to another seat; wait for your own offer" in generated_py
+
+
 def test_reviewer_checklist_matches_both_generated_hints_and_docs(tmp_path: Path) -> None:
     reviewer = seat_new.generate(args(tmp_path, role="reviewer"))
     checklist = seat_new.HARD_VERIFY_CHECKLIST

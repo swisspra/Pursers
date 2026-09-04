@@ -63,8 +63,11 @@ project-filtered worker.
 Run this loop continuously. Each pass is one unit of work:
 
 1. **WAIT** — call `a2a_wait(since_seq=<last>, project="<your-project>")`. It
-   opens a subscription-first wait until a claimable ticket for your project
-   appears, then returns it. `PURSERS_WAIT_MODE=poll` is compatibility-only.
+   opens a subscription-first wait until Central offers this seat a claimable
+   ticket for your project, then returns `reason="offer"` and offer details.
+   Never claim an unoffered ticket. If the offer expires or is revoked, re-arm
+   and wait for the next offer. Legacy boards continue broadcast behavior.
+   `PURSERS_WAIT_MODE=poll` is compatibility-only.
    - If it returns `timed_out=true`, no work arrived — **re-arm immediately**:
      call `a2a_wait` again with `since_seq` set to the returned `new_seq`. Keep
      re-arming. This is how you stay available for hours without a human poking

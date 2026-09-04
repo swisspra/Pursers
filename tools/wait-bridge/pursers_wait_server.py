@@ -64,6 +64,11 @@ from collections.abc import Awaitable, Callable
 from typing import Any, AsyncIterator
 
 from pursers_client import (
+    OFFER_EXPIRED,
+    OFFER_REVOKED,
+    REVIEW_OFFERED,
+    REVIEW_LEASE_KINDS,
+    TICKET_OFFERED,
     GENERATION_META_KEY,
     BoardClient,
     BoardClientError,
@@ -141,7 +146,13 @@ PROGRESS_INTERVAL_S = 300.0
 CATCHUP_PAGE_LIMIT = 100
 BACKLOG_SCAN_LIMIT = 100
 CLAIMABLE_RELEVANT_KINDS = frozenset(
-    {"ticket_created", "ticket_status_changed"}
+    {
+        "ticket_created",
+        "ticket_status_changed",
+        TICKET_OFFERED,
+        OFFER_EXPIRED,
+        OFFER_REVOKED,
+    }
 )
 RELEVANT_KINDS = CLAIMABLE_RELEVANT_KINDS | SUBMITTED_RELEVANT_KINDS
 WAIT_FOR_AUTO = "auto"
@@ -704,6 +715,67 @@ def _host_timeout_s() -> int:
     return HOST_TIMEOUTS_S[host]
 
 
+def _host_name() -> str:
+    host = os.environ.get("PURSERS_HOST", DEFAULT_HOST).strip().lower()
+    return host if host in HOST_TIMEOUTS_S else DEFAULT_HOST
+
+
+def _parse_capability_bool(name: str) -> bool | None:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return None
+    normalized = raw.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be true or false")
+
+
+def _seat_capabilities() -> dict[str, Any] | None:
+    """Return explicit dispatch capabilities, or None for legacy seats."""
+    names = (
+        "PURSERS_TIER_MAX",
+        "PURSERS_SKILLS",
+        "PURSERS_CAN_REVIEW",
+        "PURSERS_CAN_WORK",
+        "PURSERS_MODEL",
+        "PURSERS_PROVIDER",
+    )
+    if not any(os.environ.get(name, "").strip() for name in names):
+        return None
+    capabilities: dict[str, Any] = {"host": _host_name(), "max_parallel": 1}
+    tier = os.environ.get("PURSERS_TIER_MAX", "").strip()
+    if tier:
+        try:
+            tier_value = int(tier)
+        except ValueError as exc:
+            raise ValueError("PURSERS_TIER_MAX must be 1, 2, or 3") from exc
+        if tier_value not in {1, 2, 3}:
+            raise ValueError("PURSERS_TIER_MAX must be 1, 2, or 3")
+        capabilities["tier_max"] = tier_value
+    skills = os.environ.get("PURSERS_SKILLS", "")
+    if skills.strip():
+        capabilities["skills"] = sorted(
+            {item.strip() for item in skills.split(",") if item.strip()}
+        )
+    for env_name, field in (
+        ("PURSERS_CAN_REVIEW", "can_review"),
+        ("PURSERS_CAN_WORK", "can_work"),
+    ):
+        value = _parse_capability_bool(env_name)
+        if value is not None:
+            capabilities[field] = value
+    for env_name, field in (
+        ("PURSERS_MODEL", "model"),
+        ("PURSERS_PROVIDER", "provider"),
+    ):
+        value = os.environ.get(env_name, "").strip()
+        if value:
+            capabilities[field] = value
+    return capabilities
+
+
 def _timeout_margin_s(host_timeout_s: int) -> int:
     margin = min(60, max(30, math.ceil(host_timeout_s * 0.10)))
     if os.environ.get("PURSERS_HOST", DEFAULT_HOST).strip().lower() == "claude-desktop":
@@ -833,11 +905,14 @@ class _BoardView:
         *,
         agent_name: str | None = None,
         task_focus: str | None = None,
+        capabilities: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         selected = self.agent_name if agent_name is None else agent_name
         arguments = {"agent_name": selected}
         if task_focus is not None:
             arguments["task_focus"] = task_focus
+        if capabilities is not None:
+            arguments["capabilities"] = capabilities
         joined = await self._call(
             "board_join", arguments, refresh=True
         )
@@ -867,8 +942,14 @@ class _BoardView:
 async def _join_for_call(
     client: BoardClient, agent_name: str, explicit_name: bool
 ) -> dict[str, Any]:
+    capabilities = _seat_capabilities()
     if explicit_name:
-        return await client.board_join(agent_name=agent_name)
+        kwargs: dict[str, Any] = {"agent_name": agent_name}
+        if capabilities is not None:
+            kwargs["capabilities"] = capabilities
+        return await client.board_join(**kwargs)
+    if capabilities is not None:
+        return await client.board_join(capabilities=capabilities)
     return await client.board_join()
 
 
@@ -995,6 +1076,9 @@ class DeferredBoardConnection:
             try:
                 async with asyncio.timeout(self.JOIN_TIMEOUT_S):
                     await client.__aenter__()
+                    capabilities = _seat_capabilities()
+                    if capabilities is not None:
+                        await client.board_join(capabilities=capabilities)
                 entered = True
             except asyncio.CancelledError:
                 raise
@@ -1594,6 +1678,12 @@ class OrchestratorEngine:
                 "notes_subset": notes_subset,
                 "closed_at": closed_at,
                 "watched": is_watched,
+                "dispatch_state": copy.deepcopy(ticket_data.get("dispatch_state")),
+                "offers": {
+                    key: copy.deepcopy(ticket_data[key])
+                    for key in ("work_offer", "review_offer")
+                    if isinstance(ticket_data.get(key), dict)
+                },
             }
             tickets.append(ticket_item)
 
@@ -1623,12 +1713,34 @@ class OrchestratorEngine:
         current_cursor_map = {
             b: self.cursor_map.get(b, since_map.get(b, 0)) for b in target_boards
         }
+        unassignable_tickets = []
+        for cache_key, ticket_data in self.ticket_cache.items():
+            board_id, separator, ticket_id = cache_key.partition(":")
+            state = ticket_data.get("dispatch_state")
+            if (
+                separator
+                and board_id in target_boards
+                and isinstance(state, dict)
+                and state.get("state") == "unassignable"
+            ):
+                unassignable_tickets.append(
+                    {
+                        "board_id": board_id,
+                        "ticket_id": ticket_id,
+                        "reason": state.get("reason"),
+                        "kind": state.get("kind"),
+                    }
+                )
+        unassignable_tickets.sort(
+            key=lambda item: (item["board_id"], item["ticket_id"])
+        )
 
         return {
             "cursor_map": current_cursor_map,
             "tickets": tickets,
             "new_tickets": new_tickets,
             "counts": counts,
+            "unassignable_tickets": unassignable_tickets,
             "subscription": {
                 "connected": bool(self.subscription_health.get("connected", False)),
                 "last_event_at": self.subscription_health.get("last_event_at"),
@@ -1951,12 +2063,28 @@ def _resolve_wait_for(wait_for: str, role: str | None) -> str:
 def _event_matches_wait(event: dict[str, Any], wait_for: str) -> bool:
     kind = event.get("kind")
     if wait_for == WAIT_FOR_SUBMITTED:
+        if kind == TICKET_OFFERED:
+            return False
+        if kind in {OFFER_EXPIRED, OFFER_REVOKED}:
+            return event.get("offer_kind") == "review"
         if kind not in SUBMITTED_RELEVANT_KINDS:
             return False
         if kind == "ticket_status_changed":
             return event.get("status_to") == "submitted"
         return True
+    if kind == REVIEW_OFFERED:
+        return False
+    if kind in {OFFER_EXPIRED, OFFER_REVOKED}:
+        return event.get("offer_kind") == "work"
     return kind in CLAIMABLE_RELEVANT_KINDS
+
+
+def _wait_reason(events: list[dict[str, Any]]) -> str:
+    if any(event.get("kind") in {TICKET_OFFERED, REVIEW_OFFERED} for event in events):
+        return "offer"
+    if events and all(event.get("source") == "backlog_scan" for event in events):
+        return "backlog"
+    return "journal" if events else "timeout"
 
 
 def _forget_backlog_for_events(board_id: str, events: list[dict]) -> None:
@@ -2011,21 +2139,84 @@ async def _is_relevant(
     if not _event_matches_wait(event, wait_for):
         return False
     ticket_id = event.get("ticket_id")
-    # We need the ticket body to apply either the project filter or the
-    # only_mine ownership check. Fetch it once if either is active.
-    if only_mine or project is not None:
-        if not ticket_id:
-            return False
-        try:
-            result = await client.ticket_get(ticket_id)
-        except BoardClientError:
-            return False
-        ticket = result.get("ticket", {})
-        return ticket_is_relevant(
+    if not ticket_id:
+        return False
+    if event.get("kind") in {OFFER_EXPIRED, OFFER_REVOKED}:
+        return bool(
+            event.get("offered_agent_id") == my_agent_id
+            and event.get("offer_kind")
+            == ("review" if wait_for == WAIT_FOR_SUBMITTED else "work")
+        )
+    try:
+        result = await client.ticket_get(ticket_id)
+    except (BoardClientError, AttributeError, KeyError):
+        return not only_mine and project is None
+    ticket = result.get("ticket", {})
+    dispatch_state = ticket.get("dispatch_state")
+    if isinstance(dispatch_state, dict):
+        state = dispatch_state.get("state")
+        kind = event.get("kind")
+        if wait_for == WAIT_FOR_SUBMITTED:
+            offer = ticket.get("review_offer")
+            lease = ticket.get("review_lease")
+            relevant = bool(
+                (
+                    kind == REVIEW_OFFERED
+                    and isinstance(offer, dict)
+                    and offer.get("agent_id") == my_agent_id
+                )
+                or (
+                    kind in REVIEW_LEASE_KINDS
+                    and (
+                        event.get("reviewer_agent_id") == my_agent_id
+                        or (
+                            isinstance(lease, dict)
+                            and lease.get("reviewer_agent_id") == my_agent_id
+                        )
+                    )
+                )
+                or (
+                    state == "broadcast"
+                    and kind
+                    in {
+                        "ticket_status_changed",
+                        "ticket_submitted",
+                        "ticket_resubmitted",
+                    }
+                    and event.get("status_to") == "submitted"
+                )
+            )
+        else:
+            offer = ticket.get("work_offer")
+            relevant = bool(
+                (
+                    kind == TICKET_OFFERED
+                    and isinstance(offer, dict)
+                    and offer.get("agent_id") == my_agent_id
+                )
+                or ticket.get("claimed_by_agent_id") == my_agent_id
+                or (state == "broadcast" and ticket.get("status") == "open")
+            )
+    else:
+        relevant = ticket_is_relevant(
             ticket, my_agent_id, only_mine, project, wait_for
         )
-    # No project filter and not only_mine: every relevant-kind event counts.
-    return True
+    offered_kind = (
+        REVIEW_OFFERED if wait_for == WAIT_FOR_SUBMITTED else TICKET_OFFERED
+    )
+    if relevant and event.get("kind") == offered_kind:
+        offer = ticket.get(
+            "review_offer" if wait_for == WAIT_FOR_SUBMITTED else "work_offer"
+        )
+        if isinstance(offer, dict) and offer.get("agent_id") == my_agent_id:
+            event["offer"] = {
+                "ticket_id": ticket_id,
+                "board_id": getattr(client, "board_id", BOARD_ID),
+                "expires_at": offer.get("expires_at"),
+                "tier": ticket.get("tier", 2),
+                "skills_required": list(ticket.get("skills_required") or []),
+            }
+    return relevant
 
 
 async def _filter_relevant(
@@ -2083,7 +2274,7 @@ async def _scan_open_backlog(
                     MAX_LEASE_RENEW_INTERVAL_S, ttl_s / 3
                 )
     projected = backlog_events(
-        tickets, my_agent_id, only_mine, project, wait_for
+        tickets, my_agent_id, only_mine, project, wait_for, board_id
     )
     return _fresh_backlog_events(board_id, wait_for, projected)
 
@@ -2362,6 +2553,18 @@ async def _event_stream(
         )
         event_client.identity = identity
         event_client.generation_token = generation_token
+
+        async def redeclare_capabilities() -> None:
+            capabilities = _seat_capabilities()
+            if capabilities is None:
+                return
+            view = _BoardView(parent, board_id)
+            joined = await view.board_join(
+                agent_name=identity.agent_name,
+                capabilities=capabilities,
+            )
+            event_client.generation_token = joined.get("generation_token")
+
         events = event_client.events(
             from_cursor=from_cursor,
             only_mine=False,
@@ -2370,6 +2573,7 @@ async def _event_stream(
             acknowledge=False,
             touch=False if pure_catchup else None,
             cursor_callback=cursor_callback,
+            subscription_callback=redeclare_capabilities,
         )
         async with aclosing(events):
             async for event in events:
@@ -2450,6 +2654,7 @@ async def _wait_for_work_many(
     proj = project.strip().lower() if isinstance(project, str) and project.strip() else None
     call_agent_name = AGENT_NAME if agent_name is None else agent_name
     requested_wait_for = _normalize_wait_for(wait_for)
+    capabilities = _seat_capabilities()
     if not isinstance(call_agent_name, str) or not call_agent_name:
         raise ValueError("agent_name must be a non-empty string")
     if client.identity is None:
@@ -2460,6 +2665,7 @@ async def _wait_for_work_many(
             joined = await view.board_join(
                 agent_name=call_agent_name,
                 task_focus=task_focus,
+                capabilities=capabilities,
             )
         except BoardClientError as exc:
             skipped[board_id] = str(exc)
@@ -2481,13 +2687,6 @@ async def _wait_for_work_many(
     active = [board_id for board_id in board_order if board_id in views]
 
     def response(events: list[dict], timed_out: bool) -> dict[str, Any]:
-        reason = "timeout"
-        if events:
-            reason = (
-                "backlog"
-                if all(event.get("source") == "backlog_scan" for event in events)
-                else "journal"
-            )
         return {
             "new_seq": dict(cursors),
             "events": events,
@@ -2496,7 +2695,7 @@ async def _wait_for_work_many(
                 else round(time.monotonic() - started, 2)
             ),
             "timed_out": timed_out,
-            "reason": reason,
+            "reason": _wait_reason(events),
             "resynced": dict(resynced),
             "skipped_boards": dict(skipped),
         }
@@ -2802,11 +3001,7 @@ async def _wait_for_work(
             "events": relevant,
             "waited_s": 0.0,
             "timed_out": False,
-            "reason": (
-                "backlog"
-                if all(event.get("source") == "backlog_scan" for event in relevant)
-                else "journal"
-            ),
+            "reason": _wait_reason(relevant),
             "resynced": resynced,
         }
 
@@ -2890,7 +3085,7 @@ async def _wait_for_work(
                             "events": found,
                             "waited_s": round(time.monotonic() - started, 2),
                             "timed_out": False,
-                            "reason": "journal",
+                            "reason": _wait_reason(found),
                             "resynced": resynced,
                         }
             finally:

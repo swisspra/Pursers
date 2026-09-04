@@ -8,7 +8,13 @@ from types import SimpleNamespace
 import pytest
 
 import pursers_client.project_registry as registry_module
-from pursers_client import active_registry_boards, parse_project_registry, registry_work_dirs
+from pursers_client import (
+    DISPATCH_KINDS,
+    SUBMITTED_RELEVANT_KINDS,
+    active_registry_boards,
+    parse_project_registry,
+    registry_work_dirs,
+)
 
 
 def state(value: object) -> dict:
@@ -144,3 +150,123 @@ def test_registry_wait_bounds_backlog_and_round_trips_cursor(monkeypatch) -> Non
 
     assert seen == [21, 22, 23, 24]
     assert max(serialized_sizes) < 1_000
+
+
+@pytest.mark.parametrize(
+    ("submitted", "event_kind", "offer_key", "mine", "other"),
+    [
+        (False, "ticket_offered", "work_offer", "AI-worker-b", "AI-worker-a"),
+        (True, "review_offered", "review_offer", "AI-reviewer-b", "AI-reviewer-a"),
+    ],
+)
+def test_registry_wait_returns_only_this_seats_dispatch_offer(
+    monkeypatch, submitted, event_kind, offer_key, mine, other
+) -> None:
+    calls: list[tuple[str, dict]] = []
+    tickets = {
+        "TK-other": {
+            "ticket_id": "TK-other",
+            "status": "submitted" if submitted else "open",
+            "target_url": "home/item",
+            "dispatch_state": {"state": "offered"},
+            offer_key: {"agent_id": other, "expires_at": "later"},
+        },
+        "TK-mine": {
+            "ticket_id": "TK-mine",
+            "status": "submitted" if submitted else "open",
+            "target_url": "home/item",
+            "dispatch_state": {"state": "offered"},
+            offer_key: {"agent_id": mine, "expires_at": "later"},
+            "tier": 3,
+            "skills_required": ["dispatch"],
+        },
+    }
+
+    def result(value: dict) -> SimpleNamespace:
+        return SimpleNamespace(
+            is_error=False, structured_content={"result": value}, content=[]
+        )
+
+    class Raw:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def call_tool(self, name, arguments, **_kwargs):
+            calls.append((name, arguments))
+            if name == "board_join":
+                return result({"agent_id": mine, "generation_token": "gen"})
+            if name == "ticket_get":
+                return result({"ticket": tickets[arguments["ticket_id"]]})
+            if name == "board_catchup":
+                return result({
+                    "events": [
+                        {
+                            "seq": 1,
+                            "kind": "ticket_status_changed" if submitted else "ticket_created",
+                            "status_to": "submitted" if submitted else "open",
+                            "ticket_id": "TK-mine",
+                        },
+                        {"seq": 2, "kind": event_kind, "ticket_id": "TK-other"},
+                        {"seq": 3, "kind": event_kind, "ticket_id": "TK-mine"},
+                    ],
+                    "next_cursor": 3,
+                    "has_more": False,
+                })
+            raise AssertionError(name)
+
+        @asynccontextmanager
+        async def listen(self, **_kwargs):
+            async def empty():
+                if False:
+                    yield None
+
+            yield empty()
+
+    @asynccontextmanager
+    async def http():
+        yield None
+
+    raw = Raw()
+    monkeypatch.setattr(
+        registry_module, "streamable_http_client", lambda *_args, **_kwargs: object()
+    )
+    monkeypatch.setattr(registry_module, "Client", lambda *_args, **_kwargs: raw)
+    client = SimpleNamespace(
+        board_id="pursers",
+        agent_name="seat-b",
+        identity=SimpleNamespace(agent_id=mine),
+        _client=raw,
+        _http=http,
+        url="http://central.invalid/mcp",
+    )
+    capabilities = {"tier_max": 3, "skills": ["dispatch"]}
+    response = asyncio.run(registry_module.wait_for_boards(
+        client,
+        ["pursers"],
+        0,
+        1,
+        kinds=(
+            SUBMITTED_RELEVANT_KINDS
+            if submitted
+            else DISPATCH_KINDS | {"ticket_created", "ticket_status_changed"}
+        ),
+        submitted=submitted,
+        work_dirs={"pursers": "/repo/home"},
+        project_work_dirs={"home": "/repo/home"},
+        capabilities=capabilities,
+    ))
+
+    assert [event["ticket_id"] for event in response["events"]] == ["TK-mine"]
+    assert response["reason"] == "offer"
+    assert response["events"][0]["offer"] == {
+        "ticket_id": "TK-mine",
+        "board_id": "pursers",
+        "expires_at": "later",
+        "tier": 3,
+        "skills_required": ["dispatch"],
+    }
+    join = next(arguments for name, arguments in calls if name == "board_join")
+    assert join["capabilities"] == capabilities
