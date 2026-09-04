@@ -28,6 +28,12 @@ The destination must be new or empty. The generator creates:
 - `AGENTS.md` and `.goosehints`: identical identity, loop, and governance rules
 - the optional repository clone
 
+Use `--upgrade` to regenerate those four managed files in an existing seat.
+The repository clone and every other file are preserved. `--python` selects the
+absolute interpreter written to `bin/board.sh`; the fleet dashboard chooses the
+wait-bridge tool environment so `mcp`, `httpx`, and `pursers_client` come from a
+known runtime instead of whichever `python3` happens to be on `PATH`.
+
 The token contents are never read by the generator or copied into the seat.
 `bin/board.sh` reads the configured token file at runtime, sets
 `SSL_CERT_FILE`, and honors `PURSERS_BOARD`. You may also override the generated

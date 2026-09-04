@@ -2,6 +2,32 @@
 
 A standalone, loopback-only web dashboard for the active boards in the live project registry and their shared agent pool. It is a read-only viewer and does not require a browser extension, build step, or desktop host.
 
+## Seat configuration library
+
+`seat_config.py` is the write boundary used by the dashboard Config page. Host
+adapters expose `inspect() -> dict`, `plan(desired) -> list[Change]`, and
+`apply(plan) -> ApplyResult`; plans are human-readable and apply creates a
+timestamped backup before each atomic config write. Available integrations are
+`CodexAdapter`, `GooseAdapter`, `ClaudeDesktopAdapter`, and
+`ClaudeCodeAdapter`. `BridgeInstaller.install()` uses a persistent `uv tool`
+installation with private-CA overrides removed; generated host configs never
+launch through `uvx`.
+
+`PromptRenderer.render(desired)` fills the shared
+`seat_prompt_template.txt`, while `SeatInventory` maintains the dashboard's
+schema-1 `seats.json`. For a headless health report or repair:
+
+```bash
+python tools/fleet-dashboard/seat_config.py doctor --json
+python tools/fleet-dashboard/seat_config.py doctor --fix --json
+```
+
+Doctor output never contains token contents. It checks config drift, host
+timeout profile, bridge and Personal versions, token/CA paths, Goose seat
+interpreter and hints, clean clone freshness, a five-second push subscription,
+registry visibility, and whether a host restart is needed. A reported `poll`
+mode is a warning and remains an explicit fallback only.
+
 ## Run
 
 From the repository root, with the client package available in the current Python environment:

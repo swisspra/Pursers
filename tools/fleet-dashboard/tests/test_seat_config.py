@@ -1,0 +1,413 @@
+from __future__ import annotations
+
+import importlib.util
+import json
+import stat
+import subprocess
+import sys
+import tomllib
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+
+MODULE_PATH = Path(__file__).parents[1] / "seat_config.py"
+SPEC = importlib.util.spec_from_file_location("seat_config", MODULE_PATH)
+assert SPEC and SPEC.loader
+seat_config = importlib.util.module_from_spec(SPEC)
+sys.modules[SPEC.name] = seat_config
+SPEC.loader.exec_module(seat_config)
+
+
+def desired(tmp_path: Path, host: str, **overrides):
+    values = {
+        "host": host,
+        "role": "worker",
+        "name": f"{host}-worker",
+        "central_url": "https://central.example/mcp",
+        "home_board": "pursers",
+        "token_file": str(tmp_path / "seat.jwt"),
+        "ca_file": str(tmp_path / "ca.pem"),
+        "bridge_command": str(tmp_path / "bin/pursers-wait-bridge"),
+        "config_path": str(tmp_path / f"{host}.config"),
+    }
+    values.update(overrides)
+    return seat_config.DesiredSeat(**values)
+
+
+def test_profiles_match_wait_bridge_and_keep_host_margins() -> None:
+    actual = seat_config.wait_bridge_host_timeouts()
+    assert actual == {
+        host: profile.host_timeout_s
+        for host, profile in seat_config.HOST_PROFILES.items()
+    }
+    assert {
+        host: profile.block_s for host, profile in seat_config.HOST_PROFILES.items()
+    } == {
+        "codex": 560,
+        "codex-cli": 560,
+        "goose": 270,
+        "claude-code": 21_540,
+        "claude-desktop": 200,
+        "headless": 21_540,
+    }
+
+
+def test_codex_plan_apply_inspect_backup_and_idempotency(tmp_path: Path) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text("# keep this comment\n[features]\nweb_search = true\n")
+    adapter = seat_config.CodexAdapter(config)
+    target = desired(tmp_path, "codex", config_path=str(config))
+
+    plan = adapter.plan(target)
+    assert len(plan) == 1
+    result = adapter.apply(plan)
+    document = tomllib.loads(config.read_text())
+
+    assert document["features"]["web_search"] is True
+    assert document["mcp_servers"][target.connector_name]["tool_timeout_sec"] == 620
+    assert (
+        document["mcp_servers"]["pursers-dev"]["bearer_token_env_var"]
+        == "ONBOARD_CENTRAL_TOKEN"
+    )
+    assert (
+        document["mcp_servers"][target.connector_name]["env"]
+        ["ONBOARD_CENTRAL_TOKEN_FILE"]
+        == target.token_file
+    )
+    assert "# keep this comment" in config.read_text()
+    assert len(result.backups) == 1
+    assert Path(result.backups[0]).read_text().startswith("# keep this comment")
+    assert adapter.inspect()["error"] is None
+    assert adapter.plan(target) == []
+
+
+def test_codex_replaces_uvx_and_wrong_timeout_under_private_ca(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = tmp_path / "config.toml"
+    config.write_text(
+        "[mcp_servers.codex-worker]\n"
+        'command = "uvx"\n'
+        "tool_timeout_sec = 30\n"
+    )
+    monkeypatch.setenv("SSL_CERT_FILE", str(tmp_path / "private-ca.pem"))
+    target = desired(
+        tmp_path,
+        "codex",
+        config_path=str(config),
+        bridge_name="codex-worker",
+    )
+    adapter = seat_config.CodexAdapter(config)
+
+    result = adapter.apply(adapter.plan(target))
+    document = tomllib.loads(config.read_text())
+
+    assert document["mcp_servers"]["codex-worker"]["command"] == "/bin/sh"
+    assert document["mcp_servers"]["codex-worker"]["tool_timeout_sec"] == 620
+    assert 'command = "uvx"' not in config.read_text()
+    assert result.backups
+
+
+def test_goose_upgrade_preserves_clone_and_extra_files(tmp_path: Path) -> None:
+    config = tmp_path / "config.yaml"
+    config.write_text("provider: synthetic\nextensions:\n  keep:\n    enabled: true\n")
+    seat = tmp_path / "seat"
+    clone = seat / "Pursers"
+    clone.mkdir(parents=True)
+    (clone / "keep.txt").write_text("clone")
+    (seat / "operator-note.txt").write_text("keep")
+    target = desired(
+        tmp_path,
+        "goose",
+        config_path=str(config),
+        seat_dir=str(seat),
+    )
+    adapter = seat_config.GooseAdapter(config)
+
+    result = adapter.apply(adapter.plan(target))
+
+    text = config.read_text()
+    assert "provider: synthetic" in text
+    assert "  keep:" in text
+    assert f"  {target.connector_name}:" in text
+    assert "    timeout: 300" in text
+    assert (clone / "keep.txt").read_text() == "clone"
+    assert (seat / "operator-note.txt").read_text() == "keep"
+    assert sys.executable in (seat / "bin/board.sh").read_text()
+    assert stat.S_IMODE((seat / "bin/board.sh").stat().st_mode) == 0o755
+    assert result.backups
+    assert set(Path(path).name for path in result.changed) >= {
+        "config.yaml",
+        "board.sh",
+        "board.py",
+        "AGENTS.md",
+        ".goosehints",
+    }
+    assert adapter.plan(target) == []
+
+
+def test_claude_desktop_round_trip_preserves_unrelated_json(tmp_path: Path) -> None:
+    config = tmp_path / "claude_desktop_config.json"
+    config.write_text(json.dumps({"theme": "dark", "mcpServers": {"keep": {"command": "x"}}}))
+    target = desired(tmp_path, "claude-desktop", config_path=str(config))
+    adapter = seat_config.ClaudeDesktopAdapter(config)
+
+    first = adapter.apply(adapter.plan(target))
+    document = json.loads(config.read_text())
+
+    assert document["theme"] == "dark"
+    assert document["mcpServers"]["keep"] == {"command": "x"}
+    assert document["mcpServers"][target.connector_name]["env"]["PURSERS_HOST"] == "claude-desktop"
+    assert document["mcpServers"]["pursers-personal"]["args"][-1] == target.name
+    assert len(first.backups) == 1
+    assert adapter.plan(target) == []
+
+
+def test_claude_desktop_plans_pinned_personal_venv_repair(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    command = tmp_path / "personal-venv/bin/pursers-personal"
+    command.parent.mkdir(parents=True)
+    command.write_text("#!/bin/sh\n")
+    command.chmod(0o755)
+    target = desired(
+        tmp_path,
+        "claude-desktop",
+        personal_command=str(command),
+    )
+    monkeypatch.setattr(
+        seat_config.subprocess,
+        "run",
+        lambda command, **kwargs: subprocess.CompletedProcess(
+            command, 0, "5.0.0a1\n", ""
+        ),
+    )
+
+    plan = seat_config.ClaudeDesktopAdapter(target.config_path).plan(target)
+
+    repair = next(change for change in plan if change.action == "personal-install")
+    assert repair.path == command
+    assert repair.after == seat_config._package_version("personal")
+
+
+def test_claude_code_emits_command_and_writes_only_with_path(tmp_path: Path) -> None:
+    no_file = desired(tmp_path, "claude-code", config_path="")
+    adapter = seat_config.ClaudeCodeAdapter("")
+    assert adapter.plan(no_file) == []
+    assert adapter.inspect()["write_enabled"] is False
+    assert adapter.command(no_file).startswith("claude mcp add-json ")
+
+    target = desired(tmp_path, "claude-code", config_path=str(tmp_path / ".mcp.json"))
+    writer = seat_config.ClaudeCodeAdapter(target.config_path)
+    writer.apply(writer.plan(target))
+    assert target.connector_name in json.loads(Path(target.config_path).read_text())["mcpServers"]
+
+
+def test_bridge_installer_unsets_private_ca_and_never_uses_uvx(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = []
+
+    def which(name: str):
+        if name == "uv":
+            return "/tool/uv"
+        if name == "pursers-wait-bridge" and calls:
+            return "/tool/pursers-wait-bridge"
+        return None
+
+    def run(command, **kwargs):
+        calls.append((command, kwargs))
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(seat_config.shutil, "which", which)
+    monkeypatch.setenv("SSL_CERT_FILE", "/private/ca.pem")
+    command = seat_config.BridgeInstaller("0.1.0a6", runner=run).install()
+
+    assert command == "/tool/pursers-wait-bridge"
+    assert calls[0][0] == [
+        "/tool/uv",
+        "tool",
+        "install",
+        "--force",
+        "pursers-wait-bridge==0.1.0a6",
+    ]
+    assert "SSL_CERT_FILE" not in calls[0][1]["env"]
+    assert "uvx" not in calls[0][0]
+
+
+def test_goose_clean_clone_plans_and_applies_fast_forward(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seat = tmp_path / "seat"
+    clone = seat / "Pursers"
+    clone.mkdir(parents=True)
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append((command, kwargs.get("cwd")))
+        if command[:3] == ["git", "status", "--porcelain"]:
+            return subprocess.CompletedProcess(command, 0, "", "")
+        if command[:3] == ["git", "rev-list", "--count"]:
+            return subprocess.CompletedProcess(command, 0, "1\n", "")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(seat_config.subprocess, "run", run)
+    target = desired(
+        tmp_path,
+        "goose",
+        seat_dir=str(seat),
+        repository="https://example.test/Pursers.git",
+    )
+    adapter = seat_config.GooseAdapter(target.config_path)
+    plan = adapter.plan(target)
+
+    assert any(change.action == "git-ff" and change.path == clone for change in plan)
+    adapter.apply(plan)
+    assert (["git", "pull", "--ff-only"], clone) in calls
+
+
+def test_prompt_renderer_has_exact_registry_rearm_and_role_rules(tmp_path: Path) -> None:
+    renderer = seat_config.PromptRenderer()
+    worker = renderer.render(desired(tmp_path, "codex"))
+    reviewer = renderer.render(desired(tmp_path, "claude-desktop", role="reviewer"))
+
+    assert 'boards="registry"' in worker
+    assert "timeout_s=560" in worker
+    assert "whole new_seq map" in worker
+    assert "bound to this Codex window" in worker
+    assert "never claim, edit, commit, or push" in reviewer
+    assert "200s bridge block" in reviewer
+    assert "Never use another name" in reviewer
+
+
+def test_inventory_and_doctor_redact_token_and_report_push(tmp_path: Path) -> None:
+    target = desired(tmp_path, "codex")
+    Path(target.token_file).write_text("TOKEN_MUST_NOT_APPEAR")
+    Path(target.ca_file).write_text("synthetic ca")
+    command = Path(target.bridge_command)
+    command.parent.mkdir()
+    command.write_text("#!/bin/sh\n")
+    command.chmod(0o755)
+    adapter = seat_config.CodexAdapter(target.config_path)
+    adapter.apply(adapter.plan(target))
+
+    def run(command, **_kwargs):
+        if command[0] == "ps":
+            return subprocess.CompletedProcess(command, 0, "", "")
+        return subprocess.CompletedProcess(command, 0, "0.1.0a6\n", "")
+
+    doctor = seat_config.Doctor(
+        runner=run,
+        live_probe=lambda _desired, timeout: {
+            "mode": "push",
+            "registry_boards": ["pursers", "project-a"],
+            "skipped_boards": {},
+            "timeout_s": timeout,
+        },
+    )
+    report = seat_config._doctor_document(doctor.run(target))
+    serialized = json.dumps(report)
+
+    assert report["overall"] == "PASS"
+    assert "mode=push; boards=2; skipped=0" in serialized
+    assert "TOKEN_MUST_NOT_APPEAR" not in serialized
+
+    inventory = seat_config.SeatInventory(tmp_path / "state/seats.json")
+    inventory.upsert(target, bridge_version="0.1.0a6", doctor=report)
+    loaded = inventory.load()
+    assert loaded["seats"][0]["host"] == "codex"
+    assert loaded["seats"][0]["last_doctor"]["overall"] == "PASS"
+    assert stat.S_IMODE(inventory.path.stat().st_mode) == 0o600
+
+
+def test_default_live_probe_checks_status_subscription_and_registry_boards(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = desired(tmp_path, "codex")
+    Path(target.token_file).write_text("NOT_RETURNED")
+    calls = []
+
+    class FakeBoardClient:
+        def __init__(self, _url, _token, board, *, agent_name):
+            self.board = board
+            self.agent_name = agent_name
+            self.identity = SimpleNamespace(agent_id=f"AI-{board}")
+
+        async def __aenter__(self):
+            calls.append(("join", self.board, self.agent_name))
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def board_status(self):
+            calls.append(("status", self.board))
+            return {"latest_seq": 7}
+
+        async def board_state_get(self, key):
+            assert key == "project_registry"
+            return {
+                "state": {
+                    "value": json.dumps(
+                        {
+                            "projects": {
+                                "project": {
+                                    "board_id": "project-board",
+                                    "status": "active",
+                                }
+                            }
+                        }
+                    )
+                }
+            }
+
+        async def events(self, **arguments):
+            calls.append(("listen", self.board, arguments["from_cursor"]))
+            arguments["subscription_callback"]()
+            if False:
+                yield {}
+
+    monkeypatch.setitem(
+        sys.modules,
+        "pursers_client",
+        SimpleNamespace(BoardClient=FakeBoardClient),
+    )
+
+    result = seat_config._default_live_probe(target, 0.5)
+
+    assert result == {
+        "mode": "push",
+        "registry_boards": ["pursers", "project-board"],
+        "skipped_boards": {},
+    }
+    assert ("listen", "pursers", 7) in calls
+    assert ("status", "project-board") in calls
+
+
+def test_doctor_poll_is_explicit_warning(tmp_path: Path) -> None:
+    target = desired(tmp_path, "codex")
+    Path(target.token_file).write_text("redacted")
+    Path(target.ca_file).write_text("ca")
+    command = Path(target.bridge_command)
+    command.parent.mkdir()
+    command.write_text("#!/bin/sh\n")
+    command.chmod(0o755)
+    seat_config.CodexAdapter(target.config_path).apply(
+        seat_config.CodexAdapter(target.config_path).plan(target)
+    )
+
+    def run(command, **_kwargs):
+        stdout = "" if command[0] == "ps" else "0.1.0a6\n"
+        return subprocess.CompletedProcess(command, 0, stdout, "")
+
+    rows = seat_config.Doctor(
+        runner=run,
+        live_probe=lambda _desired, _timeout: {
+            "mode": "poll",
+            "registry_boards": ["pursers"],
+            "skipped_boards": {},
+        },
+    ).run(target)
+    assert next(row for row in rows if row.check == "live-smoke").status == "WARN"

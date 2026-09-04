@@ -325,7 +325,13 @@ def _board_python(role: str, repo_leaf: str | None, wait_timeout: int) -> str:
 
 
 def _board_shell(
-    *, name: str, board: str, central_url: str, token_file: Path, ca_file: Path
+    *,
+    name: str,
+    board: str,
+    central_url: str,
+    token_file: Path,
+    ca_file: Path,
+    python: Path,
 ) -> str:
     values = {
         "agent": shlex.quote(name),
@@ -333,6 +339,7 @@ def _board_shell(
         "url": shlex.quote(central_url),
         "token": shlex.quote(str(token_file)),
         "ca": shlex.quote(str(ca_file)),
+        "python": shlex.quote(str(python)),
     }
     return f'''#!/bin/sh
 set -eu
@@ -362,7 +369,7 @@ export ONBOARD_BOARD_ID=${{PURSERS_BOARD:-{values["board"]}}}
 export ONBOARD_AGENT_NAME={values["agent"]}
 export SSL_CERT_FILE="$CA_FILE"
 
-exec python3 "$SCRIPT_DIR/board.py" "$@"
+exec {values["python"]} "$SCRIPT_DIR/board.py" "$@"
 '''
 
 
@@ -474,21 +481,37 @@ def generate(args: argparse.Namespace) -> Path:
     token_file = Path(args.token_file).expanduser().resolve()
     ca_file = Path(args.ca_file).expanduser().resolve()
     repo_leaf = _repo_leaf(args.repo) if args.repo else None
+    python = Path(args.python).expanduser().resolve()
 
-    if dest.exists() and any(dest.iterdir()):
+    if dest.exists() and any(dest.iterdir()) and not args.upgrade:
         raise ValueError(f"destination is not empty: {dest}")
     dest.mkdir(parents=True, mode=0o700, exist_ok=True)
     dest.chmod(0o700)
 
     if args.repo:
         clone_dest = dest / repo_leaf
-        subprocess.run(
-            ["git", "clone", "--", args.repo, str(clone_dest)],
-            check=True,
-        )
+        if not clone_dest.exists():
+            subprocess.run(
+                ["git", "clone", "--", args.repo, str(clone_dest)],
+                check=True,
+            )
+        elif args.upgrade:
+            status = subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=clone_dest,
+                check=False,
+                text=True,
+                capture_output=True,
+            )
+            if status.returncode == 0 and not status.stdout.strip():
+                subprocess.run(
+                    ["git", "pull", "--ff-only"],
+                    cwd=clone_dest,
+                    check=True,
+                )
 
     bin_dir = dest / "bin"
-    bin_dir.mkdir(mode=0o755)
+    bin_dir.mkdir(mode=0o755, exist_ok=True)
     bin_dir.chmod(0o755)
     _write(
         bin_dir / "board.sh",
@@ -498,6 +521,7 @@ def generate(args: argparse.Namespace) -> Path:
             central_url=args.central_url,
             token_file=token_file,
             ca_file=ca_file,
+            python=python,
         ),
         0o755,
     )
@@ -521,6 +545,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--central-url", required=True)
     parser.add_argument("--token-file", required=True)
     parser.add_argument("--ca-file", required=True)
+    parser.add_argument(
+        "--python",
+        default=sys.executable,
+        help="known interpreter used by generated board.sh",
+    )
+    parser.add_argument(
+        "--upgrade",
+        action="store_true",
+        help="regenerate managed seat files in place and preserve all other files",
+    )
     parser.add_argument("--repo")
     parser.add_argument("--board", default="pursers")
     parser.add_argument(

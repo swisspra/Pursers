@@ -236,6 +236,42 @@ def test_nonempty_destination_is_refused(tmp_path: Path) -> None:
     assert (dest / "keep.txt").read_text() == "owned by user"
 
 
+def test_upgrade_regenerates_managed_files_and_preserves_existing_content(
+    tmp_path: Path,
+) -> None:
+    parsed = args(tmp_path)
+    dest = seat_new.generate(parsed)
+    (dest / "keep.txt").write_text("operator-owned", encoding="utf-8")
+    (dest / "bin/board.sh").write_text("stale", encoding="utf-8")
+    parsed.upgrade = True
+
+    seat_new.generate(parsed)
+
+    assert (dest / "keep.txt").read_text() == "operator-owned"
+    assert "ONBOARD_AGENT_NAME" in (dest / "bin/board.sh").read_text()
+    assert str(Path(sys.executable).resolve()) in (dest / "bin/board.sh").read_text()
+
+
+def test_upgrade_fast_forwards_existing_clean_clone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    parsed = args(tmp_path, repo="https://example.test/Pursers.git")
+    parsed.upgrade = True
+    clone = Path(parsed.dest) / "Pursers"
+    clone.mkdir(parents=True)
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append((command, kwargs.get("cwd")))
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(seat_new.subprocess, "run", run)
+    seat_new.generate(parsed)
+
+    assert (["git", "status", "--porcelain"], clone) in calls
+    assert (["git", "pull", "--ff-only"], clone) in calls
+
+
 @pytest.mark.parametrize(
     ("client", "host_timeout", "wait_timeout"),
     [
