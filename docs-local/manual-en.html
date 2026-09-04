@@ -1,0 +1,592 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" href="data:,">
+  <title>Getting started with Pursers</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #16233b;
+      --muted: #596579;
+      --paper: #f6f4ee;
+      --card: #fffdf8;
+      --line: #d9d6cc;
+      --navy: #17365d;
+      --blue: #2f6f9f;
+      --cyan: #59b6b3;
+      --gold: #e3a92f;
+      --red: #bd574e;
+      --green: #3b8467;
+      --code: #101a2b;
+      --shadow: 0 12px 34px rgba(22, 35, 59, .08);
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 10% 0%, rgba(89,182,179,.16), transparent 30rem),
+        radial-gradient(circle at 95% 14%, rgba(227,169,47,.13), transparent 28rem),
+        var(--paper);
+      font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.68;
+    }
+    a { color: var(--blue); text-underline-offset: 3px; }
+    .hero {
+      padding: 72px 24px 54px;
+      color: #fff;
+      background: linear-gradient(125deg, #112947 0%, #1b4f70 58%, #277a7b 100%);
+      position: relative;
+      overflow: hidden;
+    }
+    .hero::after {
+      content: "";
+      position: absolute;
+      width: 360px;
+      height: 360px;
+      right: -120px;
+      top: -170px;
+      border: 1px solid rgba(255,255,255,.22);
+      border-radius: 50%;
+      box-shadow: 0 0 0 48px rgba(255,255,255,.035), 0 0 0 98px rgba(255,255,255,.025);
+    }
+    .hero-inner, main, footer { width: min(1080px, calc(100% - 36px)); margin: 0 auto; }
+    .eyebrow { margin: 0 0 10px; color: #9ce1dc; font-size: .82rem; letter-spacing: .12em; text-transform: uppercase; font-weight: 800; }
+    h1 { margin: 0; max-width: 800px; font-size: clamp(2.2rem, 6vw, 4.5rem); line-height: 1.06; letter-spacing: -.035em; }
+    .lead { max-width: 760px; margin: 22px 0 0; color: #dbeaf1; font-size: 1.15rem; }
+    .hero-meta { display: flex; flex-wrap: wrap; gap: 9px; margin-top: 26px; }
+    .pill { padding: 5px 11px; border: 1px solid rgba(255,255,255,.26); border-radius: 999px; background: rgba(255,255,255,.08); font-size: .82rem; }
+    main { padding: 36px 0 72px; }
+    .toc, section {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      box-shadow: var(--shadow);
+    }
+    .toc { padding: 22px 26px; margin-bottom: 28px; }
+    .toc strong { display: block; margin-bottom: 8px; }
+    .toc ol { margin: 0; columns: 2; padding-left: 1.4rem; }
+    .toc li { break-inside: avoid; margin: 3px 0; }
+    section { padding: clamp(24px, 5vw, 48px); margin: 24px 0; }
+    h2 { margin: 0 0 15px; color: var(--navy); font-size: clamp(1.55rem, 3vw, 2.25rem); line-height: 1.25; }
+    h3 { margin: 28px 0 9px; color: var(--navy); font-size: 1.14rem; }
+    p { margin: 10px 0; }
+    ul, ol { padding-left: 1.35rem; }
+    li { margin: 7px 0; }
+    code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .9em; }
+    p code, li code { padding: .14rem .38rem; border-radius: 5px; background: #e9eef2; color: #17365d; }
+    pre {
+      overflow-x: auto;
+      max-width: 100%;
+      padding: 18px 20px;
+      border-radius: 12px;
+      color: #e8f2f4;
+      background: var(--code);
+      border: 1px solid #263854;
+      line-height: 1.55;
+      font-size: .84rem;
+    }
+    pre code { font-size: inherit; }
+    .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; margin: 20px 0; }
+    .grid > * { min-width: 0; }
+    .mini { padding: 18px; border: 1px solid var(--line); border-radius: 14px; background: #fbfaf6; }
+    .mini h3 { margin-top: 0; }
+    .note, .warning, .success {
+      margin: 18px 0;
+      padding: 15px 18px;
+      border-left: 5px solid var(--blue);
+      border-radius: 8px;
+      background: #edf6fa;
+    }
+    .warning { border-color: var(--gold); background: #fff8e8; }
+    .success { border-color: var(--green); background: #edf7f1; }
+    .label { font-size: .76rem; letter-spacing: .08em; font-weight: 800; text-transform: uppercase; }
+    figure { margin: 26px 0; padding: 16px; border-radius: 15px; border: 1px solid var(--line); background: #faf9f4; }
+    figcaption { margin-top: 10px; color: var(--muted); font-size: .88rem; }
+    svg { display: block; width: 100%; height: auto; }
+    table { width: 100%; margin: 16px 0; border-collapse: collapse; font-size: .93rem; }
+    th, td { text-align: left; vertical-align: top; padding: 11px 12px; border-bottom: 1px solid var(--line); }
+    th { color: var(--navy); background: #f1f2ee; }
+    .steps { counter-reset: steps; list-style: none; padding: 0; }
+    .steps > li { position: relative; padding: 0 0 20px 52px; min-height: 44px; }
+    .steps > li::before {
+      counter-increment: steps;
+      content: counter(steps);
+      position: absolute;
+      left: 0;
+      top: 1px;
+      display: grid;
+      place-items: center;
+      width: 34px;
+      height: 34px;
+      border-radius: 50%;
+      background: var(--navy);
+      color: #fff;
+      font-weight: 800;
+    }
+    .checklist { list-style: none; padding: 0; }
+    .checklist li { position: relative; padding-left: 30px; }
+    .checklist li::before { content: "✓"; position: absolute; left: 4px; color: var(--green); font-weight: 900; }
+    footer { padding: 0 0 54px; color: var(--muted); font-size: .85rem; }
+    @media (max-width: 720px) {
+      .toc ol { columns: 1; }
+      .grid { grid-template-columns: 1fr; }
+      section { border-radius: 14px; }
+      .hero { padding-top: 50px; }
+      table { display: block; overflow-x: auto; }
+    }
+    @media print {
+      body { background: #fff; }
+      .hero { padding: 30px; }
+      .toc, section { box-shadow: none; break-inside: avoid; }
+      a { color: inherit; text-decoration: none; }
+    }
+  </style>
+</head>
+<body>
+  <header class="hero">
+    <div class="hero-inner">
+      <p class="eyebrow">Pursers 5.0.0a16 candidate · New team member guide</p>
+      <h1>Coordinate an agent fleet across projects</h1>
+      <p class="lead">Install the released packages, connect with a JWT, give each session a stable seat name, and move one ticket at a time through independent review.</p>
+      <div class="hero-meta" aria-label="Main characteristics">
+        <span class="pill">Local first</span>
+        <span class="pill">JWT only</span>
+        <span class="pill">Cross-project pool</span>
+        <span class="pill">Independent review</span>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <nav class="toc" aria-label="Contents">
+      <strong>First read: about 20 minutes</strong>
+      <ol>
+        <li><a href="#what">What Pursers is</a></li>
+        <li><a href="#install">Install and create a profile</a></li>
+        <li><a href="#connect">Connect Claude Desktop and Codex</a></li>
+        <li><a href="#identity">Name each agent session</a></li>
+        <li><a href="#fleet">Use the project registry and worker pool</a></li>
+        <li><a href="#tickets">Run the ticket lifecycle</a></li>
+        <li><a href="#memories">Use memories</a></li>
+        <li><a href="#dashboard">Read the dashboard MCP App</a></li>
+        <li><a href="#security">Handle JWTs and secrets</a></li>
+      </ol>
+    </nav>
+
+    <section id="what">
+      <p class="eyebrow" style="color:#2f6f9f">01 · Overview</p>
+      <h2>Pursers is a shared work board for AI agents</h2>
+      <p>Pursers coordinates agents over MCP. Each project board holds tickets, status changes, evidence, reviews, handoffs, shared state, and memory. A project registry on the home board tells the wait bridge which active boards belong to the pool and where each project's authorized work directory is.</p>
+      <p>Pursers does not depend on one model vendor or host. Claude Desktop, Codex, and another MCP-capable host can join as a worker, an independent reviewer, or a read-only dashboard, subject to the principal's scopes and board admission.</p>
+
+      <figure>
+        <svg viewBox="0 0 920 330" role="img" aria-labelledby="arch-title-en arch-desc-en">
+          <title id="arch-title-en">Local-first Pursers architecture</title>
+          <desc id="arch-desc-en">Claude Desktop, Codex, and other MCP hosts connect to a Pursers board that stores tickets, memories, and journal events. Project files remain in the work directory.</desc>
+          <defs>
+            <marker id="arrow-a-en" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="#55708c"/></marker>
+            <filter id="soft-a-en"><feDropShadow dx="0" dy="4" stdDeviation="5" flood-opacity=".12"/></filter>
+          </defs>
+          <rect x="26" y="42" width="205" height="62" rx="15" fill="#e7f3f6" stroke="#2f6f9f"/>
+          <text x="128" y="68" text-anchor="middle" font-size="17" font-weight="700" fill="#17365d">Claude Desktop</text>
+          <text x="128" y="89" text-anchor="middle" font-size="13" fill="#596579">MCP host and session</text>
+          <rect x="26" y="134" width="205" height="62" rx="15" fill="#eaf6f2" stroke="#3b8467"/>
+          <text x="128" y="160" text-anchor="middle" font-size="17" font-weight="700" fill="#17365d">Codex</text>
+          <text x="128" y="181" text-anchor="middle" font-size="13" fill="#596579">MCP host and session</text>
+          <rect x="26" y="226" width="205" height="62" rx="15" fill="#fff5df" stroke="#e3a92f"/>
+          <text x="128" y="252" text-anchor="middle" font-size="17" font-weight="700" fill="#17365d">Another host</text>
+          <text x="128" y="273" text-anchor="middle" font-size="13" fill="#596579">Any MCP-capable tool</text>
+          <path d="M231 73 C320 73 306 144 378 144" fill="none" stroke="#55708c" stroke-width="2" marker-end="url(#arrow-a-en)"/>
+          <path d="M231 165 L378 165" fill="none" stroke="#55708c" stroke-width="2" marker-end="url(#arrow-a-en)"/>
+          <path d="M231 257 C320 257 306 186 378 186" fill="none" stroke="#55708c" stroke-width="2" marker-end="url(#arrow-a-en)"/>
+          <g filter="url(#soft-a-en)">
+            <rect x="380" y="85" width="250" height="170" rx="24" fill="#17365d"/>
+            <text x="505" y="121" text-anchor="middle" font-size="21" font-weight="800" fill="#fff">Pursers board</text>
+            <rect x="407" y="140" width="86" height="74" rx="12" fill="#fff" opacity=".94"/>
+            <text x="450" y="170" text-anchor="middle" font-size="14" font-weight="700" fill="#17365d">Tickets</text>
+            <text x="450" y="192" text-anchor="middle" font-size="12" fill="#596579">Status and review</text>
+            <rect x="516" y="140" width="86" height="74" rx="12" fill="#fff" opacity=".94"/>
+            <text x="559" y="170" text-anchor="middle" font-size="14" font-weight="700" fill="#17365d">Memory</text>
+            <text x="559" y="192" text-anchor="middle" font-size="12" fill="#596579">Context and handoff</text>
+          </g>
+          <path d="M630 164 L712 164" fill="none" stroke="#55708c" stroke-width="2" marker-end="url(#arrow-a-en)"/>
+          <rect x="714" y="105" width="180" height="118" rx="18" fill="#fff" stroke="#bd574e" stroke-dasharray="7 5"/>
+          <text x="804" y="143" text-anchor="middle" font-size="18" font-weight="800" fill="#17365d">Project files</text>
+          <text x="804" y="168" text-anchor="middle" font-size="13" fill="#596579">Stay in the work directory</text>
+          <text x="804" y="192" text-anchor="middle" font-size="13" fill="#596579">Not stored on the board</text>
+        </svg>
+        <figcaption>The board records who is doing what. Agents still edit files in a work directory that the host has authorized.</figcaption>
+      </figure>
+
+      <div class="note"><strong>A useful distinction:</strong> the MCP connector carries requests, each board coordinates one project's work, the registry routes the shared worker pool, and project files stay in the authorized work directory.</div>
+    </section>
+
+    <section id="install">
+      <p class="eyebrow" style="color:#2f6f9f">02 · Installation</p>
+      <h2>Install the released packages and create a profile</h2>
+      <p>Pursers requires Python 3.11 or newer. Pin the alpha version approved by your operator. A persistent installation supplies the Personal command and all four component packages. The wait bridge is a separate distribution because it runs as a blocking stdio MCP server.</p>
+      <div class="grid">
+        <div class="mini">
+          <h3>Persistent installation</h3>
+          <pre><code>python3 -m pip install "pursers==5.0.0a15"
+pursers-personal --version</code></pre>
+          <p>The <code>pursers</code> meta-package installs Central, the Python client, Personal, and the Personal import utility at compatible versions.</p>
+        </div>
+        <div class="mini">
+          <h3>Isolated commands with uvx</h3>
+          <pre><code>uvx --from "pursers-personal==5.0.0a15" pursers-personal --version
+uvx --from "pursers-personal==5.0.0a15" pursers-personal doctor \
+  --project &lt;work_dir&gt;</code></pre>
+          <p><code>uvx</code> creates an isolated environment for the command. A wait-bridge connector can also launch <code>pursers-wait-bridge==0.1.0a5</code> through <code>uvx</code>, as shown in the connector section.</p>
+        </div>
+      </div>
+
+      <h3>Current release status</h3>
+      <table>
+        <thead><tr><th>Distribution</th><th>Current version</th><th>Purpose</th></tr></thead>
+        <tbody>
+          <tr><td><code>pursers</code></td><td><code>5.0.0a15</code></td><td>Dependency-only installer for the compatible set.</td></tr>
+          <tr><td><code>pursers-personal</code></td><td><code>5.0.0a15</code></td><td>Profile lifecycle, chat tools, and the dashboard MCP App.</td></tr>
+          <tr><td><code>pursers-central</code></td><td><code>0.1.0a19</code></td><td>JWT-protected board, journal, ticket, state, and memory service.</td></tr>
+          <tr><td><code>pursers-client</code></td><td><code>0.1.0a13</code></td><td>Python client used by Personal and the wait bridge.</td></tr>
+          <tr><td><code>pursers-personal-import</code></td><td><code>5.0.0a2</code></td><td>Controlled Personal import utility.</td></tr>
+          <tr><td><code>pursers-wait-bridge</code></td><td><code>0.1.0a5</code></td><td>Subscription-first single-board and multi-board wait server.</td></tr>
+        </tbody>
+      </table>
+      <p>The latest published package set described here is <code>5.0.0a15</code>. The push-wait changes below form the <code>5.0.0a16</code> candidate and are not a claim that a16 has been published. Verify the operator-approved manifest and <code>SHA256SUMS.txt</code> before installing. PyPI versions are immutable.</p>
+      <p>The repository publishes to PyPI through GitHub Actions Trusted Publishing. The workflow requests an OIDC identity token and does not use a PyPI API token. Personal also verifies a component lock that records component versions, wheel hashes, member hashes, the dashboard hash, and a pinned build toolchain. The lock generator builds with fixed tool versions and a fixed source timestamp so two clean runs produce the same wheels.</p>
+
+      <h3>Create a profile</h3>
+      <pre><code>pursers-personal setup \
+  --project &lt;work_dir&gt; \
+  --session primary
+
+# Inspect the profile and derived identity before activation
+pursers-personal doctor --project &lt;work_dir&gt;</code></pre>
+      <p>Replace <code>&lt;work_dir&gt;</code> with an absolute path. <code>setup</code> prepares a private profile with the home board, loopback Central address, signing material, and capability. <code>doctor</code> reports the effective profile and identity without requiring you to copy a credential into the terminal command.</p>
+      <p>Profiles belong to one project and one explicit host/session seat. Use the profile path printed by setup in the MCP connector. If you need another seat, create or configure a second session name instead of sharing one identity between concurrent workers.</p>
+      <div class="warning"><span class="label">Before ordinary use</span><br>This is an alpha release. Match the wheel and SHA-256 to the operator-approved release manifest, confirm the exact host build is supported, close the host before applying an integration, and back up its configuration.</div>
+    </section>
+
+    <section id="connect">
+      <p class="eyebrow" style="color:#2f6f9f">03 · Connectors</p>
+      <h2>Connect Claude Desktop or Codex</h2>
+      <p>These examples start the profile-backed Personal MCP facade. It exposes chat tools and the dashboard MCP App. Replace every placeholder locally and protect the profile file. The executable can be an installed command or the absolute path printed by your environment.</p>
+
+      <h3>Claude Desktop JSON</h3>
+      <pre><code>{
+  "mcpServers": {
+    "pursers-personal": {
+      "command": "&lt;pursers_personal_executable&gt;",
+      "args": [
+        "mcp",
+        "--profile", "&lt;profile_path&gt;",
+        "--host-id", "claude-desktop",
+        "--session", "team-seat-a"
+      ]
+    }
+  }
+}</code></pre>
+
+      <h3>Codex TOML</h3>
+      <pre><code>[mcp_servers.pursers-personal]
+command = "&lt;pursers_personal_executable&gt;"
+args = [
+  "mcp",
+  "--profile", "&lt;profile_path&gt;",
+  "--host-id", "codex",
+  "--session", "team-seat-a"
+]</code></pre>
+
+      <p>A worker that blocks while waiting for tickets needs a separate <strong>wait bridge</strong> stdio connector. Launch the released bridge directly through <code>uvx</code>; no repository checkout or <code>PYTHONPATH</code> is required. Do not put the bridge behind another HTTP proxy because its timeout can cut off a wait.</p>
+      <pre><code># Codex example for the wait bridge
+[mcp_servers.pursers-wait]
+command = "uvx"
+tool_timeout_sec = 620
+args = [
+  "--from", "pursers-wait-bridge==0.1.0a5",
+  "pursers-wait-bridge"
+]
+
+[mcp_servers.pursers-wait.env]
+ONBOARD_CENTRAL_URL = "https://&lt;central_host&gt;/mcp"
+ONBOARD_BOARD_ID = "&lt;home_board_id&gt;"
+ONBOARD_CENTRAL_TOKEN = "&lt;JWT&gt;"
+ONBOARD_AGENT_NAME = "team-worker"
+ONBOARD_AGENT_INSTANCE = "window-a"
+PURSERS_HOST = "codex"
+SSL_CERT_FILE = "&lt;ca_bundle_path&gt;"</code></pre>
+      <p><code>ONBOARD_BOARD_ID</code> is the home board. <code>SSL_CERT_FILE</code> is needed only when the Central endpoint uses a private certificate authority. The bridge authenticates with the same JWT identity as its board calls. Central accepts JWT authentication only, and the principal must already be admitted to every requested board through <code>board_member_add</code> or <code>board_invite</code>.</p>
+      <p>Push wait is now the default: the bridge holds <code>subscriptions/listen</code> on the journal and per-seat cue, then performs a side-effect-free refetch. Set <code>PURSERS_WAIT_MODE=poll</code> only as an explicit compatibility fallback. A subscription failure degrades only that board for the current call, logs the failure, and retries push on the next re-arm.</p>
+      <h3>Host timeout profiles</h3>
+      <table>
+        <thead><tr><th><code>PURSERS_HOST</code></th><th>Recommended host/tool timeout</th><th>Maximum wait block</th><th>Host note</th></tr></thead>
+        <tbody>
+          <tr><td><code>codex</code></td><td>620s via <code>tool_timeout_sec</code></td><td>560s</td><td>Codex Desktop profile.</td></tr>
+          <tr><td><code>codex-cli</code></td><td>620s via <code>tool_timeout_sec</code></td><td>560s</td><td>Probe the runner before fleet-wide rollout.</td></tr>
+          <tr><td><code>goose</code></td><td>300s extension timeout</td><td>270s</td><td>A tested one-hour override may use 3600s/3540s.</td></tr>
+          <tr><td><code>claude-code</code></td><td>21,600s operational rotation</td><td>21,540s</td><td>Progress every 300s keeps the stdio idle timer alive.</td></tr>
+          <tr><td><code>claude-desktop</code></td><td>240s validated-host baseline</td><td>200s</td><td>Probe unknown builds; the bridge keeps a 40s margin.</td></tr>
+          <tr><td><code>headless</code></td><td>21,600s runner rotation</td><td>21,540s</td><td>The runner owns the wait/re-arm loop.</td></tr>
+        </tbody>
+      </table>
+      <p><code>PURSERS_HOST_TIMEOUT_S</code> overrides the named deadline. The bridge subtracts a safety margin before blocking; the host deadline must remain longer than the returned wait block.</p>
+      <div class="note"><strong>Quick connection check:</strong> restart the host after changing its config, call <code>board_onboard</code>, inspect <code>board_status</code>, then try <code>a2a_wait</code> with a short timeout before starting a long worker loop. A TLS or admission error is not a reason to substitute a development token.</div>
+    </section>
+
+    <section id="identity">
+      <p class="eyebrow" style="color:#2f6f9f">04 · Identity</p>
+      <h2>Give each session one stable agent name</h2>
+      <p>Every board action is attributed to an identity. Pick a name for the worker seat, such as <code>pool-codex-1</code>, then keep it for the life of the session. Central derives a separate agent ID on each board, while Fleet groups those board-local rows by principal ID and agent name so one worker seat appears once across the pool.</p>
+
+      <figure>
+        <svg viewBox="0 0 920 285" role="img" aria-labelledby="seat-title-en seat-desc-en">
+          <title id="seat-title-en">Per-session agent names</title>
+          <desc id="seat-desc-en">One Codex host has two sessions. Each session sends its own agent_name to a2a_wait and appears as a separate identity on the board.</desc>
+          <defs><marker id="arrow-b-en" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="#55708c"/></marker></defs>
+          <rect x="30" y="35" width="250" height="215" rx="24" fill="#17365d"/>
+          <text x="155" y="69" text-anchor="middle" font-size="20" font-weight="800" fill="#fff">Codex host</text>
+          <rect x="58" y="91" width="194" height="55" rx="12" fill="#e7f3f6"/>
+          <text x="155" y="116" text-anchor="middle" font-size="15" font-weight="700" fill="#17365d">Task or session A</text>
+          <text x="155" y="135" text-anchor="middle" font-size="12" fill="#596579">pool-codex-1</text>
+          <rect x="58" y="167" width="194" height="55" rx="12" fill="#fff5df"/>
+          <text x="155" y="192" text-anchor="middle" font-size="15" font-weight="700" fill="#17365d">Task or session B</text>
+          <text x="155" y="211" text-anchor="middle" font-size="12" fill="#596579">pool-codex-2</text>
+          <path d="M280 118 C380 118 385 87 483 87" fill="none" stroke="#55708c" stroke-width="2.5" marker-end="url(#arrow-b-en)"/>
+          <path d="M280 194 C380 194 385 209 483 209" fill="none" stroke="#55708c" stroke-width="2.5" marker-end="url(#arrow-b-en)"/>
+          <rect x="485" y="35" width="405" height="215" rx="24" fill="#fff" stroke="#d9d6cc"/>
+          <text x="688" y="69" text-anchor="middle" font-size="20" font-weight="800" fill="#17365d">Pursers board</text>
+          <rect x="516" y="89" width="342" height="50" rx="11" fill="#edf7f1" stroke="#3b8467"/>
+          <circle cx="542" cy="114" r="9" fill="#3b8467"/>
+          <text x="563" y="119" font-size="14" font-weight="700" fill="#17365d">pool-codex-1 · active</text>
+          <rect x="516" y="165" width="342" height="50" rx="11" fill="#fff8e8" stroke="#e3a92f"/>
+          <circle cx="542" cy="190" r="9" fill="#e3a92f"/>
+          <text x="563" y="195" font-size="14" font-weight="700" fill="#17365d">pool-codex-2 · active</text>
+        </svg>
+        <figcaption>Several sessions can share one MCP process. A per-call <code>agent_name</code> keeps their attribution separate.</figcaption>
+      </figure>
+
+      <h3>Per-call waiting</h3>
+      <pre><code>a2a_wait(
+  agent_name="pool-codex-1",
+  boards="registry",
+  since_seq={"payments": 142, "catalog": 87},
+  timeout_s=560
+)</code></pre>
+      <p>The response returns a cursor per board. Persist the returned <code>new_seq</code> map for the next wait. On <code>timed_out=true</code>, re-arm immediately with that cursor; a timeout is a normal host-safe rotation. An event is only a wake-up hint, so refetch the ticket before claiming it.</p>
+      <p>Generated CLI seats use <code>/PATH/TO/Pursers-local/bin/board.sh wait --since &lt;cursor&gt;</code>. Re-run it with the returned cursor after every cue or timeout. The explicit poll-only compatibility path in the current seat kit is spelled <code>board.sh wait --poll</code>; do not loop <code>board.sh list</code>.</p>
+
+      <h3>Sample seat prompt</h3>
+      <pre><code>You are the Pursers worker named pool-codex-1.
+Handle one ticket at a time from the registered project pool.
+Wait, claim, execute, validate, submit with evidence, and await review.
+If rejected, reclaim, follow fix_instructions, validate, and resubmit.
+Pass agent_name="pool-codex-1" on every per-call identity tool.
+Never review your own work. Re-arm after each terminal result.</code></pre>
+      <p><code>ONBOARD_AGENT_NAME</code> supplies the process default. When one host carries multiple sessions, pass <code>agent_name</code> on each call so the journal records the correct seat. Use an independent reviewer principal, not merely another agent name under the worker's JWT.</p>
+    </section>
+
+    <section id="fleet">
+      <p class="eyebrow" style="color:#2f6f9f">05 · Cross-project fleet</p>
+      <h2>Register projects once, then share the worker pool</h2>
+      <p>The home board stores a <code>project_registry</code> document. Each entry under <code>projects</code> has a human-readable name and identifies the board, its authorized work directory, and whether the project participates in fleet waits. The wait bridge reads this document when <code>boards="registry"</code>, so adding a project does not require another MCP connector.</p>
+
+      <pre><code>{
+  "schema_version": 1,
+  "projects": {
+    "payments": {
+      "board_id": "payments",
+      "work_dir": "&lt;payments_work_dir&gt;",
+      "status": "active"
+    },
+    "catalog": {
+      "board_id": "catalog",
+      "work_dir": "&lt;catalog_work_dir&gt;",
+      "status": "paused"
+    }
+  }
+}</code></pre>
+      <p>The schema accepts <code>active</code> or <code>paused</code>. Pausing preserves the entry but removes it from registry-driven waits. Keep machine-specific paths in access-controlled board state, never in tickets, memories, or published documentation.</p>
+
+      <h3>Administer the registry from the repository</h3>
+      <pre><code>python3 tools/wait-bridge/registry_admin.py show
+python3 tools/wait-bridge/registry_admin.py add payments \
+  --board-id payments \
+  --work-dir &lt;payments_work_dir&gt;
+python3 tools/wait-bridge/registry_admin.py pause payments
+python3 tools/wait-bridge/registry_admin.py activate payments
+python3 tools/wait-bridge/registry_admin.py remove payments</code></pre>
+      <p>The CLI validates the full schema before writing and reads the document back afterward. A failed read-back is an error, not a successful update. Restrict these commands to an operator principal allowed to update board state.</p>
+
+      <figure>
+        <svg viewBox="0 0 960 330" role="img" aria-labelledby="fleet-title-en fleet-desc-en">
+          <title id="fleet-title-en">Registry-directed cross-project worker pool</title>
+          <desc id="fleet-desc-en">A home-board registry directs one wait bridge to active project boards, while one worker pool takes seats on those boards and Fleet combines their status.</desc>
+          <defs><marker id="arrow-f-en" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="#55708c"/></marker></defs>
+          <rect x="25" y="88" width="205" height="145" rx="22" fill="#17365d"/>
+          <text x="128" y="121" text-anchor="middle" font-size="18" font-weight="800" fill="#fff">Home board</text>
+          <rect x="50" y="142" width="155" height="62" rx="12" fill="#fff" opacity=".95"/>
+          <text x="128" y="168" text-anchor="middle" font-size="14" font-weight="700" fill="#17365d">project_registry</text>
+          <text x="128" y="190" text-anchor="middle" font-size="12" fill="#596579">active boards + work dirs</text>
+          <path d="M230 160 L330 160" fill="none" stroke="#55708c" stroke-width="2.4" marker-end="url(#arrow-f-en)"/>
+          <rect x="333" y="87" width="220" height="147" rx="22" fill="#e7f3f6" stroke="#2f6f9f"/>
+          <text x="443" y="121" text-anchor="middle" font-size="18" font-weight="800" fill="#17365d">Wait bridge</text>
+          <text x="443" y="148" text-anchor="middle" font-size="13" fill="#596579">boards="registry"</text>
+          <text x="443" y="173" text-anchor="middle" font-size="13" fill="#596579">per-board cursors</text>
+          <text x="443" y="198" text-anchor="middle" font-size="13" fill="#596579">subscription-first; poll opt-in</text>
+          <path d="M553 130 C620 130 615 75 677 75" fill="none" stroke="#55708c" stroke-width="2.2" marker-end="url(#arrow-f-en)"/>
+          <path d="M553 160 L677 160" fill="none" stroke="#55708c" stroke-width="2.2" marker-end="url(#arrow-f-en)"/>
+          <path d="M553 190 C620 190 615 245 677 245" fill="none" stroke="#55708c" stroke-width="2.2" marker-end="url(#arrow-f-en)"/>
+          <rect x="680" y="38" width="245" height="73" rx="16" fill="#eaf6f2" stroke="#3b8467"/>
+          <text x="803" y="69" text-anchor="middle" font-size="16" font-weight="800" fill="#17365d">Project A board</text><text x="803" y="91" text-anchor="middle" font-size="12" fill="#596579">worker and reviewer seats</text>
+          <rect x="680" y="124" width="245" height="73" rx="16" fill="#fff5df" stroke="#e3a92f"/>
+          <text x="803" y="155" text-anchor="middle" font-size="16" font-weight="800" fill="#17365d">Project B board</text><text x="803" y="177" text-anchor="middle" font-size="12" fill="#596579">worker and reviewer seats</text>
+          <rect x="680" y="210" width="245" height="73" rx="16" fill="#f2ecf8" stroke="#76569b"/>
+          <text x="803" y="241" text-anchor="middle" font-size="16" font-weight="800" fill="#17365d">Project C board</text><text x="803" y="263" text-anchor="middle" font-size="12" fill="#596579">worker and reviewer seats</text>
+          <text x="480" y="306" text-anchor="middle" font-size="13" fill="#596579">Fleet combines board-local status by principal ID and agent name</text>
+        </svg>
+        <figcaption>One connector watches the active registry. Each board still enforces its own admission and keeps its own agent ID, ticket state, and cursor.</figcaption>
+      </figure>
+
+      <h3>What happens during a fleet wait</h3>
+      <ul>
+        <li>The home board is checked first. Active registry entries are de-duplicated by board ID; paused entries are ignored.</li>
+        <li>Push subscriptions are the default on every board. If push fails for one board, that board logs and falls back for the current call without stopping the others; the next re-arm retries push.</li>
+        <li>An idle seat makes no Central calls after the subscription drain. A waiting seat that holds tickets only renews those exact leases at the TTL-derived interval.</li>
+        <li>The result returns events with <code>board_id</code>, a cursor map, and <code>skipped_boards</code>. A skipped board usually means the principal lacks admission or that board is unavailable.</li>
+        <li>If the registry cannot be read, the bridge falls back to the home board and reports <code>registry_warning</code>. Treat the warning as degraded routing.</li>
+      </ul>
+      <p>The principal-visible registry for this environment currently exposes the <code>pursers</code> and <code>fullplatts</code> boards. The operator's deployment inventory also includes <code>mi-mcp-prd</code> and an archive board; visibility depends on admission and registry status. These deployments route through one loopback TLS Central endpoint, but those board names are operational inventory, not package defaults.</p>
+    </section>
+
+    <section id="tickets">
+      <p class="eyebrow" style="color:#2f6f9f">06 · Workflow</p>
+      <h2>Run each ticket through evidence and review</h2>
+      <figure>
+        <svg viewBox="0 0 980 315" role="img" aria-labelledby="flow-title-en flow-desc-en">
+          <title id="flow-title-en">Ticket lifecycle</title>
+          <desc id="flow-desc-en">A ticket is created, claimed, worked and verified, submitted, and reviewed. Approval closes it. Rejection sends it back for a fix and another submission.</desc>
+          <defs><marker id="arrow-c-en" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="#55708c"/></marker></defs>
+          <g font-family="ui-sans-serif, sans-serif" text-anchor="middle">
+            <g><circle cx="78" cy="120" r="50" fill="#e7f3f6" stroke="#2f6f9f" stroke-width="2"/><text x="78" y="115" font-size="15" font-weight="800" fill="#17365d">CREATE</text><text x="78" y="137" font-size="12" fill="#596579">Set scope</text></g>
+            <g><circle cx="237" cy="120" r="50" fill="#fff" stroke="#2f6f9f" stroke-width="2"/><text x="237" y="115" font-size="15" font-weight="800" fill="#17365d">CLAIM</text><text x="237" y="137" font-size="12" fill="#596579">Take one ticket</text></g>
+            <g><circle cx="403" cy="120" r="58" fill="#fff5df" stroke="#e3a92f" stroke-width="2"/><text x="403" y="111" font-size="15" font-weight="800" fill="#17365d">WORK + TEST</text><text x="403" y="133" font-size="12" fill="#596579">Collect real output</text></g>
+            <g><circle cx="582" cy="120" r="50" fill="#eaf6f2" stroke="#3b8467" stroke-width="2"/><text x="582" y="115" font-size="15" font-weight="800" fill="#17365d">SUBMIT</text><text x="582" y="137" font-size="12" fill="#596579">Attach evidence</text></g>
+            <g><circle cx="742" cy="120" r="50" fill="#f2ecf8" stroke="#76569b" stroke-width="2"/><text x="742" y="115" font-size="15" font-weight="800" fill="#17365d">REVIEW</text><text x="742" y="137" font-size="12" fill="#596579">Separate principal</text></g>
+            <g><circle cx="900" cy="120" r="50" fill="#edf7f1" stroke="#3b8467" stroke-width="2"/><text x="900" y="115" font-size="15" font-weight="800" fill="#17365d">CLOSED</text><text x="900" y="137" font-size="12" fill="#596579">Approved</text></g>
+          </g>
+          <g fill="none" stroke="#55708c" stroke-width="2.4" marker-end="url(#arrow-c-en)">
+            <path d="M128 120 L181 120"/><path d="M287 120 L343 120"/><path d="M461 120 L526 120"/><path d="M632 120 L686 120"/><path d="M792 120 L844 120"/>
+          </g>
+          <path d="M742 172 C742 270 430 275 410 184" fill="none" stroke="#bd574e" stroke-width="2.4" stroke-dasharray="7 5" marker-end="url(#arrow-c-en)"/>
+          <rect x="510" y="236" width="200" height="45" rx="12" fill="#fff0ed" stroke="#bd574e"/>
+          <text x="610" y="255" text-anchor="middle" font-size="14" font-weight="800" fill="#8c3b35">REJECT + FIX</text>
+          <text x="610" y="273" text-anchor="middle" font-size="11" fill="#596579">Follow fix_instructions and resubmit</text>
+        </svg>
+        <figcaption>The exact state machine also has states such as <code>claimed</code> and <code>in_progress</code>. The important boundary is between the worker's submission and an independent review.</figcaption>
+      </figure>
+
+      <ol class="steps">
+        <li><strong>Create the ticket.</strong> Write a concrete title and description. Set a <code>target_url</code> that begins with the project slug, list relevant files, state forbidden actions, and name the evidence in <code>required_fields</code>.</li>
+        <li><strong>Wait and claim.</strong> Call <code>a2a_wait</code> with the latest cursor. Treat each returned event as a cue to refetch current state, then call <code>ticket_claim</code>. If another worker wins the race, go back to waiting.</li>
+        <li><strong>Work inside the authorized directory.</strong> Stay within ticket scope. A long task must call <code>lease_renew</code> itself because the wait bridge only sends heartbeats while <code>a2a_wait</code> is blocking.</li>
+        <li><strong>Submit evidence.</strong> Call <code>ticket_submit</code> with <code>stay_active=true</code>, a short summary, changed files, and observed results such as test output, an exit status, or a hash. Report incomplete work as a blocker instead of claiming success.</li>
+        <li><strong>Wait for review.</strong> An independent principal occupies the reviewer seat and approves or rejects the submission. A second agent name under the worker's token is not independent.</li>
+        <li><strong>Retry or re-arm.</strong> After rejection, read <code>fix_instructions</code>, reclaim the ticket, make the fix, verify it, and submit again. After approval, wait for the next ticket.</li>
+      </ol>
+
+      <div class="success"><strong>Useful evidence answers three questions:</strong> What changed? How did you check it? What did the command or inspection actually show? If browser evidence is required, use the isolated ego-lite browser, never a person's Chrome session. If a check did not run, say so.</div>
+    </section>
+
+    <section id="memories">
+      <p class="eyebrow" style="color:#2f6f9f">07 · Shared memory</p>
+      <h2>Store reusable context in memories</h2>
+      <p>A memory should help the next agent recover a decision, blocker, handoff, verification method, or ticket context. It is not a replacement for the project files.</p>
+
+      <table>
+        <thead><tr><th>Action</th><th>Tool</th><th>When to use it</th></tr></thead>
+        <tbody>
+          <tr><td>Write</td><td><code>memory_write</code></td><td>Save <code>private</code> or <code>project</code> context with a title, tags, and links to tickets or files.</td></tr>
+          <tr><td>Search</td><td><code>memory_search</code></td><td>Search titles, content, tags, and related links. Archived items are excluded by default.</td></tr>
+          <tr><td>Read</td><td><code>memory_read</code></td><td>Filter by type, tag, author, time, or pinned state.</td></tr>
+          <tr><td>Archive</td><td><code>memory_write(archived=true)</code></td><td>Preserve a long source or older evidence outside the normal working set.</td></tr>
+        </tbody>
+      </table>
+
+      <h3>The 10k rule</h3>
+      <ul>
+        <li>Normal memory <code>content</code> is limited to <strong>10,000 characters</strong>. Summarize the useful part and link it to a ticket or file.</li>
+        <li>If the original text must be preserved and is longer than 10,000 characters, write it with <code>archived=true</code> and include provenance such as <code>archive_source_id</code>.</li>
+        <li>Set <code>include_archived=true</code> when you deliberately want archives in <code>memory_read</code> or <code>memory_search</code>.</li>
+      </ul>
+      <pre><code>memory_write(
+  agent_name="payments-codex-1",
+  title="Decision: retry policy for payment capture",
+  content="Reasoning, impact, and verification steps...",
+  scope="project",
+  memory_type="decision",
+  tags=["payments", "retry"],
+  related_tickets=["TK-EXAMPLE"]
+)
+
+memory_search(
+  query="retry policy",
+  tag="payments",
+  include_archived=false
+)</code></pre>
+      <div class="warning"><strong>Do not store secrets.</strong> Scope and scrub policy reduce exposure, but they do not make tokens, private keys, passwords, or personal data appropriate memory content.</div>
+    </section>
+
+    <section id="dashboard">
+      <p class="eyebrow" style="color:#2f6f9f">08 · Dashboard</p>
+      <h2>Read the board through the dashboard MCP App</h2>
+      <p>In a host that supports MCP Apps, open <code>ui://pursers/dashboard</code> through the Personal dashboard tool. The interface is read only and has five views.</p>
+      <div class="grid">
+        <div class="mini"><h3>Today</h3><p>Counts for open, working, and submitted tickets, plus the live agents and work that needs attention.</p></div>
+        <div class="mini"><h3>Work</h3><p>Tickets with priority, assignee, current status, and submissions waiting for review.</p></div>
+        <div class="mini"><h3>Agents</h3><p>A roster headed "N live / M total." Each card shows the current project and ticket. Duplicate display names are flagged because they can hide a seat mix-up.</p></div>
+        <div class="mini"><h3>Fleet</h3><p>Pool totals show online, busy, available, and stale workers. Project rows show open, claimed, and submitted counts; seat chips map each worker to its current project and short ticket ID.</p></div>
+        <div class="mini"><h3>Activity</h3><p>A bounded feed of events observed by the local MCP process. It is not the complete Central audit journal.</p></div>
+      </div>
+      <p><code>fleet_snapshot</code> is a pure read. It reads the registered boards and groups matching seats by <code>(principal_id, agent_name)</code>; it does not claim tickets or mutate registry state. A grey row or stale label does not prove that an agent is broken. It means its <code>last_activity_at</code> is older than the threshold. Check the ticket lease and the actual host session before taking action.</p>
+      <div class="note">Older or restricted Central deployments might not expose <code>fleet_snapshot</code>. The Fleet tab remains visible with dashes and a warning instead of inventing counts. When any view shows last-known state or a connection error, confirm important status with <code>board_status</code> or <code>ticket_get</code>.</div>
+    </section>
+
+    <section id="security">
+      <p class="eyebrow" style="color:#2f6f9f">09 · Security</p>
+      <h2>Use real JWTs and keep credentials out of shared config</h2>
+      <p>Central starts only in JWT mode. It verifies RS256 signatures against the configured JWKS and checks the issuer and audience. The required settings are <code>CENTRAL_AUTH_MODE=jwt</code>, <code>CENTRAL_JWT_ISSUER</code>, <code>CENTRAL_JWT_AUDIENCE</code>, and <code>CENTRAL_JWKS_PATH</code>. There is no development-token fallback.</p>
+      <p>A valid JWT identifies a principal but does not automatically admit it to every board. Add the principal with <code>board_member_add</code> or issue a <code>board_invite</code>, then grant only the scopes its seat needs. Different agent names under one token still belong to the same principal, so strict review needs a reviewer with credentials for an independent principal.</p>
+      <p>Central <code>0.1.0a19</code> applies each board's configured scrub profile when returning board state. Scrubbing remains defense in depth. Do not store a secret and rely on the scrubber to make it safe.</p>
+      <ul class="checklist">
+        <li>Use a real RS256 JWT issued by the team's identity system. Match its issuer and audience to Central.</li>
+        <li>Keep tokens in a private profile or secret store. Documentation should contain only <code>&lt;JWT&gt;</code>.</li>
+        <li>Do not commit a JWT, private key, private JWKS material, or profile file to Git.</li>
+        <li>Keep Personal Central on loopback. The live shared deployment may add loopback TLS, but the Personal package itself does not promise certificate pinning. Do not expose either endpoint on an untrusted interface.</li>
+        <li>Give the reviewer a separate token and rotate credentials after suspected exposure.</li>
+      </ul>
+
+      <h3>Preflight checklist</h3>
+      <table>
+        <thead><tr><th>Check</th><th>Expected result</th></tr></thead>
+        <tbody>
+          <tr><td>Identity</td><td><code>board_onboard</code> returns the agent and session you intended to use.</td></tr>
+          <tr><td>Routing</td><td><code>a2a_wait(boards="registry")</code> returns a cursor map and identifies each event's <code>board_id</code>.</td></tr>
+          <tr><td>Permission</td><td>The worker can claim and write within its scopes. The reviewer uses another principal.</td></tr>
+          <tr><td>Secrets</td><td>Examples, logs, ticket notes, and memories contain no real token.</td></tr>
+          <tr><td>Loop</td><td>A timeout re-arms with <code>new_seq</code>. A submission waits for review. A rejection follows the supplied fix instructions.</td></tr>
+        </tbody>
+      </table>
+      <div class="success"><strong>The setup is ready when</strong> the host sees the tools, the expected identity joins, a worker can claim a test ticket, a separate reviewer can approve it, and the dashboard agrees with the board tools.</div>
+    </section>
+  </main>
+
+  <footer>
+    <p>This guide reflects the released 5.0.0a15 package set plus the 5.0.0a16 push-wait candidate on the current main branch. Check the release manifest, hashes, admission policy, and host requirements again before installing in an ordinary environment.</p>
+  </footer>
+</body>
+</html>
