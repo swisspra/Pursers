@@ -1,0 +1,635 @@
+<!doctype html>
+<html lang="th">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" href="data:,">
+  <title>คู่มือเริ่มต้นใช้งาน Pursers</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #16233b;
+      --muted: #596579;
+      --paper: #f6f4ee;
+      --card: #fffdf8;
+      --line: #d9d6cc;
+      --navy: #17365d;
+      --blue: #2f6f9f;
+      --cyan: #59b6b3;
+      --gold: #e3a92f;
+      --red: #bd574e;
+      --green: #3b8467;
+      --code: #101a2b;
+      --shadow: 0 12px 34px rgba(22, 35, 59, .08);
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 10% 0%, rgba(89,182,179,.16), transparent 30rem),
+        radial-gradient(circle at 95% 14%, rgba(227,169,47,.13), transparent 28rem),
+        var(--paper);
+      font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Noto Sans Thai", "Segoe UI", sans-serif;
+      line-height: 1.72;
+    }
+    a { color: var(--blue); text-underline-offset: 3px; }
+    .hero {
+      padding: 72px 24px 54px;
+      color: #fff;
+      background: linear-gradient(125deg, #112947 0%, #1b4f70 58%, #277a7b 100%);
+      position: relative;
+      overflow: hidden;
+    }
+    .hero::after {
+      content: "";
+      position: absolute;
+      width: 360px;
+      height: 360px;
+      right: -120px;
+      top: -170px;
+      border: 1px solid rgba(255,255,255,.22);
+      border-radius: 50%;
+      box-shadow: 0 0 0 48px rgba(255,255,255,.035), 0 0 0 98px rgba(255,255,255,.025);
+    }
+    .hero-inner, main, footer { width: min(1080px, calc(100% - 36px)); margin: 0 auto; }
+    .eyebrow { margin: 0 0 10px; color: #9ce1dc; font-size: .82rem; letter-spacing: .12em; text-transform: uppercase; font-weight: 800; }
+    h1 { margin: 0; max-width: 760px; font-size: clamp(2.2rem, 6vw, 4.5rem); line-height: 1.06; letter-spacing: -.035em; }
+    .lead { max-width: 760px; margin: 22px 0 0; color: #dbeaf1; font-size: 1.15rem; }
+    .hero-meta { display: flex; flex-wrap: wrap; gap: 9px; margin-top: 26px; }
+    .pill { padding: 5px 11px; border: 1px solid rgba(255,255,255,.26); border-radius: 999px; background: rgba(255,255,255,.08); font-size: .82rem; }
+    main { padding: 36px 0 72px; }
+    .toc, section, .callout {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      box-shadow: var(--shadow);
+    }
+    .toc { padding: 22px 26px; margin-bottom: 28px; }
+    .toc strong { display: block; margin-bottom: 8px; }
+    .toc ol { margin: 0; columns: 2; padding-left: 1.4rem; }
+    .toc li { break-inside: avoid; margin: 3px 0; }
+    section { padding: clamp(24px, 5vw, 48px); margin: 24px 0; }
+    h2 { margin: 0 0 15px; color: var(--navy); font-size: clamp(1.55rem, 3vw, 2.25rem); line-height: 1.25; }
+    h3 { margin: 28px 0 9px; color: var(--navy); font-size: 1.14rem; }
+    p { margin: 10px 0; }
+    ul, ol { padding-left: 1.35rem; }
+    li { margin: 7px 0; }
+    code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .9em; }
+    p code, li code { padding: .14rem .38rem; border-radius: 5px; background: #e9eef2; color: #17365d; }
+    pre {
+      overflow-x: auto;
+      padding: 18px 20px;
+      border-radius: 12px;
+      color: #e8f2f4;
+      background: var(--code);
+      border: 1px solid #263854;
+      line-height: 1.55;
+      font-size: .84rem;
+    }
+    pre code { font-size: inherit; }
+    .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; margin: 20px 0; }
+    .mini { padding: 18px; border: 1px solid var(--line); border-radius: 14px; background: #fbfaf6; }
+    .mini h3 { margin-top: 0; }
+    .note, .warning, .success {
+      margin: 18px 0;
+      padding: 15px 18px;
+      border-left: 5px solid var(--blue);
+      border-radius: 8px;
+      background: #edf6fa;
+    }
+    .warning { border-color: var(--gold); background: #fff8e8; }
+    .success { border-color: var(--green); background: #edf7f1; }
+    .label { font-size: .76rem; letter-spacing: .08em; font-weight: 800; text-transform: uppercase; }
+    figure { margin: 26px 0; padding: 16px; border-radius: 15px; border: 1px solid var(--line); background: #faf9f4; }
+    figcaption { margin-top: 10px; color: var(--muted); font-size: .88rem; }
+    svg { display: block; width: 100%; height: auto; }
+    table { width: 100%; margin: 16px 0; border-collapse: collapse; font-size: .93rem; }
+    th, td { text-align: left; vertical-align: top; padding: 11px 12px; border-bottom: 1px solid var(--line); }
+    th { color: var(--navy); background: #f1f2ee; }
+    .steps { counter-reset: steps; list-style: none; padding: 0; }
+    .steps > li { position: relative; padding: 0 0 20px 52px; min-height: 44px; }
+    .steps > li::before {
+      counter-increment: steps;
+      content: counter(steps);
+      position: absolute;
+      left: 0;
+      top: 1px;
+      display: grid;
+      place-items: center;
+      width: 34px;
+      height: 34px;
+      border-radius: 50%;
+      background: var(--navy);
+      color: #fff;
+      font-weight: 800;
+    }
+    .checklist { list-style: none; padding: 0; }
+    .checklist li { position: relative; padding-left: 30px; }
+    .checklist li::before { content: "✓"; position: absolute; left: 4px; color: var(--green); font-weight: 900; }
+    footer { padding: 0 0 54px; color: var(--muted); font-size: .85rem; }
+    @media (max-width: 720px) {
+      .toc ol { columns: 1; }
+      .grid { grid-template-columns: 1fr; }
+      section { border-radius: 14px; }
+      .hero { padding-top: 50px; }
+      table { display: block; overflow-x: auto; }
+    }
+    @media print {
+      body { background: #fff; }
+      .hero { padding: 30px; }
+      .toc, section { box-shadow: none; break-inside: avoid; }
+      a { color: inherit; text-decoration: none; }
+    }
+  </style>
+</head>
+<body>
+  <header class="hero">
+    <div class="hero-inner">
+      <p class="eyebrow">Pursers · คู่มือสำหรับสมาชิกใหม่</p>
+      <h1>เริ่มต้นทำงานร่วมกับ AI agents อย่างเป็นระบบ</h1>
+      <p class="lead">ตั้งแต่ติดตั้งรุ่น Cross-Project Fleet และต่อ MCP connector ไปจนถึงรับงานข้ามหลายบอร์ด ส่งหลักฐาน รอ review และดูสถานะทั้ง fleet จากที่เดียว</p>
+      <div class="hero-meta" aria-label="คุณสมบัติสำคัญ">
+        <span class="pill">Local-first</span>
+        <span class="pill">MCP</span>
+        <span class="pill">ใช้ข้ามยี่ห้อ Host</span>
+        <span class="pill">มีหลักฐานและผู้ review</span>
+        <span class="pill">Push-wait candidate · 5.0.0a16</span>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <nav class="toc" aria-label="สารบัญ">
+      <strong>อ่านตามลำดับครั้งแรกประมาณ 15 นาที</strong>
+      <ol>
+        <li><a href="#what">Pursers คืออะไร</a></li>
+        <li><a href="#install">ติดตั้งและเตรียม profile</a></li>
+        <li><a href="#connect">ต่อ Claude Desktop และ Codex</a></li>
+        <li><a href="#fleet">ตั้ง project registry และ worker pool</a></li>
+        <li><a href="#identity">ตั้งชื่อ agent ต่อ session</a></li>
+        <li><a href="#tickets">วงจร ticket และ review</a></li>
+        <li><a href="#memories">ใช้ memories</a></li>
+        <li><a href="#dashboard">ดู Fleet dashboard</a></li>
+        <li><a href="#security">JWT และความปลอดภัย</a></li>
+      </ol>
+    </nav>
+
+    <section id="what">
+      <p class="eyebrow" style="color:#2f6f9f">01 · ภาพรวม</p>
+      <h2>Pursers คือบอร์ดงานกลางสำหรับ AI agents</h2>
+      <p>Pursers ช่วยให้หลาย agent ประสานงานผ่าน MCP โดยมี ticket, สถานะงาน, หลักฐาน, review, handoff และ memory อยู่ในบอร์ดเดียวกัน ตัวบอร์ดเป็น <strong>local-first</strong>: เจ้าของเป็นผู้ควบคุมบริการกลาง ข้อมูล และ credential ของตนเอง</p>
+      <p>แนวคิดนี้ไม่ผูกกับยี่ห้อโมเดลหรือ Host ใด Host หนึ่ง หาก Host ต่อ MCP ได้ ก็สามารถเป็น worker, reviewer หรือหน้าจออ่านสถานะได้ตามสิทธิ์ที่กำหนด</p>
+
+      <figure>
+        <svg viewBox="0 0 920 330" role="img" aria-labelledby="arch-title arch-desc">
+          <title id="arch-title">สถาปัตยกรรม Pursers แบบ local-first</title>
+          <desc id="arch-desc">Claude Desktop, Codex และ Host อื่นต่อผ่าน MCP มายัง Pursers board กลาง ซึ่งเก็บ tickets, memories และ journal ส่วนไฟล์งานยังอยู่ใน project directory</desc>
+          <defs>
+            <marker id="arrow-a" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="#55708c"/></marker>
+            <filter id="soft-a"><feDropShadow dx="0" dy="4" stdDeviation="5" flood-opacity=".12"/></filter>
+          </defs>
+          <rect x="26" y="42" width="205" height="62" rx="15" fill="#e7f3f6" stroke="#2f6f9f"/>
+          <text x="128" y="68" text-anchor="middle" font-size="17" font-weight="700" fill="#17365d">Claude Desktop</text>
+          <text x="128" y="89" text-anchor="middle" font-size="13" fill="#596579">MCP Host / agent session</text>
+          <rect x="26" y="134" width="205" height="62" rx="15" fill="#eaf6f2" stroke="#3b8467"/>
+          <text x="128" y="160" text-anchor="middle" font-size="17" font-weight="700" fill="#17365d">Codex</text>
+          <text x="128" y="181" text-anchor="middle" font-size="13" fill="#596579">MCP Host / agent session</text>
+          <rect x="26" y="226" width="205" height="62" rx="15" fill="#fff5df" stroke="#e3a92f"/>
+          <text x="128" y="252" text-anchor="middle" font-size="17" font-weight="700" fill="#17365d">Host อื่น</text>
+          <text x="128" y="273" text-anchor="middle" font-size="13" fill="#596579">ที่รองรับ MCP</text>
+          <path d="M231 73 C320 73 306 144 378 144" fill="none" stroke="#55708c" stroke-width="2" marker-end="url(#arrow-a)"/>
+          <path d="M231 165 L378 165" fill="none" stroke="#55708c" stroke-width="2" marker-end="url(#arrow-a)"/>
+          <path d="M231 257 C320 257 306 186 378 186" fill="none" stroke="#55708c" stroke-width="2" marker-end="url(#arrow-a)"/>
+          <g filter="url(#soft-a)">
+            <rect x="380" y="85" width="250" height="170" rx="24" fill="#17365d"/>
+            <text x="505" y="121" text-anchor="middle" font-size="21" font-weight="800" fill="#fff">Pursers Board</text>
+            <rect x="407" y="140" width="86" height="74" rx="12" fill="#fff" opacity=".94"/>
+            <text x="450" y="170" text-anchor="middle" font-size="14" font-weight="700" fill="#17365d">Tickets</text>
+            <text x="450" y="192" text-anchor="middle" font-size="12" fill="#596579">สถานะ + review</text>
+            <rect x="516" y="140" width="86" height="74" rx="12" fill="#fff" opacity=".94"/>
+            <text x="559" y="170" text-anchor="middle" font-size="14" font-weight="700" fill="#17365d">Memory</text>
+            <text x="559" y="192" text-anchor="middle" font-size="12" fill="#596579">ความรู้ + handoff</text>
+          </g>
+          <path d="M630 164 L712 164" fill="none" stroke="#55708c" stroke-width="2" marker-end="url(#arrow-a)"/>
+          <rect x="714" y="105" width="180" height="118" rx="18" fill="#fff" stroke="#bd574e" stroke-dasharray="7 5"/>
+          <text x="804" y="143" text-anchor="middle" font-size="18" font-weight="800" fill="#17365d">Project files</text>
+          <text x="804" y="168" text-anchor="middle" font-size="13" fill="#596579">อยู่ใน work directory</text>
+          <text x="804" y="192" text-anchor="middle" font-size="13" fill="#596579">บอร์ดไม่เก็บไฟล์แทน</text>
+        </svg>
+        <figcaption>บอร์ดดูแล “ใครทำอะไรและถึงขั้นไหน” ส่วนการแก้ไฟล์เกิดใน project directory ที่ Host อนุญาต</figcaption>
+      </figure>
+
+      <div class="note"><strong>จำง่าย ๆ:</strong> MCP connector คือทางคุย, Pursers board คือศูนย์ประสานงาน, และ work directory คือที่ทำงานจริง</div>
+    </section>
+
+    <section id="install">
+      <p class="eyebrow" style="color:#2f6f9f">02 · ติดตั้ง</p>
+      <h2>ติดตั้งชุดล่าสุด และแยก released จาก candidate</h2>
+      <p>ต้องใช้ Python 3.11 ขึ้นไป ชุดที่ publish แล้วล่าสุดใน checkout นี้คือ <code>5.0.0a15</code> ส่วน subscription-first push-wait เป็น candidate สำหรับ <code>5.0.0a16</code> ยังไม่ใช่คำยืนยันว่า a16 ถูก publish แล้ว:</p>
+      <table>
+        <thead><tr><th>ส่วนประกอบ</th><th>เวอร์ชัน</th><th>หน้าที่</th></tr></thead>
+        <tbody>
+          <tr><td><code>pursers</code> / <code>pursers-personal</code></td><td><code>5.0.0a15</code></td><td>meta installer, Personal facade และ Fleet dashboard</td></tr>
+          <tr><td><code>pursers-central</code></td><td><code>0.1.0a19</code></td><td>บอร์ดกลาง, authorization, state และ journal cues</td></tr>
+          <tr><td><code>pursers-client</code></td><td><code>0.1.0a13</code></td><td>Python client และ subscription driver</td></tr>
+          <tr><td><code>pursers-personal-import</code></td><td><code>5.0.0a2</code></td><td>นำข้อมูล v4 แบบ one-way cutover</td></tr>
+          <tr><td><code>pursers-wait-bridge</code></td><td><code>0.1.0a5</code></td><td>รอแบบ subscription-first, multi-board และ registry mode</td></tr>
+        </tbody>
+      </table>
+      <div class="warning"><strong>อย่าตีความ candidate ว่า release:</strong> ใช้ manifest และ checksum ที่ operator อนุมัติ รุ่นบน PyPI เปลี่ยนทับไม่ได้ และไม่ควรผสม component คนละชุด</div>
+      <div class="grid">
+        <div class="mini">
+          <h3>ติดตั้งถาวรใน environment</h3>
+          <pre><code>python -m pip install pursers
+pursers-personal --version</code></pre>
+          <p><code>pursers</code> เป็น meta-package ที่ติดตั้ง Central, client, Personal app และ import utility ให้ครบ ควรเห็น <code>5.0.0a15</code> สำหรับชุด released นี้</p>
+        </div>
+        <div class="mini">
+          <h3>รัน wait bridge แบบ isolated</h3>
+          <pre><code>uvx pursers-wait-bridge</code></pre>
+          <p>เหมาะกับ stdio connector ที่ไม่ต้องอ้าง source checkout; ตั้ง environment ของ Central และ identity ใน secret-backed Host config</p>
+        </div>
+      </div>
+
+      <h3>ตรวจ supply chain ของ release</h3>
+      <p>PyPI publish ผ่าน GitHub Actions Trusted Publishing ด้วย OIDC (<code>id-token: write</code>) จึงไม่มี PyPI API token ใน workflow ส่วน GitHub release แนบ wheel ที่สร้างแบบ deterministic ด้วย toolchain ที่ pin ไว้, component lock ที่ระบุ version/hash และ <code>SHA256SUMS.txt</code> สำหรับตรวจไฟล์ที่ดาวน์โหลด:</p>
+      <pre><code>shasum -a 256 -c SHA256SUMS.txt</code></pre>
+      <p>ตรวจ checksum ก่อนติดตั้งจาก release asset และเทียบ component version กับตารางด้านบน หาก manifest, wheel หรือ version ไม่ตรง ให้หยุดแทนการผสมคนละ release</p>
+
+      <h3>สร้าง profile สำหรับโปรเจกต์</h3>
+      <pre><code>pursers-personal setup \
+  --project &lt;work_dir&gt; \
+  --session primary
+
+# ตรวจผลและ identity ก่อนเปิดใช้งานจริง
+pursers-personal doctor --project &lt;work_dir&gt;</code></pre>
+      <p>คำสั่ง <code>setup</code> จะเตรียม local profile ที่ระบุ board, loopback Central และ credential โดยไม่ควรนำค่า secret ออกมาใส่เอกสารหรือ commit ลง Git การ apply integration อัตโนมัติของ Personal รุ่นนี้ออกแบบสำหรับ Claude Desktop บน macOS; Host อื่นให้ต่อด้วย config ของ Host ตามตัวอย่างหัวข้อถัดไป</p>
+      <div class="warning"><span class="label">ก่อนใช้จริง</span><br>แพ็กเกจยังเป็น alpha ให้ pin ชุดที่ operator อนุมัติทั้งก้อน ตรวจ Host/version และสำรอง config ก่อนเปลี่ยน integration</div>
+    </section>
+
+    <section id="connect">
+      <p class="eyebrow" style="color:#2f6f9f">03 · Connector</p>
+      <h2>ต่อ Pursers เข้ากับ Claude Desktop และ Codex</h2>
+      <p>ตัวอย่างด้านล่างเปิด profile-backed MCP facade ซึ่งมีทั้งเครื่องมือสนทนาและ dashboard MCP App ให้แทน placeholder ทุกจุดด้วย path ของเครื่องนั้น ๆ และให้ไฟล์ profile เป็นไฟล์ private ตัว Personal Central รับการเชื่อมต่อบน loopback ผ่าน TLS ตามค่า profile</p>
+
+      <h3>Claude Desktop — JSON</h3>
+      <pre><code>{
+  "mcpServers": {
+    "pursers-personal": {
+      "command": "&lt;venv&gt;/bin/pursers-personal",
+      "args": [
+        "mcp",
+        "--profile", "&lt;profile_path&gt;",
+        "--host-id", "claude-desktop",
+        "--session", "team-seat-a"
+      ]
+    }
+  }
+}</code></pre>
+
+      <h3>Codex — TOML</h3>
+      <pre><code>[mcp_servers.pursers-personal]
+command = "&lt;venv&gt;/bin/pursers-personal"
+args = [
+  "mcp",
+  "--profile", "&lt;profile_path&gt;",
+  "--host-id", "codex",
+  "--session", "team-seat-a"
+]</code></pre>
+
+      <p>หากทีมใช้ worker ที่ต้องรอ ticket แบบ blocking ให้เพิ่ม <strong>wait bridge</strong> เป็น stdio connector แยกต่างหาก อย่าวาง wait bridge หลัง HTTP proxy เพราะ timeout จะตัด long wait:</p>
+      <pre><code># ตัวอย่าง Codex config สำหรับ wait bridge จาก PyPI
+[mcp_servers.pursers-wait]
+command = "uvx"
+tool_timeout_sec = 620
+args = ["pursers-wait-bridge"]
+
+[mcp_servers.pursers-wait.env]
+ONBOARD_CENTRAL_URL = "https://127.0.0.1:8766/mcp"
+ONBOARD_BOARD_ID = "pursers"
+ONBOARD_CENTRAL_TOKEN = "&lt;YOUR_TOKEN&gt;"
+ONBOARD_AGENT_NAME = "team-worker"
+ONBOARD_AGENT_INSTANCE = "window-a"
+PURSERS_HOST = "codex"</code></pre>
+      <p>ค่า default คือ subscription-first: bridge ฟัง <code>subscriptions/listen</code> ของ journal และ per-seat cue แล้ว refetch แบบ <code>touch=false</code> เฉพาะเมื่อมี cue ใช้ <code>PURSERS_WAIT_MODE=poll</code> เฉพาะ fallback ที่ตั้งใจเท่านั้น หาก subscription ของบอร์ดหนึ่งล้ม จะ log ชัด ลดระดับเฉพาะ call นั้น และลอง push ใหม่เมื่อ re-arm</p>
+      <h3>Host profile และเพดานการรอ</h3>
+      <table>
+        <thead><tr><th><code>PURSERS_HOST</code></th><th>Host/tool timeout ที่แนะนำ</th><th>ช่วง block สูงสุด</th><th>หมายเหตุ</th></tr></thead>
+        <tbody>
+          <tr><td><code>codex</code></td><td>620s ผ่าน <code>tool_timeout_sec</code></td><td>560s</td><td>Codex Desktop</td></tr>
+          <tr><td><code>codex-cli</code></td><td>620s ผ่าน <code>tool_timeout_sec</code></td><td>560s</td><td>ควร probe runner ก่อนใช้ทั้ง fleet</td></tr>
+          <tr><td><code>goose</code></td><td>300s</td><td>270s</td><td>profile 3600s/3540s ใช้ได้หลัง probe</td></tr>
+          <tr><td><code>claude-code</code></td><td>หมุน call ทุก 21,600s</td><td>21,540s</td><td>ส่ง progress ทุก 300s กัน stdio idle</td></tr>
+          <tr><td><code>claude-desktop</code></td><td>baseline ที่ probe แล้ว 240s</td><td>200s</td><td>เผื่อ margin อย่างน้อย 40s</td></tr>
+          <tr><td><code>headless</code></td><td>หมุน runner ทุก 21,600s</td><td>21,540s</td><td>runner เป็นเจ้าของ wait/re-arm loop</td></tr>
+        </tbody>
+      </table>
+      <p><code>PURSERS_HOST_TIMEOUT_S</code> ใช้ override deadline ของ profile ได้ โดย bridge จะหัก safety margin ก่อนกำหนดช่วง block</p>
+      <div class="note"><strong>หลักตรวจเร็ว:</strong> restart Host หลังแก้ config → เรียก <code>board_onboard</code> → ตรวจ <code>board_status</code> → ทดลอง <code>a2a_wait</code> ด้วย timeout สั้น ๆ ก่อนเปิดวงรอจริง</div>
+    </section>
+
+    <section id="fleet">
+      <p class="eyebrow" style="color:#2f6f9f">04 · Cross-project pool</p>
+      <h2>เพิ่มโปรเจกต์ครั้งเดียว แล้วให้ worker pool รอทุกบอร์ด</h2>
+      <p>บอร์ดหลักเก็บ registry ใน <code>board_state</code> key <code>project_registry</code> เมื่อ worker เรียก <code>a2a_wait(boards="registry")</code> wait bridge จะอ่าน registry ตอนเริ่ม call, เลือกเฉพาะโปรเจกต์สถานะ <code>active</code>, ใส่ home board ก่อน และเปิดการรอหลายบอร์ดผ่าน Central connection เดิม การเพิ่ม registry entry จึงเพิ่มโปรเจกต์ใน pool โดยไม่ต้องแก้ MCP connector หรือ restart ทุก seat</p>
+
+      <figure>
+        <svg viewBox="0 0 980 430" role="img" aria-labelledby="pool-title pool-desc">
+          <title id="pool-title">Project registry เชื่อม worker pool กับหลายบอร์ด</title>
+          <desc id="pool-desc">Home board pursers เก็บ project registry จากนั้น wait bridge กระจายการรอไปยังบอร์ด pursers, fullplatts และ mi-mcp-prd โดยรักษา cursor และ agent identity แยกต่อบอร์ด</desc>
+          <defs><marker id="arrow-d" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="#55708c"/></marker></defs>
+          <rect x="28" y="42" width="245" height="135" rx="20" fill="#17365d"/>
+          <text x="150" y="75" text-anchor="middle" font-size="18" font-weight="800" fill="#fff">Home board · pursers</text>
+          <rect x="52" y="93" width="197" height="58" rx="10" fill="#fff" opacity=".96"/>
+          <text x="150" y="116" text-anchor="middle" font-size="14" font-weight="700" fill="#17365d">project_registry</text>
+          <text x="150" y="137" text-anchor="middle" font-size="12" fill="#596579">board_id · work_dir · status</text>
+          <path d="M273 110 L365 110" fill="none" stroke="#55708c" stroke-width="2.4" marker-end="url(#arrow-d)"/>
+          <rect x="368" y="38" width="250" height="146" rx="22" fill="#e7f3f6" stroke="#2f6f9f" stroke-width="2"/>
+          <text x="493" y="73" text-anchor="middle" font-size="18" font-weight="800" fill="#17365d">pursers-wait-bridge</text>
+          <text x="493" y="100" text-anchor="middle" font-size="13" fill="#596579">boards=&quot;registry&quot;</text>
+          <text x="493" y="124" text-anchor="middle" font-size="13" fill="#596579">per-board cursor + agent ID</text>
+          <text x="493" y="148" text-anchor="middle" font-size="13" fill="#596579">subscription-first · poll opt-in</text>
+          <path d="M618 110 C682 110 676 75 724 75" fill="none" stroke="#55708c" stroke-width="2.2" marker-end="url(#arrow-d)"/>
+          <path d="M618 110 L724 180" fill="none" stroke="#55708c" stroke-width="2.2" marker-end="url(#arrow-d)"/>
+          <path d="M618 110 C682 110 676 285 724 285" fill="none" stroke="#55708c" stroke-width="2.2" marker-end="url(#arrow-d)"/>
+          <g>
+            <rect x="727" y="40" width="220" height="70" rx="14" fill="#edf7f1" stroke="#3b8467"/><text x="837" y="68" text-anchor="middle" font-size="16" font-weight="800" fill="#17365d">pursers</text><text x="837" y="91" text-anchor="middle" font-size="12" fill="#596579">cursor 247 · seat A</text>
+            <rect x="727" y="145" width="220" height="70" rx="14" fill="#fff8e8" stroke="#e3a92f"/><text x="837" y="173" text-anchor="middle" font-size="16" font-weight="800" fill="#17365d">fullplatts</text><text x="837" y="196" text-anchor="middle" font-size="12" fill="#596579">cursor 81 · seat B</text>
+            <rect x="727" y="250" width="220" height="70" rx="14" fill="#f2ecf8" stroke="#76569b"/><text x="837" y="278" text-anchor="middle" font-size="16" font-weight="800" fill="#17365d">mi-mcp-prd</text><text x="837" y="301" text-anchor="middle" font-size="12" fill="#596579">cursor 19 · seat C</text>
+          </g>
+          <rect x="85" y="267" width="535" height="106" rx="18" fill="#fff" stroke="#d9d6cc"/>
+          <text x="352" y="298" text-anchor="middle" font-size="16" font-weight="800" fill="#17365d">ผลลัพธ์ multi-board</text>
+          <text x="352" y="326" text-anchor="middle" font-size="13" fill="#596579">events ทุกตัวมี board_id · new_seq/resynced เป็น map</text>
+          <text x="352" y="351" text-anchor="middle" font-size="13" fill="#596579">บอร์ดที่เข้าไม่ได้อยู่ใน skipped_boards โดยไม่ทำให้ทั้ง call ล้ม</text>
+        </svg>
+        <figcaption>แต่ละบอร์ดมี cursor, generation, deterministic agent ID, backlog scan และ lease heartbeat ของตนเอง; cue เป็นเพียงสัญญาณปลุก จากนั้น bridge refetch สถานะจริงเสมอ</figcaption>
+      </figure>
+
+      <h3>Schema ของ registry</h3>
+      <pre><code>{
+  "schema_version": 1,
+  "projects": {
+    "project-a": {
+      "board_id": "project-a-board",
+      "work_dir": "&lt;work_dir&gt;/project-a",
+      "status": "active"
+    },
+    "project-b": {
+      "board_id": "project-b-board",
+      "work_dir": "&lt;work_dir&gt;/project-b",
+      "status": "paused"
+    }
+  }
+}</code></pre>
+      <p>เอกสารต้องมีเพียง <code>schema_version</code> และ <code>projects</code>; แต่ละ entry ต้องมี <code>board_id</code>, absolute <code>work_dir</code> และ status <code>active</code> หรือ <code>paused</code> เท่านั้น อย่าใส่ credential หรือข้อมูลลับใน board state ปัจจุบัน fleet ที่ live คือ <code>pursers</code> (home), <code>fullplatts</code> และ <code>mi-mcp-prd</code> รวมทั้งข้อมูล archive ที่เก็บไว้ ทั้งหมดอยู่หลัง loopback-TLS Central ตัวเดียว; archive ไม่ควรถูกนำเข้า active worker pool</p>
+
+      <h3>บริหาร registry ด้วย CLI</h3>
+      <pre><code>python tools/wait-bridge/registry_admin.py show
+python tools/wait-bridge/registry_admin.py add project-a \
+  --board-id project-a-board --work-dir &lt;work_dir&gt;/project-a
+python tools/wait-bridge/registry_admin.py pause project-a
+python tools/wait-bridge/registry_admin.py activate project-a
+python tools/wait-bridge/registry_admin.py remove project-a</code></pre>
+      <p>CLI อ่านและ validate schema ทั้งก้อนก่อนแก้, เขียนกลับไปยัง home board <code>pursers</code>, อ่านซ้ำและเทียบค่าที่เก็บจริง หากไม่ตรงจะออก non-zero พร้อม diff ที่ไม่เปิดเผย bearer token คำสั่ง <code>add</code> ปฏิเสธชื่อซ้ำเว้นแต่ตั้งใจใช้ <code>--force</code>; <code>remove</code> พิมพ์ entry ที่ถอดออกเพื่อให้กู้คืนด้วยมือได้</p>
+
+      <h3>รอทุก active board</h3>
+      <pre><code>a2a_wait(
+  boards="registry",
+  since_seq={"pursers": 247, "fullplatts": 81, "mi-mcp-prd": 19},
+  agent_name="pool-worker"
+)</code></pre>
+      <ul>
+        <li>ส่ง <code>new_seq</code> map ที่ได้รับกลับเข้า call ถัดไปโดยไม่รวม cursor เอง</li>
+        <li>ทุกบอร์ดใช้ push เป็น default; ถ้า subscription ของบอร์ดหนึ่งล้ม จะ log และ fallback เฉพาะ call/บอร์ดนั้น แล้วลอง push ใหม่ในการ re-arm ถัดไป</li>
+        <li>seat ว่างไม่เรียก Central หลัง drain ก่อน subscribe; seat ที่ถือ ticket ต่ออายุเฉพาะ lease เหล่านั้นตามรอบที่ derive จาก TTL</li>
+        <li><code>skipped_boards</code> ระบุบอร์ดที่ bearer เข้าไม่ได้ ให้แก้ membership ก่อน อย่าถือว่าเป็น “ไม่มีงาน”</li>
+        <li>ถ้า registry หายหรือ malformed bridge จะรอเฉพาะ home board และคืน <code>registry_warning</code>; แก้ registry แล้ว re-arm</li>
+      </ul>
+    </section>
+
+    <section id="identity">
+      <p class="eyebrow" style="color:#2f6f9f">05 · Identity</p>
+      <h2>หนึ่ง session = หนึ่งชื่อ agent ที่คงที่</h2>
+      <p>ทุก action ถูกบันทึกพร้อม identity ดังนั้นตั้งชื่อให้รู้ว่าเป็น seat ใด เช่น <code>payments-codex-1</code> หรือ <code>catalog-claude-2</code> แล้วใช้ชื่อนั้นตลอดอายุ session อย่าเปลี่ยนชื่อกลางงาน</p>
+
+      <figure>
+        <svg viewBox="0 0 920 285" role="img" aria-labelledby="seat-title seat-desc">
+          <title id="seat-title">การแยก agent name ต่อ session</title>
+          <desc id="seat-desc">หนึ่ง Host มีหลาย session แต่ละ session ส่ง agent_name ของตัวเองผ่าน a2a_wait และถูกบันทึกเป็น identity แยกกันบนบอร์ด</desc>
+          <defs><marker id="arrow-b" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="#55708c"/></marker></defs>
+          <rect x="30" y="35" width="250" height="215" rx="24" fill="#17365d"/>
+          <text x="155" y="69" text-anchor="middle" font-size="20" font-weight="800" fill="#fff">Codex Host</text>
+          <rect x="58" y="91" width="194" height="55" rx="12" fill="#e7f3f6"/>
+          <text x="155" y="116" text-anchor="middle" font-size="15" font-weight="700" fill="#17365d">Task / Session A</text>
+          <text x="155" y="135" text-anchor="middle" font-size="12" fill="#596579">payments-codex-1</text>
+          <rect x="58" y="167" width="194" height="55" rx="12" fill="#fff5df"/>
+          <text x="155" y="192" text-anchor="middle" font-size="15" font-weight="700" fill="#17365d">Task / Session B</text>
+          <text x="155" y="211" text-anchor="middle" font-size="12" fill="#596579">catalog-codex-1</text>
+          <path d="M280 118 C380 118 385 87 483 87" fill="none" stroke="#55708c" stroke-width="2.5" marker-end="url(#arrow-b)"/>
+          <path d="M280 194 C380 194 385 209 483 209" fill="none" stroke="#55708c" stroke-width="2.5" marker-end="url(#arrow-b)"/>
+          <rect x="485" y="35" width="405" height="215" rx="24" fill="#fff" stroke="#d9d6cc"/>
+          <text x="688" y="69" text-anchor="middle" font-size="20" font-weight="800" fill="#17365d">Pursers Board</text>
+          <rect x="516" y="89" width="342" height="50" rx="11" fill="#edf7f1" stroke="#3b8467"/>
+          <circle cx="542" cy="114" r="9" fill="#3b8467"/>
+          <text x="563" y="119" font-size="14" font-weight="700" fill="#17365d">payments-codex-1 · active</text>
+          <rect x="516" y="165" width="342" height="50" rx="11" fill="#fff8e8" stroke="#e3a92f"/>
+          <circle cx="542" cy="190" r="9" fill="#e3a92f"/>
+          <text x="563" y="195" font-size="14" font-weight="700" fill="#17365d">catalog-codex-1 · active</text>
+        </svg>
+        <figcaption>หลาย session ใช้ MCP process เดียวกันได้ แต่ส่ง <code>agent_name</code> แบบ per-call เพื่อไม่ให้ attribution ชนกัน</figcaption>
+      </figure>
+
+      <h3>ตัวอย่าง seat เดียวที่รอข้ามโปรเจกต์</h3>
+      <pre><code>a2a_wait(
+  agent_name="pool-codex-1",
+  boards="registry",
+  since_seq=LAST_SEQS,
+  timeout_s=560
+)</code></pre>
+      <p>หากได้ <code>timed_out=true</code> ให้ re-arm ทันทีด้วย <code>new_seq</code> ที่คืนมา timeout เป็นเพียงการหมุน call ให้สั้นกว่า deadline ของ Host ไม่ใช่ error</p>
+      <p>CLI seat ที่ generate แล้วใช้ <code>/PATH/TO/Pursers-local/bin/board.sh wait --since &lt;cursor&gt;</code> และ re-arm ด้วย cursor ใหม่ทุกครั้ง สำหรับ poll-only fallback flag ที่มีจริงใน candidate ปัจจุบันสะกดว่า <code>board.sh wait --poll</code>; ห้าม loop <code>board.sh list</code></p>
+
+      <h3>Seat prompt ตัวอย่าง</h3>
+      <pre><code>You are the Pursers worker named pool-codex-1.
+Use the project registry and handle one ticket at a time.
+Wait → claim → execute → validate → submit with evidence → await review.
+If rejected, reclaim, follow fix_instructions, validate, and resubmit.
+Pass agent_name="pool-codex-1" on every per-call identity tool.
+Never review your own work; re-arm after each terminal result.</code></pre>
+      <p>ชื่อ process-level จาก <code>ONBOARD_AGENT_NAME</code> ยังใช้เป็นค่า default ได้ แต่สำหรับหลาย session ใน Host เดียวกัน ให้ส่ง <code>agent_name</code> ในแต่ละ call เพื่อความชัดเจน หนึ่งชื่อภายใต้ principal เดียวกันอาจมีหลาย <strong>worker seats</strong> บนหลายบอร์ด; fleet รวม seats เหล่านี้ด้วยคู่ <code>principal_id + agent_name</code> แต่ authorization และ lease ยังตรวจแยกต่อบอร์ด</p>
+    </section>
+
+    <section id="tickets">
+      <p class="eyebrow" style="color:#2f6f9f">06 · Workflow</p>
+      <h2>วงจร ticket: จากคำขอจนผ่าน review</h2>
+      <figure>
+        <svg viewBox="0 0 980 315" role="img" aria-labelledby="flow-title flow-desc">
+          <title id="flow-title">วงจรชีวิต ticket</title>
+          <desc id="flow-desc">Ticket เริ่มจาก create ไป open, claim, do and validate, submit, review และปิด หากถูก reject จะย้อนกลับไปแก้ตามคำสั่งแล้ว submit ใหม่</desc>
+          <defs><marker id="arrow-c" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="#55708c"/></marker></defs>
+          <g font-family="ui-sans-serif, sans-serif" text-anchor="middle">
+            <g><circle cx="78" cy="120" r="50" fill="#e7f3f6" stroke="#2f6f9f" stroke-width="2"/><text x="78" y="115" font-size="15" font-weight="800" fill="#17365d">CREATE</text><text x="78" y="137" font-size="12" fill="#596579">กำหนด scope</text></g>
+            <g><circle cx="237" cy="120" r="50" fill="#fff" stroke="#2f6f9f" stroke-width="2"/><text x="237" y="115" font-size="15" font-weight="800" fill="#17365d">CLAIM</text><text x="237" y="137" font-size="12" fill="#596579">จองงาน 1 ใบ</text></g>
+            <g><circle cx="403" cy="120" r="58" fill="#fff5df" stroke="#e3a92f" stroke-width="2"/><text x="403" y="111" font-size="15" font-weight="800" fill="#17365d">DO + VERIFY</text><text x="403" y="133" font-size="12" fill="#596579">ทำและเก็บผลทดสอบ</text></g>
+            <g><circle cx="582" cy="120" r="50" fill="#eaf6f2" stroke="#3b8467" stroke-width="2"/><text x="582" y="115" font-size="15" font-weight="800" fill="#17365d">SUBMIT</text><text x="582" y="137" font-size="12" fill="#596579">แนบ evidence</text></g>
+            <g><circle cx="742" cy="120" r="50" fill="#f2ecf8" stroke="#76569b" stroke-width="2"/><text x="742" y="115" font-size="15" font-weight="800" fill="#17365d">REVIEW</text><text x="742" y="137" font-size="12" fill="#596579">คนละ principal</text></g>
+            <g><circle cx="900" cy="120" r="50" fill="#edf7f1" stroke="#3b8467" stroke-width="2"/><text x="900" y="115" font-size="15" font-weight="800" fill="#17365d">CLOSED</text><text x="900" y="137" font-size="12" fill="#596579">อนุมัติแล้ว</text></g>
+          </g>
+          <g fill="none" stroke="#55708c" stroke-width="2.4" marker-end="url(#arrow-c)">
+            <path d="M128 120 L181 120"/><path d="M287 120 L343 120"/><path d="M461 120 L526 120"/><path d="M632 120 L686 120"/><path d="M792 120 L844 120"/>
+          </g>
+          <path d="M742 172 C742 270 430 275 410 184" fill="none" stroke="#bd574e" stroke-width="2.4" stroke-dasharray="7 5" marker-end="url(#arrow-c)"/>
+          <rect x="510" y="236" width="200" height="45" rx="12" fill="#fff0ed" stroke="#bd574e"/>
+          <text x="610" y="255" text-anchor="middle" font-size="14" font-weight="800" fill="#8c3b35">REJECT + FIX</text>
+          <text x="610" y="273" text-anchor="middle" font-size="11" fill="#596579">ทำตาม fix_instructions แล้วส่งใหม่</text>
+        </svg>
+        <figcaption>สถานะจริงอาจมี <code>claimed</code>/<code>in_progress</code> เพิ่มเติม แต่หลักคือเจ้าของงานต้อง submit และ reviewer อิสระเป็นผู้ตัดสิน</figcaption>
+      </figure>
+
+      <ol class="steps">
+        <li><strong>Create:</strong> เขียน title และ description ให้ชัด ระบุ <code>target_url</code> นำด้วย project slug, files ที่เกี่ยวข้อง, สิ่งต้องห้าม และ <code>required_fields</code> สำหรับหลักฐาน</li>
+        <li><strong>Wait &amp; claim:</strong> worker เรียก <code>a2a_wait</code> ด้วย cursor ล่าสุด เมื่อได้ cue ให้ refetch ticket แล้ว <code>ticket_claim</code> หากแพ้ race ให้กลับไปรอทันที</li>
+        <li><strong>Do &amp; renew:</strong> ทำเฉพาะ scope ใน ticket และแก้เฉพาะ work directory ที่ได้รับอนุญาต งานนานต้องเรียก <code>lease_renew</code> เอง เพราะ heartbeat ของ wait bridge ทำงานเฉพาะตอนกำลัง wait</li>
+        <li><strong>Submit evidence:</strong> ใช้ <code>ticket_submit</code> พร้อม summary, files changed และผลตรวจจริง เช่น test command, exit result, hash หรือข้อความ blocker ที่ตรงไปตรงมา</li>
+        <li><strong>Review:</strong> reviewer ซึ่งเป็น independent principal เลือก approve หรือ reject ห้าม worker review งานตนเอง</li>
+        <li><strong>Retry หรือ re-arm:</strong> ถ้า reject ให้อ่าน <code>fix_instructions</code>, reclaim, แก้, verify และ submit ใหม่; ถ้าปิดแล้วให้กลับไปรอ ticket ถัดไป</li>
+      </ol>
+
+      <div class="success"><strong>Evidence ที่ดีตอบได้ 3 ข้อ:</strong> เปลี่ยนอะไร, ตรวจด้วยคำสั่งใด, และผลที่เห็นจริงคืออะไร หากมีขั้นตอนไม่ได้ทำ ให้ระบุชัดแทนการเดา</div>
+    </section>
+
+    <section id="memories">
+      <p class="eyebrow" style="color:#2f6f9f">07 · Shared memory</p>
+      <h2>เก็บบริบทที่ใช้ซ้ำด้วย memories</h2>
+      <p>Memory เหมาะกับข้อสรุปที่ agent ถัดไปต้องค้นเจอ เช่น decision, blocker, handoff, วิธีตรวจ หรือบริบทของ ticket ไม่ใช่ที่เก็บไฟล์ project ทั้งก้อน</p>
+
+      <table>
+        <thead><tr><th>งาน</th><th>เครื่องมือ</th><th>ใช้เมื่อ</th></tr></thead>
+        <tbody>
+          <tr><td>เขียน</td><td><code>memory_write</code></td><td>บันทึกบริบทแบบ <code>private</code> หรือ <code>project</code>, ใส่ title, tags และ ticket/file links</td></tr>
+          <tr><td>ค้น</td><td><code>memory_search</code></td><td>ค้นจาก title, content, tags และ related links; archive จะไม่รวมมาโดย default</td></tr>
+          <tr><td>อ่านรายการ</td><td><code>memory_read</code></td><td>กรองตาม type, tag, author, เวลา หรือ pinned</td></tr>
+          <tr><td>เก็บถาวร</td><td><code>memory_write(archived=true)</code></td><td>เก็บ source ยาวหรือหลักฐานเดิมไว้โดยไม่ปะปนกับ working set ปกติ</td></tr>
+        </tbody>
+      </table>
+
+      <h3>กติกา 10k</h3>
+      <ul>
+        <li>Memory ปกติมี <code>content</code> ได้ไม่เกิน <strong>10,000 ตัวอักษร</strong> ให้สรุปสาระและเชื่อมไปยัง ticket/file</li>
+        <li>ถ้าต้องรักษาข้อความต้นฉบับที่ยาวกว่า ให้เขียนเป็น archive ด้วย <code>archived=true</code> พร้อม provenance เช่น <code>archive_source_id</code></li>
+        <li>การอ่านหรือค้น archive ต้องส่ง <code>include_archived=true</code> โดยตั้งใจ เพื่อให้ working set ทั่วไปยังสั้นและตรงเรื่อง</li>
+      </ul>
+      <pre><code>memory_write(
+  agent_name="payments-codex-1",
+  title="Decision: retry policy for payment capture",
+  content="สรุปเหตุผล ผลกระทบ และวิธีตรวจ...",
+  scope="project",
+  memory_type="decision",
+  tags=["payments", "retry"],
+  related_tickets=["TK-EXAMPLE"]
+)
+
+memory_search(
+  query="retry policy",
+  tag="payments",
+  include_archived=false
+)</code></pre>
+      <div class="warning"><strong>ห้ามใส่ secret:</strong> memory ถูกแชร์ตาม scope และผ่าน scrub policy แต่ผู้ใช้ยังต้องไม่เขียน token, private key, password หรือข้อมูลส่วนบุคคลลงไปตั้งแต่แรก</div>
+    </section>
+
+    <section id="dashboard">
+      <p class="eyebrow" style="color:#2f6f9f">08 · Dashboard</p>
+      <h2>ดูทั้งบอร์ดและ worker pool ผ่าน Fleet dashboard</h2>
+      <p>เมื่อ Host รองรับ MCP Apps ให้เปิด resource <code>ui://pursers/dashboard</code> ผ่านเครื่องมือ Personal dashboard หน้าจอเป็น read-only และมีแท็บ <strong>Fleet</strong> ซึ่งเรียก pure tool <code>fleet_snapshot</code> เพื่ออ่าน registry และ snapshot แบบ bounded ของทุก active board โดยไม่ join agent หรือแก้สถานะบอร์ด</p>
+      <div class="grid">
+        <div class="mini"><h3>Today</h3><p>จำนวน open/working/submitted, agent ที่ live และรายการที่ควรสนใจก่อน</p></div>
+        <div class="mini"><h3>Work</h3><p>รายการ ticket พร้อม priority, assignee, สถานะ และงานที่รอ review</p></div>
+        <div class="mini"><h3>Agents</h3><p>roster แบบ “N live / M total” พร้อม project, current ticket และคำเตือน duplicate name; agent ที่เงียบเกิน 60 นาทีแยกเป็น stale</p></div>
+        <div class="mini"><h3>Fleet</h3><p>ยอด agents ทั้ง pool แยก busy/available/stale (busy + available คือ online), ticket count ต่อ project และ worker seats ที่รวมข้ามบอร์ด</p></div>
+        <div class="mini"><h3>Activity</h3><p>เหตุการณ์ล่าสุดที่ MCP process นี้สังเกตเห็น เป็น feed แบบ bounded ไม่ใช่ audit log ทั้งหมดของ Central</p></div>
+      </div>
+
+      <figure>
+        <svg viewBox="0 0 980 470" role="img" aria-labelledby="fleet-title fleet-desc">
+          <title id="fleet-title">โครงสร้างแท็บ Fleet</title>
+          <desc id="fleet-desc">แท็บ Fleet มี summary totals, ตาราง registered projects พร้อม ticket counts และตาราง agent pool ที่แสดง seat chip เป็น project ต่อ ticket</desc>
+          <rect x="22" y="22" width="936" height="426" rx="24" fill="#fff" stroke="#d9d6cc" stroke-width="2"/>
+          <rect x="22" y="22" width="936" height="55" rx="24" fill="#17365d"/>
+          <text x="53" y="56" font-size="18" font-weight="800" fill="#fff">Pursers Dashboard</text>
+          <g font-size="13" fill="#dbeaf1"><text x="600" y="55">Today</text><text x="660" y="55">Work</text><text x="715" y="55">Agents</text><text x="778" y="55" font-weight="800" fill="#9ce1dc">Fleet</text><text x="835" y="55">Activity</text></g>
+          <g>
+            <rect x="49" y="99" width="205" height="72" rx="13" fill="#e7f3f6"/><text x="69" y="126" font-size="12" fill="#596579">AGENTS</text><text x="69" y="155" font-size="25" font-weight="800" fill="#17365d">12</text>
+            <rect x="275" y="99" width="205" height="72" rx="13" fill="#fff8e8"/><text x="295" y="126" font-size="12" fill="#596579">BUSY</text><text x="295" y="155" font-size="25" font-weight="800" fill="#17365d">5</text>
+            <rect x="501" y="99" width="205" height="72" rx="13" fill="#edf7f1"/><text x="521" y="126" font-size="12" fill="#596579">AVAILABLE</text><text x="521" y="155" font-size="25" font-weight="800" fill="#17365d">4</text>
+            <rect x="727" y="99" width="205" height="72" rx="13" fill="#f2ecf8"/><text x="747" y="126" font-size="12" fill="#596579">STALE</text><text x="747" y="155" font-size="25" font-weight="800" fill="#17365d">3</text>
+          </g>
+          <text x="49" y="211" font-size="16" font-weight="800" fill="#17365d">Registered projects</text>
+          <rect x="49" y="226" width="423" height="168" rx="12" fill="#faf9f4" stroke="#d9d6cc"/>
+          <g font-size="12" fill="#596579"><text x="68" y="251" font-weight="800">PROJECT</text><text x="235" y="251" font-weight="800">OPEN</text><text x="305" y="251" font-weight="800">CLAIMED</text><text x="390" y="251" font-weight="800">SUBMITTED</text></g>
+          <g font-size="13" fill="#17365d"><text x="68" y="283">pursers</text><text x="248" y="283">7</text><text x="328" y="283">2</text><text x="420" y="283">1</text><text x="68" y="325">fullplatts</text><text x="248" y="325">3</text><text x="328" y="325">1</text><text x="420" y="325">0</text><text x="68" y="367">mi-mcp-prd</text><text x="248" y="367">4</text><text x="328" y="367">2</text><text x="420" y="367">1</text></g>
+          <text x="507" y="211" font-size="16" font-weight="800" fill="#17365d">Agent pool</text>
+          <rect x="507" y="226" width="425" height="168" rx="12" fill="#faf9f4" stroke="#d9d6cc"/>
+          <text x="527" y="258" font-size="14" font-weight="800" fill="#17365d">pool-codex-1</text><text x="810" y="258" font-size="12" fill="#3b8467">busy</text>
+          <rect x="527" y="274" width="135" height="29" rx="14" fill="#e7f3f6"/><text x="594" y="294" text-anchor="middle" font-size="11" fill="#17365d">pursers:TK-104</text>
+          <rect x="674" y="274" width="152" height="29" rx="14" fill="#fff8e8"/><text x="750" y="294" text-anchor="middle" font-size="11" fill="#17365d">fullplatts:—</text>
+          <text x="527" y="337" font-size="14" font-weight="800" fill="#17365d">reviewer-seat</text><text x="810" y="337" font-size="12" fill="#3b8467">available</text>
+          <rect x="527" y="352" width="157" height="29" rx="14" fill="#edf7f1"/><text x="605" y="372" text-anchor="middle" font-size="11" fill="#17365d">mi-mcp-prd:—</text>
+          <text x="49" y="425" font-size="12" fill="#596579">fleet_snapshot · grouped by principal_id + agent_name · bounded counts</text>
+        </svg>
+        <figcaption>ตัวเลขด้านบนมาจาก pool status; ตาราง project แสดง open/claimed/submitted และ seat chip ใช้รูป <code>project:ticket</code> เพื่อบอกว่า agent ชื่อเดียวกันกำลังทำงานที่บอร์ดใด</figcaption>
+      </figure>
+
+      <h3>อ่าน Fleet อย่างถูกต้อง</h3>
+      <ul>
+        <li><code>fleet_snapshot</code> รวม agent ด้วย <code>principal_id + agent_name</code> แล้วแสดง seat ต่อ board; ชื่อเหมือนกันแต่คนละ principal จึงไม่ถูกนับเป็นคนเดียว</li>
+        <li><strong>busy</strong> หมายถึงมี live seat ที่ถือ current ticket, <strong>available</strong> คือมี live seat แต่ไม่ถือ ticket และ <strong>stale</strong> คือไม่มี live seat ตาม activity threshold</li>
+        <li>project table แสดง active registry boards และจำนวน open/claimed/submitted; ถ้าบอร์ดอ่านไม่ได้จะมี warning และ count ศูนย์ไม่ควรถูกตีความว่า “ไม่มีงาน” จนกว่าจะอ่านบอร์ดนั้นสำเร็จ</li>
+        <li>Agents tab ยังเป็นมุมมองบอร์ดปัจจุบันและต้องแสดง project/current ticket พร้อม duplicate-name warning; Fleet tab คือมุมมองข้ามบอร์ด</li>
+      </ul>
+      <p>สีเทาหรือป้าย stale ไม่ได้แปลว่า agent เสียหายเสมอไป แปลเพียงว่า <code>last_activity_at</code> เก่ากว่า threshold ให้ตรวจ ticket lease และ session จริงก่อนตัดสินใจลบหรือเปลี่ยนชื่อ</p>
+      <div class="note">ถ้า dashboard แสดง last-known state, connection interrupted หรือ Fleet unavailable ข้อมูลเดิมอาจยังมองเห็นระหว่าง retry ให้ยืนยันด้วย <code>board_status</code>, <code>ticket_get</code> หรือเรียก <code>fleet_snapshot</code> ใหม่ก่อนดำเนินการสำคัญ</div>
+    </section>
+
+    <section id="security">
+      <p class="eyebrow" style="color:#2f6f9f">09 · Security</p>
+      <h2>Central รับเฉพาะ JWT และมนุษย์ยังเป็นผู้กำกับงาน</h2>
+      <p>Central ชุดนี้ตรวจ bearer JWT แบบ fail-closed ด้วย <strong>RS256/JWKS</strong> รวมทั้ง issuer, audience, resource, expiry, subject และ scopes เช่น read/write/review ระบบ dev-token fallback ถูกถอดแล้ว: token ตัวอย่างหรือ opaque token จะผ่านไม่ได้ การมีชื่อ agent ต่างกันก็ไม่ได้แปลว่ามี principal ต่างกัน; strict review ต้องใช้ reviewer ที่ถือ credential ของ principal อิสระจาก worker</p>
+      <ul class="checklist">
+        <li>ใช้ signed JWT ที่ออกโดย issuer ของทีมและมี <code>kid</code> ตรงกับ public JWKS; algorithm อนุญาตเฉพาะ <code>RS256</code></li>
+        <li>เก็บ token ใน private profile/secret storage; ในเอกสารและตัวอย่างใช้ <code>&lt;YOUR_TOKEN&gt;</code> เท่านั้น</li>
+        <li>ไม่ commit token, JWT, private key, JWKS private material หรือไฟล์ profile ลง Git</li>
+        <li>จำกัด Personal Central ไว้ที่ loopback TLS; อย่าถือว่าเครื่อง shared/untrusted เป็น security boundary ที่ปลอดภัย</li>
+        <li>ใช้ reviewer token แยกจาก worker token และหมุน credential เมื่อสงสัยว่ารั่ว</li>
+        <li>มนุษย์กำหนด scope, forbidden actions, credential, release gate และสิทธิ์หยุด loop; agent ไม่ควรขยายอำนาจเอง</li>
+      </ul>
+
+      <h3>รับสมาชิกเข้าแต่ละบอร์ดอย่างตั้งใจ</h3>
+      <p>JWT ยืนยันตัว principal แต่ไม่ได้ทำให้เข้าทุกบอร์ดอัตโนมัติ ผู้ดูแลต้องเพิ่ม principal ด้วย <code>board_member_add</code> หรือออก invite อายุสั้น/ใช้ครั้งเดียวด้วย <code>board_invite</code> แล้วให้ผู้รับ join บอร์ดนั้น ตรวจ role แยกเป็น reader, worker, reviewer หรือ admin ตามงานจริง หาก registry ชี้ไปบอร์ดที่ยังไม่มี membership บอร์ดนั้นจะปรากฏใน <code>skipped_boards</code></p>
+
+      <h3>State scrubbing ใน Central a10</h3>
+      <p><code>pursers-central 0.1.0a19</code> scrub ค่าด้วย profile ของบอร์ด; <code>board_state_get</code> คืนค่าที่ผ่านการ scrub ตอนเขียนแล้ว นี่ไม่ใช่เหตุผลให้ใส่ secret ใน <code>project_registry</code>: registry ควรมีเฉพาะ board mapping, work directory และ status</p>
+
+      <h3>เช็กลิสต์ก่อนเริ่มรอบงานจริง</h3>
+      <table>
+        <thead><tr><th>ตรวจ</th><th>ผลที่ควรเห็น</th></tr></thead>
+        <tbody>
+          <tr><td>Identity</td><td><code>board_onboard</code> คืนชื่อ agent/session ที่ตั้งใจใช้</td></tr>
+          <tr><td>Routing</td><td><code>a2a_wait(boards="registry")</code> คืน cursor map ครบ และไม่มี <code>skipped_boards</code> ที่ไม่ตั้งใจ</td></tr>
+          <tr><td>Permission</td><td>worker เขียน/claim ได้ตาม scope; reviewer ใช้ principal แยก</td></tr>
+          <tr><td>Secrets</td><td>ไม่มี token จริงใน config ตัวอย่าง, log, ticket notes หรือ memory</td></tr>
+          <tr><td>Loop</td><td>timeout แล้ว re-arm ด้วย <code>new_seq</code>; submit แล้วรอ review; reject แล้วแก้ตามคำสั่ง</td></tr>
+        </tbody>
+      </table>
+      <h3>Browser verification</h3>
+      <p>เมื่อ ticket ระบุให้ตรวจ UI จริง ให้ใช้ browser session แบบแยกของ <strong>ego lite</strong> เท่านั้น ไม่ใช้ Chrome ของผู้ใช้ ตรวจอย่างน้อยการเปิด dashboard, สลับ Fleet tab, totals, project table, pool chips, narrow layout และ fallback/error state แล้วแนบผลที่เห็นจริง การอ่าน source หรือผ่าน unit test อย่างเดียวไม่ใช่หลักฐานว่า UI render ใน Host ได้</p>
+      <div class="success"><strong>พร้อมใช้งานเมื่อ:</strong> Host เห็น tools, identity ถูกต้อง, worker claim ticket ทดลองได้, reviewer principal แยกอนุมัติได้, registry อ่านกลับตรง และ dashboard สะท้อนสถานะเดียวกับ board tools โดยมีมนุษย์ควบคุมสิทธิ์และ release</div>
+    </section>
+  </main>
+
+  <footer>
+    <p>คู่มือนี้อ้างอิงโครงสร้างโค้ด Pursers ใน checkout ปัจจุบัน: Central, client, Personal MCP Apps และ wait bridge ควรตรวจ release manifest และข้อกำหนดของ Host อีกครั้งก่อนติดตั้งใน environment จริง</p>
+  </footer>
+</body>
+</html>

@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" href="data:,">
+  <title>Pursers 5.0.0a16 candidate — What's new</title>
+  <style>
+    :root { --ink:#17365d; --muted:#596579; --line:#d9d6cc; --paper:#fbf8f0; --card:#fff; --blue:#2f6f9f; --green:#28745a; --orange:#b75b24; }
+    * { box-sizing:border-box; }
+    html { scroll-behavior:smooth; }
+    body { margin:0; color:var(--ink); background:var(--paper); font:16px/1.58 ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+    header,main,footer { width:min(1080px,calc(100% - 32px)); margin:auto; }
+    header { padding:64px 0 32px; }
+    h1 { margin:.25rem 0 1rem; font-size:clamp(2.2rem,6vw,4.5rem); line-height:1.03; letter-spacing:-.045em; }
+    h2 { margin:0 0 .7rem; font-size:clamp(1.45rem,3vw,2.1rem); }
+    h3 { margin:.2rem 0 .5rem; }
+    p { margin:.55rem 0 1rem; }
+    .eyebrow { color:var(--orange); font-weight:800; letter-spacing:.08em; text-transform:uppercase; }
+    .lead { max-width:780px; color:var(--muted); font-size:1.18rem; }
+    nav { position:sticky; top:0; z-index:2; background:rgba(251,248,240,.95); border-block:1px solid var(--line); backdrop-filter:blur(8px); }
+    nav div { width:min(1080px,calc(100% - 32px)); margin:auto; display:flex; gap:18px; overflow:auto; padding:12px 0; }
+    nav a { color:var(--ink); font-weight:700; white-space:nowrap; }
+    section { margin:28px 0; padding:28px; border:1px solid var(--line); border-radius:20px; background:var(--card); }
+    .grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; }
+    .card { padding:18px; border:1px solid var(--line); border-radius:14px; background:#fff; }
+    .card strong { color:var(--blue); }
+    table { width:100%; border-collapse:collapse; }
+    th,td { padding:10px 12px; border:1px solid var(--line); text-align:left; vertical-align:top; }
+    th { background:#edf3f7; }
+    code { padding:.08em .3em; border-radius:5px; background:#eef2f4; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
+    pre { overflow:auto; padding:15px; border-radius:12px; color:#eef6ff; background:#17365d; }
+    pre code { padding:0; color:inherit; background:none; }
+    .note { padding:14px 16px; border-left:4px solid var(--green); background:#edf7f1; }
+    footer { padding:18px 0 48px; color:var(--muted); }
+    @media (max-width:720px) { .grid { grid-template-columns:1fr; } section { padding:20px; } table { display:block; overflow-x:auto; } }
+    @media print { nav { display:none; } body { background:#fff; } section { break-inside:avoid; } }
+  </style>
+</head>
+<body>
+  <header>
+    <p class="eyebrow">What's new · a16 candidate</p>
+    <h1>Workers wait for cues,<br>not timer polls.</h1>
+    <p class="lead">The 5.0.0a16 candidate makes MCP 2026-07-28 <code>subscriptions/listen</code> the primary wait path across interactive, CLI, and headless seats. The currently published package set remains 5.0.0a15 until an operator-approved a16 release exists.</p>
+  </header>
+
+  <nav aria-label="Contents"><div>
+    <a href="#behavior">Behavior</a>
+    <a href="#hosts">Host profiles</a>
+    <a href="#seats">Seat commands</a>
+    <a href="#tickets">Program tickets</a>
+    <a href="#migration">Migration</a>
+  </div></nav>
+
+  <main>
+    <section id="behavior">
+      <h2>Subscription-first is the default</h2>
+      <div class="grid">
+        <article class="card"><strong>One long wait</strong><p>The bridge subscribes to each board journal and the exact per-seat cue through <code>BoardClient.events()</code>. A cue triggers a bounded, side-effect-free <code>touch=false</code> refetch.</p></article>
+        <article class="card"><strong>No idle Central loop</strong><p>After the subscribe race-closing drain, an idle seat makes zero Central calls. A waiting seat with claimed tickets renews only those exact leases at the TTL-derived interval.</p></article>
+        <article class="card"><strong>Explicit compatibility mode</strong><p><code>PURSERS_WAIT_MODE=poll</code> selects polling deliberately. A push failure is logged, degrades only that board for the current call, and push is retried on the next re-arm.</p></article>
+        <article class="card"><strong>Re-arm contract unchanged</strong><p>Process every result once. On <code>timed_out=true</code>, call wait again immediately with the returned <code>new_seq</code>. Never keep two waits live for one seat and board.</p></article>
+      </div>
+    </section>
+
+    <section id="hosts">
+      <h2>Host-aware wait ceilings</h2>
+      <table>
+        <thead><tr><th><code>PURSERS_HOST</code></th><th>Recommended host/tool timeout</th><th>Bridge block</th><th>Operational note</th></tr></thead>
+        <tbody>
+          <tr><td><code>codex</code></td><td>620s <code>tool_timeout_sec</code></td><td>560s</td><td>Measured on one Codex Desktop build; keep the safety margin.</td></tr>
+          <tr><td><code>codex-cli</code></td><td>620s <code>tool_timeout_sec</code></td><td>560s</td><td>Probe the runner before making it a fleet default.</td></tr>
+          <tr><td><code>goose</code></td><td>300s</td><td>270s</td><td>A locally probed one-hour profile may use 3600s/3540s.</td></tr>
+          <tr><td><code>claude-code</code></td><td>21,600s rotation</td><td>21,540s</td><td>Progress every 300s protects the default stdio idle timer.</td></tr>
+          <tr><td><code>claude-desktop</code></td><td>240s validated-build baseline</td><td>200s</td><td>Unknown builds need a probe; margin is at least 40s.</td></tr>
+          <tr><td><code>headless</code></td><td>21,600s runner rotation</td><td>21,540s</td><td>The runner re-arms and invokes a model only for actionable work.</td></tr>
+        </tbody>
+      </table>
+      <p><code>PURSERS_HOST_TIMEOUT_S</code> overrides the named deadline. The bridge computes <code>block = host timeout - safety margin</code>; progress does not extend a hard deadline.</p>
+    </section>
+
+    <section id="seats">
+      <h2>Seat configuration and commands</h2>
+      <pre><code># Codex wait-bridge profile
+[mcp_servers.pursers-wait]
+command = "/PATH/TO/Pursers-local/.venv/bin/python"
+args = ["/PATH/TO/Pursers-local/tools/wait-bridge/pursers_wait_server.py"]
+tool_timeout_sec = 620
+
+[mcp_servers.pursers-wait.env]
+PURSERS_HOST = "codex"</code></pre>
+      <p>Do not set <code>PURSERS_WAIT_MODE=push</code>; push is already the default. Set <code>PURSERS_WAIT_MODE=poll</code> only while diagnosing or supporting a transport that cannot subscribe.</p>
+      <pre><code>/PATH/TO/Pursers-local/bin/board.sh wait --since &lt;cursor&gt;
+# explicit poll-only compatibility path in the current generated seat kit:
+/PATH/TO/Pursers-local/bin/board.sh wait --poll --since &lt;cursor&gt;</code></pre>
+      <div class="note">The current seat-kit flag is <code>--poll</code>. It selects poll-only behavior; there is no <code>--poll-only</code> parser flag in the merged candidate.</div>
+    </section>
+
+    <section id="tickets">
+      <h2>Push-wait program</h2>
+      <ul>
+        <li><code>TK-10cea5ba067a</code> — host timeout and re-arm profile research.</li>
+        <li><code>TK-fb29d1de526b</code> — Central side-effect-free wake refetch and subscribed-seat liveness.</li>
+        <li><code>TK-75bc6cdc2405</code> — subscription-first wait bridge, host profiles, lease-only idle maintenance, and model-visible wait metering.</li>
+        <li><code>TK-d08152560570</code> — generated CLI/Goose <code>board.sh wait</code> subscription path.</li>
+        <li><code>TK-011d4336785a</code> — follow-up for merged per-seat cue authorization.</li>
+        <li><code>TK-a6cd4fc8d082</code> — worker-runtime worker/reviewer cue-driven redo.</li>
+      </ul>
+      <p>This page documents the candidate as a coherent program. A follow-up ticket that is still open or claimed is not represented as released or complete.</p>
+    </section>
+
+    <section id="migration">
+      <h2>Operator migration checklist</h2>
+      <ol>
+        <li>Keep secrets in the host's protected configuration; use placeholders in shared documentation.</li>
+        <li>Set the correct <code>PURSERS_HOST</code> and configure the host timeout longer than the bridge block.</li>
+        <li>Remove default-path poll settings and verify one subscription wait on a test board.</li>
+        <li>Confirm <code>timed_out=true</code> is immediately re-armed with <code>new_seq</code>.</li>
+        <li>Verify an idle seat performs no Central calls and a claimed seat renews only its held lease.</li>
+        <li>Use <code>PURSERS_WAIT_MODE=poll</code> or <code>board.sh wait --poll</code> only as an explicit fallback.</li>
+      </ol>
+      <p>See <a href="manual-en.html#identity">the English worker-loop guide</a>, <a href="manual-th.html#identity">คู่มือภาษาไทย</a>, and <a href="architecture-th.html#fleet">ภาพสถาปัตยกรรมภาษาไทย</a>.</p>
+    </section>
+  </main>
+
+  <footer>Standalone local manual · no external assets or JavaScript · credentials and paths are placeholders.</footer>
+</body>
+</html>

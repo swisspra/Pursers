@@ -5,6 +5,44 @@ All notable changes to Pursers are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] - 5.0.0a16 candidate
+
+### Added
+
+- Subscription-first wait design and host profiles
+  (`TK-10cea5ba067a`): Codex/Codex CLI 620s/560s, Goose 300s/270s,
+  Claude Desktop 240s/200s, and Claude Code/headless 21,600s/21,540s,
+  with five-minute Claude Code progress notifications and immediate
+  `timed_out=true` re-arm using the returned cursor.
+- Central side-effect-free wake refetch and subscribed-seat liveness
+  (`TK-fb29d1de526b`), plus the subscription-first wait bridge
+  (`TK-75bc6cdc2405`) using `BoardClient.events()` reconnect/dedup,
+  per-board degradation, host-aware ceilings, and separate model-visible
+  wait-return metering.
+- Generated CLI/Goose seats now provide `board.sh wait` on
+  `subscriptions/listen` (`TK-d08152560570`). The default path is push;
+  the current explicit poll-only compatibility flag is `--poll`.
+- Local English and Thai manuals, the Thai architecture briefing, and a
+  standalone `docs-local/whats-new.html` now describe the a16 candidate.
+
+### Changed
+
+- Idle waits no longer use a Central timer loop. After the subscription
+  race-closing drain, a seat with no claims makes zero Central calls; a
+  waiting seat with claims renews only those exact leases at the
+  TTL-derived interval.
+- Polling is an explicit fallback only:
+  `PURSERS_WAIT_MODE=poll` for the wait bridge or
+  `board.sh wait --poll` for a generated CLI seat. A bridge subscription
+  failure degrades only that board for the current call, logs the failure,
+  and retries push on the next re-arm.
+
+### Follow-ups
+
+- `TK-011d4336785a` corrects merged per-seat cue authorization.
+- `TK-a6cd4fc8d082` reworks the headless worker and reviewer runtime around
+  subscription cues and side-effect-free refetch.
+
 ## [5.0.0a15] - 2026-09-01
 
 This release includes `pursers-personal==5.0.0a15`, `pursers==5.0.0a15`, and

@@ -1,0 +1,780 @@
+<!doctype html>
+<html lang="th">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <link rel="icon" href="data:,">
+  <title>Pursers — สถาปัตยกรรมและ Flow การทำงาน</title>
+  <style>
+    :root {
+      --ink: #17243b;
+      --muted: #58657a;
+      --paper: #f5f1e8;
+      --card: #fffdf8;
+      --line: #d8d1c3;
+      --navy: #173b57;
+      --teal: #087e78;
+      --orange: #ee7b36;
+      --gold: #efb94c;
+      --blue: #4177c6;
+      --green: #478568;
+      --red: #c14f47;
+      --shadow: 0 16px 42px rgba(31, 45, 61, .09);
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 8% 2%, rgba(239,185,76,.19), transparent 25rem),
+        radial-gradient(circle at 100% 18%, rgba(8,126,120,.12), transparent 31rem),
+        var(--paper);
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+        "Segoe UI", "Noto Sans Thai", Tahoma, sans-serif;
+      line-height: 1.72;
+    }
+    a { color: var(--teal); text-underline-offset: .16em; }
+    .page { width: min(1160px, calc(100% - 32px)); margin: 0 auto; }
+    header { padding: 64px 0 34px; }
+    .eyebrow {
+      display: inline-flex; align-items: center; gap: 9px;
+      margin: 0 0 14px; color: var(--teal); font-size: .82rem;
+      font-weight: 800; letter-spacing: .13em; text-transform: uppercase;
+    }
+    .eyebrow::before { content: ""; width: 28px; height: 3px; background: var(--orange); border-radius: 2px; }
+    h1, h2, h3 { line-height: 1.22; letter-spacing: -.025em; }
+    h1 { max-width: 1060px; margin: 0; font-size: clamp(2.55rem, 6.2vw, 5.1rem); color: var(--navy); }
+    h1 span { color: var(--orange); }
+    .lead { max-width: 810px; margin: 22px 0 0; color: var(--muted); font-size: clamp(1.05rem, 2vw, 1.32rem); }
+    .meta { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 24px; }
+    .pill { padding: 7px 12px; border: 1px solid var(--line); border-radius: 999px; background: rgba(255,253,248,.75); font-size: .86rem; }
+    nav {
+      position: sticky; top: 0; z-index: 10; border-block: 1px solid rgba(216,209,195,.8);
+      background: rgba(245,241,232,.92); backdrop-filter: blur(12px);
+    }
+    nav .page { display: flex; gap: 8px; overflow-x: auto; padding-block: 10px; scrollbar-width: thin; }
+    nav a { flex: 0 0 auto; padding: 7px 11px; color: var(--ink); border-radius: 9px; text-decoration: none; font-size: .88rem; font-weight: 700; }
+    nav a:hover { background: var(--card); color: var(--teal); }
+    main { padding: 30px 0 70px; }
+    section { scroll-margin-top: 76px; margin-top: 64px; }
+    section:first-child { margin-top: 16px; }
+    h2 { margin: 0 0 10px; color: var(--navy); font-size: clamp(1.85rem, 4vw, 3rem); }
+    h3 { margin: 0 0 9px; color: var(--navy); font-size: 1.13rem; }
+    .section-intro { max-width: 800px; margin: 0 0 24px; color: var(--muted); }
+    .card {
+      border: 1px solid var(--line); border-radius: 20px; background: var(--card);
+      box-shadow: var(--shadow); padding: clamp(20px, 3vw, 34px);
+    }
+    .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+    .mini { position: relative; overflow: hidden; }
+    .mini::after { content: ""; position: absolute; inset: auto -30px -45px auto; width: 105px; height: 105px; border-radius: 50%; background: color-mix(in srgb, var(--accent) 15%, transparent); }
+    .mini strong { display: block; margin-bottom: 5px; color: var(--accent); font-size: 1.62rem; line-height: 1; }
+    .mini p { margin: 0; color: var(--muted); }
+    .diagram { margin-top: 18px; padding: 14px; overflow-x: auto; }
+    svg { display: block; width: 100%; min-width: 760px; height: auto; }
+    svg text { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", "Noto Sans Thai", Tahoma, sans-serif; }
+    .legend { display: flex; flex-wrap: wrap; gap: 12px 20px; margin-top: 15px; color: var(--muted); font-size: .84rem; }
+    .dot { display: inline-block; width: 10px; height: 10px; margin-right: 6px; border-radius: 50%; }
+    .callout { margin-top: 18px; padding: 16px 18px; border-left: 5px solid var(--gold); border-radius: 10px; background: #fff6d9; }
+    .callout strong { color: #855712; }
+    .steps { display: grid; grid-template-columns: repeat(6, 1fr); gap: 10px; margin-top: 22px; }
+    .step { min-height: 155px; padding: 16px 14px; border: 1px solid var(--line); border-radius: 15px; background: var(--card); }
+    .step .num { display: grid; place-items: center; width: 32px; height: 32px; margin-bottom: 12px; border-radius: 50%; color: white; background: var(--teal); font-weight: 850; }
+    .step p { margin: 0; color: var(--muted); font-size: .9rem; }
+    .compare-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 18px; background: var(--card); box-shadow: var(--shadow); }
+    table { width: 100%; min-width: 820px; border-collapse: collapse; }
+    th, td { padding: 17px 18px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+    th { color: white; background: var(--navy); font-size: .88rem; letter-spacing: .02em; }
+    tr:last-child td { border-bottom: 0; }
+    td:first-child { width: 18%; font-weight: 800; color: var(--navy); }
+    td:nth-child(2) { width: 30%; color: var(--muted); }
+    td:nth-child(3) { width: 32%; }
+    td:last-child { width: 20%; color: var(--teal); font-size: .9rem; }
+    code { padding: .13em .38em; border-radius: 5px; background: #edf0ec; color: #233b4d; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .88em; overflow-wrap: anywhere; }
+    .why { display: grid; grid-template-columns: 1.1fr .9fr; gap: 18px; }
+    .why ul { margin: 12px 0 0; padding-left: 1.25rem; }
+    .why li + li { margin-top: 10px; }
+    .quote { display: grid; align-content: center; min-height: 100%; color: white; background: var(--navy); }
+    .quote p { margin: 0; font-size: clamp(1.25rem, 2.5vw, 1.85rem); line-height: 1.5; }
+    .quote small { display: block; margin-top: 18px; color: #b9d5df; }
+    .guardrails { display: grid; grid-template-columns: repeat(2, 1fr); gap: 15px; }
+    .guardrail { border-top: 4px solid var(--accent); }
+    .guardrail p { margin: 0; color: var(--muted); }
+    .takeaway { display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; }
+    .takeaway .card { box-shadow: none; }
+    .takeaway b { color: var(--orange); font-size: 1.35rem; }
+    .sources { color: var(--muted); font-size: .86rem; }
+    .sources ul { padding-left: 1.2rem; }
+    .detail-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; margin-top: 18px; }
+    .detail-grid .card { box-shadow: none; }
+    .detail-grid ul { margin: 10px 0 0; padding-left: 1.25rem; }
+    .detail-grid li + li { margin-top: 8px; }
+    pre {
+      margin: 14px 0 0; padding: 16px; overflow-x: auto; border: 1px solid var(--line);
+      border-radius: 12px; color: #d9f4f1; background: #102f43; font: .84rem/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      white-space: pre-wrap; overflow-wrap: anywhere;
+    }
+    pre code { padding: 0; color: inherit; background: transparent; font-size: inherit; }
+    .version-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-top: 18px; }
+    .detail-grid > *, .version-grid > * { min-width: 0; }
+    .version-grid .card { padding: 18px; box-shadow: none; }
+    .version-grid b { display: block; color: var(--teal); font-size: 1.12rem; }
+    .version-grid small { color: var(--muted); }
+    footer { padding: 25px 0 48px; border-top: 1px solid var(--line); color: var(--muted); font-size: .84rem; }
+    @media (max-width: 900px) {
+      .grid, .why, .guardrails, .takeaway, .detail-grid { grid-template-columns: 1fr; }
+      .version-grid { grid-template-columns: repeat(2, 1fr); }
+      .steps { grid-template-columns: repeat(2, 1fr); }
+    }
+    @media (max-width: 560px) {
+      .page { width: min(100% - 22px, 1160px); }
+      header { padding-top: 42px; }
+      .steps { grid-template-columns: 1fr; }
+      .version-grid { grid-template-columns: 1fr; }
+      .card { border-radius: 15px; }
+    }
+    @media print {
+      body { background: white; }
+      nav { display: none; }
+      header { padding-top: 24px; }
+      section { break-inside: avoid; margin-top: 34px; }
+      .card, .compare-wrap { box-shadow: none; }
+      a { color: inherit; text-decoration: none; }
+    }
+  </style>
+</head>
+<body>
+  <header class="page">
+    <p class="eyebrow">Team briefing · Pursers v5</p>
+    <h1>จาก “ความจำร่วม” สู่<br><span>ระบบส่งต่องานที่ตรวจสอบได้</span></h1>
+    <p class="lead">ภาพรวม Pursers 5.0.0a16 candidate: subscription-first push-wait ทุก seat, host-aware re-arm, project registry, worker pool และ independent review โดย a15 ยังเป็นชุดที่ publish แล้วล่าสุด</p>
+    <div class="meta">
+      <span class="pill">Central + SQLite</span>
+      <span class="pill">MCP v2</span>
+      <span class="pill">JWT-only · RS256/JWKS</span>
+      <span class="pill">Subscription-first multi-board</span>
+      <span class="pill">Fleet dashboard</span>
+      <span class="pill">a16 candidate · a15 released</span>
+    </div>
+  </header>
+
+  <nav aria-label="สารบัญ">
+    <div class="page">
+      <a href="#mental-model">ภาพจำสั้น ๆ</a>
+      <a href="#architecture">สถาปัตยกรรม</a>
+      <a href="#fleet">Fleet &amp; registry</a>
+      <a href="#flow">Flow งาน</a>
+      <a href="#compare">v4 → v5</a>
+      <a href="#release">Build &amp; release</a>
+      <a href="#why">เหตุผลการออกแบบ</a>
+      <a href="#caveats">ขอบเขตจริง</a>
+    </div>
+  </nav>
+
+  <main class="page">
+    <section id="mental-model">
+      <h2>ภาพจำสั้น ๆ ก่อน</h2>
+      <p class="section-intro">Pursers ไม่ใช่ที่เก็บไฟล์โปรเจกต์ และไม่ใช่ AI ตัวใหม่ แต่เป็น “หอบังคับการงาน” ที่ทำให้หลาย agent เห็นคิวเดียวกัน แย่งงานโดยไม่ทำซ้ำ และมีหลักฐานว่าใครทำ ใครตรวจ และจบเมื่อไร</p>
+      <div class="grid">
+        <article class="card mini" style="--accent: var(--teal)">
+          <strong>N boards</strong>
+          <h3>หนึ่ง fleet หลายโปรเจกต์</h3>
+          <p>แต่ละโปรเจกต์มี board และ cursor ของตัวเอง แต่ registry ทำให้ wait-bridge เฝ้าหลาย board ผ่าน transport เดียวได้</p>
+        </article>
+        <article class="card mini" style="--accent: var(--orange)">
+          <strong>N seats</strong>
+          <h3>หนึ่ง session ต่อหนึ่ง worker seat</h3>
+          <p>Codex, Claude หรือ host อื่นส่ง <code>agent_name</code> ต่อ call; Central derive identity แยกต่อ board โดยไม่ทับ state กัน</p>
+        </article>
+        <article class="card mini" style="--accent: var(--blue)">
+          <strong>2 roles</strong>
+          <h3>ทำงานกับตรวจงานแยกกัน</h3>
+          <p>worker claim และ submit; reviewer อีก principal ตรวจแล้ว approve หรือ reject พร้อมคำสั่งแก้ จึงย้อนดูความรับผิดชอบได้</p>
+        </article>
+      </div>
+    </section>
+
+    <section id="architecture">
+      <h2>สถาปัตยกรรม: Central อยู่กลาง แต่ agent ยังทำงานในเครื่องตัวเอง</h2>
+      <p class="section-intro">การสื่อสารแบ่งเป็นสามชั้นชัดเจน: Central แบบ JWT-only เก็บสถานะและตัดสินการแข่งขัน, connector แปลงเครื่องมือ MCP ให้ host เรียกได้, ส่วน wait-bridge รับหน้าที่รอ cue ข้ามหลาย board โดยไม่ผูก Central เข้ากับยี่ห้อใดยี่ห้อหนึ่ง</p>
+
+      <figure class="card diagram" aria-labelledby="arch-caption">
+        <svg viewBox="0 0 1080 610" role="img" aria-labelledby="arch-title arch-desc">
+          <title id="arch-title">แผนภาพสถาปัตยกรรม Pursers</title>
+          <desc id="arch-desc">Central service และ SQLite อยู่ตรงกลาง เชื่อมไปยัง host หลายยี่ห้อผ่าน connector และ wait bridge พร้อม dashboard แบบ MCP App</desc>
+          <defs>
+            <marker id="arrA" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0 0 L10 5 L0 10 z" fill="#587083"/>
+            </marker>
+            <filter id="softA" x="-20%" y="-20%" width="140%" height="140%">
+              <feDropShadow dx="0" dy="8" stdDeviation="8" flood-color="#152b3a" flood-opacity=".12"/>
+            </filter>
+            <pattern id="dotsA" width="16" height="16" patternUnits="userSpaceOnUse">
+              <circle cx="2" cy="2" r="1.4" fill="#e0d9cc"/>
+            </pattern>
+          </defs>
+          <rect x="2" y="2" width="1076" height="606" rx="24" fill="url(#dotsA)"/>
+
+          <g filter="url(#softA)">
+            <rect x="379" y="94" width="322" height="324" rx="30" fill="#173b57"/>
+            <rect x="419" y="139" width="242" height="96" rx="18" fill="#fffdf8"/>
+            <ellipse cx="540" cy="167" rx="62" ry="17" fill="#efb94c"/>
+            <path d="M478 167v37c0 10 28 18 62 18s62-8 62-18v-37" fill="#f7cf76"/>
+            <path d="M478 185c0 10 28 18 62 18s62-8 62-18" fill="none" stroke="#9e6f18" stroke-width="2"/>
+            <text x="540" y="268" text-anchor="middle" fill="#fff" font-size="28" font-weight="800">Pursers Central</text>
+            <text x="540" y="298" text-anchor="middle" fill="#c9e1e9" font-size="16">SQLite · journal · ticket state</text>
+            <rect x="430" y="329" width="220" height="52" rx="13" fill="#087e78"/>
+            <text x="540" y="351" text-anchor="middle" fill="#fff" font-size="16" font-weight="750">MCP v2 + JWT-only</text>
+            <text x="540" y="371" text-anchor="middle" fill="#d8ffff" font-size="12">RS256/JWKS · loopback</text>
+          </g>
+
+          <g>
+            <path d="M379 190 C305 190 290 140 236 140" fill="none" stroke="#587083" stroke-width="3" marker-start="url(#arrA)" marker-end="url(#arrA)"/>
+            <path d="M379 280 C305 280 290 306 236 306" fill="none" stroke="#587083" stroke-width="3" marker-start="url(#arrA)" marker-end="url(#arrA)"/>
+            <path d="M379 362 C305 362 290 473 236 473" fill="none" stroke="#587083" stroke-width="3" marker-start="url(#arrA)" marker-end="url(#arrA)"/>
+            <path d="M701 192 C772 192 784 143 838 143" fill="none" stroke="#587083" stroke-width="3" marker-start="url(#arrA)" marker-end="url(#arrA)"/>
+            <path d="M701 315 C777 315 783 340 838 340" fill="none" stroke="#587083" stroke-width="3" marker-start="url(#arrA)" marker-end="url(#arrA)"/>
+          </g>
+
+          <g filter="url(#softA)">
+            <rect x="48" y="77" width="188" height="126" rx="20" fill="#fffdf8" stroke="#d8d1c3"/>
+            <circle cx="88" cy="116" r="20" fill="#4177c6"/>
+            <path d="M76 116h24M88 104v24" stroke="#fff" stroke-width="4"/>
+            <text x="119" y="115" fill="#173b57" font-size="20" font-weight="800">Host A</text>
+            <text x="72" y="153" fill="#58657a" font-size="15">Codex + connector</text>
+            <text x="72" y="178" fill="#087e78" font-size="13">agent_name: session-a</text>
+
+            <rect x="48" y="243" width="188" height="126" rx="20" fill="#fffdf8" stroke="#d8d1c3"/>
+            <circle cx="88" cy="282" r="20" fill="#ee7b36"/>
+            <path d="M77 288c10-22 18-22 25 0" fill="none" stroke="#fff" stroke-width="4"/>
+            <text x="119" y="281" fill="#173b57" font-size="20" font-weight="800">Host B</text>
+            <text x="72" y="319" fill="#58657a" font-size="15">Claude + connector</text>
+            <text x="72" y="344" fill="#087e78" font-size="13">agent_name: session-b</text>
+
+            <rect x="48" y="410" width="188" height="126" rx="20" fill="#fffdf8" stroke="#d8d1c3"/>
+            <circle cx="88" cy="449" r="20" fill="#478568"/>
+            <path d="M76 449h24M88 437v24" stroke="#fff" stroke-width="4"/>
+            <text x="119" y="448" fill="#173b57" font-size="20" font-weight="800">Host N</text>
+            <text x="72" y="486" fill="#58657a" font-size="15">ยี่ห้ออื่นที่รองรับ MCP</text>
+            <text x="72" y="511" fill="#087e78" font-size="13">agent_name: session-n</text>
+
+            <rect x="838" y="78" width="194" height="130" rx="20" fill="#fffdf8" stroke="#d8d1c3"/>
+            <rect x="874" y="106" width="122" height="55" rx="8" fill="#e5f0f4" stroke="#4177c6"/>
+            <path d="M886 147l24-21 17 13 22-25 34 33" fill="none" stroke="#4177c6" stroke-width="4"/>
+            <text x="935" y="186" text-anchor="middle" fill="#173b57" font-size="17" font-weight="800">MCP App dashboard</text>
+
+            <rect x="838" y="274" width="194" height="132" rx="20" fill="#fffdf8" stroke="#d8d1c3"/>
+            <path d="M878 314c0-17 14-31 31-31s31 14 31 31v27h-62z" fill="#efb94c"/>
+            <path d="M870 341h78" stroke="#9e6f18" stroke-width="5" stroke-linecap="round"/>
+            <text x="935" y="374" text-anchor="middle" fill="#173b57" font-size="17" font-weight="800">wait-bridge</text>
+            <text x="935" y="394" text-anchor="middle" fill="#58657a" font-size="12">subscription-first · poll opt-in</text>
+          </g>
+
+          <text x="539" y="477" text-anchor="middle" fill="#173b57" font-size="17" font-weight="800">ไฟล์งานจริงไม่อยู่ใน board</text>
+          <text x="539" y="503" text-anchor="middle" fill="#58657a" font-size="14">worker อ่าน/แก้ไฟล์เฉพาะ working directory ที่ได้รับอนุญาต เช่น /path/to/project</text>
+          <path d="M420 526 H660" stroke="#ee7b36" stroke-width="4" stroke-linecap="round" stroke-dasharray="10 9"/>
+          <text x="540" y="557" text-anchor="middle" fill="#ee7b36" font-size="13" font-weight="750">Coordination ≠ file permission</text>
+        </svg>
+        <figcaption id="arch-caption" class="legend">
+          <span><i class="dot" style="background:var(--navy)"></i>Central ตัดสินสถานะและบันทึกหลักฐาน</span>
+          <span><i class="dot" style="background:var(--teal)"></i>MCP เป็นสัญญากลางข้าม host</span>
+          <span><i class="dot" style="background:var(--gold)"></i>Journal cue ปลุก worker แต่ต้อง refetch สถานะจริง</span>
+        </figcaption>
+      </figure>
+
+      <div class="callout">
+        <strong>เรื่อง TLS ที่ควรเล่าให้ตรง:</strong> fleet ที่ใช้งานจริงวาง <code>pursers</code>, <code>fullplatts</code>, <code>mi-mcp-prd</code> และบอร์ด archive บน Central เดียวหลัง loopback TLS แต่สิ่งที่ตัว <em>package code</em> บังคับโดยตรงคือ loopback + JWT-only; profile หรือ deployment อื่นอาจใช้ HTTP loopback ได้ จึงไม่ควรอ้างว่าแพ็กเกจ pin TLS ให้ทุก installation
+      </div>
+
+      <div class="detail-grid">
+        <article class="card">
+          <h3>Authentication และ admission</h3>
+          <ul>
+            <li><code>CENTRAL_AUTH_MODE</code> ต้องเป็น <code>jwt</code>; dev-token transition fallback ถูกถอดออกแล้ว</li>
+            <li>JWT verifier รับเฉพาะ RS256, โหลด key จาก <code>CENTRAL_JWKS_PATH</code> และตรวจ issuer, audience, resource, expiry, subject และ scope แบบ fail-closed</li>
+            <li>principal มาจาก signed claims ไม่ใช่ชื่อ agent; การเข้าแต่ละ board ต้องเป็น member ผ่าน <code>board_member_add</code> หรือ invite ที่ออกด้วย <code>board_invite</code></li>
+          </ul>
+        </article>
+        <article class="card">
+          <h3>Identity แยกทุก board</h3>
+          <p>Central สร้าง <code>agent_id</code> แบบ deterministic จาก tuple นี้:</p>
+          <pre><code>agent_id = "AI-" + sha256(
+  JSON([board_id, principal_id, agent_name])
+)</code></pre>
+          <p>ดังนั้น worker ชื่อเดียวกันภายใต้ principal เดียวกันจะยังได้ <code>agent_id</code> คนละค่าเมื่ออยู่คนละ board; dashboard จึงต้องรวม pool ด้วย <code>(principal_id, agent_name)</code> ไม่ใช่ด้วย <code>agent_id</code></p>
+        </article>
+        <article class="card">
+          <h3>board_state ใช้ scrub profile ของ board</h3>
+          <p>Central 0.1.0a19 ใช้ scrub profile ของบอร์ดกับ <code>board_state_update</code> บอร์ด <code>internal</code> จึงเก็บ registry ที่มี absolute <code>work_dir</code> ได้ ขณะที่บอร์ด <code>strict</code> ยังปฏิเสธ path ลักษณะ home directory</p>
+        </article>
+        <article class="card">
+          <h3>ขอบเขตข้อมูลกับขอบเขตไฟล์</h3>
+          <p>JWT และ membership ตัดสินว่า principal เห็น board ใด ส่วน <code>work_dir</code> ใน registry เป็นข้อมูล routing เท่านั้น สิทธิ์อ่าน/เขียนไฟล์ยังต้องถูกบังคับโดย sandbox หรือ file-editing layer ของ worker แยกต่างหาก</p>
+        </article>
+      </div>
+    </section>
+
+    <section id="fleet">
+      <h2>Cross-Project Fleet: เพิ่มโปรเจกต์หนึ่งครั้ง แล้ว pool เห็นทั้งระบบ</h2>
+      <p class="section-intro">Home board เก็บ project registry กลาง แล้ว <code>a2a_wait(boards="registry")</code> แปลง registry เป็นรายการ board ที่ active ก่อนเริ่มรอ ใน a16 candidate ทุก seat ใช้ subscription เป็นเส้นทางหลักแทน timer poll</p>
+
+      <figure class="card diagram" aria-labelledby="pool-caption">
+        <svg viewBox="0 0 1120 650" role="img" aria-labelledby="pool-title pool-desc">
+          <title id="pool-title">Data flow ของ project registry และ multi-board worker pool</title>
+          <desc id="pool-desc">ผู้ดูแลแก้ project registry หนึ่งครั้งบน home board จากนั้น wait bridge โหลด active boards สร้าง cursor และ agent id แยกต่อ board รอ subscription cue และส่ง cue กลับ worker</desc>
+          <defs>
+            <marker id="arrP" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+              <path d="M0 0 L10 5 L0 10 z" fill="#173b57"/>
+            </marker>
+            <filter id="softP" x="-20%" y="-20%" width="140%" height="140%">
+              <feDropShadow dx="0" dy="7" stdDeviation="7" flood-color="#152b3a" flood-opacity=".12"/>
+            </filter>
+          </defs>
+          <rect width="1120" height="650" rx="24" fill="#fbf8f0"/>
+
+          <g filter="url(#softP)">
+            <rect x="45" y="76" width="214" height="132" rx="20" fill="#fffdf8" stroke="#d8d1c3"/>
+            <text x="152" y="112" text-anchor="middle" fill="#173b57" font-size="19" font-weight="850">Registry admin</text>
+            <text x="152" y="142" text-anchor="middle" fill="#58657a" font-size="14">show · add · pause</text>
+            <text x="152" y="165" text-anchor="middle" fill="#58657a" font-size="14">activate · remove</text>
+            <text x="152" y="191" text-anchor="middle" fill="#087e78" font-size="12">validate + write + read-back</text>
+
+            <rect x="342" y="60" width="300" height="168" rx="24" fill="#173b57"/>
+            <text x="492" y="100" text-anchor="middle" fill="#fff" font-size="21" font-weight="850">Home board · pursers</text>
+            <text x="492" y="130" text-anchor="middle" fill="#c9e1e9" font-size="14">board_state["project_registry"]</text>
+            <rect x="382" y="152" width="220" height="48" rx="12" fill="#087e78"/>
+            <text x="492" y="181" text-anchor="middle" fill="#fff" font-size="14">schema v1 · active / paused</text>
+
+            <rect x="735" y="57" width="330" height="178" rx="24" fill="#fffdf8" stroke="#087e78" stroke-width="2"/>
+            <text x="900" y="96" text-anchor="middle" fill="#087e78" font-size="21" font-weight="850">wait-bridge</text>
+            <text x="900" y="128" text-anchor="middle" fill="#173b57" font-size="15">a2a_wait(boards="registry")</text>
+            <text x="900" y="158" text-anchor="middle" fill="#58657a" font-size="13">resolve active boards ครั้งเดียวต่อ call</text>
+            <text x="900" y="184" text-anchor="middle" fill="#58657a" font-size="13">หนึ่ง cursor + generation + agent_id ต่อ board</text>
+            <text x="900" y="211" text-anchor="middle" fill="#ee7b36" font-size="12">เพิ่ม registry entry โดยไม่แก้ connector</text>
+          </g>
+
+          <path d="M259 142H332" stroke="#173b57" stroke-width="3" fill="none" marker-end="url(#arrP)"/>
+          <path d="M642 142H725" stroke="#173b57" stroke-width="3" fill="none" marker-end="url(#arrP)"/>
+
+          <g filter="url(#softP)">
+            <rect x="74" y="330" width="246" height="142" rx="20" fill="#eaf6f3" stroke="#087e78"/>
+            <text x="197" y="368" text-anchor="middle" fill="#087e78" font-size="19" font-weight="850">pursers</text>
+            <text x="197" y="398" text-anchor="middle" fill="#58657a" font-size="13">cursor[pursers]</text>
+            <text x="197" y="423" text-anchor="middle" fill="#58657a" font-size="13">agent_id[pursers]</text>
+            <text x="197" y="450" text-anchor="middle" fill="#173b57" font-size="12">subscription cue · poll opt-in</text>
+
+            <rect x="437" y="330" width="246" height="142" rx="20" fill="#eef5f7" stroke="#4177c6"/>
+            <text x="560" y="368" text-anchor="middle" fill="#4177c6" font-size="19" font-weight="850">fullplatts</text>
+            <text x="560" y="398" text-anchor="middle" fill="#58657a" font-size="13">cursor[fullplatts]</text>
+            <text x="560" y="423" text-anchor="middle" fill="#58657a" font-size="13">agent_id[fullplatts]</text>
+            <text x="560" y="450" text-anchor="middle" fill="#173b57" font-size="12">subscription cue · poll opt-in</text>
+
+            <rect x="800" y="330" width="246" height="142" rx="20" fill="#fff2e8" stroke="#ee7b36"/>
+            <text x="923" y="368" text-anchor="middle" fill="#b64d19" font-size="19" font-weight="850">mi-mcp-prd</text>
+            <text x="923" y="398" text-anchor="middle" fill="#58657a" font-size="13">cursor[mi-mcp-prd]</text>
+            <text x="923" y="423" text-anchor="middle" fill="#58657a" font-size="13">agent_id[mi-mcp-prd]</text>
+            <text x="923" y="450" text-anchor="middle" fill="#173b57" font-size="12">+ archive board</text>
+          </g>
+
+          <path d="M835 235 C790 282 197 266 197 320" fill="none" stroke="#173b57" stroke-width="3" marker-end="url(#arrP)"/>
+          <path d="M900 235 C850 282 560 274 560 320" fill="none" stroke="#173b57" stroke-width="3" marker-end="url(#arrP)"/>
+          <path d="M965 235 C1010 282 923 273 923 320" fill="none" stroke="#173b57" stroke-width="3" marker-end="url(#arrP)"/>
+
+          <rect x="235" y="548" width="650" height="58" rx="18" fill="#173b57"/>
+          <text x="560" y="574" text-anchor="middle" fill="#fff" font-size="17" font-weight="800">cue รวมกลับ worker · event ทุกตัวติด board_id</text>
+          <text x="560" y="595" text-anchor="middle" fill="#c9e1e9" font-size="12">board ที่ไม่มี admission → skipped_boards; board อื่นยังรอต่อได้</text>
+          <path d="M197 472 C197 523 330 516 393 538" fill="none" stroke="#173b57" stroke-width="3" marker-end="url(#arrP)"/>
+          <path d="M560 472V538" fill="none" stroke="#173b57" stroke-width="3" marker-end="url(#arrP)"/>
+          <path d="M923 472 C923 523 790 516 727 538" fill="none" stroke="#173b57" stroke-width="3" marker-end="url(#arrP)"/>
+        </svg>
+        <figcaption id="pool-caption" class="legend">
+          <span><i class="dot" style="background:var(--teal)"></i>registry เป็น control point เดียวสำหรับรายชื่อโปรเจกต์</span>
+          <span><i class="dot" style="background:var(--blue)"></i>state แยกต่อ board ป้องกัน cursor และ lease ปนกัน</span>
+          <span><i class="dot" style="background:var(--orange)"></i>admission ล้มเฉพาะ board นั้น ไม่ทำให้ทั้ง pool หยุด</span>
+        </figcaption>
+      </figure>
+
+      <div class="detail-grid">
+        <article class="card">
+          <h3>Project registry contract</h3>
+          <p>ค่าอยู่ที่ key <code>project_registry</code> บน home board และเก็บเป็น JSON string ตาม schema ที่รับเฉพาะ field เหล่านี้:</p>
+          <pre><code>{
+  "schema_version": 1,
+  "projects": {
+    "&lt;name&gt;": {
+      "board_id": "&lt;board_id&gt;",
+      "work_dir": "&lt;absolute_work_dir&gt;",
+      "status": "active | paused"
+    }
+  }
+}</code></pre>
+        </article>
+        <article class="card">
+          <h3>Registry admin CLI</h3>
+          <p><code>tools/wait-bridge/registry_admin.py</code> รองรับ <code>show</code>, <code>add</code>, <code>pause</code>, <code>activate</code> และ <code>remove</code> ทุก mutation ตรวจ schema ทั้ง document ก่อนเขียน แล้วอ่านกลับเทียบค่า; mismatch จบ non-zero พร้อม diff และ token มาจาก <code>ONBOARD_CENTRAL_TOKEN</code> โดยไม่พิมพ์ออกมา</p>
+          <pre><code>python tools/wait-bridge/registry_admin.py add &lt;name&gt; \
+  --board-id &lt;board_id&gt; --work-dir &lt;absolute_work_dir&gt;</code></pre>
+        </article>
+        <article class="card">
+          <h3>Subscription-first + poll แบบ explicit</h3>
+          <p>แต่ละ accessible board subscribe ทั้ง <code>board://&lt;board_id&gt;/journal</code> และ per-seat cue ผ่าน <code>BoardClient.events()</code> Cue เป็นเพียงสัญญาณให้ refetch แบบ <code>touch=false</code> เท่านั้น หาก subscription ใดล้ม จะ log ชัดและลดระดับเฉพาะบอร์ด/call นั้น ก่อนลอง push ใหม่ในการ re-arm ถัดไป</p>
+          <p>seat ว่างไม่เรียก Central หลัง drain ก่อน subscribe; seat ที่ถือ ticket ต่ออายุเฉพาะ lease ที่ถืออยู่ตาม TTL งานที่กำลังทำต้อง renew เองนอกช่วง <code>a2a_wait</code></p>
+        </article>
+        <article class="card">
+          <h3>Failure เป็นข้อมูล ไม่ใช่การเดา</h3>
+          <p>ผล multi-board ส่ง <code>new_seq</code> เป็น map, event ทุกตัวมี <code>board_id</code> และ board ที่เข้าไม่ได้อยู่ใน <code>skipped_boards</code> หาก registry หายหรือ malformed ระบบกลับมาเฝ้า home board พร้อม <code>registry_warning</code> โดยไม่สร้างรายการ project ขึ้นเอง</p>
+        </article>
+      </div>
+
+      <h3 style="margin-top:32px">จาก registry สู่ Fleet dashboard</h3>
+      <p class="section-intro">เครื่องมือ pure-read <code>fleet_snapshot</code> โหลดเฉพาะ project ที่ active แล้วเรียก <code>board_status</code> และ bounded <code>board_snapshot</code> ของแต่ละ board โดยไม่ join identity ใหม่ ก่อน aggregate เป็นมุมมองระดับองค์กร</p>
+      <figure class="card diagram" aria-labelledby="fleet-caption">
+        <svg viewBox="0 0 1100 430" role="img" aria-labelledby="fleet-title fleet-desc">
+          <title id="fleet-title">Aggregation path ของ Fleet dashboard</title>
+          <desc id="fleet-desc">fleet snapshot อ่าน registry อ่าน status และ bounded snapshot ของแต่ละ board จัดกลุ่ม seat ด้วย principal กับ agent name แล้วส่ง totals projects และ pool ให้ dashboard</desc>
+          <defs>
+            <marker id="arrD" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10 z" fill="#173b57"/></marker>
+          </defs>
+          <rect width="1100" height="430" rx="24" fill="#fbf8f0"/>
+          <rect x="40" y="117" width="190" height="118" rx="18" fill="#173b57"/>
+          <text x="135" y="153" text-anchor="middle" fill="#fff" font-size="18" font-weight="800">project_registry</text>
+          <text x="135" y="181" text-anchor="middle" fill="#c9e1e9" font-size="13">active projects</text>
+          <text x="135" y="207" text-anchor="middle" fill="#c9e1e9" font-size="13">bounded list</text>
+
+          <rect x="300" y="60" width="205" height="92" rx="17" fill="#eef5f7" stroke="#4177c6"/>
+          <text x="402" y="96" text-anchor="middle" fill="#173b57" font-size="17" font-weight="800">board_status</text>
+          <text x="402" y="124" text-anchor="middle" fill="#58657a" font-size="12">open · claimed · submitted</text>
+          <rect x="300" y="201" width="205" height="92" rx="17" fill="#eaf6f3" stroke="#087e78"/>
+          <text x="402" y="237" text-anchor="middle" fill="#173b57" font-size="17" font-weight="800">board_snapshot</text>
+          <text x="402" y="265" text-anchor="middle" fill="#58657a" font-size="12">agents · tickets · omitted counts</text>
+
+          <rect x="575" y="91" width="230" height="176" rx="22" fill="#fff2e8" stroke="#ee7b36" stroke-width="2"/>
+          <text x="690" y="128" text-anchor="middle" fill="#b64d19" font-size="19" font-weight="850">fleet_snapshot</text>
+          <text x="690" y="160" text-anchor="middle" fill="#173b57" font-size="13">group (principal_id, agent_name)</text>
+          <text x="690" y="186" text-anchor="middle" fill="#58657a" font-size="13">dedupe seat ต่อ board</text>
+          <text x="690" y="212" text-anchor="middle" fill="#58657a" font-size="13">classify busy / available / stale</text>
+          <text x="690" y="238" text-anchor="middle" fill="#087e78" font-size="12">warning + truncation counts</text>
+
+          <rect x="875" y="65" width="185" height="226" rx="22" fill="#fffdf8" stroke="#087e78" stroke-width="2"/>
+          <text x="967" y="103" text-anchor="middle" fill="#087e78" font-size="20" font-weight="850">Fleet tab</text>
+          <text x="967" y="137" text-anchor="middle" fill="#173b57" font-size="13">Agents · Busy</text>
+          <text x="967" y="160" text-anchor="middle" fill="#173b57" font-size="13">Available · Stale</text>
+          <text x="967" y="192" text-anchor="middle" fill="#58657a" font-size="13">project ticket counts</text>
+          <text x="967" y="218" text-anchor="middle" fill="#58657a" font-size="13">pool rows</text>
+          <rect x="904" y="239" width="127" height="30" rx="15" fill="#eaf6f3"/>
+          <text x="967" y="259" text-anchor="middle" fill="#087e78" font-size="12">project:ticket</text>
+
+          <g fill="none" stroke="#173b57" stroke-width="3" marker-end="url(#arrD)">
+            <path d="M230 158 C260 145 264 106 290 106"/>
+            <path d="M230 194 C260 207 264 247 290 247"/>
+            <path d="M505 106 C540 106 540 149 565 149"/>
+            <path d="M505 247 C540 247 540 210 565 210"/>
+            <path d="M805 179H865"/>
+          </g>
+          <text x="550" y="365" text-anchor="middle" fill="#58657a" font-size="14">Roster เดิมเพิ่ม project · current ticket · duplicate-name warning; Fleet tab เป็น read-only เช่นเดิม</text>
+        </svg>
+        <figcaption id="fleet-caption" class="legend">
+          <span><i class="dot" style="background:var(--navy)"></i>pure-read: ไม่ join และไม่ mutate board</span>
+          <span><i class="dot" style="background:var(--orange)"></i>รวมคนเดียวกันข้าม board ด้วย principal + agent name</span>
+          <span><i class="dot" style="background:var(--teal)"></i>ค่าไม่พร้อมแสดง em dash และ warning อย่างตรงไปตรงมา</span>
+        </figcaption>
+      </figure>
+    </section>
+
+    <section id="flow">
+      <h2>Flow หลัก: รอ → แย่ง claim → ทำ → ส่ง → ตรวจ</h2>
+      <p class="section-intro">หัวใจคือ server เป็นผู้เปลี่ยนสถานะ ticket แบบ atomic จึงมีผู้ชนะ claim เพียงคนเดียว ส่วน journal เป็น cue ให้ตื่น ไม่ใช่สำเนาความจริง Worker ต้องอ่าน ticket ล่าสุดก่อนลงมือเสมอ</p>
+
+      <figure class="card diagram" aria-labelledby="flow-caption">
+        <svg viewBox="0 0 1100 600" role="img" aria-labelledby="flow-title flow-desc">
+          <title id="flow-title">Flow งานของ Pursers</title>
+          <desc id="flow-desc">ลำดับจาก worker arm รอ ticket แย่ง claim ทำงาน submit ให้ reviewer อีก principal ตรวจ แล้ว close หรือ reject กลับไปแก้</desc>
+          <defs>
+            <marker id="arrF" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+              <path d="M0 0 L10 5 L0 10 z" fill="#173b57"/>
+            </marker>
+            <filter id="softF" x="-20%" y="-20%" width="140%" height="140%">
+              <feDropShadow dx="0" dy="6" stdDeviation="7" flood-color="#152b3a" flood-opacity=".12"/>
+            </filter>
+          </defs>
+          <rect x="0" y="0" width="1100" height="600" rx="24" fill="#fbf8f0"/>
+          <rect x="38" y="62" width="1024" height="122" rx="18" fill="#eef5f7"/>
+          <rect x="38" y="229" width="1024" height="122" rx="18" fill="#fff2e8"/>
+          <rect x="38" y="396" width="1024" height="122" rx="18" fill="#eef5ef"/>
+          <text x="66" y="93" fill="#4177c6" font-size="16" font-weight="800">WORKERS</text>
+          <text x="66" y="260" fill="#ee7b36" font-size="16" font-weight="800">CENTRAL</text>
+          <text x="66" y="427" fill="#478568" font-size="16" font-weight="800">REVIEWER (คนละ principal)</text>
+
+          <g filter="url(#softF)">
+            <rect x="151" y="95" width="155" height="62" rx="16" fill="#4177c6"/>
+            <text x="228" y="121" text-anchor="middle" fill="#fff" font-size="17" font-weight="800">1 · ARM / WAIT</text>
+            <text x="228" y="143" text-anchor="middle" fill="#e9f2ff" font-size="12">subscription cue</text>
+
+            <rect x="386" y="95" width="155" height="62" rx="16" fill="#4177c6"/>
+            <text x="463" y="121" text-anchor="middle" fill="#fff" font-size="17" font-weight="800">3 · CLAIM</text>
+            <text x="463" y="143" text-anchor="middle" fill="#e9f2ff" font-size="12">หลาย worker แข่งกัน</text>
+
+            <rect x="621" y="95" width="155" height="62" rx="16" fill="#4177c6"/>
+            <text x="698" y="121" text-anchor="middle" fill="#fff" font-size="17" font-weight="800">5 · DO</text>
+            <text x="698" y="143" text-anchor="middle" fill="#e9f2ff" font-size="12">ทำงาน + renew lease</text>
+
+            <rect x="856" y="95" width="155" height="62" rx="16" fill="#4177c6"/>
+            <text x="933" y="121" text-anchor="middle" fill="#fff" font-size="17" font-weight="800">6 · SUBMIT</text>
+            <text x="933" y="143" text-anchor="middle" fill="#e9f2ff" font-size="12">แนบ evidence ตามที่ขอ</text>
+
+            <rect x="151" y="263" width="155" height="62" rx="16" fill="#ee7b36"/>
+            <text x="228" y="289" text-anchor="middle" fill="#fff" font-size="17" font-weight="800">2 · TICKET</text>
+            <text x="228" y="311" text-anchor="middle" fill="#fff0e7" font-size="12">journal ส่ง cue</text>
+
+            <rect x="386" y="263" width="155" height="62" rx="16" fill="#ee7b36"/>
+            <text x="463" y="289" text-anchor="middle" fill="#fff" font-size="17" font-weight="800">4 · ONE WINNER</text>
+            <text x="463" y="311" text-anchor="middle" fill="#fff0e7" font-size="12">open → claimed แบบ atomic</text>
+
+            <rect x="856" y="263" width="155" height="62" rx="16" fill="#ee7b36"/>
+            <text x="933" y="289" text-anchor="middle" fill="#fff" font-size="17" font-weight="800">7 · SUBMITTED</text>
+            <text x="933" y="311" text-anchor="middle" fill="#fff0e7" font-size="12">รอ independent review</text>
+
+            <rect x="621" y="430" width="155" height="62" rx="16" fill="#478568"/>
+            <text x="698" y="456" text-anchor="middle" fill="#fff" font-size="17" font-weight="800">8 · REVIEW</text>
+            <text x="698" y="478" text-anchor="middle" fill="#eafff1" font-size="12">อ่านผลงาน + รันหลักฐาน</text>
+
+            <rect x="856" y="430" width="155" height="62" rx="16" fill="#087e78"/>
+            <text x="933" y="456" text-anchor="middle" fill="#fff" font-size="17" font-weight="800">9A · CLOSE</text>
+            <text x="933" y="478" text-anchor="middle" fill="#d9fffb" font-size="12">approve แล้วจบ</text>
+
+            <rect x="386" y="430" width="155" height="62" rx="16" fill="#c14f47"/>
+            <text x="463" y="456" text-anchor="middle" fill="#fff" font-size="17" font-weight="800">9B · REJECT</text>
+            <text x="463" y="478" text-anchor="middle" fill="#ffe7e5" font-size="12">ส่ง fix instructions</text>
+          </g>
+
+          <g fill="none" stroke="#173b57" stroke-width="3" marker-end="url(#arrF)">
+            <path d="M228 157v103"/>
+            <path d="M306 294h70"/>
+            <path d="M463 263v-96"/>
+            <path d="M541 126h70"/>
+            <path d="M776 126h70"/>
+            <path d="M933 157v96"/>
+            <path d="M933 325v65c0 40-64 14-137 50"/>
+            <path d="M776 461h70"/>
+            <path d="M621 461h-70"/>
+            <path d="M463 430V195c0-42 100-69 148-69" stroke="#c14f47" stroke-dasharray="8 7"/>
+          </g>
+          <text x="518" y="385" fill="#c14f47" font-size="13" font-weight="750">แก้ → validate → resubmit</text>
+          <path d="M933 492v54H228v-369" fill="none" stroke="#087e78" stroke-width="3" stroke-dasharray="9 7" marker-end="url(#arrF)"/>
+          <text x="661" y="569" text-anchor="middle" fill="#087e78" font-size="13" font-weight="750">close แล้ว worker re-arm เพื่อรับงานถัดไป</text>
+        </svg>
+        <figcaption id="flow-caption" class="legend">
+          <span><i class="dot" style="background:var(--blue)"></i>worker ทำเฉพาะงานที่ claim ได้</span>
+          <span><i class="dot" style="background:var(--orange)"></i>Central เป็น source of truth</span>
+          <span><i class="dot" style="background:var(--green)"></i>reviewer ตรวจอย่างอิสระ</span>
+          <span><i class="dot" style="background:var(--red)"></i>reject ไม่ใช่จบงาน แต่เป็น loop แก้ไข</span>
+        </figcaption>
+      </figure>
+
+      <div class="steps" aria-label="สรุปหกขั้นตอน">
+        <div class="step"><div class="num">1</div><h3>Arm</h3><p>เรียก <code>a2a_wait(boards="registry")</code> ด้วย cursor map ล่าสุด; <code>timed_out=true</code> ให้ re-arm ทันทีด้วย <code>new_seq</code></p></div>
+        <div class="step"><div class="num">2</div><h3>Claim</h3><p>ถ้าแพ้การแข่งขันให้กลับไป wait ห้ามฝืนทำ ticket เดียวกัน</p></div>
+        <div class="step"><div class="num">3</div><h3>Understand</h3><p>อ่าน ticket, required fields, memory และคำสั่งแก้ล่าสุด</p></div>
+        <div class="step"><div class="num">4</div><h3>Do</h3><p>ทำใน scope ที่อนุญาต งานยาวต้องต่ออายุ lease เอง</p></div>
+        <div class="step"><div class="num">5</div><h3>Submit</h3><p>บอกสิ่งที่ทำ สิ่งที่ทดสอบ และข้อจำกัดตามจริง</p></div>
+        <div class="step"><div class="num">6</div><h3>Review</h3><p>reviewer seat คนละ principal ตรวจ; approve → close, reject → แก้และ submit ใหม่</p></div>
+      </div>
+      <div class="callout"><strong>รูปแบบการจัดทีม:</strong> worker seat หนึ่งที่นั่งคือหนึ่ง Codex session และหนึ่ง <code>agent_name</code> ต่อ call; reviewer seat แยกอยู่ภายใต้ principal ของตัวเองและต้องตรวจ evidence ก่อน approve/reject มนุษย์เป็นผู้กำกับ scope และผลลัพธ์ สำหรับงานตรวจผ่าน browser ใช้ ego lite เท่านั้น ไม่ใช้ Chrome</div>
+    </section>
+
+    <section id="compare">
+      <h2>อะไรเปลี่ยนจาก On Board v4 → Pursers v5</h2>
+      <p class="section-intro">การเปลี่ยนหลักไม่ใช่แค่ย้ายที่เก็บข้อมูล แต่ย้ายจาก “เครื่องมือความจำในโปรเจกต์เดียว” ไปเป็น “control plane งานที่หลาย host ใช้ร่วมกันได้”</p>
+      <div class="compare-wrap">
+        <table>
+          <thead>
+            <tr><th>มิติ</th><th>On Board v4</th><th>Pursers v5</th><th>ผลที่ทีมรู้สึกได้</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>ที่เก็บ</td><td>ไฟล์ <code>.agent-mem</code> กระจายตามโปรเจกต์</td><td>SQLite ที่ Central พร้อม transaction และ journal</td><td>สถานะ claim/submit ไม่ชนกันง่าย และสอบย้อนหลังได้</td></tr>
+            <tr><td>ขอบเขตโปรเจกต์</td><td>หนึ่ง board ผูกกับหนึ่งโปรเจกต์</td><td>หลาย board ต่อหนึ่ง fleet; registry บน home board ระบุ <code>board_id</code>, <code>work_dir</code> และสถานะ</td><td>เพิ่มโปรเจกต์ด้วย registry entry เดียว โดยไม่แก้ connector ของทุก worker</td></tr>
+            <tr><td>ตัวตน</td><td>หนึ่ง app หรือหนึ่ง process เท่ากับหนึ่ง identity</td><td><code>agent_name</code> ต่อ call และ <code>agent_id</code> derive แยกจาก board + principal + name</td><td>หลาย session แชร์ transport ได้ ขณะ cursor, lease และ audit ยังแยกถูก board</td></tr>
+            <tr><td>สิทธิ์</td><td>dev token และกติกาในเครื่อง</td><td>JWT-only RS256/JWKS + capability scopes + invite admission ต่อ board</td><td>ไม่มี dev-token fallback; แยกชื่อ agent ออกจากผู้ถือสิทธิ์และบังคับ review คนละ principal ได้</td></tr>
+            <tr><td>การปลุก worker</td><td>poll อย่างเดียว</td><td><code>a2a_wait(boards="registry")</code> ใช้ MCP <code>subscriptions/listen</code> เป็น default; <code>PURSERS_WAIT_MODE=poll</code> เป็น fallback ที่ตั้งใจ</td><td>seat ว่างไม่ยิง Central ตาม timer; timeout หมุน call แล้ว re-arm ด้วย cursor เดิม/ใหม่</td></tr>
+            <tr><td>ความจำ</td><td>ไฟล์อาจหายหรือถูกแทนที่ระหว่างจัดระเบียบ</td><td>live memory, archive และ retraction link แยกกัน; compaction แตะเฉพาะ telemetry ที่สร้างใหม่ได้</td><td>ข้อมูลต้นฉบับยังตามรอยได้ ไม่ต้อง “ลบเพื่อให้สั้น”</td></tr>
+            <tr><td>การ build</td><td>สภาพแวดล้อม build เปลี่ยนแล้ว bytes อาจไม่เหมือนเดิม</td><td>pin toolchain + deterministic epoch + component/member/view SHA-256 lock</td><td>component wheel build byte-identical และ package ปฏิเสธ dashboard ที่ไม่ตรง lock</td></tr>
+            <tr><td>การเผยแพร่</td><td>ติดตั้งจาก package เดิมและ workflow รุ่นเดิม</td><td>ทุก distribution อยู่บน PyPI; GitHub Actions ใช้ Trusted Publishing OIDC และ release มี <code>SHA256SUMS.txt</code></td><td>ไม่ต้องเก็บ PyPI API token ใน workflow และผู้ใช้ตรวจ artifact ได้ก่อนติดตั้ง</td></tr>
+            <tr><td>หน้าจอ</td><td>ข้อมูลอยู่ใน chat และไฟล์เป็นหลัก</td><td>MCP App read-only มี Roster และ Fleet tab จาก pure-read <code>fleet_snapshot</code></td><td>เห็น totals, ticket counts, worker pool และ seat chips ข้ามโปรเจกต์ โดยไม่เอา secret เข้า iframe</td></tr>
+            <tr><td>Governance</td><td>ส่งต่อ context เป็นหลัก</td><td>worker submit → reviewer seat คนละ principal ตรวจ → approve/close หรือ reject พร้อม fix instructions</td><td>งานไม่จบเพียงเพราะผู้ทำบอกว่าจบ; มี independent evidence gate และ audit trail</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <figure class="card diagram" aria-labelledby="evo-caption">
+        <svg viewBox="0 0 1080 350" role="img" aria-labelledby="evo-title evo-desc">
+          <title id="evo-title">วิวัฒนาการจาก On Board v4 สู่ Pursers v5</title>
+          <desc id="evo-desc">ฝั่งซ้ายเป็นไฟล์ต่อโปรเจกต์และหนึ่ง identity ต่อ app เปลี่ยนผ่านสัญญา MCP ไปสู่ Central SQLite, JWT-only, project registry, worker pool หลายบอร์ด และ artifact lock</desc>
+          <defs>
+            <linearGradient id="evoG" x1="0" x2="1">
+              <stop offset="0" stop-color="#ee7b36"/><stop offset="1" stop-color="#087e78"/>
+            </linearGradient>
+            <marker id="arrE" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+              <path d="M0 0 L10 5 L0 10 z" fill="#173b57"/>
+            </marker>
+          </defs>
+          <rect width="1080" height="350" rx="24" fill="#fbf8f0"/>
+          <rect x="54" y="55" width="316" height="238" rx="26" fill="#fff2e8" stroke="#ee7b36" stroke-width="2"/>
+          <text x="212" y="96" text-anchor="middle" fill="#b64d19" font-size="25" font-weight="850">On Board v4</text>
+          <g fill="#173b57" font-size="16">
+            <text x="92" y="140">• .agent-mem ต่อโปรเจกต์</text>
+            <text x="92" y="176">• app หนึ่งตัวตน</text>
+            <text x="92" y="212">• poll เป็นหลัก</text>
+            <text x="92" y="248">• build ตาม environment</text>
+          </g>
+          <path d="M400 175H670" fill="none" stroke="url(#evoG)" stroke-width="15" stroke-linecap="round" marker-end="url(#arrE)"/>
+          <circle cx="475" cy="175" r="38" fill="#fffdf8" stroke="#d8d1c3"/>
+          <circle cx="583" cy="175" r="38" fill="#fffdf8" stroke="#d8d1c3"/>
+          <text x="475" y="170" text-anchor="middle" fill="#173b57" font-size="14" font-weight="800">MCP</text>
+          <text x="475" y="188" text-anchor="middle" fill="#58657a" font-size="11">สัญญากลาง</text>
+          <text x="583" y="170" text-anchor="middle" fill="#173b57" font-size="14" font-weight="800">Journal</text>
+          <text x="583" y="188" text-anchor="middle" fill="#58657a" font-size="11">event cue</text>
+          <rect x="710" y="55" width="316" height="238" rx="26" fill="#eaf6f3" stroke="#087e78" stroke-width="2"/>
+          <text x="868" y="96" text-anchor="middle" fill="#087e78" font-size="25" font-weight="850">Pursers v5</text>
+          <g fill="#173b57" font-size="16">
+            <text x="748" y="140">• Central SQLite + JWT-only</text>
+            <text x="748" y="176">• registry + multi-board pool</text>
+            <text x="748" y="212">• Fleet view + reviewer seat</text>
+            <text x="748" y="248">• reproducible release chain</text>
+          </g>
+          <text x="540" y="322" text-anchor="middle" fill="#58657a" font-size="14">จาก shared memory → governed work coordination</text>
+        </svg>
+        <figcaption id="evo-caption" class="legend"><span>สิ่งที่ยังเหมือนเดิมคือ local-first และมนุษย์เป็นเจ้าของขอบเขต; สิ่งที่เพิ่มคือ concurrency, identity และ evidence ที่ตรวจสอบได้</span></figcaption>
+      </figure>
+    </section>
+
+    <section id="release">
+      <h2>Build และ release: จาก source ถึง PyPI มี hash chain</h2>
+      <p class="section-intro">ชุด pre-release ที่ publish แล้วล่าสุดใน checkout คือ <code>v5.0.0a15</code> ส่วน subscription-first push-wait เป็น <code>v5.0.0a16</code> candidate ยังไม่ใช่คำยืนยันว่า a16 ถูก publish แล้ว</p>
+
+      <div class="version-grid" aria-label="เวอร์ชัน distribution ปัจจุบัน">
+        <article class="card"><b>5.0.0a15</b><small>pursers · meta installer</small></article>
+        <article class="card"><b>5.0.0a15</b><small>pursers-personal</small></article>
+        <article class="card"><b>0.1.0a19</b><small>pursers-central</small></article>
+        <article class="card"><b>0.1.0a13</b><small>pursers-client</small></article>
+        <article class="card"><b>5.0.0a2</b><small>pursers-personal-import</small></article>
+        <article class="card"><b>0.1.0a5</b><small>pursers-wait-bridge</small></article>
+      </div>
+
+      <div class="detail-grid">
+        <article class="card">
+          <h3>ติดตั้งจาก PyPI</h3>
+          <pre><code>pip install pursers
+uvx pursers-wait-bridge</code></pre>
+          <p>ชุด released นี้ pin Central <code>0.1.0a19</code>, Client <code>0.1.0a13</code> และ Personal <code>5.0.0a15</code> แบบ exact dependency; ตรวจ manifest ก่อนติดตั้ง candidate</p>
+        </article>
+        <article class="card">
+          <h3>Trusted Publishing</h3>
+          <p><code>.github/workflows/publish-pypi.yml</code> build wheel แล้วใช้ <code>pypa/gh-action-pypi-publish</code> ผ่าน GitHub Actions OIDC (<code>id-token: write</code>) แยก environment <code>pypi</code> กับ <code>pypi-bridge</code> จึงไม่ใช้ PyPI API token ระยะยาว</p>
+        </article>
+        <article class="card">
+          <h3>Reproducible component lock</h3>
+          <p><code>tools/regenerate_component_lock.py</code> สร้าง venv build ชั่วคราวและตรวจ toolchain ที่ pin แล้ว ตั้ง <code>PYTHONHASHSEED=0</code> กับ <code>SOURCE_DATE_EPOCH=315532800</code> ก่อน build จาก clean state</p>
+          <p><code>component-lock.json</code> เก็บ version, wheel SHA-256, hash ของสมาชิกใน wheel และ hash/ขนาด dashboard bundle; Central และ Client จึง build ซ้ำได้ byte-identical ภายใต้ toolchain ที่กำหนด</p>
+        </article>
+        <article class="card">
+          <h3>Release verification</h3>
+          <p>release ที่ operator อนุมัติควรแนบ wheel และ <code>SHA256SUMS.txt</code> ผู้ใช้ตรวจชุด artifact ได้ด้วย:</p>
+          <pre><code>shasum -a 256 -c SHA256SUMS.txt</code></pre>
+          <p>chain นี้แยกหน้าที่ชัด: source กำหนดวิธี build → lock ยืนยัน component/view → release checksum ยืนยันไฟล์ที่แจก → Trusted Publishing ระบุช่องทางขึ้น PyPI</p>
+        </article>
+      </div>
+    </section>
+
+    <section id="why">
+      <h2>ทำไมออกแบบแบบนี้</h2>
+      <p class="section-intro">โจทย์ไม่ใช่ทำ agent ที่เก่งที่สุดหนึ่งตัว แต่ทำให้ agent หลายค่ายทำงานร่วมกันได้โดยทีมยังควบคุมข้อมูล สิทธิ์ และความรับผิดชอบ</p>
+      <div class="why">
+        <article class="card">
+          <h3>1. Cross-vendor คือจุดขาย ไม่ใช่ของแถม</h3>
+          <ul>
+            <li><strong>MCP เป็นเส้นแบ่งที่ชัด:</strong> host ใดทำตามสัญญาเดียวกันก็ใช้ ticket และ memory ชุดเดียวกันได้ โดย Central ไม่ต้องรู้ว่าโมเดลข้างหลังคืออะไร</li>
+            <li><strong>identity อยู่ที่ call:</strong> หลาย session ใช้ connector เดียวกันได้ แต่ทุก action ยังมี <code>agent_name</code> และ principal กำกับ</li>
+            <li><strong>การแข่งขันจบที่ server:</strong> ต่อให้ worker หลายตัวตื่นพร้อมกัน การ claim แบบ atomic ทำให้มีผู้รับงานเพียงตัวเดียว</li>
+          </ul>
+        </article>
+        <aside class="card quote">
+          <p>“ให้โมเดลแข่งกันที่คุณภาพงาน ไม่ใช่แข่งกันว่าใครเขียนทับสถานะก่อน”</p>
+          <small>แนวคิดของ Central + ticket lease + independent review</small>
+        </aside>
+        <article class="card">
+          <h3>2. Local-first ลดพื้นที่เสี่ยง</h3>
+          <ul>
+            <li>Central bind เฉพาะ loopback ใน Personal deployment และเก็บ SQLite ใน profile ที่เจ้าของควบคุม</li>
+            <li>token ไม่ควรเข้า config ที่เปิดเผย, dashboard HTML, iframe message, tool result หรือ log; ตัวอย่างใช้ <code>&lt;token&gt;</code> เท่านั้น</li>
+            <li>dashboard อ่านภาพรวม ส่วนสิทธิ์แก้ไฟล์ยังเป็นของ file-editing layer ใน <code>&lt;work_dir&gt;</code> ไม่ใช่สิทธิ์ที่ board แจก</li>
+          </ul>
+        </article>
+        <article class="card">
+          <h3>3. พร้อมขยายขึ้น cloud โดยไม่รื้อโมเดล</h3>
+          <ul>
+            <li>JWT แยก issuer, audience, scope และ principal ตั้งแต่ต้น จึงต่อยอด identity provider และ remote boundary ได้</li>
+            <li>journal cursor, bounded snapshot และ idempotent event ทำให้รองรับการเชื่อมต่อที่หลุดแล้วกลับมาใหม่</li>
+            <li>artifact lock และ pinned toolchain ช่วยให้ deploy ที่อื่นแล้วยังตรวจ provenance ได้</li>
+          </ul>
+        </article>
+      </div>
+    </section>
+
+    <section id="caveats">
+      <h2>ขอบเขตจริงที่ต้องพูดให้ครบ</h2>
+      <p class="section-intro">ภาพรวมนี้อธิบายทิศทาง v5 แต่ไม่ควรแปลงแนวคิดเป็นคำรับรองด้าน security หรือความพร้อม production เกินกว่าที่ code ปัจจุบันทำได้</p>
+      <div class="guardrails">
+        <article class="card guardrail" style="--accent: var(--red)">
+          <h3>Registry คือ routing ไม่ใช่ security fence</h3>
+          <p><code>project_registry</code> บอกว่า board ใด map ไป <code>work_dir</code> ใด แต่ไม่ได้ให้สิทธิ์อ่านไฟล์; ต้องจำกัดที่ file-editing MCP หรือ sandbox และใช้ membership แยกสำหรับสิทธิ์บน board</p>
+        </article>
+        <article class="card guardrail" style="--accent: var(--gold)">
+          <h3>Push เป็น cue ไม่ใช่ payload ที่เชื่อทันที</h3>
+          <p>เมื่อ <code>subscriptions/listen</code> ปลุก bridge ระบบจะ refetch journal/ticket แบบ <code>touch=false</code> แล้วกรองใหม่; ถ้า push ล้มเหลวจะ fallback เฉพาะ board/call นั้นและ retry push เมื่อ re-arm</p>
+        </article>
+        <article class="card guardrail" style="--accent: var(--blue)">
+          <h3>Lease มีอายุ</h3>
+          <p>wait-bridge renew เฉพาะ lease ที่ seat ถือและเฉพาะตอนอยู่ใน <code>a2a_wait</code>; seat ว่างไม่มี heartbeat ไป Central งานที่ใช้เวลานานต้องเรียก <code>lease_renew</code> เอง ไม่เช่นนั้น reaper อาจคืนงานสู่คิว</p>
+        </article>
+        <article class="card guardrail" style="--accent: var(--green)">
+          <h3>Review ต้องแยกตัวตนจริง</h3>
+          <p>ชื่อ agent ต่างกันยังอาจถือ principal เดียวกันได้ นโยบาย strict จึงตรวจ principal ของผู้ submit กับ reviewer ไม่ใช่เทียบเพียงชื่อ และ reviewer ต้องตรวจ evidence จริงก่อนตัดสิน</p>
+        </article>
+      </div>
+    </section>
+
+    <section>
+      <h2>สรุปเอาไปเล่าใน 60 วินาที</h2>
+      <div class="takeaway">
+        <article class="card"><b>01</b><h3>Central คือกรรมการกลาง</h3><p>SQLite เก็บสถานะและ journal; JWT-only + membership กำหนดผู้เข้า board และ claim แบบ atomic กันงานซ้ำ</p></article>
+        <article class="card"><b>02</b><h3>Registry ทำให้เกิด fleet</h3><p>wait-bridge โหลด active boards จาก home registry แล้วรักษา cursor และ subscription แยกต่อ board; timer poll ใช้เฉพาะ fallback ที่ตั้งใจ</p></article>
+        <article class="card"><b>03</b><h3>งานจบเมื่อคนอื่นตรวจ</h3><p>worker seat submit, reviewer seat คนละ principal approve หรือ reject; Fleet tab แสดงภาพรวม และ worker re-arm หลังปิดงาน</p></article>
+      </div>
+    </section>
+
+    <section class="sources" aria-label="หลักฐานจาก codebase">
+      <h2>หลักฐานที่ตรวจจาก checkout นี้</h2>
+      <ul>
+        <li><code>packages/central/src/pursers_central/central.py</code> — loopback binding, JWT verifier, journal notification, ticket/review tools</li>
+        <li><code>packages/central/src/pursers_central/jwt_verifier.py</code> — RS256-only JWKS verification และ required claims แบบ fail-closed</li>
+        <li><code>packages/central/tests/test_board_state_scrub_profile.py</code> — <code>board_state_update</code> ใช้ scrub profile ของ board ใน Central 0.1.0a19</li>
+        <li><code>packages/central/src/pursers_central/transactional_sqlite.py</code> และ <code>sqlite_store.py</code> — SQLite transaction และ WAL-backed storage</li>
+        <li><code>tools/wait-bridge/pursers_wait_server.py</code> และ <code>README.md</code> — subscription-first wait, host profiles, per-call identity, multi-board cursor, explicit poll fallback และ lease-only renewal</li>
+        <li><code>tools/wait-bridge/registry_admin.py</code> — schema validation, safe mutation และ read-back verification ของ project registry</li>
+        <li><code>packages/client/tests/test_per_call_identity.py</code> — explicit identity ไม่แก้ shared client state</li>
+        <li><code>packages/personal/src/pursers_personal/apps_server.py</code> — pure-read <code>fleet_snapshot</code>, bounded per-board reads และ pool grouping</li>
+        <li><code>tools/dashboard-ui/src/dashboard.ts</code> — Fleet tab, totals, project/pool tables, seat chips และ Roster fields</li>
+        <li><code>tools/regenerate_component_lock.py</code> และ <code>component-lock.json</code> — pinned build toolchain, deterministic epoch และ SHA-256 component/member/view lock</li>
+        <li><code>.github/workflows/publish-pypi.yml</code> — Trusted Publishing ผ่าน OIDC สำหรับ distribution ทั้งหก</li>
+        <li><code>packages/*/pyproject.toml</code> และ <code>tools/wait-bridge/pyproject.toml</code> — เวอร์ชันและ exact dependency pins ของชุด released/candidate ปัจจุบัน</li>
+      </ul>
+    </section>
+  </main>
+
+  <footer>
+    <div class="page">Pursers architecture briefing · v5.0.0a16 candidate · เอกสาร standalone ไม่มี external asset, CDN หรือ JavaScript · ใช้ placeholder แทน credential และ path ส่วนบุคคล</div>
+  </footer>
+</body>
+</html>
