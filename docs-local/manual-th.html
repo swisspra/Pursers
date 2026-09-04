@@ -328,6 +328,21 @@ PURSERS_HOST = "codex"</code></pre>
       </table>
       <p><code>PURSERS_HOST_TIMEOUT_S</code> ใช้ override deadline ของ profile ได้ โดย bridge จะหัก safety margin ก่อนกำหนดช่วง block</p>
       <div class="note"><strong>หลักตรวจเร็ว:</strong> restart Host หลังแก้ config → เรียก <code>board_onboard</code> → ตรวจ <code>board_status</code> → ทดลอง <code>a2a_wait</code> ด้วย timeout สั้น ๆ ก่อนเปิดวงรอจริง</div>
+
+      <h3>Claude Desktop as orchestrator</h3>
+      <p>สำหรับ Claude Desktop หรือ Host อื่นที่ทำหน้าที่เป็น leader หรือ coordinator ของ fleet Wait Bridge มีโหมด <strong>orchestrator</strong> (<code>PURSERS_ROLE="orchestrator"</code>) เพื่อแก้ปัญหาที่ Claude Desktop ตัด tool call หลังผ่านไปประมาณ 240 วินาที โดย leader ไม่จำเป็นต้อง claim ticket แต่ต้องการทราบการเปลี่ยนแปลงทันที เช่น ticket ที่ถูก submit, approve, reject หรือ close พร้อมข้อมูล <code>branch_and_commit</code> เพื่อ merge งานที่ผ่านการตรวจ</p>
+      <p>ในโหมด orchestrator ตัว bridge จะถือ subscription ใน background อย่างต่อเนื่องครอบคลุมทุก active registry board โดยเก็บประวัติใน ring buffer (จำกัดที่ 5,000 events) และ refetch ticket ด้วย <code>touch=false</code> (ไม่เกิดการเขียน SQLite หรือ renew lease ขณะ idle) พร้อมบันทึก state ลงไฟล์ในไดเรกทอรีของ bridge เพื่อให้ restart แล้วรับงานต่อได้ทันทีโดยไม่สูญเสีย event</p>
+      <p>ชุดเครื่องมือสำหรับ Orchestrator (ตอบกลับทันที ไม่ block):</p>
+      <ul>
+        <li><code>board_digest(since=None|cursor_map, boards="registry", group_by="ticket", include_notes_keys=["branch_and_commit"])</code>: สรุปการเปลี่ยนสถานะของ ticket, สถานะปัจจุบัน, ผู้ตรวจ, notes และ subscription health</li>
+        <li><code>board_digest_ack(cursor_map=None)</code>: ยืนยันการรับรู้ cursor เพื่อให้ digest ครั้งถัดไปรายงานเฉพาะการเปลี่ยนแปลงใหม่</li>
+        <li><code>board_watch(ticket_ids=None, tags=None)</code> และ <code>board_unwatch(ticket_ids=None, tags=None, all=False)</code>: ตั้ง watchlist เพื่อดึง ticket ที่ติดตามขึ้นมาแสดงก่อน</li>
+      </ul>
+      <p>นอกจากนี้ bridge ยังส่ง MCP resource update notification ไปที่ <code>board://&lt;board_id&gt;/digest</code> ทุกครั้งที่มี event ใหม่เข้ามาใน buffer</p>
+      <pre><code>You are Pursers seat coordinator-1 (orchestrator).
+Pass agent_name="coordinator-1" on every board call that accepts it. Never use another name.
+start every turn with board_digest; act on closed tickets (merge/verify), file follow-ups, then board_digest_ack; never a2a_wait; never claim.
+Never review your own work, never push main, stay in the registered work_dir for the event's board_id, and report evidence faithfully.</code></pre>
     </section>
 
     <section id="fleet">

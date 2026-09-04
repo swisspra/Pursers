@@ -42,12 +42,14 @@ RELEVANCE
 from __future__ import annotations
 
 import asyncio
+import copy
 import fcntl
 import hashlib
 import importlib.metadata
 import json
 import math
 import os
+import re
 import sys
 import tempfile
 import time
@@ -71,6 +73,7 @@ from pursers_client import (
 )
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
+from mcp.server.subscriptions import ResourceUpdated
 from agent_naming import resolve_agent_name
 from backlog import (
     WAIT_FOR_CLAIMABLE,
@@ -177,6 +180,16 @@ def bridge_stats_path() -> Path:
     )
 
 
+def bridge_state_path() -> Path:
+    explicit = os.environ.get("PURSERS_BRIDGE_STATE", "").strip()
+    if explicit:
+        return Path(explicit).expanduser().resolve()
+    state_dir = os.environ.get("PURSERS_BRIDGE_STATE_DIR", "").strip()
+    if state_dir:
+        return Path(state_dir).expanduser().resolve() / f"bridge-state-{BOARD_ID}.json"
+    return bridge_stats_path().parent / f"bridge-state-{BOARD_ID}.json"
+
+
 def _meter_bytes(value: Any) -> int:
     return len(
         json.dumps(
@@ -276,6 +289,24 @@ class BridgeStats:
                 )
         except Exception as exc:  # noqa: BLE001 - metering never breaks work.
             _log(f"wait-return stats write failed: {type(exc).__name__}")
+
+    async def record_digest_call(
+        self,
+        board_id: str,
+        agent_name: str,
+        result: dict[str, Any],
+    ) -> None:
+        """Record one model-visible board_digest result."""
+        try:
+            async with self._lock:
+                self._record_wait_return_sync(
+                    board_id,
+                    agent_name,
+                    "digest",
+                    _meter_bytes(result),
+                )
+        except Exception as exc:  # noqa: BLE001 - metering never breaks work.
+            _log(f"digest stats write failed: {type(exc).__name__}")
 
     def _record_sync(
         self,
@@ -675,12 +706,19 @@ def host_block_limit_s() -> int:
     return max(1, timeout - _timeout_margin_s(timeout))
 
 
-def clamp_timeout(timeout_s: Any) -> int:
+ORCHESTRATOR_BLOCK_LIMIT_S = 200
+
+
+def clamp_timeout(timeout_s: Any, role: str | None = None) -> int:
     try:
         t = int(timeout_s)
     except (TypeError, ValueError):
         t = DEFAULT_TIMEOUT_S
-    return max(1, min(t, host_block_limit_s()))
+    limit = host_block_limit_s()
+    effective_role = (role or os.environ.get("PURSERS_ROLE", "worker")).strip().lower()
+    if effective_role == "orchestrator":
+        limit = min(limit, ORCHESTRATOR_BLOCK_LIMIT_S)
+    return max(1, min(t, limit))
 
 
 def _progress_cadence_s() -> float | None:
@@ -712,14 +750,16 @@ class _BoardView:
     """Board-scoped calls over the lifespan client's open transport."""
 
     def __init__(self, parent: BoardClient, board_id: str) -> None:
-        raw_client = getattr(parent, "_client", None)
-        if raw_client is None:
-            raise RuntimeError("BoardClient is not entered")
+        raw_client = (
+            getattr(parent, "_client", None)
+            or getattr(parent, "_raw_client", None)
+            or parent
+        )
         self.board_id = board_id
         self._parent = parent
-        self.agent_name = parent.agent_name
-        self.identity: JoinedIdentity | None = None
-        self.generation_token: str | None = None
+        self.agent_name = getattr(parent, "agent_name", AGENT_NAME)
+        self.identity: JoinedIdentity | None = getattr(parent, "identity", None)
+        self.generation_token: str | None = getattr(parent, "generation_token", None)
         self._client = raw_client
         self.meter = getattr(parent, "meter", None)
 
@@ -1024,29 +1064,6 @@ class DeferredBoardConnection:
                 pass
 
 
-@asynccontextmanager
-async def _lifespan(server: MCPServer) -> AsyncIterator[dict[str, Any]]:
-    """Create only local state before initialize; join lazily on first tool."""
-    meter = BridgeStats(bridge_stats_path())
-    connection = DeferredBoardConnection(meter)
-    try:
-        yield {"connection": connection}
-    finally:
-        await connection.close()
-
-
-mcp = MCPServer("Pursers Wait Bridge", version=VERSION, lifespan=_lifespan)
-
-
-async def _client_for_tool(ctx: Context) -> BoardClient:
-    lifespan = ctx.request_context.lifespan_context
-    client = lifespan.get("client")
-    if client is not None:
-        return client
-    connection: DeferredBoardConnection = lifespan["connection"]
-    return await connection.client()
-
-
 def _parse_project_registry(result: dict[str, Any]) -> dict[str, Any]:
     """Compatibility wrapper around the client package's shared parser."""
     return parse_project_registry(result)
@@ -1075,11 +1092,723 @@ def _home_cursor(since_seq: int | dict[str, int]) -> int:
     return max(0, int(since_seq))
 
 
+def _extract_notes_subset(ticket: dict[str, Any], keys: list[str]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    if not keys:
+        return result
+    notes_texts: list[str] = []
+    if isinstance(ticket.get("notes"), str):
+        notes_texts.append(ticket["notes"])
+    if isinstance(ticket.get("summary"), str):
+        notes_texts.append(ticket["summary"])
+    if isinstance(ticket.get("submission_history"), list):
+        for sub in reversed(ticket["submission_history"]):
+            if isinstance(sub, dict):
+                if isinstance(sub.get("notes"), str):
+                    notes_texts.append(sub["notes"])
+                if isinstance(sub.get("summary"), str):
+                    notes_texts.append(sub["summary"])
+
+    for key in keys:
+        if key in ticket and ticket[key] is not None:
+            result[key] = ticket[key]
+            continue
+        if isinstance(ticket.get("submission_history"), list):
+            found_sub = False
+            for sub in reversed(ticket["submission_history"]):
+                if isinstance(sub, dict) and key in sub and sub[key] is not None:
+                    result[key] = sub[key]
+                    found_sub = True
+                    break
+            if found_sub:
+                continue
+
+        found = False
+        for text in notes_texts:
+            try:
+                data = json.loads(text)
+                if isinstance(data, dict) and key in data:
+                    result[key] = data[key]
+                    found = True
+                    break
+            except Exception:
+                pass
+            pattern = re.compile(rf"(?im)^\s*{re.escape(key)}\s*[:=]\s*(.+)$")
+            match = pattern.search(text)
+            if match:
+                result[key] = match.group(1).strip()
+                found = True
+                break
+        if not found and key == "branch_and_commit":
+            for text in notes_texts:
+                match = re.search(r"(?im)\bbranch_and_commit[:=]?\s*([^\n\r]+)", text)
+                if match:
+                    result[key] = match.group(1).strip()
+                    break
+    return result
+
+
+class OrchestratorEngine:
+    """Continuous background subscriber and digest aggregator for leader seats."""
+
+    def __init__(
+        self,
+        connection: Any,
+        meter: BridgeStats,
+        state_path: Path,
+    ) -> None:
+        self.connection = connection
+        self.meter = meter
+        self.state_path = state_path
+        self.cursor_map: dict[str, int] = {}
+        self.ack_cursor_map: dict[str, int] = {}
+        self.ring_buffer: list[dict[str, Any]] = []
+        self.seen_event_ids: set[str] = set()
+        self.ticket_cache: dict[str, dict[str, Any]] = {}
+        self.watched_ticket_ids: set[str] = set()
+        self.watched_tags: set[str] = set()
+        self.subscription_health: dict[str, Any] = {
+            "connected": False,
+            "last_event_at": None,
+            "reconnects": 0,
+        }
+        self.sessions: set[Any] = set()
+        self.lock = asyncio.Lock()
+        self._subscriber_task: asyncio.Task[None] | None = None
+        self._stop_event = asyncio.Event()
+        self.ready = asyncio.Event()
+
+    def load_state(self) -> None:
+        if not self.state_path.exists():
+            return
+        try:
+            data = json.loads(self.state_path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                return
+            if isinstance(data.get("cursor_map"), dict):
+                self.cursor_map = {k: int(v) for k, v in data["cursor_map"].items()}
+            if isinstance(data.get("ack_cursor_map"), dict):
+                self.ack_cursor_map = {k: int(v) for k, v in data["ack_cursor_map"].items()}
+            if isinstance(data.get("events"), list):
+                self.ring_buffer = [e for e in data["events"] if isinstance(e, dict)][-5000:]
+                self.seen_event_ids = {
+                    e.get("id") or f"EV-{e.get('board_id')}-{e.get('seq')}"
+                    for e in self.ring_buffer
+                }
+            if isinstance(data.get("tickets"), dict):
+                self.ticket_cache = {
+                    k: v for k, v in data["tickets"].items() if isinstance(v, dict)
+                }
+            if isinstance(data.get("watched_ticket_ids"), list):
+                self.watched_ticket_ids = set(data["watched_ticket_ids"])
+            if isinstance(data.get("watched_tags"), list):
+                self.watched_tags = set(data["watched_tags"])
+            if "reconnects" in data:
+                self.subscription_health["reconnects"] = int(data.get("reconnects", 0))
+            if "last_event_at" in data:
+                self.subscription_health["last_event_at"] = data.get("last_event_at")
+        except Exception as exc:
+            _log(f"warning: failed to load orchestrator state: {exc}")
+
+    def save_state(self) -> None:
+        try:
+            self.state_path.parent.mkdir(parents=True, exist_ok=True)
+            if len(self.ticket_cache) > 5000:
+                keys = list(self.ticket_cache.keys())[-5000:]
+                self.ticket_cache = {k: self.ticket_cache[k] for k in keys}
+            payload = {
+                "schema_version": 1,
+                "cursor_map": dict(self.cursor_map),
+                "ack_cursor_map": dict(self.ack_cursor_map),
+                "events": self.ring_buffer[-5000:],
+                "tickets": self.ticket_cache,
+                "watched_ticket_ids": sorted(self.watched_ticket_ids),
+                "watched_tags": sorted(self.watched_tags),
+                "reconnects": self.subscription_health["reconnects"],
+                "last_event_at": self.subscription_health["last_event_at"],
+                "last_saved_at": datetime.now(timezone.utc).isoformat(),
+            }
+            tmp = self.state_path.with_suffix(f".tmp.{os.getpid()}")
+            tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            tmp.replace(self.state_path)
+        except Exception as exc:
+            _log(f"warning: failed to persist orchestrator state: {exc}")
+
+    async def notify_resource_updated(self) -> None:
+        uri = f"board://{BOARD_ID}/digest"
+        try:
+            if hasattr(mcp, "_subscriptions") and mcp._subscriptions is not None:
+                await mcp._subscriptions.publish(ResourceUpdated(uri=uri))
+        except Exception:
+            pass
+        for session in list(self.sessions):
+            try:
+                if hasattr(session, "send_resource_updated"):
+                    await session.send_resource_updated(uri)
+            except Exception:
+                self.sessions.discard(session)
+
+    async def _get_client(self) -> BoardClient:
+        if hasattr(self.connection, "client") and callable(self.connection.client):
+            return await self.connection.client()
+        return self.connection
+
+    async def start_subscriber(self) -> None:
+        if self._subscriber_task is None or self._subscriber_task.done():
+            self._stop_event.clear()
+            self._subscriber_task = asyncio.create_task(
+                self._run_subscriber(), name="pursers-orchestrator-subscriber"
+            )
+
+    async def stop_subscriber(self) -> None:
+        self._stop_event.set()
+        task = self._subscriber_task
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+        self._subscriber_task = None
+        self.save_state()
+
+    async def ensure_subscriber_running(self) -> None:
+        if self._subscriber_task is None or self._subscriber_task.done():
+            await self.start_subscriber()
+
+    def _open_listen(self, client: Any, resources: list[str]) -> Any:
+        custom = getattr(client, "listen_across_boards", None)
+        if callable(custom):
+            return custom(resources)
+        raw = getattr(client, "_raw_client", None)
+        if raw is not None and hasattr(raw, "listen"):
+            return raw.listen(resource_subscriptions=resources)
+        inner = getattr(client, "_client", None)
+        if inner is not None and hasattr(inner, "listen"):
+            return inner.listen(resource_subscriptions=resources)
+        if hasattr(client, "listen"):
+            return client.listen(resource_subscriptions=resources)
+        raise RuntimeError(f"client {type(client).__name__} does not support listen")
+
+    async def _run_subscriber(self) -> None:
+        backoff = 0.5
+        while not self._stop_event.is_set():
+            try:
+                client = await self._get_client()
+                try:
+                    registry = await _read_project_registry(client)
+                    active_boards = _registry_boards(registry)
+                except Exception as exc:
+                    _log(f"registry read deferred/failed in background subscriber: {exc}")
+                    active_boards = [BOARD_ID]
+
+                async with self.lock:
+                    for b in active_boards:
+                        if b not in self.cursor_map:
+                            self.cursor_map[b] = 0
+
+                resources = [f"board://{b}/journal" for b in active_boards]
+
+                async def catchup_boards() -> bool:
+                    buffer_grew = False
+                    agent_name = (
+                        getattr(client, "agent_name", None)
+                        or (client.identity.agent_name if getattr(client, "identity", None) else None)
+                        or AGENT_NAME
+                    )
+                    for b in active_boards:
+                        cursor = self.cursor_map.get(b, 0)
+                        while True:
+                            view = _BoardView(client, b)
+                            try:
+                                page = await view.board_catchup(
+                                    cursor=cursor,
+                                    ack=False,
+                                    touch=False,
+                                    agent_name=agent_name,
+                                )
+                            except (PermissionError, BoardClientError) as exc:
+                                if "not a member" in str(exc).lower() or isinstance(exc, PermissionError):
+                                    try:
+                                        await view.board_join(agent_name=agent_name)
+                                        page = await view.board_catchup(
+                                            cursor=cursor,
+                                            ack=False,
+                                            touch=False,
+                                            agent_name=agent_name,
+                                        )
+                                    except Exception as join_exc:
+                                        _log(f"board_join/catchup failed for {b}: {join_exc}")
+                                        break
+                                else:
+                                    _log(f"catchup failed for {b}: {exc}")
+                                    break
+                            except Exception as c_exc:
+                                _log(f"catchup failed for {b}: {c_exc}")
+                                break
+
+                            events = page.get("events", [])
+                            next_cursor = int(page.get("next_cursor", cursor))
+                            cursor = next_cursor
+                            async with self.lock:
+                                self.cursor_map[b] = max(self.cursor_map.get(b, 0), next_cursor)
+
+                            if events:
+                                new_events = []
+                                changed_tickets = set()
+                                async with self.lock:
+                                    for ev in events:
+                                        ev_id = ev.get("id") or f"EV-{b}-{ev.get('seq')}"
+                                        if ev_id not in self.seen_event_ids:
+                                            self.seen_event_ids.add(ev_id)
+                                            ev_full = {**ev, "board_id": b, "id": ev_id}
+                                            self.ring_buffer.append(ev_full)
+                                            new_events.append(ev_full)
+                                            if ev.get("ticket_id"):
+                                                changed_tickets.add(ev["ticket_id"])
+                                    if len(self.ring_buffer) > 5000:
+                                        evicted = self.ring_buffer[:-5000]
+                                        self.ring_buffer = self.ring_buffer[-5000:]
+                                        for ev in evicted:
+                                            self.seen_event_ids.discard(ev.get("id"))
+                                if new_events:
+                                    buffer_grew = True
+                                    self.subscription_health["last_event_at"] = datetime.now(timezone.utc).isoformat()
+                                    for tid in changed_tickets:
+                                        try:
+                                            t_resp = await view.ticket_get(tid)
+                                            if t_resp and "ticket" in t_resp:
+                                                async with self.lock:
+                                                    self.ticket_cache[f"{b}:{tid}"] = t_resp["ticket"]
+                                        except Exception as exc:
+                                            _log(f"ticket_get failed for {tid}: {exc}")
+                            if not page.get("has_more"):
+                                break
+                    if buffer_grew:
+                        self.save_state()
+                        await self.notify_resource_updated()
+                    return buffer_grew
+
+                listen_cm = self._open_listen(client, resources)
+                async with listen_cm as subscription:
+                    self.subscription_health["connected"] = True
+                    backoff = 0.5
+                    await catchup_boards()
+                    self.ready.set()
+
+                    async for _cue in subscription:
+                        if self._stop_event.is_set():
+                            break
+                        await catchup_boards()
+            except asyncio.CancelledError:
+                self.subscription_health["connected"] = False
+                raise
+            except Exception as exc:
+                self.subscription_health["connected"] = False
+                self.subscription_health["reconnects"] += 1
+                _log(f"subscription reconnect #{self.subscription_health['reconnects']} after {exc}")
+                self.save_state()
+                if self._stop_event.is_set():
+                    break
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 30.0)
+
+    async def build_digest(
+        self,
+        since: dict[str, int] | int | None = None,
+        boards: list[str] | str = "registry",
+        group_by: str = "ticket",
+        include_notes_keys: list[str] | None = None,
+    ) -> dict[str, Any]:
+        keys = ["branch_and_commit"] if include_notes_keys is None else list(include_notes_keys)
+        client = await self._get_client()
+
+        if isinstance(boards, str):
+            if boards == "registry":
+                try:
+                    reg = await _read_project_registry(client)
+                    target_boards = _registry_boards(reg)
+                except Exception:
+                    target_boards = [BOARD_ID]
+            else:
+                target_boards = [b.strip() for b in boards.split(",") if b.strip()]
+        elif isinstance(boards, list):
+            target_boards = _normalize_boards(boards)
+        else:
+            target_boards = [BOARD_ID]
+
+        async with self.lock:
+            if since is None:
+                since_map = {b: self.ack_cursor_map.get(b, 0) for b in target_boards}
+            elif isinstance(since, int):
+                since_map = {b: max(0, since) for b in target_boards}
+            elif isinstance(since, dict):
+                since_map = {b: max(0, int(since.get(b, 0))) for b in target_boards}
+            else:
+                since_map = {b: 0 for b in target_boards}
+
+            filtered_events = [
+                ev for ev in self.ring_buffer
+                if ev.get("board_id") in target_boards
+                and int(ev.get("seq", 0)) > since_map.get(ev.get("board_id"), 0)
+            ]
+
+        by_ticket: dict[tuple[str, str], list[dict[str, Any]]] = OrderedDict()
+        for ev in filtered_events:
+            tid = ev.get("ticket_id")
+            bid = ev.get("board_id")
+            if tid and bid:
+                by_ticket.setdefault((bid, tid), []).append(ev)
+
+        tickets: list[dict[str, Any]] = []
+        new_tickets: list[dict[str, Any]] = []
+
+        for (bid, tid), evs in by_ticket.items():
+            cache_key = f"{bid}:{tid}"
+            ticket_data = self.ticket_cache.get(cache_key)
+            if ticket_data is None:
+                try:
+                    view = _BoardView(client, bid)
+                    t_resp = await view.ticket_get(tid)
+                    if t_resp and "ticket" in t_resp:
+                        ticket_data = t_resp["ticket"]
+                        async with self.lock:
+                            self.ticket_cache[cache_key] = ticket_data
+                except Exception:
+                    ticket_data = {}
+            if ticket_data is None:
+                ticket_data = {}
+
+            transitions = []
+            for ev in evs:
+                s_from = ev.get("status_from")
+                s_to = ev.get("status_to")
+                if ev.get("kind") == "ticket_created":
+                    s_from = s_from or None
+                    s_to = s_to or "open"
+                transitions.append({
+                    "from": s_from,
+                    "to": s_to or "unknown",
+                    "actor": ev.get("actor") or "",
+                    "at": ev.get("occurred_at") or "",
+                })
+
+            if not any(tr["to"] == "open" for tr in transitions) and ticket_data.get("created_at"):
+                transitions.insert(0, {
+                    "from": None,
+                    "to": "open",
+                    "actor": str(ticket_data.get("created_by") or ""),
+                    "at": str(ticket_data.get("created_at") or ""),
+                })
+
+            status_now = str(ticket_data.get("status") or (transitions[-1]["to"] if transitions else "open"))
+            title = str(ticket_data.get("title") or evs[0].get("title") or "")
+            claimed_by = ticket_data.get("claimed_by") or ticket_data.get("claimed_by_agent_name") or ticket_data.get("claimed_by_agent_id")
+
+            verdict = ticket_data.get("review_verdict")
+            rejection_count = int(ticket_data.get("rejection_count", 0))
+            reviewer = ticket_data.get("reviewed_by_agent_name") or ticket_data.get("reviewed_by_agent_id")
+            for ev in reversed(evs):
+                if verdict is None and ev.get("review_verdict"):
+                    verdict = ev["review_verdict"]
+                if reviewer is None and (ev.get("reviewed_by_agent_name") or ev.get("reviewed_by_agent_id")):
+                    reviewer = ev.get("reviewed_by_agent_name") or ev.get("reviewed_by_agent_id")
+                if rejection_count == 0 and ev.get("rejection_count"):
+                    rejection_count = int(ev["rejection_count"])
+
+            notes_subset = _extract_notes_subset(ticket_data, keys)
+            closed_at = ticket_data.get("closed_at")
+            if closed_at is None:
+                for tr in reversed(transitions):
+                    if tr["to"] == "closed":
+                        closed_at = tr["at"]
+                        break
+
+            is_watched = (
+                tid in self.watched_ticket_ids
+                or any(t in self.watched_tags for t in ticket_data.get("tags", []))
+            )
+
+            ticket_item = {
+                "ticket_id": tid,
+                "board_id": bid,
+                "title": title,
+                "transitions": transitions,
+                "status_now": status_now,
+                "review": {
+                    "verdict": verdict,
+                    "rejection_count": rejection_count,
+                    "reviewer": reviewer,
+                },
+                "claimed_by": claimed_by,
+                "notes_subset": notes_subset,
+                "closed_at": closed_at,
+                "watched": is_watched,
+            }
+            tickets.append(ticket_item)
+
+            if any(ev.get("kind") == "ticket_created" or ev.get("status_from") is None for ev in evs):
+                new_tickets.append({
+                    "ticket_id": tid,
+                    "board_id": bid,
+                    "title": title,
+                    "created_at": ticket_data.get("created_at") or evs[0].get("occurred_at"),
+                    "created_by": ticket_data.get("created_by") or evs[0].get("actor"),
+                    "status": status_now,
+                })
+
+        tickets.sort(key=lambda t: (not t.get("watched", False), t["ticket_id"]))
+
+        counts = {
+            "total_tickets": len(tickets),
+            "total_transitions": sum(len(t["transitions"]) for t in tickets),
+            "new": len(new_tickets),
+            "submitted": sum(1 for t in tickets if any(tr["to"] == "submitted" for tr in t["transitions"])),
+            "approved": sum(1 for t in tickets if (t.get("review") or {}).get("verdict") == "approve"),
+            "rejected": sum(1 for t in tickets if (t.get("review") or {}).get("verdict") == "reject"),
+            "closed": sum(1 for t in tickets if any(tr["to"] == "closed" for tr in t["transitions"])),
+            "cancelled": sum(1 for t in tickets if any(tr["to"] == "cancelled" for tr in t["transitions"])),
+        }
+
+        current_cursor_map = {
+            b: self.cursor_map.get(b, since_map.get(b, 0)) for b in target_boards
+        }
+
+        return {
+            "cursor_map": current_cursor_map,
+            "tickets": tickets,
+            "new_tickets": new_tickets,
+            "counts": counts,
+            "subscription": {
+                "connected": bool(self.subscription_health.get("connected", False)),
+                "last_event_at": self.subscription_health.get("last_event_at"),
+                "reconnects": int(self.subscription_health.get("reconnects", 0)),
+            },
+        }
+
+    async def ack(self, cursor_map: dict[str, int] | None = None) -> dict[str, Any]:
+        async with self.lock:
+            if cursor_map is None:
+                for b, cur in self.cursor_map.items():
+                    self.ack_cursor_map[b] = max(self.ack_cursor_map.get(b, 0), cur)
+            else:
+                for b, cur in cursor_map.items():
+                    self.ack_cursor_map[b] = max(self.ack_cursor_map.get(b, 0), int(cur))
+            self.save_state()
+            return {"ok": True, "acknowledged": dict(self.ack_cursor_map)}
+
+    async def watch(
+        self,
+        ticket_ids: list[str] | str | None = None,
+        tags: list[str] | str | None = None,
+    ) -> dict[str, Any]:
+        async with self.lock:
+            if isinstance(ticket_ids, str):
+                self.watched_ticket_ids.update(s.strip() for s in ticket_ids.split(",") if s.strip())
+            elif isinstance(ticket_ids, list):
+                self.watched_ticket_ids.update(str(s).strip() for s in ticket_ids if str(s).strip())
+
+            if isinstance(tags, str):
+                self.watched_tags.update(s.strip() for s in tags.split(",") if s.strip())
+            elif isinstance(tags, list):
+                self.watched_tags.update(str(s).strip() for s in tags if str(s).strip())
+
+            self.save_state()
+            return {
+                "ok": True,
+                "watched_ticket_ids": sorted(self.watched_ticket_ids),
+                "watched_tags": sorted(self.watched_tags),
+            }
+
+    async def unwatch(
+        self,
+        ticket_ids: list[str] | str | None = None,
+        tags: list[str] | str | None = None,
+        all: bool = False,
+    ) -> dict[str, Any]:
+        async with self.lock:
+            if all or (ticket_ids is None and tags is None):
+                self.watched_ticket_ids.clear()
+                self.watched_tags.clear()
+            else:
+                if isinstance(ticket_ids, str):
+                    for s in ticket_ids.split(","):
+                        self.watched_ticket_ids.discard(s.strip())
+                elif isinstance(ticket_ids, list):
+                    for s in ticket_ids:
+                        self.watched_ticket_ids.discard(str(s).strip())
+
+                if isinstance(tags, str):
+                    for s in tags.split(","):
+                        self.watched_tags.discard(s.strip())
+                elif isinstance(tags, list):
+                    for s in tags:
+                        self.watched_tags.discard(str(s).strip())
+
+            self.save_state()
+            return {
+                "ok": True,
+                "watched_ticket_ids": sorted(self.watched_ticket_ids),
+                "watched_tags": sorted(self.watched_tags),
+            }
+
+
+_GLOBAL_ENGINE: OrchestratorEngine | None = None
+
+
+def _get_orchestrator_engine() -> OrchestratorEngine | None:
+    return _GLOBAL_ENGINE
+
+
+class SessionCaptureMiddleware:
+    def __init__(self, engine_getter: Callable[[], OrchestratorEngine | None]) -> None:
+        self.engine_getter = engine_getter
+
+    async def __call__(self, ctx: Any, call_next: Any) -> Any:
+        session = getattr(ctx, "session", None)
+        if session is not None:
+            engine = self.engine_getter()
+            if engine is not None:
+                engine.sessions.add(session)
+        return await call_next(ctx)
+
+
+@asynccontextmanager
+async def _lifespan(server: MCPServer) -> AsyncIterator[dict[str, Any]]:
+    """Create local state before initialize; start background subscription if orchestrator."""
+    global _GLOBAL_ENGINE
+    meter = BridgeStats(bridge_stats_path())
+    connection = DeferredBoardConnection(meter)
+    engine = OrchestratorEngine(connection, meter, bridge_state_path())
+    engine.load_state()
+    _GLOBAL_ENGINE = engine
+
+    role = os.environ.get("PURSERS_ROLE", "worker").strip().lower()
+    if role == "orchestrator":
+        await engine.start_subscriber()
+    try:
+        yield {
+            "connection": connection,
+            "meter": meter,
+            "orchestrator_engine": engine,
+        }
+    finally:
+        await engine.stop_subscriber()
+        await connection.close()
+        _GLOBAL_ENGINE = None
+
+
+mcp = MCPServer("Pursers Wait Bridge", version=VERSION, lifespan=_lifespan)
+mcp._lowlevel_server.middleware.append(SessionCaptureMiddleware(_get_orchestrator_engine))
+
+
+async def _client_for_tool(ctx: Context) -> BoardClient:
+    lifespan = ctx.request_context.lifespan_context
+    client = lifespan.get("client")
+    if client is not None:
+        return client
+    connection: DeferredBoardConnection = lifespan["connection"]
+    return await connection.client()
+
+
+async def _engine_for_tool(ctx: Context) -> OrchestratorEngine:
+    lifespan = ctx.request_context.lifespan_context
+    engine = lifespan.get("orchestrator_engine")
+    if engine is None:
+        global _GLOBAL_ENGINE
+        if _GLOBAL_ENGINE is not None:
+            engine = _GLOBAL_ENGINE
+        else:
+            client = await _client_for_tool(ctx)
+            meter = getattr(client, "meter", None) or BridgeStats(bridge_stats_path())
+            conn = lifespan.get("connection")
+            if conn is None:
+                class _StaticConnection:
+                    async def client(self) -> BoardClient:
+                        return client
+                conn = _StaticConnection()
+            engine = OrchestratorEngine(conn, meter, bridge_state_path())
+            engine.load_state()
+            _GLOBAL_ENGINE = engine
+    await engine.ensure_subscriber_running()
+    return engine
+
+
 @mcp.tool()
 async def project_registry_get(ctx: Context) -> dict[str, Any]:
     """Return the parsed project registry stored on the home board."""
     client = await _client_for_tool(ctx)
     return await _read_project_registry(client)
+
+
+@mcp.tool()
+async def board_digest(
+    ctx: Context,
+    since: dict[str, int] | int | None = None,
+    boards: list[str] | str = "registry",
+    group_by: str = "ticket",
+    include_notes_keys: list[str] | None = None,
+) -> dict[str, Any]:
+    """Return grouped, deduplicated board changes since last ack or given cursors."""
+    engine = await _engine_for_tool(ctx)
+    client = await _client_for_tool(ctx)
+    meter = getattr(client, "meter", None) or getattr(engine, "meter", None)
+    selected_keys = (
+        ["branch_and_commit"] if include_notes_keys is None else list(include_notes_keys)
+    )
+    result = await engine.build_digest(
+        since=since,
+        boards=boards,
+        group_by=group_by,
+        include_notes_keys=selected_keys,
+    )
+    if meter is not None:
+        selected_agent = getattr(client.identity, "agent_name", AGENT_NAME) if getattr(client, "identity", None) else AGENT_NAME
+        await meter.record_digest_call(BOARD_ID, selected_agent, result)
+    return result
+
+
+@mcp.tool()
+async def board_digest_ack(
+    ctx: Context,
+    cursor_map: dict[str, int] | None = None,
+) -> dict[str, Any]:
+    """Advance the acknowledged cursor so subsequent digests show only newer changes."""
+    engine = await _engine_for_tool(ctx)
+    return await engine.ack(cursor_map)
+
+
+@mcp.tool()
+async def board_watch(
+    ctx: Context,
+    ticket_ids: list[str] | str | None = None,
+    tags: list[str] | str | None = None,
+) -> dict[str, Any]:
+    """Watch ticket IDs or tags to prioritize them at the top of the digest."""
+    engine = await _engine_for_tool(ctx)
+    return await engine.watch(ticket_ids=ticket_ids, tags=tags)
+
+
+@mcp.tool()
+async def board_unwatch(
+    ctx: Context,
+    ticket_ids: list[str] | str | None = None,
+    tags: list[str] | str | None = None,
+    all: bool = False,
+) -> dict[str, Any]:
+    """Remove ticket IDs or tags from watch list, or unwatch all."""
+    engine = await _engine_for_tool(ctx)
+    return await engine.unwatch(ticket_ids=ticket_ids, tags=tags, all=all)
+
+
+@mcp.resource("board://{board_id}/digest")
+async def board_digest_resource(board_id: str) -> str:
+    """Read current board digest JSON without a tool call."""
+    engine = _get_orchestrator_engine()
+    if engine is None:
+        return "{}"
+    digest = await engine.build_digest(boards=[board_id])
+    return json.dumps(digest, ensure_ascii=False, indent=2)
 
 
 async def _catchup_all(
@@ -1970,6 +2699,8 @@ async def _wait_for_work(
         if joined.get("agent_id") != my_agent_id:
             raise BoardClientError("server returned an unexpected per-call agent_id")
         role = joined.get("role", role)
+    budget = clamp_timeout(timeout_s, role)
+    deadline = started + budget
     selected_wait_for = _resolve_wait_for(wait_for, role)
 
     async def poll_once() -> list[dict]:

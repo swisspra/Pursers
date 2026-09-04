@@ -478,6 +478,7 @@ def test_prompt_renderer_has_exact_registry_rearm_and_role_rules(tmp_path: Path)
     renderer = seat_config.PromptRenderer()
     worker = renderer.render(desired(tmp_path, "codex"))
     reviewer = renderer.render(desired(tmp_path, "claude-desktop", role="reviewer"))
+    orchestrator = renderer.render(desired(tmp_path, "claude-desktop", role="orchestrator"))
 
     assert 'boards="registry"' in worker
     assert "timeout_s=560" in worker
@@ -486,6 +487,11 @@ def test_prompt_renderer_has_exact_registry_rearm_and_role_rules(tmp_path: Path)
     assert "never claim, edit, commit, or push" in reviewer
     assert "200s bridge block" in reviewer
     assert "Never use another name" in reviewer
+    assert "start every turn with board_digest; act on closed tickets (merge/verify), file follow-ups, then board_digest_ack; never a2a_wait; never claim" in orchestrator
+
+    orchestrator_seat = desired(tmp_path, "claude-desktop", role="orchestrator")
+    bridge_json = seat_config._bridge_json(orchestrator_seat)
+    assert bridge_json["env"]["PURSERS_ROLE"] == "orchestrator"
 
 
 def test_inventory_and_doctor_redact_token_and_report_push(

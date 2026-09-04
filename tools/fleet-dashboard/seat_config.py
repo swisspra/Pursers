@@ -524,8 +524,8 @@ class DesiredSeat:
     def __post_init__(self) -> None:
         if self.host not in HOST_PROFILES:
             raise ValueError(f"unsupported host: {self.host}")
-        if self.role not in {"worker", "reviewer"}:
-            raise ValueError("role must be worker or reviewer")
+        if self.role not in {"worker", "reviewer", "orchestrator"}:
+            raise ValueError("role must be worker, reviewer, or orchestrator")
         if not SAFE_NAME.fullmatch(self.name):
             raise ValueError("seat name must be a safe 1-80 character identifier")
         if not SAFE_NAME.fullmatch(self.home_board):
@@ -940,18 +940,21 @@ def _json_document(path: Path) -> dict[str, Any]:
 
 
 def _bridge_json(desired: DesiredSeat) -> dict[str, Any]:
+    env = {
+        "PURSERS_BRIDGE_COMMAND": desired.bridge_command,
+        "ONBOARD_CENTRAL_TOKEN_FILE": desired.token_file,
+        "ONBOARD_CENTRAL_URL": desired.central_url,
+        "ONBOARD_BOARD_ID": desired.home_board,
+        "ONBOARD_AGENT_NAME": desired.name,
+        "PURSERS_HOST": desired.host,
+        "SSL_CERT_FILE": desired.ca_file,
+    }
+    if desired.role == "orchestrator":
+        env["PURSERS_ROLE"] = "orchestrator"
     return {
         "command": "/bin/sh",
         "args": _bridge_shell_args(),
-        "env": {
-            "PURSERS_BRIDGE_COMMAND": desired.bridge_command,
-            "ONBOARD_CENTRAL_TOKEN_FILE": desired.token_file,
-            "ONBOARD_CENTRAL_URL": desired.central_url,
-            "ONBOARD_BOARD_ID": desired.home_board,
-            "ONBOARD_AGENT_NAME": desired.name,
-            "PURSERS_HOST": desired.host,
-            "SSL_CERT_FILE": desired.ca_file,
-        },
+        "env": env,
     }
 
 
@@ -1240,6 +1243,14 @@ class PromptRenderer:
             "claude-code": "Claude Code emits progress every 300s during its long rotation.",
             "headless": "Invoke a model only after an actionable cue.",
         }[desired.host]
+        if desired.role == "orchestrator":
+            return (
+                f"You are Pursers seat {desired.name} ({desired.role}).\n"
+                f"Pass agent_name={json.dumps(desired.name)} on every board call that accepts it. Never use another name.\n"
+                "start every turn with board_digest; act on closed tickets (merge/verify), file follow-ups, then board_digest_ack; never a2a_wait; never claim.\n"
+                "Never review your own work, never push main, stay in the registered work_dir for the event's board_id, and report evidence faithfully.\n"
+                f"{host_note}"
+            )
         action = (
             "claim, implement, test, commit, push, and submit one ticket"
             if desired.role == "worker"
