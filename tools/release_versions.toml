@@ -1,0 +1,18 @@
+schema_version = 1
+product = "5.0.0a16"
+source_date_epoch = "315532800"
+
+[packages]
+pursers = "5.0.0a16"
+central = "0.1.0a20"
+client = "0.1.0a14"
+personal = "5.0.0a16"
+import = "5.0.0a3"
+wait_bridge = "0.1.0a6"
+
+[build_toolchain]
+build = "1.3.0"
+setuptools = "80.9.0"
+wheel = "0.45.1"
+packaging = "25.0"
+pyproject-hooks = "1.2.0"

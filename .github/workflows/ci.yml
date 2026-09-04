@@ -30,6 +30,7 @@ jobs:
             packages/personal/pyproject.toml
             packages/import/pyproject.toml
             tools/wait-bridge/pyproject.toml
+            tools/release_versions.toml
 
       - name: Install pinned test and wheel-build dependencies
         run: |
@@ -54,9 +55,19 @@ jobs:
           set -euo pipefail
           mkdir -p .ci/wheels
           python -m build --wheel --no-isolation \
+            --outdir .ci/wheels packages/pursers
+          python -m build --wheel --no-isolation \
             --outdir .ci/wheels packages/central
           python -m build --wheel --no-isolation \
             --outdir .ci/wheels packages/client
+          python -m build --wheel --no-isolation \
+            --outdir .ci/wheels packages/personal
+          python -m build --wheel --no-isolation \
+            --outdir .ci/wheels packages/import
+          python -m build --wheel --no-isolation \
+            --outdir .ci/wheels tools/wait-bridge
+          printf 'PIP_FIND_LINKS=%s/.ci/wheels\n' "$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
+          printf 'UV_FIND_LINKS=%s/.ci/wheels\n' "$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
           python -m pip install --disable-pip-version-check --no-input \
             .ci/wheels/pursers_central-*.whl \
             .ci/wheels/pursers_client-*.whl
@@ -74,6 +85,7 @@ jobs:
       - name: Check manifest and collect every suite
         run: |
           set -euo pipefail
+          python tools/release_train.py check
           python tools/ci_manifest.py check
           python tools/ci_manifest.py collect --output .ci/collection-counts.json
 
