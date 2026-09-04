@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -177,3 +179,63 @@ async def test_interleaved_per_call_joins_do_not_clobber_state(monkeypatch) -> N
     assert board.agent_name == "env-default"
     assert board.identity is original_identity
     assert board.generation_token == "generation-before-call"
+
+
+@pytest.mark.anyio
+async def test_events_reports_each_honored_subscription_handshake(
+    monkeypatch,
+) -> None:
+    import pursers_client.client as client_module
+
+    board = client()
+    journal_uri = "board://board-multi-name/journal"
+    ready = asyncio.Event()
+    hold = asyncio.Event()
+
+    @asynccontextmanager
+    async def context(value):
+        yield value
+
+    class Subscription:
+        honored = SimpleNamespace(resource_subscriptions=[journal_uri])
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            await hold.wait()
+            raise StopAsyncIteration
+
+    class Session:
+        def listen(self, **_arguments):
+            return context(Subscription())
+
+    async def drain(*_args, **_kwargs):
+        if False:
+            yield {}
+
+    monkeypatch.setattr(board, "_http", lambda: context(object()))
+    monkeypatch.setattr(board, "_drain", drain)
+    monkeypatch.setattr(
+        client_module, "streamable_http_client", lambda *_args, **_kwargs: object()
+    )
+    monkeypatch.setattr(
+        client_module,
+        "Client",
+        lambda *_args, **_kwargs: context(Session()),
+    )
+
+    events = board.events(
+        from_cursor=4,
+        only_mine=False,
+        resource_subscriptions=(journal_uri,),
+        acknowledge=False,
+        touch=False,
+        subscription_callback=ready.set,
+    )
+    pending = asyncio.create_task(anext(events))
+    await asyncio.wait_for(ready.wait(), timeout=1)
+    assert not pending.done()
+    pending.cancel()
+    await asyncio.gather(pending, return_exceptions=True)
+    await events.aclose()

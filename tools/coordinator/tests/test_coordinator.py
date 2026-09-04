@@ -916,7 +916,7 @@ def test_fairness_is_critical_then_oldest_across_boards() -> None:
     assert ranks == {"TK-critical": 1, "TK-normal": 2}
 
 
-def test_board_degraded_after_three_polls_and_resets_on_success(
+def test_board_degraded_after_three_refreshes_and_resets_on_success(
     tmp_path: Path,
 ) -> None:
     degraded_snapshot = {
@@ -941,7 +941,7 @@ def test_board_degraded_after_three_polls_and_resets_on_success(
             degraded_streaks=streaks,
         )
         state = states["board-a"]
-        assert state["board_health"]["consecutive_degraded_polls"] == expected_streak
+        assert state["board_health"]["consecutive_degraded_refreshes"] == expected_streak
         degraded = [
             item for item in state["findings"] if item["kind"] == "board-degraded"
         ]
@@ -951,8 +951,8 @@ def test_board_degraded_after_three_polls_and_resets_on_success(
         item for item in state["findings"] if item["kind"] == "board-degraded"
     )
     assert finding["level"] == "critical"
-    assert "observed_consecutive_polls=3" in finding["evidence"]
-    assert "threshold_polls=3" in finding["evidence"]
+    assert "observed_consecutive_refreshes=3" in finding["evidence"]
+    assert "threshold_refreshes=3" in finding["evidence"]
     assert "TimeoutError" not in finding.get("message", "")
     assert "error_class=TimeoutError" in finding["evidence"]
 
@@ -967,7 +967,8 @@ def test_board_degraded_after_three_polls_and_resets_on_success(
     )["board-a"]
     assert reset["board_health"] == {
         "status": "healthy",
-        "consecutive_degraded_polls": 0,
+        "consecutive_degraded_refreshes": 0,
+        "consecutive_lost_subscriptions": 0,
         "reason": None,
         "error_class": None,
     }
@@ -1002,7 +1003,7 @@ def test_truncation_only_is_board_large_info_and_refreshes_daily(
     assert "journal compaction" in first_large[0]["next_action"]
     assert all(item["kind"] != "board-degraded" for item in first["findings"])
     assert first["board_health"]["status"] == "healthy"
-    assert first["board_health"]["consecutive_degraded_polls"] == 0
+    assert first["board_health"]["consecutive_degraded_refreshes"] == 0
 
     same_day = coordinator.analyze_cycle(
         [project],
@@ -1061,7 +1062,7 @@ def test_mixed_truncation_and_call_failures_do_not_share_streak(
             NOW,
             degraded_streaks=streaks,
         )["board-a"]
-        assert prior["board_health"]["consecutive_degraded_polls"] == expected
+        assert prior["board_health"]["consecutive_degraded_refreshes"] == expected
         assert all(item["kind"] != "board-degraded" for item in prior["findings"])
 
 
@@ -1084,7 +1085,7 @@ def test_state_call_failure_streak_becomes_degraded(tmp_path: Path) -> None:
             NOW,
             degraded_streaks=streaks,
         )["board-a"]
-        assert prior["board_health"]["consecutive_degraded_polls"] == expected_streak
+        assert prior["board_health"]["consecutive_degraded_refreshes"] == expected_streak
 
     finding = next(
         item for item in prior["findings"] if item["kind"] == "board-degraded"
@@ -1160,7 +1161,7 @@ def test_read_cycle_records_only_snapshot_error_class(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     "missing_key", [coordinator.STATE_KEY, coordinator.CONFIG_STATE_KEY]
 )
-def test_read_cycle_missing_optional_state_stays_healthy_for_three_polls(
+def test_read_cycle_missing_optional_state_stays_healthy_for_three_refreshes(
     tmp_path: Path, missing_key: str
 ) -> None:
     class Reader:
@@ -1201,7 +1202,7 @@ def test_read_cycle_missing_optional_state_stays_healthy_for_three_polls(
             raise AssertionError(f"unexpected call: {name}")
 
     streaks: dict[str, int] = {}
-    for _poll in range(3):
+    for _refresh in range(3):
         projects, snapshots, previous = asyncio.run(
             coordinator.read_cycle(Reader(), "pursers")
         )
@@ -1215,13 +1216,13 @@ def test_read_cycle_missing_optional_state_stays_healthy_for_three_polls(
             degraded_streaks=streaks,
         )["pursers"]
         assert state["board_health"]["status"] == "healthy"
-        assert state["board_health"]["consecutive_degraded_polls"] == 0
+        assert state["board_health"]["consecutive_degraded_refreshes"] == 0
         assert all(
             item["kind"] != "board-degraded" for item in state["findings"]
         )
 
 
-def test_read_cycle_real_optional_state_failure_degrades_after_three_polls(
+def test_read_cycle_real_optional_state_failure_degrades_after_three_refreshes(
     tmp_path: Path,
 ) -> None:
     class Reader:
@@ -1279,7 +1280,7 @@ def test_read_cycle_real_optional_state_failure_degrades_after_three_polls(
             degraded_streaks=streaks,
         )["pursers"]
         assert (
-            state["board_health"]["consecutive_degraded_polls"]
+            state["board_health"]["consecutive_degraded_refreshes"]
             == expected_streak
         )
 
@@ -1288,6 +1289,328 @@ def test_read_cycle_real_optional_state_failure_degrades_after_three_polls(
     )
     assert finding["degradation_reason"] == "state-failed"
     assert finding["error_class"] == "TimeoutError"
+
+
+def test_subscription_pool_ten_minute_idle_has_zero_calls_after_setup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import pursers_client
+
+    calls: list[tuple[str, dict[str, Any]]] = []
+    stop = asyncio.Event()
+
+    class FakeBoardClient:
+        def __init__(
+            self, _url: str, _token: str, board_id: str, *, agent_name: str
+        ) -> None:
+            self.board_id = board_id
+
+        async def events(self, **arguments: Any) -> Any:
+            calls.append((self.board_id, arguments))
+            arguments["subscription_callback"]()
+            await stop.wait()
+            if False:
+                yield {}
+
+    monkeypatch.setattr(pursers_client, "BoardClient", FakeBoardClient)
+
+    async def exercise() -> None:
+        pool = coordinator.JournalSubscriptionPool("https://board.invalid", "x", "coord")
+        await pool.sync({"board-a": 10, "board-b": 20})
+        ready = {
+            (await asyncio.wait_for(pool.next_wake(), timeout=1)).board_id,
+            (await asyncio.wait_for(pool.next_wake(), timeout=1)).board_id,
+        }
+        assert ready == {"board-a", "board-b"}
+        setup_calls = len(calls)
+
+        simulated_elapsed_seconds = 0
+        simulated_elapsed_seconds += 10 * 60
+        await asyncio.sleep(0)
+
+        assert simulated_elapsed_seconds == 600
+        assert len(calls) == setup_calls == 2
+        await pool.close()
+
+    asyncio.run(exercise())
+
+    for board_id, arguments in calls:
+        assert arguments["from_cursor"] == (10 if board_id == "board-a" else 20)
+        assert arguments["resource_subscriptions"] == (
+            f"board://{board_id}/journal",
+        )
+        assert arguments["acknowledge"] is False
+        assert arguments["touch"] is False
+
+
+def test_journal_cue_refreshes_only_cued_board_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import pursers_client
+
+    event_calls: dict[str, list[dict[str, Any]]] = {}
+    stop = asyncio.Event()
+
+    class FakeBoardClient:
+        def __init__(
+            self, _url: str, _token: str, board_id: str, *, agent_name: str
+        ) -> None:
+            self.board_id = board_id
+
+        async def events(self, **arguments: Any) -> Any:
+            event_calls.setdefault(self.board_id, []).append(arguments)
+            arguments["subscription_callback"]()
+            if self.board_id == "board-a":
+                arguments["cursor_callback"](11)
+                yield {"id": "EV-11", "kind": "ticket_created", "seq": 11}
+            await stop.wait()
+
+    class Reader:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str, dict[str, Any]]] = []
+
+        async def call(
+            self, name: str, board_id: str, **arguments: Any
+        ) -> dict[str, Any]:
+            self.calls.append((name, board_id, arguments))
+            if name == "board_snapshot":
+                return {
+                    "board": {"board_id": board_id},
+                    "agents": [],
+                    "tickets": [],
+                    "latest_seq": 11,
+                    "truncated": False,
+                }
+            if name == "ticket_list":
+                return {"count": 0, "total_matching": 0, "tickets": []}
+            if name == "board_state_get":
+                raise ValueError("state key not found")
+            raise AssertionError(f"unexpected call: {name}")
+
+    monkeypatch.setattr(pursers_client, "BoardClient", FakeBoardClient)
+
+    async def exercise() -> None:
+        pool = coordinator.JournalSubscriptionPool("https://board.invalid", "x", "coord")
+        await pool.sync({"board-a": 10, "board-b": 20})
+        wake: coordinator.SubscriptionWake | None = None
+        while wake is None or wake.kind != "cue":
+            wake = await asyncio.wait_for(pool.next_wake(), timeout=1)
+        reader = Reader()
+        projects = [
+            coordinator.Project("a", "board-a", tmp_path),
+            coordinator.Project("b", "board-b", tmp_path),
+        ]
+        _projects, snapshots, _previous = await coordinator.read_selected_boards(
+            reader, projects, pool.coalesce_cues(wake), "home"
+        )
+        assert set(snapshots) == {"board-a"}
+        assert {board_id for _name, board_id, _args in reader.calls} == {
+            "board-a"
+        }
+        assert sum(name == "board_snapshot" for name, _board, _args in reader.calls) == 1
+        assert pool.cursors["board-a"] == 11
+        await pool.close()
+
+    asyncio.run(exercise())
+
+    assert len(event_calls["board-a"]) == 1
+    assert event_calls["board-a"][0]["touch"] is False
+    assert event_calls["board-a"][0]["acknowledge"] is False
+
+
+def test_subscription_loss_falls_back_then_relistens(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import pursers_client
+
+    order: list[str] = []
+    attempts = 0
+    stop = asyncio.Event()
+
+    class FakeBoardClient:
+        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+            pass
+
+        async def events(self, **arguments: Any) -> Any:
+            nonlocal attempts
+            attempts += 1
+            order.append(f"listen-{attempts}")
+            if attempts == 1:
+                raise RuntimeError("synthetic subscription loss")
+            arguments["subscription_callback"]()
+            await stop.wait()
+            if False:
+                yield {}
+
+    monkeypatch.setattr(pursers_client, "BoardClient", FakeBoardClient)
+
+    async def exercise() -> None:
+        pool = coordinator.JournalSubscriptionPool("https://board.invalid", "x", "coord")
+        await pool.sync({"board-a": 7})
+        lost = await asyncio.wait_for(pool.next_wake(), timeout=1)
+        assert lost.kind == "lost"
+        assert lost.error_class == "RuntimeError"
+
+        async def fallback_delay(delay_s: float) -> None:
+            assert delay_s == 900
+            order.append("fallback-delay")
+
+        pool.defer_fallback("board-a", 900, fallback_delay)
+        fallback = await asyncio.wait_for(pool.next_wake(), timeout=1)
+        assert fallback.kind == "fallback"
+        order.append("fallback-refresh")
+        await pool.rearm("board-a")
+        ready = await asyncio.wait_for(pool.next_wake(), timeout=1)
+        assert ready.kind == "ready"
+        await pool.close()
+
+    asyncio.run(exercise())
+
+    assert order == [
+        "listen-1",
+        "fallback-delay",
+        "fallback-refresh",
+        "listen-2",
+    ]
+    healthy = {
+        "board": {"board_id": "board-a"},
+        "agents": [],
+        "tickets": [],
+    }
+    state = coordinator.analyze_cycle(
+        [coordinator.Project("a", "board-a", tmp_path)],
+        {"board-a": healthy},
+        {},
+        (),
+        NOW,
+        subscription_loss_streaks={"board-a": 3},
+    )["board-a"]
+    assert state["board_health"]["consecutive_lost_subscriptions"] == 3
+    assert any(item["kind"] == "board-degraded" for item in state["findings"])
+
+
+def test_daemon_cue_recomputes_only_selected_board(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    token = tmp_path / "token"
+    token.write_text("opaque", encoding="utf-8")
+    projects = [
+        coordinator.Project("a", "board-a", tmp_path),
+        coordinator.Project("b", "board-b", tmp_path),
+    ]
+    snapshots = {
+        "board-a": {"board": {"board_id": "board-a"}, "tickets": [], "latest_seq": 10},
+        "board-b": {"board": {"board_id": "board-b"}, "tickets": [], "latest_seq": 20},
+    }
+    selected_reads: list[set[str]] = []
+    analyzed: list[set[str]] = []
+    published: list[set[str]] = []
+
+    class StopLoop(RuntimeError):
+        pass
+
+    class FakeRawReader:
+        def __init__(self, *_args: Any) -> None:
+            pass
+
+        async def __aenter__(self) -> "FakeRawReader":
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+    class FakePool:
+        def __init__(self, *_args: Any) -> None:
+            self.cursors: dict[str, int] = {}
+            self.wakes = iter(
+                [
+                    coordinator.SubscriptionWake("board-a", "ready"),
+                    coordinator.SubscriptionWake("board-b", "ready"),
+                    coordinator.SubscriptionWake("board-a", "cue"),
+                ]
+            )
+            self.closed = False
+
+        async def sync(self, cursors: Mapping[str, int]) -> None:
+            self.cursors.update(cursors)
+
+        async def next_wake(self) -> coordinator.SubscriptionWake:
+            try:
+                return next(self.wakes)
+            except StopIteration as exc:
+                raise StopLoop from exc
+
+        def coalesce_cues(
+            self, wake: coordinator.SubscriptionWake
+        ) -> set[str]:
+            return {wake.board_id}
+
+        async def close(self) -> None:
+            self.closed = True
+
+    async def fake_read_cycle(
+        _reader: Any, _home: str
+    ) -> tuple[list[coordinator.Project], dict[str, Any], dict[str, Any]]:
+        return projects, dict(snapshots), {"board-a": {}, "board-b": {}}
+
+    async def fake_read_selected(
+        _reader: Any,
+        current_projects: list[coordinator.Project],
+        selected: set[str],
+        _home: str,
+    ) -> tuple[list[coordinator.Project], dict[str, Any], dict[str, Any]]:
+        selected_reads.append(set(selected))
+        return (
+            current_projects,
+            {board_id: snapshots[board_id] for board_id in selected},
+            {board_id: {} for board_id in selected},
+        )
+
+    def fake_analyze(
+        _projects: Any,
+        _snapshots: Any,
+        _previous: Any,
+        _terms: Any,
+        now: datetime,
+        **kwargs: Any,
+    ) -> dict[str, dict[str, Any]]:
+        selected = set(kwargs["selected_boards"])
+        analyzed.append(selected)
+        return {
+            board_id: coordinator.bound_findings_state([], now)
+            for board_id in selected
+        }
+
+    async def fake_write_reports(
+        _url: str,
+        _token: str,
+        _home: str,
+        _agent: str,
+        _states: Mapping[str, Mapping[str, Any]],
+        _previous: Mapping[str, Mapping[str, Any]],
+        _now: datetime,
+        _updates: Mapping[str, frozenset[str]],
+        *,
+        publish_boards: set[str],
+    ) -> None:
+        published.append(set(publish_boards))
+
+    monkeypatch.setattr(coordinator, "RawReader", FakeRawReader)
+    monkeypatch.setattr(coordinator, "JournalSubscriptionPool", FakePool)
+    monkeypatch.setattr(coordinator, "read_cycle", fake_read_cycle)
+    monkeypatch.setattr(coordinator, "read_selected_boards", fake_read_selected)
+    monkeypatch.setattr(coordinator, "analyze_cycle", fake_analyze)
+    monkeypatch.setattr(coordinator, "plan_actions", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(coordinator, "load_privacy_terms", lambda *_args: ())
+    monkeypatch.setattr(coordinator, "write_reports", fake_write_reports)
+    args = coordinator.parse_args(["--token-path", str(token)])
+
+    with pytest.raises(StopLoop):
+        asyncio.run(coordinator.run(args))
+
+    assert selected_reads == [{"board-a"}]
+    assert analyzed == [{"board-a", "board-b"}, {"board-a"}]
+    assert published == [{"board-a", "board-b"}, {"board-a"}]
 
 
 def test_write_reports_isolates_failed_board_and_mirrors_degraded_finding(
@@ -1331,8 +1654,8 @@ def test_write_reports_isolates_failed_board_and_mirrors_degraded_finding(
         "broken-board",
         "The board snapshot has been unavailable or incomplete for 3 polls.",
         error_class="TimeoutError",
-        observed_consecutive_polls=3,
-        threshold_polls=3,
+        observed_consecutive_refreshes=3,
+        threshold_refreshes=3,
     )
     states = {
         "broken-board": coordinator.bound_findings_state(
@@ -1340,7 +1663,7 @@ def test_write_reports_isolates_failed_board_and_mirrors_degraded_finding(
             NOW,
             board_health={
                 "status": "degraded",
-                "consecutive_degraded_polls": 3,
+                "consecutive_degraded_refreshes": 3,
                 "reason": "snapshot-error",
                 "error_class": "TimeoutError",
             },
@@ -1383,7 +1706,7 @@ def test_write_reports_isolates_failed_board_and_mirrors_degraded_finding(
         and item["board_id"] == "broken-board"
     )
     assert "error_class=TimeoutError" in mirrored["evidence"]
-    assert "observed_consecutive_polls=3" in mirrored["evidence"]
+    assert "observed_consecutive_refreshes=3" in mirrored["evidence"]
     assert sensitive_detail not in json.dumps(home_payload)
     assert len(json.dumps(home_payload, separators=(",", ":"))) <= coordinator.MAX_STATE_CHARS
 
@@ -1629,6 +1952,7 @@ def test_restart_kill_switch_defaults_to_shadow(tmp_path: Path) -> None:
 
     assert default_args.mode == "shadow"
     assert active_args.mode == "active"
+    assert default_args.poll_seconds == 900
     assert default_args.review_backlog_seconds == 1_800
     tuned = coordinator.parse_args(
         [

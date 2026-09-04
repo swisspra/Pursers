@@ -37,7 +37,8 @@ MAX_PRIVACY_COMMITS_PER_CYCLE = 1_000
 COMMIT_RE = re.compile(r"(?<![0-9a-fA-F])([0-9a-fA-F]{7,64})(?![0-9a-fA-F])")
 CLAIMED_STATES = frozenset({"claimed", "in_progress", "creating_report"})
 SUBMITTED_STATES = frozenset({"submitted"})
-BOARD_DEGRADED_POLLS = 3
+BOARD_DEGRADED_REFRESHES = 3
+BOARD_LOST_SUBSCRIPTIONS = 3
 BOARD_LARGE_REFRESH = timedelta(days=1)
 COORDINATOR_NAME = "coordinator-1"
 ASSIGN_RATE_SECONDS = 600
@@ -931,7 +932,7 @@ def _finding_next_action(
         "privacy-leak-suspect": f"Review the flagged commit on {board_id} against the privacy policy before publishing.",
         "privacy-scan-truncated": f"Run another bounded privacy scan cycle for {board_id} before declaring coverage complete.",
         "review-backlog": f"Review {ticket_id} on {board_id} with an available reviewer seat.",
-        "board-degraded": f"Restore snapshot and state reads for {board_id}, then confirm one healthy poll.",
+        "board-degraded": f"Restore the journal subscription and reads for {board_id}, then confirm one healthy refresh.",
         "would_nudge": f"Review the proposed nudge for {ticket_id} before enabling active mode.",
         "would_assign": f"Review the proposed assignment for {ticket_id} before enabling active mode.",
         "nudge": f"Verify the nudged seat acknowledges {ticket_id} on {board_id}.",
@@ -2217,6 +2218,133 @@ class RawReader:
         return self._decode(result)
 
 
+@dataclass(frozen=True)
+class SubscriptionWake:
+    board_id: str
+    kind: str
+    error_class: str | None = None
+
+
+class JournalSubscriptionPool:
+    """Keep one public BoardClient.events() driver open per registry board."""
+
+    def __init__(self, url: str, token: str, agent_name: str) -> None:
+        self.url = url
+        self._token = token
+        self.agent_name = agent_name
+        self.cursors: dict[str, int] = {}
+        self._queue: asyncio.Queue[SubscriptionWake] = asyncio.Queue()
+        self._tasks: dict[str, asyncio.Task[None]] = {}
+        self._fallback_tasks: dict[str, asyncio.Task[None]] = {}
+
+    async def sync(self, cursors: Mapping[str, int]) -> None:
+        selected = set(cursors)
+        removed_ids = set(self._tasks) - selected
+        removed = [self._tasks.pop(board_id) for board_id in removed_ids]
+        removed.extend(
+            self._fallback_tasks.pop(board_id)
+            for board_id in removed_ids
+            if board_id in self._fallback_tasks
+        )
+        for board_id in removed_ids:
+            self.cursors.pop(board_id, None)
+        for task in removed:
+            task.cancel()
+        if removed:
+            await asyncio.gather(*removed, return_exceptions=True)
+        for board_id, cursor in cursors.items():
+            self.cursors.setdefault(board_id, max(0, int(cursor)))
+            if board_id not in self._tasks:
+                self._tasks[board_id] = asyncio.create_task(
+                    self._watch(board_id)
+                )
+
+    async def rearm(self, board_id: str) -> None:
+        previous = self._tasks.pop(board_id, None)
+        if previous is not None:
+            previous.cancel()
+            await asyncio.gather(previous, return_exceptions=True)
+        self._tasks[board_id] = asyncio.create_task(self._watch(board_id))
+
+    def defer_fallback(
+        self,
+        board_id: str,
+        delay_s: float,
+        sleeper: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    ) -> None:
+        if board_id in self._fallback_tasks:
+            return
+
+        async def defer() -> None:
+            try:
+                await sleeper(delay_s)
+                await self._queue.put(SubscriptionWake(board_id, "fallback"))
+            finally:
+                self._fallback_tasks.pop(board_id, None)
+
+        self._fallback_tasks[board_id] = asyncio.create_task(defer())
+
+    async def _watch(self, board_id: str) -> None:
+        from pursers_client import BoardClient
+
+        def advance(cursor: int) -> None:
+            self.cursors[board_id] = max(
+                self.cursors.get(board_id, 0), int(cursor)
+            )
+
+        def ready() -> None:
+            self._queue.put_nowait(SubscriptionWake(board_id, "ready"))
+
+        client = BoardClient(
+            self.url, self._token, board_id, agent_name=self.agent_name
+        )
+        try:
+            async for _event in client.events(
+                from_cursor=self.cursors.get(board_id, 0),
+                only_mine=False,
+                resource_subscriptions=(f"board://{board_id}/journal",),
+                acknowledge=False,
+                touch=False,
+                cursor_callback=advance,
+                subscription_callback=ready,
+            ):
+                await self._queue.put(SubscriptionWake(board_id, "cue"))
+            await self._queue.put(
+                SubscriptionWake(board_id, "lost", "StreamEnded")
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            await self._queue.put(
+                SubscriptionWake(board_id, "lost", type(exc).__name__)
+            )
+
+    async def next_wake(self) -> SubscriptionWake:
+        return await self._queue.get()
+
+    def coalesce_cues(self, first: SubscriptionWake) -> set[str]:
+        boards = {first.board_id}
+        deferred: list[SubscriptionWake] = []
+        while not self._queue.empty():
+            item = self._queue.get_nowait()
+            if item.kind == "cue":
+                boards.add(item.board_id)
+            else:
+                deferred.append(item)
+        for item in deferred:
+            self._queue.put_nowait(item)
+        return boards
+
+    async def close(self) -> None:
+        tasks = [*self._tasks.values(), *self._fallback_tasks.values()]
+        self._tasks.clear()
+        self._fallback_tasks.clear()
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+
 class IntakeCaller(RawReader):
     """Central session limited to generation-fenced intake ticket creation."""
 
@@ -2274,82 +2402,123 @@ def _missing_optional_state(exc: Exception) -> bool:
     return "state key not found" in str(exc).lower()
 
 
-async def read_cycle(reader: RawReader, home_board: str) -> tuple[list[Project], dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+async def read_registry(reader: RawReader, home_board: str) -> list[Project]:
     registry = await reader.call("board_state_get", home_board, key="project_registry")
-    projects = parse_registry(registry)
+    return parse_registry(registry)
+
+
+async def read_board(
+    reader: RawReader, board_id: str, home_board: str
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    try:
+        snapshot = await reader.call(
+            "board_snapshot",
+            board_id,
+            limit=MAX_SNAPSHOT_ITEMS,
+            max_bytes=MAX_SNAPSHOT_BYTES,
+        )
+    except Exception as exc:
+        snapshot = {
+            "board": {"board_id": board_id},
+            "agents": [],
+            "tickets": [],
+            "snapshot_error_class": type(exc).__name__,
+            "truncated": True,
+            "omitted_counts": {"agents": 1, "tickets": 1},
+        }
+    else:
+        try:
+            active = await reader.call(
+                "ticket_list", board_id, include_closed=False, limit=500
+            )
+        except Exception:
+            active = {}
+        if active.get("count") == active.get("total_matching"):
+            snapshot["coordination_tickets"] = [
+                row
+                for row in active.get("tickets", [])
+                if isinstance(row, Mapping)
+            ]
+            snapshot["coordination_tickets_complete"] = True
+        try:
+            all_tickets = await reader.call(
+                "ticket_list", board_id, include_closed=True, limit=500
+            )
+        except Exception:
+            all_tickets = {}
+        if all_tickets.get("count") == all_tickets.get("total_matching"):
+            snapshot["intake_tickets"] = [
+                row
+                for row in all_tickets.get("tickets", [])
+                if isinstance(row, Mapping)
+            ]
+            snapshot["intake_tickets_complete"] = True
+    try:
+        prior = await reader.call("board_state_get", board_id, key=STATE_KEY)
+    except Exception as exc:  # Missing optional state or an unavailable board.
+        prior = None
+        if not _missing_optional_state(exc):
+            snapshot.setdefault("state_error_classes", {})[STATE_KEY] = type(
+                exc
+            ).__name__
+    previous = _previous_payload(prior)
+    try:
+        intake = await reader.call(
+            "board_state_get", board_id, key=INTAKE_STATE_KEY
+        )
+    except Exception:  # An absent opt-in queue is the normal default.
+        intake = None
+    snapshot["coordinator_intake_state"] = intake
+    if board_id == home_board:
+        try:
+            config = await reader.call(
+                "board_state_get", home_board, key=CONFIG_STATE_KEY
+            )
+        except Exception as exc:  # An absent config uses flags then built-ins.
+            config = None
+            if not _missing_optional_state(exc):
+                snapshot.setdefault("state_error_classes", {})[
+                    CONFIG_STATE_KEY
+                ] = type(exc).__name__
+        snapshot["coordinator_config_state"] = config
+    return snapshot, previous
+
+
+async def read_cycle(
+    reader: RawReader, home_board: str
+) -> tuple[
+    list[Project], dict[str, dict[str, Any]], dict[str, dict[str, Any]]
+]:
+    projects = await read_registry(reader, home_board)
     snapshots: dict[str, dict[str, Any]] = {}
     previous: dict[str, dict[str, Any]] = {}
     for board_id in sorted({project.board_id for project in projects}):
-        try:
-            snapshots[board_id] = await reader.call(
-                "board_snapshot",
-                board_id,
-                limit=MAX_SNAPSHOT_ITEMS,
-                max_bytes=MAX_SNAPSHOT_BYTES,
-            )
-        except Exception as exc:
-            snapshots[board_id] = {
-                "board": {"board_id": board_id},
-                "agents": [],
-                "tickets": [],
-                "snapshot_error_class": type(exc).__name__,
-                "truncated": True,
-                "omitted_counts": {"agents": 1, "tickets": 1},
-            }
-        else:
-            try:
-                active = await reader.call(
-                    "ticket_list", board_id, include_closed=False, limit=500
-                )
-            except Exception:
-                active = {}
-            if active.get("count") == active.get("total_matching"):
-                snapshots[board_id]["coordination_tickets"] = [
-                    row
-                    for row in active.get("tickets", [])
-                    if isinstance(row, Mapping)
-                ]
-                snapshots[board_id]["coordination_tickets_complete"] = True
-            try:
-                all_tickets = await reader.call(
-                    "ticket_list", board_id, include_closed=True, limit=500
-                )
-            except Exception:
-                all_tickets = {}
-            if all_tickets.get("count") == all_tickets.get("total_matching"):
-                snapshots[board_id]["intake_tickets"] = [
-                    row
-                    for row in all_tickets.get("tickets", [])
-                    if isinstance(row, Mapping)
-                ]
-                snapshots[board_id]["intake_tickets_complete"] = True
-        try:
-            prior = await reader.call("board_state_get", board_id, key=STATE_KEY)
-        except Exception as exc:  # Missing optional state or an unavailable board.
-            prior = None
-            if not _missing_optional_state(exc):
-                snapshots[board_id].setdefault("state_error_classes", {})[
-                    STATE_KEY
-                ] = type(exc).__name__
-        previous[board_id] = _previous_payload(prior)
-        try:
-            intake = await reader.call(
-                "board_state_get", board_id, key=INTAKE_STATE_KEY
-            )
-        except Exception:  # An absent opt-in queue is the normal default.
-            intake = None
-        snapshots[board_id]["coordinator_intake_state"] = intake
-    try:
-        config = await reader.call("board_state_get", home_board, key=CONFIG_STATE_KEY)
-    except Exception as exc:  # An absent config uses flags then built-ins.
-        config = None
-        if home_board in snapshots and not _missing_optional_state(exc):
-            snapshots[home_board].setdefault("state_error_classes", {})[
-                CONFIG_STATE_KEY
-            ] = type(exc).__name__
-    if home_board in snapshots:
-        snapshots[home_board]["coordinator_config_state"] = config
+        snapshots[board_id], previous[board_id] = await read_board(
+            reader, board_id, home_board
+        )
     return projects, snapshots, previous
+
+
+async def read_selected_boards(
+    reader: RawReader,
+    projects: Sequence[Project],
+    board_ids: set[str],
+    home_board: str,
+) -> tuple[list[Project], dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+    """Refresh only cued boards, plus newly registered boards on a home cue."""
+    selected_projects = list(projects)
+    if home_board in board_ids:
+        selected_projects = await read_registry(reader, home_board)
+    active = {project.board_id for project in selected_projects}
+    previous_boards = {project.board_id for project in projects}
+    selected = (board_ids & active) | (active - previous_boards)
+    snapshots: dict[str, dict[str, Any]] = {}
+    previous: dict[str, dict[str, Any]] = {}
+    for board_id in sorted(selected):
+        snapshots[board_id], previous[board_id] = await read_board(
+            reader, board_id, home_board
+        )
+    return selected_projects, snapshots, previous
 
 
 def analyze_cycle(
@@ -2362,7 +2531,10 @@ def analyze_cycle(
     thresholds: Thresholds = Thresholds(),
     effective_mode: str = "shadow",
     degraded_streaks: dict[str, int] | None = None,
+    subscription_loss_streaks: Mapping[str, int] | None = None,
+    selected_boards: set[str] | None = None,
 ) -> dict[str, dict[str, Any]]:
+    selected = set(snapshots) if selected_boards is None else selected_boards
     findings_by_board: dict[str, list[dict[str, Any]]] = {}
     watermarks_by_board: dict[str, dict[str, str]] = {}
     drop_counters_by_board: dict[str, dict[str, int]] = {}
@@ -2371,6 +2543,8 @@ def analyze_cycle(
     suppressed_by_board: dict[str, int] = {}
     board_health_by_board: dict[str, dict[str, Any]] = {}
     for board_id, snapshot in snapshots.items():
+        if board_id not in selected:
+            continue
         coordination_snapshot = dict(snapshot)
         coordination_snapshot["tickets"] = snapshot.get(
             "coordination_tickets", snapshot.get("tickets", [])
@@ -2391,11 +2565,12 @@ def analyze_cycle(
         findings_by_board[board_id].extend(drop_findings)
         degraded, reason, error_class = board_degradation(snapshot)
         prior_health = previous.get(board_id, {}).get("board_health", {})
-        persisted_streak = (
-            prior_health.get("consecutive_degraded_polls", 0)
-            if isinstance(prior_health, Mapping)
-            else 0
-        )
+        persisted_streak = 0
+        if isinstance(prior_health, Mapping):
+            persisted_streak = prior_health.get(
+                "consecutive_degraded_refreshes",
+                prior_health.get("consecutive_degraded_polls", 0),
+            )
         if not isinstance(persisted_streak, int) or isinstance(persisted_streak, bool):
             persisted_streak = 0
         runtime_streak = (
@@ -2406,10 +2581,20 @@ def analyze_cycle(
         streak = max(0, persisted_streak, runtime_streak) + 1 if degraded else 0
         if degraded_streaks is not None:
             degraded_streaks[board_id] = streak
+        lost_subscriptions = max(
+            0,
+            int(
+                (subscription_loss_streaks or {}).get(board_id, 0) or 0
+            ),
+        )
+        unhealthy = degraded or lost_subscriptions > 0
         board_health: dict[str, Any] = {
-            "status": "degraded" if degraded else "healthy",
-            "consecutive_degraded_polls": streak,
-            "reason": reason,
+            "status": "degraded" if unhealthy else "healthy",
+            "consecutive_degraded_refreshes": streak,
+            "consecutive_lost_subscriptions": lost_subscriptions,
+            "reason": reason or (
+                "subscription-lost" if lost_subscriptions else None
+            ),
             "error_class": error_class,
         }
         if not degraded and snapshot_is_truncated(snapshot):
@@ -2423,17 +2608,30 @@ def analyze_cycle(
                 refreshed_at.isoformat() if refreshed_at is not None else None
             )
         board_health_by_board[board_id] = board_health
-        if streak >= BOARD_DEGRADED_POLLS:
+        if (
+            streak >= BOARD_DEGRADED_REFRESHES
+            or lost_subscriptions >= BOARD_LOST_SUBSCRIPTIONS
+        ):
+            health_evidence: dict[str, Any] = {}
+            if streak >= BOARD_DEGRADED_REFRESHES:
+                health_evidence.update(
+                    degradation_reason=board_health["reason"],
+                    error_class=error_class,
+                    observed_consecutive_refreshes=streak,
+                    threshold_refreshes=BOARD_DEGRADED_REFRESHES,
+                )
+            if lost_subscriptions >= BOARD_LOST_SUBSCRIPTIONS:
+                health_evidence.update(
+                    observed_consecutive_lost_subscriptions=lost_subscriptions,
+                    threshold_lost_subscriptions=BOARD_LOST_SUBSCRIPTIONS,
+                )
             findings_by_board[board_id].append(
                 _finding(
                     "board-degraded",
                     "critical",
                     board_id,
-                    "A registry-active board had repeated snapshot or state call failures.",
-                    degradation_reason=reason,
-                    error_class=error_class,
-                    observed_consecutive_polls=streak,
-                    threshold_polls=BOARD_DEGRADED_POLLS,
+                    "A registry-active board had repeated refresh failures or lost subscriptions.",
+                    **health_evidence,
                 )
             )
         drop_counters_by_board[board_id] = counters
@@ -2443,6 +2641,8 @@ def analyze_cycle(
         prior_marks = previous.get(board_id, {}).get("privacy_watermarks", {})
         watermarks_by_board[board_id] = dict(prior_marks) if isinstance(prior_marks, Mapping) else {}
     for project in projects:
+        if project.board_id not in selected:
+            continue
         snapshot = snapshots[project.board_id]
         ticket_key = (
             "intake_tickets"
@@ -3098,14 +3298,16 @@ async def write_reports(
     previous: Mapping[str, Mapping[str, Any]],
     now: datetime,
     intake_updates: Mapping[str, frozenset[str]] | None = None,
+    publish_boards: set[str] | None = None,
 ) -> None:
     from pursers_client import BoardClient
     intake_updates = intake_updates or {}
+    targets = set(states) if publish_boards is None else publish_boards
 
     # Publish non-home findings first. A board that cannot accept its report
     # must not prevent healthy boards or the home audit surface from updating.
     for board_id, state in states.items():
-        if board_id == home_board:
+        if board_id == home_board or board_id not in targets:
             continue
         try:
             async with BoardClient(
@@ -3124,8 +3326,14 @@ async def write_reports(
     previous_home = previous.get(home_board, {})
     today = now.date().isoformat()
     week = f"{now.isocalendar().year}-W{now.isocalendar().week:02d}"
-    write_daily = previous_home.get("last_daily_digest") != today
-    write_weekly = previous_home.get("last_weekly_digest") != week
+    write_daily = (
+        home_board in targets
+        and previous_home.get("last_daily_digest") != today
+    )
+    write_weekly = (
+        home_board in targets
+        and previous_home.get("last_weekly_digest") != week
+    )
     if write_daily or write_weekly:
         async with BoardClient(url, token, home_board, agent_name=agent_name) as client:
             if write_daily:
@@ -3145,7 +3353,7 @@ async def write_reports(
                     tags=["coordinator", "digest", "weekly"],
                 )
     home_state = home_audit_state(home_board, states, now)
-    if home_state is not None:
+    if home_state is not None and targets:
         async with BoardClient(url, token, home_board, agent_name=agent_name) as client:
             await client.board_state_update(
                 STATE_KEY,
@@ -3243,7 +3451,15 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--abandoner-drops", type=int, default=Thresholds.repeat_abandon_count)
     parser.add_argument("--abandoner-window-days", type=int, default=7)
-    parser.add_argument("--poll-seconds", type=int, default=60)
+    parser.add_argument(
+        "--poll-seconds",
+        type=int,
+        default=900,
+        help=(
+            "fallback refresh delay after a journal subscription is lost; "
+            "healthy subscriptions never poll"
+        ),
+    )
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     intake = parser.add_mutually_exclusive_group()
@@ -3329,11 +3545,39 @@ async def run(args: argparse.Namespace) -> None:
     terms_path = os.environ.get("PURSERS_PRIVACY_TERMS")
     runtime = RuntimeState.for_mode("shadow" if args.dry_run else args.mode)
     degraded_streaks: dict[str, int] = {}
+    subscription_loss_streaks: dict[str, int] = {}
     reported_intake_issues: set[str] = set()
-    while True:
-        now = utc_now()
+    projects: list[Project] = []
+    snapshots: dict[str, dict[str, Any]] = {}
+    previous: dict[str, dict[str, Any]] = {}
+    state_cache: dict[str, dict[str, Any]] = {}
+
+    async def refresh(selected: set[str] | None) -> set[str]:
+        nonlocal projects
         async with RawReader(args.url, token) as reader:
-            projects, snapshots, previous = await read_cycle(reader, args.home_board)
+            if selected is None:
+                projects, fresh_snapshots, fresh_previous = await read_cycle(
+                    reader, args.home_board
+                )
+            else:
+                projects, fresh_snapshots, fresh_previous = (
+                    await read_selected_boards(
+                        reader, projects, selected, args.home_board
+                    )
+                )
+        active = {project.board_id for project in projects}
+        for stale in set(snapshots) - active:
+            snapshots.pop(stale, None)
+            previous.pop(stale, None)
+            state_cache.pop(stale, None)
+            degraded_streaks.pop(stale, None)
+            subscription_loss_streaks.pop(stale, None)
+        snapshots.update(fresh_snapshots)
+        previous.update(fresh_previous)
+        return set(fresh_snapshots)
+
+    async def process(selected: set[str]) -> None:
+        now = utc_now()
         live_config = resolve_coordinator_config(
             snapshots.get(args.home_board, {}).get("coordinator_config_state"), args
         )
@@ -3348,7 +3592,9 @@ async def run(args: argparse.Namespace) -> None:
             print(intake_credential_note(intake_authorization_rule), file=sys.stderr)
             reported_intake_issues.add(intake_authorization_rule)
         thresholds = live_config.thresholds
-        terms = load_privacy_terms(terms_path, [project.work_dir for project in projects])
+        terms = load_privacy_terms(
+            terms_path, [project.work_dir for project in projects]
+        )
         states = analyze_cycle(
             projects,
             snapshots,
@@ -3359,6 +3605,8 @@ async def run(args: argparse.Namespace) -> None:
             thresholds=thresholds,
             effective_mode=runtime.effective_mode,
             degraded_streaks=degraded_streaks,
+            subscription_loss_streaks=subscription_loss_streaks,
+            selected_boards=selected,
         )
         home_state = states.get(args.home_board)
         if home_state is not None:
@@ -3366,7 +3614,23 @@ async def run(args: argparse.Namespace) -> None:
             home_state["config_sources"] = live_config.sources
         invalid_finding = config_invalid_finding(args.home_board, live_config)
         config_findings = [invalid_finding] if invalid_finding else []
-        actions = plan_actions(snapshots, states, previous, now, thresholds)
+        selected_snapshots = {
+            board_id: snapshots[board_id]
+            for board_id in selected
+            if board_id in snapshots
+        }
+        selected_previous = {
+            board_id: previous.get(board_id, {})
+            for board_id in selected_snapshots
+        }
+        selected_projects = [
+            project
+            for project in projects
+            if project.board_id in selected_snapshots
+        ]
+        actions = plan_actions(
+            selected_snapshots, states, selected_previous, now, thresholds
+        )
         action_findings, histories = await execute_actions(
             actions,
             lambda action, cycle_now=now: mutate_action(
@@ -3374,7 +3638,7 @@ async def run(args: argparse.Namespace) -> None:
             ),
             runtime,
             now,
-            previous,
+            selected_previous,
         )
         states = merge_action_results(
             states,
@@ -3384,8 +3648,8 @@ async def run(args: argparse.Namespace) -> None:
             runtime.effective_mode,
         )
         intake_findings, intake_updates = await process_intakes(
-            projects,
-            snapshots,
+            selected_projects,
+            selected_snapshots,
             now,
             runtime,
             enabled=live_config.intake_enabled,
@@ -3415,8 +3679,9 @@ async def run(args: argparse.Namespace) -> None:
         if args.dry_run:
             print(json.dumps(states, indent=2, sort_keys=True))
         else:
+            state_cache.update(states)
             # Digest markers share the one allowed state key.
-            home = states.get(args.home_board)
+            home = state_cache.get(args.home_board)
             if home is not None:
                 home["last_daily_digest"] = now.date().isoformat()
                 home["last_weekly_digest"] = f"{now.isocalendar().year}-W{now.isocalendar().week:02d}"
@@ -3425,14 +3690,78 @@ async def run(args: argparse.Namespace) -> None:
                 token,
                 args.home_board,
                 args.agent_name,
-                states,
+                state_cache,
                 previous,
                 now,
                 intake_updates,
+                **({} if args.once else {"publish_boards": selected}),
             )
-        if args.once:
-            return
-        await asyncio.sleep(args.poll_seconds)
+        if args.dry_run:
+            state_cache.update(states)
+
+    initial = await refresh(None)
+    await process(initial)
+    if args.once:
+        return
+
+    cursors = {
+        board_id: max(0, int(snapshot.get("latest_seq", 0) or 0))
+        for board_id, snapshot in snapshots.items()
+    }
+    subscriptions = JournalSubscriptionPool(
+        args.url, token, args.agent_name
+    )
+    await subscriptions.sync(cursors)
+    try:
+        while True:
+            wake = await subscriptions.next_wake()
+            if wake.kind == "ready":
+                subscription_loss_streaks[wake.board_id] = 0
+                continue
+            if wake.kind == "lost":
+                subscription_loss_streaks[wake.board_id] = (
+                    subscription_loss_streaks.get(wake.board_id, 0) + 1
+                )
+                print(
+                    "coordinator: journal subscription lost for "
+                    f"board={wake.board_id!r} error_class={wake.error_class}; "
+                    f"fallback refresh in {args.poll_seconds}s",
+                    file=sys.stderr,
+                )
+                subscriptions.defer_fallback(
+                    wake.board_id, args.poll_seconds
+                )
+                continue
+            if wake.kind == "fallback":
+                selected = {wake.board_id}
+            else:
+                subscription_loss_streaks[wake.board_id] = 0
+                selected = subscriptions.coalesce_cues(wake)
+                for board_id in selected:
+                    subscription_loss_streaks[board_id] = 0
+
+            refreshed = await refresh(selected)
+            if refreshed:
+                await process(refreshed)
+            active = {project.board_id for project in projects}
+            next_cursors = {
+                board_id: subscriptions.cursors.get(
+                    board_id,
+                    max(
+                        0,
+                        int(
+                            snapshots.get(board_id, {}).get("latest_seq", 0)
+                            or 0
+                        ),
+                    ),
+                )
+                for board_id in active
+            }
+            await subscriptions.sync(next_cursors)
+            if wake.kind == "fallback" and wake.board_id in active:
+                await subscriptions.rearm(wake.board_id)
+    finally:
+        await subscriptions.close()
 
 
 def main(argv: Sequence[str] | None = None) -> None:
