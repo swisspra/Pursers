@@ -268,8 +268,9 @@ def test_reject_requires_nonempty_fix_before_any_board_call(tmp_path: Path) -> N
     assert loaded is False
 
 
+@pytest.mark.parametrize("platform", ["codex", "goose", "claude", "generic"])
 def test_verify_detaches_sha_checks_scope_origin_leaks_and_runs_suite(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], platform: str
 ) -> None:
     origin = tmp_path / "origin.git"
     author = tmp_path / "author"
@@ -283,7 +284,8 @@ def test_verify_detaches_sha_checks_scope_origin_leaks_and_runs_suite(
     subprocess.run(["git", "commit", "-m", "base"], cwd=author, check=True, capture_output=True)
     subprocess.run(["git", "remote", "add", "origin", str(origin)], cwd=author, check=True)
     subprocess.run(["git", "push", "-u", "origin", "main"], cwd=author, check=True, capture_output=True)
-    subprocess.run(["git", "switch", "-c", "codex/TK-review"], cwd=author, check=True, capture_output=True)
+    branch = f"{platform}/TK-review"
+    subprocess.run(["git", "switch", "-c", branch], cwd=author, check=True, capture_output=True)
     (author / "change.txt").write_text("verified change\n", encoding="utf-8")
     (author / "test_sample.py").write_text(
         "import unittest\n\nclass Sample(unittest.TestCase):\n"
@@ -297,13 +299,13 @@ def test_verify_detaches_sha_checks_scope_origin_leaks_and_runs_suite(
         capture_output=True, text=True,
     ).stdout.strip()
     subprocess.run(
-        ["git", "push", "-u", "origin", "codex/TK-review"],
+        ["git", "push", "-u", "origin", branch],
         cwd=author, check=True, capture_output=True,
     )
     subprocess.run(["git", "clone", str(origin), str(clone)], check=True, capture_output=True)
     generated = load_generated(
         seat_new.generate(args(tmp_path / "seat", role="reviewer")) / "bin" / "board.py",
-        "board_verify",
+        f"board_verify_{platform}",
     )
     ticket = {
         "ticket_id": "TK-review",
@@ -313,7 +315,7 @@ def test_verify_detaches_sha_checks_scope_origin_leaks_and_runs_suite(
         "submission_history": [
             {
                 "files_changed": ["change.txt", "test_sample.py"],
-                "notes": f"branch_and_commit: codex/TK-review @ {sha}",
+                "notes": f"branch_and_commit: {branch} @ {sha}",
             }
         ],
     }
@@ -335,6 +337,70 @@ def test_verify_detaches_sha_checks_scope_origin_leaks_and_runs_suite(
         ["git", "rev-parse", "HEAD"], cwd=clone, check=True,
         capture_output=True, text=True,
     ).stdout.strip() == sha
+
+
+def test_submission_rejects_invalid_git_ref(tmp_path: Path) -> None:
+    generated = load_generated(
+        seat_new.generate(args(tmp_path, role="reviewer")) / "bin" / "board.py",
+        "board_verify_invalid_ref",
+    )
+    ticket = {
+        "submission_history": [{
+            "notes": "branch_and_commit: goose/TK-review.lock @ " + "a" * 40,
+        }]
+    }
+
+    with pytest.raises(ValueError, match="valid platform/branch"):
+        generated._submission(ticket)
+
+
+@pytest.mark.parametrize(
+    ("rule", "sample"),
+    [
+        ("real-identity", "owner=" + "swiss" + "pran"),
+        ("real-identity", "login=" + "siz" + "ssy"),
+        ("real-identity", "contact=ops@" + "scg" + "." + "com"),
+        (
+            "raw-token",
+            "token=" + "e" + "yJabcde.abcdefghijkl.abcdefghijklmnop",
+        ),
+        ("local-operator-path", "path=/Users/" + "swiss" + "p/project"),
+        ("local-operator-path", "path=C:\\Users\\" + "operator" + "\\project"),
+        ("authorization-token", "Authorization: " + "Bearer" + " " + "A" * 24),
+        ("api-key", "api_key=" + "Z" * 24),
+        ("private-key", "-----BEGIN " + "PRIVATE" + " KEY-----"),
+    ],
+)
+def test_verify_leak_rules_cover_mandatory_categories(
+    tmp_path: Path, rule: str, sample: str
+) -> None:
+    generated = load_generated(
+        seat_new.generate(args(tmp_path, role="reviewer")) / "bin" / "board.py",
+        "board_verify_leak_" + rule.replace("-", "_"),
+    )
+
+    assert rule in generated._leak_rule_names(sample)
+
+
+def test_verify_leak_rules_allow_documented_synthetic_fixtures(tmp_path: Path) -> None:
+    generated = load_generated(
+        seat_new.generate(args(tmp_path, role="reviewer")) / "bin" / "board.py",
+        "board_verify_synthetic_leaks",
+    )
+    fixtures = "\n".join(
+        [
+            "Authorization: " + "Bearer" + " synthetic-local-bearer",
+            "api_key=placeholder_value",
+            "/Users/example/project",
+            r"C:\Users\synthetic\project",
+            "seat@example.test",
+            "-----BEGIN SYNTHETIC " + "PRIVATE" + " KEY-----",
+            "token synthetic_token",
+            "ey" + "J.synthetic.fixture",
+        ]
+    )
+
+    assert generated._leak_rule_names(fixtures) == []
 
 
 def test_repo_clone_uses_repo_basename(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

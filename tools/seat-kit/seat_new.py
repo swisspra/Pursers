@@ -76,12 +76,69 @@ LEAK_SCAN_RE = re.compile(
     r"(?im)\bleak-scan:\s*(?:clean|\d+\s+matches?)(?:\s|$)"
 )
 MODEL_RE = re.compile(r"(?im)\bmodel:\s*\S+")
-BRANCH_RE = re.compile(r"(?<![A-Za-z0-9._/-])(codex/[A-Za-z0-9._/-]+)")
+BRANCH_RE = re.compile(
+    r"(?im)^\s*branch_and_commit:\s*"
+    r"([A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)+)"
+    r"(?=\s|@|$)"
+)
+BRANCH_VALUE_RE = re.compile(
+    r"[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)+"
+)
+SYNTHETIC_VALUE_RE = (
+    r"(?:placeholder|redacted|example|sample|dummy|synthetic|your)"
+    r"(?:[-_](?:access|auth|bearer|credential|key|secret|token|value|here|local))*"
+)
+REAL_IDENTITY_MARKERS = (
+    "swiss" + "pran",
+    "siz" + "ssy",
+    "scg" + "." + "com",
+)
+PRIVATE_KEY_MARKER = "PRIVATE" + " KEY"
+JWT_PREFIX = "e" + "yJ"
+SECRET_VALUE_PATTERN = (
+    rf"(?!(?:{SYNTHETIC_VALUE_RE})(?![A-Za-z0-9._~+/=-]))"
+    r"[A-Za-z0-9._~+/=-]{12,}"
+)
 LEAK_PATTERNS = {
-    "bearer-token": re.compile(r"(?i)authorization:\s*bearer\s+[A-Za-z0-9._-]{12,}"),
-    "api-key": re.compile(r"(?i)api[_-]?key\s*[:=]\s*[A-Za-z0-9._-]{12,}"),
-    "private-key": re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
+    "real-identity": re.compile(
+        r"(?i)(?<![A-Za-z0-9._-])(?:"
+        + "|".join(re.escape(value) for value in REAL_IDENTITY_MARKERS)
+        + r")(?![A-Za-z0-9._-])"
+    ),
+    "email": re.compile(
+        r"(?i)(?<![A-Z0-9._%+-])[A-Z0-9][A-Z0-9._%+-]*@"
+        r"(?!(?:[A-Z0-9-]+\.)*(?:example|test|invalid)(?:\.|\b))"
+        r"(?:[A-Z0-9-]+\.)+[A-Z]{2,}(?![A-Z0-9-])"
+    ),
+    "local-operator-path": re.compile(
+        rf"(?i)(?:/Users/(?!{SYNTHETIC_VALUE_RE}(?:/|\s|$))"
+        rf"[A-Z0-9][A-Z0-9._-]*"
+        rf"|[A-Z]:\\Users\\(?!{SYNTHETIC_VALUE_RE}(?:\\|\s|$))"
+        rf"[A-Z0-9][A-Z0-9._-]*)"
+    ),
+    "authorization-token": re.compile(
+        rf"(?i)(?<![A-Za-z0-9._-])(?:authorization[ \t]*:[ \t]*)?"
+        rf"(?:bearer|token)[ \t]+{SECRET_VALUE_PATTERN}"
+    ),
+    "api-key": re.compile(
+        rf"(?i)\b(?:api[_-]?key|access[_-]?key|client[_-]?secret)\s*[:=]\s*"
+        rf"[\"']?{SECRET_VALUE_PATTERN}"
+    ),
+    "private-key": re.compile(
+        rf"-----BEGIN (?!(?:SYNTHETIC|EXAMPLE|SAMPLE|DUMMY)\b)"
+        rf"(?:[A-Z0-9 ]+ )?{PRIVATE_KEY_MARKER}-----"
+    ),
+    "raw-token": re.compile(
+        rf"(?i)(?:\b{JWT_PREFIX}[A-Za-z0-9_-]{{5,}}\."
+        r"[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{8,}\b"
+        r"|\b(?:gh[pousr]_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9_-]{20,}"
+        r"|xox[baprs]-[A-Za-z0-9-]{20,})\b)"
+    ),
 }
+
+
+def _leak_rule_names(text: str) -> list[str]:
+    return sorted(name for name, pattern in LEAK_PATTERNS.items() if pattern.search(text))
 
 
 def _approve_notes(notes: str, force: bool) -> str:
@@ -120,11 +177,20 @@ def _submission(ticket: dict[str, Any]) -> tuple[dict[str, Any], str, str]:
         for key in ("branch_and_commit", "notes", "summary")
     )
     sha_match = SHA_RE.search(str(submission.get("commit_hash") or "")) or SHA_RE.search(evidence)
-    branch_value = str(submission.get("branch") or "")
-    branch_match = BRANCH_RE.search(branch_value) or BRANCH_RE.search(evidence)
-    if sha_match is None or branch_match is None:
-        raise ValueError("verify requires submitted branch_and_commit with codex/<branch> and full SHA")
-    return submission, sha_match.group(0).lower(), branch_match.group(1)
+    branch_value = str(submission.get("branch") or "").strip()
+    branch_match = BRANCH_RE.search(evidence)
+    branch = branch_value if BRANCH_VALUE_RE.fullmatch(branch_value) else (
+        branch_match.group(1) if branch_match else ""
+    )
+    branch_valid = bool(branch) and subprocess.run(
+        ["git", "check-ref-format", "--branch", branch],
+        check=False, text=True, capture_output=True,
+    ).returncode == 0
+    if sha_match is None or not branch_valid:
+        raise ValueError(
+            "verify requires submitted branch_and_commit with a valid platform/branch and full SHA"
+        )
+    return submission, sha_match.group(0).lower(), branch
 
 
 def _git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -211,9 +277,7 @@ def _verify_ticket(
         if remote.startswith("origin/") and remote != expected_remote
     )
     diff = _git(repo, "show", "--format=", "--no-ext-diff", sha).stdout
-    leak_rules = sorted(
-        name for name, pattern in LEAK_PATTERNS.items() if pattern.search(diff)
-    )
+    leak_rules = _leak_rule_names(diff)
     leak_line = "leak-scan: clean" if not leak_rules else f"leak-scan: {len(leak_rules)} matches"
     print(f"verified-sha: {sha}")
     print(f"submitted-branch: {branch}")
