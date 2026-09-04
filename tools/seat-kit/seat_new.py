@@ -22,7 +22,7 @@ CLIENT_PROFILES = {
 HARD_VERIFY_CHECKLIST = """## HARD-verify checklist
 
 Before approval:
-1. Fetch and detach the exact submitted 40-hex SHA in the seat clone.
+1. Resolve origin from the routed project, then fetch and detach the exact submitted 40-hex SHA in a reviewer-owned temporary clone. Never mutate the routed checkout.
 2. Compare git show --stat and changed paths with files_changed and ticket scope.
 3. Confirm the SHA is on `origin/<submitted-branch>` and never on `origin/main`.
 4. Re-run every claimed suite and compare the real result tails.
@@ -61,6 +61,7 @@ import re
 import shlex
 import subprocess
 import sys
+import tempfile
 import time
 from contextlib import aclosing
 from pathlib import Path
@@ -761,11 +762,36 @@ async def _execute(args: argparse.Namespace) -> None:
                     routed = project_work_dirs.get(
                         project, board_work_dirs.get(target_board)
                     )
-                    seat_repo = Path(__file__).resolve().parents[1] / str(REPO_LEAF or "")
-                    repo = Path(routed) if routed and (Path(routed) / ".git").exists() else seat_repo
-                    verification = _verify_ticket(
-                        ticket, repo, run_suites=bool(args.run_suites)
+                    seat_root = Path(__file__).resolve().parents[1]
+                    seat_repo = seat_root / str(REPO_LEAF or "")
+                    source_repo = (
+                        Path(routed)
+                        if routed and (Path(routed) / ".git").exists()
+                        else seat_repo
                     )
+                    if not (source_repo / ".git").exists():
+                        raise ValueError(
+                            f"verify requires a routed git repository: {source_repo}"
+                        )
+                    origin_url = _git(
+                        source_repo, "remote", "get-url", "origin"
+                    ).stdout.strip()
+                    if not origin_url:
+                        raise ValueError("verify requires an origin remote")
+                    with tempfile.TemporaryDirectory(
+                        prefix=".verify-", dir=seat_root
+                    ) as temporary:
+                        repo = Path(temporary) / "repo"
+                        subprocess.run(
+                            [
+                                "git", "clone", "--no-checkout", "--origin", "origin",
+                                "--", origin_url, str(repo),
+                            ],
+                            check=True, text=True, capture_output=True,
+                        )
+                        verification = _verify_ticket(
+                            ticket, repo, run_suites=bool(args.run_suites)
+                        )
                     emit({"ticket": ticket, "verification": verification})
                     return
                 if args.command == "approve":

@@ -440,6 +440,7 @@ def _review_verification_fixture(
     )
     ticket = {
         "ticket_id": "TK-review",
+        "target_url": "sample/path",
         "submission_history": [
             {
                 "files_changed": ["change.txt"],
@@ -448,6 +449,93 @@ def _review_verification_fixture(
         ],
     }
     return author, clone, generated, ticket, sha
+
+
+def test_routed_verify_uses_and_cleans_reviewer_owned_clone_without_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _author, routed, generated, ticket, sha = _review_verification_fixture(tmp_path)
+    subprocess.run(
+        ["git", "switch", "main"], cwd=routed, check=True, capture_output=True,
+    )
+    (routed / "base.txt").write_text("local routed change\n", encoding="utf-8")
+    (routed / "local-only.txt").write_text("keep me\n", encoding="utf-8")
+
+    def git_output(*arguments: str) -> str:
+        return subprocess.run(
+            ["git", *arguments], cwd=routed, check=True,
+            capture_output=True, text=True,
+        ).stdout
+
+    original_branch = git_output("branch", "--show-current")
+    original_head = git_output("rev-parse", "HEAD")
+    original_status = git_output("status", "--porcelain=v1")
+    original_files = {
+        name: (routed / name).read_text(encoding="utf-8")
+        for name in ("base.txt", "local-only.txt")
+    }
+    seat_root = Path(generated.__file__).resolve().parents[1]
+    verified_paths: list[Path] = []
+    verify_ticket = generated._verify_ticket
+
+    def track_verification(ticket_value, repo, *, run_suites=False):
+        verified_paths.append(repo)
+        assert repo != routed
+        assert repo.is_relative_to(seat_root)
+        return verify_ticket(ticket_value, repo, run_suites=run_suites)
+
+    generated._verify_ticket = track_verification
+
+    class ReviewClient:
+        identity = SimpleNamespace(agent_id="AI-reviewer")
+
+        def __init__(self, *_arguments, **_keywords) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_arguments) -> None:
+            pass
+
+        async def board_join(self):
+            return {"ok": True}
+
+        async def board_state_get(self, *, key):
+            return {"key": key, "value": {"schema_version": 1}}
+
+        async def ticket_get(self, ticket_id):
+            assert ticket_id == ticket["ticket_id"]
+            return {"ok": True, "ticket": ticket}
+
+    generated._load_client = lambda: (
+        ReviewClient,
+        "project_registry",
+        lambda _registry, _home: ["pursers"],
+        lambda _value: {"schema_version": 1},
+        lambda _registry: {"sample": str(routed)},
+        lambda _registry: {"pursers": str(routed)},
+        None,
+    )
+    monkeypatch.setenv("ONBOARD_CENTRAL_URL", "https://central.example/mcp")
+    monkeypatch.setenv("ONBOARD_CENTRAL_TOKEN", "TOKEN_PLACEHOLDER")
+    monkeypatch.setenv("ONBOARD_BOARD_ID", "pursers")
+    monkeypatch.setenv("ONBOARD_AGENT_NAME", "reviewer-a")
+
+    asyncio.run(generated._execute(generated._parser().parse_args(["verify", "TK-review"])))
+
+    output = capsys.readouterr().out
+    assert f"verified-sha: {sha}" in output
+    assert verified_paths and all(not path.exists() for path in verified_paths)
+    assert list(seat_root.glob(".verify-*")) == []
+    assert git_output("branch", "--show-current") == original_branch
+    assert git_output("rev-parse", "HEAD") == original_head
+    assert git_output("status", "--porcelain=v1") == original_status
+    assert {
+        name: (routed / name).read_text(encoding="utf-8")
+        for name in original_files
+    } == original_files
 
 
 @pytest.mark.parametrize(

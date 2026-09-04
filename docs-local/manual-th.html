@@ -471,7 +471,7 @@ Pass agent_name="pool-reviewer-1" on every per-call identity tool.</code></pre>
       <pre><code>## HARD-verify checklist
 
 Before approval:
-1. Fetch and detach the exact submitted 40-hex SHA in the seat clone.
+1. Resolve origin from the routed project, then fetch and detach the exact submitted 40-hex SHA in a reviewer-owned temporary clone. Never mutate the routed checkout.
 2. Compare git show --stat and changed paths with files_changed and ticket scope.
 3. Confirm the SHA is on `origin/&lt;submitted-branch&gt;` and never on `origin/main`.
 4. Re-run every claimed suite and compare the real result tails.
