@@ -82,6 +82,9 @@ jobs:
           print("mcp=2.1.1")
           PY
 
+      - name: Scan repository for secrets and identifying paths
+        run: python tools/leak_scan.py
+
       - name: Check manifest and collect every suite
         run: |
           set -euo pipefail
