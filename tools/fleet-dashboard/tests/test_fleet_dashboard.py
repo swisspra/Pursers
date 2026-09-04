@@ -4320,6 +4320,54 @@ def test_push_wait_pressure_supersedes_poll_and_exposes_return_rate(
     assert session["estimated_tokens_per_hour"] == 100_000
 
 
+def test_fallback_poll_wait_does_not_suppress_genuine_poll_history(
+    tmp_path: Path,
+) -> None:
+    document = {
+        "schema_version": 3,
+        "days": {},
+        "model_wait": {
+            "fallback": {
+                "board_id": "board",
+                "agent_name": "worker",
+                "hours": {},
+                "returns": [
+                    {
+                        "at": "2030-01-10T12:00:00Z",
+                        "response_bytes": 200_000,
+                        "outcome": "cue",
+                        "mode": "poll",
+                        "reason": "journal",
+                    }
+                ],
+            }
+        },
+        "poll_cycles": {
+            "same": {
+                "board_id": "board",
+                "agent_name": "worker",
+                "latest_at": "2030-01-10T12:10:00Z",
+                "latest_response_bytes": 900_000,
+                "mode": "poll",
+                "samples": [],
+            }
+        },
+    }
+    path = tmp_path / "stats.json"
+    path.write_text(json.dumps(document), encoding="utf-8")
+
+    result = dashboard.read_overhead_stats(
+        path, now=datetime(2030, 1, 10, 12, 30, tzinfo=timezone.utc)
+    )
+
+    assert len(result["sessions"]) == 2
+    assert {session["reason"] for session in result["sessions"]} == {
+        "journal",
+        "legacy",
+    }
+    assert {session["mode"] for session in result["sessions"]} == {"poll"}
+
+
 def test_single_return_over_one_million_tokens_is_stats_anomaly(
     tmp_path: Path,
 ) -> None:

@@ -287,8 +287,6 @@ class BridgeStats:
         board_id: str,
         agent_name: str,
         result: dict[str, Any],
-        *,
-        mode: str | None = None,
     ) -> None:
         """Record exactly one model-visible a2a_wait result."""
         outcome = "timeout" if result.get("timed_out") else "cue"
@@ -299,7 +297,7 @@ class BridgeStats:
                     agent_name,
                     outcome,
                     _meter_bytes(result),
-                    str(result.get("mode") or mode or "unknown"),
+                    str(result.get("mode") or "unknown"),
                     str(result.get("reason") or outcome),
                 )
         except Exception as exc:  # noqa: BLE001 - metering never breaks work.
@@ -2315,7 +2313,7 @@ async def a2a_wait(
     async with meter.poll_cycle():
         result = await run()
     selected_agent = AGENT_NAME if agent_name is None else agent_name
-    await meter.record_wait_return(BOARD_ID, selected_agent, result, mode=WAIT_MODE)
+    await meter.record_wait_return(BOARD_ID, selected_agent, result)
     return result
 
 
@@ -2505,6 +2503,10 @@ async def _wait_for_work_many(
         lease_due_by_board[board_id] = {}
 
     active = [board_id for board_id in board_order if board_id in views]
+    # Entry catchup/backlog checks are direct reads. A board becomes push only
+    # after its subscription stream proves ready by advancing a cursor or
+    # yielding an event.
+    mode_by_board = {board_id: "poll" for board_id in active}
 
     def response(events: list[dict], timed_out: bool) -> dict[str, Any]:
         reason = "timeout"
@@ -2514,6 +2516,8 @@ async def _wait_for_work_many(
                 if all(event.get("source") == "backlog_scan" for event in events)
                 else "journal"
             )
+        modes = set(mode_by_board.values())
+        actual_mode = next(iter(modes)) if len(modes) == 1 else "mixed"
         return {
             "new_seq": dict(cursors),
             "events": events,
@@ -2522,6 +2526,8 @@ async def _wait_for_work_many(
                 else round(time.monotonic() - started, 2)
             ),
             "timed_out": timed_out,
+            "mode": actual_mode if modes else "poll",
+            "mode_by_board": dict(mode_by_board),
             "reason": reason,
             "resynced": dict(resynced),
             "skipped_boards": dict(skipped),
@@ -2656,10 +2662,12 @@ async def _wait_for_work_many(
                 found: list[dict[str, Any]] = []
                 for board_id, kind, detail in items:
                     if kind == "cursor":
+                        mode_by_board[board_id] = "push"
                         cursors[board_id] = max(
                             cursors[board_id], int(str(detail))
                         )
                     elif kind == "event" and isinstance(detail, dict):
+                        mode_by_board[board_id] = "push"
                         _forget_backlog_for_events(board_id, [detail])
                         sequence = detail.get("seq")
                         if isinstance(sequence, int):
@@ -2675,6 +2683,7 @@ async def _wait_for_work_many(
                             found.append({**detail, "board_id": board_id})
                     elif kind == "failed":
                         fallback.add(board_id)
+                        mode_by_board[board_id] = "poll"
                         _log(
                             "WARNING: subscriptions/listen unavailable for "
                             f"board={board_id!r}; polling this board for the "
@@ -2828,6 +2837,7 @@ async def _wait_for_work(
             "events": relevant,
             "waited_s": 0.0,
             "timed_out": False,
+            "mode": "poll",
             "reason": (
                 "backlog"
                 if all(event.get("source") == "backlog_scan" for event in relevant)
@@ -2843,8 +2853,11 @@ async def _wait_for_work(
             await _run_progress(progress_callback, started, budget)
             next_progress = now + (progress_cadence or PROGRESS_INTERVAL_S)
 
+    actual_mode = "poll"
+
     def advance_cursor(value: int) -> None:
-        nonlocal cursor
+        nonlocal cursor, actual_mode
+        actual_mode = "push"
         cursor = max(cursor, value)
 
     # 2. Push mode uses BoardClient.events() for live-first subscription,
@@ -2880,6 +2893,7 @@ async def _wait_for_work(
                             "events": [],
                             "waited_s": round(now - started, 2),
                             "timed_out": True,
+                            "mode": "push",
                             "reason": "timeout",
                             "resynced": resynced,
                         }
@@ -2893,6 +2907,7 @@ async def _wait_for_work(
                         await maintain(time.monotonic())
                         continue
                     event = pending_event.result()
+                    actual_mode = "push"
                     found: list[dict[str, Any]] = []
                     while True:
                         _forget_backlog_for_events(BOARD_ID, [event])
@@ -2916,6 +2931,7 @@ async def _wait_for_work(
                             "events": found,
                             "waited_s": round(time.monotonic() - started, 2),
                             "timed_out": False,
+                            "mode": "push",
                             "reason": "journal",
                             "resynced": resynced,
                         }
@@ -2924,6 +2940,7 @@ async def _wait_for_work(
                 await asyncio.gather(pending_event, return_exceptions=True)
                 await events.aclose()
         except Exception as exc:
+            actual_mode = "poll"
             _log(
                 "WARNING: subscriptions/listen unavailable; falling back to "
                 f"poll for this call and retrying push on re-arm: {exc}"
@@ -2954,6 +2971,7 @@ async def _wait_for_work(
                 "events": relevant,
                 "waited_s": round(time.monotonic() - started, 2),
                 "timed_out": False,
+                "mode": actual_mode,
                 "reason": "journal",
                 "resynced": resynced,
             }
@@ -2964,6 +2982,7 @@ async def _wait_for_work(
         "events": [],
         "waited_s": round(time.monotonic() - started, 2),
         "timed_out": True,
+        "mode": actual_mode,
         "reason": "timeout",
         "resynced": resynced,
     }

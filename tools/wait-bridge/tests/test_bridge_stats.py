@@ -183,6 +183,22 @@ class BridgeStatsTests(unittest.TestCase):
             ],
         )
 
+    def test_model_wait_does_not_infer_configured_mode(self) -> None:
+        result = {
+            "new_seq": 7,
+            "events": [],
+            "waited_s": 180.0,
+            "timed_out": True,
+            "reason": "timeout",
+        }
+        asyncio.run(
+            self.stats.record_wait_return("board-one", "worker-one", result)
+        )
+
+        document = json.loads(self.path.read_text(encoding="utf-8"))
+        seat = next(iter(document["model_wait"].values()))
+        self.assertEqual(seat["returns"][0]["mode"], "unknown")
+
 
 if __name__ == "__main__":
     unittest.main()
