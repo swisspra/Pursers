@@ -41,6 +41,7 @@ FLEET_SNAPSHOT_LIMIT = 500
 FLEET_SNAPSHOT_MAX_BYTES = 250_000
 FLEET_RESPONSE_MAX_BYTES = 250_000
 FLEET_CLAIM_STATES = frozenset({"claimed", "in_progress", "creating_report"})
+DASHBOARD_ACTIVE_TICKET_STATES = frozenset({"open", *FLEET_CLAIM_STATES})
 LINK_SCHEMA_VERSION = 1
 LINK_MEMORY_LIMIT = 200
 LINK_EDGE_LIMIT = 1_000
@@ -555,6 +556,7 @@ class LiveDashboard:
         self._view_connected = False
         self._view_error: str | None = None
         self._projection: dict[str, Any] | None = None
+        self._projection_ticket_sources: dict[str, dict[str, Any]] = {}
         self._event_cursor: int | None = None
         self._event_ids: set[str] = set()
         self._events: list[dict[str, Any]] = []
@@ -1242,43 +1244,14 @@ class LiveDashboard:
                 )
             ]
         tickets = listed.get("tickets", [])
-        current_tickets_by_agent_id: dict[str, dict[str, Any]] = {}
-        recent_tickets_by_agent_id: dict[str, dict[str, Any]] = {}
-        for ticket in tickets:
-            if not isinstance(ticket, dict):
-                continue
-            holder_ids = {
-                ticket.get("claimed_by_agent_id"),
-                ticket.get("assigned_to_agent_id"),
-            }
-            for agent_id in holder_ids - {None, ""}:
-                key = str(agent_id)
-                if ticket.get("status") not in {
-                    "closed",
-                    "rejected",
-                    "canceled",
-                    "terminated",
-                }:
-                    current = current_tickets_by_agent_id.get(key)
-                    if current is None or self._ticket_claimed_sort_key(
-                        ticket
-                    ) > self._ticket_claimed_sort_key(current):
-                        current_tickets_by_agent_id[key] = ticket
-
-            touched_ids = holder_ids | {
-                ticket.get("last_claimed_by_agent_id"),
-                ticket.get("submitted_by_agent_id"),
-                ticket.get("reviewed_by_agent_id"),
-                ticket.get("created_by_agent_id"),
-            }
-            recency = self._ticket_touched_sort_key(ticket)
-            for agent_id in touched_ids - {None, ""}:
-                key = str(agent_id)
-                previous = recent_tickets_by_agent_id.get(key)
-                if previous is None or recency > self._ticket_touched_sort_key(
-                    previous
-                ):
-                    recent_tickets_by_agent_id[key] = ticket
+        ticket_sources = {
+            str(ticket["ticket_id"]): copy.deepcopy(ticket)
+            for ticket in tickets
+            if isinstance(ticket, dict) and ticket.get("ticket_id")
+        }
+        current_tickets_by_agent_id, recent_tickets_by_agent_id = (
+            self._ticket_assignments(ticket_sources.values())
+        )
         pinned = briefing.get("pinned_digest", [])
         if not isinstance(pinned, list):
             pinned = []
@@ -1359,6 +1332,7 @@ class LiveDashboard:
             ),
             "snapshot_at": cold.get("snapshot_at"),
         }
+        self._projection_ticket_sources = ticket_sources
         self._projection = projection
 
     async def _refresh_view(self) -> None:
@@ -1572,6 +1546,44 @@ class LiveDashboard:
         return (max(timestamps), str(ticket.get("ticket_id") or ""))
 
     @classmethod
+    def _ticket_assignments(
+        cls, tickets: Any
+    ) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+        current_by_agent: dict[str, dict[str, Any]] = {}
+        recent_by_agent: dict[str, dict[str, Any]] = {}
+        for ticket in tickets:
+            if not isinstance(ticket, dict):
+                continue
+            holder_ids = {
+                ticket.get("claimed_by_agent_id"),
+                ticket.get("assigned_to_agent_id"),
+            }
+            if ticket.get("status") in DASHBOARD_ACTIVE_TICKET_STATES:
+                for agent_id in holder_ids - {None, ""}:
+                    key = str(agent_id)
+                    current = current_by_agent.get(key)
+                    if current is None or cls._ticket_claimed_sort_key(
+                        ticket
+                    ) > cls._ticket_claimed_sort_key(current):
+                        current_by_agent[key] = ticket
+
+            touched_ids = holder_ids | {
+                ticket.get("last_claimed_by_agent_id"),
+                ticket.get("submitted_by_agent_id"),
+                ticket.get("reviewed_by_agent_id"),
+                ticket.get("created_by_agent_id"),
+            }
+            recency = cls._ticket_touched_sort_key(ticket)
+            for agent_id in touched_ids - {None, ""}:
+                key = str(agent_id)
+                previous = recent_by_agent.get(key)
+                if previous is None or recency > cls._ticket_touched_sort_key(
+                    previous
+                ):
+                    recent_by_agent[key] = ticket
+        return current_by_agent, recent_by_agent
+
+    @classmethod
     def _agent_view(
         cls,
         agent: dict[str, Any],
@@ -1695,6 +1707,105 @@ class LiveDashboard:
             "warnings": [str(item) for item in warnings[:8]],
         }
 
+    @staticmethod
+    def _ticket_source_from_view(ticket: dict[str, Any]) -> dict[str, Any]:
+        """Recover assignment fields when a test supplied only a projection."""
+        return {
+            "ticket_id": ticket.get("id"),
+            "target_url": ticket.get("project"),
+            "title": ticket.get("title"),
+            "description": ticket.get("description"),
+            "status": ticket.get("status"),
+            "priority": ticket.get("priority"),
+            "assigned_to": ticket.get("assigned_to"),
+            "assigned_to_agent_id": ticket.get("assigned_agent_id"),
+            "claimed_by_agent_id": ticket.get("claimed_agent_id"),
+            "lease_expires_at": ticket.get("lease_expires_at"),
+            "ttl_s": ticket.get("ttl_s"),
+            "abandoned_count": ticket.get("abandoned_count", 0),
+            "rejection_count": ticket.get("rejection_count", 0),
+            "created_at": ticket.get("created_at"),
+            "updated_at": ticket.get("updated_at"),
+            "submitted_at": ticket.get("submitted_at"),
+            "closed_at": ticket.get("closed_at"),
+        }
+
+    def _refresh_ticket_projection(self, ticket: dict[str, Any]) -> None:
+        if self._projection is None:
+            return
+        projected = copy.deepcopy(self._projection)
+        sources = copy.deepcopy(self._projection_ticket_sources)
+        if not sources:
+            sources = {
+                str(item["id"]): self._ticket_source_from_view(item)
+                for item in projected.get("tickets", [])
+                if isinstance(item, dict) and item.get("id")
+            }
+
+        ticket_id = str(ticket["ticket_id"])
+        previous = sources.get(ticket_id)
+        is_new = previous is None
+        sources[ticket_id] = copy.deepcopy(ticket)
+
+        projected["tickets"] = [
+            self._ticket_view(sources[key]) for key in sorted(sources)
+        ]
+        counts: dict[str, int] = {}
+        for source in sources.values():
+            status = str(source.get("status") or "unknown")
+            counts[status] = counts.get(status, 0) + 1
+        status_view = projected.setdefault("status", {})
+        status_view["ticket_status_counts"] = counts
+
+        total = int(projected.get("ticket_total", len(sources)))
+        if is_new:
+            total += 1
+        projected["ticket_total"] = max(total, len(sources))
+        projected["ticket_truncated"] = projected["ticket_total"] > len(sources)
+
+        current_by_agent, recent_by_agent = self._ticket_assignments(
+            sources.values()
+        )
+        affected_agent_ids = {
+            value
+            for source in (previous, ticket)
+            if isinstance(source, dict)
+            for field in (
+                "claimed_by_agent_id",
+                "assigned_to_agent_id",
+                "last_claimed_by_agent_id",
+                "submitted_by_agent_id",
+                "reviewed_by_agent_id",
+                "created_by_agent_id",
+            )
+            if (value := source.get(field)) not in {None, ""}
+        }
+        updated_project = self._project_from_target(ticket.get("target_url"))
+        for agent in projected.get("agents", []):
+            if not isinstance(agent, dict):
+                continue
+            agent_id = str(agent.get("id") or "")
+            current = current_by_agent.get(agent_id)
+            recent = recent_by_agent.get(agent_id)
+            agent["current_ticket_id"] = (
+                str(current["ticket_id"])
+                if current is not None and current.get("ticket_id")
+                else None
+            )
+            agent["current_ticket"] = (
+                self._ticket_view(current) if current is not None else None
+            )
+            project_ticket = current if current is not None else recent
+            if project_ticket is not None:
+                agent["project"] = self._project_from_target(
+                    project_ticket.get("target_url")
+                )
+            elif agent_id in affected_agent_ids:
+                agent["project"] = updated_project
+
+        self._projection_ticket_sources = sources
+        self._projection = projected
+
     def _observe_result(self, result: dict[str, Any]) -> None:
         for key in ("event", "admission_event"):
             event = result.get(key)
@@ -1707,18 +1818,7 @@ class LiveDashboard:
         ticket = result.get("ticket")
         if not isinstance(ticket, dict) or not ticket.get("ticket_id"):
             return
-        if self._projection is None:
-            return
-        projected = copy.deepcopy(self._projection)
-        tickets = {
-            item["id"]: item for item in projected.get("tickets", []) if item.get("id")
-        }
-        tickets[ticket["ticket_id"]] = self._ticket_view(ticket)
-        projected["tickets"] = [tickets[key] for key in sorted(tickets)]
-        projected["ticket_total"] = max(
-            int(projected.get("ticket_total", 0)), len(tickets)
-        )
-        self._projection = projected
+        self._refresh_ticket_projection(ticket)
 
     def _observe_event(self, event: dict[str, Any]) -> None:
         event_id = str(event.get("id", ""))

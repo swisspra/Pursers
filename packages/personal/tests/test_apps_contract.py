@@ -890,6 +890,20 @@ async def test_app_reads_use_only_the_non_joining_pure_reader() -> None:
 async def test_dashboard_idle_reads_cache_and_ticket_cue_refetches_once() -> None:
     central_calls: list[str] = []
     cues: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+    agents = [
+        {"agent_id": "AI-previous", "agent_name": "previous-worker"},
+        {"agent_id": "AI-current", "agent_name": "current-worker"},
+    ]
+    ticket_state: dict[str, Any] = {
+        "ticket_id": "TK-cued",
+        "title": "updated by cue",
+        "status": "open",
+        "priority": "medium",
+        "assigned_to_agent_id": "AI-previous",
+        "target_url": "pursers-local/packages/personal",
+        "created_at": "2026-09-04T00:00:00+00:00",
+        "updated_at": "2026-09-04T00:00:00+00:00",
+    }
 
     class CachedReader:
         def __init__(self, config: DashboardConfig):
@@ -911,11 +925,19 @@ async def test_dashboard_idle_reads_cache_and_ticket_cue_refetches_once() -> Non
 
         async def board_status(self) -> dict[str, Any]:
             central_calls.append("board_status")
-            return {"agents": [], "latest_seq": 10}
+            return {
+                "agents": agents,
+                "ticket_status_counts": {"open": 1},
+                "latest_seq": 10,
+            }
 
         async def ticket_list(self, **_kwargs: Any) -> dict[str, Any]:
             central_calls.append("ticket_list")
-            return {"tickets": [], "total_matching": 0, "latest_seq": 10}
+            return {
+                "tickets": [dict(ticket_state)],
+                "total_matching": 1,
+                "latest_seq": 10,
+            }
 
         async def board_get_briefing(self, **_kwargs: Any) -> dict[str, Any]:
             central_calls.append("board_get_briefing")
@@ -923,14 +945,8 @@ async def test_dashboard_idle_reads_cache_and_ticket_cue_refetches_once() -> Non
 
         async def ticket_get(self, ticket_id: str) -> dict[str, Any]:
             central_calls.append("ticket_get")
-            return {
-                "ticket": {
-                    "ticket_id": ticket_id,
-                    "title": "arrived by cue",
-                    "status": "open",
-                    "priority": "medium",
-                }
-            }
+            assert ticket_id == ticket_state["ticket_id"]
+            return {"ticket": dict(ticket_state)}
 
         async def events(
             self, from_cursor: int, cursor_callback: Any
@@ -958,6 +974,10 @@ async def test_dashboard_idle_reads_cache_and_ticket_cue_refetches_once() -> Non
     try:
         initial = await state.snapshot()
         assert initial["data_mode"] == "live"
+        assert initial["status"]["ticket_status_counts"] == {"open": 1}
+        initial_agents = {agent["id"]: agent for agent in initial["agents"]}
+        assert initial_agents["AI-previous"]["current_ticket_id"] == "TK-cued"
+        assert initial_agents["AI-current"]["current_ticket_id"] is None
         calls_before_idle = list(central_calls)
         assert calls_before_idle == [
             "board_snapshot",
@@ -973,21 +993,71 @@ async def test_dashboard_idle_reads_cache_and_ticket_cue_refetches_once() -> Non
             assert cached["data_mode"] == "live"
         assert central_calls == calls_before_idle
 
+        ticket_state.update(
+            status="claimed",
+            assigned_to_agent_id="AI-current",
+            claimed_by_agent_id="AI-current",
+            claimed_at="2026-09-04T00:01:00+00:00",
+            updated_at="2026-09-04T00:01:00+00:00",
+        )
         await cues.put(
             {
-                "id": "EV-ticket-cue",
+                "id": "EV-ticket-claimed",
                 "seq": 11,
-                "kind": "ticket_created",
+                "kind": "ticket_status_changed",
                 "ticket_id": "TK-cued",
                 "occurred_at": "2026-09-04T00:00:00+00:00",
             }
         )
         async with asyncio.timeout(1):
-            while "ticket_get" not in central_calls:
+            while central_calls.count("ticket_get") < 1:
                 await asyncio.sleep(0)
-        updated = await state.feed()
-        assert {ticket["id"] for ticket in updated["tickets"]} == {"TK-cued"}
+        claimed = await state.feed()
+        assert claimed["tickets"][0]["status"] == "claimed"
+        assert claimed["status"]["ticket_status_counts"] == {"claimed": 1}
+        claimed_agents = {agent["id"]: agent for agent in claimed["agents"]}
+        assert claimed_agents["AI-previous"]["current_ticket_id"] is None
+        assert claimed_agents["AI-previous"]["current_ticket"] is None
+        assert claimed_agents["AI-current"]["current_ticket_id"] == "TK-cued"
+        assert claimed_agents["AI-current"]["current_ticket"]["status"] == "claimed"
+        assert claimed_agents["AI-current"]["project"] == "pursers-local"
         assert central_calls == calls_before_idle + ["board_catchup", "ticket_get"]
+
+        ticket_state.update(
+            status="submitted",
+            last_claimed_by_agent_id="AI-current",
+            submitted_by_agent_id="AI-current",
+            submitted_at="2026-09-04T00:02:00+00:00",
+            updated_at="2026-09-04T00:02:00+00:00",
+        )
+        await cues.put(
+            {
+                "id": "EV-ticket-submitted",
+                "seq": 12,
+                "kind": "ticket_status_changed",
+                "ticket_id": "TK-cued",
+                "occurred_at": "2026-09-04T00:02:00+00:00",
+            }
+        )
+        async with asyncio.timeout(1):
+            while central_calls.count("ticket_get") < 2:
+                await asyncio.sleep(0)
+        submitted = await state.feed()
+        assert submitted["tickets"][0]["status"] == "submitted"
+        assert submitted["status"]["ticket_status_counts"] == {"submitted": 1}
+        submitted_agents = {
+            agent["id"]: agent for agent in submitted["agents"]
+        }
+        assert submitted_agents["AI-previous"]["current_ticket_id"] is None
+        assert submitted_agents["AI-current"]["current_ticket_id"] is None
+        assert submitted_agents["AI-current"]["current_ticket"] is None
+        assert submitted_agents["AI-current"]["project"] == "pursers-local"
+        assert central_calls == calls_before_idle + [
+            "board_catchup",
+            "ticket_get",
+            "board_catchup",
+            "ticket_get",
+        ]
     finally:
         await state.stop()
 
@@ -2227,8 +2297,8 @@ async def test_projection_joins_agents_to_their_current_ticket() -> None:
         "last_activity_at", "lease_expires_at", "stale", "duplicate", "suggested_name",
         "duplicate_name", "current_ticket_id", "current_ticket", "project",
     }
-    assert projected_agents["AI-WORKING"]["current_ticket_id"] == "TK-NEWER"
-    assert projected_agents["AI-WORKING"]["current_ticket"] == state._ticket_view(tickets[1])
+    assert projected_agents["AI-WORKING"]["current_ticket_id"] == "TK-OLDER"
+    assert projected_agents["AI-WORKING"]["current_ticket"] == state._ticket_view(tickets[0])
     assert projected_agents["AI-ASSIGNED"]["current_ticket_id"] == "TK-ASSIGNED"
     assert projected_agents["AI-ASSIGNED"]["current_ticket"] == state._ticket_view(tickets[3])
     assert projected_agents["AI-IDLE"]["current_ticket_id"] is None
