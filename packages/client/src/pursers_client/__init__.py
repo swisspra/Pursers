@@ -8,6 +8,14 @@ from .client import (
     JoinedIdentity,
     ScrubRejectedError,
 )
+from .events import (
+    REVIEW_LEASE_EXPIRED,
+    REVIEW_LEASE_KINDS,
+    REVIEW_LEASE_RELEASED,
+    SUBMISSION_KINDS,
+    SUBMITTED_RELEVANT_KINDS,
+    TICKET_REVIEW_CLAIMED,
+)
 from .personal_profile import (
     PERSONAL_REVIEW_POLICY,
     PROFILE_ENV,
@@ -49,7 +57,13 @@ __all__ = [
     "PersonalProfile",
     "PersonalProfileError",
     "ProfileSecurityError",
+    "REVIEW_LEASE_EXPIRED",
+    "REVIEW_LEASE_KINDS",
+    "REVIEW_LEASE_RELEASED",
     "ScrubRejectedError",
+    "SUBMISSION_KINDS",
+    "SUBMITTED_RELEVANT_KINDS",
+    "TICKET_REVIEW_CLAIMED",
     "active_registry_boards",
     "bootstrap_personal_review_policy",
     "central_environment",

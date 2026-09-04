@@ -70,19 +70,37 @@ class BacklogTests(unittest.TestCase):
         available = self.ticket(
             ticket_id="TK-review", status="submitted", review_state="unclaimed"
         )
-        claimed = self.ticket(
-            ticket_id="TK-busy", status="submitted", review_state="claimed"
+        expired = self.ticket(
+            ticket_id="TK-expired", status="submitted", review_state="expired"
+        )
+        unavailable = [
+            self.ticket(
+                ticket_id="TK-busy",
+                status="submitted",
+                review_state=state,
+            )
+            for state in ("claimed_by_me", "claimed_by_other")
+        ]
+        unavailable.append(
+            self.ticket(
+                ticket_id="TK-lease",
+                status="submitted",
+                review_lease={"reviewer_agent_id": "AI-other"},
+            )
         )
 
         events = backlog_events(
-            [available, claimed],
+            [available, expired, *unavailable],
             "AI-reviewer",
             only_mine=False,
             project="pursers",
             wait_for="submitted",
         )
 
-        self.assertEqual([event["ticket_id"] for event in events], ["TK-review"])
+        self.assertEqual(
+            [event["ticket_id"] for event in events],
+            ["TK-review", "TK-expired"],
+        )
 
 
 if __name__ == "__main__":

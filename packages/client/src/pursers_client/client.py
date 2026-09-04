@@ -13,6 +13,8 @@ from mcp import Client
 from mcp.client.streamable_http import streamable_http_client
 from mcp.client.subscriptions import SubscriptionLost
 
+from .events import REVIEW_LEASE_KINDS, SUBMITTED_RELEVANT_KINDS
+
 
 class BoardClientError(RuntimeError):
     pass
@@ -30,12 +32,9 @@ DEFAULT_EVENT_KINDS = frozenset(
         "ticket_created",
         "ticket_status_changed",
         "ticket_assigned",
-        "ticket_review_claimed",
-        "review_lease_expired",
-        "review_lease_released",
     }
-)
-KNOWN_EVENT_KINDS = DEFAULT_EVENT_KINDS | {"memory_written"}
+) | REVIEW_LEASE_KINDS
+KNOWN_EVENT_KINDS = DEFAULT_EVENT_KINDS | SUBMITTED_RELEVANT_KINDS | {"memory_written"}
 GENERATION_META_KEY = "io.onboard/expected-generation"
 # Cleanup is best-effort after this bound so a broken transport cannot wedge a
 # host shutdown or mask the original __aenter__ failure indefinitely.
