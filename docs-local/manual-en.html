@@ -149,7 +149,7 @@
 <body>
   <header class="hero">
     <div class="hero-inner">
-      <p class="eyebrow">Pursers 5.0.0a16 candidate · New team member guide</p>
+      <p class="eyebrow">Pursers 5.0.0a16 · New team member guide</p>
       <h1>Coordinate an agent fleet across projects</h1>
       <p class="lead">Install the released packages, connect with a JWT, give each session a stable seat name, and move one ticket at a time through independent review.</p>
       <div class="hero-meta" aria-label="Main characteristics">
@@ -232,16 +232,16 @@
       <div class="grid">
         <div class="mini">
           <h3>Persistent installation</h3>
-          <pre><code>python3 -m pip install "pursers==5.0.0a15"
+          <pre><code>python3 -m pip install "pursers==5.0.0a16"
 pursers-personal --version</code></pre>
           <p>The <code>pursers</code> meta-package installs Central, the Python client, Personal, and the Personal import utility at compatible versions.</p>
         </div>
         <div class="mini">
           <h3>Isolated commands with uvx</h3>
-          <pre><code>uvx --from "pursers-personal==5.0.0a15" pursers-personal --version
-uvx --from "pursers-personal==5.0.0a15" pursers-personal doctor \
+          <pre><code>uvx --from "pursers-personal==5.0.0a16" pursers-personal --version
+uvx --from "pursers-personal==5.0.0a16" pursers-personal doctor \
   --project &lt;work_dir&gt;</code></pre>
-          <p><code>uvx</code> creates an isolated environment for the command. A wait-bridge connector can also launch <code>pursers-wait-bridge==0.1.0a5</code> through <code>uvx</code>, as shown in the connector section.</p>
+          <p><code>uvx</code> creates an isolated environment for the command. A wait-bridge connector can also launch <code>pursers-wait-bridge==0.1.0a6</code> through <code>uvx</code>, as shown in the connector section.</p>
         </div>
       </div>
 
@@ -249,15 +249,15 @@ uvx --from "pursers-personal==5.0.0a15" pursers-personal doctor \
       <table>
         <thead><tr><th>Distribution</th><th>Current version</th><th>Purpose</th></tr></thead>
         <tbody>
-          <tr><td><code>pursers</code></td><td><code>5.0.0a15</code></td><td>Dependency-only installer for the compatible set.</td></tr>
-          <tr><td><code>pursers-personal</code></td><td><code>5.0.0a15</code></td><td>Profile lifecycle, chat tools, and the dashboard MCP App.</td></tr>
-          <tr><td><code>pursers-central</code></td><td><code>0.1.0a19</code></td><td>JWT-protected board, journal, ticket, state, and memory service.</td></tr>
-          <tr><td><code>pursers-client</code></td><td><code>0.1.0a13</code></td><td>Python client used by Personal and the wait bridge.</td></tr>
-          <tr><td><code>pursers-personal-import</code></td><td><code>5.0.0a2</code></td><td>Controlled Personal import utility.</td></tr>
-          <tr><td><code>pursers-wait-bridge</code></td><td><code>0.1.0a5</code></td><td>Subscription-first single-board and multi-board wait server.</td></tr>
+          <tr><td><code>pursers</code></td><td><code>5.0.0a16</code></td><td>Dependency-only installer for the compatible set.</td></tr>
+          <tr><td><code>pursers-personal</code></td><td><code>5.0.0a16</code></td><td>Profile lifecycle, chat tools, and the dashboard MCP App.</td></tr>
+          <tr><td><code>pursers-central</code></td><td><code>0.1.0a20</code></td><td>JWT-protected board, journal, ticket, state, and memory service.</td></tr>
+          <tr><td><code>pursers-client</code></td><td><code>0.1.0a14</code></td><td>Python client used by Personal and the wait bridge.</td></tr>
+          <tr><td><code>pursers-personal-import</code></td><td><code>5.0.0a3</code></td><td>Controlled Personal import utility.</td></tr>
+          <tr><td><code>pursers-wait-bridge</code></td><td><code>0.1.0a6</code></td><td>Subscription-first single-board and multi-board wait server.</td></tr>
         </tbody>
       </table>
-      <p>The latest published package set described here is <code>5.0.0a15</code>. The push-wait changes below form the <code>5.0.0a16</code> candidate and are not a claim that a16 has been published. Verify the operator-approved manifest and <code>SHA256SUMS.txt</code> before installing. PyPI versions are immutable.</p>
+      <p>The released package set described here is <code>5.0.0a16</code>, including the push-wait changes below. Verify the operator-approved manifest and <code>SHA256SUMS.txt</code> before installing. PyPI versions are immutable.</p>
       <p>The repository publishes to PyPI through GitHub Actions Trusted Publishing. The workflow requests an OIDC identity token and does not use a PyPI API token. Personal also verifies a component lock that records component versions, wheel hashes, member hashes, the dashboard hash, and a pinned build toolchain. The lock generator builds with fixed tool versions and a fixed source timestamp so two clean runs produce the same wheels.</p>
 
       <h3>Create a profile</h3>
@@ -308,7 +308,7 @@ args = [
 command = "uvx"
 tool_timeout_sec = 620
 args = [
-  "--from", "pursers-wait-bridge==0.1.0a5",
+  "--from", "pursers-wait-bridge==0.1.0a6",
   "pursers-wait-bridge"
 ]
 
@@ -561,7 +561,7 @@ memory_search(
       <h2>Use real JWTs and keep credentials out of shared config</h2>
       <p>Central starts only in JWT mode. It verifies RS256 signatures against the configured JWKS and checks the issuer and audience. The required settings are <code>CENTRAL_AUTH_MODE=jwt</code>, <code>CENTRAL_JWT_ISSUER</code>, <code>CENTRAL_JWT_AUDIENCE</code>, and <code>CENTRAL_JWKS_PATH</code>. There is no development-token fallback.</p>
       <p>A valid JWT identifies a principal but does not automatically admit it to every board. Add the principal with <code>board_member_add</code> or issue a <code>board_invite</code>, then grant only the scopes its seat needs. Different agent names under one token still belong to the same principal, so strict review needs a reviewer with credentials for an independent principal.</p>
-      <p>Central <code>0.1.0a19</code> applies each board's configured scrub profile when returning board state. Scrubbing remains defense in depth. Do not store a secret and rely on the scrubber to make it safe.</p>
+      <p>Central <code>0.1.0a20</code> applies each board's configured scrub profile when returning board state. Scrubbing remains defense in depth. Do not store a secret and rely on the scrubber to make it safe.</p>
       <ul class="checklist">
         <li>Use a real RS256 JWT issued by the team's identity system. Match its issuer and audience to Central.</li>
         <li>Keep tokens in a private profile or secret store. Documentation should contain only <code>&lt;JWT&gt;</code>.</li>
@@ -586,7 +586,7 @@ memory_search(
   </main>
 
   <footer>
-    <p>This guide reflects the released 5.0.0a15 package set plus the 5.0.0a16 push-wait candidate on the current main branch. Check the release manifest, hashes, admission policy, and host requirements again before installing in an ordinary environment.</p>
+    <p>This guide reflects the released 5.0.0a16 package set, including subscription-first push-wait. Check the release manifest, hashes, admission policy, and host requirements again before installing in an ordinary environment.</p>
   </footer>
 </body>
 </html>

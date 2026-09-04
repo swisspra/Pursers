@@ -12,7 +12,7 @@ from .personal_import import (
     status_import,
 )
 
-__version__ = "5.0.0a2"
+__version__ = "5.0.0a3"
 
 __all__ = [
     "__version__",
