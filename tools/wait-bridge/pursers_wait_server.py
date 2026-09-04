@@ -44,12 +44,14 @@ from __future__ import annotations
 import asyncio
 import fcntl
 import hashlib
+import importlib.metadata
 import json
 import math
 import os
 import sys
 import tempfile
 import time
+import tomllib
 from collections import OrderedDict
 from contextlib import aclosing, asynccontextmanager
 from contextvars import ContextVar
@@ -77,7 +79,42 @@ from backlog import (
     ticket_is_relevant,
 )
 
-VERSION = "0.1.0a6"
+SOURCE_VERSION = "0.1.0a7"
+
+
+def _source_version() -> str:
+    source = Path(__file__).resolve()
+    manifest = source.parents[2] / "tools/release_versions.toml"
+    pyproject = source.with_name("pyproject.toml")
+    if manifest.is_file():
+        try:
+            value = tomllib.loads(manifest.read_text(encoding="utf-8"))
+            version = value.get("packages", {}).get("wait_bridge")
+            if version:
+                return str(version)
+        except (OSError, tomllib.TOMLDecodeError):
+            pass
+    if pyproject.is_file():
+        try:
+            value = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+            version = value.get("project", {}).get("version")
+            if version:
+                return str(version)
+        except (OSError, tomllib.TOMLDecodeError):
+            pass
+    if pyproject.exists() or manifest.exists():
+        return SOURCE_VERSION
+    raise RuntimeError("pursers-wait-bridge distribution metadata is unavailable")
+
+
+def _runtime_version() -> str:
+    try:
+        return importlib.metadata.version("pursers-wait-bridge")
+    except importlib.metadata.PackageNotFoundError:
+        return _source_version()
+
+
+VERSION = _runtime_version()
 
 # --- config from env -------------------------------------------------------
 
@@ -998,7 +1035,7 @@ async def _lifespan(server: MCPServer) -> AsyncIterator[dict[str, Any]]:
         await connection.close()
 
 
-mcp = MCPServer("Pursers Wait Bridge", version="0.1.0", lifespan=_lifespan)
+mcp = MCPServer("Pursers Wait Bridge", version=VERSION, lifespan=_lifespan)
 
 
 async def _client_for_tool(ctx: Context) -> BoardClient:

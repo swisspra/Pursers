@@ -108,7 +108,7 @@ def _package_version(project: str) -> str:
 
 JWT_PATTERN = re.compile(r"^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$")
 NVM_NPX_PATTERN = re.compile(
-    r"(/[^\s\"\'\)]*?\.nvm/versions/node/[^/\s\"\'\)]+/bin/npx\b)"
+    r"(/[^\"\'\n\)]*?\.nvm/versions/node/[^/\"\'\n\)]+/bin/npx\b)"
 )
 
 

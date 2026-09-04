@@ -3212,7 +3212,7 @@ def test_seat_config_manager_plan_apply_backup_restart_and_no_token_leak(
     ca.write_text("CA")
 
     class Bridge:
-        version = "0.1.0a6"
+        version = "0.1.0a7"
 
         def inspect(self) -> dict:
             return {
@@ -3258,7 +3258,7 @@ def test_seat_config_manager_plan_apply_backup_restart_and_no_token_leak(
     assert Path(result["backup_path"]).read_text() == f'api_token = "{secret}"\n'
     manager.inventory.upsert(
         dashboard.DesiredSeat.from_dict(desired),
-        bridge_version="0.1.0a6",
+        bridge_version="0.1.0a7",
         doctor={
             "overall": "WARN",
             "checks": [
@@ -3280,7 +3280,7 @@ def test_seat_config_manager_plan_apply_backup_restart_and_no_token_leak(
 
 def test_seat_config_registry_coverage_uses_live_fleet_seats(tmp_path: Path) -> None:
     class Bridge:
-        version = "0.1.0a6"
+        version = "0.1.0a7"
 
         def inspect(self) -> dict:
             return {"version": self.version, "command": None}
@@ -3302,7 +3302,7 @@ def test_seat_config_registry_coverage_uses_live_fleet_seats(tmp_path: Path) -> 
         bridge_command="/tmp/pursers-wait-bridge",
         config_path=str(tmp_path / "config.toml"),
     )
-    manager.inventory.upsert(desired, bridge_version="0.1.0a6")
+    manager.inventory.upsert(desired, bridge_version="0.1.0a7")
 
     result = manager.registry(
         {
@@ -3344,7 +3344,7 @@ def test_config_api_and_ui_contract_are_separate_from_coordinator_config() -> No
             return {"seats": [], "discovered_configs": []}
 
         def bridge(self) -> dict:
-            return {"installed_version": None, "pinned_version": "0.1.0a6"}
+            return {"installed_version": None, "pinned_version": "0.1.0a7"}
 
         def registry(self, fleet: dict) -> dict:
             return {"boards": [], "read_only": True}
@@ -3398,7 +3398,7 @@ def test_config_api_and_ui_contract_are_separate_from_coordinator_config() -> No
         with urllib.request.urlopen(base + "/api/config/seats") as response:
             assert json.load(response)["seats"] == []
         with urllib.request.urlopen(base + "/api/config/bridge") as response:
-            assert json.load(response)["pinned_version"] == "0.1.0a6"
+            assert json.load(response)["pinned_version"] == "0.1.0a7"
         with urllib.request.urlopen(base + "/api/config/registry") as response:
             assert json.load(response)["read_only"] is True
         assert post("/api/config/plan", {"name": "fixture"})["plan_id"] == "a" * 32

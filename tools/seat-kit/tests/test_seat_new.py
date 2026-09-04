@@ -516,6 +516,7 @@ def test_routed_verify_uses_and_cleans_reviewer_owned_clone_without_mutation(
     generated._load_client = lambda: (
         ReviewClient,
         "project_registry",
+        frozenset({"ticket_submitted"}),
         lambda _registry, _home: ["pursers"],
         lambda _value: {"schema_version": 1},
         lambda _registry: {"sample": str(routed)},

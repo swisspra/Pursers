@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "product_version": "5.0.0a16",
+  "product_version": "5.0.0a17",
   "build_toolchain": {
     "build": "1.3.0",
     "setuptools": "80.9.0",
@@ -10,13 +10,13 @@
   },
   "components": {
     "pursers-central": {
-      "version": "0.1.0a20",
-      "wheel_sha256": "19d910991cde1c52274c2518d133d9ee4a4c07bb25e9315cb8f9892f71168c23",
+      "version": "0.1.0a21",
+      "wheel_sha256": "056bd12f02e868a9536369bfe8813d4128250f42bee24c5ea7780df883ed9698",
       "members": {
-        "pursers_central-0.1.0a20.dist-info/METADATA": "8e5f7a61f91286dc945e0e0cf478f9135d7c999ed1403ae76ae57784365c2997",
-        "pursers_central-0.1.0a20.dist-info/WHEEL": "ff309ddcdd65ebd02bc724dbf2bcc4a0ff53a5b61792a44548d383e4ebb19d3b",
-        "pursers_central-0.1.0a20.dist-info/licenses/LICENSE": "c48efd75374a365d9d9f3e24c5b4148d53ce8621dd55bf470c9b4c513d03d84d",
-        "pursers_central-0.1.0a20.dist-info/top_level.txt": "36b183999f65ce4c6f41b59602a397b8c3c0b3db4fd216bdf5b9c8c45d9cc55e",
+        "pursers_central-0.1.0a21.dist-info/METADATA": "e100e4cbd1b6c818aa548f16de0bb39372194e4fdbb4cd78605c5fad43ade011",
+        "pursers_central-0.1.0a21.dist-info/WHEEL": "ff309ddcdd65ebd02bc724dbf2bcc4a0ff53a5b61792a44548d383e4ebb19d3b",
+        "pursers_central-0.1.0a21.dist-info/licenses/LICENSE": "c48efd75374a365d9d9f3e24c5b4148d53ce8621dd55bf470c9b4c513d03d84d",
+        "pursers_central-0.1.0a21.dist-info/top_level.txt": "36b183999f65ce4c6f41b59602a397b8c3c0b3db4fd216bdf5b9c8c45d9cc55e",
         "pursers_central/__init__.py": "0d67dcb332978fe4c7d7b4615f882272ca763cdb065586743fa772f4f4e008a1",
         "pursers_central/central.py": "38a72d6c8f774910dd30cba079918a5dd038cb224de630e3b2020fee799d8a3f",
         "pursers_central/cursor.py": "5f57c3d58bdb88ca9f01497e518de96c9651063047b0928689a0fda58cceeb2b",
@@ -50,6 +50,6 @@
   "view": {
     "resource": "pursers_personal/resources/dashboard.html",
     "size_bytes": 404280,
-    "sha256": "03d6807dc5ce87a3fce96e06ae67eb5fd3afdd2a1b27771f7e8fb2b600e34ac2"
+    "sha256": "d33f076e9396f7e5fa4f55cd79044a2dfba6ca2f0066add1d69c0f9e3630aeec"
   }
 }

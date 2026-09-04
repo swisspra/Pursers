@@ -776,6 +776,9 @@ class PursersBoardAPI:
             timeout_s=self.config.wait_timeout_s,
             only_mine=False,
             agent_name=self.config.agent_name,
+            wait_for=(
+                "submitted" if self.config.role == "reviewer" else "claimable"
+            ),
             task_focus=(
                 f"worker-runtime role={self.config.role} "
                 f"max_tier={self.config.max_tier}"

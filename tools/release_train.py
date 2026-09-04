@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import difflib
 import hashlib
 import json
@@ -87,6 +88,8 @@ VERSION_FILES: dict[str, tuple[str, ...]] = {
         "docs-local/architecture-th.html",
         "docs-local/manual-en.html",
         "docs-local/manual-th.html",
+        "tools/fleet-dashboard/tests/test_fleet_dashboard.py",
+        "tools/fleet-dashboard/tests/test_seat_config.py",
         "tools/seat-kit/README.md",
         "tools/wait-bridge/pursers_wait_server.py",
         "tools/wait-bridge/pyproject.toml",
@@ -328,6 +331,27 @@ def check(root: Path, versions: ReleaseVersions) -> list[str]:
         for relative in paths:
             if expected not in (root / relative).read_text(encoding="utf-8"):
                 errors.append(f"{relative}: missing {key} version {expected}")
+    bridge_source = root / "tools/wait-bridge/pursers_wait_server.py"
+    bridge_module = ast.parse(bridge_source.read_text(encoding="utf-8"))
+    source_version = next(
+        (
+            node.value.value
+            for node in bridge_module.body
+            if isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and target.id == "SOURCE_VERSION"
+                for target in node.targets
+            )
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)
+        ),
+        None,
+    )
+    if source_version != package["wait_bridge"]:
+        errors.append(
+            "tools/wait-bridge/pursers_wait_server.py: "
+            f"SOURCE_VERSION {source_version!r} != {package['wait_bridge']!r}"
+        )
     lock_path = root / "packages/personal/src/pursers_personal/resources/component-lock.json"
     lock = json.loads(lock_path.read_text(encoding="utf-8"))
     if lock.get("product_version") != versions.product:

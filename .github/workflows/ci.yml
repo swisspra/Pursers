@@ -82,6 +82,38 @@ jobs:
           print("mcp=2.1.1")
           PY
 
+      - name: Verify isolated wheel imports
+        run: |
+          set -euo pipefail
+          test -n "${PIP_FIND_LINKS:-}"
+          test -n "${UV_FIND_LINKS:-}"
+          python -m venv .ci/isolated-wheel-imports
+          env -u PYTHONPATH .ci/isolated-wheel-imports/bin/python -m pip install \
+            --disable-pip-version-check --no-input \
+            .ci/wheels/pursers_central-*.whl \
+            .ci/wheels/pursers_client-*.whl \
+            .ci/wheels/pursers_personal-*.whl \
+            .ci/wheels/pursers_wait_bridge-*.whl
+          env -u PYTHONPATH .ci/isolated-wheel-imports/bin/python - <<'PY'
+          import importlib.metadata as metadata
+          import tomllib
+          import pursers_central.central
+          import pursers_personal
+          import pursers_wait_server
+          import pursers_client
+
+          with open("tools/release_versions.toml", "rb") as stream:
+              packages = tomllib.load(stream)["packages"]
+          expected = {
+              "pursers-central": packages["central"],
+              "pursers-client": packages["client"],
+              "pursers-personal": packages["personal"],
+              "pursers-wait-bridge": packages["wait_bridge"],
+          }
+          assert {name: metadata.version(name) for name in expected} == expected
+          print("isolated-wheel-imports=pass")
+          PY
+
       - name: Check manifest and collect every suite
         run: |
           set -euo pipefail
