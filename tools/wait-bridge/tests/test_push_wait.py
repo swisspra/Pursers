@@ -413,7 +413,7 @@ class PushWaitTests(unittest.IsolatedAsyncioTestCase):
             },
         )
         self.environment.start()
-        self.mcp, _service = central.build_server(
+        self.mcp, self.service = central.build_server(
             "localhost", 8765, self.root / "data"
         )
         self.principal = central.Principal(
@@ -436,6 +436,219 @@ class PushWaitTests(unittest.IsolatedAsyncioTestCase):
         await client.board_join()
         await client.board_join(agent_name="push-actor")
         return client
+
+    async def test_dispatch_central_wait_matrix_isolated_offers_and_legacy(
+        self,
+    ) -> None:
+        admin = self.principal
+        worker_a = central.Principal(
+            "PR-live-a", "live-a", frozenset({"board:read", "board:write"})
+        )
+        worker_b = central.Principal(
+            "PR-live-b", "live-b", frozenset({"board:read", "board:write"})
+        )
+        reviewer_a = central.Principal(
+            "PR-live-review-a", "live-review-a",
+            frozenset({"board:read", "board:write", "board:review"}),
+        )
+        reviewer_b = central.Principal(
+            "PR-live-review-b", "live-review-b",
+            frozenset({"board:read", "board:write", "board:review"}),
+        )
+
+        async with Client(self.mcp, mode="2026-07-28", cache=None) as raw:
+            async def join(
+                principal: central.Principal,
+                name: str,
+                capabilities: dict[str, Any],
+            ) -> InProcessBoardClient:
+                self.principal = principal
+                client = InProcessBoardClient(raw)
+                client.agent_name = name
+                joined = await client._call(
+                    "board_join", agent_name=name, capabilities=capabilities
+                )
+                client.identity = JoinedIdentity(
+                    joined["board_id"], joined["agent_id"],
+                    joined["principal_id"], joined["agent_name"], joined["role"],
+                )
+                return client
+
+            self.principal = admin
+            admin_client = await join(
+                admin, "live-admin", {"can_work": False, "can_review": False}
+            )
+            for principal, membership_role in (
+                (worker_a, "member"),
+                (worker_b, "member"),
+                (reviewer_a, "reviewer"),
+                (reviewer_b, "reviewer"),
+            ):
+                self.principal = admin
+                await admin_client._call(
+                    "board_member_add",
+                    agent_name="live-admin",
+                    principal_id=principal.principal_id,
+                    role=membership_role,
+                )
+            a = await join(worker_a, "live-worker-a", {"tier_max": 1})
+            b = await join(worker_b, "live-worker-b", {"tier_max": 3})
+            ra = await join(
+                reviewer_a, "live-reviewer-a",
+                {"can_work": False, "can_review": True},
+            )
+            rb = await join(
+                reviewer_b, "live-reviewer-b",
+                {"can_work": False, "can_review": True},
+            )
+
+            legacy_cursor = int(
+                self.service.journal.read_after(wait_server.BOARD_ID, 0)[
+                    "latest_cursor"
+                ]
+            )
+            self.principal = admin
+            legacy = await admin_client._call(
+                "ticket_create", agent_name="live-admin",
+                title="legacy broadcast", description="dispatch disabled fixture",
+                target_url="pursers/tools/wait-bridge", scope="interactive-no-send",
+                required_fields=["test_output"],
+            )
+            self.principal = worker_b
+            legacy_wait = await wait_server._wait_for_work(
+                b, since_seq=legacy_cursor, timeout_s=1,
+                only_mine=False, wait_for="claimable",
+            )
+            self.assertEqual(
+                legacy_wait["events"][0]["ticket_id"],
+                legacy["ticket"]["ticket_id"],
+            )
+            self.principal = admin
+            await admin_client._call(
+                "ticket_cancel", agent_name="live-admin",
+                ticket_id=legacy["ticket"]["ticket_id"], reason="fixture complete",
+            )
+            await admin_client._call(
+                "board_dispatch_policy_set", agent_name="live-admin", offer_ttl_s=1
+            )
+
+            cursor = int(
+                self.service.journal.read_after(wait_server.BOARD_ID, 0)[
+                    "latest_cursor"
+                ]
+            )
+            first = await admin_client._call(
+                "ticket_create", agent_name="live-admin",
+                title="tier one offer", description="live offer isolation fixture",
+                target_url="pursers/tools/wait-bridge", scope="interactive-no-send",
+                required_fields=["test_output"], tier=1,
+                prefer_agents=[a.identity.agent_id],
+            )
+            first_id = first["ticket"]["ticket_id"]
+            self.assertEqual(
+                first["ticket"]["work_offer"]["agent_id"], a.identity.agent_id
+            )
+
+            self.principal = worker_b
+            with (
+                patch.object(wait_server, "WAIT_MODE", "poll"),
+                patch.object(wait_server, "clamp_timeout", return_value=0.03),
+                patch.object(wait_server, "DEFAULT_POLL_INTERVAL_S", 0.01),
+            ):
+                b_wait = await wait_server._wait_for_work(
+                    b, since_seq=cursor, timeout_s=1,
+                    only_mine=False, wait_for="claimable",
+                )
+            self.assertTrue(b_wait["timed_out"], b_wait)
+            self.assertEqual(b_wait["events"], [])
+            denied = await b._call(
+                "ticket_claim", agent_name=b.agent_name, ticket_id=first_id
+            )
+            self.assertEqual(denied["error"]["code"], "claim_not_offered")
+
+            self.principal = worker_a
+            a_wait = await wait_server._wait_for_work(
+                a, since_seq=cursor, timeout_s=1,
+                only_mine=False, wait_for="claimable",
+            )
+            self.assertEqual(a_wait["reason"], "offer")
+            self.assertEqual(a_wait["events"][0]["offer"]["ticket_id"], first_id)
+            await a._call(
+                "ticket_claim", agent_name=a.agent_name, ticket_id=first_id
+            )
+
+            review_cursor = int(
+                self.service.journal.read_after(wait_server.BOARD_ID, 0)[
+                    "latest_cursor"
+                ]
+            )
+            submitted = await a._call(
+                "ticket_submit", agent_name=a.agent_name, ticket_id=first_id,
+                summary="ready", notes="test_output: live matrix",
+                files_changed=["tools/wait-bridge/pursers_wait_server.py"],
+            )
+            offered_reviewer = submitted["ticket"]["review_offer"]["agent_id"]
+            offered_client, offered_principal = (
+                (ra, reviewer_a) if offered_reviewer == ra.identity.agent_id
+                else (rb, reviewer_b)
+            )
+            other_client, other_principal = (
+                (rb, reviewer_b) if offered_client is ra else (ra, reviewer_a)
+            )
+            self.principal = other_principal
+            with (
+                patch.object(wait_server, "WAIT_MODE", "poll"),
+                patch.object(wait_server, "clamp_timeout", return_value=0.03),
+                patch.object(wait_server, "DEFAULT_POLL_INTERVAL_S", 0.01),
+            ):
+                other_review = await wait_server._wait_for_work(
+                    other_client, since_seq=review_cursor, timeout_s=1,
+                    only_mine=False, wait_for="submitted",
+                )
+            self.assertTrue(other_review["timed_out"])
+            self.assertEqual(other_review["events"], [])
+            self.principal = offered_principal
+            offered_review = await wait_server._wait_for_work(
+                offered_client, since_seq=review_cursor, timeout_s=1,
+                only_mine=False, wait_for="submitted",
+            )
+            self.assertEqual(offered_review["reason"], "offer")
+            self.assertEqual(
+                offered_review["events"][0]["offer"]["ticket_id"], first_id
+            )
+
+            self.principal = admin
+            expiry_start = time.time()
+            with patch.object(central.time, "time", return_value=expiry_start):
+                expiring = await admin_client._call(
+                    "ticket_create", agent_name="live-admin",
+                    title="expiry rotation", description="rotate offer to worker B",
+                    target_url="pursers/tools/wait-bridge", scope="interactive-no-send",
+                    required_fields=["test_output"], tier=1,
+                    prefer_agents=[a.identity.agent_id],
+                )
+            expiring_id = expiring["ticket"]["ticket_id"]
+            self.assertEqual(
+                expiring["ticket"]["work_offer"]["agent_id"], a.identity.agent_id
+            )
+            expiry_cursor = int(
+                self.service.journal.read_after(wait_server.BOARD_ID, 0)[
+                    "latest_cursor"
+                ]
+            )
+            with patch.object(
+                central.time, "time", return_value=expiry_start + 2.0
+            ):
+                await admin_client._call("board_reap")
+            self.principal = worker_b
+            b_rotated = await wait_server._wait_for_work(
+                b, since_seq=expiry_cursor, timeout_s=1,
+                only_mine=False, wait_for="claimable",
+            )
+            self.assertEqual(b_rotated["reason"], "offer")
+            self.assertEqual(
+                b_rotated["events"][0]["offer"]["ticket_id"], expiring_id
+            )
 
     async def test_push_task_stops_after_first_real_cue_without_cleanup_error(
         self,

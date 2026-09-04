@@ -49,6 +49,38 @@ def ticket_is_relevant(
     """Apply the wait bridge's project and ownership relevance rules."""
     if project is not None and ticket_project(ticket) != project:
         return False
+    dispatch_state = ticket.get("dispatch_state")
+    dispatch_enabled = isinstance(dispatch_state, dict)
+    if dispatch_enabled:
+        state = str(dispatch_state.get("state") or "")
+        if wait_for == WAIT_FOR_SUBMITTED:
+            offer = ticket.get("review_offer")
+            lease = ticket.get("review_lease")
+            return bool(
+                ticket.get("status") == "submitted"
+                and (
+                    (isinstance(offer, dict) and offer.get("agent_id") == my_agent_id)
+                    or (
+                        isinstance(lease, dict)
+                        and lease.get("reviewer_agent_id") == my_agent_id
+                    )
+                    or (
+                        state == "broadcast"
+                        and _review_is_available(ticket, my_agent_id)
+                    )
+                )
+            )
+        offer = ticket.get("work_offer")
+        return bool(
+            ticket.get("claimed_by_agent_id") == my_agent_id
+            or (
+                ticket.get("status") == "open"
+                and (
+                    (isinstance(offer, dict) and offer.get("agent_id") == my_agent_id)
+                    or state == "broadcast"
+                )
+            )
+        )
     if wait_for == WAIT_FOR_SUBMITTED:
         return (
             ticket.get("status") == "submitted"
@@ -78,6 +110,7 @@ def backlog_events(
     only_mine: bool,
     project: str | None,
     wait_for: str = WAIT_FOR_CLAIMABLE,
+    board_id: str | None = None,
 ) -> list[dict[str, Any]]:
     """Project relevant tickets into bounded, sequence-free wake cues."""
     wanted_status = "submitted" if wait_for == WAIT_FOR_SUBMITTED else "open"
@@ -94,12 +127,31 @@ def backlog_events(
             ticket, my_agent_id, only_mine, project, wait_for
         ):
             continue
+        offer_key = (
+            "review_offer" if wait_for == WAIT_FOR_SUBMITTED else "work_offer"
+        )
+        offer = ticket.get(offer_key)
+        offered_to_me = (
+            isinstance(offer, dict) and offer.get("agent_id") == my_agent_id
+        )
         event: dict[str, Any] = {
-            "kind": "ticket_backlog",
+            "kind": (
+                "review_offered"
+                if offered_to_me and wait_for == WAIT_FOR_SUBMITTED
+                else "ticket_offered" if offered_to_me else "ticket_backlog"
+            ),
             "source": "backlog_scan",
             "ticket_id": ticket_id,
             "status": wanted_status,
         }
+        if offered_to_me:
+            event["offer"] = {
+                "ticket_id": ticket_id,
+                "board_id": board_id,
+                "expires_at": offer.get("expires_at"),
+                "tier": ticket.get("tier", 2),
+                "skills_required": list(ticket.get("skills_required") or []),
+            }
         updated_at = ticket.get("updated_at")
         if isinstance(updated_at, str) and updated_at:
             event["updated_at"] = updated_at

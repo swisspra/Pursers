@@ -984,6 +984,11 @@ class GooseAdapter(FileAdapter):
                         token_file=Path(desired.token_file).expanduser(),
                         ca_file=Path(desired.ca_file).expanduser(),
                         python=python,
+                        tier_max=2,
+                        skills="",
+                        can_review=desired.role == "reviewer",
+                        can_work=desired.role == "worker",
+                        host="goose",
                     ),
                     0o755,
                 ),
@@ -1405,6 +1410,7 @@ class PromptRenderer:
             quoted_name=json.dumps(desired.name),
             timeout_s=desired.profile.block_s,
             action=action,
+            wait_for=("claimable" if desired.role == "worker" else "submitted"),
             host_note=f"{host_note}\n{capability_note}",
         )
 

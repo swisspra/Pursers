@@ -102,6 +102,61 @@ class BacklogTests(unittest.TestCase):
             ["TK-review", "TK-expired"],
         )
 
+    def test_dispatch_worker_sees_only_its_offer_with_offer_payload(self) -> None:
+        mine = self.ticket(
+            ticket_id="TK-mine",
+            dispatch_state={"state": "offered"},
+            work_offer={"agent_id": "AI-me", "expires_at": "later"},
+            tier=1,
+            skills_required=["python"],
+        )
+        other = self.ticket(
+            ticket_id="TK-tier-3",
+            dispatch_state={"state": "offered"},
+            work_offer={"agent_id": "AI-tier-3", "expires_at": "later"},
+            tier=3,
+        )
+
+        events = backlog_events(
+            [mine, other], "AI-me", only_mine=False, project="pursers",
+            board_id="pursers",
+        )
+
+        self.assertEqual([event["ticket_id"] for event in events], ["TK-mine"])
+        self.assertEqual(events[0]["kind"], "ticket_offered")
+        self.assertEqual(
+            events[0]["offer"],
+            {
+                "ticket_id": "TK-mine",
+                "board_id": "pursers",
+                "expires_at": "later",
+                "tier": 1,
+                "skills_required": ["python"],
+            },
+        )
+
+    def test_dispatch_reviewer_sees_only_its_review_offer(self) -> None:
+        mine = self.ticket(
+            ticket_id="TK-review-mine",
+            status="submitted",
+            dispatch_state={"state": "review_offered"},
+            review_offer={"agent_id": "AI-reviewer", "expires_at": "later"},
+        )
+        other = self.ticket(
+            ticket_id="TK-review-other",
+            status="submitted",
+            dispatch_state={"state": "review_offered"},
+            review_offer={"agent_id": "AI-other", "expires_at": "later"},
+        )
+
+        events = backlog_events(
+            [mine, other], "AI-reviewer", only_mine=False, project="pursers",
+            wait_for="submitted", board_id="pursers",
+        )
+
+        self.assertEqual([event["ticket_id"] for event in events], ["TK-review-mine"])
+        self.assertEqual(events[0]["kind"], "review_offered")
+
 
 if __name__ == "__main__":
     unittest.main()

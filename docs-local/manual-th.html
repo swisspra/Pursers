@@ -313,7 +313,10 @@ ONBOARD_CENTRAL_TOKEN = "&lt;YOUR_TOKEN&gt;"
 ONBOARD_AGENT_NAME = "team-worker"
 ONBOARD_AGENT_INSTANCE = "window-a"
 PURSERS_HOST = "codex"</code></pre>
+      <p>สำหรับ seat แบบ dispatch ให้เพิ่ม <code>PURSERS_TIER_MAX</code>, <code>PURSERS_SKILLS</code>, <code>PURSERS_CAN_WORK</code> และ <code>PURSERS_CAN_REVIEW</code>; ระบุ <code>PURSERS_MODEL</code>/<code>PURSERS_PROVIDER</code> ได้ถ้าต้องการ metadata เพิ่มเติม</p>
       <p>ค่า default คือ subscription-first: bridge ฟัง <code>subscriptions/listen</code> ของ journal และ per-seat cue แล้ว refetch แบบ <code>touch=false</code> เฉพาะเมื่อมี cue ใช้ <code>PURSERS_WAIT_MODE=poll</code> เฉพาะ fallback ที่ตั้งใจเท่านั้น หาก subscription ของบอร์ดหนึ่งล้ม จะ log ชัด ลดระดับเฉพาะ call นั้น และลอง push ใหม่เมื่อ re-arm</p>
+      <h3>งานมาถึง seat อย่างไร</h3>
+      <p>seat ที่ตั้ง capability จะประกาศ tier สูงสุด, skills, สิทธิ์ทำงาน/รีวิว, host และ model/provider ตอน join และหลัง reconnect บนบอร์ด dispatch worker จะตื่นเฉพาะ offer ของตนเอง, การหมดอายุหรือยกเลิก offer และ event ของ ticket ที่ตนถืออยู่ ส่วน reviewer จะตื่นเฉพาะ review offer ของตนเองและ review-lease event ผลลัพธ์ใช้ <code>reason="offer"</code> พร้อม ticket, board, เวลาหมดอายุ, tier และ skills ที่ต้องใช้ ห้าม claim ticket ที่ไม่ได้ offer ให้ seat นี้; หาก offer หมดอายุให้ re-arm แล้วรอใหม่ ถ้าไม่ตั้ง capability variables จะคงพฤติกรรม broadcast แบบ legacy</p>
       <h3>Host profile และเพดานการรอ</h3>
       <table>
         <thead><tr><th><code>PURSERS_HOST</code></th><th>Host/tool timeout ที่แนะนำ</th><th>ช่วง block สูงสุด</th><th>หมายเหตุ</th></tr></thead>
@@ -464,7 +467,7 @@ python tools/wait-bridge/registry_admin.py remove project-a</code></pre>
   timeout_s=560
 )</code></pre>
       <p>หากได้ <code>timed_out=true</code> ให้ re-arm ทันทีด้วย <code>new_seq</code> ที่คืนมา timeout เป็นเพียงการหมุน call ให้สั้นกว่า deadline ของ Host ไม่ใช่ error</p>
-      <p><code>wait_for="auto"</code> เลือกคิวจาก role ที่ join: worker รอ ticket ที่ claim ได้ ส่วน reviewer รอ ticket ที่ submit แล้ว การระบุ <code>wait_for="submitted"</code> ต้องมีสิทธิ์ <code>board:review</code> ค่า <code>reason</code> ที่คืนมาคือ <code>journal</code>, <code>backlog</code> หรือ <code>timeout</code> และ backlog เดิมจะถูกส่งเพียงครั้งเดียวต่อ bridge process จนกว่า ticket เปลี่ยน; เมื่อ restart อาจเห็น cue เดิมอีกหนึ่งครั้ง</p>
+      <p><code>wait_for="auto"</code> เลือกคิวจาก role ที่ join: worker รอ ticket ที่ claim ได้ ส่วน reviewer รอ ticket ที่ submit แล้ว การระบุ <code>wait_for="submitted"</code> ต้องมีสิทธิ์ <code>board:review</code> ค่า <code>reason</code> ที่คืนมาคือ <code>offer</code>, <code>journal</code>, <code>backlog</code> หรือ <code>timeout</code> และ backlog แบบ legacy เดิมจะถูกส่งเพียงครั้งเดียวต่อ bridge process จนกว่า ticket เปลี่ยน; เมื่อ restart อาจเห็น cue เดิมอีกหนึ่งครั้ง</p>
       <p>CLI seat ที่ generate แล้วใช้ <code>/PATH/TO/Pursers-local/bin/board.sh wait --since '&lt;cursor-or-json-map&gt;'</code> โดย default จะ subscribe ครั้งเดียวครอบคลุมทุก active board ใน registry; event มี <code>board_id</code> และ <code>work_dir</code> และต้องส่ง cursor map ทั้งก้อนกลับตอน re-arm คำสั่งถัดไปต้องใช้ <code>--board &lt;id&gt;</code>; ใช้ <code>--boards home</code> เฉพาะโหมด legacy บอร์ดเดียว สำหรับ poll-only fallback ใช้ <code>board.sh wait --poll</code>; ห้าม loop <code>board.sh list</code></p>
 
       <h3>Seat prompt ตัวอย่าง</h3>

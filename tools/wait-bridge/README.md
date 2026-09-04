@@ -33,6 +33,11 @@ SHA-256 `1a0981ec6cc47aed8eeb5e8f488bef260ab6b5fd5c7c88e2cd99604654103e1a`.
 | `PURSERS_WAIT_MODE` | no | `push` (default) or explicit compatibility `poll`; a subscription error polls only that board for the current call and push is retried on re-arm. |
 | `PURSERS_HOST` | no | `codex` (default), `codex-cli`, `goose`, `claude-code`, `claude-desktop`, or `headless`; selects the safe call ceiling. |
 | `PURSERS_HOST_TIMEOUT_S` | no | Explicit host/runner deadline in seconds; overrides the named profile. |
+| `PURSERS_TIER_MAX` | no | Maximum dispatch tier (`1`-`3`) declared when the seat joins. |
+| `PURSERS_SKILLS` | no | Comma-separated dispatch skills declared when the seat joins. |
+| `PURSERS_CAN_REVIEW` | no | Boolean reviewer capability declared when the seat joins. |
+| `PURSERS_CAN_WORK` | no | Boolean worker capability declared when the seat joins. |
+| `PURSERS_MODEL` / `PURSERS_PROVIDER` | no | Optional model and provider metadata included in the declaration. |
 
 With no `ONBOARD_AGENT_INSTANCE`, the effective name is exactly
 `ONBOARD_AGENT_NAME`, preserving the single-instance behavior. When the value
@@ -72,6 +77,22 @@ existing active identity does not produce another join journal event. A newly
 used name also was not a recipient of old journal entries. It can recover
 currently `open` work through the bridge's backlog scan, but it cannot discover
 old non-open history through `a2a_wait`.
+
+## How work reaches a seat
+
+When any capability variable above is present, the bridge declares that seat
+on join and again after every subscription reconnect. A dispatch-enabled board
+then wakes a worker only for its own `ticket_offered` event, offer expiry or
+revocation, and events for tickets it already holds. A reviewer waiting for
+submitted work wakes only for its own `review_offered` event and its review
+lease lifecycle. The returned `reason` is `offer`, and the event includes
+`offer: {ticket_id, board_id, expires_at, tier, skills_required}`.
+Offer addressing is checked before ticket refetch; a refetch failure discards
+the cue instead of waking a seat that was not proven to own it.
+
+Do not claim an unoffered ticket. If an offer expires or is revoked, re-arm and
+wait for the next offer. When none of the capability variables is set, the
+seat remains legacy and open/backlog broadcast behavior is unchanged.
 
 ## Multi-board response
 

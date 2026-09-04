@@ -290,6 +290,81 @@ async def test_events_reports_each_honored_subscription_handshake(
 
 
 @pytest.mark.anyio
+async def test_events_redeclares_after_subscription_reconnect(monkeypatch) -> None:
+    import pursers_client.client as client_module
+
+    board = client()
+    board.reconnect_delay_s = 0.01
+    journal_uri = "board://board-multi-name/journal"
+    second_handshake = asyncio.Event()
+    callback_count = 0
+    session_count = 0
+
+    @asynccontextmanager
+    async def context(value):
+        yield value
+
+    class Subscription:
+        honored = SimpleNamespace(resource_subscriptions=[journal_uri])
+
+        def __init__(self, index: int) -> None:
+            self.index = index
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            if self.index == 1:
+                raise StopAsyncIteration
+            await asyncio.Event().wait()
+            raise StopAsyncIteration
+
+    class Session:
+        def __init__(self, index: int) -> None:
+            self.index = index
+
+        def listen(self, **_arguments):
+            return context(Subscription(self.index))
+
+    def session_context(*_args, **_kwargs):
+        nonlocal session_count
+        session_count += 1
+        return context(Session(session_count))
+
+    async def drain(*_args, **_kwargs):
+        if False:
+            yield {}
+
+    def on_handshake() -> None:
+        nonlocal callback_count
+        callback_count += 1
+        if callback_count == 2:
+            second_handshake.set()
+
+    monkeypatch.setattr(board, "_http", lambda: context(object()))
+    monkeypatch.setattr(board, "_drain", drain)
+    monkeypatch.setattr(
+        client_module, "streamable_http_client", lambda *_args, **_kwargs: object()
+    )
+    monkeypatch.setattr(client_module, "Client", session_context)
+
+    events = board.events(
+        from_cursor=4,
+        only_mine=False,
+        resource_subscriptions=(journal_uri,),
+        acknowledge=False,
+        touch=False,
+        subscription_callback=on_handshake,
+    )
+    pending = asyncio.create_task(anext(events))
+    await asyncio.wait_for(second_handshake.wait(), timeout=1)
+    assert callback_count == 2
+    pending.cancel()
+    await asyncio.gather(pending, return_exceptions=True)
+    await events.aclose()
+
+
+@pytest.mark.anyio
 async def test_events_early_close_exits_listen_scopes_in_producer_task(
     monkeypatch,
 ) -> None:
