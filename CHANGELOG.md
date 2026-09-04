@@ -9,6 +9,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed
 
+- `a2a_wait(wait_for="auto")` now derives reviewer waits from the joined role,
+  wakes reviewers only for submitted/review work, suppresses unchanged backlog
+  cues after their first process-local return, and reports whether each return
+  came from the journal, backlog, or timeout.
 - `BoardClient.events()` now owns MCP listen scopes in a dedicated producer
   task, and generated seats close the event stream explicitly after one cue,
   preventing early-exit cancel-scope errors and false nonzero wait exits.

@@ -449,6 +449,7 @@ python tools/wait-bridge/registry_admin.py remove project-a</code></pre>
   timeout_s=560
 )</code></pre>
       <p>หากได้ <code>timed_out=true</code> ให้ re-arm ทันทีด้วย <code>new_seq</code> ที่คืนมา timeout เป็นเพียงการหมุน call ให้สั้นกว่า deadline ของ Host ไม่ใช่ error</p>
+      <p><code>wait_for="auto"</code> เลือกคิวจาก role ที่ join: worker รอ ticket ที่ claim ได้ ส่วน reviewer รอ ticket ที่ submit แล้ว การระบุ <code>wait_for="submitted"</code> ต้องมีสิทธิ์ <code>board:review</code> ค่า <code>reason</code> ที่คืนมาคือ <code>journal</code>, <code>backlog</code> หรือ <code>timeout</code> และ backlog เดิมจะถูกส่งเพียงครั้งเดียวต่อ bridge process จนกว่า ticket เปลี่ยน; เมื่อ restart อาจเห็น cue เดิมอีกหนึ่งครั้ง</p>
       <p>CLI seat ที่ generate แล้วใช้ <code>/PATH/TO/Pursers-local/bin/board.sh wait --since &lt;cursor&gt;</code> และ re-arm ด้วย cursor ใหม่ทุกครั้ง สำหรับ poll-only fallback flag ใน release นี้สะกดว่า <code>board.sh wait --poll</code>; ห้าม loop <code>board.sh list</code></p>
 
       <h3>Seat prompt ตัวอย่าง</h3>

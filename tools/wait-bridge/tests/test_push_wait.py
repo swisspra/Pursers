@@ -86,6 +86,21 @@ class InProcessBoardClient:
             required_fields=["test_output"],
         )
 
+    async def claim_ticket(self, ticket_id: str) -> dict[str, Any]:
+        return await self._call(
+            "ticket_claim", agent_name="push-actor", ticket_id=ticket_id
+        )
+
+    async def submit_ticket(self, ticket_id: str) -> dict[str, Any]:
+        return await self._call(
+            "ticket_submit",
+            agent_name="push-actor",
+            ticket_id=ticket_id,
+            summary="reviewer wait fixture",
+            notes="test_output: PASS",
+            files_changed=[],
+        )
+
     async def events_for_board(
         self,
         board_id: str,
@@ -330,6 +345,7 @@ class ManualClock:
 
 class PushWaitTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
+        wait_server._BACKLOG_SEEN.clear()
         self.temp_dir = tempfile.TemporaryDirectory(dir=ROOT)
         self.root = Path(self.temp_dir.name)
         jwks_path = self.root / "jwks.json"
@@ -532,6 +548,7 @@ class PushWaitTests(unittest.IsolatedAsyncioTestCase):
                         timeout_s=2,
                         only_mine=False,
                         project="pursers",
+                        wait_for="claimable",
                     )
                 )
                 await asyncio.wait_for(ready.wait(), timeout=1)
@@ -549,6 +566,40 @@ class PushWaitTests(unittest.IsolatedAsyncioTestCase):
                     for event in result["events"]
                 )
             )
+
+    async def test_reviewer_real_listen_ignores_open_and_wakes_on_submit(self) -> None:
+        async with Client(self.mcp, mode="2026-07-28", cache=None) as raw:
+            client = await self._joined_client(raw)
+            open_ticket = await client.create_ticket("open reviewer fixture")
+            ready = asyncio.Event()
+            signaling = SignalingListenClient(raw, ready)
+            client._client = signaling
+
+            with patch.object(wait_server, "WAIT_MODE", "push"):
+                waiting = asyncio.create_task(
+                    wait_server._wait_for_work(
+                        client,
+                        since_seq=0,
+                        timeout_s=2,
+                        only_mine=False,
+                        project="pursers",
+                    )
+                )
+                await asyncio.wait_for(ready.wait(), timeout=1)
+                submitted = await client.create_ticket("submitted reviewer fixture")
+                ticket_id = submitted["ticket"]["ticket_id"]
+                await client.claim_ticket(ticket_id)
+                await client.submit_ticket(ticket_id)
+                result = await asyncio.wait_for(waiting, timeout=1)
+
+            self.assertEqual(client.identity.role, "reviewer")
+            self.assertEqual(result["reason"], "journal")
+            self.assertFalse(result["timed_out"])
+            self.assertEqual(
+                [event.get("ticket_id") for event in result["events"]],
+                [ticket_id],
+            )
+            self.assertNotEqual(ticket_id, open_ticket["ticket"]["ticket_id"])
 
     async def test_push_timeout_is_honored(self) -> None:
         async with Client(self.mcp, mode="2026-07-28", cache=None) as raw:
@@ -570,6 +621,7 @@ class PushWaitTests(unittest.IsolatedAsyncioTestCase):
                         timeout_s=1,
                         only_mine=False,
                         project="pursers",
+                        wait_for="claimable",
                     )
                 )
                 await asyncio.wait_for(ready.wait(), timeout=1)
@@ -601,6 +653,7 @@ class PushWaitTests(unittest.IsolatedAsyncioTestCase):
                         timeout_s=2,
                         only_mine=False,
                         project="pursers",
+                        wait_for="claimable",
                     )
                 )
                 await asyncio.wait_for(attempted.wait(), timeout=1)
@@ -634,6 +687,7 @@ class PushWaitTests(unittest.IsolatedAsyncioTestCase):
                         timeout_s=2,
                         only_mine=False,
                         project="pursers",
+                        wait_for="claimable",
                     )
                 )
                 await asyncio.sleep(0.05)
@@ -827,6 +881,7 @@ class PushWaitTests(unittest.IsolatedAsyncioTestCase):
                 "events": [event],
                 "waited_s": 0.25,
                 "timed_out": False,
+                "reason": "journal",
                 "resynced": False,
             },
         )

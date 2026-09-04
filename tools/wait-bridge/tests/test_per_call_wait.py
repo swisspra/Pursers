@@ -6,6 +6,7 @@ import sys
 import unittest
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -19,14 +20,15 @@ import pursers_wait_server as wait_server  # noqa: E402
 
 
 class FakeClient:
-    def __init__(self) -> None:
+    def __init__(self, role: str = "worker") -> None:
         self.agent_name = "env-default"
+        self.role = role
         self.identity = JoinedIdentity(
             wait_server.BOARD_ID,
             wait_server._derived_agent_id("PR-shared", "env-default"),
             "PR-shared",
             "env-default",
-            "worker",
+            role,
         )
         self.join_calls: list[str | None] = []
         self.catchup_calls: list[str | None] = []
@@ -42,7 +44,7 @@ class FakeClient:
             wait_server._derived_agent_id("PR-shared", selected),
             "PR-shared",
             selected,
-            "worker",
+            self.role,
         )
         if agent_name is None:
             self.identity = identity
@@ -97,6 +99,9 @@ class FakeClient:
 
 
 class PerCallWaitTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        wait_server._BACKLOG_SEEN.clear()
+
     async def test_omitted_name_uses_default_without_extra_join(self) -> None:
         client = FakeClient()
 
@@ -214,6 +219,107 @@ class PerCallWaitTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(client.renewed, ["TK-mine"])
+
+    async def test_auto_reviewer_ignores_open_backlog_and_times_out(self) -> None:
+        client = FakeClient(role="reviewer")
+
+        async def empty_catchup(**arguments: Any):
+            return {
+                "events": [],
+                "next_cursor": int(arguments["cursor"]),
+                "has_more": False,
+                "resync_required": False,
+            }
+
+        async def open_backlog(**_arguments: Any):
+            return {"tickets": [{"ticket_id": "TK-open", "status": "open"}]}
+
+        client.board_catchup = empty_catchup  # type: ignore[method-assign]
+        client.ticket_list = open_backlog  # type: ignore[method-assign]
+        with (
+            patch.object(wait_server, "WAIT_MODE", "poll"),
+            patch.object(wait_server, "clamp_timeout", return_value=0.03),
+            patch.object(wait_server, "DEFAULT_POLL_INTERVAL_S", 0.01),
+        ):
+            result = await wait_server._wait_for_work(
+                client, timeout_s=1, only_mine=False
+            )
+
+        self.assertTrue(result["timed_out"])
+        self.assertEqual(result["reason"], "timeout")
+
+    async def test_worker_backlog_is_surfaced_once_until_journal_change(self) -> None:
+        client = FakeClient()
+        ticket = {
+            "ticket_id": "TK-once",
+            "status": "open",
+            "updated_at": "2026-09-04T12:00:00Z",
+        }
+
+        async def ticket_list(**_arguments: Any):
+            return {"tickets": [ticket]}
+
+        client.ticket_list = ticket_list  # type: ignore[method-assign]
+        first = await wait_server._scan_open_backlog(
+            client, client.identity.agent_id, False, None
+        )
+        second = await wait_server._scan_open_backlog(
+            client, client.identity.agent_id, False, None
+        )
+        wait_server._forget_backlog_for_events(
+            wait_server.BOARD_ID,
+            [{"kind": "ticket_status_changed", "ticket_id": "TK-once"}],
+        )
+        third = await wait_server._scan_open_backlog(
+            client, client.identity.agent_id, False, None
+        )
+
+        self.assertEqual([event["ticket_id"] for event in first], ["TK-once"])
+        self.assertEqual(second, [])
+        self.assertEqual([event["ticket_id"] for event in third], ["TK-once"])
+
+    async def test_submitted_backlog_wakes_reviewer(self) -> None:
+        client = FakeClient(role="reviewer")
+
+        async def empty_catchup(**arguments: Any):
+            return {
+                "events": [],
+                "next_cursor": int(arguments["cursor"]),
+                "has_more": False,
+                "resync_required": False,
+            }
+
+        async def submitted_backlog(**_arguments: Any):
+            return {
+                "tickets": [
+                    {
+                        "ticket_id": "TK-submitted",
+                        "status": "submitted",
+                        "review_state": "unclaimed",
+                    }
+                ]
+            }
+
+        client.board_catchup = empty_catchup  # type: ignore[method-assign]
+        client.ticket_list = submitted_backlog  # type: ignore[method-assign]
+        result = await wait_server._wait_for_work(
+            client, timeout_s=1, only_mine=True
+        )
+
+        self.assertFalse(result["timed_out"])
+        self.assertEqual(result["reason"], "backlog")
+        self.assertEqual(result["events"][0]["ticket_id"], "TK-submitted")
+
+    async def test_wait_for_override_requires_reviewer_authorization(self) -> None:
+        worker = FakeClient()
+        with self.assertRaisesRegex(wait_server.ToolError, "board:review"):
+            await wait_server._wait_for_work(worker, wait_for="submitted")
+
+        reviewer = FakeClient(role="reviewer")
+        result = await wait_server._wait_for_work(
+            reviewer, wait_for="claimable", only_mine=True
+        )
+        self.assertEqual(result["events"][0]["status_to"], "open")
 
 
 if __name__ == "__main__":
