@@ -179,6 +179,125 @@ class LegacyToolsTests(unittest.IsolatedAsyncioTestCase):
                 for dep in central.DEPRECATED_TOOLS:
                     self.assertIn(dep, tool_names)
 
+    async def test_never_joined_request_metadata_cannot_enable_legacy_tools(
+        self,
+    ) -> None:
+        client = Client(
+            self.mcp,
+            client_info=types.Implementation(
+                name="never-joined-seat", version="1.0"
+            ),
+            mode="2026-07-28",
+            cache=None,
+        )
+        async with client:
+            result = await client.list_tools(
+                meta={
+                    "io.modelcontextprotocol/clientCapabilities": {
+                        "legacy_tools": True
+                    },
+                    "legacy_tools": True,
+                }
+            )
+
+        self.assertEqual(len(result.tools), 29)
+        self.assertTrue(
+            central.DEPRECATED_TOOLS.isdisjoint(
+                {tool.name for tool in result.tools}
+            )
+        )
+
+    async def test_warning_append_failure_retries_without_poisoned_dedupe(
+        self,
+    ) -> None:
+        client_info = types.Implementation(name="admin-agent", version="1.0")
+        original_append_once = self.service.journal.append_once
+        failed = False
+
+        def fail_first_warning(*args, **kwargs):
+            nonlocal failed
+            event = args[1]
+            if event.get("kind") == "deprecated_tool_warning" and not failed:
+                failed = True
+                raise OSError("synthetic warning append failure")
+            return original_append_once(*args, **kwargs)
+
+        before = self.service.journal.read_after("pursers", 0, 1)[
+            "latest_cursor"
+        ]
+        async with Client(
+            self.mcp,
+            client_info=client_info,
+            mode="2026-07-28",
+            cache=None,
+        ) as client:
+            with patch.object(
+                self.service.journal,
+                "append_once",
+                side_effect=fail_first_warning,
+            ):
+                with self.assertRaises(central.MCPError):
+                    await client.call_tool(
+                        "board_get_briefing", {"board_id": "pursers"}
+                    )
+            after_failure = self.service.journal.read_after(
+                "pursers", before, 100
+            )
+            self.assertEqual(
+                [
+                    event
+                    for event in after_failure["events"]
+                    if event.get("kind") == "deprecated_tool_warning"
+                ],
+                [],
+            )
+
+            retry = await client.call_tool(
+                "board_get_briefing", {"board_id": "pursers"}
+            )
+            self.assertFalse(retry.is_error)
+            repeat = await client.call_tool(
+                "board_get_briefing", {"board_id": "pursers"}
+            )
+            self.assertFalse(repeat.is_error)
+
+        warnings = [
+            event
+            for event in self.service.journal.read_after(
+                "pursers", before, 100
+            )["events"]
+            if event.get("kind") == "deprecated_tool_warning"
+        ]
+        self.assertEqual(len(warnings), 1)
+        self.assertEqual(warnings[0]["tool"], "board_get_briefing")
+        self.assertEqual(warnings[0]["caller_principal_id"], "PR-admin")
+        self.assertEqual(warnings[0]["caller_agent_name"], "admin-agent")
+
+        restarted_mcp, restarted_service = central.build_server(
+            "localhost", 8765, self.root / "data"
+        )
+        self.mcp = restarted_mcp
+        self.service = restarted_service
+        restart_cursor = self.service.journal.read_after("pursers", 0, 1)[
+            "latest_cursor"
+        ]
+        async with Client(
+            self.mcp,
+            client_info=client_info,
+            mode="2026-07-28",
+            cache=None,
+        ) as client:
+            after_restart = await client.call_tool(
+                "board_get_briefing", {"board_id": "pursers"}
+            )
+        self.assertFalse(after_restart.is_error)
+        self.assertEqual(
+            self.service.journal.read_after("pursers", 0, 1)[
+                "latest_cursor"
+            ],
+            restart_cursor,
+        )
+
     async def test_calling_deprecated_tool_post_authorization_durable_dedupe_and_restart(self) -> None:
         """Denials cause zero mutation/events; authorized calls emit sequenced journal warning and dedupe survives restart."""
         # 1. Adversarial test: unjoined outsider calling ticket_terminate against pursers board

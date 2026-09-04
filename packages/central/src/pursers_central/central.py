@@ -130,7 +130,14 @@ REVIEW_POLICIES = frozenset({"strict", "workflow"})
 REVIEW_EVENT_KINDS = frozenset({"board_review_policy_changed"}) | REVIEW_LEASE_KINDS
 DEPRECATION_EVENT_KINDS = frozenset({"deprecated_tool_warning"})
 DEPRECATION_EVENT_FIELDS = frozenset(
-    {"tool", "message", "fixture_provenance", "recipient_identities"}
+    {
+        "tool",
+        "message",
+        "caller_principal_id",
+        "caller_agent_name",
+        "fixture_provenance",
+        "recipient_identities",
+    }
 )
 DEPRECATED_TOOLS = frozenset(
     {
@@ -445,8 +452,6 @@ class CentralBoard:
                 if member is not None:
                     caps = member.get("capabilities", {})
                     if isinstance(caps, Mapping) and caps.get("legacy_tools") is True:
-                        return True
-                    if member.get("legacy_tools") is True:
                         return True
         except Exception:
             pass
@@ -1265,62 +1270,61 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                     board_id = kwargs.get("board_id")
                     if not board_id and args:
                         board_id = args[0] if isinstance(args[0], str) else None
-                    agent_name = kwargs.get("agent_name") or "unknown"
-                    actor_key = None
-                    try:
-                        p = current_principal()
-                        actor_key = p.principal_id
-                    except Exception:
-                        actor_key = "anonymous"
+                    ctx = kwargs.get("ctx")
+                    if ctx is None:
+                        ctx = next(
+                            (value for value in args if isinstance(value, Context)),
+                            None,
+                        )
+                    agent_name = kwargs.get("agent_name")
+                    if not agent_name and ctx is not None:
+                        try:
+                            client_params = ctx.session.client_params
+                        except (AttributeError, ValueError):
+                            client_params = None
+                        client_info = (
+                            client_params.client_info
+                            if client_params is not None
+                            else None
+                        )
+                        agent_name = getattr(client_info, "name", None)
 
                     if board_id and isinstance(board_id, str):
-                        full_caller_id = f"{board_id}:{actor_key}:{agent_name}:{tool_name}"
-
-                        def record_warning_once(document: dict[str, Any]) -> bool:
-                            warned = document.setdefault("deprecated_warned_callers", {})
-                            if full_caller_id in warned:
-                                return False
-                            warned[full_caller_id] = iso_at(time.time())
-                            return True
-
-                        try:
-                            should_warn = service.mutate(
-                                board_id, record_warning_once, require_generation=False
-                            )
-                            if should_warn:
-                                actor_agent = (
-                                    agent_id(board_id, actor_key, agent_name)
-                                    if actor_key != "anonymous"
-                                    else actor_key
-                                )
-                                ctx = kwargs.get("ctx")
-                                if ctx is None:
-                                    for a in args:
-                                        if isinstance(a, Context):
-                                            ctx = a
-                                            break
-                                await append_and_publish(
-                                    board_id,
-                                    {"agent_id": actor_agent},
-                                    "deprecated_tool_warning",
-                                    f"board://{board_id}/tool/{tool_name}",
-                                    [],
-                                    ctx,
-                                    tool=tool_name,
-                                    message=f"Tool '{tool_name}' is deprecated in a18 and scheduled for removal in a19.",
-                                )
-                                if isinstance(result, dict):
-                                    cur_seq = latest_seq(board_id)
-                                    if "latest_seq" in result:
-                                        result["latest_seq"] = cur_seq
-                                    if (
-                                        "briefing" in result
-                                        and isinstance(result["briefing"], dict)
-                                        and "latest_seq" in result["briefing"]
-                                    ):
-                                        result["briefing"]["latest_seq"] = cur_seq
-                        except Exception:
-                            pass
+                        principal = current_principal()
+                        caller_name = str(agent_name or "unknown")
+                        actor_agent = agent_id(
+                            board_id, principal.principal_id, caller_name
+                        )
+                        _warning, created = await append_once_and_publish(
+                            board_id,
+                            {"agent_id": actor_agent},
+                            "deprecated_tool_warning",
+                            f"board://{board_id}/tool/{tool_name}",
+                            [],
+                            ctx,
+                            unique_fields=(
+                                "tool",
+                                "caller_principal_id",
+                                "caller_agent_name",
+                            ),
+                            tool=tool_name,
+                            caller_principal_id=principal.principal_id,
+                            caller_agent_name=caller_name,
+                            message=(
+                                f"Tool '{tool_name}' is deprecated in a18 and "
+                                "scheduled for removal in a19."
+                            ),
+                        )
+                        if created and isinstance(result, dict):
+                            cur_seq = latest_seq(board_id)
+                            if "latest_seq" in result:
+                                result["latest_seq"] = cur_seq
+                            if (
+                                "briefing" in result
+                                and isinstance(result["briefing"], dict)
+                                and "latest_seq" in result["briefing"]
+                            ):
+                                result["briefing"]["latest_seq"] = cur_seq
 
                 return result
 
@@ -1381,7 +1385,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         kind: str,
         payload_ref: str,
         recipients: list[str],
-        ctx: Context,
+        ctx: Context | None,
         *,
         unique_fields: tuple[str, ...],
         **fields: Any,
@@ -1403,7 +1407,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             raise
         except Exception as exc:
             raise MCPError(INTERNAL_ERROR, "Internal server error") from exc
-        if created:
+        if created and ctx is not None:
             pending = service.pending_notifications.get()
             journal_uri = f"board://{board_id}/journal"
             if pending is None:
@@ -5427,6 +5431,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
     async def memory_search(
         board_id: str,
         query: str,
+        ctx: Context,
         tag: str | None = None,
         author: str | None = None,
         include_archived: bool = False,
@@ -5487,6 +5492,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
     @tool()
     async def memory_links(
         board_id: str,
+        ctx: Context,
         memory_id: str | None = None,
         ticket_id: str | None = None,
         file: str | None = None,
@@ -5774,6 +5780,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
     @tool()
     async def board_get_briefing(
         board_id: str,
+        ctx: Context,
         token_budget: int = 4_000,
         ticket_id: str | None = None,
     ) -> dict[str, Any]:
@@ -6227,13 +6234,10 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
     ) -> types.ListToolsResult:
         meta = ctx.meta if hasattr(ctx, "meta") and isinstance(ctx.meta, Mapping) else {}
         client_info = meta.get("io.modelcontextprotocol/clientInfo") or {}
-        client_caps = meta.get("io.modelcontextprotocol/clientCapabilities") or {}
         agent_name = client_info.get("name") if isinstance(client_info, Mapping) else None
 
         legacy = False
         if os.environ.get("PURSERS_LEGACY_TOOLS") == "1":
-            legacy = True
-        elif client_caps.get("legacy_tools") is True or meta.get("legacy_tools") is True:
             legacy = True
         elif agent_name:
             try:
