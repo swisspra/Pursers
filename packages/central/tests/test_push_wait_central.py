@@ -100,7 +100,8 @@ class PushWaitCentralTests(unittest.IsolatedAsyncioTestCase):
 
     async def join(self, principal: central.Principal, name: str) -> str:
         self.principal = principal
-        joined = await self.call("board_join", agent_name=name)
+        role = "coordinator" if "board:coordinate" in principal.scopes else "worker"
+        joined = await self.call("board_join", agent_name=name, role=role)
         self.assertFalse(joined.is_error)
         return joined.structured_content["agent_id"]
 

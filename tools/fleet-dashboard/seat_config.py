@@ -11,6 +11,8 @@ from __future__ import annotations
 import argparse
 import asyncio
 import ast
+import hashlib
+import hmac
 import importlib.util
 import json
 import os
@@ -358,6 +360,48 @@ def _inspect_env_var(
     )
 
 
+def _env_value_digest(
+    var_name: str,
+    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+) -> tuple[str, str | None, str]:
+    """Read only a SHA-256 digest from process or login-shell state."""
+    if not ENV_NAME.fullmatch(var_name):
+        return "FAIL", None, f"invalid environment variable name {var_name!r}"
+    value = os.environ.get(var_name)
+    if value:
+        return "PASS", hashlib.sha256(value.encode()).hexdigest(), "process"
+    code = (
+        "import hashlib,os,sys;v=os.environ.get(sys.argv[1],'');"
+        "print(hashlib.sha256(v.encode()).hexdigest() if v else '')"
+    )
+    command = shlex.join([sys.executable, "-c", code, var_name])
+    candidates = [os.environ.get("SHELL", "").strip(), "zsh", "bash"]
+    searched: list[str] = []
+    for candidate in candidates:
+        if not candidate or candidate in searched:
+            continue
+        searched.append(candidate)
+        shell = shutil.which(candidate)
+        if not shell:
+            continue
+        try:
+            result = runner(
+                [shell, "-lic", command],
+                check=False,
+                text=True,
+                capture_output=True,
+                timeout=5,
+            )
+        except Exception:
+            continue
+        digest = result.stdout.strip()
+        if result.returncode == 0 and re.fullmatch(r"[0-9a-f]{64}", digest):
+            return "PASS", digest, f"login-shell ({shell})"
+        if result.returncode == 0:
+            return "FAIL", None, f"login-shell ({shell})"
+    return "FAIL", None, f"unavailable (searched {', '.join(searched)})"
+
+
 CAT_COMMAND_PATTERN = re.compile(r'\$\(\s*(cat\s+[^)\n]+)\)')
 
 
@@ -484,7 +528,7 @@ def _extract_env_token_references(
         doc = inspection.get("document", {})
         bearer_var = (
             doc.get("mcp_servers", {})
-            .get("pursers-dev", {})
+            .get(desired.http_connector_name, {})
             .get("bearer_token_env_var")
         )
         vars_.append(bearer_var or desired.token_env_var)
@@ -562,24 +606,31 @@ class DesiredSeat:
     personal_command: str = "pursers-personal"
     token_env_var: str = "ONBOARD_CENTRAL_TOKEN"
     bridge_name: str | None = None
+    board_connector_name: str | None = None
     tier_max: int = 2
     skills: tuple[str, ...] = ()
     can_review: bool | None = None
-    can_work: bool = True
+    can_work: bool | None = None
     model: str | None = None
     provider: str | None = None
 
     def __post_init__(self) -> None:
         if self.host not in HOST_PROFILES:
             raise ValueError(f"unsupported host: {self.host}")
-        if self.role not in {"worker", "reviewer", "orchestrator"}:
-            raise ValueError("role must be worker, reviewer, or orchestrator")
+        if self.role not in {"worker", "reviewer", "orchestrator", "coordinator"}:
+            raise ValueError(
+                "role must be worker, reviewer, orchestrator, or coordinator"
+            )
         if not SAFE_NAME.fullmatch(self.name):
             raise ValueError("seat name must be a safe 1-80 character identifier")
         if not SAFE_NAME.fullmatch(self.home_board):
             raise ValueError("home board must be a safe 1-80 character identifier")
         if not ENV_NAME.fullmatch(self.token_env_var):
             raise ValueError("token env var must be a safe identifier")
+        if self.board_connector_name is not None and not SAFE_NAME.fullmatch(
+            self.board_connector_name
+        ):
+            raise ValueError("board connector name must be a safe identifier")
         if isinstance(self.tier_max, bool) or self.tier_max not in {1, 2, 3}:
             raise ValueError("tier_max must be 1, 2, or 3")
         normalized_skills = tuple(
@@ -589,13 +640,21 @@ class DesiredSeat:
             raise ValueError("skills must contain safe identifiers")
         object.__setattr__(self, "skills", normalized_skills)
         if self.can_review is None:
-            object.__setattr__(
-                self,
-                "can_review",
-                self.role == "reviewer" and self.tier_max > 1,
-            )
+            object.__setattr__(self, "can_review", self.role == "reviewer")
+        if self.can_work is None:
+            object.__setattr__(self, "can_work", self.role == "worker")
         if not isinstance(self.can_review, bool) or not isinstance(self.can_work, bool):
             raise ValueError("can_review and can_work must be boolean")
+        if self.role == "worker" and self.can_review:
+            raise ValueError("worker seats cannot declare can_review=true")
+        if self.role == "reviewer" and self.can_work:
+            raise ValueError("reviewer seats cannot declare can_work=true")
+        if self.role in {"orchestrator", "coordinator"} and (
+            self.can_work or self.can_review
+        ):
+            raise ValueError(
+                f"{self.role} seats cannot declare work or review capabilities"
+            )
         for field_name in ("model", "provider"):
             value = getattr(self, field_name)
             if value is not None and (not isinstance(value, str) or len(value) > 200):
@@ -604,6 +663,12 @@ class DesiredSeat:
     @property
     def connector_name(self) -> str:
         return self.bridge_name or f"pursers-wait-{self.name}"
+
+    @property
+    def http_connector_name(self) -> str:
+        if self.board_connector_name is not None:
+            return self.board_connector_name
+        return "pursers-review" if self.role == "reviewer" else "pursers-dev"
 
     @property
     def profile(self) -> HostProfile:
@@ -799,9 +864,15 @@ def _remove_toml_tables(text: str, names: set[str]) -> str:
     return "".join(kept).rstrip() + "\n"
 
 
-def _bridge_shell_args() -> list[str]:
+def _bridge_shell_args(
+    token_env_var: str = "ONBOARD_CENTRAL_TOKEN",
+) -> list[str]:
+    if not ENV_NAME.fullmatch(token_env_var):
+        raise ValueError("token env var must be a safe identifier")
     script = (
+        f'connector_token=${{{token_env_var}-}}; '
         'token=$(tr -d "\\r\\n" < "$ONBOARD_CENTRAL_TOKEN_FILE"); '
+        'export PURSERS_BOARD_CONNECTOR_TOKEN="$connector_token"; '
         'export ONBOARD_CENTRAL_TOKEN="$token"; exec "$PURSERS_BRIDGE_COMMAND"'
     )
     return ["-c", script]
@@ -822,14 +893,17 @@ class CodexAdapter(FileAdapter):
 
     def _render(self, desired: DesiredSeat) -> str:
         name = desired.connector_name
+        board_name = desired.http_connector_name
         if not SAFE_NAME.fullmatch(name):
             raise ValueError("bridge connector name is unsafe")
+        if name == board_name:
+            raise ValueError("bridge and board connector names must differ")
         current = self.path.read_text(encoding="utf-8") if self.path.exists() else ""
         tables = {
             f"mcp_servers.{name}",
             f"mcp_servers.{name}.env",
-            "mcp_servers.pursers-dev",
-            "mcp_servers.pursers-dev.env_http_headers",
+            f"mcp_servers.{board_name}",
+            f"mcp_servers.{board_name}.env_http_headers",
         }
         prefix = _remove_toml_tables(current, tables)
         prefix = "".join(
@@ -840,7 +914,7 @@ class CodexAdapter(FileAdapter):
         block = f"""
 [{f'mcp_servers.{name}'}]
 command = "/bin/sh"
-args = {_toml_array(_bridge_shell_args())}
+args = {_toml_array(_bridge_shell_args(desired.token_env_var))}
 tool_timeout_sec = {desired.profile.host_timeout_s}
 
 [{f'mcp_servers.{name}.env'}]
@@ -857,13 +931,14 @@ PURSERS_CAN_REVIEW = {_toml_string(str(desired.can_review).lower())}
 PURSERS_CAN_WORK = {_toml_string(str(desired.can_work).lower())}
 PURSERS_MODEL = {_toml_string(desired.model or '')}
 PURSERS_PROVIDER = {_toml_string(desired.provider or '')}
+PURSERS_REQUIRE_TOKEN_MATCH = "1"
 SSL_CERT_FILE = {_toml_string(desired.ca_file)}
 
-[mcp_servers.pursers-dev]
+[mcp_servers.{board_name}]
 url = {_toml_string(desired.central_url)}
 bearer_token_env_var = {_toml_string(desired.token_env_var)}
 
-[mcp_servers.pursers-dev.env_http_headers]
+[mcp_servers.{board_name}.env_http_headers]
 ONBOARD_BOARD_ID = {_toml_string(desired.home_board)}
 """
         result = prefix.rstrip() + "\n\n" + MANAGED_COMMENT + block
@@ -875,6 +950,18 @@ ONBOARD_BOARD_ID = {_toml_string(desired.home_board)}
         before = self.path.read_text(encoding="utf-8") if self.path.exists() else None
         if before == after:
             return []
+        if before:
+            try:
+                b_doc = tomllib.loads(before).get("mcp_servers", {})
+                a_doc = tomllib.loads(after).get("mcp_servers", {})
+                name = desired.connector_name
+                board_name = desired.http_connector_name
+                if b_doc.get(name) == a_doc.get(name) and b_doc.get(
+                    board_name
+                ) == a_doc.get(board_name):
+                    return []
+            except Exception:
+                pass
         return [Change(self.path, "Codex wait and board connectors", before, after)]
 
 
@@ -893,7 +980,10 @@ def _goose_block(desired: DesiredSeat) -> list[str]:
         f"    timeout: {desired.profile.host_timeout_s}\n",
         f"    cmd: {_yaml_quote('/bin/sh')}\n",
         "    args:\n",
-        *[f"      - {_yaml_quote(item)}\n" for item in _bridge_shell_args()],
+        *[
+            f"      - {_yaml_quote(item)}\n"
+            for item in _bridge_shell_args(desired.token_env_var)
+        ],
         "    envs:\n",
         f"      PURSERS_BRIDGE_COMMAND: {_yaml_quote(desired.bridge_command)}\n",
         f"      ONBOARD_CENTRAL_TOKEN_FILE: {_yaml_quote(desired.token_file)}\n",
@@ -1090,7 +1180,7 @@ def _bridge_json(desired: DesiredSeat) -> dict[str, Any]:
     }
     return {
         "command": "/bin/sh",
-        "args": _bridge_shell_args(),
+        "args": _bridge_shell_args(desired.token_env_var),
         "env": env,
     }
 
@@ -1487,6 +1577,7 @@ def _default_live_probe(desired: DesiredSeat, timeout_s: float) -> dict[str, Any
             token,
             desired.home_board,
             agent_name=desired.name,
+            role=desired.role,
         ) as client:
             status = await client.board_status()
             state = await client.board_state_get("project_registry")
@@ -1547,6 +1638,7 @@ def _default_live_probe(desired: DesiredSeat, timeout_s: float) -> dict[str, Any
                         token,
                         board,
                         agent_name=desired.name,
+                        role=desired.role,
                     ) as board_client:
                         await board_client.board_status()
                     available.append(board)
@@ -1628,6 +1720,43 @@ class Doctor:
                         ),
                     )
                 )
+        configured_role = None
+        if desired.host in {"codex", "codex-cli"}:
+            configured_role = (
+                inspection.get("document", {})
+                .get("mcp_servers", {})
+                .get(desired.connector_name, {})
+                .get("env", {})
+                .get("PURSERS_ROLE")
+            )
+        elif desired.host in {"claude-desktop", "claude-code"}:
+            configured_role = (
+                inspection.get("document", {})
+                .get("mcpServers", {})
+                .get(desired.connector_name, {})
+                .get("env", {})
+                .get("PURSERS_ROLE")
+            )
+        elif desired.host == "goose":
+            match = re.search(
+                rf"(?ms)^  {re.escape(desired.connector_name)}:\s*$.*?PURSERS_ROLE:\s*([^\s\n]+)",
+                inspection.get("text", ""),
+            )
+            configured_role = match.group(1).strip("\"'") if match else None
+        if configured_role is not None:
+            role_ok = configured_role == desired.role
+            rows.append(
+                self._check(
+                    desired,
+                    "role",
+                    "PASS" if role_ok else "FAIL",
+                    (
+                        f"declared role '{configured_role}' matches seat"
+                        if role_ok
+                        else f"declared role '{configured_role}' differs from seat '{desired.role}'"
+                    ),
+                )
+            )
         timeout = desired.profile.host_timeout_s
         if desired.host in {"codex", "codex-cli"}:
             timeout = (
@@ -1687,6 +1816,41 @@ class Doctor:
                     "token-env",
                     env_status,
                     "; ".join(env_messages),
+                )
+            )
+
+        if desired.host in {"codex", "codex-cli"}:
+            try:
+                bridge_token = Path(desired.token_file).expanduser().read_text(
+                    encoding="utf-8"
+                ).strip()
+            except OSError:
+                bridge_token = ""
+            status, connector_digest, source = _env_value_digest(
+                desired.token_env_var, self.runner
+            )
+            bridge_digest = (
+                hashlib.sha256(bridge_token.encode()).hexdigest()
+                if bridge_token
+                else None
+            )
+            identity_ok = (
+                status == "PASS"
+                and bridge_digest is not None
+                and connector_digest is not None
+                and hmac.compare_digest(bridge_digest, connector_digest)
+            )
+            rows.append(
+                self._check(
+                    desired,
+                    "split-identity",
+                    "PASS" if identity_ok else "FAIL",
+                    (
+                        f"one seat token shared; source={source}"
+                        if identity_ok
+                        else "split identity: bridge and connector token mismatch; "
+                        f"source={source}"
+                    ),
                 )
             )
 

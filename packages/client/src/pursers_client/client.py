@@ -100,6 +100,7 @@ class BoardClient:
         board_id: str,
         *,
         agent_name: str = "pursers-client",
+        role: str = "worker",
         reconnect_delay_s: float = 0.05,
         claim_ttl_s: int | None = None,
     ):
@@ -107,6 +108,11 @@ class BoardClient:
         self.token = token
         self.board_id = board_id
         self.agent_name = agent_name
+        if role not in {"worker", "reviewer", "orchestrator", "coordinator"}:
+            raise ValueError(
+                "role must be worker, reviewer, orchestrator, or coordinator"
+            )
+        self.role = role
         self.reconnect_delay_s = reconnect_delay_s
         self.claim_ttl_s = claim_ttl_s
         self.identity: JoinedIdentity | None = None
@@ -251,10 +257,14 @@ class BoardClient:
         agent_platform: str | None = None,
         task_focus: str | None = None,
         agent_name: str | None = None,
+        role: str | None = None,
         capabilities: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         selected_name = self.agent_name if agent_name is None else agent_name
-        arguments: dict[str, Any] = {"agent_name": selected_name}
+        arguments: dict[str, Any] = {
+            "agent_name": selected_name,
+            "role": self.role if role is None else role,
+        }
         if claim_ttl_s is not None:
             arguments["claim_ttl_s"] = claim_ttl_s
         if agent_platform is not None:
@@ -292,11 +302,13 @@ class BoardClient:
         task_focus: str | None = None,
         token_budget: int = 4_000,
         ticket_id: str | None = None,
+        role: str | None = None,
         capabilities: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         arguments: dict[str, Any] = {
             "agent_name": self.agent_name,
             "token_budget": token_budget,
+            "role": self.role if role is None else role,
         }
         caps = dict(capabilities or {})
         if os.environ.get("PURSERS_LEGACY_TOOLS") == "1":

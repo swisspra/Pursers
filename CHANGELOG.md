@@ -37,6 +37,19 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   - `memory_checkpoint`, `memory_handoff`, `memory_links`, `memory_read`, `memory_search`, `memory_unpin`: specialized memory family with 0 model seat read calls in 7 days; moved behind capability negotiation. (Note: `memory_write` with 102 calls and `ticket_unclaim` with 138 calls remain visible core tools).
   - Deprecated tools remain callable for backward compatibility in a18. Invocations emit a `_deprecated: true` annotation and a one-time journal warning per caller (`deprecated_tool_warning`). Warning idempotency survives journal compaction in a journal-local 4,096-entry, oldest-sequence-first bounded summary. Physical removal is scheduled for a19.
 
+### Fixed
+
+- `board_join` and `board_onboard` now persist an explicit seat role instead of
+  inferring reviewer behavior from token scopes. Review-scoped worker tokens
+  therefore continue to wait for claimable work. Worker declarations require
+  `board:write`, reviewer declarations require `board:review`, and coordinator
+  or orchestrator declarations require `board:coordinate`. Default capabilities
+  are role-safe; hybrid work/review seats are rejected.
+- Codex seat configuration now uses one token identity for the wait bridge and
+  HTTP board connector. The bridge fails closed and Doctor reports
+  `split identity` when the two token sources differ. Worker and reviewer
+  connector pairs now coexist without overwriting each other.
+
 ## [5.0.0a17] - 2026-09-04
 
 This release includes `pursers-central==0.1.0a21`,

@@ -30,6 +30,7 @@ SHA-256 `1a0981ec6cc47aed8eeb5e8f488bef260ab6b5fd5c7c88e2cd99604654103e1a`.
 | `ONBOARD_BOARD_ID` | no | Board ID; defaults to `pursers`. |
 | `ONBOARD_AGENT_NAME` | no | Base board identity; defaults to `pursers-wait-bridge`. |
 | `ONBOARD_AGENT_INSTANCE` | no | Stable per-instance suffix, such as `window-a`. |
+| `PURSERS_ROLE` | no | Declared seat role: `worker` (default), `reviewer`, `orchestrator`, or `coordinator`. |
 | `PURSERS_WAIT_MODE` | no | `push` (default) or explicit compatibility `poll`; a subscription error polls only that board for the current call and push is retried on re-arm. |
 | `PURSERS_HOST` | no | `codex` (default), `codex-cli`, `goose`, `claude-code`, `claude-desktop`, or `headless`; selects the safe call ceiling. |
 | `PURSERS_HOST_TIMEOUT_S` | no | Explicit host/runner deadline in seconds; overrides the named profile. |
@@ -57,12 +58,20 @@ bridge process and one Central connection serve multiple session identities:
 a2a_wait(since_seq=0, project="PROJECT_PLACEHOLDER", agent_name="session-a")
 ```
 
-`wait_for="auto"` is the default: joined reviewer identities wait for
-`submitted` tickets, while workers wait for `claimable` tickets. Callers may
-select `claimable` explicitly; selecting `submitted` requires the joined
-principal's `board:review` authorization. Reviewer journal filtering ignores
+`wait_for="auto"` is the default: a seat declared as `reviewer` waits for
+`submitted` tickets, while a `worker` waits for `claimable` tickets.
+Coordinator and orchestrator seats must select an explicit view. Token scopes
+authorize actions but never select the wait mode. Callers
+may select `claimable` explicitly; selecting `submitted` requires a joined
+reviewer seat, whose join also requires `board:review`. Reviewer filtering ignores
 ticket-created/claimed noise and wakes on submissions, resubmissions, and
 review-lease changes.
+
+Codex-managed seats set `PURSERS_REQUIRE_TOKEN_MATCH=1`. Their launcher compares
+the inherited HTTP connector token with the token file used by the bridge and
+refuses startup with `split identity` when they differ. Token values are never
+included in the error or logs. Regenerate the seat configuration and restart
+Codex after changing either token source.
 
 An explicit identity is joined when its call starts. Joins are stateless and
 idempotent; the bridge deliberately keeps no mutable join cache and does not
