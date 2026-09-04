@@ -18,6 +18,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - Client and generated reviewer seats support review claim/renew/release and
   unclaimed-only listing; reviewer approve/reject claims first and returns to
   wait on a structured `review_already_claimed` conflict.
+- The loopback Fleet Dashboard now has a top-level Config page for seat
+  inventory, diff-before-apply setup, timestamped backups, restart guidance,
+  one/all Doctor jobs, wait-bridge install/upgrade, and read-only registry seat
+  coverage. New `/api/config/*` writes are loopback-only, journaled locally,
+  and never return JWT contents to the browser.
 
 ### Fixed
 

@@ -19,6 +19,13 @@ pursers-personal --version
 
 Getting-started manuals (English and Thai) cover profile creation, host configuration, stable agent identity, and the initial connection check without putting credentials in shared configuration.
 
+For local seat setup, run `python tools/fleet-dashboard/fleet_dashboard.py`,
+open `http://127.0.0.1:8899`, and choose **Config**. The wizard checks token
+and CA file paths without sending token contents to the browser, previews a
+redacted diff, backs up existing host configs before apply, and provides Doctor,
+restart, bridge-upgrade, and registry-coverage status. Direct file editing is a
+recovery appendix in the manuals rather than the primary setup path.
+
 ## What it does
 
 - **Durable shared state** — memories, tickets, and board state persist across agent sessions in a local Central service (SQLite, loopback TLS). Agents stop losing context when a session ends. Memories are never silently lost: oversize content is archived byte-exact, and v4 archives import losslessly.

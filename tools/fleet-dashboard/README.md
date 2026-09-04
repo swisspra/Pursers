@@ -2,6 +2,29 @@
 
 A standalone, loopback-only web dashboard for the active boards in the live project registry and their shared agent pool. It is a read-only viewer and does not require a browser extension, build step, or desktop host.
 
+## Configure seats in the dashboard
+
+Start the loopback Fleet Dashboard, open **Config**, and use **Add or update
+seat** as the primary setup path. Enter only paths for the JWT token and CA
+files; token contents never enter the browser. **Preview exact changes** shows
+a redacted unified diff, and **Confirm and apply** creates timestamped backups
+before atomic writes. Restart the selected host when the result shows **NEEDS
+RESTART**.
+
+The same page inventories seats, shows installed/pinned/latest bridge versions,
+runs Doctor for one or all seats, upgrades the bridge in a background job, and
+shows read-only project-registry coverage. Long jobs expose a job id and are
+polled by the browser once per second. Config POSTs are loopback-only and each
+plan/apply/doctor/install action is recorded in
+`~/.pursers/fleet-dashboard/config-actions.jsonl` without credentials.
+
+### Manual-edit appendix
+
+Direct editing remains available for recovery and headless use. Back up the
+host config first, keep the token in a private file, use the timeout from
+`HOST_PROFILES`, and run `seat_config.py doctor --json` afterward. Do not put a
+JWT directly in TOML, JSON, YAML, prompts, or the seat inventory.
+
 ## Seat configuration library
 
 `seat_config.py` is the write boundary used by the dashboard Config page. Host

@@ -172,7 +172,7 @@
         <li><a href="#fleet">Use the project registry and worker pool</a></li>
         <li><a href="#tickets">Run the ticket lifecycle</a></li>
         <li><a href="#memories">Use memories</a></li>
-        <li><a href="#dashboard">Read the dashboard MCP App</a></li>
+        <li><a href="#dashboard">Set up seats and read dashboards</a></li>
         <li><a href="#security">Handle JWTs and secrets</a></li>
       </ol>
     </nav>
@@ -552,6 +552,10 @@ memory_search(
 
     <section id="dashboard">
       <p class="eyebrow" style="color:#2f6f9f">08 · Dashboard</p>
+      <h2>Set up seats through the loopback Fleet Dashboard</h2>
+      <p>Run <code>python tools/fleet-dashboard/fleet_dashboard.py</code>, open <code>http://127.0.0.1:8899</code>, and choose <strong>Config</strong>. The Add or update seat wizard is the primary setup path: choose host and role, enter the stable seat name, home board, and local token/CA file paths, then preview the exact redacted diff before confirming. The browser never receives token contents. Apply creates timestamped backups and tells you when the host must restart.</p>
+      <p>Use <strong>Doctor</strong> for one seat or all seats to check config drift, timeouts, token/CA path readability, bridge version, live push mode, and restart state. Bridge install and upgrade run as background jobs. Registry coverage is read only.</p>
+      <details><summary>Manual-edit appendix</summary><p>For recovery or headless use, back up the host config, keep JWTs in a private token file, apply the matching host timeout, and run <code>python tools/fleet-dashboard/seat_config.py doctor --json</code>. Never paste a JWT into TOML, JSON, YAML, prompts, or the inventory.</p></details>
       <h2>Read the board through the dashboard MCP App</h2>
       <p>In a host that supports MCP Apps, open <code>ui://pursers/dashboard</code> through the Personal dashboard tool. The interface is read only and has five views.</p>
       <div class="grid">
