@@ -5341,7 +5341,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 scrub_profile=profile, allow_counts=allow_counts,
             )
             safe_notes = clean_text(
-                "notes", notes, required=notes is not None, max_length=2_000,
+                "notes", notes, required=notes is not None, max_length=5_000,
                 scrub_profile=profile, allow_counts=allow_counts,
             )
             actor, released, renewed = prepare_board_call(document, principal, agent_name, now)

@@ -45,6 +45,7 @@ GENERATION_META_KEY = "io.onboard/expected-generation"
 # Cleanup is best-effort after this bound so a broken transport cannot wedge a
 # host shutdown or mask the original __aenter__ failure indefinitely.
 TRANSPORT_CLOSE_TIMEOUT_S = 2.0
+TICKET_SUBMIT_NOTES_MAX_CHARS = 5_000
 STATUS_ICONS = {
     "open": "📭",
     "claimed": "📌",
@@ -85,6 +86,40 @@ def _retryable_connection_error(exc: BaseException) -> bool:
         or (module.startswith("mcp") and any(word in text for word in transport_words))
         or "connection closed" in text
     )
+
+
+def _truncate_ticket_submit_notes(
+    notes: str,
+) -> tuple[str, dict[str, int | str] | None]:
+    if len(notes) <= TICKET_SUBMIT_NOTES_MAX_CHARS:
+        return notes, None
+
+    marker = ""
+    boundary = 0
+    for _ in range(10):
+        budget = max(
+            0,
+            TICKET_SUBMIT_NOTES_MAX_CHARS - len(marker) - 1,
+        )
+        boundary = notes.rfind("\n", 0, budget + 1)
+        if boundary < 0:
+            boundary = budget
+        omitted = len(notes) - boundary
+        next_marker = f"…[truncated {omitted} chars]"
+        if next_marker == marker:
+            break
+        marker = next_marker
+
+    truncated = f"{notes[:boundary]}\n{marker}" if boundary else marker
+    metadata: dict[str, int | str] = {
+        "field": "notes",
+        "limit": TICKET_SUBMIT_NOTES_MAX_CHARS,
+        "original_chars": len(notes),
+        "submitted_chars": len(truncated),
+        "truncated_chars": len(notes) - boundary,
+        "marker": marker,
+    }
+    return truncated, metadata
 
 
 @dataclass(frozen=True)
@@ -489,6 +524,9 @@ class BoardClient:
             "ticket_id": ticket_id,
             "stay_active": stay_active,
         }
+        notes_truncation: dict[str, int | str] | None = None
+        if notes is not None:
+            notes, notes_truncation = _truncate_ticket_submit_notes(notes)
         optional = {
             "summary": summary,
             "files_changed": files_changed,
@@ -497,6 +535,14 @@ class BoardClient:
         arguments.update({key: value for key, value in optional.items() if value is not None})
         result = await self._call("ticket_submit", arguments)
         self._remember_event(result)
+        if notes_truncation is not None:
+            warnings.warn(
+                "ticket_submit notes exceeded 5000 characters; "
+                f"truncated {notes_truncation['truncated_chars']} characters",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            result["input_truncation"] = {"notes": notes_truncation}
         return result
 
     async def lease_renew(self, ticket_id: str) -> dict[str, Any]:
