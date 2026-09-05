@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 import os
 import sys
@@ -60,7 +61,7 @@ class LegacyToolsTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_tools_list_default_hides_deprecated_tools(self) -> None:
-        """By default, deprecated tools are hidden while lifecycle tools remain."""
+        """Default discovery hides four tools while lifecycle tools remain."""
         async with Client(self.mcp, mode="2026-07-28", cache=None) as client:
             res = await client.list_tools()
             tool_names = {t.name for t in res.tools}
@@ -71,11 +72,12 @@ class LegacyToolsTests(unittest.IsolatedAsyncioTestCase):
                     dep, tool_names, f"Deprecated tool {dep} should be hidden by default"
                 )
 
-            # Core and active tools must be present, including memory_write and ticket_unclaim
+            # Core and Personal memory tools remain visible by default.
             core_tools = {
                 "ticket_claim", "ticket_get", "ticket_list", "ticket_submit",
                 "ticket_review", "ticket_create", "ticket_cancel", "lease_renew",
-                "ticket_unclaim", "memory_write",
+                "ticket_unclaim", "memory_write", "memory_read", "memory_search",
+                "memory_links", "memory_checkpoint", "memory_handoff", "memory_unpin",
                 "board_join", "board_onboard", "board_snapshot", "board_status",
                 "board_state_get", "board_state_update", "board_catchup"
             }
@@ -84,8 +86,8 @@ class LegacyToolsTests(unittest.IsolatedAsyncioTestCase):
                     core, tool_names, f"Active tool {core} must be visible"
                 )
 
-            # Count check: 47 total - 10 deprecated = 37 active tools
-            self.assertEqual(len(tool_names), 37)
+            # Count check: 47 total - 4 deprecated = 43 active tools.
+            self.assertEqual(len(tool_names), 43)
             self.assertIn("board_claim_ttl_set", tool_names)
 
     async def test_authenticated_two_connection_seat_scoped_capability_and_rejoin(self) -> None:
@@ -138,15 +140,15 @@ class LegacyToolsTests(unittest.IsolatedAsyncioTestCase):
             for dep in central.DEPRECATED_TOOLS:
                 self.assertIn(dep, legacy_names)
 
-            # modern-seat remains strictly on the 37-tool active surface
-            self.assertEqual(len(res_modern.tools), 37)
+            # modern-seat under same principal remains on the 43-tool surface.
+            self.assertEqual(len(res_modern.tools), 43)
             modern_names = {t.name for t in res_modern.tools}
             for dep in central.DEPRECATED_TOOLS:
                 self.assertNotIn(dep, modern_names)
 
             # Verify actual deprecated Tool.annotations on the legacy connection
             dep_tools = [t for t in res_legacy.tools if t.name in central.DEPRECATED_TOOLS]
-            self.assertEqual(len(dep_tools), 10)
+            self.assertEqual(len(dep_tools), 4)
             for dt in dep_tools:
                 self.assertIsNotNone(dt.annotations)
                 self.assertTrue(dt.annotations.title.startswith("[DEPRECATED]"))
@@ -163,15 +165,15 @@ class LegacyToolsTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertFalse(rejoin.is_error)
 
-            # Now legacy-seat immediately drops to the 37-tool surface
+            # Now legacy-seat immediately drops to the 43-tool surface.
             res_rejoin = await c_legacy.list_tools()
-            self.assertEqual(len(res_rejoin.tools), 37)
+            self.assertEqual(len(res_rejoin.tools), 43)
             rejoin_names = {t.name for t in res_rejoin.tools}
             for dep in central.DEPRECATED_TOOLS:
                 self.assertNotIn(dep, rejoin_names)
 
     async def test_tools_list_with_env_override(self) -> None:
-        """The environment override exposes active and deprecated tools."""
+        """When PURSERS_LEGACY_TOOLS=1, all 47 tools are visible before join."""
         with patch.dict(os.environ, {"PURSERS_LEGACY_TOOLS": "1"}):
             async with Client(self.mcp, mode="2026-07-28", cache=None) as client:
                 res = await client.list_tools()
@@ -201,7 +203,7 @@ class LegacyToolsTests(unittest.IsolatedAsyncioTestCase):
                 }
             )
 
-        self.assertEqual(len(result.tools), 37)
+        self.assertEqual(len(result.tools), 43)
         self.assertTrue(
             central.DEPRECATED_TOOLS.isdisjoint(
                 {tool.name for tool in result.tools}
@@ -216,12 +218,7 @@ class LegacyToolsTests(unittest.IsolatedAsyncioTestCase):
         before_cursor = self.service.journal.read_after("pursers", 0, 1)[
             "latest_cursor"
         ]
-        calls = [
-            ("board_get_briefing", {}),
-            ("memory_read", {"agent_name": "admin-agent"}),
-            ("memory_search", {"query": "absent"}),
-            ("memory_links", {}),
-        ]
+        calls = [("board_get_briefing", {})]
         with patch.object(central, "log_runtime_event") as runtime_event:
             async with Client(
                 self.mcp,
@@ -254,6 +251,61 @@ class LegacyToolsTests(unittest.IsolatedAsyncioTestCase):
             self.service.journal.read_after("pursers", 0, 1)["latest_cursor"],
             before_cursor,
         )
+
+    def test_shipped_callers_do_not_reference_deprecated_tools(self) -> None:
+        repo_root = PACKAGE_ROOT.parents[1]
+        caller_roots = (
+            repo_root / "packages" / "personal" / "src",
+            repo_root / "tools" / "fleet-dashboard",
+            repo_root / "tools" / "coordinator",
+            repo_root / "tools" / "worker-runtime",
+            repo_root / "tools" / "seat-kit",
+        )
+        # TODO(TK-7d99c07860bd): remove these exceptions when the coordinator
+        # migrates from the deprecated assignment/nudge escape hatches.
+        allowed_deprecated_callers = {
+            ("tools/coordinator/coordinator.py", "agent_nudge"),
+            ("tools/coordinator/coordinator.py", "ticket_assign"),
+        }
+        observed_exceptions: set[tuple[str, str]] = set()
+        violations: list[str] = []
+        for root in caller_roots:
+            for path in root.rglob("*.py"):
+                if "tests" in path.parts:
+                    continue
+                tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+                for node in ast.walk(tree):
+                    deprecated_name = None
+                    if (
+                        isinstance(node, ast.Constant)
+                        and isinstance(node.value, str)
+                        and node.value in central.DEPRECATED_TOOLS
+                    ):
+                        deprecated_name = node.value
+                    elif (
+                        isinstance(node, ast.Attribute)
+                        and node.attr in central.DEPRECATED_TOOLS
+                    ):
+                        deprecated_name = node.attr
+                    elif (
+                        isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                        and node.name in central.DEPRECATED_TOOLS
+                    ):
+                        deprecated_name = node.name
+                    if deprecated_name is not None:
+                        exception = (
+                            path.relative_to(repo_root).as_posix(),
+                            deprecated_name,
+                        )
+                        if exception in allowed_deprecated_callers:
+                            observed_exceptions.add(exception)
+                            continue
+                        violations.append(
+                            f"{path.relative_to(repo_root)}:{node.lineno}:"
+                            f"{deprecated_name}"
+                        )
+        self.assertEqual(observed_exceptions, allowed_deprecated_callers)
+        self.assertEqual(violations, [])
 
     async def test_warning_dedupe_survives_compaction_and_restart(self) -> None:
         warning = {

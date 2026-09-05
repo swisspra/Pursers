@@ -179,19 +179,11 @@ DEPRECATED_TOOLS = frozenset(
     {
         "agent_nudge",
         "board_get_briefing",
-        "memory_checkpoint",
-        "memory_handoff",
-        "memory_links",
-        "memory_read",
-        "memory_search",
-        "memory_unpin",
         "ticket_assign",
         "ticket_terminate",
     }
 )
-DEPRECATED_READ_TOOLS = frozenset(
-    {"board_get_briefing", "memory_read", "memory_search", "memory_links"}
-)
+DEPRECATED_READ_TOOLS = frozenset({"board_get_briefing"})
 REVIEW_CORE_OVERRIDE_FIELDS = frozenset(
     {"review_policy_at_verdict", "review_label", "review_verdict"}
 )
