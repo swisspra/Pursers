@@ -3281,7 +3281,7 @@ def test_seat_config_manager_plan_apply_backup_restart_and_no_token_leak(
     ca.write_text("CA")
 
     class Bridge:
-        version = "0.1.0a9"
+        version = "0.1.0a10"
 
         def inspect(self) -> dict:
             return {
@@ -3303,7 +3303,7 @@ def test_seat_config_manager_plan_apply_backup_restart_and_no_token_leak(
         tmp_path / "state/seats.json",
         state_dir=tmp_path / "state",
         bridge_installer=Bridge(),
-        latest_version=lambda: "0.1.0a9",
+        latest_version=lambda: "0.1.0a10",
     )
     desired = {
         "host": "codex",
@@ -3332,7 +3332,7 @@ def test_seat_config_manager_plan_apply_backup_restart_and_no_token_leak(
     assert Path(result["backup_path"]).read_text() == f'api_token = "{secret}"\n'
     manager.inventory.upsert(
         dashboard.DesiredSeat.from_dict(desired),
-        bridge_version="0.1.0a9",
+        bridge_version="0.1.0a10",
         doctor={
             "overall": "WARN",
             "checks": [
@@ -3349,10 +3349,10 @@ def test_seat_config_manager_plan_apply_backup_restart_and_no_token_leak(
     assert row["principal_label"] == "worker"
     assert row["needs_restart"] is True
     bridge = manager.bridge()
-    assert bridge["installed_version"] == "0.1.0a9"
+    assert bridge["installed_version"] == "0.1.0a10"
     assert bridge["reported_version"] == "0.1.0a1"
-    assert bridge["pinned_version"] == "0.1.0a9"
-    assert bridge["latest_pypi_version"] == "0.1.0a9"
+    assert bridge["pinned_version"] == "0.1.0a10"
+    assert bridge["latest_pypi_version"] == "0.1.0a10"
     assert bridge["resolution_source"] == "well-known:uv-tool"
     journal = (tmp_path / "state/config-actions.jsonl").read_text()
     assert secret not in journal
@@ -3360,7 +3360,7 @@ def test_seat_config_manager_plan_apply_backup_restart_and_no_token_leak(
 
 def test_seat_config_registry_coverage_uses_live_fleet_seats(tmp_path: Path) -> None:
     class Bridge:
-        version = "0.1.0a9"
+        version = "0.1.0a10"
 
         def inspect(self) -> dict:
             return {"version": self.version, "command": None}
@@ -3382,7 +3382,7 @@ def test_seat_config_registry_coverage_uses_live_fleet_seats(tmp_path: Path) -> 
         bridge_command="/tmp/pursers-wait-bridge",
         config_path=str(tmp_path / "config.toml"),
     )
-    manager.inventory.upsert(desired, bridge_version="0.1.0a9")
+    manager.inventory.upsert(desired, bridge_version="0.1.0a10")
 
     result = manager.registry(
         {
@@ -3432,15 +3432,15 @@ def test_config_api_and_ui_contract_are_separate_from_coordinator_config() -> No
 
         def bridge(self) -> dict:
             return {
-                "installed_version": "0.1.0a9",
+                "installed_version": "0.1.0a10",
                 "reported_version": "0.1.0a6",
-                "package_metadata_version": "0.1.0a9",
-                "pinned_version": "0.1.0a9",
-                "latest_pypi_version": "0.1.0a9",
+                "package_metadata_version": "0.1.0a10",
+                "pinned_version": "0.1.0a10",
+                "latest_pypi_version": "0.1.0a10",
                 "resolution_source": "config:codex",
                 "status": "WARN",
                 "message": (
-                    "version string stale; reported=0.1.0a6; package=0.1.0a9"
+                    "version string stale; reported=0.1.0a6; package=0.1.0a10"
                 ),
             }
 
@@ -3498,15 +3498,15 @@ def test_config_api_and_ui_contract_are_separate_from_coordinator_config() -> No
         with urllib.request.urlopen(base + "/api/config/bridge") as response:
             bridge = json.load(response)
             assert bridge == {
-                "installed_version": "0.1.0a9",
+                "installed_version": "0.1.0a10",
                 "reported_version": "0.1.0a6",
-                "package_metadata_version": "0.1.0a9",
-                "pinned_version": "0.1.0a9",
-                "latest_pypi_version": "0.1.0a9",
+                "package_metadata_version": "0.1.0a10",
+                "pinned_version": "0.1.0a10",
+                "latest_pypi_version": "0.1.0a10",
                 "resolution_source": "config:codex",
                 "status": "WARN",
                 "message": (
-                    "version string stale; reported=0.1.0a6; package=0.1.0a9"
+                    "version string stale; reported=0.1.0a6; package=0.1.0a10"
                 ),
             }
         with urllib.request.urlopen(base + "/api/config/registry") as response:
