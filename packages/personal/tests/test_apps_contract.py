@@ -1968,7 +1968,18 @@ async def test_app_reads_leave_sqlite_domain_journal_and_cursor_unchanged(
     try:
         pursers_personal.artifacts.verify_component_artifacts(set(required))
     except pursers_personal.artifacts.ArtifactVerificationError as exc:
-        pytest.skip(f"locked artifacts not installed: {exc}")
+        if os.environ.get("PURSERS_TEST_ALLOW_PRERELEASE_CENTRAL_DRIFT") != "1":
+            pytest.skip(f"locked artifacts not installed: {exc}")
+        assert "pursers-central" in str(exc)
+        # Release-blocker validation intentionally builds Central before the
+        # train owns its final version and component lock. Keep the production
+        # verifier intact, and still require the unchanged client wheel to
+        # match its exact lock before exercising this test-only path.
+        pursers_personal.artifacts.verify_component_artifacts({"pursers-client"})
+        for package_name in ("pursers_central", "pursers_client"):
+            spec = importlib.util.find_spec(package_name)
+            assert spec is not None and spec.origin is not None
+            assert "site-packages" in Path(spec.origin).resolve().parts
 
     client_class, client_error_class = apps_server._load_board_client()
     package = sys.modules["pursers_client"]
