@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <link rel="icon" href="data:,">
-  <title>Pursers 5.0.0a20 — What's new</title>
+  <title>Pursers 5.0.0a21 — What's new</title>
   <style>
     :root { --ink:#17365d; --muted:#596579; --line:#d9d6cc; --paper:#fbf8f0; --card:#fff; --blue:#2f6f9f; --green:#28745a; --orange:#b75b24; }
     * { box-sizing:border-box; }
@@ -39,9 +39,9 @@
 </head>
 <body>
   <header>
-    <p class="eyebrow">What's new · a20 release</p>
-    <h1>Push-wait vocabulary is<br>shared and resilient.</h1>
-    <p class="lead">The 5.0.0a20 release restores subscription-first waits, tolerates future event-kind skew, and makes every push failure visible in Fleet Needs attention.</p>
+    <p class="eyebrow">What's new · a21 release</p>
+    <h1>Fleet operations now have<br>one guarded control surface.</h1>
+    <p class="lead">The 5.0.0a21 stopping-point release combines live-seat dispatch, bounded catch-up, fleet-owned clones, a reduced tool surface, and immutable Release &amp; Operations plans.</p>
   </header>
 
   <nav aria-label="Contents"><div>
@@ -54,27 +54,25 @@
 
   <main>
     <section id="behavior">
-      <h2>a20 push-wait restoration</h2>
+      <h2>a21 fleet operations</h2>
       <div class="grid">
-        <article class="card"><strong>One event vocabulary</strong><p>Client, bridge, and Central share the same claim-TTL, dispatch, deprecation, review-lease, admission, scrub, and core event-kind constants. Cross-package tests prevent the subscription set from drifting again.</p></article>
-        <article class="card"><strong>Fail-open subscriptions</strong><p>The client drops unknown requested kinds with one warning and keeps every recognized kind subscribed. Vocabulary skew no longer forces the whole bridge into polling.</p></article>
-        <article class="card"><strong>Visible push failures</strong><p>Bridge stats retain <code>push unavailable: &lt;reason&gt;</code> per seat, Fleet Needs attention surfaces it, and a later healthy push return clears the warning.</p></article>
-        <article class="card"><strong>Compatibility retained</strong><p><code>PURSERS_LEGACY_TOOLS</code> and <code>capabilities.legacy_tools</code> remain available in a20. Physical removal is tracked separately.</p></article>
+        <article class="card"><strong>Release &amp; Operations</strong><p>The loopback Config page reports tag, CI, PyPI, GitHub Release, Central version, and restart state. Destructive jobs execute only a short-lived, one-use server plan whose concrete command and digest the operator confirmed.</p></article>
+        <article class="card"><strong>Fleet-owned clones</strong><p>Each Registry card records <code>fleet_clone_dir</code>. Seat setup and Doctor require that managed clone and reject the operator checkout as a worker directory.</p></article>
+        <article class="card"><strong>Live-seat dispatch</strong><p>Retired and automatically stale seats leave rotation. Offers rotate across live capable seats, preserve deadlines across Central restart, and surface dispatch history in Needs attention.</p></article>
+        <article class="card"><strong>Reduced tool surface</strong><p><code>agent_nudge</code>, <code>board_get_briefing</code>, and <code>ticket_terminate</code> are removed. <code>ticket_assign</code> remains admin-only, while the Personal <code>memory_*</code> tools remain supported for the shipped UI.</p></article>
       </div>
 
-      <h2>Subscription-first is the default</h2>
+      <h2>Bounded work remains subscription-first</h2>
       <div class="grid">
-        <article class="card"><strong>One long wait</strong><p>The bridge subscribes to each board journal and the exact per-seat cue through <code>BoardClient.events()</code>. A cue triggers a bounded, side-effect-free <code>touch=false</code> refetch.</p></article>
-        <article class="card"><strong>No idle Central loop</strong><p>After the subscribe race-closing drain, an idle seat makes zero Central calls. A waiting seat with claimed tickets renews only those exact leases at the TTL-derived interval.</p></article>
-        <article class="card"><strong>Explicit compatibility mode</strong><p><code>PURSERS_WAIT_MODE=poll</code> selects polling deliberately. A push failure is logged, degrades only that board for the current call, and push is retried on the next re-arm.</p></article>
-        <article class="card"><strong>Re-arm contract unchanged</strong><p>Process every result once. On <code>timed_out=true</code>, call wait again immediately with the returned <code>new_seq</code>. Never keep two waits live for one seat and board.</p></article>
+        <article class="card"><strong>Progress-guaranteed catch-up</strong><p>Large journal windows are batched and compacted. Deadline-bounded partial results always carry a usable next cursor, and out-of-range cursors are clamped safely.</p></article>
+        <article class="card"><strong>Bounded submission notes</strong><p>Central caps ticket submission notes and the client exposes explicit truncation metadata instead of overrunning an MCP frame.</p></article>
+        <article class="card"><strong>Exact seat ownership</strong><p>Config can import seats and run Doctor for one or all. Restart checks prefer exact configured seat markers and report unknown when process ancestry cannot prove ownership.</p></article>
+        <article class="card"><strong>Operator-visible failures</strong><p>Stage, publish, kickstart, and restart jobs serialize conflicting work, stream bounded logs, scrub audit records, and keep rollback failures plus recovery details prominent.</p></article>
       </div>
       <ul>
-        <li><strong>Dispatch offers:</strong> capable seats declare tier, skills, work/review flags, host, and optional model/provider at join and reconnect. A worker or reviewer now wakes only for its own offer and held-ticket lease events; <code>reason=offer</code> carries expiry, tier, and required skills. Legacy boards keep broadcast behavior.</li>
-        <li><strong>Reviewer waits:</strong> reviewer identities now wait for submissions by default, unchanged legacy backlog cues are surfaced once per bridge process, and each return reports <code>reason=offer|journal|backlog|timeout</code>.</li>
-        <li><strong>Orchestrator mode (TK-55b6bc8985fc):</strong> wait bridge background subscription with instant <code>board_digest</code>, <code>board_digest_ack</code>, <code>board_watch</code>, and <code>board_unwatch</code> tools for Claude Desktop leaders. Eliminates blocking wait and polling; buffers events in a persistent ring buffer, fetches with <code>touch=false</code> (zero board writes while idle), and emits MCP resource notifications on <code>board://&lt;board&gt;/digest</code>.</li>
-<li><strong>Tool surface audit and deprecation (TK-2ffa16368cbb):</strong> measured 7-day usage across 45 Central and bridge tools. Implemented hide-unless-legacy mechanism in Central and Wait-Bridge for a18: 10 superseded, redundant, or unused tools (<code>agent_nudge</code>, <code>board_get_briefing</code>, <code>ticket_terminate</code>, <code>ticket_assign</code>, and 6 unused <code>memory_*</code> tools) are hidden from default <code>tools/list</code> saving ~1,500 context tokens per turn (while <code>memory_write</code> and <code>ticket_unclaim</code> remain visible core tools). Seats can opt-in via <code>capabilities={"legacy_tools": true}</code> upon <code>board_join</code> or <code>PURSERS_LEGACY_TOOLS=1</code> env var. Calling deprecated tools emits a <code>_deprecated: true</code> annotation and a one-time journal warning per caller; compatibility remains available in a20 and physical removal is tracked separately. Comprehensive audit documentation published at <code>docs/tool-surface-audit.md</code>.</li>
-        <li><strong>Reviewer hardening:</strong> generated seats now carry one HARD-verify checklist, an exact-SHA <code>board.sh verify</code> helper, approval evidence gates, and non-empty rejection fixes. Generic leak rules ship in-repo; operator regexes load locally from <code>~/.pursers/leak-markers.txt</code> or <code>PURSERS_LEAK_MARKERS_FILE</code> and only their count is printed.</li>
+        <li><strong>Lifecycle:</strong> <code>agent_retire</code> and automatic stale retirement make retire-all-inert explicit.</li>
+        <li><strong>Role defaults:</strong> <code>board_join</code> derives its default role from reviewer membership while still enforcing token scopes.</li>
+        <li><strong>Runbook:</strong> the local fleet operations guide covers clone ownership, seat setup, Doctor, release staging, and recovery.</li>
       </ul>
     </section>
 
@@ -117,19 +115,16 @@ PURSERS_BOARD_CONNECTOR_TOKEN = "&lt;same seat token&gt;"</code></pre>
       <h2>Dashboard-first seat setup</h2>
       <p>The loopback Fleet Dashboard now provides a top-level Config page with a seat wizard, redacted diff-before-apply flow, backups, restart prompts, Doctor jobs, wait-bridge upgrades, and read-only registry coverage. Token contents stay server-side and Config writes are accepted only from loopback clients.</p>
       <p>The wizard now declares tier, skills, work/review gates, model, and provider across Codex, Goose, Claude Desktop, and Claude Code. Connector-derived skill suggestions remain editable, Doctor flags Central drift, and each board has a dispatch panel for policy, capability gaps, current offers, and recent offer events. The wait bridge and seat kit consume these capability declarations for targeted dispatch.</p>
-      <h2>Push-wait program</h2>
+      <h2>a21 stopping-point tickets</h2>
       <ul>
-        <li><code>TK-10cea5ba067a</code> — host timeout and re-arm profile research.</li>
-        <li><code>TK-fb29d1de526b</code> — Central side-effect-free wake refetch and subscribed-seat liveness.</li>
-        <li><code>TK-75bc6cdc2405</code> — subscription-first wait bridge, host profiles, lease-only idle maintenance, and model-visible wait metering.</li>
-        <li><code>TK-d08152560570</code> — generated CLI/Goose <code>board.sh wait</code> subscription path.</li>
-        <li><code>TK-011d4336785a</code> — follow-up for merged per-seat cue authorization.</li>
-        <li><code>TK-a6cd4fc8d082</code> — worker-runtime worker/reviewer cue-driven redo.</li>
-        <li><code>TK-55b6bc8985fc</code> — wait-bridge orchestrator mode: background subscription + instant board_digest/ack tools for Claude Desktop leaders.</li>
-        <li><code>TK-522f6f779c84</code> — coordinator membership authorization alignment.</li>
-        <li><code>TK-d3dcb3be08ad</code> — Codex and Goose connector-token forwarding plus Doctor runtime identity probes.</li>
+        <li><code>TK-73421f92b9ec</code> — bounded submit notes and client truncation metadata.</li>
+        <li><code>TK-27967752905a</code> and <code>TK-e5cfe34cebdf</code> — seat retirement, live-seat rotation, durable offer deadlines, and dispatch history.</li>
+        <li><code>TK-9877d2feb770</code> — batched, compacted, deadline-aware catch-up with cursor clamping.</li>
+        <li><code>TK-0ca7f133cbc0</code>, <code>TK-42dc192f4eb0</code>, and <code>TK-e2c601f1bbfa</code> — operations runbook, Config import/Doctor, and fleet-owned clones.</li>
+        <li><code>TK-1d4dfa55ca48</code>, <code>TK-b53f73288142</code>, and <code>TK-7d99c07860bd</code> — Personal memory support, role defaults, and the reduced tool surface.</li>
+        <li><code>TK-cc9c69e33134</code> — guarded Release &amp; Operations panel.</li>
       </ul>
-      <p>This page documents the a20 release as a coherent program. A follow-up ticket that is still open or claimed is not represented as released or complete.</p>
+      <p>This page documents the a21 release as one consolidated stopping point.</p>
     </section>
 
     <section id="migration">
@@ -138,7 +133,8 @@ PURSERS_BOARD_CONNECTOR_TOKEN = "&lt;same seat token&gt;"</code></pre>
         <li>Keep secrets in the host's protected configuration; use placeholders in shared documentation.</li>
         <li>Set <code>PURSERS_ROLE</code> explicitly to <code>worker</code>, <code>reviewer</code>, or <code>orchestrator</code> for every seat.</li>
         <li>Use one token identity per seat for both its wait bridge and board connector.</li>
-        <li>Set <code>PURSERS_LEGACY_TOOLS=1</code> only while deprecated tools are required; compatibility remains available in a20 and removal is tracked separately.</li>
+        <li>Set <code>fleet_clone_dir</code> for every project in the Config page Registry card, then run seats only from that managed clone.</li>
+        <li>Replace <code>agent_nudge</code> with Dispatcher offers, <code>board_get_briefing</code> with <code>board_status</code> / <code>board_snapshot</code>, and <code>ticket_terminate</code> with <code>ticket_cancel</code>. <code>PURSERS_LEGACY_TOOLS</code> no longer restores those removed tools.</li>
         <li>Set the correct <code>PURSERS_HOST</code> and configure the host timeout longer than the bridge block.</li>
         <li>Remove default-path poll settings and verify one subscription wait on a test board.</li>
         <li>Confirm <code>timed_out=true</code> is immediately re-armed with <code>new_seq</code>.</li>
