@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import copy
+import contextlib
 import contextvars
 import fcntl
 import hashlib
@@ -15,6 +16,7 @@ import os
 import re
 import secrets
 import time
+from collections.abc import AsyncIterator
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -70,7 +72,7 @@ from journal import (
 from jwt_verifier import JWTTokenVerifier, JWTVerifierConfig
 from runtime_health import (
     RuntimeDiagnostics,
-    create_streamable_http_app,
+    create_streamable_http_app as _runtime_create_streamable_http_app,
     log_runtime_error,
     log_runtime_event,
 )
@@ -641,12 +643,30 @@ class CentralBoard:
         self.expected_generation: contextvars.ContextVar[Any] = contextvars.ContextVar(
             "central_expected_generation", default=None
         )
+        self._rehydrated_on_loop: bool = False
+
+    def _ensure_runtime_loop_rehydration(self) -> None:
+        if self._rehydrated_on_loop:
+            return
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._rehydrated_on_loop = True
+        self.rehydrate_offer_deadlines()
 
     def cancel_offer_deadline(self, board_id: str, ticket_id: str, kind: str) -> None:
         key = (board_id, ticket_id, kind)
         task = self.offer_deadline_tasks.pop(key, None)
         if task is not None and not task.done():
             task.cancel()
+
+    def cancel_all_offer_deadlines(self) -> None:
+        for task in list(self.offer_deadline_tasks.values()):
+            if not task.done():
+                task.cancel()
+        self.offer_deadline_tasks.clear()
+        self._rehydrated_on_loop = False
 
     def rehydrate_offer_deadlines(self) -> None:
         try:
@@ -1422,6 +1442,7 @@ class SubscriptionAuthorization:
         self.service = service
 
     async def __call__(self, ctx: ServerRequestContext[Any, Any], call_next) -> HandlerResult:
+        self.service._ensure_runtime_loop_rehydration()
         if ctx.method == "tools/call":
             async with self.service.tool_lock:
                 pending: list[tuple[Any, str]] = []
@@ -1584,6 +1605,14 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             clock_skew_s=clock_skew_s,
         )
     )
+    @contextlib.asynccontextmanager
+    async def central_lifespan(server: Any) -> AsyncIterator[None]:
+        service._ensure_runtime_loop_rehydration()
+        try:
+            yield
+        finally:
+            service.cancel_all_offer_deadlines()
+
     mcp = MCPServer(
         "On Board Central Skeleton",
         version="0.1.0a9",
@@ -1593,6 +1622,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             resource_server_url=AnyHttpUrl(resource_url),
             required_scopes=["board:read"],
         ),
+        lifespan=central_lifespan,
         middleware=[SubscriptionAuthorization(service)],
     )
     deprecated_read_warnings: set[tuple[str, str, str, str]] = set()
@@ -2421,7 +2451,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         return await check_and_reap_expired(board_id, now, principal=None, ctx=None)
 
     service._reap_callback = server_reap_callback
-    service.rehydrate_offer_deadlines()
+    service._ensure_runtime_loop_rehydration()
 
     def latest_seq(board_id: str) -> int:
         # read_after exposes the watermark even when cursor zero predates retention.
@@ -7915,6 +7945,37 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
 
     mcp.list_tools = custom_list_tools
     return mcp, service
+
+
+def create_streamable_http_app(
+    mcp: Any,
+    service: Any,
+    *,
+    host: str,
+    extra_payload: Mapping[str, Any] | Callable[[], Mapping[str, Any]] | None = None,
+) -> Any:
+    app = _runtime_create_streamable_http_app(
+        mcp, service, host=host, extra_payload=extra_payload
+    )
+    original_lifespan = app.router.lifespan_context
+
+    @contextlib.asynccontextmanager
+    async def app_lifespan(app_instance: Any) -> AsyncIterator[Any]:
+        ensure_fn = getattr(service, "_ensure_runtime_loop_rehydration", None)
+        if ensure_fn is not None:
+            ensure_fn()
+        async with original_lifespan(app_instance) as state:
+            if ensure_fn is not None:
+                ensure_fn()
+            try:
+                yield state
+            finally:
+                cancel_fn = getattr(service, "cancel_all_offer_deadlines", None)
+                if cancel_fn is not None:
+                    cancel_fn()
+
+    app.router.lifespan_context = app_lifespan
+    return app
 
 
 def main() -> None:

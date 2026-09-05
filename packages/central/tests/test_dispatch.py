@@ -989,41 +989,50 @@ class DispatchTests(unittest.IsolatedAsyncioTestCase):
             self.service.journal.read_after("pursers", 0, 1)["latest_cursor"]
         )
 
-        _mcp2, service2 = central.build_server(
-            "localhost", 8765, self.root / "data"
+        mcp2, service2 = await asyncio.to_thread(
+            central.build_server, "localhost", 8765, self.root / "data"
         )
-        self.assertIn(key, service2.offer_deadline_tasks)
+        self.assertEqual(len(service2.offer_deadline_tasks), 0)
 
-        await asyncio.sleep(1.2)
+        published_cues: list[str] = []
+        original_publish = mcp2._subscriptions.publish
+        async def tracking_publish(event: Any) -> None:
+            published_cues.append(getattr(event, "uri", ""))
+            await original_publish(event)
+        mcp2._subscriptions.publish = tracking_publish
 
-        journal_slice = service2.journal.read_after("pursers", watermark, 1000)
-        events = journal_slice["events"]
-        expired_events = [
-            e for e in events
-            if e.get("kind") == OFFER_EXPIRED and e.get("offer_kind") == "work"
-        ]
-        self.assertEqual(len(expired_events), 1)
-        new_cursor = int(journal_slice["latest_cursor"])
-        self.assertGreater(new_cursor, watermark)
+        app2 = central.create_streamable_http_app(mcp2, service2, host="localhost")
+        async with app2.router.lifespan_context(app2):
+            self.assertIn(key, service2.offer_deadline_tasks)
 
-        doc = service2.load("pursers")
-        ticket = doc["tickets"][ticket_id]
-        self.assertNotIn("work_offer", ticket)
-        self.assertEqual(ticket["dispatch_state"]["state"], "broadcast")
-        self.assertEqual(ticket["dispatch_state"]["reason"], "no_candidates_remaining")
+            await asyncio.sleep(1.2)
 
-        service2.rehydrate_offer_deadlines()
-        doc_again = service2.load("pursers")
-        service2.rehydrate_board_offer_deadlines("pursers", doc_again)
-        await asyncio.sleep(0.2)
-        after_slice = service2.journal.read_after("pursers", watermark, 1000)
-        self.assertEqual(len(after_slice["events"]), len(events))
-        self.assertEqual(int(after_slice["latest_cursor"]), new_cursor)
-        tasks2 = [t for t in service2.offer_deadline_tasks.values() if not t.done()]
-        for t in tasks2:
-            t.cancel()
-        if tasks2:
-            await asyncio.gather(*tasks2, return_exceptions=True)
+            journal_slice = service2.journal.read_after("pursers", watermark, 1000)
+            events = journal_slice["events"]
+            expired_events = [
+                e for e in events
+                if e.get("kind") == OFFER_EXPIRED and e.get("offer_kind") == "work"
+            ]
+            self.assertEqual(len(expired_events), 1)
+            new_cursor = int(journal_slice["latest_cursor"])
+            self.assertGreater(new_cursor, watermark)
+
+            self.assertIn(f"board://pursers/ticket/{ticket_id}", published_cues)
+            self.assertIn("board://pursers/journal", published_cues)
+
+            doc = service2.load("pursers")
+            ticket = doc["tickets"][ticket_id]
+            self.assertNotIn("work_offer", ticket)
+            self.assertEqual(ticket["dispatch_state"]["state"], "broadcast")
+            self.assertEqual(ticket["dispatch_state"]["reason"], "no_candidates_remaining")
+
+            service2.rehydrate_offer_deadlines()
+            doc_again = service2.load("pursers")
+            service2.rehydrate_board_offer_deadlines("pursers", doc_again)
+            await asyncio.sleep(0.2)
+            after_slice = service2.journal.read_after("pursers", watermark, 1000)
+            self.assertEqual(len(after_slice["events"]), len(events))
+            self.assertEqual(int(after_slice["latest_cursor"]), new_cursor)
 
     async def test_review_offer_rehydrates_and_expires_promptly_after_central_restart(self) -> None:
         _worker = await self.add_seat(self.worker_a, "worker-a", {"tier_max": 2})
@@ -1059,42 +1068,51 @@ class DispatchTests(unittest.IsolatedAsyncioTestCase):
             self.service.journal.read_after("pursers", 0, 1)["latest_cursor"]
         )
 
-        _mcp2, service2 = central.build_server(
-            "localhost", 8765, self.root / "data"
+        mcp2, service2 = await asyncio.to_thread(
+            central.build_server, "localhost", 8765, self.root / "data"
         )
-        self.assertIn(key, service2.offer_deadline_tasks)
+        self.assertEqual(len(service2.offer_deadline_tasks), 0)
 
-        await asyncio.sleep(1.2)
+        published_cues: list[str] = []
+        original_publish = mcp2._subscriptions.publish
+        async def tracking_publish(event: Any) -> None:
+            published_cues.append(getattr(event, "uri", ""))
+            await original_publish(event)
+        mcp2._subscriptions.publish = tracking_publish
 
-        journal_slice = service2.journal.read_after("pursers", watermark, 1000)
-        events = journal_slice["events"]
-        expired_events = [
-            e for e in events
-            if e.get("kind") == OFFER_EXPIRED and e.get("offer_kind") == "review"
-        ]
-        self.assertEqual(len(expired_events), 1)
-        new_cursor = int(journal_slice["latest_cursor"])
-        self.assertGreater(new_cursor, watermark)
+        app2 = central.create_streamable_http_app(mcp2, service2, host="localhost")
+        async with app2.router.lifespan_context(app2):
+            self.assertIn(key, service2.offer_deadline_tasks)
 
-        doc = service2.load("pursers")
-        ticket = doc["tickets"][ticket_id]
-        self.assertNotIn("review_offer", ticket)
-        self.assertEqual(ticket["status"], "submitted")
-        self.assertEqual(ticket["dispatch_state"]["state"], "broadcast")
-        self.assertEqual(ticket["dispatch_state"]["reason"], "no_candidates_remaining")
+            await asyncio.sleep(1.2)
 
-        service2.rehydrate_offer_deadlines()
-        doc_again = service2.load("pursers")
-        service2.rehydrate_board_offer_deadlines("pursers", doc_again)
-        await asyncio.sleep(0.2)
-        after_slice = service2.journal.read_after("pursers", watermark, 1000)
-        self.assertEqual(len(after_slice["events"]), len(events))
-        self.assertEqual(int(after_slice["latest_cursor"]), new_cursor)
-        tasks2 = [t for t in service2.offer_deadline_tasks.values() if not t.done()]
-        for t in tasks2:
-            t.cancel()
-        if tasks2:
-            await asyncio.gather(*tasks2, return_exceptions=True)
+            journal_slice = service2.journal.read_after("pursers", watermark, 1000)
+            events = journal_slice["events"]
+            expired_events = [
+                e for e in events
+                if e.get("kind") == OFFER_EXPIRED and e.get("offer_kind") == "review"
+            ]
+            self.assertEqual(len(expired_events), 1)
+            new_cursor = int(journal_slice["latest_cursor"])
+            self.assertGreater(new_cursor, watermark)
+
+            self.assertIn(f"board://pursers/ticket/{ticket_id}", published_cues)
+            self.assertIn("board://pursers/journal", published_cues)
+
+            doc = service2.load("pursers")
+            ticket = doc["tickets"][ticket_id]
+            self.assertNotIn("review_offer", ticket)
+            self.assertEqual(ticket["status"], "submitted")
+            self.assertEqual(ticket["dispatch_state"]["state"], "broadcast")
+            self.assertEqual(ticket["dispatch_state"]["reason"], "no_candidates_remaining")
+
+            service2.rehydrate_offer_deadlines()
+            doc_again = service2.load("pursers")
+            service2.rehydrate_board_offer_deadlines("pursers", doc_again)
+            await asyncio.sleep(0.2)
+            after_slice = service2.journal.read_after("pursers", watermark, 1000)
+            self.assertEqual(len(after_slice["events"]), len(events))
+            self.assertEqual(int(after_slice["latest_cursor"]), new_cursor)
 
 
 if __name__ == "__main__":
