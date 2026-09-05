@@ -1203,6 +1203,83 @@ class DispatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fetched["work_offer_expirations"], 1)
         self.assertNotIn("work_offer", fetched)
 
+    async def test_broadcast_reoffers_after_cadence_and_flags_attention(self) -> None:
+        worker = await self.add_seat(
+            self.worker_a, "only-worker", {"tier_max": 2}
+        )
+        self.service.register_listener("pursers", worker)
+        self.principal = self.admin
+        await self.call(
+            "board_dispatch_policy_set",
+            agent_name="admin-agent",
+            offer_ttl_s=10,
+            broadcast_reoffer_s=60,
+        )
+        base_time = central.time.time()
+        with patch.object(central.time, "time", return_value=base_time):
+            ticket = (await self.create()).structured_content["ticket"]
+        with patch.object(central.time, "time", return_value=base_time + 20):
+            await self.call("board_reap")
+        broadcast = (
+            await self.call("ticket_get", ticket_id=ticket["ticket_id"])
+        ).structured_content["ticket"]
+        self.assertEqual(broadcast["dispatch_state"]["state"], "broadcast")
+
+        with patch.object(central.time, "time", return_value=base_time + 81):
+            status = await self.call("board_status")
+            await self.call("board_reap")
+        self.assertEqual(
+            status.structured_content["unclaimed_tickets"][0]["ticket_id"],
+            ticket["ticket_id"],
+        )
+        reoffered = (
+            await self.call("ticket_get", ticket_id=ticket["ticket_id"])
+        ).structured_content["ticket"]
+        self.assertEqual(reoffered["work_offer"]["agent_id"], worker)
+        self.assertIn(
+            "requeued",
+            [entry["state"] for entry in reoffered["dispatch_history"]],
+        )
+
+    async def test_coordinator_is_never_offered_even_with_stale_work_capability(self) -> None:
+        coordinator_principal = central.Principal(
+            "PR-coordinate-only",
+            "coordinate-only",
+            frozenset({"board:read", "board:coordinate"}),
+        )
+        self.principal = self.admin
+        await self.call(
+            "board_member_add",
+            agent_name="admin-agent",
+            principal_id=coordinator_principal.principal_id,
+            role="member",
+        )
+        self.principal = coordinator_principal
+        joined = await self.call(
+            "board_join", agent_name="coordinator-seat", role="coordinator"
+        )
+        coordinator_id = joined.structured_content["agent_id"]
+
+        def corrupt_legacy_capability(document: dict[str, Any]) -> None:
+            member = document["members"][coordinator_id]
+            member["capabilities_explicit"] = True
+            member["capabilities"]["can_work"] = True
+            member["last_activity_at"] = central.iso_at(central.time.time())
+
+        self.service.mutate(
+            "pursers", corrupt_legacy_capability, require_generation=False
+        )
+        self.service.register_listener("pursers", coordinator_id)
+        real_worker = await self.add_seat(
+            self.worker_a, "real-worker", {"tier_max": 2}
+        )
+        self.principal = self.admin
+        created = await self.create(prefer_agents=[coordinator_id])
+        self.assertEqual(
+            created.structured_content["ticket"]["work_offer"]["agent_id"],
+            real_worker,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

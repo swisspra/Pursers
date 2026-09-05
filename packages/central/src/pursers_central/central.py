@@ -81,6 +81,9 @@ from transactional_sqlite import TransactionalSQLiteStore
 
 ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,80}$")
 DEFAULT_CLAIM_TTL_S = 900
+DEFAULT_BROADCAST_REOFFER_S = 600
+MIN_BROADCAST_REOFFER_S = 60
+MAX_BROADCAST_REOFFER_S = 86_400
 DEFAULT_STALE_AFTER_DAYS = 3
 MIN_STALE_AFTER_DAYS = 1
 MAX_STALE_AFTER_DAYS = 3_650
@@ -808,6 +811,7 @@ class CentralBoard:
                 "review_policy": "strict",
                 "dispatch_policy": {
                     "offer_ttl_s": DEFAULT_OFFER_TTL_S,
+                    "broadcast_reoffer_s": DEFAULT_BROADCAST_REOFFER_S,
                     "second_opinion": True,
                     "fallback_broadcast": True,
                 },
@@ -884,6 +888,7 @@ class CentralBoard:
             "dispatch_policy",
             {
                 "offer_ttl_s": DEFAULT_OFFER_TTL_S,
+                "broadcast_reoffer_s": DEFAULT_BROADCAST_REOFFER_S,
                 "second_opinion": True,
                 "fallback_broadcast": True,
             },
@@ -897,6 +902,17 @@ class CentralBoard:
             or not MIN_OFFER_TTL_S <= offer_ttl_s <= MAX_OFFER_TTL_S
         ):
             raise ValueError("board dispatch offer_ttl_s is invalid")
+        broadcast_reoffer_s = dispatch_policy.setdefault(
+            "broadcast_reoffer_s", DEFAULT_BROADCAST_REOFFER_S
+        )
+        if (
+            isinstance(broadcast_reoffer_s, bool)
+            or not isinstance(broadcast_reoffer_s, int)
+            or not MIN_BROADCAST_REOFFER_S
+            <= broadcast_reoffer_s
+            <= MAX_BROADCAST_REOFFER_S
+        ):
+            raise ValueError("board dispatch broadcast_reoffer_s is invalid")
         for field, default in (
             ("second_opinion", True),
             ("fallback_broadcast", True),
@@ -1847,6 +1863,42 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
     def dispatch_policy(document: Mapping[str, Any]) -> dict[str, Any]:
         return dict(document.get("config", {}).get("dispatch_policy", {}))
 
+    def parse_epoch(value: Any) -> float | None:
+        if not isinstance(value, str):
+            return None
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return parsed.timestamp() if parsed.tzinfo is not None else None
+
+    def broadcast_since_epoch(ticket: Mapping[str, Any], kind: str) -> float | None:
+        state = ticket.get("dispatch_state")
+        if isinstance(state, Mapping) and state.get("state") == "broadcast":
+            at = parse_epoch(state.get("at"))
+            if at is not None:
+                return at
+        for entry in reversed(ticket.get("dispatch_history", [])):
+            if not isinstance(entry, Mapping) or entry.get("kind") != kind:
+                continue
+            if entry.get("state") not in {"broadcast", "expired"}:
+                continue
+            at = parse_epoch(entry.get("at") or entry.get("offered_at"))
+            if at is not None:
+                return at
+        return parse_epoch(ticket.get("updated_at") or ticket.get("created_at"))
+
+    def set_broadcast_state(
+        ticket: dict[str, Any], now: float, kind: str, reason: str,
+    ) -> None:
+        cycle = int(ticket.get(f"{kind}_dispatch_cycle", 0) or 0)
+        state = {
+            "state": "broadcast", "kind": kind, "reason": reason,
+            "at": iso_at(now), "cycle": cycle,
+        }
+        ticket["dispatch_state"] = state
+        ticket.setdefault("dispatch_history", []).append(copy.deepcopy(state))
+
     def agent_matches(values: Iterable[str], member: Mapping[str, Any]) -> bool:
         wanted = {str(value).casefold() for value in values}
         identities = {
@@ -1898,10 +1950,34 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             return None
         policy = dispatch_policy(document)
         attempts = int(ticket.get(f"{kind}_offer_expirations", 0))
-        if policy.get("fallback_broadcast", True) and attempts >= DEFAULT_FALLBACK_AFTER_OFFERS:
-            ticket["dispatch_state"] = {
-                "state": "broadcast", "kind": kind, "reason": "offer_limit_reached"
-            }
+        reoffer_cycle = False
+        state = ticket.get("dispatch_state")
+        broadcast = isinstance(state, Mapping) and state.get("state") == "broadcast"
+        if broadcast:
+            since = broadcast_since_epoch(ticket, kind) if broadcast else None
+            reoffer_after = int(
+                policy.get("broadcast_reoffer_s", DEFAULT_BROADCAST_REOFFER_S)
+            )
+            if since is None or now - since < reoffer_after:
+                return None
+            ticket[f"{kind}_offer_expirations"] = 0
+            reoffer_cycle = True
+            ticket[f"{kind}_dispatch_cycle"] = int(
+                ticket.get(f"{kind}_dispatch_cycle", 0) or 0
+            ) + 1
+            attempts = 0
+            ticket.setdefault("dispatch_history", []).append(
+                {
+                    "state": "requeued", "kind": kind,
+                    "reason": "broadcast_reoffer_due", "at": iso_at(now),
+                    "cycle": ticket[f"{kind}_dispatch_cycle"],
+                }
+            )
+        elif (
+            policy.get("fallback_broadcast", True)
+            and attempts >= DEFAULT_FALLBACK_AFTER_OFFERS
+        ):
+            set_broadcast_state(ticket, now, kind, "offer_limit_reached")
             return None
         required_tier = int(ticket.get("tier", 2))
         required_skills = set(ticket.get("skills_required", []))
@@ -1915,6 +1991,8 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             if isinstance(entry, Mapping)
             and entry.get("state") == "expired"
             and entry.get("kind") == kind
+            and int(entry.get("cycle", 0) or 0)
+            == int(ticket.get(f"{kind}_dispatch_cycle", 0) or 0)
             and entry.get("agent_id")
         }
         candidates: list[tuple[dict[str, Any], dict[str, Any]]] = []
@@ -1932,11 +2010,17 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 continue
             if not member.get("capabilities_explicit"):
                 continue
+            if (
+                kind == "work"
+                and member.get("role") in {"coordinator", "orchestrator"}
+            ):
+                continue
             caps = member_capabilities(member)
             if int(caps["tier_max"]) < required_tier or not required_skills.issubset(caps["skills"]):
                 continue
-            if kind == "work" and not caps["can_work"]:
-                continue
+            if kind == "work":
+                if not caps["can_work"]:
+                    continue
             if kind == "review":
                 if not caps["can_review"] or membership.get("role") not in {"admin", "reviewer"}:
                     continue
@@ -1974,10 +2058,11 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         if alternatives:
             candidates = alternatives
         if not candidates:
+            if reoffer_cycle:
+                set_broadcast_state(ticket, now, kind, "no_live_candidates")
+                return None
             if attempts > 0 and policy.get("fallback_broadcast", True):
-                state = {"state": "broadcast", "kind": kind, "reason": "no_candidates_remaining"}
-                ticket["dispatch_state"] = state
-                ticket.setdefault("dispatch_history", []).append({**state, "at": iso_at(now)})
+                set_broadcast_state(ticket, now, kind, "no_candidates_remaining")
                 return None
             reason = f"no_eligible_{'worker' if kind == 'work' else 'reviewer'}"
             state = {"state": "unassignable", "kind": kind, "reason": reason}
@@ -2008,6 +2093,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             "agent_id": selected["agent_id"], "agent_name": selected["agent_name"],
             "offered_at": iso_at(now), "expires_at": iso_at(expires_epoch),
             "expires_at_epoch": expires_epoch,
+            "cycle": int(ticket.get(f"{kind}_dispatch_cycle", 0) or 0),
         }
         ticket[offer_key] = offer
         ticket["dispatch_state"] = {"state": "offered", **copy.deepcopy(offer)}
@@ -2044,6 +2130,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                     "agent_id": expired.get("agent_id"),
                     "agent_name": expired.get("agent_name"),
                     "at": iso_at(now),
+                    "cycle": int(expired.get("cycle", 0) or 0),
                 }
             )
             events.append(
@@ -2231,6 +2318,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             dispatch_event = dispatch_ticket(document, ticket, now, "work")
             if dispatch_event is not None:
                 released.append(dispatch_event)
+        released.extend(redispatch_queue(document, now))
         return released
 
     def prepare_board_call(
@@ -4383,6 +4471,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         agent_name: str,
         ctx: Context,
         offer_ttl_s: int = DEFAULT_OFFER_TTL_S,
+        broadcast_reoffer_s: int = DEFAULT_BROADCAST_REOFFER_S,
         second_opinion: bool = True,
         fallback_broadcast: bool = True,
         expected_generation: str | None = None,
@@ -4397,6 +4486,17 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             raise ValueError(
                 f"offer_ttl_s must be between {MIN_OFFER_TTL_S} and {MAX_OFFER_TTL_S}"
             )
+        if (
+            isinstance(broadcast_reoffer_s, bool)
+            or not isinstance(broadcast_reoffer_s, int)
+            or not MIN_BROADCAST_REOFFER_S
+            <= broadcast_reoffer_s
+            <= MAX_BROADCAST_REOFFER_S
+        ):
+            raise ValueError(
+                "broadcast_reoffer_s must be between "
+                f"{MIN_BROADCAST_REOFFER_S} and {MAX_BROADCAST_REOFFER_S}"
+            )
         if not isinstance(second_opinion, bool) or not isinstance(fallback_broadcast, bool):
             raise ValueError("second_opinion and fallback_broadcast must be boolean")
         principal = current_principal()
@@ -4407,6 +4507,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             actor = require_admin_actor(document, principal, agent_name)
             policy = {
                 "offer_ttl_s": offer_ttl_s,
+                "broadcast_reoffer_s": broadcast_reoffer_s,
                 "second_opinion": second_opinion,
                 "fallback_broadcast": fallback_broadcast,
             }
@@ -7382,6 +7483,13 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         status_counts: dict[str, int] = {}
         review_label_counts: dict[str, int] = {}
         unassignable: list[dict[str, Any]] = []
+        unclaimed_attention: list[dict[str, Any]] = []
+        status_now = time.time()
+        reoffer_after = int(
+            dispatch_policy(document).get(
+                "broadcast_reoffer_s", DEFAULT_BROADCAST_REOFFER_S
+            )
+        )
         for ticket in document["tickets"].values():
             status = str(ticket.get("status", "unknown"))
             status_counts[status] = status_counts.get(status, 0) + 1
@@ -7390,6 +7498,22 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 unassignable.append(
                     {"ticket_id": ticket.get("ticket_id"), "reason": state.get("reason")}
                 )
+            if (
+                ticket.get("status") == "open"
+                and isinstance(state, Mapping)
+                and state.get("state") == "broadcast"
+            ):
+                since = broadcast_since_epoch(ticket, "work")
+                age_s = max(0, int(status_now - since)) if since is not None else 0
+                if age_s >= reoffer_after:
+                    unclaimed_attention.append(
+                        {
+                            "ticket_id": ticket.get("ticket_id"),
+                            "reason": "unclaimed_broadcast",
+                            "unclaimed_for_s": age_s,
+                            "threshold_s": reoffer_after,
+                        }
+                    )
             for review in ticket.get("review_history", []):
                 label = review.get("review_label")
                 if isinstance(label, str) and label:
@@ -7413,6 +7537,12 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 "Unassignable: " + (
                     ", ".join(
                         f"{item['ticket_id']} ({item['reason']})" for item in unassignable
+                    ) or "none"
+                ),
+                "Unclaimed attention: " + (
+                    ", ".join(
+                        f"{item['ticket_id']} ({item['unclaimed_for_s']}s)"
+                        for item in unclaimed_attention
                     ) or "none"
                 ),
                 "Review labels: " + (
@@ -7441,6 +7571,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             "review_policy": current_review_policy,
             "dispatch_policy": dispatch_policy(document),
             "unassignable_tickets": unassignable,
+            "unclaimed_tickets": unclaimed_attention,
             "review_label_counts": review_label_counts,
             "scrub_allow_counts": copy.deepcopy(
                 document["config"].get("scrub_allow_counts", {})

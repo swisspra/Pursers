@@ -390,6 +390,7 @@ class BoardClient:
         self,
         *,
         offer_ttl_s: int = 120,
+        broadcast_reoffer_s: int = 600,
         second_opinion: bool = True,
         fallback_broadcast: bool = True,
     ) -> dict[str, Any]:
@@ -398,6 +399,7 @@ class BoardClient:
             {
                 "agent_name": self.agent_name,
                 "offer_ttl_s": offer_ttl_s,
+                "broadcast_reoffer_s": broadcast_reoffer_s,
                 "second_opinion": second_opinion,
                 "fallback_broadcast": fallback_broadcast,
             },
