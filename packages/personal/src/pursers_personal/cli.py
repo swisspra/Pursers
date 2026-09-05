@@ -407,12 +407,22 @@ def _initialize_personal_board(
                 await asyncio.sleep(delay)
             try:
                 async with asyncio.timeout(12):
-                    async with client_module.BoardClient(
-                        context.central_url,
-                        context.capability_token,
-                        context.board_id,
-                        agent_name=context.agent_name,
-                    ) as client:
+                    try:
+                        client_cm = client_module.BoardClient(
+                            context.central_url,
+                            context.capability_token,
+                            context.board_id,
+                            agent_name=context.agent_name,
+                            capabilities={"can_work": False, "can_review": False},
+                        )
+                    except TypeError:
+                        client_cm = client_module.BoardClient(
+                            context.central_url,
+                            context.capability_token,
+                            context.board_id,
+                            agent_name=context.agent_name,
+                        )
+                    async with client_cm as client:
                         policy = await api.bootstrap_personal_review_policy(client)
                         status = await client.board_status()
                         identity = client.identity
