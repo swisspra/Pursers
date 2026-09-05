@@ -216,6 +216,12 @@ class LegacyToolsTests(unittest.IsolatedAsyncioTestCase):
         before_cursor = self.service.journal.read_after("pursers", 0, 1)[
             "latest_cursor"
         ]
+        calls = [
+            ("board_get_briefing", {}),
+            ("memory_read", {"agent_name": "admin-agent"}),
+            ("memory_search", {"query": "absent"}),
+            ("memory_links", {}),
+        ]
         with patch.object(central, "log_runtime_event") as runtime_event:
             async with Client(
                 self.mcp,
@@ -223,23 +229,26 @@ class LegacyToolsTests(unittest.IsolatedAsyncioTestCase):
                 mode="2026-07-28",
                 cache=None,
             ) as client:
-                first = await client.call_tool(
-                    "board_get_briefing", {"board_id": "pursers"}
-                )
+                for tool_name, arguments in calls:
+                    result = await client.call_tool(
+                        tool_name, {"board_id": "pursers", **arguments}
+                    )
+                    self.assertFalse(result.is_error)
+                    self.assertTrue(json.loads(result.content[0].text)["_deprecated"])
                 repeat = await client.call_tool(
                     "board_get_briefing", {"board_id": "pursers"}
                 )
 
-        self.assertFalse(first.is_error)
         self.assertFalse(repeat.is_error)
-        self.assertTrue(json.loads(first.content[0].text)["_deprecated"])
-        runtime_event.assert_called_once_with(
-            "deprecated_tool_warning",
-            board_id="pursers",
-            tool="board_get_briefing",
-            caller_principal_id="PR-admin",
-            caller_agent_name="admin-agent",
-        )
+        self.assertEqual(runtime_event.call_count, len(calls))
+        for tool_name, _arguments in calls:
+            runtime_event.assert_any_call(
+                "deprecated_tool_warning",
+                board_id="pursers",
+                tool=tool_name,
+                caller_principal_id="PR-admin",
+                caller_agent_name="admin-agent",
+            )
         self.assertEqual(self.service.load("pursers"), before_document)
         self.assertEqual(
             self.service.journal.read_after("pursers", 0, 1)["latest_cursor"],

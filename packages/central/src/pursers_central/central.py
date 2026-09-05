@@ -6527,22 +6527,6 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             cutoff = max(cutoff, time.time() - since_minutes * 60)
         principal = current_principal()
         require_scope(principal, "board:read")
-        release_events: list[dict[str, Any]] = []
-        renewed: list[str] = []
-        if "board:write" in principal.scopes:
-            now = time.time()
-
-            def prepare(document: dict[str, Any]) -> dict[str, Any]:
-                actor, released, implicit = prepare_board_call(
-                    document, principal, agent_name, now
-                )
-                return {"actor": actor, "released": released, "renewed": implicit}
-
-            prepared = service.mutate(board_id, prepare)
-            release_events = await publish_releases(
-                board_id, prepared["released"], principal, ctx
-            )
-            renewed = prepared["renewed"]
         document = service.load(board_id)
         service.member(document, principal, agent_name)
         visible = [project_memory(entry) for entry in visible_memories(document, principal)]
@@ -6581,8 +6565,8 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             "memories": visible,
             "visible_count": len(visible),
             "total_matching": total_matching,
-            "release_events": release_events,
-            "implicitly_renewed": renewed,
+            "release_events": [],
+            "implicitly_renewed": [],
         }
 
     @tool()

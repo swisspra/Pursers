@@ -846,10 +846,6 @@ async def test_app_reads_use_only_the_non_joining_pure_reader() -> None:
             calls.append(f"ticket_list:{kwargs}")
             return {"tickets": [], "total_matching": 0, "latest_seq": 7}
 
-        async def board_get_briefing(self, **kwargs: Any) -> dict[str, Any]:
-            calls.append(f"board_get_briefing:{kwargs}")
-            return {"pinned_digest": [], "latest_handoff": None}
-
     bootstrap_calls: list[object] = []
 
     async def bootstrap(client: object) -> dict[str, Any]:
@@ -938,10 +934,6 @@ async def test_dashboard_idle_reads_cache_and_ticket_cue_refetches_once() -> Non
                 "total_matching": 1,
                 "latest_seq": 10,
             }
-
-        async def board_get_briefing(self, **_kwargs: Any) -> dict[str, Any]:
-            central_calls.append("board_get_briefing")
-            return {"pinned_digest": [], "latest_handoff": None}
 
         async def ticket_get(self, ticket_id: str) -> dict[str, Any]:
             central_calls.append("ticket_get")
@@ -1089,9 +1081,6 @@ async def test_dashboard_subscription_loss_marks_cache_stale_and_logs(
 
         async def ticket_list(self, **_kwargs: Any) -> dict[str, Any]:
             return {"tickets": [], "total_matching": 0, "latest_seq": 3}
-
-        async def board_get_briefing(self, **_kwargs: Any) -> dict[str, Any]:
-            return {"pinned_digest": [], "latest_handoff": None}
 
         async def events(
             self, _from_cursor: int, cursor_callback: Any
@@ -1503,9 +1492,6 @@ async def test_projection_flags_only_duplicate_active_agent_names() -> None:
         async def ticket_list(self, **_kwargs: Any) -> dict[str, Any]:
             return {"tickets": [], "total_matching": 0, "latest_seq": 4}
 
-        async def board_get_briefing(self, **_kwargs: Any) -> dict[str, Any]:
-            return {"pinned_digest": [], "latest_handoff": None}
-
     state = LiveDashboard(
         fake_config(),
         client_class=FakeClient,
@@ -1627,10 +1613,6 @@ async def test_projection_adds_projects_without_extra_central_reads() -> None:
                 },
             ]
             return {"tickets": tickets, "total_matching": 5, "latest_seq": 8}
-
-        async def board_get_briefing(self, **_kwargs: Any) -> dict[str, Any]:
-            calls.append("board_get_briefing")
-            return {"pinned_digest": [], "latest_handoff": None}
 
     state = LiveDashboard(
         fake_config(),
@@ -1780,9 +1762,6 @@ async def test_hung_raw_view_exit_is_bounded_and_releases_read_lock() -> None:
 
         async def ticket_list(self, **_kwargs: Any) -> dict[str, Any]:
             return {"tickets": [], "total_matching": 0, "latest_seq": 1}
-
-        async def board_get_briefing(self, **_kwargs: Any) -> dict[str, Any]:
-            return {"pinned_digest": [], "latest_handoff": None}
 
     class HealthyReader(HangingExitReader):
         async def __aexit__(self, *_args: Any) -> None:
@@ -2276,9 +2255,6 @@ async def test_projection_joins_agents_to_their_current_ticket() -> None:
 
         async def ticket_list(self, **_kwargs: Any) -> dict[str, Any]:
             return {"tickets": tickets, "total_matching": len(tickets), "latest_seq": 4}
-
-        async def board_get_briefing(self, **_kwargs: Any) -> dict[str, Any]:
-            return {"pinned_digest": [], "latest_handoff": None}
 
     state = LiveDashboard(
         fake_config(),
