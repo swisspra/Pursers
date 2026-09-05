@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <link rel="icon" href="data:,">
-  <title>Pursers 5.0.0a17 — What's new</title>
+  <title>Pursers 5.0.0a18 — What's new</title>
   <style>
     :root { --ink:#17365d; --muted:#596579; --line:#d9d6cc; --paper:#fbf8f0; --card:#fff; --blue:#2f6f9f; --green:#28745a; --orange:#b75b24; }
     * { box-sizing:border-box; }
@@ -39,9 +39,9 @@
 </head>
 <body>
   <header>
-    <p class="eyebrow">What's new · a16 release</p>
+    <p class="eyebrow">What's new · a18 release</p>
     <h1>Workers wait for cues,<br>not timer polls.</h1>
-    <p class="lead">The 5.0.0a17 release makes MCP 2026-07-28 <code>subscriptions/listen</code> the primary wait path across interactive, CLI, and headless seats.</p>
+    <p class="lead">The 5.0.0a18 release makes MCP 2026-07-28 <code>subscriptions/listen</code> the primary wait path across interactive, CLI, and headless seats.</p>
   </header>
 
   <nav aria-label="Contents"><div>
@@ -63,7 +63,7 @@
       </div>
       <ul>
         <li><strong>Dispatch offers:</strong> capable seats declare tier, skills, work/review flags, host, and optional model/provider at join and reconnect. A worker or reviewer now wakes only for its own offer and held-ticket lease events; <code>reason=offer</code> carries expiry, tier, and required skills. Legacy boards keep broadcast behavior.</li>
-        <li><strong>Unreleased:</strong> reviewer identities now wait for submissions by default, unchanged legacy backlog cues are surfaced once per bridge process, and each return reports <code>reason=offer|journal|backlog|timeout</code>.</li>
+        <li><strong>Reviewer waits:</strong> reviewer identities now wait for submissions by default, unchanged legacy backlog cues are surfaced once per bridge process, and each return reports <code>reason=offer|journal|backlog|timeout</code>.</li>
         <li><strong>Orchestrator mode (TK-55b6bc8985fc):</strong> wait bridge background subscription with instant <code>board_digest</code>, <code>board_digest_ack</code>, <code>board_watch</code>, and <code>board_unwatch</code> tools for Claude Desktop leaders. Eliminates blocking wait and polling; buffers events in a persistent ring buffer, fetches with <code>touch=false</code> (zero board writes while idle), and emits MCP resource notifications on <code>board://&lt;board&gt;/digest</code>.</li>
         <li><strong>Tool surface audit and deprecation (TK-2ffa16368cbb):</strong> measured 7-day usage across 45 Central and bridge tools. Implemented hide-unless-legacy mechanism in Central and Wait-Bridge for a18: 10 superseded, redundant, or unused tools (<code>agent_nudge</code>, <code>board_get_briefing</code>, <code>ticket_terminate</code>, <code>ticket_assign</code>, and 6 unused <code>memory_*</code> tools) are hidden from default <code>tools/list</code> saving ~1,500 context tokens per turn (while <code>memory_write</code> and <code>ticket_unclaim</code> remain visible core tools). Seats can opt-in via <code>capabilities={"legacy_tools": true}</code> upon <code>board_join</code> or <code>PURSERS_LEGACY_TOOLS=1</code> env var. Calling deprecated tools emits a <code>_deprecated: true</code> annotation and a one-time journal warning per caller; physical removal is scheduled for a19. Comprehensive audit documentation published at <code>docs/tool-surface-audit.md</code>.</li>
         <li><strong>Reviewer hardening:</strong> generated seats now carry one HARD-verify checklist, an exact-SHA <code>board.sh verify</code> helper, approval evidence gates, and non-empty rejection fixes. Generic leak rules ship in-repo; operator regexes load locally from <code>~/.pursers/leak-markers.txt</code> or <code>PURSERS_LEAK_MARKERS_FILE</code> and only their count is printed.</li>
@@ -105,9 +105,9 @@ PURSERS_HOST = "codex"</code></pre>
     </section>
 
     <section id="tickets">
-      <h2>Unreleased: dashboard-first seat setup</h2>
+      <h2>Dashboard-first seat setup</h2>
       <p>The loopback Fleet Dashboard now provides a top-level Config page with a seat wizard, redacted diff-before-apply flow, backups, restart prompts, Doctor jobs, wait-bridge upgrades, and read-only registry coverage. Token contents stay server-side and Config writes are accepted only from loopback clients.</p>
-      <p>The wizard now declares tier, skills, work/review gates, model, and provider across Codex, Goose, Claude Desktop, and Claude Code. Connector-derived skill suggestions remain editable, Doctor flags Central drift, and each board has a dispatch panel for policy, capability gaps, current offers, and recent offer events. Capability environment values are generated now; automatic wait-bridge and seat-kit consumption still depends on unmerged Dispatch Part 2 (<code>TK-dae93d61ff3d</code>).</p>
+      <p>The wizard now declares tier, skills, work/review gates, model, and provider across Codex, Goose, Claude Desktop, and Claude Code. Connector-derived skill suggestions remain editable, Doctor flags Central drift, and each board has a dispatch panel for policy, capability gaps, current offers, and recent offer events. The wait bridge and seat kit consume these capability declarations for targeted dispatch.</p>
       <h2>Push-wait program</h2>
       <ul>
         <li><code>TK-10cea5ba067a</code> — host timeout and re-arm profile research.</li>
@@ -118,13 +118,16 @@ PURSERS_HOST = "codex"</code></pre>
         <li><code>TK-a6cd4fc8d082</code> — worker-runtime worker/reviewer cue-driven redo.</li>
         <li><code>TK-55b6bc8985fc</code> — wait-bridge orchestrator mode: background subscription + instant board_digest/ack tools for Claude Desktop leaders.</li>
       </ul>
-      <p>This page documents the a16 release as a coherent program. A follow-up ticket that is still open or claimed is not represented as released or complete.</p>
+      <p>This page documents the a18 release as a coherent program. A follow-up ticket that is still open or claimed is not represented as released or complete.</p>
     </section>
 
     <section id="migration">
       <h2>Operator migration checklist</h2>
       <ol>
         <li>Keep secrets in the host's protected configuration; use placeholders in shared documentation.</li>
+        <li>Set <code>PURSERS_ROLE</code> explicitly to <code>worker</code>, <code>reviewer</code>, or <code>orchestrator</code> for every seat.</li>
+        <li>Use one token identity per seat for both its wait bridge and board connector.</li>
+        <li>Set <code>PURSERS_LEGACY_TOOLS=1</code> only while deprecated tools are required; this compatibility path is removed in a19.</li>
         <li>Set the correct <code>PURSERS_HOST</code> and configure the host timeout longer than the bridge block.</li>
         <li>Remove default-path poll settings and verify one subscription wait on a test board.</li>
         <li>Confirm <code>timed_out=true</code> is immediately re-armed with <code>new_seq</code>.</li>

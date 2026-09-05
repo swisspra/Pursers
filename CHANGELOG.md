@@ -7,6 +7,34 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [5.0.0a18] - 2026-09-05
+
+This release includes `pursers-central==0.1.0a22`,
+`pursers-client==0.1.0a16`, `pursers-personal-import==5.0.0a3`,
+`pursers-personal==5.0.0a18`, `pursers==5.0.0a18`, and
+`pursers-wait-bridge==0.1.0a8`.
+
+### Package summary
+
+- **Central 0.1.0a22:** adds dispatch-aware offers, explicit seat roles,
+  orchestrator digests, and the audited legacy-tool visibility policy.
+- **Client 0.1.0a16:** declares seat capabilities and roles, handles targeted
+  offer waits, and keeps wait-bridge and connector token identity aligned.
+- **Wait Bridge 0.1.0a8:** adds orchestrator mode and role-safe push waits while
+  hiding deprecated tools unless legacy compatibility is enabled.
+- **Personal and meta 5.0.0a18:** ship the matching dashboard, setup, Doctor,
+  packaging, and release-lock updates; Personal Import remains at 5.0.0a3.
+- **Fleet Dashboard and seat-kit tooling:** add capability and dispatch controls,
+  explicit role generation, split-identity diagnostics, and reviewer safeguards.
+
+### Migration
+
+- Set `PURSERS_ROLE` explicitly to `worker`, `reviewer`, or `orchestrator` for
+  every seat.
+- Use one token identity per seat for both its wait bridge and board connector.
+- Set `PURSERS_LEGACY_TOOLS=1` only when deprecated tools are still required;
+  this compatibility path remains available through a18 and is removed in a19.
+
 ### Added
 
 - Fleet Dashboard seat capability controls (`tier_max`, skills, work/review gates,

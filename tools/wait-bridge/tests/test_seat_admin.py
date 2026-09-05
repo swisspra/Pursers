@@ -310,7 +310,7 @@ class SeatAdminTests(unittest.TestCase):
                         "from importlib.metadata import version; "
                         "import registry_admin, registry_doctor, seat_admin; "
                         f"assert version('pursers-wait-bridge') == {_bridge_version()!r}; "
-                        "assert version('pursers-client') == '0.1.0a15'; "
+                        "assert version('pursers-client') == '0.1.0a16'; "
                         "assert version('mcp') == '2.1.1'; "
                         "assert hasattr(registry_doctor.LiveBackend, 'board_snapshot'); "
                         "assert hasattr(seat_admin.SeatBoardClient, 'board_member_add'); "
