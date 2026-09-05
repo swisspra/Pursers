@@ -2778,6 +2778,8 @@ async def _ticket_projection(
     client: BoardClient,
     wait_for: str,
     deadline: float,
+    *,
+    ticket_ids: set[str] | None = None,
 ) -> tuple[list[dict[str, Any]] | None, bool, dict[str, Any] | None]:
     """Fetch one bounded active-ticket projection inside the wait deadline."""
     remaining = deadline - time.monotonic()
@@ -2785,8 +2787,10 @@ async def _ticket_projection(
         return None, False, {"code": "ticket_projection_timeout"}
     arguments: dict[str, Any] = {
         "include_closed": False,
-        "limit": CATCHUP_PAGE_LIMIT,
+        "limit": len(ticket_ids) if ticket_ids else CATCHUP_PAGE_LIMIT,
     }
+    if ticket_ids:
+        arguments["ticket_ids"] = sorted(ticket_ids)
     if wait_for == WAIT_FOR_SUBMITTED:
         arguments["status"] = "submitted"
     try:
@@ -2816,11 +2820,57 @@ async def _ticket_projection(
     return tickets, complete, warning
 
 
+def _page_candidate_ticket_ids(
+    page: dict[str, Any], wait_for: str
+) -> set[str]:
+    return {
+        ticket_id
+        for event in page["events"]
+        if _event_matches_wait(event, wait_for)
+        and isinstance((ticket_id := event.get("ticket_id")), str)
+        and ticket_id
+        and not (
+            wait_for == WAIT_FOR_SUBMITTED
+            and event.get("kind")
+            in {REVIEW_LEASE_EXPIRED, REVIEW_LEASE_RELEASED}
+        )
+    }
+
+
+async def _project_catchup_pages(
+    client: BoardClient,
+    caught: dict[str, Any],
+    wait_for: str,
+    deadline: float,
+) -> tuple[list[dict[str, Any]], int, dict[str, Any] | None]:
+    """Resolve each journal page with one keyed, deadline-bounded projection."""
+    tickets: list[dict[str, Any]] = []
+    resolved_pages = 0
+    for page in caught.get("pages", []):
+        candidate_ids = _page_candidate_ticket_ids(page, wait_for)
+        if candidate_ids:
+            projected, complete, warning = await _ticket_projection(
+                client,
+                wait_for,
+                deadline,
+                ticket_ids=candidate_ids,
+            )
+            if warning is not None or projected is None or not complete:
+                detail = dict(warning or {"code": "ticket_projection_incomplete"})
+                detail["cursor_before"] = int(page["cursor_before"])
+                return tickets, resolved_pages, detail
+            tickets.extend(projected)
+        resolved_pages += 1
+    return tickets, resolved_pages, None
+
+
 def _resolved_catchup_pages(
     caught: dict[str, Any],
     tickets: list[dict[str, Any]] | None,
     projection_complete: bool,
     wait_for: str,
+    *,
+    max_pages: int | None = None,
 ) -> tuple[list[dict[str, Any]], int, list[dict[str, Any]]]:
     """Keep only whole journal pages whose candidate ticket state is known."""
     tickets_by_id = {
@@ -2831,18 +2881,11 @@ def _resolved_catchup_pages(
     safe_events: list[dict[str, Any]] = []
     safe_pages: list[dict[str, Any]] = []
     cursor = int(caught.get("base_cursor", 0))
-    for page in caught.get("pages", []):
-        candidates = {
-            event.get("ticket_id")
-            for event in page["events"]
-            if _event_matches_wait(event, wait_for)
-            and event.get("ticket_id")
-            and not (
-                wait_for == WAIT_FOR_SUBMITTED
-                and event.get("kind")
-                in {REVIEW_LEASE_EXPIRED, REVIEW_LEASE_RELEASED}
-            )
-        }
+    pages = list(caught.get("pages", []))
+    if max_pages is not None:
+        pages = pages[:max_pages]
+    for page in pages:
+        candidates = _page_candidate_ticket_ids(page, wait_for)
         if not projection_complete and not candidates.issubset(tickets_by_id):
             break
         safe_events.extend(page["events"])
@@ -3755,7 +3798,19 @@ async def _wait_for_work_many(
         active_tickets: list[dict[str, Any]] | None = None
         projection_complete = False
         projection_warning: dict[str, Any] | None = None
-        if caught["events"] or backlog:
+        resolved_page_count: int | None = None
+        if caught["events"]:
+            (
+                active_tickets,
+                resolved_page_count,
+                projection_warning,
+            ) = await _project_catchup_pages(
+                views[board_id], caught, wait_for_by_board[board_id], deadline
+            )
+            projection_complete = True
+            if projection_warning is not None:
+                meta["warnings"].append(projection_warning)
+        elif backlog:
             (
                 active_tickets,
                 projection_complete,
@@ -3770,6 +3825,7 @@ async def _wait_for_work_many(
             active_tickets,
             projection_complete,
             wait_for_by_board[board_id],
+            max_pages=resolved_page_count,
         )
         projection_partial = len(safe_pages) < len(caught["pages"])
         if caught["persisted_cursor"] and safe_pages:
@@ -4126,7 +4182,19 @@ async def _wait_for_work(
         last_active_tickets = None
         projection_complete = False
         projection_warning: dict[str, Any] | None = None
-        if caught["events"] or scan_backlog:
+        resolved_page_count: int | None = None
+        if caught["events"]:
+            (
+                last_active_tickets,
+                resolved_page_count,
+                projection_warning,
+            ) = await _project_catchup_pages(
+                client, caught, selected_wait_for, deadline
+            )
+            projection_complete = True
+            if projection_warning is not None:
+                catchup_meta["warnings"].append(projection_warning)
+        elif scan_backlog:
             (
                 last_active_tickets,
                 projection_complete,
@@ -4139,6 +4207,7 @@ async def _wait_for_work(
             last_active_tickets,
             projection_complete,
             selected_wait_for,
+            max_pages=resolved_page_count,
         )
         projection_partial = len(safe_pages) < len(caught["pages"])
         if caught["persisted_cursor"] and safe_pages:

@@ -23,7 +23,13 @@ import pursers_wait_server as wait_server  # noqa: E402
 
 
 class BulkClient:
-    def __init__(self, count: int = 500, *, page_size: int = 500) -> None:
+    def __init__(
+        self,
+        count: int = 500,
+        *,
+        page_size: int = 500,
+        ticket_order: str = "oldest",
+    ) -> None:
         self.agent_name = "perf-seat"
         self.identity = JoinedIdentity(
             wait_server.BOARD_ID,
@@ -51,6 +57,7 @@ class BulkClient:
             for seq in range(1, count + 1)
         ]
         self.page_size = page_size
+        self.ticket_order = ticket_order
         self.persisted_cursor = 0
         self.calls: list[tuple[str, dict[str, Any]]] = []
 
@@ -67,17 +74,29 @@ class BulkClient:
             "events": page,
             "next_cursor": next_cursor,
             "latest_cursor": len(self.events),
+            "acknowledged_cursor": start,
             "has_more": next_cursor < len(self.events),
             "resync_required": False,
         }
 
     async def ticket_list(self, **arguments: Any) -> dict[str, Any]:
         self.calls.append(("ticket_list", dict(arguments)))
-        tickets = self.tickets[: int(arguments.get("limit", 100))]
+        tickets = list(self.tickets)
+        if self.ticket_order == "newest":
+            tickets.reverse()
+        ticket_ids = arguments.get("ticket_ids")
+        if ticket_ids is not None:
+            selected = set(ticket_ids)
+            tickets = [ticket for ticket in tickets if ticket["ticket_id"] in selected]
+        status = arguments.get("status")
+        if status is not None:
+            tickets = [ticket for ticket in tickets if ticket["status"] == status]
+        total = len(tickets)
+        tickets = tickets[: int(arguments.get("limit", 100))]
         return {
             "tickets": tickets,
             "count": len(tickets),
-            "total_matching": len(self.tickets),
+            "total_matching": total,
         }
 
     async def ticket_get(self, _ticket_id: str) -> dict[str, Any]:
@@ -219,30 +238,53 @@ class CatchupPerformanceTests(unittest.IsolatedAsyncioTestCase):
             ["board_catchup", "ticket_list"],
         )
 
-    async def test_truncated_projection_stops_before_unresolved_page(self) -> None:
-        client = BulkClient(count=600)
+    async def test_rearm_after_partial_reaches_tickets_beyond_projection_limit(self) -> None:
+        for ticket_order in ("oldest", "newest"):
+            with self.subTest(ticket_order=ticket_order):
+                client = BulkClient(count=600, ticket_order=ticket_order)
+                original = client.ticket_list
+                projection_calls = 0
 
-        result = await wait_server._wait_for_work(
-            client, since_seq=None, timeout_s=1, only_mine=False
-        )
+                async def truncate_second_projection(**arguments: Any) -> dict[str, Any]:
+                    nonlocal projection_calls
+                    projection_calls += 1
+                    result = await original(**arguments)
+                    if projection_calls == 2:
+                        result["total_matching"] = len(result["tickets"]) + 1
+                    return result
 
-        self.assertTrue(result["partial"])
-        self.assertFalse(result["timed_out"])
-        self.assertEqual(result["new_seq"], 500)
-        self.assertEqual(client.persisted_cursor, 500)
-        self.assertEqual(len(result["events"]), wait_server.REPLAY_EVENT_LIMIT)
-        self.assertEqual(result["events"][0]["ticket_id"], "TK-0301")
-        self.assertEqual(result["events"][-1]["ticket_id"], "TK-0500")
-        self.assertNotIn("TK-0501", {event["ticket_id"] for event in result["events"]})
-        self.assertEqual(result["dropped"], 300)
-        self.assertIn(
-            {
-                "code": "ticket_projection_truncated",
-                "returned": 500,
-                "total_matching": 600,
-            },
-            result["warnings"],
-        )
+                client.ticket_list = truncate_second_projection  # type: ignore[method-assign]
+                with patch.object(wait_server, "clamp_timeout", return_value=0.1):
+                    started = time.monotonic()
+                    first = await wait_server._wait_for_work(
+                        client, since_seq=None, timeout_s=1, only_mine=False
+                    )
+                self.assertLess(time.monotonic() - started, 0.1)
+                self.assertTrue(first["partial"])
+                self.assertEqual(first["new_seq"], 500)
+                self.assertEqual(client.persisted_cursor, 500)
+
+                calls_after_first = len(client.calls)
+                with patch.object(wait_server, "clamp_timeout", return_value=0.1):
+                    second = await wait_server._wait_for_work(
+                        client, since_seq=None, timeout_s=1, only_mine=False
+                    )
+                self.assertFalse(second.get("partial", False))
+                self.assertEqual(second["new_seq"], 600)
+                self.assertEqual(client.persisted_cursor, 600)
+                self.assertEqual(
+                    {event["ticket_id"] for event in second["events"]},
+                    {f"TK-{seq:04d}" for seq in range(501, 601)},
+                )
+                self.assertLess(calls_after_first, 20)
+                self.assertLess(len(client.calls) - calls_after_first, 20)
+                keyed = [
+                    arguments
+                    for name, arguments in client.calls
+                    if name == "ticket_list" and "ticket_ids" in arguments
+                ]
+                self.assertTrue(keyed)
+                self.assertTrue(all(len(arguments["ticket_ids"]) <= 500 for arguments in keyed))
 
     async def test_submitted_ticket_claimed_by_other_reviewer_does_not_wake(self) -> None:
         client = BulkClient(count=0)
