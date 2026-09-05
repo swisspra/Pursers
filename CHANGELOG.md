@@ -20,8 +20,9 @@ This release includes `pursers-central==0.1.0a22`,
   orchestrator digests, and the audited legacy-tool visibility policy.
 - **Client 0.1.0a16:** declares seat capabilities and roles, handles targeted
   offer waits, and keeps wait-bridge and connector token identity aligned.
-- **Wait Bridge 0.1.0a8:** adds orchestrator mode and role-safe push waits while
-  hiding deprecated tools unless legacy compatibility is enabled.
+- **Wait Bridge 0.1.0a8:** adds orchestrator mode, role-safe push waits, and
+  background lease keepalive while hiding deprecated tools unless legacy
+  compatibility is enabled.
 - **Personal and meta 5.0.0a18:** ship the matching dashboard, setup, Doctor,
   packaging, and release-lock updates; Personal Import remains at 5.0.0a3.
 - **Fleet Dashboard and seat-kit tooling:** add capability and dispatch controls,
@@ -37,6 +38,12 @@ This release includes `pursers-central==0.1.0a22`,
 
 ### Added
 
+- Background lease keepalive in the wait bridge: held work and review claims are
+  renewed process-wide at about 40% of the lease TTL, independent of whether the
+  seat is inside `a2a_wait`; a lost claim is surfaced once instead of failing at
+  submit. Board claim TTL is now adjustable live by an admin or coordinator, and
+  claims carry a successor continuation hint (previous holder and branch) so a
+  new holder resumes instead of restarting.
 - Fleet Dashboard seat capability controls (`tier_max`, skills, work/review gates,
   model, and provider), connector-derived skill suggestions, Central drift checks,
   and per-board dispatch policy, capability-gap, current-offer, and offer-timeline
