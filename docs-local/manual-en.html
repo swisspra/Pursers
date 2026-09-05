@@ -736,7 +736,7 @@ gh run watch &lt;publish_run_id&gt; --exit-status</code></pre>
       <p>Confirm all six expected distributions on PyPI and compare the GitHub Release wheels against <code>SHA256SUMS.txt</code>. If any published artifact is wrong, advance the affected version and cut another train; never replace an existing PyPI version.</p>
 
       <h3>3. Promote Central, bridge, Personal, and seats</h3>
-      <p>Stage Central before touching the running service. Download the Central and Client wheels from the approved GitHub Release, copy the Central and Client versions from the candidate manifest and the MCP pin from Central package metadata, then verify the wheel hash before creating the venv. The placeholders below are deliberate: deployment inventory owns its resolved runtime dependency pins, paths, and launchd label.</p>
+      <p>Stage Central before touching the running service. Download the Central and Client wheels from the approved GitHub Release, then verify the wheel hash before creating the venv. Resolve <code>&lt;central_version&gt;</code> and <code>&lt;client_version&gt;</code> from <code>tools/release_versions.toml</code> at the release tag. Resolve <code>&lt;mcp_runtime_version&gt;</code> from the exact <code>mcp[cli]==</code> dependency in <code>packages/central/pyproject.toml</code> at that tag. The approved deployment inventory is authoritative for the exact <code>&lt;jwt_runtime_version&gt;</code> and <code>&lt;server_runtime_version&gt;</code>; both must satisfy the <code>PyJWT[crypto]</code> and <code>uvicorn</code> ranges in that same Central metadata. Record the three resolved runtime pins in the deployment change. The remaining path and launchd placeholders also come from deployment inventory.</p>
       <pre><code>central_sha="$(shasum -a 256 "&lt;central_wheel&gt;" | cut -d' ' -f1)"
 test "$central_sha" = "&lt;central_wheel_sha256&gt;"
 
@@ -756,7 +756,9 @@ import importlib.metadata as metadata
 expected = {
     "pursers-central": "&lt;central_version&gt;",
     "pursers-client": "&lt;client_version&gt;",
-    "mcp": "2.1.1",
+    "mcp": "&lt;mcp_runtime_version&gt;",
+    "PyJWT": "&lt;jwt_runtime_version&gt;",
+    "uvicorn": "&lt;server_runtime_version&gt;",
 }
 actual = {name: metadata.version(name) for name in expected}
 assert actual == expected, (actual, expected)
@@ -835,7 +837,7 @@ python3 tools/worker-runtime/pursers_worker.py \
           <tr><td>Lease churn or lost claim</td><td>TTL is shorter than the renew schedule, the holder stopped renewing, Central restarted, or identity changed.</td><td>Stop edits, call <code>ticket_get</code>, verify holder/principal and <code>ttl_s</code>, reclaim only if current state permits, and renew about every five minutes during manual work. Check claim-TTL changes and the current Central service before resuming.</td></tr>
           <tr><td>Phantom or duplicate identities</td><td>A seat name/instance changed across restarts, or old config still launches another connector.</td><td>Restore one stable seat name, inspect inventory and Doctor, stop obsolete processes, then use <code>agent_retire</code> on the exact inert identity only after confirming it has no live work or review lease.</td></tr>
           <tr><td>Submission notes rejected or truncated</td><td>Notes exceeded the 5,000-character contract.</td><td>Keep the required fields and concise real test tails. The client truncates at a line boundary and returns metadata; move full logs to an approved artifact instead of claiming the omitted text was submitted.</td></tr>
-          <tr><td>Cursor ahead of journal</td><td>A cursor map came from another board, a restored state is newer than Central, or journal state was replaced.</td><td>Keep cursors per board. On a21 the bridge clamps to the journal head and returns <code>cursor_ahead_clamped</code>; treat it as recovery evidence, refetch ticket state, and re-arm with the returned whole cursor map.</td></tr>
+          <tr><td>Cursor ahead of journal</td><td>A cursor map came from another board, a restored state is newer than Central, or journal state was replaced.</td><td>Keep cursors per board. The released a21 bridge can surface this as an error; do not claim automatic clamping unless that bridge change has passed review and is present in the deployed version. On the board connector, call <code>board_catchup(board_id="&lt;board_id&gt;", agent_name="&lt;seat_name&gt;", cursor=0, limit=1, max_events=1, ack=false, touch=false)</code>, read <code>latest_cursor</code>, replace only that board's entry in the whole cursor map, refetch ticket state, and re-arm the wait.</td></tr>
           <tr><td>Codex bridge has no token</td><td>Codex did not forward a shell variable into its stdio subprocess.</td><td>Use the Config adapter so the private managed bridge env contains the token literal, keep the config mode 0600, verify literal/file principal equality with Doctor, and restart Codex.</td></tr>
         </tbody>
       </table>
