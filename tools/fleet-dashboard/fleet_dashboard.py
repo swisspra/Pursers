@@ -55,6 +55,7 @@ from seat_config import (  # noqa: I001
     DoctorCheck,
     PromptRenderer,
     SeatInventory,
+    _load_seat_new,
     adapter_for,
     connector_skill_suggestions,
 )
@@ -4000,10 +4001,68 @@ class SeatConfigManager:
             "clone": self._clone_state(target),
         }
 
+    def _seat_effective_work_dir(
+        self, desired: DesiredSeat, project_name: str, project_entry: dict[str, Any]
+    ) -> Path | None:
+        if not isinstance(project_entry, dict):
+            return None
+        fleet_clone = project_entry.get("fleet_clone_dir")
+        if isinstance(fleet_clone, str) and fleet_clone.strip():
+            return Path(fleet_clone).expanduser().resolve()
+        if desired.seat_dir:
+            seat_path = Path(desired.seat_dir).expanduser().resolve()
+            operator_dir = (
+                Path(project_entry["work_dir"]).expanduser().resolve()
+                if project_entry.get("work_dir")
+                else None
+            )
+            if seat_path != operator_dir:
+                if desired.repository:
+                    try:
+                        seat_new = _load_seat_new()
+                        repo_leaf = seat_new._repo_leaf(desired.repository)
+                        clone = seat_path / repo_leaf
+                        if (clone / ".git").exists() or clone.is_dir():
+                            return clone.resolve()
+                    except Exception:
+                        pass
+                clone = seat_path / project_name
+                if (clone / ".git").exists() or clone.is_dir():
+                    return clone.resolve()
+                if seat_path.is_dir():
+                    for child in seat_path.iterdir():
+                        if child.name.casefold() == project_name.casefold() and (
+                            (child / ".git").exists() or child.is_dir()
+                        ):
+                            return child.resolve()
+        work_dir = project_entry.get("work_dir")
+        if isinstance(work_dir, str) and work_dir.strip():
+            return Path(work_dir).expanduser().resolve()
+        return None
+
+    def _is_seat_using_operator_checkout(
+        self, desired: DesiredSeat, project_name: str, project_entry: dict[str, Any]
+    ) -> bool:
+        if not isinstance(project_entry, dict):
+            return False
+        if project_entry.get("work_dir_owner", "operator") != "operator":
+            return False
+        operator_dir = (
+            Path(project_entry["work_dir"]).expanduser().resolve()
+            if project_entry.get("work_dir")
+            else None
+        )
+        if operator_dir is None:
+            return False
+        effective = self._seat_effective_work_dir(desired, project_name, project_entry)
+        return effective is not None and effective == operator_dir
+
     def registry(
         self, fleet: dict[str, Any], registry_payload: dict[str, Any] | None = None
     ) -> dict[str, Any]:
         names = {row.get("name") for row in self.seats()["seats"]}
+        records = self.inventory.load()["seats"]
+        desired_seats = [self._desired(row) for row in records]
         covered: dict[str, set[str]] = {}
         live_seats: dict[str, dict[str, Any]] = {}
         for agent in fleet.get("agents", []):
@@ -4045,6 +4104,11 @@ class SeatConfigManager:
             clone_path = Path(
                 entry.get("fleet_clone_dir") or self._fleet_clone_default(name)
             ).expanduser().resolve()
+            unsafe_seats = [
+                d.name
+                for d in desired_seats
+                if self._is_seat_using_operator_checkout(d, name, entry)
+            ]
             projects.append(
                 {
                     "name": name,
@@ -4055,12 +4119,7 @@ class SeatConfigManager:
                     "fleet_clone_dir": entry.get("fleet_clone_dir"),
                     "default_fleet_clone_dir": str(self._fleet_clone_default(name)),
                     "clone": self._clone_state(clone_path),
-                    "operator_checkout_seats": (
-                        sorted(name for name in names if isinstance(name, str))
-                        if entry.get("work_dir_owner", "operator") == "operator"
-                        and not entry.get("fleet_clone_dir")
-                        else []
-                    ),
+                    "operator_checkout_seats": sorted(unsafe_seats),
                 }
             )
         result = {
@@ -4127,21 +4186,23 @@ class SeatConfigManager:
                 if isinstance(registry_payload, dict)
                 else None
             )
-            unsafe_projects = [
-                name
+            active_projects = {
+                name: entry
                 for name, entry in (
                     registry.get("projects", {}).items()
                     if isinstance(registry, dict)
                     else []
                 )
-                if isinstance(entry, dict)
-                and entry.get("status") == "active"
-                and entry.get("work_dir_owner", "operator") == "operator"
-                and not entry.get("fleet_clone_dir")
-            ]
+                if isinstance(entry, dict) and entry.get("status") == "active"
+            }
             for record in records:
                 desired = self._desired(record)
                 checks = self.doctor_factory().run(desired)
+                unsafe_projects = [
+                    name
+                    for name, entry in active_projects.items()
+                    if self._is_seat_using_operator_checkout(desired, name, entry)
+                ]
                 checks.append(
                     DoctorCheck(
                         desired.name,
@@ -4149,9 +4210,9 @@ class SeatConfigManager:
                         "FAIL" if unsafe_projects else "PASS",
                         (
                             "operator checkout is read-only for seats; missing "
-                            "fleet clones: " + ", ".join(sorted(unsafe_projects))
+                            "fleet or seat clones: " + ", ".join(sorted(unsafe_projects))
                             if unsafe_projects
-                            else "all active projects route to fleet-owned clones"
+                            else "working tree routes to fleet-owned or seat-owned clone"
                         ),
                     )
                 )

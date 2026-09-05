@@ -3590,20 +3590,42 @@ def test_seat_config_doctor_reports_operator_checkout(tmp_path: Path) -> None:
         config_path=str(tmp_path / "config.toml"),
     )
     manager.inventory.upsert(desired, bridge_version=Bridge.version)
+
+    seat_two_dir = tmp_path / "seat-two"
+    (seat_two_dir / "Alpha" / ".git").mkdir(parents=True)
+    desired_two = dashboard.DesiredSeat(
+        host="goose",
+        role="worker",
+        name="worker-two",
+        central_url="https://127.0.0.1:8766/mcp",
+        home_board="pursers",
+        token_file=str(tmp_path / "token2"),
+        ca_file=str(tmp_path / "ca2.pem"),
+        bridge_command="/tmp/pursers-wait-bridge",
+        config_path=str(tmp_path / "config2.yaml"),
+        seat_dir=str(seat_two_dir),
+    )
+    manager.inventory.upsert(desired_two, bridge_version=Bridge.version)
+
+    registry_payload = {
+        "registry": {
+            "schema_version": 1,
+            "projects": {
+                "Alpha": {
+                    "board_id": "alpha",
+                    "work_dir": "/operator/alpha",
+                    "status": "active",
+                }
+            },
+        }
+    }
+    reg = manager.registry(fleet={}, registry_payload=registry_payload)
+    alpha_proj = next(p for p in reg["projects"] if p["name"] == "Alpha")
+    assert alpha_proj["operator_checkout_seats"] == ["worker-one"]
+
     job = manager.doctor(
-        ["worker-one"],
-        {
-            "registry": {
-                "schema_version": 1,
-                "projects": {
-                    "Alpha": {
-                        "board_id": "alpha",
-                        "work_dir": "/operator/alpha",
-                        "status": "active",
-                    }
-                },
-            }
-        },
+        ["worker-one", "worker-two"],
+        registry_payload,
     )
     deadline = time.monotonic() + 2
     while (result := manager.job(job["job_id"]))["status"] not in {
@@ -3613,10 +3635,14 @@ def test_seat_config_doctor_reports_operator_checkout(tmp_path: Path) -> None:
         time.sleep(0.01)
 
     assert result["status"] == "succeeded"
-    working_tree = result["result"]["seats"][0]["checks"][0]
-    assert working_tree["check"] == "working-tree"
-    assert working_tree["status"] == "FAIL"
-    assert "operator checkout is read-only for seats" in working_tree["message"]
+    seats_by_name = {s["seat"]: s for s in result["result"]["seats"]}
+    worker_one_tree = next(c for c in seats_by_name["worker-one"]["checks"] if c["check"] == "working-tree")
+    assert worker_one_tree["status"] == "FAIL"
+    assert "operator checkout is read-only for seats" in worker_one_tree["message"]
+
+    worker_two_tree = next(c for c in seats_by_name["worker-two"]["checks"] if c["check"] == "working-tree")
+    assert worker_two_tree["status"] == "PASS"
+    assert "working tree routes to fleet-owned or seat-owned clone" in worker_two_tree["message"]
 
 
 def test_config_api_and_ui_contract_are_separate_from_coordinator_config() -> None:
