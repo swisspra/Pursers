@@ -18,6 +18,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Self
+from unittest.mock import MagicMock
 
 import pytest
 import tomllib
@@ -5138,3 +5139,52 @@ def test_config_ops_endpoint_guards_and_execution() -> None:
 
     actions = [c[1].get("action") for c in calls if c[0] == "ops_action"]
     assert actions == ["publish_from_tag", "stage_central", "kickstart_central", "restart_dashboard"]
+
+
+def test_seat_config_manager_ops_action_parameter_rejections_and_jobs(tmp_path: Path) -> None:
+    release_ops = MagicMock()
+    release_ops.get_preview_commands.return_value = {
+        "publish_from_tag": "gh workflow run publish-pypi.yml --ref v5.0.0a20",
+        "stage_central": "cp wheel && pip install",
+        "kickstart_central": "launchctl kickstart -k gui/501/com.onboard.central",
+        "restart_dashboard": "launchctl kickstart -k gui/501/com.pursers.fleet-dashboard",
+    }
+    release_ops.publish_from_tag.return_value = {"ok": True, "output": "published"}
+    release_ops.stage_central.return_value = {"ok": True, "output": "staged"}
+    release_ops.kickstart_central.return_value = {"ok": True, "output": "kickstarted"}
+    release_ops.restart_dashboard.return_value = {"ok": True, "output": "restarted"}
+
+    manager = dashboard.SeatConfigManager(state_dir=tmp_path, release_ops_manager=release_ops)
+
+    # Unknown parameter rejections
+    with pytest.raises(ValueError, match="unknown parameters for stage_central"):
+        manager.ops_action("stage_central", profile_path="/etc/passwd")
+
+    with pytest.raises(ValueError, match="unknown parameters for stage_central"):
+        manager.ops_action("stage_central", venv_python="/bin/sh")
+
+    with pytest.raises(ValueError, match="unknown parameters for kickstart_central"):
+        manager.ops_action("kickstart_central", job_label="com.evil.service")
+
+    with pytest.raises(ValueError, match="unknown parameters for restart_dashboard"):
+        manager.ops_action("restart_dashboard", job_label="com.evil.service")
+
+    with pytest.raises(ValueError, match="unknown parameters for publish_from_tag"):
+        manager.ops_action("publish_from_tag", bad_key="val")
+
+    # Valid job dispatch
+    job = manager.ops_action("kickstart_central")
+    assert job["action"] == "kickstart_central"
+    assert job["status"] == "queued"
+    assert "launchctl kickstart -k" in job["command"]
+
+    # Poll job until succeeded
+    for _ in range(50):
+        state = manager.job(job["job_id"])
+        if state["status"] in {"succeeded", "failed"}:
+            break
+        time.sleep(0.05)
+
+    assert state["status"] == "succeeded"
+    assert any("Queued kickstart_central" in line for line in state["logs"])
+    assert "SUCCEEDED" in state["logs"]

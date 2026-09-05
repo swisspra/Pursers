@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
 import sys
 import time
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -20,6 +20,7 @@ if str(MODULE_DIR) not in sys.path:
 from release_ops import (
     ReleaseOpsManager,
     _clean_text,
+    is_loopback_url,
     parse_elapsed_seconds,
 )
 
@@ -37,6 +38,13 @@ def test_clean_text_redacts_tokens_and_jwts() -> None:
     assert "token = [REDACTED]" in cleaned
     assert "api_key: [REDACTED]" in cleaned
     assert "/path/to/token.jwt" in cleaned  # Path not redacted
+
+
+def test_is_loopback_url() -> None:
+    assert is_loopback_url("http://127.0.0.1:8766/mcp") is True
+    assert is_loopback_url("https://localhost:8899/api") is True
+    assert is_loopback_url("https://pypi.org/pypi/pursers/json") is False
+    assert is_loopback_url("https://api.github.com/repos") is False
 
 
 def test_parse_elapsed_seconds() -> None:
@@ -60,6 +68,55 @@ def test_load_manifest_versions(tmp_path: Path) -> None:
     assert versions["packages"]["central"] == "0.1.0a25"
 
 
+def test_origin_tag_resolution_and_local_tag_divergence(tmp_path: Path) -> None:
+    def mock_runner(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if "ls-remote" in cmd:
+            # Origin has v5.0.0a22 and v5.0.0a21
+            stdout = (
+                "aaaaaaaa11111111\trefs/tags/v5.0.0a21\n"
+                "bbbbbbbb22222222\trefs/tags/v5.0.0a22\n"
+                "cccccccc33333333\trefs/tags/v5.0.0a22^{}\n"
+            )
+            return subprocess.CompletedProcess(cmd, 0, stdout=stdout)
+        if "tag" in cmd and "-l" in cmd:
+            # Local tag has only v5.0.0a19
+            return subprocess.CompletedProcess(cmd, 0, stdout="v5.0.0a19\n")
+        return subprocess.CompletedProcess(cmd, 1, stderr="error")
+
+    ops = ReleaseOpsManager(root=tmp_path, runner=mock_runner)
+    latest = ops.get_latest_tag()
+    # Must resolve from origin (v5.0.0a22), NOT local (v5.0.0a19)
+    assert latest == "v5.0.0a22"
+    assert ops.validate_publish_tag("v5.0.0a22") is True
+    assert ops.validate_publish_tag("v9.9.9") is False
+
+
+def test_ci_status_queries_intended_workflow(tmp_path: Path) -> None:
+    gh_calls: list[list[str]] = []
+
+    def mock_runner(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if "run" in cmd and "list" in cmd:
+            gh_calls.append(cmd)
+            return subprocess.CompletedProcess(
+                cmd,
+                0,
+                stdout=json.dumps([{"status": "completed", "conclusion": "success", "url": "https://ci/1"}]),
+            )
+        if "rev-list" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, stdout="sha123\n")
+        return subprocess.CompletedProcess(cmd, 0, stdout="")
+
+    ops = ReleaseOpsManager(root=tmp_path, runner=mock_runner)
+    status = ops.get_ci_status("v5.0.0a20")
+    assert status["main"]["conclusion"] == "success"
+    assert status["tag"]["conclusion"] == "success"
+    # Verify both main and commit queries passed --workflow ci.yml
+    for call in gh_calls:
+        assert "--workflow" in call
+        idx = call.index("--workflow")
+        assert call[idx + 1] == "ci.yml"
+
+
 def test_release_card_status_and_pypi_checks(tmp_path: Path) -> None:
     manifest = tmp_path / "release_versions.toml"
     manifest.write_text(
@@ -74,8 +131,8 @@ def test_release_card_status_and_pypi_checks(tmp_path: Path) -> None:
     )
 
     def mock_runner(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
-        if "tag" in cmd:
-            return subprocess.CompletedProcess(cmd, 0, stdout="v5.0.0a20\nv5.0.0a19\n")
+        if "ls-remote" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, stdout="sha1\trefs/tags/v5.0.0a20\n")
         if "rev-list" in cmd:
             return subprocess.CompletedProcess(cmd, 0, stdout="1122334455667788\n")
         if "run" in cmd and "list" in cmd:
@@ -127,6 +184,9 @@ def test_release_card_status_and_pypi_checks(tmp_path: Path) -> None:
     assert status["central_version"]["live_version"] == "0.1.0a24"
     assert status["central_version"]["staged_version"] == "0.1.0a24"
     assert status["central_version"]["status"] == "matches"
+    assert "commands" in status
+    assert "publish_from_tag" in status["commands"]
+    assert "stage_central" in status["commands"]
 
 
 def test_restart_checklist_flags_older_bridge_processes(tmp_path: Path) -> None:
@@ -137,7 +197,6 @@ def test_restart_checklist_flags_older_bridge_processes(tmp_path: Path) -> None:
     bridge_installer._resolve.return_value = (shim_file, "path", [])
 
     current_time = 100000.0
-    # Shim updated at 99900 (age 100 seconds)
     os.utime(shim_file, (99900, 99900))
 
     inventory = MagicMock()
@@ -145,8 +204,6 @@ def test_restart_checklist_flags_older_bridge_processes(tmp_path: Path) -> None:
 
     def mock_runner(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         if "ps" in cmd:
-            # PID 101 elapsed 50s (< 100s, so started AFTER shim update)
-            # PID 102 elapsed 300s (> 100s, so started BEFORE shim update -> STALE)
             stdout = (
                 "  00:50   101 python -m pursers_wait_server\n"
                 "  05:00   102 python /bin/pursers-wait-bridge\n"
@@ -171,54 +228,92 @@ def test_restart_checklist_flags_older_bridge_processes(tmp_path: Path) -> None:
     assert "PID 102 started before shim update" in codex_check["reason"]
 
 
-def test_publish_from_tag(tmp_path: Path) -> None:
-    calls = []
+def test_publish_from_tag_validates_origin_tag(tmp_path: Path) -> None:
+    calls: list[list[str]] = []
 
     def mock_runner(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if "ls-remote" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, stdout="sha1\trefs/tags/v5.0.0a20\n")
         calls.append(cmd)
         return subprocess.CompletedProcess(cmd, 0, stdout="Workflow triggered\n")
 
     ops = ReleaseOpsManager(root=tmp_path, runner=mock_runner, state_dir=tmp_path)
+
+    # Unknown tag rejected
+    with pytest.raises(ValueError, match="does not exist on origin"):
+        ops.publish_from_tag("v9.9.9")
+
+    # Valid origin tag runs workflow
     result = ops.publish_from_tag("v5.0.0a20")
     assert result["ok"] is True
     assert "gh workflow run publish-pypi.yml --ref v5.0.0a20" in result["command"]
     assert result["output"] == "Workflow triggered"
     assert calls[0] == ["gh", "workflow", "run", "publish-pypi.yml", "--ref", "v5.0.0a20"]
 
-    # Journal check
-    journal = (tmp_path / "config-actions.jsonl").read_text(encoding="utf-8")
-    assert "ops:publish_from_tag" in journal
 
-
-def test_stage_central_preflight_and_execution(tmp_path: Path) -> None:
+def test_stage_central_transaction_wheel_copy_and_pin_update(tmp_path: Path) -> None:
     profile = tmp_path / "profile.env"
-    profile.write_text("CENTRAL_WHEEL=wheel.whl\nCENTRAL_WHEEL_SHA256=123\n", encoding="utf-8")
+    profile.write_text(
+        "CENTRAL_WHEEL=/old/path.whl\nCENTRAL_WHEEL_SHA256=oldsha\n",
+        encoding="utf-8",
+    )
     python = tmp_path / "python"
     python.write_text("#!/bin/sh\n", encoding="utf-8")
     python.chmod(0o755)
 
-    calls = []
+    source_wheel = tmp_path / "pursers_central-0.1.0a25-py3-none-any.whl"
+    wheel_content = b"fake-wheel-binary-data-12345"
+    source_wheel.write_bytes(wheel_content)
+    expected_sha = hashlib.sha256(wheel_content).hexdigest()
+
+    manifest = tmp_path / "release_versions.toml"
+    manifest.write_text(
+        'product = "5.0.0a21"\n[packages]\npursers = "5.0.0a21"\ncentral = "0.1.0a25"\n',
+        encoding="utf-8",
+    )
+
+    pip_calls: list[list[str]] = []
 
     def mock_runner(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
-        calls.append(cmd)
-        return subprocess.CompletedProcess(cmd, 0, stdout="Installed\n")
+        pip_calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout="Successfully installed pursers_central\n")
 
     ops = ReleaseOpsManager(
         root=tmp_path,
+        manifest_path=manifest,
         profile_env_path=profile,
         central_venv_python=python,
         runner=mock_runner,
         state_dir=tmp_path,
     )
-    result = ops.stage_central()
+
+    logs: list[str] = []
+    result = ops.stage_central(wheel_path=source_wheel, log_callback=logs.append)
     assert result["ok"] is True
-    assert "pip install --no-deps" in result["command"]
-    assert calls[0][0] == "bash"
-    assert calls[0][1] == "-c"
+    assert result["sha256"] == expected_sha
+
+    # Verify wheel was copied to staging directory
+    dest_wheel = tmp_path / "wheels" / source_wheel.name
+    assert dest_wheel.is_file()
+    assert dest_wheel.read_bytes() == wheel_content
+
+    # Verify profile.env pins were atomically updated
+    updated_profile = profile.read_text(encoding="utf-8")
+    assert f"CENTRAL_WHEEL={dest_wheel}" in updated_profile
+    assert f"CENTRAL_WHEEL_SHA256={expected_sha}" in updated_profile
+
+    # Verify pip install --no-deps was called with destination wheel
+    assert pip_calls[0] == [str(python), "-m", "pip", "install", "--no-deps", str(dest_wheel)]
+
+    # Verify incremental logs were emitted
+    assert any("Step 2: Copying" in line for line in logs)
+    assert any("Step 3: Preflight SHA-256" in line for line in logs)
+    assert any("Step 4: Atomically updating" in line for line in logs)
+    assert any("Step 5 succeeded" in line for line in logs)
 
 
 def test_kickstart_central_and_restart_dashboard(tmp_path: Path) -> None:
-    calls = []
+    calls: list[list[str]] = []
 
     def mock_runner(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         calls.append(cmd)

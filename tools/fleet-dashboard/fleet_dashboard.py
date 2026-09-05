@@ -3620,18 +3620,94 @@ class SeatConfigManager:
     def release_status(self) -> dict[str, Any]:
         return self.release_ops.release_card_status()
 
+    def _start_ops_job(
+        self,
+        action: str,
+        command: str,
+        target: Callable[[Callable[[str], None]], Any],
+    ) -> dict[str, Any]:
+        job_id = uuid.uuid4().hex
+        with self._lock:
+            if len(self._jobs) >= CONFIG_JOB_LIMIT:
+                self._jobs.pop(next(iter(self._jobs)))
+            self._jobs[job_id] = {
+                "job_id": job_id,
+                "action": action,
+                "command": command,
+                "status": "queued",
+                "logs": [f"Queued {action}: {command}"],
+            }
+
+        def work() -> None:
+            with self._lock:
+                self._jobs[job_id]["status"] = "running"
+
+            def emit(msg: str) -> None:
+                with self._lock:
+                    logs = self._jobs[job_id].setdefault("logs", [])
+                    logs.append(msg)
+
+            try:
+                result = target(emit)
+            except Exception as exc:  # noqa: BLE001
+                err_msg = _clean_text(str(exc))
+                with self._lock:
+                    self._jobs[job_id].update(status="failed", error=err_msg)
+                    self._jobs[job_id].setdefault("logs", []).append(f"FAILED: {err_msg}")
+            else:
+                with self._lock:
+                    self._jobs[job_id].update(status="succeeded", result=result)
+                    self._jobs[job_id].setdefault("logs", []).append("SUCCEEDED")
+
+        threading.Thread(target=work, daemon=True, name=f"ops-{action}").start()
+        return {"job_id": job_id, "action": action, "command": command, "status": "queued"}
+
     def ops_action(self, action: str, **kwargs: Any) -> dict[str, Any]:
+        previews = self.release_ops.get_preview_commands(kwargs.get("tag"))
         if action in {"publish", "publish_from_tag"}:
-            return self.release_ops.publish_from_tag(kwargs.get("tag"))
+            unknown = set(kwargs) - {"tag"}
+            if unknown:
+                raise ValueError(f"unknown parameters for {action}: {unknown}")
+            tag = kwargs.get("tag")
+            cmd = previews["publish_from_tag"]
+            return self._start_ops_job(
+                "publish_from_tag",
+                cmd,
+                lambda emit: self.release_ops.publish_from_tag(tag, log_callback=emit),
+            )
         if action in {"stage", "stage_central"}:
-            return self.release_ops.stage_central(
-                profile_path=kwargs.get("profile_path"),
-                venv_python=kwargs.get("venv_python"),
+            unknown = set(kwargs) - {"wheel_path"}
+            if unknown:
+                raise ValueError(f"unknown parameters for {action}: {unknown}")
+            wheel_path = kwargs.get("wheel_path")
+            cmd = previews["stage_central"]
+            return self._start_ops_job(
+                "stage_central",
+                cmd,
+                lambda emit: self.release_ops.stage_central(
+                    wheel_path=wheel_path, log_callback=emit
+                ),
             )
         if action in {"kickstart", "kickstart_central"}:
-            return self.release_ops.kickstart_central(kwargs.get("job_label"))
+            unknown = set(kwargs)
+            if unknown:
+                raise ValueError(f"unknown parameters for {action}: {unknown}")
+            cmd = previews["kickstart_central"]
+            return self._start_ops_job(
+                "kickstart_central",
+                cmd,
+                lambda emit: self.release_ops.kickstart_central(log_callback=emit),
+            )
         if action in {"restart_dashboard"}:
-            return self.release_ops.restart_dashboard(kwargs.get("job_label"))
+            unknown = set(kwargs)
+            if unknown:
+                raise ValueError(f"unknown parameters for {action}: {unknown}")
+            cmd = previews["restart_dashboard"]
+            return self._start_ops_job(
+                "restart_dashboard",
+                cmd,
+                lambda emit: self.release_ops.restart_dashboard(log_callback=emit),
+            )
         raise ValueError(f"unknown ops action: {action}")
 
     @staticmethod
@@ -4514,7 +4590,7 @@ refreshSeats=async function(){try{const [inventory,bridge,release]=await Promise
 const refreshCentralBeforeSeats=refreshCentral;refreshCentral=async function(...args){await refreshCentralBeforeSeats(...args);if(initialSeatsRefreshPending&&navKind()==='seats'&&centralLabels.length)await refreshSeats()}
 async function suggestSeatSkills(){const form=document.querySelector('#seat-wizard'),status=document.querySelector('#seat-suggestions');try{const result=await configPost('/api/config/suggestions',seatPayload(form)),input=form.elements.skills,current=String(input.value||'').split(',').map(x=>x.trim()).filter(Boolean);input.value=[...new Set([...current,...result.skills])].join(',');status.textContent=result.skills.length?`Suggested: ${result.skills.join(', ')}`:'No mapped connectors found.'}catch(e){status.textContent=`Suggestions failed: ${e.message}`}}
 async function saveDispatch(event){event.preventDefault();const form=event.target,central=centralLabels[0],board=form.dataset.board,status=form.querySelector('.dispatch-status')||form.nextElementSibling;try{dispatchData[board]=await configPost(`/api/dispatch?${apiCentral(central)}`,{board_id:board,policy:{claim_ttl_s:Number(form.elements.claim_ttl_s.value),offer_ttl_s:Number(form.elements.offer_ttl_s.value),second_opinion:form.elements.second_opinion.checked,fallback_broadcast:form.elements.fallback_broadcast.checked}});status.textContent='Policy saved.';await refreshSeats()}catch(e){status.textContent=`Save failed: ${e.message}`}}
-bindSeats=function(){const wizard=document.querySelector('#seat-wizard');wizard?.addEventListener('submit',seatSubmit);if(wizard){const review=wizard.elements.can_review,work=wizard.elements.can_work,sync=()=>{const role=wizard.elements.role.value;if(!review.dataset.touched)review.checked=role==='reviewer';if(!work.dataset.touched)work.checked=role==='worker'};review.addEventListener('input',()=>review.dataset.touched='true');work.addEventListener('input',()=>work.dataset.touched='true');wizard.elements.role.addEventListener('change',sync)}document.querySelector('[data-seat-suggest]')?.addEventListener('click',suggestSeatSkills);document.querySelector('#seat-apply')?.addEventListener('click',applySeat);document.querySelector('#copy-session-prompt')?.addEventListener('click',async event=>{await navigator.clipboard.writeText(seatSessionPrompt);event.target.textContent='Copied'});document.querySelectorAll('.dispatch-form').forEach(form=>form.addEventListener('submit',saveDispatch));document.querySelectorAll('[data-ops-action]').forEach(btn=>{btn.addEventListener('click',async()=>{const action=btn.dataset.opsAction,cmd=btn.dataset.cmd;if(!confirm(`Run command:\n${cmd}\n\nAre you sure?`))return;const out=document.querySelector('#ops-output');if(out)out.textContent=`Running ${action}…\nCommand: ${cmd}`;btn.disabled=true;try{let payload={action};if(action==='publish')payload={action:'publish_from_tag',tag:releaseData?.latest_tag};else if(action==='stage')payload={action:'stage_central'};else if(action==='kickstart')payload={action:'kickstart_central'};else if(action==='restart-dash')payload={action:'restart_dashboard'};const res=await configPost('/api/config/ops',payload);if(out)out.textContent=`Command: ${res.command}\nResult: ${res.ok?'SUCCESS':'FAILED'}\n\n${res.output||res.error||''}`;await refreshSeats()}catch(err){if(out)out.textContent=`Error: ${err.message}`}finally{btn.disabled=false}})});const host=document.querySelector('#central-sections');host.onclick=seatClick;host.querySelector('.page-head')?.addEventListener('click',seatGlobal)}
+bindSeats=function(){const wizard=document.querySelector('#seat-wizard');wizard?.addEventListener('submit',seatSubmit);if(wizard){const review=wizard.elements.can_review,work=wizard.elements.can_work,sync=()=>{const role=wizard.elements.role.value;if(!review.dataset.touched)review.checked=role==='reviewer';if(!work.dataset.touched)work.checked=role==='worker'};review.addEventListener('input',()=>review.dataset.touched='true');work.addEventListener('input',()=>work.dataset.touched='true');wizard.elements.role.addEventListener('change',sync)}document.querySelector('[data-seat-suggest]')?.addEventListener('click',suggestSeatSkills);document.querySelector('#seat-apply')?.addEventListener('click',applySeat);document.querySelector('#copy-session-prompt')?.addEventListener('click',async event=>{await navigator.clipboard.writeText(seatSessionPrompt);event.target.textContent='Copied'});document.querySelectorAll('.dispatch-form').forEach(form=>form.addEventListener('submit',saveDispatch));document.querySelectorAll('[data-ops-action]').forEach(btn=>{btn.addEventListener('click',async()=>{const action=btn.dataset.opsAction;const cmdKey=action==='publish'?'publish_from_tag':action==='stage'?'stage_central':action==='kickstart'?'kickstart_central':'restart_dashboard';const cmd=(releaseData?.commands||{})[cmdKey]||btn.dataset.cmd;if(!confirm(`Run command:\n${cmd}\n\nAre you sure?`))return;const out=document.querySelector('#ops-output');if(out)out.textContent=`Queuing ${action}…\nCommand: ${cmd}\n`;btn.disabled=true;try{let payload={action};if(action==='publish')payload={action:'publish_from_tag',tag:releaseData?.latest_tag};else if(action==='stage')payload={action:'stage_central'};else if(action==='kickstart')payload={action:'kickstart_central'};else if(action==='restart-dash')payload={action:'restart_dashboard'};const job=await configPost('/api/config/ops',payload);if(out)out.textContent=`Job ${job.job_id} queued:\n${job.command}\n\nStreaming output…\n`;const timer=setInterval(async()=>{try{const state=await fetchJson(`/api/config/jobs/${job.job_id}`);if(out&&state.logs){out.textContent=`Command: ${state.command||job.command}\nStatus: ${state.status}\n\n${state.logs.join('\n')}`}if(state.status==='succeeded'||state.status==='failed'){clearInterval(timer);btn.disabled=false;await refreshSeats()}}catch(e){clearInterval(timer);btn.disabled=false;if(out)out.textContent+=`\nPolling error: ${e.message}`}},1000)}catch(err){btn.disabled=false;if(out)out.textContent=`Request error: ${err.message}`}})});const host=document.querySelector('#central-sections');host.onclick=seatClick;host.querySelector('.page-head')?.addEventListener('click',seatGlobal)}
 renderOverview=renderAttentionOverview;
 renderBoardsHub=renderAttentionBoardsHub;
 const attentionHubClickV1=hubClick;
