@@ -51,7 +51,7 @@ This document delivers:
 | `board_catchup` | Central | 33 files | 123,983 | worker: 112,220, reviewer: 11,763 | 2026-09-04 (daily aggregate) | **LEGACY FALLBACK** | Keep a18, Trim a19 | Heavily used by legacy polling loops and bridge fallback. Trim touch/ack in a19. |
 | `board_digest` | Bridge | 7 files | 0 | None | None (0 calls recorded in 7d window) | **KEEP** | Active Core | New instant non-blocking change summary tool for orchestrators (TK-55b6bc8985fc). |
 | `board_digest_ack` | Bridge | 7 files | 0 | None | None (0 calls recorded in 7d window) | **KEEP** | Active Core | Acknowledges digest sequence cursors; core orchestrator tool. |
-| `board_get_briefing` | Central | 5 files | 0 | None | None (0 calls recorded in 7d window) | **CONSOLIDATE** | Hide a18, Remove a19 | Completely redundant with `board_snapshot` and `board_status`. Zero model calls. |
+| `board_get_briefing` | Central | Personal app, client, tests | 0 model calls | Personal dashboard read path | None (0 model calls recorded in 7d window) | **CONSOLIDATE** | Hide a18, Remove a19 | Personal migrates to bounded `board_snapshot` + `board_status` in a18; no legacy capability required. |
 | `board_invite` | Central | 4 files | 0 | None | None (0 calls recorded in 7d window) | **KEEP** | Active Core | Cryptographic board admission and token verification. |
 | `board_join` | Central | 29 files | 5,063 | worker: 4,719, reviewer: 343, orchestrator: 1 | 2026-09-04 (daily aggregate) | **KEEP** | Active Core | Core seat identity registration and capability negotiation entrypoint. |
 | `board_list` | Central | 2 files | 0 | None | None (0 calls recorded in 7d window) | **KEEP** | Active Core | Cross-board discovery for multi-project fleet environments. |
@@ -179,8 +179,8 @@ In a18, exactly 10 deprecated tools remain fully callable at runtime for backwar
 ### 5.2. Post-Authorization Deprecation Warnings & Durable Dedupe
 When a deprecated tool is called at runtime:
 1. **Post-Authorization Execution:** The tool function executes first. If the caller lacks authorization (e.g. outsider on unjoined board), `PermissionError` is raised before any warning logic is reached. Denied calls produce **zero** mutations and **zero** journal events.
-2. **Durable One-Time Deduplication:** If the call succeeds, Central atomically keys the warning by `tool + caller_principal_id + caller_agent_name` in the journal transaction. The journal keeps at most 4,096 identities and evicts the oldest sequence first, an explicit bound that prevents unbounded state growth.
-3. **Normal Sequenced Journal Path:** If not previously warned, Central appends a `deprecated_tool_warning` event to the normal durable sequenced journal via `append_once_and_publish`. It advances `latest_seq` and receives a unique event ID. The bounded journal-local idempotency summary survives both service restart and `journal_compact`; compaction also migrates older warning rows into that summary before removing them.
+2. **Read tools never mutate domain state:** successful calls to `board_get_briefing`, `memory_read`, `memory_search`, and `memory_links` emit a process-local, one-time machine-log event only. They do not change the board document, journal, or cursor.
+3. **Durable write-tool deduplication:** for deprecated write tools, Central atomically keys the warning by `tool + caller_principal_id + caller_agent_name` in the journal transaction. The journal keeps at most 4,096 identities and evicts the oldest sequence first. A new write-tool warning uses `append_once_and_publish`; its bounded summary survives restart and compaction.
 4. **Result Metadata:** The returned dictionary carries `_deprecated: True` and `deprecated: True` as an additional compatibility signal.
 
 ---
@@ -197,7 +197,8 @@ The ticket specification authorizes immediate code removal only under strictly d
      - `agent_nudge`: 0 calls in 7 days, but referenced in `test_coordinator_writes.py` and `docs/coordinator-design.md`. Deleting it now would break unit test imports and coordinator test suites.
      - `ticket_terminate`: 1 call in 7 days; referenced in `test_coordinator_writes.py` and `packages/client/client.py`.
      - `ticket_unclaim`: 138 calls in 7 days; active test coverage in `test_ticket_unclaim.py`.
-     - `board_get_briefing`: Referenced in `test_response_bounds.py` and `client.py`.
+     - `board_get_briefing`: Referenced by the Personal dashboard read path,
+       `test_response_bounds.py`, and `client.py`; Personal migrates in a18.
      - `memory_*`: Used in `packages/personal/apps_server.py` and `test_apps_contract.py`.
 2. **Bridge Tools (6):**
    - `project_registry_get` is explicitly asserted by `test_startup_handshake.py`.

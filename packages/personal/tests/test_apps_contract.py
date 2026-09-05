@@ -983,7 +983,6 @@ async def test_dashboard_idle_reads_cache_and_ticket_cue_refetches_once() -> Non
             "board_snapshot",
             "board_status",
             "ticket_list",
-            "board_get_briefing",
             "board_catchup",
         ]
 
@@ -1647,7 +1646,7 @@ async def test_projection_adds_projects_without_extra_central_reads() -> None:
         },
     )
 
-    assert calls == ["board_status", "ticket_list", "board_get_briefing"]
+    assert calls == ["board_status", "ticket_list"]
     assert state._projection is not None
     tickets = {ticket["id"]: ticket for ticket in state._projection["tickets"]}
     assert tickets["TK-held"]["project"] == "pursers"
@@ -2201,7 +2200,6 @@ async def test_real_central_dashboard_is_idle_until_ticket_cue(
             "board_snapshot",
             "board_status",
             "ticket_list",
-            "board_get_briefing",
             "board_catchup",
         ]
 
