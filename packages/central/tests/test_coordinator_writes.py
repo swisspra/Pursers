@@ -41,7 +41,9 @@ class CoordinatorWriteTests(unittest.IsolatedAsyncioTestCase):
         self.admin = central.Principal(
             "PR-admin",
             "admin-canonical",
-            frozenset({"board:read", "board:write", "board:review"}),
+            frozenset(
+                {"board:read", "board:write", "board:review", "board:coordinate"}
+            ),
         )
         self.worker = central.Principal(
             "PR-worker",
@@ -56,6 +58,16 @@ class CoordinatorWriteTests(unittest.IsolatedAsyncioTestCase):
         self.coordinator = central.Principal(
             "PR-coordinator",
             "coordinator-canonical",
+            frozenset({"board:read", "board:coordinate"}),
+        )
+        self.reviewer_coordinator = central.Principal(
+            "PR-reviewer-coordinator",
+            "reviewer-coordinator-canonical",
+            frozenset({"board:read", "board:coordinate"}),
+        )
+        self.outsider_coordinator = central.Principal(
+            "PR-outsider-coordinator",
+            "outsider-coordinator-canonical",
             frozenset({"board:read", "board:coordinate"}),
         )
         self.intake_joiner = central.Principal(
@@ -89,6 +101,12 @@ class CoordinatorWriteTests(unittest.IsolatedAsyncioTestCase):
                 principal_id=principal.principal_id,
                 role="member",
             )
+        await self.call(
+            "board_member_add",
+            agent_name="admin-agent",
+            principal_id=self.reviewer_coordinator.principal_id,
+            role="reviewer",
+        )
         self.principal = self.worker
         joined = await self.call("board_join", agent_name="worker-agent")
         self.worker_id = joined.structured_content["agent_id"]
@@ -132,6 +150,151 @@ class CoordinatorWriteTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(created.is_error)
         return created.structured_content["ticket"]["ticket_id"]
+
+    async def test_coordinate_only_join_accepts_every_admitted_membership(self) -> None:
+        admitted = (
+            (self.admin, "admin"),
+            (self.coordinator, "member"),
+            (self.reviewer_coordinator, "reviewer"),
+        )
+        for principal, membership_role in admitted:
+            for tool_name in ("board_join", "board_onboard"):
+                for seat_role in ("orchestrator", "coordinator"):
+                    with self.subTest(
+                        membership_role=membership_role,
+                        tool_name=tool_name,
+                        seat_role=seat_role,
+                    ):
+                        self.principal = principal
+                        result = await self.call(
+                            tool_name,
+                            agent_name=(
+                                f"{membership_role}-{tool_name}-{seat_role}"
+                            ),
+                            role=seat_role,
+                        )
+                        self.assertFalse(result.is_error)
+                        self.assertEqual(
+                            result.structured_content["role"], seat_role
+                        )
+                        self.assertEqual(
+                            result.structured_content["membership_role"],
+                            membership_role,
+                        )
+
+    async def test_coordinate_only_join_denies_nonmember_and_invite_token(self) -> None:
+        self.principal = self.outsider_coordinator
+        with self.assertRaisesRegex(ToolError, "board access denied"):
+            await self.call(
+                "board_join",
+                agent_name="outsider-orchestrator",
+                role="orchestrator",
+            )
+
+        self.principal = self.admin
+        with self.assertRaisesRegex(
+            ToolError, "coordinator authorization cannot change board membership"
+        ):
+            await self.call(
+                "board_join",
+                agent_name="admin-invite-orchestrator",
+                role="orchestrator",
+                invite_token="invite-cannot-be-consumed-by-coordinate-only-join",
+            )
+
+    async def test_admin_membership_can_run_narrow_coordinator_operations(self) -> None:
+        ticket_id = await self.create_ticket("admin coordination target")
+        self.principal = central.Principal(
+            self.admin.principal_id,
+            self.admin.canonical,
+            frozenset({"board:read", "board:coordinate"}),
+        )
+
+        updated = await self.call(
+            "ticket_update",
+            agent_name="admin-agent",
+            ticket_id=ticket_id,
+            tier=2,
+        )
+        policy = await self.call(
+            "board_dispatch_policy_set",
+            agent_name="admin-agent",
+            offer_ttl_s=120,
+        )
+
+        nudge = await self.call(
+            "agent_nudge",
+            agent_name="admin-agent",
+            ticket_id=ticket_id,
+            target_agent_id=self.worker_id,
+            coordinator_op_key="admin-nudge",
+            reason="admin coordinate scope is authorized",
+            expires_at=(
+                datetime.now(timezone.utc) + timedelta(minutes=10)
+            ).isoformat(),
+        )
+        assigned = await self.call(
+            "ticket_assign",
+            agent_name="admin-agent",
+            ticket_id=ticket_id,
+            assigned_to_agent_id=self.worker_id,
+            expected_status="open",
+            expected_assigned_to_agent_id=None,
+            coordinator_op_key="admin-assignment",
+            reason="admin coordinate scope is authorized",
+        )
+        finding = await self.call(
+            "board_state_update",
+            agent_name="admin-agent",
+            key="coordinator_findings",
+            value='{"admin":"authorized"}',
+        )
+        digest = await self.call(
+            "memory_write",
+            agent_name="admin-agent",
+            title="Coordinator daily digest 2030-01-09",
+            content="admin coordinate scope is authorized",
+            scope="project",
+            memory_type="checkpoint",
+            tags=["coordinator", "digest", "daily"],
+        )
+
+        self.principal = self.coordinator
+        with self.assertRaisesRegex(ToolError, "board role not authorized"):
+            await self.call(
+                "board_dispatch_policy_set",
+                agent_name="coordinator-1",
+                offer_ttl_s=180,
+            )
+
+        self.principal = central.Principal(
+            self.admin.principal_id,
+            self.admin.canonical,
+            frozenset({"board:read", "board:intake"}),
+        )
+        intake_ticket = await self.call(
+            "ticket_create",
+            agent_name="admin-agent",
+            ticket_id="TK-admin-intake",
+            title="Admin intake membership",
+            description="Admin membership may use a scoped intake credential.",
+            target_url="pursers/tests",
+            scope="interactive-no-send",
+            required_fields=["test_output"],
+            unassigned=True,
+            coordinator_op_key="admin-intake-create",
+        )
+
+        for result in (
+            updated,
+            policy,
+            nudge,
+            assigned,
+            finding,
+            digest,
+            intake_ticket,
+        ):
+            self.assertFalse(result.is_error)
 
     async def test_assignment_is_atomic_targeted_and_idempotent(self) -> None:
         ticket_id = await self.create_ticket()

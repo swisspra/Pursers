@@ -7,6 +7,16 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed
+
+- Coordinator and orchestrator joins now admit existing `admin`, `member`, and
+  `reviewer` board memberships consistently. The same membership rule applies
+  to narrow `board:coordinate` and `board:intake` operations; token scopes
+  remain the action-authority boundary, and coordinate-only joins still cannot
+  consume invites or change membership. Coordinate-only credentials may update
+  ticket dispatch requirements under the existing creator/admin rule, while
+  dispatch-policy changes remain restricted to admin memberships.
+
 ## [5.0.0a18] - 2026-09-05
 
 This release includes `pursers-central==0.1.0a22`,

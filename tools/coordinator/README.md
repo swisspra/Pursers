@@ -112,3 +112,15 @@ scopes only; token minting and key material remain operator-only:
 coordinator-main:   board:read board:write board:coordinate
 coordinator-intake: board:read board:intake
 ```
+
+Board membership is admission, while token scopes authorize coordinator
+actions. An admitted `admin`, `member`, or `reviewer` principal may therefore
+join a `coordinator` or `orchestrator` seat and use its narrowly scoped
+coordination/intake operations when its token carries the required scope. A
+coordinate-only join never consumes an invite or changes board membership.
+
+For dispatch controls, a `board:coordinate` credential may call
+`ticket_update` under the existing creator-or-admin membership check. It may
+also call `board_dispatch_policy_set`, but that operation remains limited to an
+`admin` board membership. Other admin-only configuration tools keep their
+existing `board:write` requirements.
