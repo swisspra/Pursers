@@ -148,7 +148,84 @@ class CatchupPerformanceTests(unittest.IsolatedAsyncioTestCase):
         self.assertLess(time.monotonic() - started, 0.1)
         self.assertTrue(result["partial"])
         self.assertFalse(result["timed_out"])
-        self.assertEqual(result["new_seq"], 200)
+        self.assertEqual(result["new_seq"], 100)
+
+    async def test_single_slow_catchup_is_bounded_by_wait_deadline(self) -> None:
+        client = BulkClient()
+        original = client.board_catchup
+
+        async def slow_catchup(**arguments: Any) -> dict[str, Any]:
+            await asyncio.sleep(0.2)
+            return await original(**arguments)
+
+        client.board_catchup = slow_catchup  # type: ignore[method-assign]
+        with patch.object(wait_server, "clamp_timeout", return_value=0.03):
+            started = time.monotonic()
+            result = await wait_server._wait_for_work(
+                client, since_seq=17, timeout_s=1, only_mine=False
+            )
+        self.assertLess(time.monotonic() - started, 0.1)
+        self.assertTrue(result["partial"])
+        self.assertFalse(result["timed_out"])
+        self.assertEqual(result["events"], [])
+        self.assertEqual(result["new_seq"], 17)
+
+    async def test_submitted_ticket_claimed_by_other_reviewer_does_not_wake(self) -> None:
+        client = BulkClient(count=0)
+        client.identity = JoinedIdentity(
+            wait_server.BOARD_ID,
+            wait_server._derived_agent_id("PR-perf", client.agent_name),
+            "PR-perf",
+            client.agent_name,
+            "reviewer",
+        )
+        client.events = [
+            {
+                "id": "EV-1",
+                "seq": 1,
+                "kind": "ticket_submitted",
+                "ticket_id": "TK-held-review",
+                "status_to": "submitted",
+            }
+        ]
+        client.tickets = [
+            {
+                "ticket_id": "TK-held-review",
+                "status": "submitted",
+                "target_url": "pursers/review",
+                "dispatch_state": {"state": "broadcast"},
+                "review_lease": {"reviewer_agent_id": "AI-other"},
+            }
+        ]
+
+        with (
+            patch.object(wait_server, "WAIT_MODE", "poll"),
+            patch.object(wait_server, "clamp_timeout", return_value=0.02),
+            patch.object(wait_server, "DEFAULT_POLL_INTERVAL_S", 0.01),
+        ):
+            result = await wait_server._wait_for_work(
+                client,
+                since_seq=0,
+                timeout_s=1,
+                only_mine=False,
+                wait_for="submitted",
+            )
+        self.assertTrue(result["timed_out"])
+        self.assertEqual(result["events"], [])
+        list_calls = [args for name, args in client.calls if name == "ticket_list"]
+        self.assertTrue(list_calls)
+        self.assertTrue(all("review_unclaimed_only" not in args for args in list_calls))
+
+        missing = await wait_server._filter_relevant(
+            client,
+            client.events,
+            client.identity.agent_id,
+            only_mine=False,
+            project=None,
+            wait_for="submitted",
+            tickets=[],
+        )
+        self.assertEqual(missing, [])
 
     async def test_cursor_ahead_is_clamped_with_warning(self) -> None:
         client = BulkClient(count=10)

@@ -74,7 +74,9 @@ from pursers_client import (
     OFFER_EXPIRED,
     OFFER_REVOKED,
     REVIEW_OFFERED,
+    REVIEW_LEASE_EXPIRED,
     REVIEW_LEASE_KINDS,
+    REVIEW_LEASE_RELEASED,
     TICKET_OFFERED,
     GENERATION_META_KEY,
     BoardClient,
@@ -2622,6 +2624,17 @@ async def _catchup_all(
     persisted_cursor = cursor is None
     current_cursor = 0 if cursor is None else cursor
     pages_read = 0
+
+    async def catchup(arguments: dict[str, Any]) -> dict[str, Any]:
+        if deadline is None:
+            return await client.board_catchup(**arguments)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError
+        return await asyncio.wait_for(
+            client.board_catchup(**arguments), timeout=remaining
+        )
+
     while True:
         if deadline is not None and time.monotonic() >= deadline:
             partial = pages_read > 0
@@ -2641,7 +2654,10 @@ async def _catchup_all(
         if explicit_name:
             catchup_args["agent_name"] = agent_name
         try:
-            page = await client.board_catchup(**catchup_args)
+            page = await catchup(catchup_args)
+        except TimeoutError:
+            partial = True
+            break
         except BoardClientError as exc:
             message = str(exc).lower()
             if "cursor is ahead of journal" in message:
@@ -2654,7 +2670,11 @@ async def _catchup_all(
                 }
                 if explicit_name:
                     head_args["agent_name"] = agent_name
-                head = await client.board_catchup(**head_args)
+                try:
+                    head = await catchup(head_args)
+                except TimeoutError:
+                    partial = True
+                    break
                 current_cursor = int(
                     head.get("latest_cursor", head.get("next_cursor", 0))
                 )
@@ -2676,13 +2696,21 @@ async def _catchup_all(
                     "WARNING: side-effect-free board_catchup is unavailable; "
                     "using ack=False compatibility refetch for this deployment"
                 )
-                page = await client.board_catchup(**catchup_args)
+                try:
+                    page = await catchup(catchup_args)
+                except TimeoutError:
+                    partial = True
+                    break
             elif not explicit_name or HANDOFF_REJOIN_MESSAGE not in str(exc):
                 raise
             else:
                 _log(f"agent={agent_name!r}: handed off; rejoining once")
                 await _join_for_call(client, agent_name, explicit_name)
-                page = await client.board_catchup(**catchup_args)
+                try:
+                    page = await catchup(catchup_args)
+                except TimeoutError:
+                    partial = True
+                    break
         else:
             if pure_requested:
                 setattr(client, "_pursers_pure_catchup", True)
@@ -2837,7 +2865,10 @@ async def _is_relevant(
     if tickets_by_id is not None:
         ticket = tickets_by_id.get(ticket_id)
         if not isinstance(ticket, dict):
-            return not only_mine and project is None
+            return bool(
+                wait_for == WAIT_FOR_SUBMITTED
+                and kind in {REVIEW_LEASE_EXPIRED, REVIEW_LEASE_RELEASED}
+            )
     else:
         try:
             result = await client.ticket_get(ticket_id)
@@ -2901,6 +2932,13 @@ async def _is_relevant(
                         "ticket_resubmitted",
                     }
                     and event.get("status_to") == "submitted"
+                    and ticket_is_relevant(
+                        ticket,
+                        my_agent_id,
+                        only_mine,
+                        project,
+                        WAIT_FOR_SUBMITTED,
+                    )
                 )
             )
         else:
@@ -3573,9 +3611,7 @@ async def _wait_for_work_many(
                     "limit": CATCHUP_PAGE_LIMIT,
                 }
                 if wait_for_by_board[board_id] == WAIT_FOR_SUBMITTED:
-                    list_args.update(
-                        status="submitted", review_unclaimed_only=True
-                    )
+                    list_args["status"] = "submitted"
                 listed = await views[board_id].ticket_list(**list_args)
                 active_tickets = list(listed.get("tickets", []))
             except Exception as exc:
@@ -3595,7 +3631,7 @@ async def _wait_for_work_many(
             meta["dropped"] += max(0, len(events) - len(compacted))
             meta["event_counts"] = _event_kind_counts(events)
             relevant = compacted
-        if backlog:
+        if backlog and not meta["partial"]:
             queued = await _scan_open_backlog(
                 views[board_id],
                 agent_ids[board_id],
@@ -3916,9 +3952,7 @@ async def _wait_for_work(
                     "limit": CATCHUP_PAGE_LIMIT,
                 }
                 if selected_wait_for == WAIT_FOR_SUBMITTED:
-                    list_args.update(
-                        status="submitted", review_unclaimed_only=True
-                    )
+                    list_args["status"] = "submitted"
                 listed = await client.ticket_list(**list_args)
                 last_active_tickets = list(listed.get("tickets", []))
             except Exception as exc:
@@ -3943,6 +3977,16 @@ async def _wait_for_work(
     # 1. CHECK BEFORE BLOCKING. Journal events advance the cursor; synthetic
     # backlog cues never carry or fabricate a sequence number.
     relevant = await poll_once(scan_backlog=True)
+    if catchup_meta["partial"]:
+        return with_catchup_meta({
+            "new_seq": cursor,
+            "events": relevant,
+            "waited_s": round(time.monotonic() - started, 2),
+            "timed_out": False,
+            "mode": "poll",
+            "reason": _wait_reason(relevant) if relevant else "partial",
+            "resynced": resynced,
+        })
     backlog = await _scan_open_backlog(
         client,
         my_agent_id,

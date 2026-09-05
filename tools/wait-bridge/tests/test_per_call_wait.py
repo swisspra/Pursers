@@ -318,8 +318,7 @@ class PerCallWaitTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["events"][0]["ticket_id"], "TK-submitted")
         self.assertEqual(
             list_calls,
-            [{"include_closed": False, "limit": 500, "status": "submitted",
-              "review_unclaimed_only": True}],
+            [{"include_closed": False, "limit": 500, "status": "submitted"}],
         )
 
     async def test_release_and_expiry_events_wake_waiting_reviewer(self) -> None:
