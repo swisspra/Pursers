@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <link rel="icon" href="data:,">
-  <title>Pursers 5.0.0a19 — What's new</title>
+  <title>Pursers 5.0.0a20 — What's new</title>
   <style>
     :root { --ink:#17365d; --muted:#596579; --line:#d9d6cc; --paper:#fbf8f0; --card:#fff; --blue:#2f6f9f; --green:#28745a; --orange:#b75b24; }
     * { box-sizing:border-box; }
@@ -39,9 +39,9 @@
 </head>
 <body>
   <header>
-    <p class="eyebrow">What's new · a19 release</p>
-    <h1>Coordinator access and<br>host token identity are aligned.</h1>
-    <p class="lead">The 5.0.0a19 release makes coordinator membership checks consistent and gives managed Codex and Goose wait bridges an explicit, verifiable connector identity.</p>
+    <p class="eyebrow">What's new · a20 release</p>
+    <h1>Push-wait vocabulary is<br>shared and resilient.</h1>
+    <p class="lead">The 5.0.0a20 release restores subscription-first waits, tolerates future event-kind skew, and makes every push failure visible in Fleet Needs attention.</p>
   </header>
 
   <nav aria-label="Contents"><div>
@@ -54,10 +54,12 @@
 
   <main>
     <section id="behavior">
-      <h2>a19 authorization and identity fixes</h2>
+      <h2>a20 push-wait restoration</h2>
       <div class="grid">
-        <article class="card"><strong>Coordinator membership</strong><p>Coordinator and orchestrator joins admit existing <code>admin</code>, <code>member</code>, and <code>reviewer</code> memberships. Narrow <code>board:coordinate</code> and <code>board:intake</code> operations use the same membership rule while token scopes remain the authority boundary.</p></article>
-        <article class="card"><strong>Managed connector identity</strong><p>Codex and Goose configs carry the connector token-file value in the private bridge environment. Doctor verifies the literal, both Central-resolved principals, and the exact stdio launch environment without displaying token contents.</p></article>
+        <article class="card"><strong>One event vocabulary</strong><p>Client, bridge, and Central share the same claim-TTL, dispatch, deprecation, review-lease, admission, scrub, and core event-kind constants. Cross-package tests prevent the subscription set from drifting again.</p></article>
+        <article class="card"><strong>Fail-open subscriptions</strong><p>The client drops unknown requested kinds with one warning and keeps every recognized kind subscribed. Vocabulary skew no longer forces the whole bridge into polling.</p></article>
+        <article class="card"><strong>Visible push failures</strong><p>Bridge stats retain <code>push unavailable: &lt;reason&gt;</code> per seat, Fleet Needs attention surfaces it, and a later healthy push return clears the warning.</p></article>
+        <article class="card"><strong>Compatibility retained</strong><p><code>PURSERS_LEGACY_TOOLS</code> and <code>capabilities.legacy_tools</code> remain available in a20. Physical removal is tracked separately.</p></article>
       </div>
 
       <h2>Subscription-first is the default</h2>
@@ -71,7 +73,7 @@
         <li><strong>Dispatch offers:</strong> capable seats declare tier, skills, work/review flags, host, and optional model/provider at join and reconnect. A worker or reviewer now wakes only for its own offer and held-ticket lease events; <code>reason=offer</code> carries expiry, tier, and required skills. Legacy boards keep broadcast behavior.</li>
         <li><strong>Reviewer waits:</strong> reviewer identities now wait for submissions by default, unchanged legacy backlog cues are surfaced once per bridge process, and each return reports <code>reason=offer|journal|backlog|timeout</code>.</li>
         <li><strong>Orchestrator mode (TK-55b6bc8985fc):</strong> wait bridge background subscription with instant <code>board_digest</code>, <code>board_digest_ack</code>, <code>board_watch</code>, and <code>board_unwatch</code> tools for Claude Desktop leaders. Eliminates blocking wait and polling; buffers events in a persistent ring buffer, fetches with <code>touch=false</code> (zero board writes while idle), and emits MCP resource notifications on <code>board://&lt;board&gt;/digest</code>.</li>
-        <li><strong>Tool surface audit and deprecation (TK-2ffa16368cbb):</strong> measured 7-day usage across 45 Central and bridge tools. Implemented hide-unless-legacy mechanism in Central and Wait-Bridge for a18: 10 superseded, redundant, or unused tools (<code>agent_nudge</code>, <code>board_get_briefing</code>, <code>ticket_terminate</code>, <code>ticket_assign</code>, and 6 unused <code>memory_*</code> tools) are hidden from default <code>tools/list</code> saving ~1,500 context tokens per turn (while <code>memory_write</code> and <code>ticket_unclaim</code> remain visible core tools). Seats can opt-in via <code>capabilities={"legacy_tools": true}</code> upon <code>board_join</code> or <code>PURSERS_LEGACY_TOOLS=1</code> env var. Calling deprecated tools emits a <code>_deprecated: true</code> annotation and a one-time journal warning per caller; compatibility is retained through a19 and physical removal moves to a20. Comprehensive audit documentation published at <code>docs/tool-surface-audit.md</code>.</li>
+<li><strong>Tool surface audit and deprecation (TK-2ffa16368cbb):</strong> measured 7-day usage across 45 Central and bridge tools. Implemented hide-unless-legacy mechanism in Central and Wait-Bridge for a18: 10 superseded, redundant, or unused tools (<code>agent_nudge</code>, <code>board_get_briefing</code>, <code>ticket_terminate</code>, <code>ticket_assign</code>, and 6 unused <code>memory_*</code> tools) are hidden from default <code>tools/list</code> saving ~1,500 context tokens per turn (while <code>memory_write</code> and <code>ticket_unclaim</code> remain visible core tools). Seats can opt-in via <code>capabilities={"legacy_tools": true}</code> upon <code>board_join</code> or <code>PURSERS_LEGACY_TOOLS=1</code> env var. Calling deprecated tools emits a <code>_deprecated: true</code> annotation and a one-time journal warning per caller; compatibility remains available in a20 and physical removal is tracked separately. Comprehensive audit documentation published at <code>docs/tool-surface-audit.md</code>.</li>
         <li><strong>Reviewer hardening:</strong> generated seats now carry one HARD-verify checklist, an exact-SHA <code>board.sh verify</code> helper, approval evidence gates, and non-empty rejection fixes. Generic leak rules ship in-repo; operator regexes load locally from <code>~/.pursers/leak-markers.txt</code> or <code>PURSERS_LEAK_MARKERS_FILE</code> and only their count is printed.</li>
       </ul>
     </section>
@@ -127,7 +129,7 @@ PURSERS_BOARD_CONNECTOR_TOKEN = "&lt;same seat token&gt;"</code></pre>
         <li><code>TK-522f6f779c84</code> — coordinator membership authorization alignment.</li>
         <li><code>TK-d3dcb3be08ad</code> — Codex and Goose connector-token forwarding plus Doctor runtime identity probes.</li>
       </ul>
-      <p>This page documents the a19 release as a coherent program. A follow-up ticket that is still open or claimed is not represented as released or complete.</p>
+      <p>This page documents the a20 release as a coherent program. A follow-up ticket that is still open or claimed is not represented as released or complete.</p>
     </section>
 
     <section id="migration">
@@ -136,7 +138,7 @@ PURSERS_BOARD_CONNECTOR_TOKEN = "&lt;same seat token&gt;"</code></pre>
         <li>Keep secrets in the host's protected configuration; use placeholders in shared documentation.</li>
         <li>Set <code>PURSERS_ROLE</code> explicitly to <code>worker</code>, <code>reviewer</code>, or <code>orchestrator</code> for every seat.</li>
         <li>Use one token identity per seat for both its wait bridge and board connector.</li>
-        <li>Set <code>PURSERS_LEGACY_TOOLS=1</code> only while deprecated tools are required; compatibility is retained through a19 and removal moves to a20.</li>
+        <li>Set <code>PURSERS_LEGACY_TOOLS=1</code> only while deprecated tools are required; compatibility remains available in a20 and removal is tracked separately.</li>
         <li>Set the correct <code>PURSERS_HOST</code> and configure the host timeout longer than the bridge block.</li>
         <li>Remove default-path poll settings and verify one subscription wait on a test board.</li>
         <li>Confirm <code>timed_out=true</code> is immediately re-armed with <code>new_seq</code>.</li>
