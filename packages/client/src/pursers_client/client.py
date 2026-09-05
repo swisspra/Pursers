@@ -413,12 +413,15 @@ class BoardClient:
         *,
         limit: int | None = None,
         max_bytes: int | None = None,
+        include_retired: bool = False,
     ) -> dict[str, Any]:
         arguments: dict[str, Any] = {}
         if limit is not None:
             arguments["limit"] = limit
         if max_bytes is not None:
             arguments["max_bytes"] = max_bytes
+        if include_retired:
+            arguments["include_retired"] = True
         result = await self._call("board_snapshot", arguments)
         for ticket in result.get("tickets", []):
             payload_ref = ticket.get("payload_ref")
@@ -797,8 +800,32 @@ class BoardClient:
             arguments["ticket_id"] = ticket_id
         return await self._call("board_get_briefing", arguments)
 
-    async def board_status(self) -> dict[str, Any]:
-        return await self._call("board_status", {})
+    async def board_status(self, *, include_retired: bool = False) -> dict[str, Any]:
+        return await self._call(
+            "board_status", {"include_retired": True} if include_retired else {}
+        )
+
+    async def agent_retire(
+        self, target_agent_id: str | None = None
+    ) -> dict[str, Any]:
+        arguments: dict[str, Any] = {"agent_name": self.agent_name}
+        if target_agent_id is not None:
+            arguments["target_agent_id"] = target_agent_id
+        return await self._call("agent_retire", arguments)
+
+    async def agent_retire_inert(self) -> dict[str, Any]:
+        return await self._call(
+            "agent_retire_inert", {"agent_name": self.agent_name}
+        )
+
+    async def board_stale_after_set(self, stale_after_days: int) -> dict[str, Any]:
+        return await self._call(
+            "board_stale_after_set",
+            {
+                "agent_name": self.agent_name,
+                "stale_after_days": stale_after_days,
+            },
+        )
 
     async def board_dispatch_events(self, *, limit: int = 25) -> dict[str, Any]:
         """Read Central's member-authorized cross-seat dispatch projection."""

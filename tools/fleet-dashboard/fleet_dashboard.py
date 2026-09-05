@@ -177,15 +177,22 @@ class IntakeRateLimitError(RuntimeError):
 
 
 class FleetClient(Protocol):
-    async def board_status(self) -> dict[str, Any]: ...
+    async def board_status(self, *, include_retired: bool = False) -> dict[str, Any]: ...
 
     async def board_dispatch_events(self, *, limit: int = 25) -> dict[str, Any]: ...
 
     async def board_state_get(self, key: str | None = None) -> dict[str, Any]: ...
 
     async def board_snapshot(
-        self, *, limit: int | None = None, max_bytes: int | None = None
+        self, *, limit: int | None = None, max_bytes: int | None = None,
+        include_retired: bool = False,
     ) -> dict[str, Any]: ...
+
+    async def agent_retire(
+        self, target_agent_id: str | None = None
+    ) -> dict[str, Any]: ...
+
+    async def agent_retire_inert(self) -> dict[str, Any]: ...
 
     async def board_catchup(
         self,
@@ -2522,6 +2529,7 @@ def aggregate_fleet(
     now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     groups: dict[tuple[str, str], dict[str, Any]] = {}
     boards: list[dict[str, Any]] = []
+    inactive_agents: list[dict[str, Any]] = []
 
     for raw in board_rows[:MAX_BOARDS]:
         board_id = _clip(raw.get("board_id"), MAX_LABEL_CHARS)
@@ -2573,6 +2581,23 @@ def aggregate_fleet(
             seen_at = _parse_time(
                 agent.get("last_activity_at") or agent.get("joined_at")
             )
+            lifecycle = str(agent.get("lifecycle_status", "active"))
+            if lifecycle in {"retired", "stale"}:
+                inactive_agents.append(
+                    {
+                        "agent_id": _clip(agent_id, MAX_LABEL_CHARS) or None,
+                        "principal_id": _clip(principal_id, MAX_LABEL_CHARS),
+                        "agent_name": _clip(agent_name, MAX_LABEL_CHARS),
+                        "board_id": board_id,
+                        "project": label,
+                        "role": _clip(
+                            agent.get("membership_role") or agent.get("role"), 32
+                        ) or None,
+                        "lifecycle_status": lifecycle,
+                        "last_seen": seen_at.isoformat() if seen_at else None,
+                    }
+                )
+                continue
             if (
                 "coordinator" in agent_name.lower()
                 and seen_at is not None
@@ -2726,6 +2751,10 @@ def aggregate_fleet(
                     coordinator_seen_at.isoformat() if coordinator_seen_at else None
                 ),
                 "coordinator_findings": project_coordinator_findings(snapshot),
+                "stale_after_days": (
+                    snapshot.get("board", {}).get("stale_after_days", 3)
+                    if isinstance(snapshot.get("board"), dict) else 3
+                ),
                 "snapshot_truncation": snapshot.get("_snapshot_truncation"),
                 "truncated": bool(
                     snapshot.get("truncated") or len(ticket_rows) > MAX_TICKET_ROWS
@@ -2782,6 +2811,10 @@ def aggregate_fleet(
             "stale": stale,
         },
         "agents": agent_rows,
+        "inactive_agents": sorted(
+            inactive_agents,
+            key=lambda item: (item["project"], item["agent_name"]),
+        )[:MAX_AGENT_ROWS],
         "boards": boards,
         "bounds": {
             "boards": MAX_BOARDS,
@@ -2878,7 +2911,8 @@ class FleetFetcher:
         try:
             async with self._client(board_id) as client:
                 snapshot = await client.board_snapshot(
-                    limit=SNAPSHOT_LIMIT, max_bytes=SNAPSHOT_MAX_BYTES
+                    limit=SNAPSHOT_LIMIT, max_bytes=SNAPSHOT_MAX_BYTES,
+                    include_retired=True,
                 )
                 snapshot_tickets = snapshot.get("tickets")
                 snapshot_tickets = (
@@ -3181,6 +3215,26 @@ class FleetFetcher:
             "claim_ttl_s": ttl_result.get("claim_ttl_s", claim_ttl),
             "previous_claim_ttl_s": ttl_result.get("previous_claim_ttl_s"),
         }
+
+    async def retire_agent(self, board_id: str, agent_id: str) -> dict[str, Any]:
+        if not BOARD_ID_RE.fullmatch(board_id):
+            raise ValueError("invalid board_id")
+        if not isinstance(agent_id, str) or not agent_id:
+            raise ValueError("invalid agent_id")
+        active = {active_board for _label, active_board in await self._boards()}
+        if board_id not in active:
+            raise ValueError("board_id is not registry-active")
+        async with self._client(board_id) as client:
+            return await client.agent_retire(agent_id)
+
+    async def retire_inert(self, board_id: str) -> dict[str, Any]:
+        if not BOARD_ID_RE.fullmatch(board_id):
+            raise ValueError("invalid board_id")
+        active = {active_board for _label, active_board in await self._boards()}
+        if board_id not in active:
+            raise ValueError("board_id is not registry-active")
+        async with self._client(board_id) as client:
+            return await client.agent_retire_inert()
 
     async def fetch_config(self) -> dict[str, Any]:
         async with self._client(self.config.home_board) as client:
@@ -4034,6 +4088,22 @@ class DashboardCache:
             asyncio.run(self.fetchers[label].save_dispatch(board_id, value)), label
         )
 
+    def retire_agent(
+        self, board_id: str, agent_id: str, central: str | None = None
+    ) -> dict[str, Any]:
+        label = self.resolve_central(central)
+        return self._labeled(
+            asyncio.run(self.fetchers[label].retire_agent(board_id, agent_id)), label
+        )
+
+    def retire_inert(
+        self, board_id: str, central: str | None = None
+    ) -> dict[str, Any]:
+        label = self.resolve_central(central)
+        return self._labeled(
+            asyncio.run(self.fetchers[label].retire_inert(board_id)), label
+        )
+
     def save_config(
         self,
         value: Any,
@@ -4109,7 +4179,7 @@ function route(){let m=location.hash.match(/^#\/central\/([^/?]+)\/(board\/([^/?
 function renderCentral(d){const central=d.central,s=d.pool_summary,boards=filterHomeBoards(d.boards,filterNeedle),agents=d.agents.filter(a=>matches([a.agent_name,a.pool_status,...a.boards],filterNeedle));return `<section class="central-group" data-central="${esc(central)}"><div class="top central-heading"><div><h2>${esc(central)}</h2><p class="muted">Independent central trust domain</p></div><nav class="tabs"><a class="tab" href="${centralHref(central,'overhead')}">Overhead</a><a class="tab" href="${centralHref(central,'config')}">Config</a></nav></div><section class="strip">${['online','busy','available','stale'].map(k=>`<div class="metric"><span>${esc(k)}</span><b>${esc(s[k])}</b></div>`).join('')}</section><section class="grid">${boards.map(b=>`<article class="card"><a class="board-link" href="${boardHref(central,b.board_id)}"><div class="top"><div><h2>${esc(b.label)}</h2><span class="meta">${esc(b.board_id)}</span></div>${b.truncated?'<span class="status">bounded view</span>':''}</div></a>${b.error?`<p class="error">Unavailable: ${esc(b.error)}</p>`:`<div class="counts">${Object.entries(b.counts).map(([k,v])=>`<span class="pill">${esc(k.replace('_',' '))}: <b>${esc(v)}</b></span>`).join('')}</div><div class="table-scroll"><table><thead><tr><th>Ticket</th><th>Title</th><th>Status</th><th class="hide-small">Claimed by</th></tr></thead><tbody>${b.tickets.length?b.tickets.map(t=>`<tr><td><a class="id" href="${ticketHref(central,b.board_id,t.id)}">${esc(t.id)}</a></td><td>${esc(t.title)}</td><td><span class="status">${esc(t.status_label||t.status)}</span></td><td class="hide-small">${esc(t.claimed_by||'—')}</td></tr>`).join(''):'<tr><td colspan="4" class="empty">No matching tickets</td></tr>'}</tbody></table></div>`}</article>`).join('')||'<p class="empty">No boards match the filter.</p>'}</section><section class="card pool"><h2>Agent pool · ${esc(central)}</h2>${agents.length?agents.map(a=>`<details class="agent" data-state-key="${esc(`agent:${central}:${a.agent_name}`)}"><summary><b>${esc(a.agent_name)}${a.duplicate_name?' <span class="warning">duplicate name</span>':''}</b><span>${esc(a.pool_status)}</span><span>${esc(a.boards.join(', '))}</span><span>${esc(fmt(a.last_seen))}</span></summary><div class="agent-body table-scroll"><table><thead><tr><th>Project</th><th>Role</th><th>Current claim</th><th>Last seen</th></tr></thead><tbody>${a.seats.map(seat=>`<tr><td><a href="${boardHref(central,seat.board_id)}">${esc(seat.project)}</a><div class="meta">${esc(seat.board_id)}</div></td><td>${esc(seat.role||'—')}</td><td>${seat.current_ticket_id?`<a class="id" href="${ticketHref(central,seat.board_id,seat.current_ticket_id)}">${esc(seat.current_ticket_id)}</a><div>${esc(seat.current_ticket_title)}</div>`:'—'}</td><td>${esc(fmt(seat.last_seen))}</td></tr>`).join('')}</tbody></table></div></details>`).join(''):'<p class="empty">No agents match the filter.</p>'}</section></section>`}
 function renderFleet(){document.querySelector('#central-sections').innerHTML=centralLabels.map(label=>fleetData[label]?renderCentral(fleetData[label]):`<section class="central-group unavailable" data-central="${esc(label)}"><div class="top central-heading"><div><h2>${esc(label)}</h2><p class="error">Unavailable: ${esc(fleetErrors[label]||'loading')}</p></div><nav class="tabs"><a class="tab" href="${centralHref(label,'overhead')}">Overhead</a><a class="tab" href="${centralHref(label,'config')}">Config</a></nav></div></section>`).join('');const newest=Object.values(fleetData).map(d=>d.generated_at).sort().at(-1);document.querySelector('#state').textContent=newest?`Updated ${fmt(newest)}`:'No central available';if(typeof bindInteractive==='function')bindInteractive(document.querySelector('#central-sections'));if(typeof renderSearchResults==='function')renderSearchResults()}
 const legacyRenderCentralAgentsV1=renderCentral;
-renderCentral=function(d){const base=legacyRenderCentralAgentsV1({...d,agents:[]}),marker='<section class="card pool"><h2>Agent pool · ',start=base.lastIndexOf(marker);if(start<0)return base;const central=d.central,agents=visibleAgents((d.agents||[]).filter(a=>matches([a.agent_name,a.pool_status,...(a.boards||[])],filterNeedle))),pool=`<section class="card pool"><div class="section-title"><h2>Agent pool · ${esc(central)}</h2>${agentVisibilityToggle()}</div>${agents.length?agents.map(a=>`<details class="agent" data-state-key="${esc(`agent:${central}:${a.agent_name}`)}"><summary><b>${esc(a.agent_name)}${a.duplicate_name?' <span class="warning">duplicate name</span>':''}</b>${agentStateSummary(central,a)}<span>${esc((a.boards||[]).join(', '))}</span><span class="meta">${esc(relativeAge(a.last_seen))}</span></summary><div class="agent-body table-scroll"><table><thead><tr><th>Project</th><th>Role</th><th>Current claim</th><th>Last seen</th></tr></thead><tbody>${(a.seats||[]).map(seat=>`<tr><td><a href="${boardHref(central,seat.board_id)}">${esc(seat.project)}</a><div class="meta">${esc(seat.board_id)}</div></td><td>${esc(seat.role||'—')}</td><td>${seat.current_ticket_id?agentTicketLink(central,seat):'<span class="meta">ว่าง/idle</span>'}</td><td>${esc(relativeAge(seat.last_seen))}</td></tr>`).join('')}</tbody></table></div></details>`).join(''):`<p class="empty">${showStaleAgents?'No agents match the filter.':'No active agents match the filter.'}</p>`}</section>`;return`${base.slice(0,start)}${pool}</section>`}
+renderCentral=function(d){const base=legacyRenderCentralAgentsV1({...d,agents:[]}),marker='<section class="card pool"><h2>Agent pool · ',start=base.lastIndexOf(marker);if(start<0)return base;const central=d.central,agents=visibleAgents((d.agents||[]).filter(a=>matches([a.agent_name,a.pool_status,...(a.boards||[])],filterNeedle))),inactive=(d.inactive_agents||[]).filter(a=>matches([a.agent_name,a.lifecycle_status,a.board_id,a.project],filterNeedle)),inactiveDrawer=`<details class="card pool" data-state-key="inactive:${esc(central)}"><summary><b>Retired / stale · ${esc(inactive.length)}</b></summary><p class="muted">Reactivation: the agent must call board_join or board_onboard with the same identity.</p><div class="toolbar">${[...new Map((d.boards||[]).map(b=>[b.board_id,b])).values()].map(b=>`<button type="button" data-retire-inert data-central="${esc(central)}" data-board="${esc(b.board_id)}">Retire inert · ${esc(b.label)}</button>`).join('')}</div>${inactive.length?`<div class="table-scroll"><table><thead><tr><th>Agent</th><th>Project</th><th>Status</th><th>Last seen</th><th>Action</th></tr></thead><tbody>${inactive.map(a=>`<tr><td><b>${esc(a.agent_name)}</b></td><td>${esc(a.project)}<div class="meta">${esc(a.board_id)}</div></td><td><span class="status">${esc(a.lifecycle_status)}</span></td><td>${esc(relativeAge(a.last_seen))}</td><td>${a.lifecycle_status==='retired'?'—':`<button type="button" data-retire-agent data-central="${esc(central)}" data-board="${esc(a.board_id)}" data-agent="${esc(a.agent_id)}">Retire</button>`}</td></tr>`).join('')}</tbody></table></div>`:'<p class="empty">No retired or stale agents.</p>'}</details>`,pool=`<section class="card pool"><div class="section-title"><h2>Agent pool · ${esc(central)}</h2>${agentVisibilityToggle()}</div>${agents.length?agents.map(a=>`<details class="agent" data-state-key="${esc(`agent:${central}:${a.agent_name}`)}"><summary><b>${esc(a.agent_name)}${a.duplicate_name?' <span class="warning">duplicate name</span>':''}</b>${agentStateSummary(central,a)}<span>${esc((a.boards||[]).join(', '))}</span><span class="meta">${esc(relativeAge(a.last_seen))}</span></summary><div class="agent-body table-scroll"><table><thead><tr><th>Project</th><th>Role</th><th>Current claim</th><th>Last seen</th></tr></thead><tbody>${(a.seats||[]).map(seat=>`<tr><td><a href="${boardHref(central,seat.board_id)}">${esc(seat.project)}</a><div class="meta">${esc(seat.board_id)}</div></td><td>${esc(seat.role||'—')}</td><td>${seat.current_ticket_id?agentTicketLink(central,seat):'<span class="meta">ว่าง/idle</span>'}</td><td>${esc(relativeAge(seat.last_seen))}</td></tr>`).join('')}</tbody></table></div></details>`).join(''):`<p class="empty">${showStaleAgents?'No agents match the filter.':'No active agents match the filter.'}</p>`}</section>`;return`${base.slice(0,start)}${pool}${inactiveDrawer}</section>`}
 function pressureBadge(s){const label=s.pressure==='compact'?'COMPACT':s.pressure;return `<span class="status pressure-${esc(s.pressure)}" title="${esc(s.next_action)}">${esc(label)}</span>`}
 function renderOverhead(d){const sessions=d.sessions||[],model=d.model_wait||[],cumulative=d.seats||[];document.querySelector('#detail-view').innerHTML=`<a class="back" href="#/">← All centrals</a><div class="top"><div><h2>Session context pressure · ${esc(d.central)}</h2><p class="muted">Model-visible wait cost is separated from bridge-to-Central diagnostics.</p></div></div><section class="card pool"><h3>Model-visible a2a_wait cost</h3>${model.length?`<div class="table-scroll"><table aria-label="Model-visible wait cost"><thead><tr><th>Seat</th><th>Returns this hour</th><th>Context this hour</th><th>24-hour outcomes</th></tr></thead><tbody>${model.map(s=>`<tr><td><b>${esc(s.agent_name)}</b><div class="meta">${esc(s.board_id)}</div></td><td>${esc(s.returns_per_hour)}</td><td>${esc(s.context_bytes_per_hour)} B<div class="meta">≈ ${esc(s.estimated_tokens_per_hour)} tokens</div></td><td>${esc(JSON.stringify(s.outcomes||{}))}<div class="meta">${esc(s.last_24h_returns)} returns · ${esc(s.last_24h_context_bytes)} B</div></td></tr>`).join('')}</tbody></table></div>`:`<p class="empty">No model-visible wait returns yet.</p>`}</section><section class="card pool">${sessions.length?`<div class="table-scroll"><table aria-label="Session context pressure"><thead><tr><th>Seat</th><th>Board</th><th>Est. tokens / poll</th><th>Trend vs median</th><th>Pressure</th></tr></thead><tbody>${sessions.map(s=>`<tr><td><b>${esc(s.agent_name)}</b><div class="meta">sampled ${esc(fmt(s.latest_at))}</div></td><td>${esc(s.board_id)}</td><td>${esc(s.latest_estimated_tokens)}</td><td>${esc(s.trend)} ${s.trend_ratio===null?'—':`${esc(s.trend_ratio)}×`}<div class="meta">24-sample median ≈ ${esc(s.median_estimated_tokens)} tokens · ${esc(s.sample_count)} samples</div></td><td>${pressureBadge(s)}<div class="meta">${esc(s.next_action)}</div></td></tr>`).join('')}</tbody></table></div>`:`<p class="empty">No session pressure samples yet — context pressure is calm (${esc(d.source_status)}).</p>`}</section><details class="card pool" data-state-key="overhead-details:${esc(d.central)}"><summary>Bridge-to-Central diagnostic details</summary>${cumulative.length?`<div class="table-scroll"><table><thead><tr><th>Seat</th><th>Today</th><th>7-day</th><th>Top tools by bytes</th></tr></thead><tbody>${cumulative.map(s=>`<tr><td><b>${esc(s.agent_name)}</b><div class="meta">${esc(s.board_id)}</div></td><td>${esc(s.today_bytes)} B<div class="meta">≈ ${esc(s.today_estimated_tokens)} tokens · ${esc(s.today_calls)} calls</div></td><td>${esc(s.seven_day_bytes)} B<div class="meta">≈ ${esc(s.seven_day_estimated_tokens)} tokens · ${esc(s.seven_day_calls)} calls</div></td><td class="overhead-tools">${s.top_tools.map(t=>`${esc(t.tool)}: ${esc(t.bytes)} B`).join(' · ')||'—'}</td></tr>`).join('')}</tbody></table></div>`:`<p class="empty">No cumulative debug stats.</p>`}</details>`;bindInteractive(document.querySelector('#detail-view'))}
 function sortedTickets(items){const rank=s=>['claimed','in_progress','creating_report'].includes(s)?0:['submitted','reviewing','in_review'].includes(s)?1:s==='open'?2:3;return [...items].sort((a,b)=>rank(a.status)-rank(b.status)||(detailSort==='oldest'?String(a.updated_at||'').localeCompare(String(b.updated_at||'')):String(b.updated_at||'').localeCompare(String(a.updated_at||''))))}
@@ -4186,6 +4256,8 @@ let coordinatorConfig=null;
 const sourceFor=(d,path)=>d.sources?.[path]||'unknown';
 function configNumber(d,key,label,min,max){const v=d.effective.thresholds[key];return `<label>${esc(label)} <span class="source">source: ${esc(sourceFor(d,`thresholds.${key}`))}</span><input name="${esc(key)}" type="number" min="${min}" max="${max}" step="${key.endsWith('_ratio')?'.01':'1'}" value="${esc(v)}" required></label>`}
 function renderConfig(d){coordinatorConfig=d;const e=d.effective||{};if(!e.thresholds||!e.intake){document.querySelector('#config-view').innerHTML=`<a class="back" href="#/">← All centrals</a><h2>Coordinator config · ${esc(d.central)}</h2><p class="warning">Run the coordinator once to publish effective values before editing.</p>`;return}document.querySelector('#config-view').innerHTML=`<a class="back" href="#/">← All centrals</a><div class="top"><div><h2>Coordinator config · ${esc(d.central)}</h2><p class="muted">Live policy document on the ${esc(d.central)} home board</p></div><div><span class="status">mode: ${esc(d.mode)}</span><p class="warning">Mode changes require a restart.</p></div></div><form id="config-form" class="card pool"><div class="config-grid">${CONFIG_NUMBERS.map(x=>configNumber(d,...x)).join('')}<label>Integration watch since <span class="source">source: ${esc(sourceFor(d,'integration_watch_since'))}</span><input name="integration_watch_since" type="text" placeholder="ISO-8601 or blank" value="${esc(e.integration_watch_since||'')}"></label><label>Intake enabled <span class="source">source: ${esc(sourceFor(d,'intake.enabled'))}</span><input name="enabled" type="checkbox" ${e.intake.enabled?'checked':''}></label><label>Intake token path <span class="source">source: ${esc(sourceFor(d,'intake.token_path'))}</span><input name="token_path" type="text" placeholder="/absolute/path/to/intake-token" value="${esc(e.intake.token_path||'')}"></label><label>Work domain always ask <span class="source">source: ${esc(sourceFor(d,'intake.work_domain_always_ask'))}</span><input name="work_domain_always_ask" type="checkbox" ${e.intake.work_domain_always_ask?'checked':''}></label><label>Intake rate per hour <span class="source">source: ${esc(sourceFor(d,'intake.rate_per_hour'))}</span><input name="rate_per_hour" type="number" min="1" max="20" value="${esc(e.intake.rate_per_hour)}" required></label>${CONFIG_CATEGORIES.map(c=>`<label>${esc(c)} policy <span class="source">source: ${esc(sourceFor(d,e.intake.auto_categories.includes(c)?'intake.auto_categories':'intake.always_ask_categories'))}</span><select name="category_${esc(c)}"><option value="auto"${e.intake.auto_categories.includes(c)?' selected':''}>auto</option><option value="ask"${e.intake.always_ask_categories.includes(c)?' selected':''}>always ask</option></select></label>`).join('')}</div><div class="toolbar"><button type="submit">Save config</button><span id="config-status" class="muted">${esc(d.concurrency.toUpperCase())} · updated ${esc(fmt(d.updated_at))} by ${esc(d.updated_by||'—')}</span></div></form>`;document.querySelector('#config-form').addEventListener('submit',saveConfig)}
+const legacyRenderConfigLifecycle=renderConfig;
+renderConfig=function(d){legacyRenderConfigLifecycle(d);const boards=fleetData[d.central]?.boards||[],host=document.querySelector('#config-view');host.insertAdjacentHTML('beforeend',`<section class="card pool"><h3>Agent lifecycle</h3><p class="muted">Board inactivity thresholds; join/onboard reactivates retired or stale identities.</p><div class="table-scroll"><table><thead><tr><th>Board</th><th>Stale after</th></tr></thead><tbody>${boards.length?boards.map(b=>`<tr><td>${esc(b.label)}<div class="meta">${esc(b.board_id)}</div></td><td>${esc(b.stale_after_days||3)} days</td></tr>`).join(''):'<tr><td colspan="2" class="empty">No active boards.</td></tr>'}</tbody></table></div></section>`)};
 async function refreshConfig(){const r=route();if(!r||r.kind!=='config')return;const key=`config:${r.central}`;try{const response=await fetch(`/api/config?${apiCentral(r.central)}`,{cache:'no-store'});if(!response.ok)throw new Error(`HTTP ${response.status}`);const data=await response.json();if(route()?.central===r.central){renderConfig(data);markConnectionSuccess(key)}}catch(e){markConnectionFailure(key);if(!coordinatorConfig||coordinatorConfig.central!==r.central)document.querySelector('#config-view').innerHTML=`<a class="back" href="#/">← All centrals</a><p class="error">Config unavailable for ${esc(r.central)}.</p>`}}
 async function saveConfig(event){event.preventDefault();const f=new FormData(event.target),thresholds={};for(const [key] of CONFIG_NUMBERS)thresholds[key]=key.endsWith('_ratio')?Number(f.get(key)):Number.parseInt(f.get(key),10);const auto=[],always=[];for(const c of CONFIG_CATEGORIES)(f.get(`category_${c}`)==='auto'?auto:always).push(c);const config={schema_version:1,thresholds,integration_watch_since:f.get('integration_watch_since').trim()||null,intake:{enabled:f.get('enabled')==='on',token_path:f.get('token_path').trim()||null,auto_categories:auto,always_ask_categories:always,work_domain_always_ask:f.get('work_domain_always_ask')==='on',rate_per_hour:Number.parseInt(f.get('rate_per_hour'),10)}};const status=document.querySelector('#config-status'),central=coordinatorConfig.central;status.textContent=`Saving ${central}…`;try{const r=await fetch(`/api/config?${apiCentral(central)}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({config,expected_sha256:coordinatorConfig.expected_sha256})});const body=await r.json();if(!r.ok)throw new Error(body.error||`HTTP ${r.status}`);status.textContent=`Saved ${body.central} with ${body.concurrency.toUpperCase()}; waiting for coordinator poll`;setTimeout(refreshConfig,1000)}catch(e){status.textContent=`Save failed for ${central}: ${e.message}`;status.className='error'}}
 function syncConfigRoute(){const r=route(),active=r?.kind==='config';document.querySelector('#config-view').hidden=!active;if(active){document.querySelector('#home-view').hidden=true;document.querySelector('#detail-view').hidden=true;if(centralLabels.length)refreshConfig()}}
@@ -4329,7 +4401,7 @@ function openAgentDialog(){let dialog=document.querySelector('#agent-dialog');if
 function syncAgentDialog(){const form=document.querySelector('#agent-dialog-form');if(!form)return;const data=hubWorkers[form.elements.central.value]||{},roles=data.roles||['worker'];form.elements.role.innerHTML=roles.map(r=>`<option value="${esc(r)}">${esc(r)}</option>`).join('');document.querySelector('#role-note').textContent=roles.includes('reviewer')?'Reviewer runtime available.':'Worker-only until reviewer runtime is installed.';form.elements.provider.innerHTML=workerPresetOptions(data.presets||{});syncAgentPreset()}
 function syncAgentPreset(){const form=document.querySelector('#agent-dialog-form');if(!form)return;const option=form.elements.provider.selectedOptions[0];form.elements.base_url.value=option?.dataset.url||'';form.elements.base_url.readOnly=!['custom','azure'].includes(form.elements.provider.value);form.elements.api_key.required=option?.dataset.key==='true';form.elements.api_key.disabled=option?.dataset.key!=='true';if(form.elements.api_key.disabled)form.elements.api_key.value=''}
 async function saveHubAgent(event){event.preventDefault();const form=event.target,f=new FormData(form),central=f.get('central'),status=document.querySelector('#agent-dialog-status'),payload={name:f.get('name'),role:f.get('role'),provider:f.get('provider'),base_url:f.get('base_url'),model:f.get('model'),api_key:f.get('api_key')||'',max_tier:f.get('max_tier')};status.textContent='Saving to Keychain and local config…';try{await workerRequest('/api/workers',central,payload);form.elements.api_key.value='';hubWorkers[central]=await fetchJson(`/api/workers?${apiCentral(central)}`);const worker=workerByName(central,payload.name);hubGuide={...worker,central};document.querySelector('#agent-dialog').close();renderHub()}catch(e){form.elements.api_key.value='';status.className='error wide';status.textContent=`Save failed: ${e.message}`}}
-async function hubClick(event){const visibility=event.target.closest('[data-agent-visibility-toggle]');if(visibility){showStaleAgents=!showStaleAgents;renderHub();return}const copy=event.target.closest('[data-hub-copy]');if(copy){await navigator.clipboard.writeText(copy.dataset.hubCopy);const status=document.querySelector('#hub-agent-status');if(status)status.textContent='Seat command copied.';return}const button=event.target.closest('[data-hub-agent-action]');if(!button)return;const status=document.querySelector('#hub-agent-status');button.disabled=true;if(status)status.textContent=`${button.textContent} ${button.dataset.name}…`;try{await workerRequest(`/api/workers/${encodeURIComponent(button.dataset.name)}/${button.dataset.hubAgentAction}`,button.dataset.central);hubWorkers[button.dataset.central]=await fetchJson(`/api/workers?${apiCentral(button.dataset.central)}`);if(hubGuide?.name===button.dataset.name)hubGuide={...workerByName(button.dataset.central,button.dataset.name),central:button.dataset.central};renderHub()}catch(e){button.disabled=false;if(status){status.className='error';status.textContent=`Action failed: ${e.message}`}}}
+async function hubClick(event){const visibility=event.target.closest('[data-agent-visibility-toggle]');if(visibility){showStaleAgents=!showStaleAgents;renderHub();return}const retire=event.target.closest('[data-retire-agent],[data-retire-inert]');if(retire){retire.disabled=true;try{const path=retire.hasAttribute('data-retire-inert')?'/api/agents/retire-inert':'/api/agents/retire',payload=retire.hasAttribute('data-retire-inert')?{board_id:retire.dataset.board}:{board_id:retire.dataset.board,agent_id:retire.dataset.agent};await workerRequest(path,retire.dataset.central,payload);await refreshCentral(retire.dataset.central)}catch(e){retire.disabled=false;alert(`Retire failed: ${e.message}`)}return}const copy=event.target.closest('[data-hub-copy]');if(copy){await navigator.clipboard.writeText(copy.dataset.hubCopy);const status=document.querySelector('#hub-agent-status');if(status)status.textContent='Seat command copied.';return}const button=event.target.closest('[data-hub-agent-action]');if(!button)return;const status=document.querySelector('#hub-agent-status');button.disabled=true;if(status)status.textContent=`${button.textContent} ${button.dataset.name}…`;try{await workerRequest(`/api/workers/${encodeURIComponent(button.dataset.name)}/${button.dataset.hubAgentAction}`,button.dataset.central);hubWorkers[button.dataset.central]=await fetchJson(`/api/workers?${apiCentral(button.dataset.central)}`);if(hubGuide?.name===button.dataset.name)hubGuide={...workerByName(button.dataset.central,button.dataset.name),central:button.dataset.central};renderHub()}catch(e){button.disabled=false;if(status){status.className='error';status.textContent=`Action failed: ${e.message}`}}}
 function syncHub(){const r=route(),active=!r||hubKinds.has(r.kind);if(active){document.querySelector('#home-view').hidden=false;document.querySelector('#detail-view').hidden=true;document.querySelector('#config-view').hidden=true;document.querySelector('#workers-view').hidden=true;renderHub();refreshHubExtras()}syncNav()}
 const legacySyncRouteHubV1=syncRoute;
 syncRoute=function(){const r=route();if(hubKinds.has(r?.kind)){syncHub();return}legacySyncRouteHubV1()};
@@ -4792,6 +4864,8 @@ def make_handler(
                 "/api/config/bridge/install",
                 "/api/config/bridge/upgrade-all",
                 "/api/dispatch",
+                "/api/agents/retire",
+                "/api/agents/retire-inert",
                 "/api/attention",
             }
             worker_action = re.fullmatch(
@@ -4885,6 +4959,27 @@ def make_handler(
                             request["board_id"],
                             request["policy"],
                             central=central,
+                        )
+                    )
+                elif route == "/api/agents/retire":
+                    if not isinstance(request, dict) or set(request) != {
+                        "board_id", "agent_id"
+                    }:
+                        raise ValueError("request must contain board_id and agent_id")
+                    body = _json_bytes(
+                        cache_call(
+                            "retire_agent",
+                            request["board_id"],
+                            request["agent_id"],
+                            central=central,
+                        )
+                    )
+                elif route == "/api/agents/retire-inert":
+                    if not isinstance(request, dict) or set(request) != {"board_id"}:
+                        raise ValueError("request must contain only board_id")
+                    body = _json_bytes(
+                        cache_call(
+                            "retire_inert", request["board_id"], central=central
                         )
                     )
                 elif route == "/api/attention":

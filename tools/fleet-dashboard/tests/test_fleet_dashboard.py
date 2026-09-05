@@ -178,6 +178,44 @@ def test_agents_group_by_principal_and_name_across_board_specific_ids() -> None:
     }
 
 
+def test_retired_and_stale_seats_are_outside_active_pool() -> None:
+    now = datetime(2030, 1, 2, 12, tzinfo=timezone.utc)
+    rows = [
+        {
+            "label": "One",
+            "board_id": "board-one",
+            "snapshot": {
+                "board": {"stale_after_days": 7},
+                "agents": [
+                    {
+                        "principal_id": "PR-active",
+                        "agent_name": "active",
+                        "agent_id": "AI-active",
+                        "last_activity_at": now.isoformat(),
+                        "lifecycle_status": "active",
+                    },
+                    {
+                        "principal_id": "PR-retired",
+                        "agent_name": "retired",
+                        "agent_id": "AI-retired",
+                        "last_activity_at": now.isoformat(),
+                        "lifecycle_status": "retired",
+                    },
+                ],
+                "tickets": [],
+            },
+            "events": [],
+        }
+    ]
+
+    result = dashboard.aggregate_fleet(rows, stale_seconds=300, now=now)
+
+    assert [item["agent_name"] for item in result["agents"]] == ["active"]
+    assert result["pool_summary"]["online"] == 1
+    assert result["inactive_agents"][0]["agent_name"] == "retired"
+    assert result["boards"][0]["stale_after_days"] == 7
+
+
 def test_available_and_stale_classification() -> None:
     now = datetime(2030, 1, 2, 12, tzinfo=timezone.utc)
     agents = [
@@ -364,9 +402,14 @@ def test_fetcher_requests_central_max_snapshot_bounds() -> None:
             return None
 
         async def board_snapshot(
-            self, *, limit: int | None = None, max_bytes: int | None = None
+            self, *, limit: int | None = None, max_bytes: int | None = None,
+            include_retired: bool = False,
         ) -> dict:
-            requested.update(limit=limit, max_bytes=max_bytes)
+            requested.update(
+                limit=limit,
+                max_bytes=max_bytes,
+                include_retired=include_retired,
+            )
             return {"latest_seq": 0, "agents": [], "tickets": []}
 
         async def board_catchup(self, **_kwargs: object) -> dict:
@@ -384,7 +427,11 @@ def test_fetcher_requests_central_max_snapshot_bounds() -> None:
 
     asyncio.run(fetcher._read_board("Board", "board"))
 
-    assert requested == {"limit": 1_000, "max_bytes": 300_000}
+    assert requested == {
+        "limit": 1_000,
+        "max_bytes": 300_000,
+        "include_retired": True,
+    }
 
 
 def test_output_rows_and_titles_are_bounded() -> None:
@@ -535,7 +582,10 @@ def test_fetch_board_uses_bounded_snapshot_and_catchup() -> None:
     result = asyncio.run(fetcher.fetch_board("board-detail"))
 
     assert result["board"]["board_id"] == "board-detail"
-    assert ("board_snapshot", {"limit": 1_000, "max_bytes": 300_000}) in calls
+    assert (
+        "board_snapshot",
+        {"limit": 1_000, "max_bytes": 300_000, "include_retired": True},
+    ) in calls
     assert (
         "board_catchup",
         {
@@ -4477,6 +4527,59 @@ def test_capability_and_dispatch_ui_contract_is_present() -> None:
     assert ">coordinator</option>" in dashboard.HTML
     assert "review.checked=role==='reviewer'" in dashboard.HTML
     assert "work.checked=role==='worker'" in dashboard.HTML
+    assert "Retired / stale" in dashboard.HTML
+    assert "data-retire-agent" in dashboard.HTML
+    assert "data-retire-inert" in dashboard.HTML
+    assert "/api/agents/retire" in dashboard.HTML
+    assert "stale_after_days" in dashboard.HTML
+
+
+def test_lifecycle_http_endpoints_use_same_origin_json_guard() -> None:
+    calls: list[tuple[str, str, str | None]] = []
+
+    class Cache:
+        def resolve_central(self, value: str | None) -> str:
+            return value or "default"
+
+        def retire_agent(self, board_id: str, agent_id: str) -> dict:
+            calls.append(("agent", board_id, agent_id))
+            return {"ok": True}
+
+        def retire_inert(self, board_id: str) -> dict:
+            calls.append(("inert", board_id, None))
+            return {"ok": True}
+
+    server = dashboard.ThreadingHTTPServer(
+        ("127.0.0.1", 0), dashboard.make_handler(Cache(), seat_manager=SimpleNamespace())
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    try:
+        for path, payload in (
+            (
+                "/api/agents/retire",
+                {"board_id": "pursers", "agent_id": "AI-target"},
+            ),
+            ("/api/agents/retire-inert", {"board_id": "pursers"}),
+        ):
+            request = urllib.request.Request(
+                base + path,
+                data=json.dumps(payload).encode(),
+                headers={"Content-Type": "application/json", "Origin": base},
+                method="POST",
+            )
+            with urllib.request.urlopen(request) as response:
+                assert json.load(response)["ok"] is True
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+    assert calls == [
+        ("agent", "pursers", "AI-target"),
+        ("inert", "pursers", None),
+    ]
 
 
 def test_dispatch_http_endpoints_use_same_origin_json_guard() -> None:
