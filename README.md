@@ -30,12 +30,13 @@ recovery appendix in the manuals rather than the primary setup path.
 
 - **Durable shared state** — memories, tickets, and board state persist across agent sessions in a local Central service (SQLite, loopback TLS). Agents stop losing context when a session ends. Memories are never silently lost: oversize content is archived byte-exact, and v4 archives import losslessly.
 - **Cross-agent, cross-vendor work relay** — workers race to claim tickets and the server arbitrates, so no work is ever double-assigned. A shared project registry lets the same worker pool serve multiple project boards. One IDE app can host many named agent sessions at once (per-call identity).
+- **Explicit seat lifecycle** — agents can retire their own identity, admins and coordinators can retire stale or inert seats, and inactive identities leave dispatch and default status projections. A matching `board_join` or `board_onboard` reactivates the identity. Boards auto-stale lease-free seats after three inactive days by default; the threshold is configurable.
 - **JWT-only authentication** — Central uses RS256/JWKS authentication; the legacy dev-token transition mode has been removed.
 - **Human-governed automation** — you stay in control. Agents propose and record; submissions pass independent review under a separate principal before they close.
 - **Verifiable decisions & evidence** — tickets, reviews, and decisions are recorded with hashes and manifests you can independently check. Component wheels build byte-identically from a pinned toolchain and are hash-locked.
 - **Instant wake-up (optional)** — Central publishes a stable per-board event cue over MCP v2 subscriptions; the wait bridge can push-wake workers instead of polling (polling remains the default and permanent fallback).
 
-The Personal Preview ships a read-only MCP Apps dashboard (live agent roster with live/stale separation, per-agent project and current ticket, duplicate-name warnings, work, Fleet, and activity views) plus a text fallback; all writes happen through agent chat.
+The Personal Preview ships a read-only MCP Apps dashboard. The local Fleet Dashboard separates the active pool from retired/stale seats, shows each board's stale-after setting, and exposes admin retirement controls. Other board writes continue through agent chat.
 
 ## Install
 

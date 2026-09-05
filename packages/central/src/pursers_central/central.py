@@ -43,6 +43,7 @@ types.ToolAnnotations.model_rebuild(force=True)
 types.Tool.model_rebuild(force=True)
 from pursers_client import (
     ADMISSION_EVENT_KINDS,
+    AGENT_LIFECYCLE_EVENT_KINDS,
     CLAIM_TTL_EVENT_KINDS,
     DEPRECATION_EVENT_KINDS,
     DISPATCH_EVENT_KINDS,
@@ -80,6 +81,9 @@ from transactional_sqlite import TransactionalSQLiteStore
 
 ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,80}$")
 DEFAULT_CLAIM_TTL_S = 900
+DEFAULT_STALE_AFTER_DAYS = 3
+MIN_STALE_AFTER_DAYS = 1
+MAX_STALE_AFTER_DAYS = 3_650
 MIN_CLAIM_TTL_S = 1
 MAX_CLAIM_TTL_S = 86_400
 BRANCH_AND_COMMIT_RE = re.compile(
@@ -147,6 +151,17 @@ DEPRECATION_EVENT_FIELDS = frozenset(
         "message",
         "caller_principal_id",
         "caller_agent_name",
+        "fixture_provenance",
+        "recipient_identities",
+    }
+)
+AGENT_LIFECYCLE_EVENT_FIELDS = frozenset(
+    {
+        "target_agent_id",
+        "target_agent_name",
+        "lifecycle_status_from",
+        "lifecycle_status_to",
+        "lifecycle_reason",
         "fixture_provenance",
         "recipient_identities",
     }
@@ -418,6 +433,7 @@ class CentralJournal(Journal):
             | REVIEW_EVENT_KINDS
             | DISPATCH_EVENT_KINDS
             | DEPRECATION_EVENT_KINDS
+            | AGENT_LIFECYCLE_EVENT_KINDS
         ):
             raise ValueError(f"unsupported event kind: {kind}")
         board_id = _require_text("board_id", board_id)
@@ -432,6 +448,7 @@ class CentralJournal(Journal):
             | COORDINATOR_EVENT_FIELDS
             | DISPATCH_EVENT_FIELDS
             | DEPRECATION_EVENT_FIELDS
+            | AGENT_LIFECYCLE_EVENT_FIELDS
         )
         semantic = {
             key: copy.deepcopy(event[key])
@@ -484,6 +501,7 @@ class CentralJournal(Journal):
             | REVIEW_EVENT_KINDS
             | DISPATCH_EVENT_KINDS
             | DEPRECATION_EVENT_KINDS
+            | AGENT_LIFECYCLE_EVENT_KINDS
         ):
             raise ValueError(f"unsupported event kind: {kind}")
         if not unique_fields:
@@ -500,6 +518,7 @@ class CentralJournal(Journal):
             | COORDINATOR_EVENT_FIELDS
             | DISPATCH_EVENT_FIELDS
             | DEPRECATION_EVENT_FIELDS
+            | AGENT_LIFECYCLE_EVENT_FIELDS
         )
         semantic = {
             key: copy.deepcopy(event[key])
@@ -761,6 +780,7 @@ class CentralBoard:
             "generation_revision": 0,
             "config": {
                 "claim_ttl_s": DEFAULT_CLAIM_TTL_S,
+                "stale_after_days": DEFAULT_STALE_AFTER_DAYS,
                 "scrub_profile": "strict",
                 "review_policy": "strict",
                 "dispatch_policy": {
@@ -870,6 +890,15 @@ class CentralBoard:
             or not 1 <= intake_rate_limit <= MAX_INTAKE_RATE_LIMIT_PER_HOUR
         ):
             raise ValueError("board intake rate limit is invalid")
+        stale_after_days = config.setdefault(
+            "stale_after_days", DEFAULT_STALE_AFTER_DAYS
+        )
+        if (
+            isinstance(stale_after_days, bool)
+            or not isinstance(stale_after_days, int)
+            or not MIN_STALE_AFTER_DAYS <= stale_after_days <= MAX_STALE_AFTER_DAYS
+        ):
+            raise ValueError("board stale_after_days is invalid")
         allow_counts = config.setdefault("scrub_allow_counts", {})
         if not isinstance(allow_counts, dict) or any(
             not isinstance(rule, str)
@@ -1238,6 +1267,7 @@ class CentralBoard:
             for item in document.get("members", {}).values()
             if item.get("principal_id") in admitted
             and item.get("agent_id") != exclude_agent_id
+            and item.get("lifecycle_status", "active") == "active"
         )
 
     def board_documents_for(self, principal_id: str) -> list[dict[str, Any]]:
@@ -1699,6 +1729,10 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
     def claim_ttl(document: dict[str, Any]) -> int:
         return int(document.setdefault("config", {}).setdefault("claim_ttl_s", DEFAULT_CLAIM_TTL_S))
 
+    def board_stale_after_days(document: dict[str, Any]) -> int:
+        service.ensure_schema(document)
+        return int(document["config"]["stale_after_days"])
+
     def renew_claim(ticket: dict[str, Any], now: float, ttl_s: int) -> None:
         expires = now + ttl_s
         ticket["ttl_s"] = ttl_s
@@ -1723,6 +1757,50 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         except (TypeError, ValueError):
             return False
 
+    def member_has_live_lease(
+        document: Mapping[str, Any], agent_id_value: str, now: float
+    ) -> bool:
+        for ticket in document.get("tickets", {}).values():
+            if (
+                ticket.get("status") in PRE_SUBMISSION_STATES
+                and ticket.get("claimed_by_agent_id") == agent_id_value
+            ):
+                expires = ticket.get("lease_expires_at_epoch")
+                if expires is None:
+                    return True
+                try:
+                    if float(expires) > now:
+                        return True
+                except (TypeError, ValueError):
+                    return True
+            lease = ticket.get("review_lease")
+            if (
+                ticket.get("status") == "submitted"
+                and isinstance(lease, Mapping)
+                and lease.get("reviewer_agent_id") == agent_id_value
+            ):
+                expires = lease.get("expires_at_epoch")
+                if expires is None:
+                    return True
+                try:
+                    if float(expires) > now:
+                        return True
+                except (TypeError, ValueError):
+                    return True
+        return False
+
+    def member_last_activity_epoch(member: Mapping[str, Any]) -> float | None:
+        value = member.get("last_activity_at") or member.get("joined_at")
+        if not isinstance(value, str):
+            return None
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            return None
+        return parsed.timestamp()
+
     def claim_review_lease(
         ticket: dict[str, Any], actor: dict[str, Any], principal: Principal,
         now: float, ttl_s: int,
@@ -1741,6 +1819,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
     def dispatch_enabled(document: Mapping[str, Any]) -> bool:
         return any(
             bool(member.get("capabilities_explicit"))
+            and member.get("lifecycle_status", "active") == "active"
             for member in document.get("members", {}).values()
         )
 
@@ -1957,8 +2036,83 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 events.append(event)
         return events
 
+    def revoke_agent_offers(
+        document: dict[str, Any], member: Mapping[str, Any], now: float, reason: str
+    ) -> list[dict[str, Any]]:
+        events: list[dict[str, Any]] = []
+        for ticket in document["tickets"].values():
+            for kind in ("work", "review"):
+                key = f"{kind}_offer"
+                offer = ticket.get(key)
+                if not isinstance(offer, Mapping) or offer.get("agent_id") != member["agent_id"]:
+                    continue
+                revoked = ticket.pop(key)
+                ticket["updated_at"] = iso_at(now)
+                events.append(
+                    {
+                        "kind": OFFER_REVOKED,
+                        "ticket_id": ticket["ticket_id"],
+                        "offer_kind": kind,
+                        "offered_agent_id": member["agent_id"],
+                        "offered_agent_name": member["agent_name"],
+                        "offer_expires_at": revoked.get("expires_at"),
+                        "dispatch_reason": reason,
+                        "recipients": [member["agent_id"]],
+                    }
+                )
+        return events
+
+    def lifecycle_transition(
+        document: dict[str, Any], member: dict[str, Any], now: float,
+        status: str, reason: str, actor_id: str,
+    ) -> dict[str, Any] | None:
+        previous = str(member.get("lifecycle_status", "active"))
+        if previous == status:
+            return None
+        member["lifecycle_status"] = status
+        member["lifecycle_changed_at"] = iso_at(now)
+        member["lifecycle_reason"] = reason
+        member["lifecycle_changed_by_agent_id"] = actor_id
+        return {
+            "kind": "agent_lifecycle",
+            "actor_id": actor_id,
+            "target_agent_id": member["agent_id"],
+            "target_agent_name": member["agent_name"],
+            "lifecycle_status_from": previous,
+            "lifecycle_status_to": status,
+            "lifecycle_reason": reason,
+            "recipients": service.admitted_agent_ids(document),
+        }
+
+    def auto_stale_members(
+        document: dict[str, Any], now: float
+    ) -> list[dict[str, Any]]:
+        cutoff = now - board_stale_after_days(document) * 86_400
+        events: list[dict[str, Any]] = []
+        changed = False
+        for member in document["members"].values():
+            if member.get("lifecycle_status", "active") != "active":
+                continue
+            last_activity = member_last_activity_epoch(member)
+            if (
+                last_activity is None
+                or last_activity > cutoff
+                or member_has_live_lease(document, member["agent_id"], now)
+            ):
+                continue
+            events.extend(revoke_agent_offers(document, member, now, "agent_stale"))
+            transition = lifecycle_transition(
+                document, member, now, "stale", "inactivity_threshold", "board-reaper"
+            )
+            if transition is not None:
+                events.append(transition)
+                changed = True
+        if changed:
+            events.extend(redispatch_queue(document, now))
+        return events
+
     def reap_expired(document: dict[str, Any], now: float) -> list[dict[str, Any]]:
-        released: list[dict[str, Any]] = []
+        released = auto_stale_members(document, now)
         recipients = service.admitted_agent_ids(document)
         for ticket in document["tickets"].values():
             released.extend(expire_dispatch_offers(document, ticket, now))
@@ -2035,8 +2189,10 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
     ) -> tuple[dict[str, Any], list[dict[str, Any]], list[str]]:
         released = reap_expired(document, now)
         actor = service.member(document, principal, agent_name)
-        if actor.get("lifecycle_status", "active") == "handed_off":
-            raise PermissionError("agent handed off; call board_onboard or board_join before more work")
+        if actor.get("lifecycle_status", "active") != "active":
+            raise PermissionError(
+                "agent is not active; call board_onboard or board_join before more work"
+            )
         actor["last_activity_at"] = iso_at(now)
         renewed: list[str] = []
         ttl_s = claim_ttl(document)
@@ -2058,6 +2214,23 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         events: list[dict[str, Any]] = []
         reaper = {"agent_id": f"board-reaper:{principal.principal_id}"}
         for item in released:
+            if item.get("kind") == "agent_lifecycle":
+                events.append(
+                    await append_and_publish(
+                        board_id,
+                        {"agent_id": item.get("actor_id", reaper["agent_id"])},
+                        "agent_lifecycle_changed",
+                        resource_uri(board_id, "agent", item["target_agent_id"]),
+                        item["recipients"],
+                        ctx,
+                        target_agent_id=item["target_agent_id"],
+                        target_agent_name=item["target_agent_name"],
+                        lifecycle_status_from=item["lifecycle_status_from"],
+                        lifecycle_status_to=item["lifecycle_status_to"],
+                        lifecycle_reason=item["lifecycle_reason"],
+                    )
+                )
+                continue
             if item.get("kind") in DISPATCH_EVENT_KINDS:
                 events.append(
                     await append_and_publish(
@@ -2165,7 +2338,9 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             "abandoned_count": int(ticket.get("abandoned_count", 0) or 0),
         }
 
-    def project_agents(document: dict[str, Any]) -> list[dict[str, Any]]:
+    def project_agents(
+        document: dict[str, Any], *, include_retired: bool = False
+    ) -> list[dict[str, Any]]:
         service.ensure_schema(document)
         lease_by_agent: dict[str, list[str]] = {}
         offer_by_agent: dict[str, dict[str, Any]] = {}
@@ -2193,6 +2368,8 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 continue
             leases = sorted(lease_by_agent.get(member["agent_id"], []))
             lifecycle = member.get("lifecycle_status", "active")
+            if lifecycle in {"retired", "stale"} and not include_retired:
+                continue
             current_offer = offer_by_agent.get(member["agent_id"])
             projected.append(
                 {
@@ -2341,12 +2518,13 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         if not requested:
             return None, None
         exact = document["members"].get(requested)
-        if exact is not None:
+        if exact is not None and exact.get("lifecycle_status", "active") == "active":
             return exact["agent_id"], "agent_id"
         requested_key = requested.casefold()
         name_matches = [
             item for item in document["members"].values()
-            if str(item.get("agent_name", "")).casefold() == requested_key
+            if item.get("lifecycle_status", "active") == "active"
+            and str(item.get("agent_name", "")).casefold() == requested_key
         ]
         if len(name_matches) > 1:
             raise ValueError("assigned_to is ambiguous; use an exact agent_id")
@@ -2354,7 +2532,8 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             return name_matches[0]["agent_id"], "agent_name"
         platform_matches = [
             item for item in document["members"].values()
-            if str(item.get("agent_platform", "")).casefold() == requested_key
+            if item.get("lifecycle_status", "active") == "active"
+            and str(item.get("agent_platform", "")).casefold() == requested_key
         ]
         if platform_matches:
             # A platform assignment is intentionally a queue for any matching
@@ -2922,6 +3101,10 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         existing = document["members"].get(identity_id)
         rejoined = existing is not None
         previous_role = existing.get("role") if existing is not None else None
+        previous_lifecycle = (
+            str(existing.get("lifecycle_status", "active"))
+            if existing is not None else "active"
+        )
         member = existing or {
             "agent_id": identity_id,
             "agent_name": agent_name,
@@ -2969,6 +3152,18 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         if os.environ.get("PURSERS_LEGACY_TOOLS") == "1":
             member["capabilities"]["legacy_tools"] = True
         document["members"][identity_id] = member
+        lifecycle_change = None
+        if previous_lifecycle in {"retired", "stale", "handed_off"}:
+            lifecycle_change = {
+                "kind": "agent_lifecycle",
+                "actor_id": identity_id,
+                "target_agent_id": identity_id,
+                "target_agent_name": agent_name,
+                "lifecycle_status_from": previous_lifecycle,
+                "lifecycle_status_to": "active",
+                "lifecycle_reason": "agent_joined",
+                "recipients": service.admitted_agent_ids(document),
+            }
         if allow_workflow_side_effects and dispatch_enabled(document):
             released.extend(redispatch_queue(document, now))
         renewed: list[str] = []
@@ -3014,9 +3209,12 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             "renewed": renewed,
             "renewed_leases": renewed_leases,
             "claim_ttl_s": configured_ttl,
+            "lifecycle_change": lifecycle_change,
         }
 
-    def snapshot_payload(document: dict[str, Any]) -> dict[str, Any]:
+    def snapshot_payload(
+        document: dict[str, Any], *, include_retired: bool = False
+    ) -> dict[str, Any]:
         tickets = [
             project_ticket(document["board_id"], ticket)
             for ticket in sorted(
@@ -3027,6 +3225,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             "board": {
                 "board_id": document["board_id"],
                 "claim_ttl_s": claim_ttl(document),
+                "stale_after_days": board_stale_after_days(document),
                 "scrub_profile": board_scrub_profile(document),
                 "review_policy": board_review_policy(document),
                 "dispatch_policy": dispatch_policy(document),
@@ -3037,7 +3236,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 "principal_member_count": len(document["principal_memberships"]),
                 "ticket_count": len(tickets),
             },
-            "agents": project_agents(document),
+            "agents": project_agents(document, include_retired=include_retired),
             "tickets": tickets,
             "state": copy.deepcopy(document.get("state", {})),
         }
@@ -3066,9 +3265,10 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         max_bytes: int,
         watermark: int,
         snapshot_at: str,
+        include_retired: bool = False,
     ) -> dict[str, Any]:
         """Build a deterministic snapshot with explicit collection and byte bounds."""
-        snapshot = snapshot_payload(document)
+        snapshot = snapshot_payload(document, include_retired=include_retired)
         scrub_items = sorted(snapshot["board"]["scrub_allow_counts"].items())
         collections: dict[str, Any] = {
             "agents": snapshot["agents"][:limit],
@@ -3408,6 +3608,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 "renewed_ticket_ids": joined["renewed"],
                 "renewed_leases": joined["renewed_leases"],
                 "released": joined["released"],
+                "lifecycle_change": joined["lifecycle_change"],
                 "admission_change": admission_change,
                 "admission_recipients": service.admitted_agent_ids(
                     document, member["agent_id"]
@@ -3418,6 +3619,11 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         result = service.mutate(board_id, join, require_generation=False)
         result["release_events"] = await publish_releases(
             board_id, result.pop("released"), principal, ctx
+        )
+        lifecycle_change = result.pop("lifecycle_change")
+        result["lifecycle_event"] = (
+            (await publish_releases(board_id, [lifecycle_change], principal, ctx))[0]
+            if lifecycle_change is not None else None
         )
         result["admission_event"] = await publish_admission_event(
             board_id,
@@ -3486,6 +3692,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 "actor": copy.deepcopy(joined["actor"]),
                 "rejoined": joined["rejoined"],
                 "released": joined["released"],
+                "lifecycle_change": joined["lifecycle_change"],
                 "renewed": joined["renewed"],
                 "renewed_leases": joined["renewed_leases"],
                 "claim_ttl_s": joined["claim_ttl_s"],
@@ -3501,6 +3708,12 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         result = service.mutate(board_id, onboard, require_generation=False)
         release_events = await publish_releases(
             board_id, result["released"], principal, ctx
+        )
+        lifecycle_event = (
+            (await publish_releases(
+                board_id, [result["lifecycle_change"]], principal, ctx
+            ))[0]
+            if result["lifecycle_change"] is not None else None
         )
         admission_event = await publish_admission_event(
             board_id,
@@ -3538,6 +3751,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             "renewed_ticket_ids": result["renewed"],
             "renewed_leases": result["renewed_leases"],
             "release_events": release_events,
+            "lifecycle_event": lifecycle_event,
             "admission_event": admission_event,
             "snapshot": snapshot,
             "briefing": briefing,
@@ -3549,6 +3763,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         board_id: str,
         limit: int = DEFAULT_SNAPSHOT_LIMIT,
         max_bytes: int = DEFAULT_SNAPSHOT_MAX_BYTES,
+        include_retired: bool = False,
     ) -> dict[str, Any]:
         """Return a bounded cold projection and exact journal splice watermark.
 
@@ -3568,6 +3783,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             max_bytes=max_bytes,
             watermark=watermark,
             snapshot_at=datetime.now(timezone.utc).isoformat(),
+            include_retired=include_retired,
         )
 
     @tool()
@@ -3721,6 +3937,204 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             "previous_review_policy": result["previous"],
             "changed": result["changed"],
             "event": event,
+        }
+
+    @tool()
+    async def agent_retire(
+        board_id: str,
+        agent_name: str,
+        ctx: Context,
+        target_agent_id: str | None = None,
+        expected_generation: str | None = None,
+    ) -> dict[str, Any]:
+        """Retire this seat, or retire another seat with admin/coordinator authority."""
+        board_id = require_id("board_id", board_id)
+        agent_name = require_id("agent_name", agent_name)
+        if target_agent_id is not None:
+            target_agent_id = require_id("target_agent_id", target_agent_id)
+        principal = current_principal()
+        require_board_write_or_coordinate(principal)
+        now = time.time()
+
+        def retire(document: dict[str, Any]) -> dict[str, Any]:
+            actor, released, renewed = prepare_board_call(
+                document, principal, agent_name, now
+            )
+            target_id = target_agent_id or actor["agent_id"]
+            target = document["members"].get(target_id)
+            if target is None:
+                raise ValueError("target agent not found")
+            if target_id != actor["agent_id"]:
+                membership = service.resolve_board_context(
+                    document, principal.principal_id
+                )
+                coordinator = (
+                    COORDINATOR_SCOPE in principal.scopes
+                    and actor.get("role") in {"coordinator", "orchestrator"}
+                )
+                if membership.get("role") != "admin" and not coordinator:
+                    raise PermissionError(
+                        "retiring another agent requires board admin or coordinator"
+                    )
+            if member_has_live_lease(document, target_id, now):
+                raise ValueError("agent has an active work or review lease")
+            released.extend(
+                revoke_agent_offers(document, target, now, "agent_retired")
+            )
+            transition = lifecycle_transition(
+                document, target, now, "retired", "manual_retire", actor["agent_id"]
+            )
+            if transition is not None:
+                released.append(transition)
+                released.extend(redispatch_queue(document, now))
+            return {
+                "actor": copy.deepcopy(actor),
+                "target": copy.deepcopy(target),
+                "changed": transition is not None,
+                "released": released,
+                "renewed": renewed,
+            }
+
+        result = service.mutate(board_id, retire)
+        events = await publish_releases(board_id, result["released"], principal, ctx)
+        return {
+            "ok": True,
+            "board_id": board_id,
+            "agent": result["target"],
+            "changed": result["changed"],
+            "renewed_ticket_ids": result["renewed"],
+            "events": events,
+        }
+
+    @tool()
+    async def agent_retire_inert(
+        board_id: str,
+        agent_name: str,
+        ctx: Context,
+        expected_generation: str | None = None,
+    ) -> dict[str, Any]:
+        """Retire all non-coordinator inactive seats with no dispatch capability."""
+        board_id = require_id("board_id", board_id)
+        agent_name = require_id("agent_name", agent_name)
+        principal = current_principal()
+        require_board_write_or_coordinate(principal)
+        now = time.time()
+
+        def retire_inert(document: dict[str, Any]) -> dict[str, Any]:
+            actor, released, renewed = prepare_board_call(
+                document, principal, agent_name, now
+            )
+            membership = service.resolve_board_context(document, principal.principal_id)
+            coordinator = (
+                COORDINATOR_SCOPE in principal.scopes
+                and actor.get("role") in {"coordinator", "orchestrator"}
+            )
+            if membership.get("role") != "admin" and not coordinator:
+                raise PermissionError(
+                    "retiring inert agents requires board admin or coordinator"
+                )
+            retired: list[dict[str, Any]] = []
+            cutoff = now - 86_400
+            for target in document["members"].values():
+                caps = member_capabilities(target)
+                last_activity = member_last_activity_epoch(target)
+                if (
+                    target.get("lifecycle_status", "active") != "active"
+                    or target.get("role") in {"coordinator", "orchestrator"}
+                    or caps["can_work"]
+                    or caps["can_review"]
+                    or last_activity is None
+                    or last_activity > cutoff
+                    or member_has_live_lease(document, target["agent_id"], now)
+                ):
+                    continue
+                released.extend(
+                    revoke_agent_offers(document, target, now, "agent_retired_inert")
+                )
+                transition = lifecycle_transition(
+                    document, target, now, "retired", "inert_identity_cleanup",
+                    actor["agent_id"],
+                )
+                if transition is not None:
+                    released.append(transition)
+                    retired.append(copy.deepcopy(target))
+            if retired:
+                released.extend(redispatch_queue(document, now))
+            return {
+                "retired": retired,
+                "released": released,
+                "renewed": renewed,
+            }
+
+        result = service.mutate(board_id, retire_inert)
+        events = await publish_releases(board_id, result["released"], principal, ctx)
+        return {
+            "ok": True,
+            "board_id": board_id,
+            "retired_count": len(result["retired"]),
+            "retired_agents": result["retired"],
+            "renewed_ticket_ids": result["renewed"],
+            "events": events,
+        }
+
+    @tool()
+    async def board_stale_after_set(
+        board_id: str,
+        agent_name: str,
+        stale_after_days: int,
+        ctx: Context,
+        expected_generation: str | None = None,
+    ) -> dict[str, Any]:
+        """Set the inactivity threshold used to auto-stale agent identities."""
+        board_id = require_id("board_id", board_id)
+        agent_name = require_id("agent_name", agent_name)
+        if (
+            isinstance(stale_after_days, bool)
+            or not isinstance(stale_after_days, int)
+            or not MIN_STALE_AFTER_DAYS <= stale_after_days <= MAX_STALE_AFTER_DAYS
+        ):
+            raise ValueError(
+                f"stale_after_days_value must be between {MIN_STALE_AFTER_DAYS} "
+                f"and {MAX_STALE_AFTER_DAYS}"
+            )
+        principal = current_principal()
+        require_board_write_or_coordinate(principal)
+        now = time.time()
+
+        def set_threshold(document: dict[str, Any]) -> dict[str, Any]:
+            actor, released, renewed = prepare_board_call(
+                document, principal, agent_name, now
+            )
+            membership = service.resolve_board_context(document, principal.principal_id)
+            coordinator = (
+                COORDINATOR_SCOPE in principal.scopes
+                and actor.get("role") in {"coordinator", "orchestrator"}
+            )
+            if membership.get("role") != "admin" and not coordinator:
+                raise PermissionError(
+                    "changing stale-after requires board admin or coordinator"
+                )
+            previous = board_stale_after_days(document)
+            document["config"]["stale_after_days"] = stale_after_days
+            document["config"]["stale_after_updated_at"] = iso_at(now)
+            document["config"]["stale_after_updated_by_agent_id"] = actor["agent_id"]
+            released.extend(auto_stale_members(document, now))
+            return {
+                "previous": previous,
+                "released": released,
+                "renewed": renewed,
+            }
+
+        result = service.mutate(board_id, set_threshold)
+        events = await publish_releases(board_id, result["released"], principal, ctx)
+        return {
+            "ok": True,
+            "board_id": board_id,
+            "stale_after_days": stale_after_days,
+            "previous_stale_after_days": result["previous"],
+            "changed": result["previous"] != stale_after_days,
+            "renewed_ticket_ids": result["renewed"],
+            "events": events,
         }
 
     @tool()
@@ -5303,7 +5717,11 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         events = await publish_releases(board_id, result["released"], principal, ctx)
         return {
             "ok": True,
-            "released": [item["ticket_id"] for item in result["released"]],
+            "released": [
+                item.get("ticket_id") or item.get("target_agent_id")
+                for item in result["released"]
+                if item.get("ticket_id") or item.get("target_agent_id")
+            ],
             "release_events": events,
             "implicitly_renewed": result["renewed"],
             "post_submission_preserved": result["post_submission_preserved"],
@@ -7019,7 +7437,9 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         }
 
     @tool()
-    async def board_status(board_id: str) -> dict[str, Any]:
+    async def board_status(
+        board_id: str, include_retired: bool = False
+    ) -> dict[str, Any]:
         """Return a pure structured and rendered board status summary."""
         board_id = require_id("board_id", board_id)
         principal = current_principal()
@@ -7046,7 +7466,11 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 label = review.get("review_label")
                 if isinstance(label, str) and label:
                     review_label_counts[label] = review_label_counts.get(label, 0) + 1
-        agents = project_agents(document)
+        agents = project_agents(document, include_retired=include_retired)
+        hidden_lifecycle_count = sum(
+            1 for member in document["members"].values()
+            if member.get("lifecycle_status", "active") in {"retired", "stale"}
+        )
         current_review_policy = board_review_policy(document)
         review_policy_text = (
             "workflow (agent cross-check; never independent-principal approval)"
@@ -7083,6 +7507,8 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             "board_id": board_id,
             "agents": agents,
             "claim_ttl_s": claim_ttl(document),
+            "stale_after_days": board_stale_after_days(document),
+            "retired_or_stale_count": hidden_lifecycle_count,
             "scrub_profile": board_scrub_profile(document),
             "review_policy": current_review_policy,
             "dispatch_policy": dispatch_policy(document),

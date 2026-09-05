@@ -10,6 +10,7 @@ from .client import (
 )
 from .events import (
     ADMISSION_EVENT_KINDS,
+    AGENT_LIFECYCLE_EVENT_KINDS,
     CENTRAL_EVENT_KINDS,
     CLAIM_TTL_EVENT_KINDS,
     CORE_EVENT_KINDS,
@@ -61,6 +62,7 @@ from .project_registry import (
 
 __all__ = [
     "ADMISSION_EVENT_KINDS",
+    "AGENT_LIFECYCLE_EVENT_KINDS",
     "BoardClient",
     "BoardClientError",
     "CENTRAL_EVENT_KINDS",
