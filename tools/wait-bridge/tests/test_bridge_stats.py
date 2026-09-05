@@ -106,7 +106,7 @@ class BridgeStatsTests(unittest.TestCase):
         self.record("board_catchup", 100, 300)
 
         document = json.loads(self.path.read_text(encoding="utf-8"))
-        self.assertEqual(document["schema_version"], 3)
+        self.assertEqual(document["schema_version"], 4)
         seat = next(iter(document["days"]["2030-01-01"]["seats"].values()))
         self.assertEqual(seat["request_bytes"], 100)
         self.assertEqual(seat["response_bytes"], 300)
@@ -143,7 +143,7 @@ class BridgeStatsTests(unittest.TestCase):
             asyncio.run(cycle(index))
 
         document = json.loads(self.path.read_text(encoding="utf-8"))
-        self.assertEqual(document["schema_version"], 3)
+        self.assertEqual(document["schema_version"], 4)
         seat = next(iter(document["poll_cycles"].values()))
         self.assertEqual(seat["latest_response_bytes"], 348)
         self.assertEqual(len(seat["samples"]), wait_server.POLL_SAMPLE_LIMIT)
@@ -198,6 +198,32 @@ class BridgeStatsTests(unittest.TestCase):
         document = json.loads(self.path.read_text(encoding="utf-8"))
         seat = next(iter(document["model_wait"].values()))
         self.assertEqual(seat["returns"][0]["mode"], "unknown")
+
+    def test_push_unavailable_is_persisted_and_cleared_by_healthy_push(self) -> None:
+        asyncio.run(
+            self.stats.record_push_unavailable(
+                "board-one", "worker-one", " unknown event kinds: ['new'] \n"
+            )
+        )
+        document = json.loads(self.path.read_text(encoding="utf-8"))
+        warning = next(iter(document["push_unavailable"].values()))
+        self.assertEqual(warning["reason"], "unknown event kinds: ['new']")
+        self.assertEqual(warning["observed_at"], "2030-01-01T12:00:00+00:00")
+
+        asyncio.run(
+            self.stats.record_wait_return(
+                "board-one",
+                "worker-one",
+                {
+                    "events": [],
+                    "timed_out": True,
+                    "mode": "push",
+                    "reason": "timeout",
+                },
+            )
+        )
+        document = json.loads(self.path.read_text(encoding="utf-8"))
+        self.assertEqual(document["push_unavailable"], {})
 
 
 if __name__ == "__main__":

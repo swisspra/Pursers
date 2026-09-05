@@ -407,6 +407,64 @@ async def test_events_redeclares_after_subscription_reconnect(monkeypatch) -> No
 
 
 @pytest.mark.anyio
+async def test_events_drops_unknown_kinds_and_keeps_subscription(monkeypatch) -> None:
+    import pursers_client.client as client_module
+
+    board = client()
+    journal_uri = "board://board-multi-name/journal"
+    captured: list[frozenset[str]] = []
+
+    @asynccontextmanager
+    async def context(value):
+        yield value
+
+    class Subscription:
+        honored = SimpleNamespace(resource_subscriptions=[journal_uri])
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            await asyncio.Event().wait()
+            raise StopAsyncIteration
+
+    class Session:
+        def listen(self, **_arguments):
+            return context(Subscription())
+
+    async def drain(*_args, kinds, **_kwargs):
+        captured.append(kinds)
+        yield {"id": "EV-5", "seq": 5, "kind": "ticket_created"}
+
+    monkeypatch.setattr(board, "_http", lambda: context(object()))
+    monkeypatch.setattr(board, "_drain", drain)
+    monkeypatch.setattr(
+        client_module, "streamable_http_client", lambda *_args, **_kwargs: object()
+    )
+    monkeypatch.setattr(
+        client_module,
+        "Client",
+        lambda *_args, **_kwargs: context(Session()),
+    )
+
+    events = board.events(
+        from_cursor=4,
+        kinds=("ticket_created", "future_server_kind"),
+        only_mine=False,
+        resource_subscriptions=(journal_uri,),
+        acknowledge=False,
+        touch=False,
+    )
+    with pytest.warns(
+        RuntimeWarning,
+        match=r"dropping unknown event kinds: \['future_server_kind'\]",
+    ):
+        assert (await anext(events))["id"] == "EV-5"
+    await events.aclose()
+    assert captured == [frozenset({"ticket_created"})]
+
+
+@pytest.mark.anyio
 async def test_events_early_close_exits_listen_scopes_in_producer_task(
     monkeypatch,
 ) -> None:
