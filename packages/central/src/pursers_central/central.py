@@ -68,6 +68,7 @@ from runtime_health import (
     RuntimeDiagnostics,
     create_streamable_http_app,
     log_runtime_error,
+    log_runtime_event,
 )
 from scrub import Policy, ScrubRejected, scrub
 from transactional_sqlite import TransactionalSQLiteStore
@@ -173,6 +174,9 @@ DEPRECATED_TOOLS = frozenset(
         "ticket_assign",
         "ticket_terminate",
     }
+)
+DEPRECATED_READ_TOOLS = frozenset(
+    {"board_get_briefing", "memory_read", "memory_search", "memory_links"}
 )
 REVIEW_CORE_OVERRIDE_FIELDS = frozenset(
     {"review_policy_at_verdict", "review_label", "review_verdict"}
@@ -1455,6 +1459,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         ),
         middleware=[SubscriptionAuthorization(service)],
     )
+    deprecated_read_warnings: set[tuple[str, str, str, str]] = set()
 
     def tool() -> Any:
         """Register tools while preserving intentional client-facing failures."""
@@ -1516,35 +1521,52 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                     if board_id and isinstance(board_id, str):
                         principal = current_principal()
                         caller_name = str(agent_name or "unknown")
-                        actor_agent = agent_id(
-                            board_id, principal.principal_id, caller_name
-                        )
-                        _warning, created = await append_once_and_publish(
-                            board_id,
-                            {"agent_id": actor_agent},
-                            "deprecated_tool_warning",
-                            f"board://{board_id}/tool/{tool_name}",
-                            [],
-                            ctx,
-                            unique_fields=DEPRECATION_WARNING_UNIQUE_FIELDS,
-                            tool=tool_name,
-                            caller_principal_id=principal.principal_id,
-                            caller_agent_name=caller_name,
-                            message=(
-                                f"Tool '{tool_name}' is deprecated in a18 and "
-                                "scheduled for removal in a19."
-                            ),
-                        )
-                        if created and isinstance(result, dict):
-                            cur_seq = latest_seq(board_id)
-                            if "latest_seq" in result:
-                                result["latest_seq"] = cur_seq
-                            if (
-                                "briefing" in result
-                                and isinstance(result["briefing"], dict)
-                                and "latest_seq" in result["briefing"]
-                            ):
-                                result["briefing"]["latest_seq"] = cur_seq
+                        if tool_name in DEPRECATED_READ_TOOLS:
+                            warning_key = (
+                                board_id,
+                                tool_name,
+                                principal.principal_id,
+                                caller_name,
+                            )
+                            if warning_key not in deprecated_read_warnings:
+                                deprecated_read_warnings.add(warning_key)
+                                log_runtime_event(
+                                    "deprecated_tool_warning",
+                                    board_id=board_id,
+                                    tool=tool_name,
+                                    caller_principal_id=principal.principal_id,
+                                    caller_agent_name=caller_name,
+                                )
+                        else:
+                            actor_agent = agent_id(
+                                board_id, principal.principal_id, caller_name
+                            )
+                            _warning, created = await append_once_and_publish(
+                                board_id,
+                                {"agent_id": actor_agent},
+                                "deprecated_tool_warning",
+                                f"board://{board_id}/tool/{tool_name}",
+                                [],
+                                ctx,
+                                unique_fields=DEPRECATION_WARNING_UNIQUE_FIELDS,
+                                tool=tool_name,
+                                caller_principal_id=principal.principal_id,
+                                caller_agent_name=caller_name,
+                                message=(
+                                    f"Tool '{tool_name}' is deprecated in a18 and "
+                                    "scheduled for removal in a19."
+                                ),
+                            )
+                            if created and isinstance(result, dict):
+                                cur_seq = latest_seq(board_id)
+                                if "latest_seq" in result:
+                                    result["latest_seq"] = cur_seq
+                                if (
+                                    "briefing" in result
+                                    and isinstance(result["briefing"], dict)
+                                    and "latest_seq" in result["briefing"]
+                                ):
+                                    result["briefing"]["latest_seq"] = cur_seq
 
                 return result
 
@@ -6505,22 +6527,6 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             cutoff = max(cutoff, time.time() - since_minutes * 60)
         principal = current_principal()
         require_scope(principal, "board:read")
-        release_events: list[dict[str, Any]] = []
-        renewed: list[str] = []
-        if "board:write" in principal.scopes:
-            now = time.time()
-
-            def prepare(document: dict[str, Any]) -> dict[str, Any]:
-                actor, released, implicit = prepare_board_call(
-                    document, principal, agent_name, now
-                )
-                return {"actor": actor, "released": released, "renewed": implicit}
-
-            prepared = service.mutate(board_id, prepare)
-            release_events = await publish_releases(
-                board_id, prepared["released"], principal, ctx
-            )
-            renewed = prepared["renewed"]
         document = service.load(board_id)
         service.member(document, principal, agent_name)
         visible = [project_memory(entry) for entry in visible_memories(document, principal)]
@@ -6559,8 +6565,8 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             "memories": visible,
             "visible_count": len(visible),
             "total_matching": total_matching,
-            "release_events": release_events,
-            "implicitly_renewed": renewed,
+            "release_events": [],
+            "implicitly_renewed": [],
         }
 
     @tool()

@@ -208,116 +208,69 @@ class LegacyToolsTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-    async def test_warning_append_failure_retries_without_poisoned_dedupe(
+    async def test_deprecated_read_is_annotated_without_domain_mutation(
         self,
     ) -> None:
         client_info = types.Implementation(name="admin-agent", version="1.0")
-        original_append_once = self.service.journal.append_once
-        failed = False
-
-        def fail_first_warning(*args, **kwargs):
-            nonlocal failed
-            event = args[1]
-            if event.get("kind") == "deprecated_tool_warning" and not failed:
-                failed = True
-                raise OSError("synthetic warning append failure")
-            return original_append_once(*args, **kwargs)
-
-        before = self.service.journal.read_after("pursers", 0, 1)[
+        before_document = self.service.load("pursers")
+        before_cursor = self.service.journal.read_after("pursers", 0, 1)[
             "latest_cursor"
         ]
-        async with Client(
-            self.mcp,
-            client_info=client_info,
-            mode="2026-07-28",
-            cache=None,
-        ) as client:
-            with patch.object(
-                self.service.journal,
-                "append_once",
-                side_effect=fail_first_warning,
-            ):
-                with self.assertRaises(central.MCPError):
-                    await client.call_tool(
-                        "board_get_briefing", {"board_id": "pursers"}
+        calls = [
+            ("board_get_briefing", {}),
+            ("memory_read", {"agent_name": "admin-agent"}),
+            ("memory_search", {"query": "absent"}),
+            ("memory_links", {}),
+        ]
+        with patch.object(central, "log_runtime_event") as runtime_event:
+            async with Client(
+                self.mcp,
+                client_info=client_info,
+                mode="2026-07-28",
+                cache=None,
+            ) as client:
+                for tool_name, arguments in calls:
+                    result = await client.call_tool(
+                        tool_name, {"board_id": "pursers", **arguments}
                     )
-            after_failure = self.service.journal.read_after(
-                "pursers", before, 100
-            )
-            self.assertEqual(
-                [
-                    event
-                    for event in after_failure["events"]
-                    if event.get("kind") == "deprecated_tool_warning"
-                ],
-                [],
-            )
+                    self.assertFalse(result.is_error)
+                    self.assertTrue(json.loads(result.content[0].text)["_deprecated"])
+                repeat = await client.call_tool(
+                    "board_get_briefing", {"board_id": "pursers"}
+                )
 
-            retry = await client.call_tool(
-                "board_get_briefing", {"board_id": "pursers"}
+        self.assertFalse(repeat.is_error)
+        self.assertEqual(runtime_event.call_count, len(calls))
+        for tool_name, _arguments in calls:
+            runtime_event.assert_any_call(
+                "deprecated_tool_warning",
+                board_id="pursers",
+                tool=tool_name,
+                caller_principal_id="PR-admin",
+                caller_agent_name="admin-agent",
             )
-            self.assertFalse(retry.is_error)
-            repeat = await client.call_tool(
-                "board_get_briefing", {"board_id": "pursers"}
-            )
-            self.assertFalse(repeat.is_error)
-
-        warnings = [
-            event
-            for event in self.service.journal.read_after(
-                "pursers", before, 100
-            )["events"]
-            if event.get("kind") == "deprecated_tool_warning"
-        ]
-        self.assertEqual(len(warnings), 1)
-        self.assertEqual(warnings[0]["tool"], "board_get_briefing")
-        self.assertEqual(warnings[0]["caller_principal_id"], "PR-admin")
-        self.assertEqual(warnings[0]["caller_agent_name"], "admin-agent")
-
-        restarted_mcp, restarted_service = central.build_server(
-            "localhost", 8765, self.root / "data"
-        )
-        self.mcp = restarted_mcp
-        self.service = restarted_service
-        restart_cursor = self.service.journal.read_after("pursers", 0, 1)[
-            "latest_cursor"
-        ]
-        async with Client(
-            self.mcp,
-            client_info=client_info,
-            mode="2026-07-28",
-            cache=None,
-        ) as client:
-            after_restart = await client.call_tool(
-                "board_get_briefing", {"board_id": "pursers"}
-            )
-        self.assertFalse(after_restart.is_error)
+        self.assertEqual(self.service.load("pursers"), before_document)
         self.assertEqual(
-            self.service.journal.read_after("pursers", 0, 1)[
-                "latest_cursor"
-            ],
-            restart_cursor,
+            self.service.journal.read_after("pursers", 0, 1)["latest_cursor"],
+            before_cursor,
         )
 
     async def test_warning_dedupe_survives_compaction_and_restart(self) -> None:
-        client_info = types.Implementation(name="admin-agent", version="1.0")
-        async with Client(
-            self.mcp,
-            client_info=client_info,
-            mode="2026-07-28",
-            cache=None,
-        ) as client:
-            original = await client.call_tool(
-                "board_get_briefing", {"board_id": "pursers"}
-            )
-        self.assertFalse(original.is_error)
-        original_warning = [
-            event
-            for event in self.service.journal.read_after(
-                "pursers", 0, 100
-            )["events"]
-            if event.get("kind") == "deprecated_tool_warning"
-        ][0]
+        warning = {
+            "kind": "deprecated_tool_warning",
+            "actor": "AI-admin",
+            "payload_ref": "board://pursers/tool/ticket_terminate",
+            "tool": "ticket_terminate",
+            "caller_principal_id": "PR-admin",
+            "caller_agent_name": "admin-agent",
+            "message": "deprecated",
+        }
+        original_warning, created = self.service.journal.append_once(
+            "pursers",
+            warning,
+            unique_fields=central.DEPRECATION_WARNING_UNIQUE_FIELDS,
+        )
+        self.assertTrue(created)
 
         for index in range(central.MIN_COMPACTION_RETAIN_LAST + 1):
             self.service.journal.append(
@@ -356,16 +309,12 @@ class LegacyToolsTests(unittest.IsolatedAsyncioTestCase):
         restart_cursor = self.service.journal.read_after("pursers", 0, 1)[
             "latest_cursor"
         ]
-        async with Client(
-            self.mcp,
-            client_info=client_info,
-            mode="2026-07-28",
-            cache=None,
-        ) as client:
-            duplicate = await client.call_tool(
-                "board_get_briefing", {"board_id": "pursers"}
-            )
-        self.assertFalse(duplicate.is_error)
+        _duplicate, created = self.service.journal.append_once(
+            "pursers",
+            warning,
+            unique_fields=central.DEPRECATION_WARNING_UNIQUE_FIELDS,
+        )
+        self.assertFalse(created)
         self.assertEqual(
             self.service.journal.read_after("pursers", 0, 1)[
                 "latest_cursor"
@@ -373,18 +322,13 @@ class LegacyToolsTests(unittest.IsolatedAsyncioTestCase):
             restart_cursor,
         )
 
-        async with Client(
-            self.mcp,
-            client_info=types.Implementation(
-                name="other-admin", version="1.0"
-            ),
-            mode="2026-07-28",
-            cache=None,
-        ) as client:
-            distinct = await client.call_tool(
-                "board_get_briefing", {"board_id": "pursers"}
-            )
-        self.assertFalse(distinct.is_error)
+        distinct_warning = dict(warning, caller_agent_name="other-admin")
+        _distinct, created = self.service.journal.append_once(
+            "pursers",
+            distinct_warning,
+            unique_fields=central.DEPRECATION_WARNING_UNIQUE_FIELDS,
+        )
+        self.assertTrue(created)
         new_page = self.service.journal.read_after(
             "pursers", restart_cursor, 10
         )

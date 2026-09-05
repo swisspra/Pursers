@@ -846,10 +846,6 @@ async def test_app_reads_use_only_the_non_joining_pure_reader() -> None:
             calls.append(f"ticket_list:{kwargs}")
             return {"tickets": [], "total_matching": 0, "latest_seq": 7}
 
-        async def board_get_briefing(self, **kwargs: Any) -> dict[str, Any]:
-            calls.append(f"board_get_briefing:{kwargs}")
-            return {"pinned_digest": [], "latest_handoff": None}
-
     bootstrap_calls: list[object] = []
 
     async def bootstrap(client: object) -> dict[str, Any]:
@@ -939,10 +935,6 @@ async def test_dashboard_idle_reads_cache_and_ticket_cue_refetches_once() -> Non
                 "latest_seq": 10,
             }
 
-        async def board_get_briefing(self, **_kwargs: Any) -> dict[str, Any]:
-            central_calls.append("board_get_briefing")
-            return {"pinned_digest": [], "latest_handoff": None}
-
         async def ticket_get(self, ticket_id: str) -> dict[str, Any]:
             central_calls.append("ticket_get")
             assert ticket_id == ticket_state["ticket_id"]
@@ -983,7 +975,6 @@ async def test_dashboard_idle_reads_cache_and_ticket_cue_refetches_once() -> Non
             "board_snapshot",
             "board_status",
             "ticket_list",
-            "board_get_briefing",
             "board_catchup",
         ]
 
@@ -1090,9 +1081,6 @@ async def test_dashboard_subscription_loss_marks_cache_stale_and_logs(
 
         async def ticket_list(self, **_kwargs: Any) -> dict[str, Any]:
             return {"tickets": [], "total_matching": 0, "latest_seq": 3}
-
-        async def board_get_briefing(self, **_kwargs: Any) -> dict[str, Any]:
-            return {"pinned_digest": [], "latest_handoff": None}
 
         async def events(
             self, _from_cursor: int, cursor_callback: Any
@@ -1504,9 +1492,6 @@ async def test_projection_flags_only_duplicate_active_agent_names() -> None:
         async def ticket_list(self, **_kwargs: Any) -> dict[str, Any]:
             return {"tickets": [], "total_matching": 0, "latest_seq": 4}
 
-        async def board_get_briefing(self, **_kwargs: Any) -> dict[str, Any]:
-            return {"pinned_digest": [], "latest_handoff": None}
-
     state = LiveDashboard(
         fake_config(),
         client_class=FakeClient,
@@ -1629,10 +1614,6 @@ async def test_projection_adds_projects_without_extra_central_reads() -> None:
             ]
             return {"tickets": tickets, "total_matching": 5, "latest_seq": 8}
 
-        async def board_get_briefing(self, **_kwargs: Any) -> dict[str, Any]:
-            calls.append("board_get_briefing")
-            return {"pinned_digest": [], "latest_handoff": None}
-
     state = LiveDashboard(
         fake_config(),
         client_class=FakeClient,
@@ -1647,7 +1628,7 @@ async def test_projection_adds_projects_without_extra_central_reads() -> None:
         },
     )
 
-    assert calls == ["board_status", "ticket_list", "board_get_briefing"]
+    assert calls == ["board_status", "ticket_list"]
     assert state._projection is not None
     tickets = {ticket["id"]: ticket for ticket in state._projection["tickets"]}
     assert tickets["TK-held"]["project"] == "pursers"
@@ -1781,9 +1762,6 @@ async def test_hung_raw_view_exit_is_bounded_and_releases_read_lock() -> None:
 
         async def ticket_list(self, **_kwargs: Any) -> dict[str, Any]:
             return {"tickets": [], "total_matching": 0, "latest_seq": 1}
-
-        async def board_get_briefing(self, **_kwargs: Any) -> dict[str, Any]:
-            return {"pinned_digest": [], "latest_handoff": None}
 
     class HealthyReader(HangingExitReader):
         async def __aexit__(self, *_args: Any) -> None:
@@ -1976,6 +1954,7 @@ async def test_hung_model_client_exit_does_not_block_dashboard_stop() -> None:
 @pytest.mark.anyio
 async def test_app_reads_leave_sqlite_domain_journal_and_cursor_unchanged(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     required = {"pursers-central": "0.1.0a21", "pursers-client": "0.1.0a15"}
     for distribution, version in required.items():
@@ -1990,7 +1969,23 @@ async def test_app_reads_leave_sqlite_domain_journal_and_cursor_unchanged(
     try:
         pursers_personal.artifacts.verify_component_artifacts(set(required))
     except pursers_personal.artifacts.ArtifactVerificationError as exc:
-        pytest.skip(f"locked artifacts not installed: {exc}")
+        if os.environ.get("PURSERS_TEST_ALLOW_PRERELEASE_CENTRAL_DRIFT") != "1":
+            pytest.skip(f"locked artifacts not installed: {exc}")
+        assert "pursers-central" in str(exc)
+        # Release-blocker validation intentionally builds components before the
+        # train owns their final versions and lock. Keep production verification
+        # intact while this opt-in test path exercises the installed wheels.
+        for package_name in ("pursers_central", "pursers_client"):
+            spec = importlib.util.find_spec(package_name)
+            assert spec is not None and spec.origin is not None
+            assert "site-packages" in Path(spec.origin).resolve().parts
+        from pursers_client import BoardClient, BoardClientError
+
+        monkeypatch.setattr(
+            apps_server,
+            "_load_board_client",
+            lambda: (BoardClient, BoardClientError),
+        )
 
     client_class, client_error_class = apps_server._load_board_client()
     package = sys.modules["pursers_client"]
@@ -2201,7 +2196,6 @@ async def test_real_central_dashboard_is_idle_until_ticket_cue(
             "board_snapshot",
             "board_status",
             "ticket_list",
-            "board_get_briefing",
             "board_catchup",
         ]
 
@@ -2278,9 +2272,6 @@ async def test_projection_joins_agents_to_their_current_ticket() -> None:
 
         async def ticket_list(self, **_kwargs: Any) -> dict[str, Any]:
             return {"tickets": tickets, "total_matching": len(tickets), "latest_seq": 4}
-
-        async def board_get_briefing(self, **_kwargs: Any) -> dict[str, Any]:
-            return {"pinned_digest": [], "latest_handoff": None}
 
     state = LiveDashboard(
         fake_config(),

@@ -35,6 +35,14 @@ def _machine_logger() -> logging.Logger:
 MACHINE_LOGGER = _machine_logger()
 
 
+def log_runtime_event(event: str, **fields: Any) -> None:
+    """Emit one non-error machine-readable runtime event."""
+    payload = {"event": event, **fields, **_fd_snapshot()}
+    MACHINE_LOGGER.info(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    )
+
+
 def _fd_snapshot() -> dict[str, int | float | None]:
     """Return bounded process FD pressure without failing diagnostics."""
     count: int | None = None

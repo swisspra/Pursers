@@ -57,7 +57,6 @@ PRIMARY_UI_TOOL_NAMES = frozenset(
 CHAT_TOOL_NAMES = frozenset(
     {
         "board_onboard",
-        "board_get_briefing",
         "board_status",
         "board_catchup",
         "ticket_get",
@@ -421,7 +420,6 @@ class RawBoardReader:
             "board_status",
             "ticket_get",
             "ticket_list",
-            "board_get_briefing",
             "board_state_get",
             "memory_links",
         }:
@@ -494,14 +492,6 @@ class RawBoardReader:
             cursor_callback=cursor_callback,
         ):
             yield event
-
-    async def board_get_briefing(
-        self, *, token_budget: int = 4_000, ticket_id: str | None = None
-    ) -> dict[str, Any]:
-        arguments: dict[str, Any] = {"token_budget": token_budget}
-        if ticket_id is not None:
-            arguments["ticket_id"] = ticket_id
-        return await self._call("board_get_briefing", arguments)
 
     async def board_state_get(self, *, key: str | None = None) -> dict[str, Any]:
         arguments: dict[str, Any] = {}
@@ -1218,7 +1208,6 @@ class LiveDashboard:
         cold = snapshot if snapshot is not None else await client.board_snapshot()
         status = await client.board_status()
         listed = await client.ticket_list(include_closed=True, limit=MAX_TICKETS)
-        briefing = await client.board_get_briefing(token_budget=1_200)
         board = cold.get("board", {})
         board_id = str(board.get("board_id", self.config.board_id))
         agents = status.get("agents")
@@ -1252,6 +1241,19 @@ class LiveDashboard:
         current_tickets_by_agent_id, recent_tickets_by_agent_id = (
             self._ticket_assignments(ticket_sources.values())
         )
+        state = cold.get("state", {})
+        briefing_entry = state.get("briefing", {}) if isinstance(state, dict) else {}
+        briefing_value = (
+            briefing_entry.get("value") if isinstance(briefing_entry, dict) else None
+        )
+        briefing: dict[str, Any] = {}
+        if isinstance(briefing_value, str):
+            try:
+                decoded = json.loads(briefing_value)
+            except ValueError:
+                decoded = None
+            if isinstance(decoded, dict):
+                briefing = decoded
         pinned = briefing.get("pinned_digest", [])
         if not isinstance(pinned, list):
             pinned = []
@@ -2020,19 +2022,6 @@ def build_dashboard_server(
             task_focus=task_focus,
             token_budget=token_budget,
             ticket_id=ticket_id,
-        )
-
-    @apps.tool(
-        resource_uri=UI_URI,
-        description="Get a bounded briefing for the selected personal board.",
-        visibility=MODEL_ONLY,
-    )
-    async def board_get_briefing(
-        token_budget: int = 4_000,
-        ticket_id: str | None = None,
-    ) -> dict[str, Any]:
-        return await state._rpc(
-            "board_get_briefing", token_budget=token_budget, ticket_id=ticket_id
         )
 
     @apps.tool(
