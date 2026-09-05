@@ -28,14 +28,14 @@ Least privilege differs by phase:
 | Phase | Board role | Runtime capability | Allowed use |
 | --- | --- | --- | --- |
 | 1 | `member` | `board:read` only | Non-joining reads, detection, and reports |
-| 2 | `member` initially | `board:read` + narrowly authorized coordination writes | Dispatch, expiry reap, and nudge |
+| 2 | `member` initially | `board:read` + narrowly authorized coordination writes | Assignment and expiry reap |
 | 3 | Same as phase 2 | Adds policy-gated `ticket_create` | Structured intake |
 
 The current role set is enough for phase 1. It is not a safe authorization
 model for phase 2: a `member` cannot atomically assign an existing ticket or
 release another seat's unexpired claim, while `admin` is much broader than the
 job. Before phase 2, add a narrow coordinator/dispatcher capability or role
-that grants only the new assignment and nudge operations described below.
+that grants only the assignment operations described below.
 
 Phase 1 uses the non-joining read path used by `fleet_snapshot`. A pure wake
 primitive now exists: Central authorizes `board://<board>/journal`, and
@@ -144,20 +144,18 @@ reports capacity starvation rather than admitting or moving principals.
      window;
    - **expired**: server time is past `lease_expires_at`;
    - **repeat abandoner**: abandonment count crosses the operator threshold.
-3. For at-risk work, issue one deduplicated nudge and wait through a grace
-   window. A project memory is not sufficient: `memory_written` is deliberately
-   ignored by the wait bridge and is not a targeted wake-up.
+3. For at-risk work, rely on the Dispatcher's targeted offers. The coordinator
+   must not duplicate the dispatch wake path.
 4. For expired work, refetch the ticket and call `board_reap`. The server, not
    the coordinator, decides whether the lease is actually expired and releases
    only pre-submission states. Submitted and closed work remains durable.
 5. Escalate repeated abandonment, missing seats, or a failed reap to the
    operator. Never force-release an unexpired claim.
 
-There is no targeted nudge/acknowledgement primitive today. Phase 2 needs a
-bounded `agent_nudge` or ticket-attention event with recipient agent ID,
-ticket ID, reason code, dedupe key, expiry, acknowledgement, and rate limit.
-`ticket_unclaim` is not a substitute: it is limited to the current claimer or
-an admin, and giving the coordinator admin would violate least privilege.
+The Dispatcher now owns targeted wake-up through bounded per-seat offers.
+`ticket_unclaim` remains an operator escape hatch: it is limited to the current
+claimer or an admin, and giving the coordinator admin would violate least
+privilege.
 
 ### 3. Human intake
 
@@ -244,7 +242,7 @@ read-only materialized history and state the coverage window in every digest.
 | Pure journal read or read-only wake cue | The wait/catchup path mutates seat activity and may renew leases | Strict phase 1 event-driven mode |
 | Narrow coordinator authorization | `member` lacks coordination mutations; `admin` and `reviewer` grant unrelated power | Phase 2 |
 | Atomic `ticket_assign` with state precondition and idempotency | Existing tickets cannot be assigned without cancel/recreate; claiming on behalf is wrong | Phase 2 dispatch |
-| Targeted nudge with acknowledgement, expiry, dedupe, and rate limit | Project memories do not wake a specific seat and are ignored by the wait bridge | Phase 2 babysitting |
+| Targeted work wake-up | Implemented by Dispatcher per-seat offers; the duplicate coordinator mutation was removed | Complete |
 | Single-writer coordinator leader lease | Board state has no compare-and-set TTL ownership | Automatic phase 2/3 failover |
 | Structured submission artifacts plus integration policy/ack | Commit refs and merge policy are prose or external; closure is not integration | Reliable integration watch |
 | Intake idempotency key | A transport retry can create duplicate generated-ID tickets | Phase 3 |
@@ -258,7 +256,7 @@ read-only materialized history and state the coverage window in every digest.
 | Detect starvation, stale work, and integration gaps | Yes | Report findings and evidence |
 | Produce daily/weekly digest | Yes | Operator chooses delivery channel and retention |
 | Reap a server-confirmed expired lease | Phase 2, within rate limit | Repeated abandonment or failed reap |
-| Assign open work or nudge a seat | Phase 2, after narrow primitives exist | Ambiguous eligibility, cross-policy routing, or override |
+| Assign open work | Phase 2, after narrow primitives exist | Ambiguous eligibility, cross-policy routing, or override |
 | Create a low-risk, policy-complete ticket | Phase 3 | Ambiguous/high-impact intake |
 | Merge, push, deploy, send externally, or delete | Never | Always |
 | Admit/remove members; change roles, registry, scrub policy, or review policy | Never | Always |
@@ -304,7 +302,7 @@ circuit breaker opens and the coordinator returns to report-only mode.
 ### Runaway loop or duplicate writers
 
 Use per-board and global write budgets, exponential backoff with jitter, one
-nudge per ticket/seat/grace window, one reap attempt per observed expiry, and a
+assignment per board/rate window, one reap attempt per observed expiry, and a
 hard daily intake cap. Mutation failures do not retry until current state is
 refetched. Only one phase-2/3 writer is active; lack of a leader lease forces
 manual failover. The operator has a kill switch that removes write capability
@@ -339,13 +337,13 @@ Exit only when:
 - coordinator shutdown leaves the worker/reviewer path unchanged; and
 - the operator answers the open questions below.
 
-### Phase 2: dispatch and nudge writes
+### Phase 2: assignment writes
 
-Add wake-driven monitoring, atomic assignment, targeted nudge, and server-
-confirmed expiry reap. Do not add intake.
+Add wake-driven monitoring, atomic assignment, and server-confirmed expiry
+reap. Dispatcher offers own targeted wakes. Do not add intake.
 
 Entry requires the narrow coordinator authorization, atomic `ticket_assign`,
-targeted nudge/ack, mutation idempotency, and a single-writer/failover control.
+mutation idempotency, and a single-writer/failover control.
 Exit requires a shadow comparison period, no double assignments, verified
 state-precondition failures under races, effective rate/circuit breakers,
 operator-visible audit reasons, and a demonstrated kill switch that returns

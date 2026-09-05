@@ -132,7 +132,7 @@ Every v4 public tool is accounted for below.
 | `memory_links` | Equivalent: `memory_links` | Strong basis for the inline linkage explorer |
 | `memory_checkpoint` | Equivalent: `memory_checkpoint` | Journaled and attributable |
 | `memory_handoff` | Equivalent: `memory_handoff` | Journaled and attributable |
-| `memory_get_briefing` | Equivalent: `board_get_briefing` | Bounded current context |
+| `memory_get_briefing` | Replaced by `board_status` + `board_snapshot` | The redundant briefing tool was removed |
 | `memory_status` | Equivalent: `board_status` | Standalone fleet projection adds cross-board status |
 | `memory_doctor` | Partial equivalent | Personal CLI doctor checks installation/identity; board/fleet semantic doctor is a **HIGH** gap |
 | `memory_update_state` | Equivalent: `board_state_update` | Board-state values are scrubbed and namespaced by policy |
@@ -148,7 +148,7 @@ Every v4 public tool is accounted for below.
 | `memory_submit_ticket` | Equivalent: `ticket_submit` | Supports `stay_active` and strict review |
 | `memory_review_ticket` | Equivalent: `ticket_review` | Independent-principal review policy |
 | `memory_cancel_ticket` | Equivalent: `ticket_cancel` | Role-authorized |
-| `memory_terminate_ticket` | Equivalent: `ticket_terminate` | Destructive and role-authorized |
+| `memory_terminate_ticket` | Replaced by `ticket_cancel` | One role-authorized cancellation verb |
 | `memory_list_tickets` | Equivalent: `ticket_list` | Bounded; exact ticket retrieval is separate |
 | `memory_wait_for_event` | Equivalent: `a2a_wait` + `board_catchup` | v5 adds multi-board registry pools, optional push cue, leases, and resync |
 
@@ -292,7 +292,7 @@ one-way audited v4 import. These should remain the foundation.
 | Stale/orphan/starvation findings | Coordinator thresholds over leases/snapshots | Coordinator | Both surfaces display evidence |
 | Closed-but-unmerged finding | Submission metadata + read-only integration checks | Coordinator | Standalone dashboard surfaces queue |
 | Timeline/changes/digests | Bounded journal/history or durable aggregates | Coordinator/core | Standalone dashboard renders trends |
-| Dispatch, nudge, and intake | Narrow authorized coordinator tools | Coordinator | No direct dashboard mutation |
+| Dispatch and intake | Dispatcher offers plus narrow coordinator tools | Coordinator | No direct dashboard mutation |
 | Role, token, registry, and policy changes | Operator/admin tools | Operator | Dashboards remain read-only |
 
 ## Proposed next three tickets

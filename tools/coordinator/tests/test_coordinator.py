@@ -157,9 +157,7 @@ def test_absent_ticket_tier_defaults_standard_for_coordinator() -> None:
         "privacy-scan-unavailable",
         "privacy-leak-suspect",
         "privacy-scan-truncated",
-        "would_nudge",
         "would_assign",
-        "nudge",
         "assign",
         "mutation_failed",
         "coordinator_circuit_open",
@@ -1744,17 +1742,17 @@ def test_write_reports_isolates_failed_board_and_mirrors_degraded_finding(
     assert len(json.dumps(home_payload, separators=(",", ":"))) <= coordinator.MAX_STATE_CHARS
 
 
-def action(kind: str, index: int = 0) -> coordinator.Action:
+def action(index: int = 0) -> coordinator.Action:
     return coordinator.Action(
-        kind=kind,
+        kind="assign",
         board_id="board-a",
         ticket_id=f"TK-{index}",
         target_agent_id="AI-target",
         target_agent_name="worker-target",
-        stage=1 if kind == "nudge" else 2,
+        stage=2,
         threshold_seconds=1_800,
-        threshold_window=1 if kind == "nudge" else 2,
-        op_key=f"coord-op-{kind}-{index}",
+        threshold_window=2,
+        op_key=f"coord-op-assign-{index}",
         reason="deterministic test decision",
     )
 
@@ -1790,7 +1788,7 @@ def test_mutate_action_declares_coordinator_role(
             "https://board.invalid/mcp",
             "TOKEN_PLACEHOLDER",
             "coordinator-test",
-            action("assign"),
+            action(),
             NOW,
         )
     )
@@ -1812,7 +1810,7 @@ def test_shadow_mode_emits_would_findings_and_makes_zero_mutation_calls() -> Non
     runtime = coordinator.RuntimeState.for_mode("shadow")
     findings, histories = asyncio.run(
         coordinator.execute_actions(
-            [action("nudge"), action("assign", 1)],
+            [action(), action(1)],
             fake_mutate,
             runtime,
             NOW,
@@ -1821,7 +1819,7 @@ def test_shadow_mode_emits_would_findings_and_makes_zero_mutation_calls() -> Non
     )
 
     assert calls == []
-    assert [item["kind"] for item in findings] == ["would_nudge", "would_assign"]
+    assert [item["kind"] for item in findings] == ["would_assign", "would_assign"]
     assert histories == {}
 
 
@@ -1835,7 +1833,7 @@ def test_active_assignment_precondition_race_is_reported_without_retry() -> None
     runtime = coordinator.RuntimeState.for_mode("active")
     findings, histories = asyncio.run(
         coordinator.execute_actions(
-            [action("assign")], fake_mutate, runtime, NOW, {}
+            [action()], fake_mutate, runtime, NOW, {}
         )
     )
 
@@ -1878,7 +1876,7 @@ def test_action_idempotency_key_is_stable_across_restart() -> None:
     assert first[0].threshold_window == 2
 
 
-def test_rate_limits_assignment_and_nudges_across_restart() -> None:
+def test_rate_limits_assignment_across_restart() -> None:
     agents = [
         {
             "agent_id": "AI-free",
@@ -1888,18 +1886,7 @@ def test_rate_limits_assignment_and_nudges_across_restart() -> None:
             "membership_role": "member",
         }
     ]
-    previous = {
-        "board-a": {
-            "action_history": [
-                {
-                    "kind": "nudge",
-                    "target_agent_id": "AI-free",
-                    "performed_at": ago(100 + index),
-                }
-                for index in range(3)
-            ]
-        }
-    }
+    previous = {"board-a": {"action_history": []}}
     stage_one = {
         "board-a": {
             "board": {},
@@ -1954,7 +1941,7 @@ def test_three_mutation_failures_open_circuit_and_remaining_actions_are_shadowed
     runtime = coordinator.RuntimeState.for_mode("active")
     findings, _ = asyncio.run(
         coordinator.execute_actions(
-            [action("nudge", index) for index in range(4)],
+            [action(index) for index in range(4)],
             fail,
             runtime,
             NOW,
@@ -1966,7 +1953,7 @@ def test_three_mutation_failures_open_circuit_and_remaining_actions_are_shadowed
     assert runtime.effective_mode == "shadow"
     assert sum(item["kind"] == "mutation_failed" for item in findings) == 3
     assert any(item["kind"] == "coordinator_circuit_open" for item in findings)
-    assert findings[-1]["kind"] == "would_nudge"
+    assert findings[-1]["kind"] == "would_assign"
 
 
 def test_repeat_abandoner_is_deprioritized_using_live_pool_eligibility() -> None:

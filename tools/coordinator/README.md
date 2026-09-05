@@ -1,14 +1,14 @@
 # Pursers fleet coordinator
 
 The coordinator observes every active board in the home board's
-`project_registry`. Phase 2 adds targeted nudges and atomic assignment while
+`project_registry`. Phase 2 adds atomic assignment while
 leaving worker claim, submission, and independent review paths unchanged.
 
 ## Modes and kill switch
 
 `--mode shadow` is the default. It computes the same decisions as active mode
-and writes `would_nudge` / `would_assign` findings, but performs zero workflow
-mutations. `--mode active` performs `agent_nudge` and `ticket_assign` calls and
+and writes `would_assign` findings, but performs zero workflow mutations.
+`--mode active` performs `ticket_assign` calls and
 records each outcome in `coordinator_findings` and the digest.
 
 Mode is a process-start flag and cannot be toggled at runtime. The kill switch
@@ -48,24 +48,25 @@ last local cursor. Other healthy boards remain subscribed.
 ## Policy and safeguards
 
 - Normal tickets starve at 30 minutes; critical tickets at 10 minutes.
-- At one threshold, every idle eligible seat may receive a targeted nudge.
+- At one threshold, the Dispatcher continues offering work to eligible seats;
+  the coordinator makes no duplicate wake call.
 - At exactly twice the threshold, the oldest fleet-fair ticket is assigned to
   the least-loaded eligible seat. Critical work ranks before other priorities.
 - Seats with three proven drops in seven days remain eligible but rank last.
 - Assignment is atomic only while the ticket is open, unclaimed, and at the
   expected assignee. A lost race is reported and never overwritten.
-- Central publishes `coordinator_nudge` and `coordinator_assignment` cues only
-  to the selected agent. Ordinary `ticket_created` and reopened-ticket events
+- Central publishes `coordinator_assignment` cues only to the selected agent.
+  Ordinary `ticket_created` and reopened-ticket events
   remain visible to all admitted workers through open-backlog catch-up.
-- Operation keys are deterministic across restarts. Limits are one assignment
-  per board per 10 minutes and three nudges per seat per hour.
+- Operation keys are deterministic across restarts. The limit is one assignment
+  per board per 10 minutes.
 - Three consecutive mutation failures open the circuit breaker and change the
   process's effective mode to shadow.
 
 ## Dual credentials for intake
 
 The daemon uses two principals. `--token-path` is the main credential for
-joining boards, reading fleet state, assignments/nudges, findings, queue drain,
+joining boards, reading fleet state, assignments, findings, queue drain,
 and digests, including the read used to verify an idempotent replay.
 `--intake-token-path` is used only by a non-joining `ticket_create` call. The
 intake credential must include
@@ -118,6 +119,10 @@ actions. An admitted `admin`, `member`, or `reviewer` principal may therefore
 join a `coordinator` or `orchestrator` seat and use its narrowly scoped
 coordination/intake operations when its token carries the required scope. A
 coordinate-only join never consumes an invite or changes board membership.
+
+`ticket_assign` is the manual dispatch escape hatch. It additionally requires
+`admin` board membership and `board:coordinate`; ordinary member/reviewer
+coordinator seats rely on Dispatcher offers instead.
 
 For dispatch controls, a `board:coordinate` credential may call
 `ticket_update` under the existing creator-or-admin membership check. It may
