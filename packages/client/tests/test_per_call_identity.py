@@ -265,6 +265,37 @@ async def test_claim_ttl_set_carries_admin_seat_identity(monkeypatch) -> None:
 
 
 @pytest.mark.anyio
+async def test_agent_lifecycle_arguments_are_forwarded(monkeypatch) -> None:
+    board = client()
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    async def call(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        calls.append((name, arguments))
+        return {"ok": True}
+
+    monkeypatch.setattr(board, "_call", call)
+    await board.board_snapshot(include_retired=True)
+    await board.board_status(include_retired=True)
+    await board.agent_retire("AI-target")
+    await board.agent_retire_inert()
+    await board.board_stale_after_set(7)
+
+    assert calls == [
+        ("board_snapshot", {"include_retired": True}),
+        ("board_status", {"include_retired": True}),
+        (
+            "agent_retire",
+            {"agent_name": "env-default", "target_agent_id": "AI-target"},
+        ),
+        ("agent_retire_inert", {"agent_name": "env-default"}),
+        (
+            "board_stale_after_set",
+            {"agent_name": "env-default", "stale_after_days": 7},
+        ),
+    ]
+
+
+@pytest.mark.anyio
 async def test_interleaved_per_call_joins_do_not_clobber_state(monkeypatch) -> None:
     board = client()
     original_identity = JoinedIdentity(

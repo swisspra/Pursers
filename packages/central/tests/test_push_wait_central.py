@@ -232,7 +232,8 @@ class PushWaitCentralTests(unittest.IsolatedAsyncioTestCase):
         before = self.service.load("pursers")["members"][self.worker_id][
             "last_activity_at"
         ]
-        with patch.object(central.time, "time", return_value=2_000_000_000.0):
+        call_time = datetime.fromisoformat(before).timestamp() + 60
+        with patch.object(central.time, "time", return_value=call_time):
             result = await self.call(
                 "board_catchup",
                 agent_name="worker-agent",

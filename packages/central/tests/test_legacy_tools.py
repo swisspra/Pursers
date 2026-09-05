@@ -60,7 +60,7 @@ class LegacyToolsTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_tools_list_default_hides_deprecated_tools(self) -> None:
-        """By default without legacy capability, 10 deprecated tools are hidden, leaving 33 active tools."""
+        """By default, deprecated tools are hidden while lifecycle tools remain."""
         async with Client(self.mcp, mode="2026-07-28", cache=None) as client:
             res = await client.list_tools()
             tool_names = {t.name for t in res.tools}
@@ -84,8 +84,8 @@ class LegacyToolsTests(unittest.IsolatedAsyncioTestCase):
                     core, tool_names, f"Active tool {core} must be visible"
                 )
 
-            # Count check: 44 total - 10 deprecated = 34 active tools
-            self.assertEqual(len(tool_names), 34)
+            # Count check: 47 total - 10 deprecated = 37 active tools
+            self.assertEqual(len(tool_names), 37)
             self.assertIn("board_claim_ttl_set", tool_names)
 
     async def test_authenticated_two_connection_seat_scoped_capability_and_rejoin(self) -> None:
@@ -132,14 +132,14 @@ class LegacyToolsTests(unittest.IsolatedAsyncioTestCase):
             res_legacy = await c_legacy.list_tools()
             res_modern = await c_modern.list_tools()
 
-            # legacy-seat sees all 44 tools
-            self.assertEqual(len(res_legacy.tools), 44)
+            # legacy-seat sees all 47 tools
+            self.assertEqual(len(res_legacy.tools), 47)
             legacy_names = {t.name for t in res_legacy.tools}
             for dep in central.DEPRECATED_TOOLS:
                 self.assertIn(dep, legacy_names)
 
-            # modern-seat under same principal remains strictly on the 34-tool surface
-            self.assertEqual(len(res_modern.tools), 34)
+            # modern-seat remains strictly on the 37-tool active surface
+            self.assertEqual(len(res_modern.tools), 37)
             modern_names = {t.name for t in res_modern.tools}
             for dep in central.DEPRECATED_TOOLS:
                 self.assertNotIn(dep, modern_names)
@@ -163,20 +163,20 @@ class LegacyToolsTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertFalse(rejoin.is_error)
 
-            # Now legacy-seat immediately drops to the 34-tool surface
+            # Now legacy-seat immediately drops to the 37-tool surface
             res_rejoin = await c_legacy.list_tools()
-            self.assertEqual(len(res_rejoin.tools), 34)
+            self.assertEqual(len(res_rejoin.tools), 37)
             rejoin_names = {t.name for t in res_rejoin.tools}
             for dep in central.DEPRECATED_TOOLS:
                 self.assertNotIn(dep, rejoin_names)
 
     async def test_tools_list_with_env_override(self) -> None:
-        """When PURSERS_LEGACY_TOOLS=1 env var is set, all 43 tools are visible without join capability."""
+        """The environment override exposes active and deprecated tools."""
         with patch.dict(os.environ, {"PURSERS_LEGACY_TOOLS": "1"}):
             async with Client(self.mcp, mode="2026-07-28", cache=None) as client:
                 res = await client.list_tools()
                 tool_names = {t.name for t in res.tools}
-                self.assertEqual(len(tool_names), 44)
+                self.assertEqual(len(tool_names), 47)
                 for dep in central.DEPRECATED_TOOLS:
                     self.assertIn(dep, tool_names)
 
@@ -201,7 +201,7 @@ class LegacyToolsTests(unittest.IsolatedAsyncioTestCase):
                 }
             )
 
-        self.assertEqual(len(result.tools), 34)
+        self.assertEqual(len(result.tools), 37)
         self.assertTrue(
             central.DEPRECATED_TOOLS.isdisjoint(
                 {tool.name for tool in result.tools}

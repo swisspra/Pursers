@@ -41,6 +41,7 @@ SCRUB_EVENT_KINDS = frozenset({"board_scrub_profile_changed"})
 CLAIM_TTL_EVENT_KINDS = frozenset({"board_claim_ttl_changed"})
 REVIEW_EVENT_KINDS = frozenset({"board_review_policy_changed"}) | REVIEW_LEASE_KINDS
 DEPRECATION_EVENT_KINDS = frozenset({"deprecated_tool_warning"})
+AGENT_LIFECYCLE_EVENT_KINDS = frozenset({"agent_lifecycle_changed"})
 
 # Central imports this vocabulary rather than maintaining an independent set.
 CENTRAL_EVENT_KINDS = (
@@ -50,6 +51,7 @@ CENTRAL_EVENT_KINDS = (
     | CLAIM_TTL_EVENT_KINDS
     | REVIEW_EVENT_KINDS
     | DEPRECATION_EVENT_KINDS
+    | AGENT_LIFECYCLE_EVENT_KINDS
     | DISPATCH_EVENT_KINDS
 )
 

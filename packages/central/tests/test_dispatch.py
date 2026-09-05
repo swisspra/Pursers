@@ -259,6 +259,182 @@ class DispatchTests(unittest.IsolatedAsyncioTestCase):
         }
         self.assertEqual(offered, {worker_a, worker_b})
 
+    async def test_retire_hides_agent_and_join_reactivates_identity(self) -> None:
+        worker_id = await self.add_seat(
+            self.worker_a, "worker-a", {"tier_max": 2}
+        )
+        self.principal = self.admin
+        retired = await self.call(
+            "agent_retire", agent_name="admin-agent", target_agent_id=worker_id
+        )
+        self.assertTrue(retired.structured_content["changed"])
+        self.assertEqual(
+            retired.structured_content["agent"]["lifecycle_status"], "retired"
+        )
+        status = await self.call("board_status")
+        self.assertNotIn(
+            worker_id,
+            {item["agent_id"] for item in status.structured_content["agents"]},
+        )
+        status_all = await self.call("board_status", include_retired=True)
+        self.assertEqual(
+            next(
+                item for item in status_all.structured_content["agents"]
+                if item["agent_id"] == worker_id
+            )["lifecycle_status"],
+            "retired",
+        )
+
+        self.principal = self.worker_a
+        rejoined = await self.call(
+            "board_join", agent_name="worker-a", capabilities={"tier_max": 2}
+        )
+        self.assertEqual(rejoined.structured_content["agent_id"], worker_id)
+        self.assertEqual(rejoined.structured_content["lifecycle_status"], "active")
+        self.assertEqual(
+            rejoined.structured_content["lifecycle_event"]["kind"],
+            "agent_lifecycle_changed",
+        )
+
+    async def test_least_privilege_reviewer_can_self_retire_only(self) -> None:
+        reviewer = central.Principal(
+            "PR-review-only",
+            "review-only",
+            frozenset({"board:read", "board:review"}),
+        )
+        reviewer_id = await self.add_seat(
+            reviewer,
+            "review-only",
+            {"tier_max": 2, "can_work": False, "can_review": True},
+            role="reviewer",
+        )
+        worker_id = await self.add_seat(
+            self.worker_a, "worker-a", {"tier_max": 2}
+        )
+
+        self.principal = reviewer
+        retired = await self.call("agent_retire", agent_name="review-only")
+        self.assertTrue(retired.structured_content["changed"])
+        self.assertEqual(
+            retired.structured_content["agent"]["lifecycle_status"], "retired"
+        )
+
+        self.principal = self.admin
+        status = await self.call("board_status")
+        self.assertNotIn(
+            reviewer_id,
+            {item["agent_id"] for item in status.structured_content["agents"]},
+        )
+        status_all = await self.call("board_status", include_retired=True)
+        reviewer_row = next(
+            item for item in status_all.structured_content["agents"]
+            if item["agent_id"] == reviewer_id
+        )
+        self.assertEqual(reviewer_row["lifecycle_status"], "retired")
+
+        self.principal = reviewer
+        rejoined = await self.call(
+            "board_join",
+            agent_name="review-only",
+            role="reviewer",
+            capabilities={
+                "tier_max": 2,
+                "can_work": False,
+                "can_review": True,
+            },
+        )
+        self.assertEqual(rejoined.structured_content["agent_id"], reviewer_id)
+        self.assertEqual(rejoined.structured_content["lifecycle_status"], "active")
+
+        with self.assertRaisesRegex(ToolError, "board:coordinate authorization"):
+            await self.call(
+                "agent_retire",
+                agent_name="review-only",
+                target_agent_id=worker_id,
+            )
+
+    async def test_retire_rejects_agent_with_live_claim(self) -> None:
+        await self.add_seat(self.worker_a, "worker-a", {"tier_max": 2})
+        created = await self.create()
+        ticket_id = created.structured_content["ticket"]["ticket_id"]
+        self.principal = self.worker_a
+        await self.call("ticket_claim", agent_name="worker-a", ticket_id=ticket_id)
+        with self.assertRaisesRegex(ToolError, "active work or review lease"):
+            await self.call("agent_retire", agent_name="worker-a")
+
+    async def test_auto_stale_is_once_and_excluded_from_dispatch(self) -> None:
+        worker_id = await self.add_seat(
+            self.worker_a, "worker-a", {"tier_max": 2}
+        )
+        now = 1_900_000_000.0
+
+        def age_worker(document: dict[str, object]) -> None:
+            document["members"][worker_id]["last_activity_at"] = central.iso_at(
+                now - 4 * 86_400
+            )
+            next(
+                member for member in document["members"].values()
+                if member["agent_name"] == "admin-agent"
+            )["last_activity_at"] = central.iso_at(now)
+
+        self.service.mutate("pursers", age_worker, require_generation=False)
+        self.principal = self.admin
+        with patch.object(central.time, "time", return_value=now):
+            first = await self.call("board_reap")
+            second = await self.call("board_reap")
+            created = await self.create()
+        first_lifecycle = [
+            event for event in first.structured_content["release_events"]
+            if event["kind"] == "agent_lifecycle_changed"
+        ]
+        second_lifecycle = [
+            event for event in second.structured_content["release_events"]
+            if event["kind"] == "agent_lifecycle_changed"
+        ]
+        self.assertEqual(len(first_lifecycle), 1)
+        self.assertEqual(second_lifecycle, [])
+        self.assertEqual(first_lifecycle[0]["lifecycle_status_to"], "stale")
+        self.assertEqual(
+            created.structured_content["ticket"]["dispatch_state"]["state"],
+            "unassignable",
+        )
+
+    async def test_admin_retires_inert_identity_and_sets_stale_threshold(self) -> None:
+        worker_id = await self.add_seat(
+            self.worker_a,
+            "worker-a",
+            {"can_work": False, "can_review": False},
+        )
+        now = 1_900_000_000.0
+
+        def age_worker(document: dict[str, object]) -> None:
+            document["members"][worker_id]["last_activity_at"] = central.iso_at(
+                now - 2 * 86_400
+            )
+            next(
+                member for member in document["members"].values()
+                if member["agent_name"] == "admin-agent"
+            )["last_activity_at"] = central.iso_at(now)
+
+        self.service.mutate("pursers", age_worker, require_generation=False)
+        self.principal = self.admin
+        with patch.object(central.time, "time", return_value=now):
+            retired = await self.call(
+                "agent_retire_inert", agent_name="admin-agent"
+            )
+            configured = await self.call(
+                "board_stale_after_set",
+                agent_name="admin-agent",
+                stale_after_days=7,
+            )
+        self.assertEqual(retired.structured_content["retired_count"], 1)
+        self.assertEqual(
+            retired.structured_content["retired_agents"][0]["agent_id"], worker_id
+        )
+        self.assertEqual(configured.structured_content["stale_after_days"], 7)
+        status = await self.call("board_status", include_retired=True)
+        self.assertEqual(status.structured_content["stale_after_days"], 7)
+
     async def test_unassignable_work_rejects_every_ineligible_claim(self) -> None:
         busy_principal = central.Principal(
             "PR-busy", "busy", frozenset({"board:read", "board:write"})
