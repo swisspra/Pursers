@@ -5,6 +5,7 @@ import os
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 
@@ -18,24 +19,37 @@ import pursers_wait_server as wait_server  # noqa: E402
 
 
 class RawClient:
-    def __init__(self, *, fail: bool = False) -> None:
+    def __init__(
+        self, *, fail: bool = False, ticket: dict[str, Any] | None = None
+    ) -> None:
         self.agent_name = "keepalive-seat"
         self.role = "worker"
         self.fail = fail
+        self.ticket = ticket or {
+            "ticket_id": "TK-lost",
+            "status": "open",
+            "last_release_reason": "lease expired",
+        }
         self.calls: list[tuple[str, dict[str, Any]]] = []
 
     async def call_tool(
         self, name: str, arguments: dict[str, Any], **_kwargs: Any
     ) -> dict[str, Any]:
         self.calls.append((name, arguments))
-        if self.fail:
+        if name == "lease_renew" and self.fail:
             raise RuntimeError("claim was lost")
-        return {
-            "ok": True,
-            "ticket_id": arguments["ticket_id"],
-            "ttl_s": 1,
-            "lease_expires_at": "later",
-        }
+        if name == "ticket_get":
+            payload = {"ticket": self.ticket}
+        else:
+            payload = {
+                "ok": True,
+                "ticket_id": arguments["ticket_id"],
+                "ttl_s": 1,
+                "lease_expires_at": "later",
+            }
+        return SimpleNamespace(
+            is_error=False, structured_content=payload, content=[]
+        )
 
 
 class Connection:
@@ -49,6 +63,28 @@ class Connection:
 class NoDiscoveryKeepalive(wait_server.LeaseKeepalive):
     async def _discover(self) -> None:
         return None
+
+    async def _subscribe(self) -> None:
+        await self.stopped.wait()
+
+
+class ClaimOnDiscoveryKeepalive(NoDiscoveryKeepalive):
+    async def _discover(self) -> None:
+        self.discoveries = getattr(self, "discoveries", 0) + 1
+        self.observe_join(
+            "pursers",
+            {
+                "agent_name": "keepalive-seat",
+                "claim_ttl_s": 1,
+                "renewed_leases": [
+                    {
+                        "ticket_id": "TK-new",
+                        "lease_kind": "work",
+                        "ttl_s": 1,
+                    }
+                ],
+            },
+        )
 
 
 class LeaseKeepaliveTests(unittest.IsolatedAsyncioTestCase):
@@ -68,7 +104,11 @@ class LeaseKeepaliveTests(unittest.IsolatedAsyncioTestCase):
             },
         )
         keepalive.start()
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(0.7)
+        self.assertFalse(
+            keepalive.task.done(),
+            repr(keepalive.task.exception()) if keepalive.task.done() else "",
+        )
         renewals = [call for call in client.calls if call[0] == "lease_renew"]
         self.assertEqual(len(renewals), 1)
 
@@ -87,7 +127,16 @@ class LeaseKeepaliveTests(unittest.IsolatedAsyncioTestCase):
         await keepalive.stop()
 
     async def test_lost_claim_surfaces_once(self) -> None:
-        client = RawClient(fail=True)
+        client = RawClient(
+            fail=True,
+            ticket={
+                "ticket_id": "TK-lost",
+                "status": "submitted",
+                "review_lease": {
+                    "reviewer_agent_name": "another-reviewer"
+                },
+            },
+        )
         keepalive = NoDiscoveryKeepalive(Connection(client))
         keepalive.board_ttls["pursers"] = 1
         keepalive.observe_lease(
@@ -102,6 +151,70 @@ class LeaseKeepaliveTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cues[0]["lease_kind"], "review")
         await asyncio.sleep(0.5)
         self.assertEqual(keepalive.drain_cues({"pursers"}), [])
+        await keepalive.stop()
+
+    async def test_join_reconciles_released_lease_and_failure_classifies_submit(
+        self,
+    ) -> None:
+        client = RawClient(
+            fail=True,
+            ticket={"ticket_id": "TK-done", "status": "submitted"},
+        )
+        keepalive = NoDiscoveryKeepalive(Connection(client))
+        keepalive.observe_join(
+            "pursers",
+            {
+                "agent_name": "keepalive-seat",
+                "claim_ttl_s": 30,
+                "renewed_leases": [
+                    {"ticket_id": "TK-released", "lease_kind": "work", "ttl_s": 30}
+                ],
+            },
+        )
+        self.assertIn(("pursers", "TK-released"), keepalive.leases)
+        keepalive.observe_join(
+            "pursers",
+            {
+                "agent_name": "keepalive-seat",
+                "claim_ttl_s": 30,
+                "renewed_leases": [],
+            },
+        )
+        self.assertNotIn(("pursers", "TK-released"), keepalive.leases)
+
+        keepalive.observe_lease(
+            "pursers",
+            "TK-done",
+            {"lease_kind": "work", "ttl_s": 30, "agent_name": "keepalive-seat"},
+        )
+        await keepalive._renew("pursers", "TK-done")
+        self.assertNotIn(("pursers", "TK-done"), keepalive.leases)
+        self.assertEqual(keepalive.drain_cues({"pursers"}), [])
+
+    async def test_ttl_decrease_and_claim_signal_advance_discovery_and_renewal(
+        self,
+    ) -> None:
+        client = RawClient()
+        keepalive = ClaimOnDiscoveryKeepalive(Connection(client))
+        old_due = asyncio.get_running_loop().time() + 360
+        keepalive.next_discovery = old_due
+        keepalive.observe_event(
+            "pursers",
+            {"kind": "board_claim_ttl_changed", "claim_ttl_to": 1},
+        )
+        self.assertLess(keepalive.next_discovery, old_due)
+
+        # A journal resource cue for the subsequent claim forces immediate
+        # authoritative join reconciliation, independent of a2a_wait.
+        keepalive.signal_board_change()
+        keepalive.start()
+        await asyncio.sleep(0.7)
+        self.assertFalse(
+            keepalive.task.done(),
+            repr(keepalive.task.exception()) if keepalive.task.done() else "",
+        )
+        self.assertGreaterEqual(keepalive.discoveries, 2)
+        self.assertIn(("pursers", "TK-new"), keepalive.leases)
         await keepalive.stop()
 
 

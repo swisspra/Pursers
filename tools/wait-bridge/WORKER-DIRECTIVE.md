@@ -136,6 +136,12 @@ Run this loop continuously. Each pass is one unit of work:
 - **Reviewer:** decide per deployment — a human reviewing through the board, or
   a dedicated reviewer seat with its **own separate principal/token**. Never the
   worker itself, and never the worker's token.
+- **Live claim TTL:** an admin or coordinator may change the board claim TTL
+  without restarting Central. New claims and every renewal use the current
+  value; each lease response records its effective `ttl_s`, so the bridge can
+  safely reschedule keepalive at about 40% after a shorter TTL is published.
+  The former startup-only environment guard prevented operational tuning and is
+  no longer needed because lease arithmetic remains explicit per response.
 - **What the current central (a6) actually enforces — do not overclaim:**
   attribution is real and automatic (your name is on every journal event).
   Mandatory review, reviewer-must-differ, and per-project permission are **not**

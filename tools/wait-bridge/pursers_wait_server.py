@@ -159,6 +159,8 @@ CLAIMABLE_RELEVANT_KINDS = frozenset(
     }
 )
 RELEVANT_KINDS = CLAIMABLE_RELEVANT_KINDS | SUBMITTED_RELEVANT_KINDS
+KEEPALIVE_SIGNAL_KINDS = frozenset({"board_claim_ttl_changed"})
+RELEVANT_KINDS = RELEVANT_KINDS | KEEPALIVE_SIGNAL_KINDS
 WAIT_FOR_AUTO = "auto"
 WAIT_FOR_VALUES = frozenset(
     {WAIT_FOR_AUTO, WAIT_FOR_CLAIMABLE, WAIT_FOR_SUBMITTED}
@@ -1269,7 +1271,9 @@ class LeaseKeepalive:
         self.changed = asyncio.Event()
         self.stopped = asyncio.Event()
         self.task: asyncio.Task[None] | None = None
+        self.subscription_task: asyncio.Task[None] | None = None
         self.failed: set[tuple[str, str]] = set()
+        self.next_discovery = 0.0
 
     @staticmethod
     def interval(ttl_s: Any) -> float:
@@ -1284,10 +1288,16 @@ class LeaseKeepalive:
             self.task = asyncio.create_task(
                 self._run(), name="pursers-lease-keepalive"
             )
+            self.subscription_task = asyncio.create_task(
+                self._subscribe(), name="pursers-lease-signal-subscription"
+            )
 
     async def stop(self) -> None:
         self.stopped.set()
         self.changed.set()
+        if self.subscription_task is not None:
+            self.subscription_task.cancel()
+            await asyncio.gather(self.subscription_task, return_exceptions=True)
         if self.task is not None:
             await asyncio.gather(self.task, return_exceptions=True)
 
@@ -1303,16 +1313,26 @@ class LeaseKeepalive:
                 {"ticket_id": ticket_id, "lease_kind": "work", "ttl_s": ttl_s}
                 for ticket_id in result.get("renewed_ticket_ids", [])
             ]
+        renewed_keys: set[tuple[str, str]] = set()
+        joined_agent_name = str(result.get("agent_name") or AGENT_NAME)
         for lease in leases:
             if not isinstance(lease, dict):
                 continue
             ticket_id = lease.get("ticket_id")
             if isinstance(ticket_id, str) and ticket_id:
+                renewed_keys.add((board_id, ticket_id))
                 self.observe_lease(
                     board_id,
                     ticket_id,
-                    {**lease, "agent_name": result.get("agent_name") or AGENT_NAME},
+                    {**lease, "agent_name": joined_agent_name},
                 )
+        for key, tracked in list(self.leases.items()):
+            if (
+                key[0] == board_id
+                and tracked.get("agent_name") == joined_agent_name
+                and key not in renewed_keys
+            ):
+                self.leases.pop(key, None)
 
     def observe_claim(
         self, board_id: str, result: dict[str, Any], *, lease_kind: str = "work"
@@ -1357,11 +1377,23 @@ class LeaseKeepalive:
         self.changed.set()
 
     def observe_event(self, board_id: str, event: dict[str, Any]) -> None:
+        kind = event.get("kind")
+        if kind == "board_claim_ttl_changed":
+            ttl_s = event.get("claim_ttl_to")
+            try:
+                self.board_ttls[board_id] = max(1, int(ttl_s))
+            except (TypeError, ValueError):
+                return
+            self.next_discovery = min(
+                self.next_discovery,
+                time.monotonic() + self.interval(ttl_s),
+            )
+            self.changed.set()
+            return
         ticket_id = event.get("ticket_id")
         if not isinstance(ticket_id, str):
             return
         status_to = event.get("status_to")
-        kind = event.get("kind")
         if status_to in {
             "open", "submitted", "closed", "rejected", "canceled", "terminated"
         } or kind in {
@@ -1369,6 +1401,11 @@ class LeaseKeepalive:
         }:
             self.leases.pop((board_id, ticket_id), None)
             self.changed.set()
+
+    def signal_board_change(self) -> None:
+        """Schedule immediate authoritative join reconciliation after a push cue."""
+        self.next_discovery = 0.0
+        self.changed.set()
 
     async def forward_cues(
         self,
@@ -1420,6 +1457,45 @@ class LeaseKeepalive:
             except Exception as exc:
                 _log(f"lease keepalive discovery failed for {board_id}: {exc}")
 
+    @staticmethod
+    def _open_listen(client: BoardClient, resources: list[str]) -> Any:
+        raw = getattr(client, "_raw_client", None)
+        if raw is not None and hasattr(raw, "listen"):
+            return raw.listen(resource_subscriptions=resources)
+        inner = getattr(client, "_client", None)
+        if inner is not None and hasattr(inner, "listen"):
+            return inner.listen(resource_subscriptions=resources)
+        if hasattr(client, "listen"):
+            return client.listen(resource_subscriptions=resources)
+        raise RuntimeError("board client does not support listen")
+
+    async def _subscribe(self) -> None:
+        backoff = 0.5
+        while not self.stopped.is_set():
+            try:
+                client = await self.connection.client()
+                try:
+                    boards = _registry_boards(await _read_project_registry(client))
+                except Exception:
+                    boards = [BOARD_ID]
+                resources = [f"board://{board_id}/journal" for board_id in boards]
+                async with self._open_listen(client, resources) as subscription:
+                    backoff = 0.5
+                    async for _cue in subscription:
+                        self.signal_board_change()
+                        if self.stopped.is_set():
+                            return
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                _log(f"lease keepalive subscription reconnecting: {exc}")
+                try:
+                    async with asyncio.timeout(backoff):
+                        await self.stopped.wait()
+                except TimeoutError:
+                    pass
+                backoff = min(30.0, backoff * 2)
+
     async def _renew(self, board_id: str, ticket_id: str) -> None:
         key = (board_id, ticket_id)
         lease = self.leases.get(key)
@@ -1438,7 +1514,58 @@ class LeaseKeepalive:
                 f"through {result.get('lease_expires_at')}"
             )
         except Exception as exc:
-            self.leases.pop(key, None)
+            intentional_stop = False
+            still_held = False
+            try:
+                client = await self.connection.client()
+                ticket_result = await _BoardView(client, board_id).ticket_get(ticket_id)
+                ticket = ticket_result.get("ticket", {})
+                if lease["lease_kind"] == "review":
+                    review_lease = ticket.get("review_lease")
+                    still_held = bool(
+                        ticket.get("status") == "submitted"
+                        and isinstance(review_lease, dict)
+                        and review_lease.get("reviewer_agent_name")
+                        == lease["agent_name"]
+                    )
+                    intentional_stop = not still_held and ticket.get("status") in {
+                        "open", "closed", "rejected", "canceled", "terminated"
+                    }
+                    if (
+                        ticket.get("status") == "submitted"
+                        and not isinstance(review_lease, dict)
+                    ):
+                        intentional_stop = True
+                else:
+                    still_held = bool(
+                        ticket.get("status") in CLAIMED_STATES
+                        and ticket.get("claimed_by") == lease["agent_name"]
+                    )
+                    intentional_stop = bool(
+                        ticket.get("status") in {
+                            "submitted", "closed", "rejected", "canceled", "terminated"
+                        }
+                        or (
+                            ticket.get("status") == "open"
+                            and ticket.get("last_release_reason")
+                            in {"explicit unclaim", "review rejected"}
+                        )
+                    )
+            except Exception as classify_exc:
+                _log(
+                    f"lease keepalive classification failed board={board_id} "
+                    f"ticket={ticket_id}: {classify_exc}"
+                )
+            if intentional_stop:
+                self.leases.pop(key, None)
+                self.failed.discard(key)
+                return
+            if still_held:
+                lease["due"] = time.monotonic() + min(
+                    5.0, self.interval(lease["ttl_s"])
+                )
+            else:
+                self.leases.pop(key, None)
             if key not in self.failed:
                 self.failed.add(key)
                 await self.cues.put(
@@ -1456,23 +1583,24 @@ class LeaseKeepalive:
                 )
 
     async def _run(self) -> None:
-        next_discovery = 0.0
         while not self.stopped.is_set():
             now = time.monotonic()
-            if now >= next_discovery:
+            if now >= self.next_discovery:
                 try:
                     await self._discover()
                 except Exception as exc:
                     _log(f"lease keepalive discovery deferred: {exc}")
                 ttl = min(self.board_ttls.values(), default=DEFAULT_CLAIM_TTL_S)
-                next_discovery = time.monotonic() + self.interval(ttl)
+                self.next_discovery = time.monotonic() + self.interval(ttl)
             now = time.monotonic()
             due_keys = [
                 key for key, lease in self.leases.items() if lease["due"] <= now
             ]
             for board_id, ticket_id in due_keys:
                 await self._renew(board_id, ticket_id)
-            deadlines = [next_discovery, *[v["due"] for v in self.leases.values()]]
+            deadlines = [
+                self.next_discovery, *[v["due"] for v in self.leases.values()]
+            ]
             wait_s = max(0.01, min(deadlines) - time.monotonic())
             self.changed.clear()
             try:

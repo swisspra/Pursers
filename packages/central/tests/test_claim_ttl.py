@@ -93,6 +93,11 @@ class ClaimTtlTests(unittest.IsolatedAsyncioTestCase):
             "board_claim_ttl_set", agent_name="admin-agent", claim_ttl_s=120
         )
         self.assertEqual(changed.structured_content["claim_ttl_s"], 120)
+        self.assertEqual(
+            changed.structured_content["event"]["kind"],
+            "board_claim_ttl_changed",
+        )
+        self.assertEqual(changed.structured_content["event"]["claim_ttl_to"], 120)
 
         ticket_id = await self.create_ticket()
         self.principal = self.worker

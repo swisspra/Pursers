@@ -135,6 +135,10 @@ SCRUB_EVENT_FIELDS = frozenset(
         "recipient_identities",
     }
 )
+CLAIM_TTL_EVENT_KINDS = frozenset({"board_claim_ttl_changed"})
+CLAIM_TTL_EVENT_FIELDS = frozenset(
+    {"claim_ttl_from", "claim_ttl_to", "fixture_provenance", "recipient_identities"}
+)
 REVIEW_POLICIES = frozenset({"strict", "workflow"})
 REVIEW_EVENT_KINDS = frozenset({"board_review_policy_changed"}) | REVIEW_LEASE_KINDS
 DEPRECATION_EVENT_KINDS = frozenset({"deprecated_tool_warning"})
@@ -409,6 +413,7 @@ class CentralJournal(Journal):
             CORE_JOURNAL_KINDS
             | ADMISSION_EVENT_KINDS
             | SCRUB_EVENT_KINDS
+            | CLAIM_TTL_EVENT_KINDS
             | REVIEW_EVENT_KINDS
             | DISPATCH_EVENT_KINDS
             | DEPRECATION_EVENT_KINDS
@@ -421,6 +426,7 @@ class CentralJournal(Journal):
             CORE_JOURNAL_FIELDS
             | ADMISSION_EVENT_FIELDS
             | SCRUB_EVENT_FIELDS
+            | CLAIM_TTL_EVENT_FIELDS
             | REVIEW_EVENT_FIELDS
             | COORDINATOR_EVENT_FIELDS
             | DISPATCH_EVENT_FIELDS
@@ -473,6 +479,7 @@ class CentralJournal(Journal):
             CORE_JOURNAL_KINDS
             | ADMISSION_EVENT_KINDS
             | SCRUB_EVENT_KINDS
+            | CLAIM_TTL_EVENT_KINDS
             | REVIEW_EVENT_KINDS
             | DISPATCH_EVENT_KINDS
             | DEPRECATION_EVENT_KINDS
@@ -487,6 +494,7 @@ class CentralJournal(Journal):
             CORE_JOURNAL_FIELDS
             | ADMISSION_EVENT_FIELDS
             | SCRUB_EVENT_FIELDS
+            | CLAIM_TTL_EVENT_FIELDS
             | REVIEW_EVENT_FIELDS
             | COORDINATOR_EVENT_FIELDS
             | DISPATCH_EVENT_FIELDS
@@ -3833,15 +3841,35 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             previous = claim_ttl(document)
             document["config"]["claim_ttl_s"] = claim_ttl_s
             actor["last_activity_at"] = iso_at(now)
-            return {"previous": previous, "current": claim_ttl_s}
+            return {
+                "actor": copy.deepcopy(actor),
+                "recipients": service.admitted_agent_ids(
+                    document, actor["agent_id"]
+                ),
+                "previous": previous,
+                "current": claim_ttl_s,
+            }
 
         result = service.mutate(board_id, set_ttl)
+        event = None
+        if result["current"] != result["previous"]:
+            event = await append_and_publish(
+                board_id,
+                result["actor"],
+                "board_claim_ttl_changed",
+                f"board://{board_id}/config/claim-ttl",
+                result["recipients"],
+                ctx,
+                claim_ttl_from=result["previous"],
+                claim_ttl_to=result["current"],
+            )
         return {
             "ok": True,
             "board_id": board_id,
             "claim_ttl_s": result["current"],
             "previous_claim_ttl_s": result["previous"],
             "changed": result["current"] != result["previous"],
+            "event": event,
         }
 
     @tool()
