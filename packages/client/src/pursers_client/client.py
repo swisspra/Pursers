@@ -618,14 +618,6 @@ class BoardClient:
         self._remember_event(result)
         return result
 
-    async def ticket_terminate(self, ticket_id: str, *, reason: str | None = None) -> dict[str, Any]:
-        arguments = {"agent_name": self.agent_name, "ticket_id": ticket_id}
-        if reason is not None:
-            arguments["reason"] = reason
-        result = await self._call("ticket_terminate", arguments)
-        self._remember_event(result)
-        return result
-
     async def ticket_list(
         self,
         *,
@@ -798,14 +790,6 @@ class BoardClient:
         if warnings is not None:
             arguments["warnings"] = warnings
         return await self._call("memory_handoff", arguments)
-
-    async def board_get_briefing(
-        self, *, token_budget: int = 4_000, ticket_id: str | None = None
-    ) -> dict[str, Any]:
-        arguments: dict[str, Any] = {"token_budget": token_budget}
-        if ticket_id is not None:
-            arguments["ticket_id"] = ticket_id
-        return await self._call("board_get_briefing", arguments)
 
     async def board_status(self, *, include_retired: bool = False) -> dict[str, Any]:
         return await self._call(

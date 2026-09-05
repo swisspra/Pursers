@@ -17,6 +17,8 @@ from mcp import types  # noqa: E402
 from mcp.client.client import Client  # noqa: E402
 from mcp.server.mcpserver.exceptions import ToolError  # noqa: E402
 
+REMOVED_TOOLS = {"agent_nudge", "board_get_briefing", "ticket_terminate"}
+
 
 class LegacyToolsTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
@@ -61,7 +63,7 @@ class LegacyToolsTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_tools_list_default_hides_deprecated_tools(self) -> None:
-        """Default discovery hides four tools while lifecycle tools remain."""
+        """Default discovery hides the retained assignment escape hatch."""
         async with Client(self.mcp, mode="2026-07-28", cache=None) as client:
             res = await client.list_tools()
             tool_names = {t.name for t in res.tools}
@@ -86,7 +88,7 @@ class LegacyToolsTests(unittest.IsolatedAsyncioTestCase):
                     core, tool_names, f"Active tool {core} must be visible"
                 )
 
-            # Count check: 47 total - 4 deprecated = 43 active tools.
+            # Three retired tools are gone; the one deprecated tool stays hidden.
             self.assertEqual(len(tool_names), 43)
             self.assertIn("board_claim_ttl_set", tool_names)
 
@@ -134,8 +136,8 @@ class LegacyToolsTests(unittest.IsolatedAsyncioTestCase):
             res_legacy = await c_legacy.list_tools()
             res_modern = await c_modern.list_tools()
 
-            # legacy-seat sees all 47 tools
-            self.assertEqual(len(res_legacy.tools), 47)
+            # legacy-seat sees the 43 active tools plus ticket_assign.
+            self.assertEqual(len(res_legacy.tools), 44)
             legacy_names = {t.name for t in res_legacy.tools}
             for dep in central.DEPRECATED_TOOLS:
                 self.assertIn(dep, legacy_names)
@@ -148,7 +150,7 @@ class LegacyToolsTests(unittest.IsolatedAsyncioTestCase):
 
             # Verify actual deprecated Tool.annotations on the legacy connection
             dep_tools = [t for t in res_legacy.tools if t.name in central.DEPRECATED_TOOLS]
-            self.assertEqual(len(dep_tools), 4)
+            self.assertEqual(len(dep_tools), 1)
             for dt in dep_tools:
                 self.assertIsNotNone(dt.annotations)
                 self.assertTrue(dt.annotations.title.startswith("[DEPRECATED]"))
@@ -173,14 +175,15 @@ class LegacyToolsTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn(dep, rejoin_names)
 
     async def test_tools_list_with_env_override(self) -> None:
-        """When PURSERS_LEGACY_TOOLS=1, all 47 tools are visible before join."""
+        """The environment override exposes the retained deprecated tool."""
         with patch.dict(os.environ, {"PURSERS_LEGACY_TOOLS": "1"}):
             async with Client(self.mcp, mode="2026-07-28", cache=None) as client:
                 res = await client.list_tools()
                 tool_names = {t.name for t in res.tools}
-                self.assertEqual(len(tool_names), 47)
+                self.assertEqual(len(tool_names), 44)
                 for dep in central.DEPRECATED_TOOLS:
                     self.assertIn(dep, tool_names)
+                self.assertTrue(REMOVED_TOOLS.isdisjoint(tool_names))
 
     async def test_never_joined_request_metadata_cannot_enable_legacy_tools(
         self,
@@ -210,48 +213,6 @@ class LegacyToolsTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-    async def test_deprecated_read_is_annotated_without_domain_mutation(
-        self,
-    ) -> None:
-        client_info = types.Implementation(name="admin-agent", version="1.0")
-        before_document = self.service.load("pursers")
-        before_cursor = self.service.journal.read_after("pursers", 0, 1)[
-            "latest_cursor"
-        ]
-        calls = [("board_get_briefing", {})]
-        with patch.object(central, "log_runtime_event") as runtime_event:
-            async with Client(
-                self.mcp,
-                client_info=client_info,
-                mode="2026-07-28",
-                cache=None,
-            ) as client:
-                for tool_name, arguments in calls:
-                    result = await client.call_tool(
-                        tool_name, {"board_id": "pursers", **arguments}
-                    )
-                    self.assertFalse(result.is_error)
-                    self.assertTrue(json.loads(result.content[0].text)["_deprecated"])
-                repeat = await client.call_tool(
-                    "board_get_briefing", {"board_id": "pursers"}
-                )
-
-        self.assertFalse(repeat.is_error)
-        self.assertEqual(runtime_event.call_count, len(calls))
-        for tool_name, _arguments in calls:
-            runtime_event.assert_any_call(
-                "deprecated_tool_warning",
-                board_id="pursers",
-                tool=tool_name,
-                caller_principal_id="PR-admin",
-                caller_agent_name="admin-agent",
-            )
-        self.assertEqual(self.service.load("pursers"), before_document)
-        self.assertEqual(
-            self.service.journal.read_after("pursers", 0, 1)["latest_cursor"],
-            before_cursor,
-        )
-
     def test_shipped_callers_do_not_reference_deprecated_tools(self) -> None:
         repo_root = PACKAGE_ROOT.parents[1]
         caller_roots = (
@@ -261,10 +222,7 @@ class LegacyToolsTests(unittest.IsolatedAsyncioTestCase):
             repo_root / "tools" / "worker-runtime",
             repo_root / "tools" / "seat-kit",
         )
-        # TODO(TK-7d99c07860bd): remove these exceptions when the coordinator
-        # migrates from the deprecated assignment/nudge escape hatches.
         allowed_deprecated_callers = {
-            ("tools/coordinator/coordinator.py", "agent_nudge"),
             ("tools/coordinator/coordinator.py", "ticket_assign"),
         }
         observed_exceptions: set[tuple[str, str]] = set()
@@ -311,8 +269,8 @@ class LegacyToolsTests(unittest.IsolatedAsyncioTestCase):
         warning = {
             "kind": "deprecated_tool_warning",
             "actor": "AI-admin",
-            "payload_ref": "board://pursers/tool/ticket_terminate",
-            "tool": "ticket_terminate",
+            "payload_ref": "board://pursers/tool/ticket_assign",
+            "tool": "ticket_assign",
             "caller_principal_id": "PR-admin",
             "caller_agent_name": "admin-agent",
             "message": "deprecated",
@@ -400,8 +358,8 @@ class LegacyToolsTests(unittest.IsolatedAsyncioTestCase):
                     {
                         "kind": "deprecated_tool_warning",
                         "actor": f"AI-caller-{index}",
-                        "payload_ref": "board://pursers/tool/board_get_briefing",
-                        "tool": "board_get_briefing",
+                        "payload_ref": "board://pursers/tool/ticket_assign",
+                        "tool": "ticket_assign",
                         "caller_principal_id": f"PR-caller-{index}",
                         "caller_agent_name": f"caller-{index}",
                         "message": "deprecated",
@@ -425,7 +383,6 @@ class LegacyToolsTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_calling_deprecated_tool_post_authorization_durable_dedupe_and_restart(self) -> None:
         """Denials cause zero mutation/events; authorized calls emit sequenced journal warning and dedupe survives restart."""
-        # 1. Adversarial test: unjoined outsider calling ticket_terminate against pursers board
         outsider_principal = central.Principal(
             "PR-outsider", "outsider-canonical", frozenset({"board:read"})
         )
@@ -434,106 +391,102 @@ class LegacyToolsTests(unittest.IsolatedAsyncioTestCase):
         before_seq = self.service.journal.read_after("pursers", 0, 1)["latest_cursor"]
         with self.assertRaises(ToolError):
             await self.call(
-                "ticket_terminate",
+                "ticket_assign",
                 agent_name="outsider-agent",
                 ticket_id="TK-nonexistent",
+                assigned_to_agent_id="AI-nonexistent",
+                expected_status="open",
+                coordinator_op_key="adversarial-assignment",
                 reason="Adversarial attempt",
             )
 
-        # Assert zero mutations/events caused by denied call
         after_denied_journal = self.service.journal.read_after("pursers", before_seq, 100)
         self.assertEqual(len(after_denied_journal["events"]), 0)
         self.assertEqual(after_denied_journal["latest_cursor"], before_seq)
 
-        # 2. Authorized call: switch back to admin principal
         central.current_principal = lambda: self.admin_principal
-        created = await self.call(
-            "ticket_create",
-            agent_name="admin-agent",
-            title="Deprecated Tool Test Ticket 1",
-            description="Testing deprecation warnings",
-            target_url="pursers/test",
-            scope="interactive-no-send",
-            required_fields=["test_output"],
-        )
-        self.assertFalse(created.is_error)
-        ticket_id1 = json.loads(created.content[0].text)["ticket"]["ticket_id"]
+        target_name = "assignment-target"
+        joined = await self.call("board_join", agent_name=target_name)
+        self.assertFalse(joined.is_error)
+        target_id = central.agent_id("pursers", "PR-admin", target_name)
 
-        seq_before_term = self.service.journal.read_after("pursers", 0, 1)["latest_cursor"]
+        async def create_and_assign(index: int):
+            created = await self.call(
+                "ticket_create",
+                agent_name="admin-agent",
+                title=f"Deprecated Tool Test Ticket {index}",
+                description="Testing deprecation warnings",
+                target_url=f"pursers/test{index}",
+                scope="interactive-no-send",
+                required_fields=["test_output"],
+            )
+            self.assertFalse(created.is_error)
+            ticket_id = json.loads(created.content[0].text)["ticket"]["ticket_id"]
+            return await self.call(
+                "ticket_assign",
+                agent_name="admin-agent",
+                ticket_id=ticket_id,
+                assigned_to_agent_id=target_id,
+                expected_status="open",
+                coordinator_op_key=f"deprecated-assignment-{index}",
+                reason="Testing deprecation",
+            )
 
-        # Call deprecated ticket_terminate
-        res1 = await self.call(
-            "ticket_terminate",
-            agent_name="admin-agent",
-            ticket_id=ticket_id1,
-            reason="Testing deprecation",
-        )
-        self.assertFalse(res1.is_error)
-        data1 = json.loads(res1.content[0].text)
-        self.assertTrue(data1.get("_deprecated"))
-        self.assertTrue(data1.get("deprecated"))
+        seq_before_first = self.service.journal.read_after("pursers", 0, 1)[
+            "latest_cursor"
+        ]
+        first = await create_and_assign(1)
+        self.assertFalse(first.is_error)
+        first_data = json.loads(first.content[0].text)
+        self.assertTrue(first_data.get("_deprecated"))
+        self.assertTrue(first_data.get("deprecated"))
 
-        # Check normal sequenced journal path: exactly one deprecated_tool_warning event
-        events_after = self.service.journal.read_after("pursers", seq_before_term, 100)["events"]
-        warn_events = [e for e in events_after if e.get("kind") == "deprecated_tool_warning"]
+        events_after = self.service.journal.read_after(
+            "pursers", seq_before_first, 100
+        )["events"]
+        warn_events = [
+            event
+            for event in events_after
+            if event.get("kind") == "deprecated_tool_warning"
+        ]
         self.assertEqual(len(warn_events), 1)
-        self.assertEqual(warn_events[0].get("tool"), "ticket_terminate")
-        self.assertGreater(warn_events[0].get("seq", 0), seq_before_term)
+        self.assertEqual(warn_events[0].get("tool"), "ticket_assign")
 
-        # 3. Repeat call by same caller on a second ticket: NO duplicate warning
-        created2 = await self.call(
-            "ticket_create",
-            agent_name="admin-agent",
-            title="Deprecated Tool Test Ticket 2",
-            description="Testing repeat call",
-            target_url="pursers/test2",
-            scope="interactive-no-send",
-            required_fields=["test_output"],
+        seq_before_second = self.service.journal.read_after("pursers", 0, 1)[
+            "latest_cursor"
+        ]
+        second = await create_and_assign(2)
+        self.assertFalse(second.is_error)
+        events_after_second = self.service.journal.read_after(
+            "pursers", seq_before_second, 100
+        )["events"]
+        self.assertEqual(
+            [
+                event
+                for event in events_after_second
+                if event.get("kind") == "deprecated_tool_warning"
+            ],
+            [],
         )
-        ticket_id2 = json.loads(created2.content[0].text)["ticket"]["ticket_id"]
 
-        seq_before_term2 = self.service.journal.read_after("pursers", 0, 1)["latest_cursor"]
-
-        res2 = await self.call(
-            "ticket_terminate",
-            agent_name="admin-agent",
-            ticket_id=ticket_id2,
-            reason="Second termination",
-        )
-        self.assertFalse(res2.is_error)
-        events_after2 = self.service.journal.read_after("pursers", seq_before_term2, 100)["events"]
-        warn_events2 = [e for e in events_after2 if e.get("kind") == "deprecated_tool_warning"]
-        self.assertEqual(len(warn_events2), 0)
-
-        # 4. Durable restart test: rebuild Central service from same data directory
         restarted_mcp, restarted_service = central.build_server(
             "localhost", 8765, self.root / "data"
         )
         self.mcp = restarted_mcp
         self.service = restarted_service
-
-        created3 = await self.call(
-            "ticket_create",
-            agent_name="admin-agent",
-            title="Deprecated Tool Test Ticket 3",
-            description="Testing restart deduplication",
-            target_url="pursers/test3",
-            scope="interactive-no-send",
-            required_fields=["test_output"],
+        restart_cursor = self.service.journal.read_after("pursers", 0, 1)[
+            "latest_cursor"
+        ]
+        third = await create_and_assign(3)
+        self.assertFalse(third.is_error)
+        events_after_restart = self.service.journal.read_after(
+            "pursers", restart_cursor, 100
+        )["events"]
+        self.assertEqual(
+            [
+                event
+                for event in events_after_restart
+                if event.get("kind") == "deprecated_tool_warning"
+            ],
+            [],
         )
-        ticket_id3 = json.loads(created3.content[0].text)["ticket"]["ticket_id"]
-
-        seq_before_term3 = self.service.journal.read_after("pursers", 0, 1)["latest_cursor"]
-
-        res3 = await self.call(
-            "ticket_terminate",
-            agent_name="admin-agent",
-            ticket_id=ticket_id3,
-            reason="Termination after restart",
-        )
-        self.assertFalse(res3.is_error)
-
-        # Assert no duplicate warning event emitted after restart!
-        events_after3 = self.service.journal.read_after("pursers", seq_before_term3, 100)["events"]
-        warn_events3 = [e for e in events_after3 if e.get("kind") == "deprecated_tool_warning"]
-        self.assertEqual(len(warn_events3), 0)

@@ -42,9 +42,6 @@ BOARD_LOST_SUBSCRIPTIONS = 3
 BOARD_LARGE_REFRESH = timedelta(days=1)
 COORDINATOR_NAME = "coordinator-1"
 ASSIGN_RATE_SECONDS = 600
-NUDGE_RATE_SECONDS = 3_600
-MAX_NUDGES_PER_SEAT = 3
-NUDGE_EXPIRY_SECONDS = 600
 INTAKE_RATE_LIMIT = 5
 INTAKE_RATE_WINDOW_SECONDS = 3_600
 INTAKE_BREAKER_FAILURES = 3
@@ -933,9 +930,7 @@ def _finding_next_action(
         "privacy-scan-truncated": f"Run another bounded privacy scan cycle for {board_id} before declaring coverage complete.",
         "review-backlog": f"Review {ticket_id} on {board_id} with an available reviewer seat.",
         "board-degraded": f"Restore the journal subscription and reads for {board_id}, then confirm one healthy refresh.",
-        "would_nudge": f"Review the proposed nudge for {ticket_id} before enabling active mode.",
         "would_assign": f"Review the proposed assignment for {ticket_id} before enabling active mode.",
-        "nudge": f"Verify the nudged seat acknowledges {ticket_id} on {board_id}.",
         "assign": f"Verify the assigned seat claims {ticket_id} on {board_id}.",
         "mutation_failed": f"Review the failed coordinator mutation for {ticket_id} before retrying.",
         "coordinator_circuit_open": f"Resolve the coordinator mutation failures on {board_id} before restoring active mode.",
@@ -1442,7 +1437,7 @@ def _recent_action_history(
                 if not isinstance(row, Mapping):
                     continue
                 age = age_seconds(row.get("performed_at"), now)
-                if age is not None and age <= NUDGE_RATE_SECONDS:
+                if age is not None and age <= ASSIGN_RATE_SECONDS:
                     kept.append(dict(row))
         result[board_id] = kept
     return result
@@ -1516,7 +1511,6 @@ def plan_actions(
 
     actions: list[Action] = []
     assignment_planned: set[str] = set()
-    planned_nudges: Counter[str] = Counter()
     for _priority, _created, board_id, ticket in sorted(
         ranked, key=lambda row: (row[0], row[1], row[2], str(row[3].get("ticket_id", "")))
     ):
@@ -1557,43 +1551,13 @@ def plan_actions(
                 )
                 assignment_planned.add(board_id)
             continue
-        if stage != 1:
-            continue
-        for target in eligible:
-            target_id = str(target["agent_id"])
-            recent_count = sum(
-                1
-                for row in history.get(board_id, [])
-                if row.get("kind") == "nudge"
-                and row.get("target_agent_id") == target_id
-                and (age_seconds(row.get("performed_at"), now) or 0) < NUDGE_RATE_SECONDS
-            )
-            if recent_count + planned_nudges[f"{board_id}\x00{target_id}"] >= MAX_NUDGES_PER_SEAT:
-                continue
-            actions.append(
-                Action(
-                    "nudge",
-                    board_id,
-                    ticket_id,
-                    target_id,
-                    str(target.get("agent_name", target_id)),
-                    stage,
-                    threshold,
-                    window,
-                    action_op_key(
-                        board_id, ticket_id, "nudge", stage, window, target_id
-                    ),
-                    "Open ticket reached its starvation threshold; wake an idle eligible seat.",
-                )
-            )
-            planned_nudges[f"{board_id}\x00{target_id}"] += 1
     return actions
 
 
 def action_finding(action: Action, kind: str, mode: str, **extra: Any) -> dict[str, Any]:
     return _finding(
         kind,
-        "info" if kind.startswith("would_") or kind in {"nudge", "assign"} else "warn",
+        "info" if kind.startswith("would_") or kind == "assign" else "warn",
         action.board_id,
         action.reason,
         ticket_id=action.ticket_id,
@@ -2111,7 +2075,7 @@ def bound_findings_state(
             base["action_history"].pop()
             base["truncation"]["action_history"] += 1
             base["action_history_incomplete_until"] = (
-                generated_at + timedelta(seconds=NUDGE_RATE_SECONDS)
+                generated_at + timedelta(seconds=ASSIGN_RATE_SECONDS)
             ).isoformat()
             break
     for item in sorted(
@@ -2843,28 +2807,18 @@ async def mutate_action(
         agent_name=agent_name,
         role="coordinator",
     ) as client:
-        if action.kind == "assign":
-            return await client._call(  # noqa: SLF001 - phase-2 primitive wrapper.
-                "ticket_assign",
-                {
-                    "agent_name": agent_name,
-                    "ticket_id": action.ticket_id,
-                    "assigned_to_agent_id": action.target_agent_id,
-                    "expected_status": "open",
-                    "expected_assigned_to_agent_id": None,
-                    "coordinator_op_key": action.op_key,
-                    "reason": action.reason,
-                },
-            )
+        if action.kind != "assign":
+            raise ValueError(f"unsupported coordinator action: {action.kind}")
         return await client._call(  # noqa: SLF001 - phase-2 primitive wrapper.
-            "agent_nudge",
+            "ticket_assign",
             {
                 "agent_name": agent_name,
                 "ticket_id": action.ticket_id,
-                "target_agent_id": action.target_agent_id,
+                "assigned_to_agent_id": action.target_agent_id,
+                "expected_status": "open",
+                "expected_assigned_to_agent_id": None,
                 "coordinator_op_key": action.op_key,
                 "reason": action.reason,
-                "expires_at": (now + timedelta(seconds=NUDGE_EXPIRY_SECONDS)).isoformat(),
             },
         )
 

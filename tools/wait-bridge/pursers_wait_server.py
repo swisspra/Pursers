@@ -190,7 +190,7 @@ POLL_SAMPLE_LIMIT = 24
 WAIT_HOUR_RETENTION = 48
 WAIT_RETURN_SAMPLE_LIMIT = 256
 CONTEXT_READ_TOOLS = frozenset(
-    {"board_get_briefing", "board_onboard", "board_snapshot", "board_catchup"}
+    {"board_onboard", "board_snapshot", "board_catchup"}
 )
 HOST_TIMEOUTS_S = {
     "codex": 620,
