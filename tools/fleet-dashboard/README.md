@@ -27,6 +27,43 @@ polled by the browser once per second. Config POSTs are loopback-only and each
 plan/apply/doctor/install action is recorded in
 `~/.pursers/fleet-dashboard/config-actions.jsonl` without credentials.
 
+## Release & Operations panel
+
+The Config page integrates release status and guarded operational controls
+without shell commands or credential exposure:
+
+- **Release card**: telemetry from `release_versions.toml`, latest git/origin tags,
+  CI status for `main` and the tag commit (via `gh run list`), PyPI distribution
+  presence per package (JSON 200 is present, 404 is absent, and every other
+  bounded HTTP/transport result is unavailable), GitHub Release status,
+  and live Central version (`/healthz`) compared against staged `profile.env` pins.
+- **Seat restart checklist**: attributes each wait-bridge PID to a configured
+  host only from an exact seat marker or its process ancestry. Unprovable or
+  ambiguous processes are reported under `unknown` and never copied onto every
+  host. Only a stale bridge proven to belong to a host flags that host.
+- **Operator operations**:
+  - `Publish from tag`: runs `gh workflow run publish-pypi.yml --ref <tag>`
+  - `Stage Central`: resolves only the exact manifest version from the trusted
+    staging root, verifies its independent build-metadata digest before mutation,
+    preserves `profile.env` mode and ownership during a durable atomic pin update,
+    installs the staged wheel `--no-deps`, and rolls back pins/artifacts on failure.
+    Request-supplied wheel paths are rejected, and the button stays disabled until
+    the wheel, digest, profile, and interpreter form a concrete confirmation plan.
+  - `Kickstart Central`: restarts the Central service via `launchctl kickstart -k`
+  - `Restart dashboard`: restarts the fleet dashboard launchd service
+- **Safety model**:
+  - All operations require loopback requests with same-origin validation and JSON payloads.
+  - Interactive actions first create a short-lived server-side plan. The browser
+    confirms its exact command and digest, then submits only that plan id/digest.
+    Plans are one-use; execution revalidates stored version, path, metadata, and
+    hash invariants instead of resolving replacement values after confirmation.
+  - Stage jobs are serialized, and duplicate publish triggers are refused while
+    an earlier job is queued or running.
+  - Every plan/execution attempt, resolution or subprocess failure, and rollback
+    outcome appends a scrubbed audit record to `config-actions.jsonl`. Rollback
+    failures remain visible in the job result with recovery-step details.
+  - Sensitive tokens and authorization values are never requested, stored, or logged.
+
 ### Manual-edit appendix
 
 Direct editing remains available for recovery and headless use. Back up the

@@ -19,6 +19,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Self
+from unittest.mock import MagicMock
 
 import pytest
 import tomllib
@@ -3933,6 +3934,23 @@ def test_config_api_and_ui_contract_are_separate_from_coordinator_config() -> No
             calls.append(("job", job_id))
             return {"job_id": job_id, "status": "succeeded", "result": {}}
 
+        def release_status(self) -> dict:
+            calls.append(("release_status", {}))
+            return {"latest_tag": "v5.0.0a20", "versions": {"product": "5.0.0a20"}}
+
+        def prepare_ops_action(self, action: str, **kwargs: Any) -> dict:
+            calls.append(("prepare_ops_action", action, kwargs))
+            return {
+                "plan_id": "e" * 32,
+                "digest": "f" * 64,
+                "action": action,
+                "command": f"cmd {action}",
+            }
+
+        def ops_action(self, plan_id: str, digest: str) -> dict:
+            calls.append(("ops_action", plan_id, digest))
+            return {"ok": True, "job_id": "9" * 32, "command": "cmd"}
+
     server = dashboard.ThreadingHTTPServer(
         ("127.0.0.1", 0), dashboard.make_handler(Cache(), seat_manager=Seats())
     )
@@ -3969,6 +3987,8 @@ def test_config_api_and_ui_contract_are_separate_from_coordinator_config() -> No
             }
         with urllib.request.urlopen(base + "/api/config/registry") as response:
             assert json.load(response)["read_only"] is False
+        with urllib.request.urlopen(base + "/api/config/release") as response:
+            assert json.load(response)["latest_tag"] == "v5.0.0a20"
         clone = post("/api/config/registry/clone", {"project": "fixture"})
         assert clone["clone"]["status"] == "ready"
         assert post("/api/config/plan", {"name": "fixture"})["plan_id"] == "a" * 32
@@ -3978,6 +3998,14 @@ def test_config_api_and_ui_contract_are_separate_from_coordinator_config() -> No
         assert post("/api/config/import", {})["imported"] == []
         assert post("/api/config/bridge/install", {})["job_id"] == "c" * 32
         assert post("/api/config/bridge/upgrade-all", {})["job_id"] == "d" * 32
+        ops_plan = post(
+            "/api/config/ops/plan",
+            {"action": "publish_from_tag", "tag": "v5.0.0a20"},
+        )
+        assert post(
+            "/api/config/ops",
+            {"plan_id": ops_plan["plan_id"], "digest": ops_plan["digest"]},
+        )["ok"] is True
         with urllib.request.urlopen(base + "/api/config/jobs/" + "b" * 32) as response:
             assert json.load(response)["status"] == "succeeded"
     finally:
@@ -3986,6 +4014,7 @@ def test_config_api_and_ui_contract_are_separate_from_coordinator_config() -> No
         thread.join()
 
     assert calls == [
+        ("release_status", {}),
         ("prepare-clone", "fixture"),
         (
             "save-registry",
@@ -3998,9 +4027,19 @@ def test_config_api_and_ui_contract_are_separate_from_coordinator_config() -> No
         ("import", None),
         ("install", {}),
         ("upgrade-all", {}),
+        ("prepare_ops_action", "publish_from_tag", {"tag": "v5.0.0a20"}),
+        ("ops_action", "e" * 32, "f" * 64),
         ("job", "b" * 32),
     ]
     assert 'href="#/seats"' in dashboard.HTML
+    assert "Release & Operations" in dashboard.HTML
+    assert "Release card" in dashboard.HTML
+    assert "Seat restart checklist" in dashboard.HTML
+    assert "data-ops-action=" in dashboard.HTML
+    assert "Publish from tag" in dashboard.HTML
+    assert "Stage Central" in dashboard.HTML
+    assert "Kickstart Central" in dashboard.HTML
+    assert "Restart dashboard" in dashboard.HTML
     assert "Preview exact changes" in dashboard.HTML
     assert "Copy session prompt" in dashboard.HTML
     assert "Token file path · token never enters this page" in dashboard.HTML
@@ -5453,3 +5492,220 @@ def test_attention_state_persists_across_manager_instances(tmp_path: Path) -> No
 
     assert second.attention_state() == {"items": value}
     assert (state_dir / "attention-state.json").stat().st_mode & 0o777 == 0o600
+
+
+def test_config_ops_endpoint_guards_and_execution() -> None:
+    calls: list[tuple[str, dict]] = []
+
+    class Cache:
+        def resolve_central(self, value: str | None) -> str:
+            return value or "default"
+
+    class Seats:
+        def release_status(self) -> dict:
+            calls.append(("release_status", {}))
+            return {"schema_version": 1, "latest_tag": "v5.0.0a20"}
+
+        def prepare_ops_action(self, action: str, **kwargs: Any) -> dict:
+            calls.append(("prepare_ops_action", {"action": action, **kwargs}))
+            return {
+                "plan_id": "a" * 32,
+                "digest": "b" * 64,
+                "action": action,
+                "command": f"cmd {action}",
+                "expires_in_s": 120,
+            }
+
+        def ops_action(self, plan_id: str, digest: str) -> dict:
+            calls.append(("ops_action", {"plan_id": plan_id, "digest": digest}))
+            return {"ok": True, "action": "planned", "command": "cmd", "output": "ok"}
+
+    server = dashboard.ThreadingHTTPServer(
+        ("127.0.0.1", 0), dashboard.make_handler(Cache(), seat_manager=Seats())
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+
+    def post(path: str, payload: object, headers: dict | None = None) -> tuple[int, dict]:
+        req_headers = {"Content-Type": "application/json", "Origin": base}
+        if headers:
+            req_headers.update(headers)
+        request = urllib.request.Request(
+            base + path,
+            data=json.dumps(payload).encode(),
+            headers=req_headers,
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request) as response:
+                return response.status, json.load(response)
+        except urllib.error.HTTPError as exc:
+            return exc.code, {}
+
+    try:
+        # Cross origin rejected
+        status, _ = post("/api/config/ops/plan", {"action": "stage_central"}, {"Origin": "https://attacker.invalid"})
+        assert status == 403
+
+        # text/plain rejected
+        status, _ = post("/api/config/ops/plan", {"action": "stage_central"}, {"Content-Type": "text/plain"})
+        assert status == 415
+
+        # Invalid host rejected
+        status, _ = post("/api/config/ops/plan", {"action": "stage_central"}, {"Host": "attacker.invalid"})
+        assert status == 403
+
+        # Missing action rejected at planning; unbound execution is also rejected.
+        status, _ = post("/api/config/ops/plan", {})
+        assert status == 503 or status == 400
+        status, _ = post("/api/config/ops", {"action": "stage_central"})
+        assert status == 400
+
+        # Every successful execution is bound to the returned immutable plan.
+        for payload in (
+            {"action": "publish_from_tag", "tag": "v5.0.0a20"},
+            {"action": "stage_central"},
+            {"action": "kickstart_central"},
+            {"action": "restart_dashboard"},
+        ):
+            status, plan = post("/api/config/ops/plan", payload)
+            assert status == 200
+            status, res = post(
+                "/api/config/ops",
+                {"plan_id": plan["plan_id"], "digest": plan["digest"]},
+            )
+            assert status == 200
+            assert res["ok"] is True
+
+        # GET /api/config/release
+        with urllib.request.urlopen(base + "/api/config/release") as response:
+            assert response.status == 200
+            assert json.load(response)["latest_tag"] == "v5.0.0a20"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+    actions = [c[1].get("action") for c in calls if c[0] == "prepare_ops_action"]
+    assert actions == ["publish_from_tag", "stage_central", "kickstart_central", "restart_dashboard"]
+
+
+def test_seat_config_manager_ops_action_parameter_rejections_and_jobs(tmp_path: Path) -> None:
+    release_ops = MagicMock()
+    release_ops.resolve_action_plan.side_effect = lambda action, tag=None: {
+        "action": action,
+        "command": f"command {action}",
+        "tag": tag,
+    }
+    release_ops.plan_digest.return_value = "d" * 64
+    release_ops.execute_action_plan.return_value = {"ok": True, "output": "done"}
+
+    manager = dashboard.SeatConfigManager(state_dir=tmp_path, release_ops_manager=release_ops)
+
+    # Unknown parameter rejections
+    with pytest.raises(ValueError, match="unknown parameters for stage_central"):
+        manager.prepare_ops_action("stage_central", profile_path="/etc/passwd")
+
+    with pytest.raises(ValueError, match="unknown parameters for stage_central"):
+        manager.prepare_ops_action("stage_central", venv_python="/bin/sh")
+
+    with pytest.raises(ValueError, match="unknown parameters for stage_central"):
+        manager.prepare_ops_action(
+            "stage_central",
+            wheel_path="/tmp/pursers_central-0.1.0a24-py3-none-any.whl",
+        )
+
+    with pytest.raises(ValueError, match="unknown parameters for kickstart_central"):
+        manager.prepare_ops_action("kickstart_central", job_label="com.evil.service")
+
+    with pytest.raises(ValueError, match="unknown parameters for restart_dashboard"):
+        manager.prepare_ops_action("restart_dashboard", job_label="com.evil.service")
+
+    with pytest.raises(ValueError, match="unknown parameters for publish_from_tag"):
+        manager.prepare_ops_action("publish_from_tag", bad_key="val")
+
+    # Valid job dispatch
+    plan = manager.prepare_ops_action("kickstart_central")
+    assert plan["command"] == "command kickstart_central"
+    assert plan["digest"] == "d" * 64
+    job = manager.ops_action(plan["plan_id"], plan["digest"])
+    assert job["action"] == "kickstart_central"
+    assert job["status"] == "queued"
+    assert job["command"] == "command kickstart_central"
+
+    # Poll job until succeeded
+    for _ in range(50):
+        state = manager.job(job["job_id"])
+        if state["status"] in {"succeeded", "failed"}:
+            break
+        time.sleep(0.05)
+
+    assert state["status"] == "succeeded"
+    assert any("Queued kickstart_central" in line for line in state["logs"])
+    assert "SUCCEEDED" in state["logs"]
+    assert "/api/config/ops/plan" in dashboard.HTML
+    assert "Plan digest:" in dashboard.HTML
+
+
+@pytest.mark.parametrize("action", ["stage_central", "publish_from_tag"])
+def test_ops_jobs_reject_concurrent_duplicate_actions(
+    tmp_path: Path, action: str
+) -> None:
+    release_ops = MagicMock()
+    release_ops.resolve_action_plan.side_effect = lambda name, tag=None: {
+        "action": name,
+        "command": f"command {name}",
+        "tag": tag,
+    }
+    release_ops.plan_digest.return_value = "c" * 64
+    started = threading.Event()
+    finish = threading.Event()
+
+    def execute(plan: dict, *, log_callback: Any = None) -> dict:
+        started.set()
+        assert finish.wait(2)
+        return {"ok": True}
+
+    release_ops.execute_action_plan.side_effect = execute
+    manager = dashboard.SeatConfigManager(
+        state_dir=tmp_path, release_ops_manager=release_ops
+    )
+    first = manager.prepare_ops_action(action)
+    first_job = manager.ops_action(first["plan_id"], first["digest"])
+    assert started.wait(1)
+
+    second = manager.prepare_ops_action(action)
+    with pytest.raises(RuntimeError, match="already queued or running"):
+        manager.ops_action(second["plan_id"], second["digest"])
+
+    release_ops.record_attempt.assert_called_with(
+        action,
+        phase="queue",
+        ok=False,
+        error="duplicate or concurrent job refused",
+    )
+    finish.set()
+    for _ in range(50):
+        if manager.job(first_job["job_id"])["status"] == "succeeded":
+            break
+        time.sleep(0.01)
+    assert manager.job(first_job["job_id"])["status"] == "succeeded"
+
+
+def test_ops_confirmation_plan_is_one_time_and_digest_bound(tmp_path: Path) -> None:
+    release_ops = MagicMock()
+    release_ops.resolve_action_plan.return_value = {
+        "action": "kickstart_central",
+        "command": "launchctl kickstart -k gui/501/com.onboard.central",
+    }
+    release_ops.plan_digest.return_value = "a" * 64
+    manager = dashboard.SeatConfigManager(
+        state_dir=tmp_path, release_ops_manager=release_ops
+    )
+    plan = manager.prepare_ops_action("kickstart_central")
+
+    with pytest.raises(ValueError, match="digest mismatch"):
+        manager.ops_action(plan["plan_id"], "b" * 64)
+    with pytest.raises(KeyError):
+        manager.ops_action(plan["plan_id"], plan["digest"])
