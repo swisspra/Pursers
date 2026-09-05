@@ -689,8 +689,9 @@ memory_search(
       <p>The default tool surface stays deliberately small. Use <code>board_status</code> for a hot bounded summary and <code>board_snapshot</code> for cold recovery; <code>memory_write</code> remains a core tool. Deprecated compatibility tools stay hidden unless a deliberately legacy seat declares <code>legacy_tools</code> or the bridge has <code>PURSERS_LEGACY_TOOLS=1</code>. Do not enable that switch fleet-wide during ordinary operation.</p>
 
       <h3>2. Cut, verify, tag, release, and publish one train</h3>
-      <p>Create the train from a clean approved integration ref. <code>release_train.py bump</code> updates version consumers and regenerates the component lock; do not hand-edit generated pins. Review every generated change, then commit it before pushing the train.</p>
-      <pre><code>git fetch origin --tags
+      <p>Run every command block in sections 2 and 3 in Bash. Each block enables fail-fast options before its first gate; stop the procedure when a block exits nonzero. Create the train from a clean approved integration ref. <code>release_train.py bump</code> updates version consumers and regenerates the component lock; do not hand-edit generated pins. Review every generated change, then commit it before pushing the train.</p>
+      <pre><code>set -euo pipefail
+git fetch origin --tags
 git switch -c train/&lt;product_version&gt; &lt;integration_ref&gt;
 test -z "$(git status --porcelain)"
 
@@ -702,11 +703,13 @@ python3 tools/release_train.py bump \
   --set import=&lt;import_version&gt; \
   --set wait_bridge=&lt;wait_bridge_version&gt;</code></pre>
       <p>The bump already regenerates the component lock. If a manual regeneration is required, do it now in a new empty wheel directory, before tests, review, staging, and the release commit. The script verifies a temporary environment from the exact build-toolchain pins in <code>tools/release_versions.toml</code>.</p>
-      <pre><code>mkdir &lt;empty_wheel_dir&gt;
+      <pre><code>set -euo pipefail
+mkdir &lt;empty_wheel_dir&gt;
 python3 tools/regenerate_component_lock.py \
   --wheel-dir &lt;empty_wheel_dir&gt;
 python3 tools/release_train.py check</code></pre>
-      <pre><code>python3 tools/release_train.py check
+      <pre><code>set -euo pipefail
+python3 tools/release_train.py check
 python3 tools/ci_manifest.py check
 python3 tools/ci_manifest.py collect --output &lt;collection_report&gt;
 python3 tools/ci_manifest.py run
@@ -728,7 +731,8 @@ release_commit="$(git rev-parse HEAD)"
 git show --stat --oneline "$release_commit"
 test -z "$(git status --porcelain)"</code></pre>
       <p>Push the train, obtain review, and require both jobs in <code>.github/workflows/ci.yml</code>. The Python job builds the six checkout wheels, performs isolated wheel imports, checks/collects/runs/verifies all ten suites, and runs the leak scan. The dashboard job installs the locked npm tree and runs TypeScript without emitting files.</p>
-      <pre><code>git push -u origin train/&lt;product_version&gt;
+      <pre><code>set -euo pipefail
+git push -u origin train/&lt;product_version&gt;
 remote_head="$(git ls-remote --heads origin \
   refs/heads/train/&lt;product_version&gt; | awk '{print $1}')"
 test "$remote_head" = "$release_commit"
@@ -740,7 +744,8 @@ pr_head="$(gh pr view "$pr_url" --json headRefOid --jq .headRefOid)"
 test "$pr_head" = "$release_commit"
 gh pr checks "$pr_url" --watch</code></pre>
       <p>After the reviewed train is integrated, tag the exact verified commit. The tag-triggered release workflow builds all six wheels with the pinned toolchain, writes <code>SHA256SUMS.txt</code>, extracts non-empty CHANGELOG notes, and creates or completes the GitHub Release.</p>
-      <pre><code>git fetch origin main --tags
+      <pre><code>set -euo pipefail
+git fetch origin main --tags
 verified_commit="$(gh pr view "$pr_url" --json mergeCommit --jq .mergeCommit.oid)"
 test -n "$verified_commit"
 git cat-file -e "$verified_commit^{commit}"
@@ -751,7 +756,8 @@ gh run list --workflow release.yml \
   --branch &lt;release_tag&gt; --limit 1
 gh run watch &lt;release_run_id&gt; --exit-status</code></pre>
       <p>Publish only from that immutable tag. The manual workflow uses GitHub OIDC Trusted Publishing and separate <code>pypi</code> and <code>pypi-bridge</code> environments; it carries no PyPI API token.</p>
-      <pre><code>gh workflow run publish-pypi.yml --ref &lt;release_tag&gt;
+      <pre><code>set -euo pipefail
+gh workflow run publish-pypi.yml --ref &lt;release_tag&gt;
 gh run list --workflow publish-pypi.yml \
   --branch &lt;release_tag&gt; --limit 1
 gh run watch &lt;publish_run_id&gt; --exit-status</code></pre>
@@ -759,7 +765,8 @@ gh run watch &lt;publish_run_id&gt; --exit-status</code></pre>
 
       <h3>3. Promote Central, bridge, Personal, and seats</h3>
       <p>Stage Central before touching the running service. The release-tag checkout is authoritative for component versions and dependency ranges. The resolver commands below supply the exact PyJWT and uvicorn pins for this train; record their output in the deployment change. On each host, the <code>tools/central_scaffold.py init</code> artifacts are the deployment inventory: <code>&lt;central_instance_root&gt;/.pursers-central-instance.json</code> supplies the label, <code>profile.env</code> supplies Central runtime values, and the loaded <code>&lt;launch_agents_dir&gt;/&lt;central_launchd_label&gt;.plist</code> is the authoritative current service definition (the plist under the instance root is only its scaffold seed). <code>&lt;launch_agents_dir&gt;</code>, <code>&lt;ca_bundle&gt;</code>, and <code>&lt;central_health_url&gt;</code> are explicit operator-owned paths/URL; stop if any cannot be resolved rather than guessing.</p>
-      <pre><code># Verify every downloaded release artifact, including both installed wheels.
+      <pre><code>set -euo pipefail
+# Verify every downloaded release artifact, including both installed wheels.
 (cd &lt;release_download_dir&gt; &amp;&amp; shasum -a 256 -c SHA256SUMS.txt)
 central_wheel="&lt;release_download_dir&gt;/&lt;central_wheel_filename&gt;"
 client_wheel="&lt;release_download_dir&gt;/&lt;client_wheel_filename&gt;"
@@ -811,8 +818,9 @@ actual = {name: metadata.version(name) for name in expected}
 assert actual == expected, (actual, expected)
 print(actual)
 PY</code></pre>
-      <p>Build a versioned candidate plist from that inventory, with <code>ProgramArguments[0]</code> pointing directly to <code>&lt;central_next_venv&gt;/bin/python</code>. The bootout/copy/bootstrap sequence switches the definition without running two Central processes against the same SQLite directory; its failure branch restores the prior plist.</p>
-      <pre><code>central_launchd_label="$(python3 -c \
+      <p>Build a versioned candidate plist from that inventory, with <code>ProgramArguments[0]</code> pointing directly to <code>&lt;central_next_venv&gt;/bin/python</code>. The fail-fast switch does not run two Central processes against the same SQLite directory. After the old job is booted out, any candidate copy, bootstrap, loaded-state, or health failure boots out the candidate, restores the saved plist, bootstraps the previous service, and verifies its loaded program. A failed rollback exits with a distinct hard-error status.</p>
+      <pre><code>set -Eeuo pipefail
+central_launchd_label="$(python3 -c \
   'import json,sys; print(json.load(open(sys.argv[1]))["name"])' \
   &lt;central_instance_root&gt;/.pursers-central-instance.json)"
 central_candidate_plist="&lt;central_instance_root&gt;/${central_launchd_label}-&lt;release_tag&gt;.plist"
@@ -853,13 +861,76 @@ PY
 
 plutil -lint "$central_candidate_plist"
 cp "$central_loaded_plist" "$central_previous_plist"
+
+central_switch_started=false
+rollback_central() {
+  local failed=0 previous_program="" rollback_state
+  rollback_state="${central_previous_plist}.launchctl-state"
+
+  if launchctl print "gui/$(id -u)/$central_launchd_label" \
+      &gt;/dev/null 2&gt;&amp;1; then
+    if ! launchctl bootout "gui/$(id -u)/$central_launchd_label"; then
+      failed=1
+    fi
+  fi
+  if ! cp "$central_previous_plist" "$central_loaded_plist"; then
+    failed=1
+  fi
+  if (( failed == 0 )) &amp;&amp; ! plutil -lint "$central_loaded_plist"; then
+    failed=1
+  fi
+  if (( failed == 0 )) &amp;&amp; ! previous_program="$(plutil -extract ProgramArguments.0 raw -o - \
+      "$central_loaded_plist")"; then
+    failed=1
+  fi
+  if (( failed == 0 )) &amp;&amp; \
+      ! launchctl bootstrap "gui/$(id -u)" "$central_loaded_plist"; then
+    failed=1
+  fi
+  if (( failed == 0 )) &amp;&amp; \
+      ! launchctl print "gui/$(id -u)/$central_launchd_label" \
+      &gt; "$rollback_state"; then
+    failed=1
+  fi
+  if (( failed == 0 )) &amp;&amp; \
+      ! python3 - "$rollback_state" "$previous_program" &lt;&lt;'PY'
+import pathlib
+import sys
+
+state = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+assert sys.argv[2] in state, "rollback loaded another ProgramArguments target"
+PY
+  then
+    failed=1
+  fi
+  if (( failed == 0 )) &amp;&amp; \
+      ! curl --fail --silent --show-error --cacert &lt;ca_bundle&gt; \
+        &lt;central_health_url&gt;; then
+    failed=1
+  fi
+  if (( failed != 0 )); then
+    printf '%s\n' 'FATAL: Central rollback failed; manual recovery required' &gt;&amp;2
+    return 1
+  fi
+  printf '%s\n' 'Central candidate failed; previous service restored and verified' &gt;&amp;2
+}
+
+on_central_switch_error() {
+  local original_status=$?
+  trap - ERR
+  if [[ "$central_switch_started" == true ]]; then
+    if ! rollback_central; then
+      exit 70
+    fi
+  fi
+  exit "$original_status"
+}
+trap on_central_switch_error ERR
+
 launchctl bootout "gui/$(id -u)/$central_launchd_label"
+central_switch_started=true
 cp "$central_candidate_plist" "$central_loaded_plist"
-if ! launchctl bootstrap "gui/$(id -u)" "$central_loaded_plist"; then
-  cp "$central_previous_plist" "$central_loaded_plist"
-  launchctl bootstrap "gui/$(id -u)" "$central_loaded_plist"
-  exit 1
-fi
+launchctl bootstrap "gui/$(id -u)" "$central_loaded_plist"
 
 loaded_program="$(plutil -extract ProgramArguments.0 raw -o - \
   "$central_loaded_plist")"
@@ -876,14 +947,18 @@ PY
 
 curl --fail --silent --show-error \
   --cacert &lt;ca_bundle&gt; \
-  &lt;central_health_url&gt;</code></pre>
+  &lt;central_health_url&gt;
+central_switch_started=false
+trap - ERR</code></pre>
       <p>Upgrade the persistent wait-bridge tool next. Managed host configs point at its resolved shim; they do not launch daily work through <code>uvx</code>.</p>
-      <pre><code>env -u SSL_CERT_FILE uv tool install --force \
+      <pre><code>set -euo pipefail
+env -u SSL_CERT_FILE uv tool install --force \
   "pursers-wait-bridge==&lt;wait_bridge_version&gt;"
 pursers-wait-bridge --version
 python3 tools/fleet-dashboard/seat_config.py doctor --json</code></pre>
       <p>Upgrade each persistent Personal venv to the exact product set, verify it, then restart only the owned service.</p>
-      <pre><code>&lt;personal_venv&gt;/bin/python -m pip install --upgrade \
+      <pre><code>set -euo pipefail
+&lt;personal_venv&gt;/bin/python -m pip install --upgrade \
   "pursers==&lt;product_version&gt;"
 &lt;personal_venv&gt;/bin/pursers-personal --version
 &lt;personal_venv&gt;/bin/pursers-personal doctor \
