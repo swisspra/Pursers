@@ -1247,6 +1247,147 @@ def test_generated_submit_truncates_notes_and_reports_warning(
     assert "warning: ticket_submit notes exceeded 5000 characters" in streams.err
 
 
+def test_generated_claim_refuses_operator_checkout_before_board_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    claims: list[str] = []
+    registry = {
+        "schema_version": 1,
+        "projects": {
+            "alpha": {
+                "board_id": "pursers",
+                "work_dir": "/operator/alpha",
+                "work_dir_owner": "operator",
+                "status": "active",
+            }
+        },
+    }
+
+    class Client:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def board_join(self, **_kwargs: object) -> dict[str, object]:
+            return {"ok": True}
+
+        async def board_state_get(self, **_kwargs: object) -> dict[str, object]:
+            return {"state": {"value": json.dumps(registry)}}
+
+        async def ticket_get(self, ticket_id: str) -> dict[str, object]:
+            return {"ticket": {"ticket_id": ticket_id, "target_url": "alpha/task"}}
+
+        async def ticket_claim(self, ticket_id: str) -> dict[str, object]:
+            claims.append(ticket_id)
+            return {"ok": True}
+
+    dest = seat_new.generate(args(tmp_path / "seat", client="goose"))
+    generated = load_generated(dest / "bin" / "board.py", "board_clone_guard")
+    monkeypatch.setattr(
+        generated,
+        "_load_client",
+        lambda: (
+            Client,
+            frozenset(),
+            "project_registry",
+            frozenset(),
+            lambda value, _home: value,
+            lambda value: json.loads(value["state"]["value"]),
+            lambda value: {"alpha": value["projects"]["alpha"]["work_dir"]},
+            lambda value: {"pursers": value["projects"]["alpha"]["work_dir"]},
+            object(),
+        ),
+    )
+    monkeypatch.setenv("ONBOARD_CENTRAL_URL", "http://central.invalid/mcp")
+    monkeypatch.setenv("ONBOARD_CENTRAL_TOKEN", "test-token")
+    monkeypatch.setenv("ONBOARD_BOARD_ID", "pursers")
+    monkeypatch.setenv("ONBOARD_AGENT_NAME", "worker-agent")
+
+    asyncio.run(generated._execute(generated._parser().parse_args(["claim", "TK-unsafe"])))
+
+    result = json.loads(capsys.readouterr().out)
+    assert claims == []
+    assert result["claim_refused"] is True
+    assert result["error"] == {
+        "code": "operator_checkout_read_only",
+        "message": "operator checkout is read-only for seats",
+    }
+
+
+def test_generated_claim_routes_matching_seat_owned_clone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    claims: list[str] = []
+    registry = {
+        "schema_version": 1,
+        "projects": {
+            "alpha": {
+                "board_id": "pursers",
+                "work_dir": "/operator/alpha",
+                "status": "active",
+            }
+        },
+    }
+
+    class Client:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def board_join(self, **_kwargs: object) -> dict[str, object]:
+            return {"ok": True}
+
+        async def board_state_get(self, **_kwargs: object) -> dict[str, object]:
+            return {"state": {"value": json.dumps(registry)}}
+
+        async def ticket_get(self, ticket_id: str) -> dict[str, object]:
+            return {"ticket": {"ticket_id": ticket_id, "target_url": "alpha/task"}}
+
+        async def ticket_claim(self, ticket_id: str) -> dict[str, object]:
+            claims.append(ticket_id)
+            return {"ok": True, "ticket": {"ticket_id": ticket_id, "target_url": "alpha/task"}}
+
+    dest = seat_new.generate(args(tmp_path / "seat", client="goose"))
+    (dest / "alpha" / ".git").mkdir(parents=True)
+    generated = load_generated(dest / "bin" / "board.py", "board_own_clone")
+    generated.REPO_LEAF = "alpha"
+    monkeypatch.setattr(
+        generated,
+        "_load_client",
+        lambda: (
+            Client,
+            frozenset(),
+            "project_registry",
+            frozenset(),
+            lambda value, _home: value,
+            lambda value: json.loads(value["state"]["value"]),
+            lambda value: {"alpha": value["projects"]["alpha"]["work_dir"]},
+            lambda value: {"pursers": value["projects"]["alpha"]["work_dir"]},
+            object(),
+        ),
+    )
+    monkeypatch.setenv("ONBOARD_CENTRAL_URL", "http://central.invalid/mcp")
+    monkeypatch.setenv("ONBOARD_CENTRAL_TOKEN", "test-token")
+    monkeypatch.setenv("ONBOARD_BOARD_ID", "pursers")
+    monkeypatch.setenv("ONBOARD_AGENT_NAME", "worker-agent")
+
+    asyncio.run(generated._execute(generated._parser().parse_args(["claim", "TK-safe"])))
+
+    result = json.loads(capsys.readouterr().out)
+    assert claims == ["TK-safe"]
+    assert result["work_dir"] == str(dest / "alpha")
+
+
 def test_generated_main_real_listen_event_exits_zero_without_stderr(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

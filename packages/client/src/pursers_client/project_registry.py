@@ -25,6 +25,7 @@ from .events import (
 PROJECT_REGISTRY_KEY = "project_registry"
 PROJECT_REGISTRY_SCHEMA_VERSION = 1
 PROJECT_STATUSES = frozenset({"active", "paused"})
+WORK_DIR_OWNERS = frozenset({"operator", "fleet"})
 CATCHUP_PAGE_LIMIT = 100
 MAX_CATCHUP_PAGES_PER_BOARD = 8
 MAX_EVENTS_PER_BOARD = 1
@@ -74,11 +75,29 @@ def parse_project_registry(result: dict[str, Any]) -> dict[str, Any]:
             raise ValueError(
                 f"project_registry project {name!r} status must be active or paused"
             )
+        owner = project.get("work_dir_owner", "operator")
+        if owner not in WORK_DIR_OWNERS:
+            raise ValueError(
+                f"project_registry project {name!r} work_dir_owner must be "
+                "operator or fleet"
+            )
+        fleet_clone_dir = project.get("fleet_clone_dir")
+        if fleet_clone_dir is not None and (
+            not isinstance(fleet_clone_dir, str)
+            or not os.path.isabs(fleet_clone_dir)
+        ):
+            raise ValueError(
+                f"project_registry project {name!r} fleet_clone_dir must be absolute"
+            )
         normalized[name] = {
             "board_id": board_id,
             "work_dir": work_dir,
             "status": status,
         }
+        if "work_dir_owner" in project:
+            normalized[name]["work_dir_owner"] = owner
+        if fleet_clone_dir is not None:
+            normalized[name]["fleet_clone_dir"] = fleet_clone_dir
     return {"schema_version": PROJECT_REGISTRY_SCHEMA_VERSION, "projects": normalized}
 
 
@@ -96,7 +115,9 @@ def registry_work_dirs(registry: dict[str, Any]) -> dict[str, str]:
     candidates: dict[str, set[str]] = {}
     for project in registry["projects"].values():
         if project["status"] == "active":
-            candidates.setdefault(project["board_id"], set()).add(project["work_dir"])
+            candidates.setdefault(project["board_id"], set()).add(
+                project.get("fleet_clone_dir") or project["work_dir"]
+            )
     return {
         board_id: next(iter(paths))
         for board_id, paths in candidates.items()
@@ -108,6 +129,39 @@ def registry_project_work_dirs(registry: dict[str, Any]) -> dict[str, str]:
     selected: dict[str, str] = {}
     for name, project in registry["projects"].items():
         if project["status"] != "active":
+            continue
+        work_dir = project.get("fleet_clone_dir") or project["work_dir"]
+        selected[name.casefold()] = work_dir
+        selected[Path(project["work_dir"]).name.casefold()] = work_dir
+    return selected
+
+
+def registry_operator_work_dirs(registry: dict[str, Any]) -> dict[str, str]:
+    """Return unambiguous active operator-owned checkouts by board ID."""
+    candidates: dict[str, set[str]] = {}
+    for project in registry["projects"].values():
+        if (
+            project["status"] == "active"
+            and project.get("work_dir_owner", "operator") == "operator"
+        ):
+            candidates.setdefault(project["board_id"], set()).add(project["work_dir"])
+    return {
+        board_id: next(iter(paths))
+        for board_id, paths in candidates.items()
+        if len(paths) == 1
+    }
+
+
+def registry_project_operator_work_dirs(
+    registry: dict[str, Any],
+) -> dict[str, str]:
+    """Return active operator-owned checkout paths by project routing key."""
+    selected: dict[str, str] = {}
+    for name, project in registry["projects"].items():
+        if (
+            project["status"] != "active"
+            or project.get("work_dir_owner", "operator") != "operator"
+        ):
             continue
         selected[name.casefold()] = project["work_dir"]
         selected[Path(project["work_dir"]).name.casefold()] = project["work_dir"]

@@ -56,6 +56,8 @@ from .project_registry import (
     active_registry_boards,
     parse_project_registry,
     registry_project_work_dirs,
+    registry_project_operator_work_dirs,
+    registry_operator_work_dirs,
     registry_work_dirs,
     wait_for_boards,
 )
@@ -105,6 +107,8 @@ __all__ = [
     "load_personal_profile",
     "parse_project_registry",
     "registry_project_work_dirs",
+    "registry_project_operator_work_dirs",
+    "registry_operator_work_dirs",
     "profile_path_for_project",
     "read_capability",
     "resolve_personal_context",
