@@ -11,6 +11,8 @@ from __future__ import annotations
 import argparse
 import asyncio
 import ast
+import base64
+import binascii
 import hashlib
 import hmac
 import importlib.util
@@ -308,6 +310,14 @@ def _validate_token_file(path_raw: str | Path) -> tuple[bool, str]:
     return True, "readable; valid JWT"
 
 
+def _read_token_literal(path_raw: str | Path) -> str:
+    """Read a seat token for a managed host config without ever logging it."""
+    try:
+        return Path(path_raw).expanduser().read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeError):
+        return ""
+
+
 def _inspect_env_var(
     var_name: str,
     runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
@@ -360,20 +370,17 @@ def _inspect_env_var(
     )
 
 
-def _env_value_digest(
+def _env_value(
     var_name: str,
     runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
 ) -> tuple[str, str | None, str]:
-    """Read only a SHA-256 digest from process or login-shell state."""
+    """Resolve an environment value for an identity probe without displaying it."""
     if not ENV_NAME.fullmatch(var_name):
         return "FAIL", None, f"invalid environment variable name {var_name!r}"
     value = os.environ.get(var_name)
     if value:
-        return "PASS", hashlib.sha256(value.encode()).hexdigest(), "process"
-    code = (
-        "import hashlib,os,sys;v=os.environ.get(sys.argv[1],'');"
-        "print(hashlib.sha256(v.encode()).hexdigest() if v else '')"
-    )
+        return "PASS", value, "process"
+    code = "import os,sys;print(os.environ.get(sys.argv[1],''),end='')"
     command = shlex.join([sys.executable, "-c", code, var_name])
     candidates = [os.environ.get("SHELL", "").strip(), "zsh", "bash"]
     searched: list[str] = []
@@ -394,9 +401,8 @@ def _env_value_digest(
             )
         except Exception:
             continue
-        digest = result.stdout.strip()
-        if result.returncode == 0 and re.fullmatch(r"[0-9a-f]{64}", digest):
-            return "PASS", digest, f"login-shell ({shell})"
+        if result.returncode == 0 and result.stdout:
+            return "PASS", result.stdout, f"login-shell ({shell})"
         if result.returncode == 0:
             return "FAIL", None, f"login-shell ({shell})"
     return "FAIL", None, f"unavailable (searched {', '.join(searched)})"
@@ -911,6 +917,7 @@ class CodexAdapter(FileAdapter):
             for line in prefix.splitlines(keepends=True)
             if line.strip() != MANAGED_COMMENT
         )
+        connector_token = _read_token_literal(desired.token_file)
         block = f"""
 [{f'mcp_servers.{name}'}]
 command = "/bin/sh"
@@ -932,6 +939,7 @@ PURSERS_CAN_WORK = {_toml_string(str(desired.can_work).lower())}
 PURSERS_MODEL = {_toml_string(desired.model or '')}
 PURSERS_PROVIDER = {_toml_string(desired.provider or '')}
 PURSERS_REQUIRE_TOKEN_MATCH = "1"
+{desired.token_env_var} = {_toml_string(connector_token)}
 SSL_CERT_FILE = {_toml_string(desired.ca_file)}
 
 [mcp_servers.{board_name}]
@@ -971,6 +979,7 @@ def _yaml_quote(value: str) -> str:
 
 def _goose_block(desired: DesiredSeat) -> list[str]:
     name = desired.connector_name
+    connector_token = _read_token_literal(desired.token_file)
     return [
         f"  {name}:\n",
         f"    {MANAGED_COMMENT}\n",
@@ -992,6 +1001,8 @@ def _goose_block(desired: DesiredSeat) -> list[str]:
         f"      ONBOARD_AGENT_NAME: {_yaml_quote(desired.name)}\n",
         "      PURSERS_HOST: goose\n",
         f"      PURSERS_ROLE: {_yaml_quote(desired.role)}\n",
+        "      PURSERS_REQUIRE_TOKEN_MATCH: \"1\"\n",
+        f"      {desired.token_env_var}: {_yaml_quote(connector_token)}\n",
         *[
             f"      {name}: {_yaml_quote(value)}\n"
             for name, value in capability_env(desired).items()
@@ -1557,6 +1568,189 @@ def adapter_for(desired: DesiredSeat) -> HostAdapter:
 
 
 LiveProbe = Callable[[DesiredSeat, float], dict[str, Any]]
+IdentityProbe = Callable[[DesiredSeat, str, str, float], tuple[str, str]]
+RuntimeProbe = Callable[[DesiredSeat, dict[str, Any], float], tuple[bool, str]]
+
+
+def _decode_managed_scalar(value: str) -> str:
+    raw = value.strip()
+    try:
+        decoded = json.loads(raw)
+    except json.JSONDecodeError:
+        return raw.strip("'\"")
+    return str(decoded)
+
+
+def _goose_launch_spec(
+    desired: DesiredSeat, inspection: dict[str, Any]
+) -> tuple[str, list[str], dict[str, str]]:
+    lines = str(inspection.get("text", "")).splitlines()
+    heading = f"  {desired.connector_name}:"
+    try:
+        start = lines.index(heading)
+    except ValueError as exc:
+        raise ValueError("managed Goose extension is missing") from exc
+    end = len(lines)
+    for index in range(start + 1, len(lines)):
+        line = lines[index]
+        if line.startswith("  ") and not line.startswith("    ") and line.strip():
+            end = index
+            break
+    block = lines[start + 1 : end]
+    command = ""
+    args: list[str] = []
+    env: dict[str, str] = {}
+    section = ""
+    for line in block:
+        if line.startswith("    cmd:"):
+            command = _decode_managed_scalar(line.split(":", 1)[1])
+            section = ""
+        elif line == "    args:":
+            section = "args"
+        elif line == "    envs:":
+            section = "env"
+        elif line.startswith("    ") and not line.startswith("      "):
+            section = ""
+        elif section == "args" and line.startswith("      - "):
+            args.append(_decode_managed_scalar(line[8:]))
+        elif section == "env" and line.startswith("      ") and ":" in line:
+            key, raw = line.strip().split(":", 1)
+            env[key] = _decode_managed_scalar(raw)
+    if not command:
+        raise ValueError("managed Goose command is missing")
+    return command, args, env
+
+
+def _host_launch_spec(
+    desired: DesiredSeat, inspection: dict[str, Any]
+) -> tuple[str, list[str], dict[str, str]]:
+    if desired.host in {"codex", "codex-cli"}:
+        server = (
+            inspection.get("document", {})
+            .get("mcp_servers", {})
+            .get(desired.connector_name, {})
+        )
+        command = server.get("command")
+        args = server.get("args")
+        env = server.get("env")
+        if not isinstance(command, str) or not isinstance(args, list) or not isinstance(env, dict):
+            raise ValueError("managed Codex bridge configuration is incomplete")
+        if not all(isinstance(item, str) for item in args):
+            raise ValueError("managed Codex bridge arguments are invalid")
+        return command, list(args), {str(key): str(value) for key, value in env.items()}
+    if desired.host == "goose":
+        return _goose_launch_spec(desired, inspection)
+    raise ValueError(f"runtime bridge probe is unsupported for {desired.host}")
+
+
+def _configured_connector_token(
+    desired: DesiredSeat, inspection: dict[str, Any]
+) -> str | None:
+    try:
+        _command, _args, env = _host_launch_spec(desired, inspection)
+    except ValueError:
+        return None
+    value = env.get(desired.token_env_var)
+    return value if value else None
+
+
+def _default_runtime_probe(
+    desired: DesiredSeat,
+    inspection: dict[str, Any],
+    timeout_s: float,
+) -> tuple[bool, str]:
+    """Launch the managed bridge with only its host env block and join Central."""
+    command, args, env = _host_launch_spec(desired, inspection)
+    from mcp import Client
+    from mcp.client.stdio import StdioServerParameters
+
+    async def probe() -> tuple[bool, str]:
+        params = StdioServerParameters(command=command, args=args, env=env)
+        async with Client(
+            params,
+            mode="2026-07-28",
+            read_timeout_seconds=timeout_s,
+        ) as client:
+            result = await client.call_tool("project_registry_get", {})
+        if not result.is_error:
+            return True, "host env block starts bridge and joins Central"
+        rendered = " ".join(
+            block.text
+            for block in result.content
+            if getattr(block, "type", None) == "text"
+        )
+        return False, rendered
+
+    runtime_ok, detail = asyncio.run(asyncio.wait_for(probe(), timeout=timeout_s))
+    if runtime_ok:
+        return True, detail
+    safe_details = (
+        "connector token not visible to the bridge process; see Codex env forwarding",
+        "split identity: wait bridge and board connector tokens differ",
+        "Central rejected ONBOARD_CENTRAL_TOKEN",
+    )
+    safe = next((item for item in safe_details if item in detail), None)
+    return False, safe or "runtime probe failed"
+
+
+def _default_identity_probe(
+    desired: DesiredSeat,
+    bridge_token: str,
+    connector_token: str,
+    timeout_s: float,
+) -> tuple[str, str]:
+    """Have Central validate both tokens, then compare their principal claims."""
+    import httpx2
+    from mcp import Client
+    from mcp.client.streamable_http import streamable_http_client
+
+    def principal_id(token: str) -> str:
+        try:
+            encoded = token.split(".")[1]
+            padding = "=" * (-len(encoded) % 4)
+            claims = json.loads(base64.urlsafe_b64decode(encoded + padding))
+            components = [
+                claims.get("client_id") or "-",
+                claims.get("iss") or "-",
+                claims.get("sub") or "-",
+            ]
+            if not all(isinstance(item, str) and item for item in components):
+                raise ValueError("identity claims are malformed")
+        except (
+            IndexError,
+            ValueError,
+            TypeError,
+            UnicodeError,
+            binascii.Error,
+            json.JSONDecodeError,
+        ) as exc:
+            raise ValueError("identity claims are malformed") from exc
+        canonical = json.dumps(components, separators=(",", ":"))
+        return "PR-" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    async def identify(token: str) -> str:
+        async with httpx2.AsyncClient(
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=httpx2.Timeout(timeout_s, read=timeout_s),
+            trust_env=False,
+        ) as http:
+            transport = streamable_http_client(desired.central_url, http_client=http)
+            async with Client(transport, mode="2026-07-28", cache=None) as client:
+                result = await client.call_tool(
+                    "board_status", {"board_id": desired.home_board}
+                )
+                if result.is_error:
+                    raise RuntimeError("Central rejected identity probe")
+        return principal_id(token)
+
+    async def probe() -> tuple[str, str]:
+        values = await asyncio.gather(
+            identify(bridge_token), identify(connector_token)
+        )
+        return str(values[0]), str(values[1])
+
+    result = asyncio.run(asyncio.wait_for(probe(), timeout=timeout_s))
+    return str(result[0]), str(result[1])
 
 
 def _default_live_probe(desired: DesiredSeat, timeout_s: float) -> dict[str, Any]:
@@ -1661,11 +1855,15 @@ class Doctor:
         self,
         *,
         live_probe: LiveProbe | None = None,
+        identity_probe: IdentityProbe | None = None,
+        runtime_probe: RuntimeProbe | None = None,
         runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
         clock: Callable[[], float] = time.time,
         pypi_fetcher: Callable[[], str | None] | None = None,
     ) -> None:
         self.live_probe = live_probe or _default_live_probe
+        self.identity_probe = identity_probe or _default_identity_probe
+        self.runtime_probe = runtime_probe or _default_runtime_probe
         self.runner = runner
         self.clock = clock
         self.pypi_fetcher = pypi_fetcher
@@ -1819,38 +2017,61 @@ class Doctor:
                 )
             )
 
-        if desired.host in {"codex", "codex-cli"}:
+        if desired.host in {"codex", "codex-cli", "goose"}:
             try:
                 bridge_token = Path(desired.token_file).expanduser().read_text(
                     encoding="utf-8"
                 ).strip()
             except OSError:
                 bridge_token = ""
-            status, connector_digest, source = _env_value_digest(
+            configured_token = _configured_connector_token(desired, inspection)
+            literal_ok = bool(
+                bridge_token
+                and configured_token
+                and hmac.compare_digest(bridge_token, configured_token)
+            )
+            status, connector_token, source = _env_value(
                 desired.token_env_var, self.runner
             )
-            bridge_digest = (
-                hashlib.sha256(bridge_token.encode()).hexdigest()
-                if bridge_token
-                else None
-            )
-            identity_ok = (
-                status == "PASS"
-                and bridge_digest is not None
-                and connector_digest is not None
-                and hmac.compare_digest(bridge_digest, connector_digest)
-            )
+            identity_ok = False
+            identity_source = "Central"
+            if status == "PASS" and bridge_token and connector_token:
+                try:
+                    bridge_principal, connector_principal = self.identity_probe(
+                        desired, bridge_token, connector_token, 5.0
+                    )
+                    identity_ok = hmac.compare_digest(
+                        bridge_principal, connector_principal
+                    )
+                except Exception:
+                    identity_ok = False
             rows.append(
                 self._check(
                     desired,
                     "split-identity",
-                    "PASS" if identity_ok else "FAIL",
+                    "PASS" if literal_ok and identity_ok else "FAIL",
                     (
-                        f"one seat token shared; source={source}"
-                        if identity_ok
-                        else "split identity: bridge and connector token mismatch; "
-                        f"source={source}"
+                        f"one Central principal; config literal matches token file; "
+                        f"source={source}; check={identity_source}"
+                        if literal_ok and identity_ok
+                        else "split identity: token file, managed literal, or connector "
+                        f"principal differs; source={source}"
                     ),
+                )
+            )
+            try:
+                runtime_ok, runtime_message = self.runtime_probe(
+                    desired, inspection, 5.0
+                )
+            except Exception as exc:
+                runtime_ok = False
+                runtime_message = type(exc).__name__
+            rows.append(
+                self._check(
+                    desired,
+                    "host-runtime",
+                    "PASS" if runtime_ok else "FAIL",
+                    runtime_message,
                 )
             )
 

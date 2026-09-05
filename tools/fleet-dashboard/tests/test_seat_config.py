@@ -18,6 +18,25 @@ assert SPEC and SPEC.loader
 seat_config = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = seat_config
 SPEC.loader.exec_module(seat_config)
+REAL_RUNTIME_PROBE = seat_config._default_runtime_probe
+REAL_IDENTITY_PROBE = seat_config._default_identity_probe
+
+
+@pytest.fixture(autouse=True)
+def stub_doctor_network_probes(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        seat_config,
+        "_default_runtime_probe",
+        lambda _desired, _inspection, _timeout: (True, "stub runtime ok"),
+    )
+    monkeypatch.setattr(
+        seat_config,
+        "_default_identity_probe",
+        lambda _desired, bridge, connector, _timeout: (
+            "PR-bridge",
+            "PR-bridge" if bridge == connector else "PR-connector",
+        ),
+    )
 
 
 def desired(tmp_path: Path, host: str, **overrides):
@@ -33,7 +52,12 @@ def desired(tmp_path: Path, host: str, **overrides):
         "config_path": str(tmp_path / f"{host}.config"),
     }
     values.update(overrides)
-    return seat_config.DesiredSeat(**values)
+    target = seat_config.DesiredSeat(**values)
+    token_file = Path(target.token_file)
+    token_file.parent.mkdir(parents=True, exist_ok=True)
+    if not token_file.exists():
+        token_file.write_text("header.synthetic.signature")
+    return target
 
 
 def test_profiles_match_wait_bridge_and_keep_host_margins() -> None:
@@ -118,6 +142,11 @@ def test_codex_plan_apply_inspect_backup_and_idempotency(tmp_path: Path) -> None
         ["PURSERS_REQUIRE_TOKEN_MATCH"]
         == "1"
     )
+    assert (
+        document["mcp_servers"][target.connector_name]["env"]
+        [target.token_env_var]
+        == "header.synthetic.signature"
+    )
     assert "PURSERS_BOARD_CONNECTOR_TOKEN" in document[
         "mcp_servers"
     ][target.connector_name]["args"][1]
@@ -187,6 +216,7 @@ def test_codex_worker_and_reviewer_connectors_coexist_and_match_independently(
         assert wait["env"]["ONBOARD_AGENT_NAME"] == target.name
         assert wait["env"]["PURSERS_ROLE"] == target.role
         assert wait["env"]["PURSERS_REQUIRE_TOKEN_MATCH"] == "1"
+        assert wait["env"][target.token_env_var] == Path(target.token_file).read_text()
         assert board["bearer_token_env_var"] == target.token_env_var
         assert f"${{{target.token_env_var}-}}" in wait["args"][1]
 
@@ -283,6 +313,8 @@ def test_goose_upgrade_preserves_clone_and_extra_files(tmp_path: Path) -> None:
     assert "  keep:" in text
     assert f"  {target.connector_name}:" in text
     assert "    timeout: 300" in text
+    assert "      PURSERS_REQUIRE_TOKEN_MATCH: \"1\"" in text
+    assert "      ONBOARD_CENTRAL_TOKEN: \"header.synthetic.signature\"" in text
     assert (clone / "keep.txt").read_text() == "clone"
     assert (seat / "operator-note.txt").read_text() == "keep"
     assert sys.executable in (seat / "bin/board.sh").read_text()
@@ -980,6 +1012,169 @@ def test_doctor_reports_split_identity_fail_and_shared_token_pass(
     )
     assert passed.status == "PASS"
     assert token not in passed.message
+
+
+def test_doctor_compares_central_principals_and_managed_literal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = desired(tmp_path, "codex")
+    token = "part1.part2.part3"
+    Path(target.token_file).write_text(token)
+    Path(target.ca_file).write_text("ca")
+    command = Path(target.bridge_command)
+    command.parent.mkdir(parents=True)
+    command.write_text("#!/bin/sh\n")
+    command.chmod(0o755)
+    adapter = seat_config.CodexAdapter(target.config_path)
+    adapter.apply(adapter.plan(target))
+    monkeypatch.setenv(target.token_env_var, "connector.part.token")
+    calls: list[tuple[str, str]] = []
+
+    def identity_probe(_desired, bridge_token, connector_token, _timeout):
+        calls.append((bridge_token, connector_token))
+        return "PR-shared", "PR-shared"
+
+    doctor = seat_config.Doctor(
+        identity_probe=identity_probe,
+        runtime_probe=lambda _d, _i, _t: (True, "stub ok"),
+        pypi_fetcher=lambda: "0.1.0a8",
+        live_probe=lambda _d, _t: {
+            "mode": "push", "registry_boards": ["pursers"], "skipped_boards": {}
+        },
+    )
+    passed = next(
+        row for row in doctor.run(target) if row.check == "split-identity"
+    )
+    assert passed.status == "PASS"
+    assert calls == [(token, "connector.part.token")]
+    assert token not in passed.message
+
+    document = tomllib.loads(Path(target.config_path).read_text())
+    document["mcp_servers"][target.connector_name]["env"][target.token_env_var] = (
+        "stale.literal.token"
+    )
+    Path(target.config_path).write_text(
+        "\n".join(
+            [
+                f'[mcp_servers.{target.connector_name}]',
+                'command = "/bin/sh"',
+                f'args = {json.dumps(seat_config._bridge_shell_args(target.token_env_var))}',
+                "tool_timeout_sec = 620",
+                "",
+                f'[mcp_servers.{target.connector_name}.env]',
+                f'PURSERS_BRIDGE_COMMAND = {json.dumps(target.bridge_command)}',
+                f'ONBOARD_CENTRAL_TOKEN_FILE = {json.dumps(target.token_file)}',
+                f'{target.token_env_var} = "stale.literal.token"',
+                'PURSERS_REQUIRE_TOKEN_MATCH = "1"',
+                "",
+            ]
+        )
+    )
+    failed = next(
+        row for row in doctor.run(target) if row.check == "split-identity"
+    )
+    assert failed.status == "FAIL"
+
+
+def test_default_identity_probe_validates_both_tokens_with_central(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = desired(tmp_path, "codex")
+    payload = "eyJjbGllbnRfaWQiOiJjbGllbnQiLCJpc3MiOiJpc3N1ZXIiLCJzdWIiOiJzdWJqZWN0In0"
+    bridge_token = f"header.{payload}.bridge"
+    connector_token = f"header.{payload}.connector"
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    class StubHttp:
+        def __init__(self, **kwargs):
+            self.headers = kwargs["headers"]
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+    class StubClient:
+        def __init__(self, transport, **_kwargs):
+            self.transport = transport
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def call_tool(self, name, arguments):
+            calls.append((self.transport.headers["Authorization"], {name: arguments}))
+            return SimpleNamespace(is_error=False)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "httpx2",
+        SimpleNamespace(
+            AsyncClient=StubHttp,
+            Timeout=lambda *args, **kwargs: (args, kwargs),
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "mcp", SimpleNamespace(Client=StubClient))
+    monkeypatch.setitem(sys.modules, "mcp.client", SimpleNamespace())
+    monkeypatch.setitem(
+        sys.modules,
+        "mcp.client.streamable_http",
+        SimpleNamespace(streamable_http_client=lambda _url, *, http_client: http_client),
+    )
+
+    bridge_principal, connector_principal = REAL_IDENTITY_PROBE(
+        target, bridge_token, connector_token, 2.0
+    )
+
+    assert bridge_principal == connector_principal
+    assert calls == [
+        (f"Bearer {bridge_token}", {"board_status": {"board_id": "pursers"}}),
+        (f"Bearer {connector_token}", {"board_status": {"board_id": "pursers"}}),
+    ]
+
+
+@pytest.mark.parametrize("host", ["codex", "goose"])
+def test_doctor_runtime_probe_launches_host_env_block_only(
+    tmp_path: Path, host: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = desired(tmp_path, host)
+    marker = tmp_path / f"{host}-runtime.json"
+    bridge = Path(target.bridge_command)
+    bridge.parent.mkdir(parents=True)
+    bridge.write_text(
+        f"#!{sys.executable}\n"
+        "import json, os\n"
+        "from pathlib import Path\n"
+        "from mcp.server.mcpserver import MCPServer\n"
+        "server = MCPServer('runtime-stub')\n"
+        "@server.tool()\n"
+        "async def project_registry_get():\n"
+        "    if 'SHOULD_NOT_REACH_PROBE' in os.environ:\n"
+        "        raise RuntimeError('inherited env reached stub')\n"
+        "    if os.environ.get('ONBOARD_CENTRAL_TOKEN') != 'header.synthetic.signature':\n"
+        "        raise RuntimeError('file token missing')\n"
+        "    if os.environ.get('PURSERS_BOARD_CONNECTOR_TOKEN') != 'header.synthetic.signature':\n"
+        "        raise RuntimeError('connector token missing')\n"
+        f"    Path({str(marker)!r}).write_text(json.dumps(sorted(os.environ)))\n"
+        "    return {'ok': True}\n"
+        "server.run(transport='stdio')\n"
+    )
+    bridge.chmod(0o755)
+    adapter = seat_config.adapter_for(target)
+    adapter.apply(adapter.plan(target))
+    monkeypatch.setenv("SHOULD_NOT_REACH_PROBE", "forbidden")
+
+    inspection = adapter.inspect()
+    ok, message = REAL_RUNTIME_PROBE(target, inspection, 2.0)
+
+    assert ok is True
+    assert "joins Central" in message
+    observed = json.loads(marker.read_text())
+    assert "SHOULD_NOT_REACH_PROBE" not in observed
+    assert target.token_env_var in observed
 
 
 def test_doctor_token_file_validation_and_redaction(

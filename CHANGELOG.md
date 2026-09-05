@@ -7,6 +7,14 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed
+
+- Codex and Goose wait bridges no longer depend on GUI hosts forwarding the
+  HTTP connector token into stdio subprocesses. Managed configs carry the
+  token-file value in their private env block, startup distinguishes a missing
+  connector token from a real mismatch, and Doctor probes the host launch plus
+  Central-resolved principal identity without exposing token contents.
+
 ## [5.0.0a18] - 2026-09-05
 
 This release includes `pursers-central==0.1.0a22`,

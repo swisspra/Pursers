@@ -1019,7 +1019,13 @@ def _split_identity_failure() -> BoardJoinFailure | None:
     if os.environ.get("PURSERS_REQUIRE_TOKEN_MATCH", "").strip() != "1":
         return None
     connector_token = os.environ.get(CONNECTOR_TOKEN_ENV, "")
-    if not connector_token or not CENTRAL_TOKEN or not hmac.compare_digest(
+    if not connector_token:
+        return BoardJoinFailure(
+            "configuration",
+            "connector token not visible to the bridge process; "
+            "see Codex env forwarding",
+        )
+    if not CENTRAL_TOKEN or not hmac.compare_digest(
         connector_token, CENTRAL_TOKEN
     ):
         return BoardJoinFailure(

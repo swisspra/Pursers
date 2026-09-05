@@ -22,8 +22,11 @@ plan/apply/doctor/install action is recorded in
 
 Direct editing remains available for recovery and headless use. Back up the
 host config first, keep the token in a private file, use the timeout from
-`HOST_PROFILES`, and run `seat_config.py doctor --json` afterward. Do not put a
-JWT directly in TOML, JSON, YAML, prompts, or the seat inventory.
+`HOST_PROFILES`, and run `seat_config.py doctor --json` afterward. Do not paste
+a JWT into prompts or the seat inventory. Codex and Goose managed config files
+contain a dashboard-generated token literal because GUI hosts do not reliably
+forward connector environment variables to stdio MCP processes; keep those
+files mode `0600` and regenerate them from the same private token file.
 
 ## Seat configuration library
 
@@ -46,16 +49,20 @@ python tools/fleet-dashboard/seat_config.py doctor --fix --json
 ```
 
 Doctor output never contains token contents. It checks config drift, host
-timeout profile, bridge and Personal versions, token/CA paths, Goose seat
-interpreter and hints, clean clone freshness, a five-second push subscription,
-registry visibility, and whether a host restart is needed. A reported `poll`
-mode is a warning and remains an explicit fallback only.
+timeout profile, bridge and Personal versions, token/CA paths, the managed
+token literal, a host-equivalent bridge launch using only the configured env
+block, Goose seat interpreter and hints, clean clone freshness, a five-second
+push subscription, registry visibility, and whether a host restart is needed.
+A reported `poll` mode is a warning and remains an explicit fallback only.
 
 For Codex seats, the generated wait bridge and HTTP board connector use one
-seat token. Doctor compares only SHA-256 digests and reports `split identity`
-as a failure when the token file and `bearer_token_env_var` resolve to different
-values. Apply the generated config, set the connector environment variable from
-the same seat token file, and restart Codex before rerunning Doctor.
+seat token. The adapter copies the token file value into the wait bridge's
+managed env block, while the HTTP connector continues to name its
+`bearer_token_env_var`. Doctor verifies file-to-literal equality, asks Central
+to resolve both token sources to principal IDs, and reports `split identity`
+when any source differs. Apply the generated config, set the connector
+environment variable from the same seat token file, and restart Codex before
+rerunning Doctor.
 Worker seats target `pursers-dev` and reviewer seats target `pursers-review` by
 default; inventory/API input may set `board_connector_name` explicitly. Each
 apply replaces only that seat's wait/board pair, so both pairs coexist in one
