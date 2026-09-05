@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "product_version": "5.0.0a17",
+  "product_version": "5.0.0a18",
   "build_toolchain": {
     "build": "1.3.0",
     "setuptools": "80.9.0",
@@ -10,46 +10,46 @@
   },
   "components": {
     "pursers-central": {
-      "version": "0.1.0a21",
-      "wheel_sha256": "056bd12f02e868a9536369bfe8813d4128250f42bee24c5ea7780df883ed9698",
+      "version": "0.1.0a22",
+      "wheel_sha256": "6e234b705271f18e835b8f41fa75fb27f3e72747916b9a2a4b7651c36ed93be0",
       "members": {
-        "pursers_central-0.1.0a21.dist-info/METADATA": "e100e4cbd1b6c818aa548f16de0bb39372194e4fdbb4cd78605c5fad43ade011",
-        "pursers_central-0.1.0a21.dist-info/WHEEL": "ff309ddcdd65ebd02bc724dbf2bcc4a0ff53a5b61792a44548d383e4ebb19d3b",
-        "pursers_central-0.1.0a21.dist-info/licenses/LICENSE": "c48efd75374a365d9d9f3e24c5b4148d53ce8621dd55bf470c9b4c513d03d84d",
-        "pursers_central-0.1.0a21.dist-info/top_level.txt": "36b183999f65ce4c6f41b59602a397b8c3c0b3db4fd216bdf5b9c8c45d9cc55e",
+        "pursers_central-0.1.0a22.dist-info/METADATA": "d908a383a10c3cae0999246ea0bcaf7de711fcdb4aa60584c323e3e2ebd46cf6",
+        "pursers_central-0.1.0a22.dist-info/WHEEL": "ff309ddcdd65ebd02bc724dbf2bcc4a0ff53a5b61792a44548d383e4ebb19d3b",
+        "pursers_central-0.1.0a22.dist-info/licenses/LICENSE": "c48efd75374a365d9d9f3e24c5b4148d53ce8621dd55bf470c9b4c513d03d84d",
+        "pursers_central-0.1.0a22.dist-info/top_level.txt": "36b183999f65ce4c6f41b59602a397b8c3c0b3db4fd216bdf5b9c8c45d9cc55e",
         "pursers_central/__init__.py": "0d67dcb332978fe4c7d7b4615f882272ca763cdb065586743fa772f4f4e008a1",
-        "pursers_central/central.py": "38a72d6c8f774910dd30cba079918a5dd038cb224de630e3b2020fee799d8a3f",
+        "pursers_central/central.py": "9b4dc8cb4d6da7b17b8dff12328650d7b17093957ce8750a60f5b5f999cfab8a",
         "pursers_central/cursor.py": "5f57c3d58bdb88ca9f01497e518de96c9651063047b0928689a0fda58cceeb2b",
         "pursers_central/instance_lock.py": "3127eb46fcb44412e73024a4ca3ae8f4ead35afd8b7c848c70ddfe41ab9aaa6e",
         "pursers_central/journal.py": "e7f92668e91427b9d418a9aecbc65e8a3d4731da9706edbd4034ad1ebd663904",
         "pursers_central/jwt_verifier.py": "e4ad036ae4db25da6f85a82268b827686259507f266e3d53c6a3c50a3964ca25",
         "pursers_central/locked_store.py": "d5575f8b0c3e9a6587fb51969ba08f05ff3dda4d19036ae6af60d85200331869",
         "pursers_central/pursers_central_runtime.py": "13a647bcbdcff803a9bb1b47e46ce1540f70dd8fcc616b434f67796109e667fb",
-        "pursers_central/runtime_health.py": "05fc4f7a078f9eea290f86ed79dda2d5a8e10e565e563cbced4d033dc98f9462",
+        "pursers_central/runtime_health.py": "d322e046176c515b33bd69f110372f42d0ea21248635b1ad2fd0ca59401f6374",
         "pursers_central/scrub.py": "6c73ebb7559ae01d2b5513dba6e0361ac89e0028962211c293800a711405bd7b",
         "pursers_central/sqlite_store.py": "6fe55c1445d2d70f6163d017ec011c860ed9df32d1dfdeea4b94b4249b10042b",
         "pursers_central/transactional_sqlite.py": "a329341eb7eed3c006f17e5cb58d60634a5db23c75ccc9c7dbc335cfed6698f4"
       }
     },
     "pursers-client": {
-      "version": "0.1.0a15",
-      "wheel_sha256": "ba180417f127ed1ddbe1f12513e56778cc64a0ef66a07587bb016d1ab4774232",
+      "version": "0.1.0a16",
+      "wheel_sha256": "ef33b7c496e9904a32e78fde9f5eefe61c1cab75bbb068662dc343fe3a7e3d85",
       "members": {
-        "pursers_client-0.1.0a15.dist-info/METADATA": "93ddb662e5512fc31fcf9ad6db6b36afae49af45094158e90d16461e33bbc761",
-        "pursers_client-0.1.0a15.dist-info/WHEEL": "ff309ddcdd65ebd02bc724dbf2bcc4a0ff53a5b61792a44548d383e4ebb19d3b",
-        "pursers_client-0.1.0a15.dist-info/licenses/LICENSE": "c48efd75374a365d9d9f3e24c5b4148d53ce8621dd55bf470c9b4c513d03d84d",
-        "pursers_client-0.1.0a15.dist-info/top_level.txt": "f1c543c98535c0f218812ac0a8b29ce27e28b6430eda69116c789ecc853cf7b4",
-        "pursers_client/__init__.py": "ddce08129b5e99e3b3790cc51a15bcb36dd98d2a186e87bfb27bb4a0cc318e5d",
-        "pursers_client/client.py": "62d09a2b08c2e87c871f27069ce64b7dd6833f67e0d3e23e1ff8a16a86f7d194",
-        "pursers_client/events.py": "cfbda3b24ce095356366b38ba9a2847b713de61ae9edae940baf9855cddb99c1",
+        "pursers_client-0.1.0a16.dist-info/METADATA": "ece46d125122d5c8f8a47ffc827ed5886541aa78e23b397ad3c082cc50466ef5",
+        "pursers_client-0.1.0a16.dist-info/WHEEL": "ff309ddcdd65ebd02bc724dbf2bcc4a0ff53a5b61792a44548d383e4ebb19d3b",
+        "pursers_client-0.1.0a16.dist-info/licenses/LICENSE": "c48efd75374a365d9d9f3e24c5b4148d53ce8621dd55bf470c9b4c513d03d84d",
+        "pursers_client-0.1.0a16.dist-info/top_level.txt": "f1c543c98535c0f218812ac0a8b29ce27e28b6430eda69116c789ecc853cf7b4",
+        "pursers_client/__init__.py": "70e1558d5574659a5b7fb0451c23d1607a6d11a6271458a04ebb35e702a0fa69",
+        "pursers_client/client.py": "5e3177e7fe9429867f5ea2aa4e3c46b4dbc116fc314b0317ba49a92088d233f2",
+        "pursers_client/events.py": "f5534d98e2625276351d5f5b048fb131a47e1ab55316e73c135f9df4cfd3806a",
         "pursers_client/personal_profile.py": "07b9e9c5e3e994932869bf8668e8208d58a6c84e306a72553f7a79a8aa7507e8",
-        "pursers_client/project_registry.py": "7452b3b1ee5e473e0d12ac4308883ae25bb65ff7460605954ad6a29a2759a5df"
+        "pursers_client/project_registry.py": "ef3a00561abe9fe154c8af2ccbd2631b7ade65f168cb68e09daed6d150ac1432"
       }
     }
   },
   "view": {
     "resource": "pursers_personal/resources/dashboard.html",
     "size_bytes": 404280,
-    "sha256": "d33f076e9396f7e5fa4f55cd79044a2dfba6ca2f0066add1d69c0f9e3630aeec"
+    "sha256": "e150424c2d255f01f101e9ef10988dd995fe68d3b1196554dd7c958bbe0acbd3"
   }
 }
