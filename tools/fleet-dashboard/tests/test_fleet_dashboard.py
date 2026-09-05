@@ -3938,9 +3938,18 @@ def test_config_api_and_ui_contract_are_separate_from_coordinator_config() -> No
             calls.append(("release_status", {}))
             return {"latest_tag": "v5.0.0a20", "versions": {"product": "5.0.0a20"}}
 
-        def ops_action(self, action: str, **kwargs: Any) -> dict:
-            calls.append(("ops_action", action, kwargs))
-            return {"ok": True, "action": action, "command": f"cmd {action}"}
+        def prepare_ops_action(self, action: str, **kwargs: Any) -> dict:
+            calls.append(("prepare_ops_action", action, kwargs))
+            return {
+                "plan_id": "e" * 32,
+                "digest": "f" * 64,
+                "action": action,
+                "command": f"cmd {action}",
+            }
+
+        def ops_action(self, plan_id: str, digest: str) -> dict:
+            calls.append(("ops_action", plan_id, digest))
+            return {"ok": True, "job_id": "9" * 32, "command": "cmd"}
 
     server = dashboard.ThreadingHTTPServer(
         ("127.0.0.1", 0), dashboard.make_handler(Cache(), seat_manager=Seats())
@@ -3989,7 +3998,14 @@ def test_config_api_and_ui_contract_are_separate_from_coordinator_config() -> No
         assert post("/api/config/import", {})["imported"] == []
         assert post("/api/config/bridge/install", {})["job_id"] == "c" * 32
         assert post("/api/config/bridge/upgrade-all", {})["job_id"] == "d" * 32
-        assert post("/api/config/ops", {"action": "publish_from_tag", "tag": "v5.0.0a20"})["ok"] is True
+        ops_plan = post(
+            "/api/config/ops/plan",
+            {"action": "publish_from_tag", "tag": "v5.0.0a20"},
+        )
+        assert post(
+            "/api/config/ops",
+            {"plan_id": ops_plan["plan_id"], "digest": ops_plan["digest"]},
+        )["ok"] is True
         with urllib.request.urlopen(base + "/api/config/jobs/" + "b" * 32) as response:
             assert json.load(response)["status"] == "succeeded"
     finally:
@@ -4011,7 +4027,8 @@ def test_config_api_and_ui_contract_are_separate_from_coordinator_config() -> No
         ("import", None),
         ("install", {}),
         ("upgrade-all", {}),
-        ("ops_action", "publish_from_tag", {"tag": "v5.0.0a20"}),
+        ("prepare_ops_action", "publish_from_tag", {"tag": "v5.0.0a20"}),
+        ("ops_action", "e" * 32, "f" * 64),
         ("job", "b" * 32),
     ]
     assert 'href="#/seats"' in dashboard.HTML
@@ -5489,9 +5506,19 @@ def test_config_ops_endpoint_guards_and_execution() -> None:
             calls.append(("release_status", {}))
             return {"schema_version": 1, "latest_tag": "v5.0.0a20"}
 
-        def ops_action(self, action: str, **kwargs: Any) -> dict:
-            calls.append(("ops_action", {"action": action, **kwargs}))
-            return {"ok": True, "action": action, "command": f"cmd {action}", "output": "ok"}
+        def prepare_ops_action(self, action: str, **kwargs: Any) -> dict:
+            calls.append(("prepare_ops_action", {"action": action, **kwargs}))
+            return {
+                "plan_id": "a" * 32,
+                "digest": "b" * 64,
+                "action": action,
+                "command": f"cmd {action}",
+                "expires_in_s": 120,
+            }
+
+        def ops_action(self, plan_id: str, digest: str) -> dict:
+            calls.append(("ops_action", {"plan_id": plan_id, "digest": digest}))
+            return {"ok": True, "action": "planned", "command": "cmd", "output": "ok"}
 
     server = dashboard.ThreadingHTTPServer(
         ("127.0.0.1", 0), dashboard.make_handler(Cache(), seat_manager=Seats())
@@ -5518,38 +5545,38 @@ def test_config_ops_endpoint_guards_and_execution() -> None:
 
     try:
         # Cross origin rejected
-        status, _ = post("/api/config/ops", {"action": "stage_central"}, {"Origin": "https://attacker.invalid"})
+        status, _ = post("/api/config/ops/plan", {"action": "stage_central"}, {"Origin": "https://attacker.invalid"})
         assert status == 403
 
         # text/plain rejected
-        status, _ = post("/api/config/ops", {"action": "stage_central"}, {"Content-Type": "text/plain"})
+        status, _ = post("/api/config/ops/plan", {"action": "stage_central"}, {"Content-Type": "text/plain"})
         assert status == 415
 
         # Invalid host rejected
-        status, _ = post("/api/config/ops", {"action": "stage_central"}, {"Host": "attacker.invalid"})
+        status, _ = post("/api/config/ops/plan", {"action": "stage_central"}, {"Host": "attacker.invalid"})
         assert status == 403
 
-        # Missing action rejected
-        status, _ = post("/api/config/ops", {})
+        # Missing action rejected at planning; unbound execution is also rejected.
+        status, _ = post("/api/config/ops/plan", {})
         assert status == 503 or status == 400
+        status, _ = post("/api/config/ops", {"action": "stage_central"})
+        assert status == 400
 
-        # Successful ops calls
-        status, res = post("/api/config/ops", {"action": "publish_from_tag", "tag": "v5.0.0a20"})
-        assert status == 200
-        assert res["ok"] is True
-        assert res["action"] == "publish_from_tag"
-
-        status, res = post("/api/config/ops", {"action": "stage_central"})
-        assert status == 200
-        assert res["ok"] is True
-
-        status, res = post("/api/config/ops", {"action": "kickstart_central"})
-        assert status == 200
-        assert res["ok"] is True
-
-        status, res = post("/api/config/ops", {"action": "restart_dashboard"})
-        assert status == 200
-        assert res["ok"] is True
+        # Every successful execution is bound to the returned immutable plan.
+        for payload in (
+            {"action": "publish_from_tag", "tag": "v5.0.0a20"},
+            {"action": "stage_central"},
+            {"action": "kickstart_central"},
+            {"action": "restart_dashboard"},
+        ):
+            status, plan = post("/api/config/ops/plan", payload)
+            assert status == 200
+            status, res = post(
+                "/api/config/ops",
+                {"plan_id": plan["plan_id"], "digest": plan["digest"]},
+            )
+            assert status == 200
+            assert res["ok"] is True
 
         # GET /api/config/release
         with urllib.request.urlopen(base + "/api/config/release") as response:
@@ -5560,52 +5587,52 @@ def test_config_ops_endpoint_guards_and_execution() -> None:
         server.server_close()
         thread.join()
 
-    actions = [c[1].get("action") for c in calls if c[0] == "ops_action"]
+    actions = [c[1].get("action") for c in calls if c[0] == "prepare_ops_action"]
     assert actions == ["publish_from_tag", "stage_central", "kickstart_central", "restart_dashboard"]
 
 
 def test_seat_config_manager_ops_action_parameter_rejections_and_jobs(tmp_path: Path) -> None:
     release_ops = MagicMock()
-    release_ops.get_preview_commands.return_value = {
-        "publish_from_tag": "gh workflow run publish-pypi.yml --ref v5.0.0a20",
-        "stage_central": "cp wheel && pip install",
-        "kickstart_central": "launchctl kickstart -k gui/501/com.onboard.central",
-        "restart_dashboard": "launchctl kickstart -k gui/501/com.pursers.fleet-dashboard",
+    release_ops.resolve_action_plan.side_effect = lambda action, tag=None: {
+        "action": action,
+        "command": f"command {action}",
+        "tag": tag,
     }
-    release_ops.publish_from_tag.return_value = {"ok": True, "output": "published"}
-    release_ops.stage_central.return_value = {"ok": True, "output": "staged"}
-    release_ops.kickstart_central.return_value = {"ok": True, "output": "kickstarted"}
-    release_ops.restart_dashboard.return_value = {"ok": True, "output": "restarted"}
+    release_ops.plan_digest.return_value = "d" * 64
+    release_ops.execute_action_plan.return_value = {"ok": True, "output": "done"}
 
     manager = dashboard.SeatConfigManager(state_dir=tmp_path, release_ops_manager=release_ops)
 
     # Unknown parameter rejections
     with pytest.raises(ValueError, match="unknown parameters for stage_central"):
-        manager.ops_action("stage_central", profile_path="/etc/passwd")
+        manager.prepare_ops_action("stage_central", profile_path="/etc/passwd")
 
     with pytest.raises(ValueError, match="unknown parameters for stage_central"):
-        manager.ops_action("stage_central", venv_python="/bin/sh")
+        manager.prepare_ops_action("stage_central", venv_python="/bin/sh")
 
     with pytest.raises(ValueError, match="unknown parameters for stage_central"):
-        manager.ops_action(
+        manager.prepare_ops_action(
             "stage_central",
             wheel_path="/tmp/pursers_central-0.1.0a24-py3-none-any.whl",
         )
 
     with pytest.raises(ValueError, match="unknown parameters for kickstart_central"):
-        manager.ops_action("kickstart_central", job_label="com.evil.service")
+        manager.prepare_ops_action("kickstart_central", job_label="com.evil.service")
 
     with pytest.raises(ValueError, match="unknown parameters for restart_dashboard"):
-        manager.ops_action("restart_dashboard", job_label="com.evil.service")
+        manager.prepare_ops_action("restart_dashboard", job_label="com.evil.service")
 
     with pytest.raises(ValueError, match="unknown parameters for publish_from_tag"):
-        manager.ops_action("publish_from_tag", bad_key="val")
+        manager.prepare_ops_action("publish_from_tag", bad_key="val")
 
     # Valid job dispatch
-    job = manager.ops_action("kickstart_central")
+    plan = manager.prepare_ops_action("kickstart_central")
+    assert plan["command"] == "command kickstart_central"
+    assert plan["digest"] == "d" * 64
+    job = manager.ops_action(plan["plan_id"], plan["digest"])
     assert job["action"] == "kickstart_central"
     assert job["status"] == "queued"
-    assert "launchctl kickstart -k" in job["command"]
+    assert job["command"] == "command kickstart_central"
 
     # Poll job until succeeded
     for _ in range(50):
@@ -5617,3 +5644,68 @@ def test_seat_config_manager_ops_action_parameter_rejections_and_jobs(tmp_path: 
     assert state["status"] == "succeeded"
     assert any("Queued kickstart_central" in line for line in state["logs"])
     assert "SUCCEEDED" in state["logs"]
+    assert "/api/config/ops/plan" in dashboard.HTML
+    assert "Plan digest:" in dashboard.HTML
+
+
+@pytest.mark.parametrize("action", ["stage_central", "publish_from_tag"])
+def test_ops_jobs_reject_concurrent_duplicate_actions(
+    tmp_path: Path, action: str
+) -> None:
+    release_ops = MagicMock()
+    release_ops.resolve_action_plan.side_effect = lambda name, tag=None: {
+        "action": name,
+        "command": f"command {name}",
+        "tag": tag,
+    }
+    release_ops.plan_digest.return_value = "c" * 64
+    started = threading.Event()
+    finish = threading.Event()
+
+    def execute(plan: dict, *, log_callback: Any = None) -> dict:
+        started.set()
+        assert finish.wait(2)
+        return {"ok": True}
+
+    release_ops.execute_action_plan.side_effect = execute
+    manager = dashboard.SeatConfigManager(
+        state_dir=tmp_path, release_ops_manager=release_ops
+    )
+    first = manager.prepare_ops_action(action)
+    first_job = manager.ops_action(first["plan_id"], first["digest"])
+    assert started.wait(1)
+
+    second = manager.prepare_ops_action(action)
+    with pytest.raises(RuntimeError, match="already queued or running"):
+        manager.ops_action(second["plan_id"], second["digest"])
+
+    release_ops.record_attempt.assert_called_with(
+        action,
+        phase="queue",
+        ok=False,
+        error="duplicate or concurrent job refused",
+    )
+    finish.set()
+    for _ in range(50):
+        if manager.job(first_job["job_id"])["status"] == "succeeded":
+            break
+        time.sleep(0.01)
+    assert manager.job(first_job["job_id"])["status"] == "succeeded"
+
+
+def test_ops_confirmation_plan_is_one_time_and_digest_bound(tmp_path: Path) -> None:
+    release_ops = MagicMock()
+    release_ops.resolve_action_plan.return_value = {
+        "action": "kickstart_central",
+        "command": "launchctl kickstart -k gui/501/com.onboard.central",
+    }
+    release_ops.plan_digest.return_value = "a" * 64
+    manager = dashboard.SeatConfigManager(
+        state_dir=tmp_path, release_ops_manager=release_ops
+    )
+    plan = manager.prepare_ops_action("kickstart_central")
+
+    with pytest.raises(ValueError, match="digest mismatch"):
+        manager.ops_action(plan["plan_id"], "b" * 64)
+    with pytest.raises(KeyError):
+        manager.ops_action(plan["plan_id"], plan["digest"])

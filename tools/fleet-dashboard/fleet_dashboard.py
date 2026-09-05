@@ -98,6 +98,7 @@ CONTEXT_STATS_ANOMALY_TOKENS = 1_000_000
 WORKER_API_MAX_BYTES = 20_000
 CONFIG_API_MAX_BYTES = 40_000
 CONFIG_JOB_LIMIT = 100
+CONFIG_OPS_PLAN_TTL_SECONDS = 120
 CONFIG_PLAN_LIMIT = 50
 CONFIG_STATE_DIR = Path("~/.pursers/fleet-dashboard")
 MAX_REVIEW_STATE_BYTES = 4_096
@@ -3683,6 +3684,8 @@ class SeatConfigManager:
             inventory=self.inventory,
         )
         self._plans: dict[str, tuple[DesiredSeat, list[Any]]] = {}
+        self._ops_plans: dict[str, dict[str, Any]] = {}
+        self._active_ops: set[str] = set()
         self._jobs: dict[str, dict[str, Any]] = {}
         self._lock = threading.Lock()
 
@@ -3697,6 +3700,16 @@ class SeatConfigManager:
     ) -> dict[str, Any]:
         job_id = uuid.uuid4().hex
         with self._lock:
+            if action in {"stage_central", "publish_from_tag"}:
+                if action in self._active_ops:
+                    self.release_ops.record_attempt(
+                        action,
+                        phase="queue",
+                        ok=False,
+                        error="duplicate or concurrent job refused",
+                    )
+                    raise RuntimeError(f"{action} already queued or running")
+                self._active_ops.add(action)
             if len(self._jobs) >= CONFIG_JOB_LIMIT:
                 self._jobs.pop(next(iter(self._jobs)))
             self._jobs[job_id] = {
@@ -3706,6 +3719,9 @@ class SeatConfigManager:
                 "status": "queued",
                 "logs": [f"Queued {action}: {command}"],
             }
+            self.release_ops.record_attempt(
+                action, phase="queue", ok=True, job_id=job_id, command=command
+            )
 
         def work() -> None:
             with self._lock:
@@ -3720,70 +3736,112 @@ class SeatConfigManager:
                 result = target(emit)
             except Exception as exc:  # noqa: BLE001
                 err_msg = _clean_text(str(exc))
+                self.release_ops.record_attempt(
+                    action,
+                    phase="job",
+                    ok=False,
+                    job_id=job_id,
+                    error=err_msg,
+                )
                 with self._lock:
                     self._jobs[job_id].update(status="failed", error=err_msg)
                     self._jobs[job_id].setdefault("logs", []).append(f"FAILED: {err_msg}")
             else:
+                self.release_ops.record_attempt(
+                    action, phase="job", ok=True, job_id=job_id
+                )
                 with self._lock:
                     self._jobs[job_id].update(status="succeeded", result=result)
                     self._jobs[job_id].setdefault("logs", []).append("SUCCEEDED")
+            finally:
+                with self._lock:
+                    self._active_ops.discard(action)
 
         threading.Thread(target=work, daemon=True, name=f"ops-{action}").start()
         return {"job_id": job_id, "action": action, "command": command, "status": "queued"}
 
-    def ops_action(self, action: str, **kwargs: Any) -> dict[str, Any]:
-        if action in {"publish", "publish_from_tag"}:
-            unknown = set(kwargs) - {"tag"}
-            if unknown:
-                raise ValueError(f"unknown parameters for {action}: {unknown}")
-            tag = kwargs.get("tag")
-            previews = self.release_ops.get_preview_commands(tag)
-            cmd = previews["publish_from_tag"]
-            if not isinstance(cmd, str):
-                raise RuntimeError("Publish unavailable: no origin release tag resolved")
-            return self._start_ops_job(
-                "publish_from_tag",
-                cmd,
-                lambda emit: self.release_ops.publish_from_tag(tag, log_callback=emit),
+    @staticmethod
+    def _canonical_ops_action(action: str) -> str:
+        aliases = {
+            "publish": "publish_from_tag",
+            "publish_from_tag": "publish_from_tag",
+            "stage": "stage_central",
+            "stage_central": "stage_central",
+            "kickstart": "kickstart_central",
+            "kickstart_central": "kickstart_central",
+            "restart-dash": "restart_dashboard",
+            "restart_dashboard": "restart_dashboard",
+        }
+        try:
+            return aliases[action]
+        except KeyError as exc:
+            raise ValueError(f"unknown ops action: {action}") from exc
+
+    def prepare_ops_action(self, action: str, **kwargs: Any) -> dict[str, Any]:
+        canonical = self._canonical_ops_action(action)
+        allowed = {"tag"} if canonical == "publish_from_tag" else set()
+        unknown = set(kwargs) - allowed
+        if unknown:
+            raise ValueError(f"unknown parameters for {canonical}: {unknown}")
+        plan = self.release_ops.resolve_action_plan(
+            canonical,
+            tag=kwargs.get("tag") if canonical == "publish_from_tag" else None,
+        )
+        plan_id = uuid.uuid4().hex
+        digest = self.release_ops.plan_digest(plan)
+        expires_at = time.monotonic() + CONFIG_OPS_PLAN_TTL_SECONDS
+        with self._lock:
+            self._ops_plans = {
+                key: value
+                for key, value in self._ops_plans.items()
+                if value["expires_at"] > time.monotonic()
+            }
+            if len(self._ops_plans) >= CONFIG_JOB_LIMIT:
+                self._ops_plans.pop(next(iter(self._ops_plans)))
+            self._ops_plans[plan_id] = {
+                "plan": plan,
+                "digest": digest,
+                "expires_at": expires_at,
+            }
+        return {
+            "plan_id": plan_id,
+            "digest": digest,
+            "action": canonical,
+            "command": str(plan["command"]),
+            "expires_in_s": CONFIG_OPS_PLAN_TTL_SECONDS,
+        }
+
+    def ops_action(self, plan_id: str, digest: str) -> dict[str, Any]:
+        if not isinstance(plan_id, str) or not re.fullmatch(r"[a-f0-9]{32}", plan_id):
+            raise ValueError("valid plan_id is required")
+        if not isinstance(digest, str) or not re.fullmatch(r"[a-f0-9]{64}", digest):
+            raise ValueError("valid plan digest is required")
+        with self._lock:
+            stored = self._ops_plans.pop(plan_id, None)
+        if stored is None:
+            raise KeyError(plan_id)
+        plan = stored["plan"]
+        action = str(plan["action"])
+        if stored["expires_at"] <= time.monotonic():
+            self.release_ops.record_attempt(
+                action, phase="confirm", ok=False, error="plan expired"
             )
-        if action in {"stage", "stage_central"}:
-            unknown = set(kwargs)
-            if unknown:
-                raise ValueError(f"unknown parameters for {action}: {unknown}")
-            previews = self.release_ops.get_preview_commands()
-            cmd = previews["stage_central"]
-            if not isinstance(cmd, str):
-                raise RuntimeError(
-                    "Stage Central unavailable: trusted wheel, digest, profile, or interpreter did not resolve"
-                )
-            return self._start_ops_job(
-                "stage_central",
-                cmd,
-                lambda emit: self.release_ops.stage_central(log_callback=emit),
+            raise RuntimeError("ops confirmation plan expired")
+        actual_digest = self.release_ops.plan_digest(plan)
+        if not hmac.compare_digest(digest, stored["digest"]) or not hmac.compare_digest(
+            actual_digest, stored["digest"]
+        ):
+            self.release_ops.record_attempt(
+                action, phase="confirm", ok=False, error="plan digest mismatch"
             )
-        if action in {"kickstart", "kickstart_central"}:
-            unknown = set(kwargs)
-            if unknown:
-                raise ValueError(f"unknown parameters for {action}: {unknown}")
-            previews = self.release_ops.get_preview_commands()
-            cmd = previews["kickstart_central"]
-            return self._start_ops_job(
-                "kickstart_central",
-                cmd,
-                lambda emit: self.release_ops.kickstart_central(log_callback=emit),
-            )
-        if action in {"restart_dashboard"}:
-            unknown = set(kwargs)
-            if unknown:
-                raise ValueError(f"unknown parameters for {action}: {unknown}")
-            previews = self.release_ops.get_preview_commands()
-            cmd = previews["restart_dashboard"]
-            return self._start_ops_job(
-                "restart_dashboard",
-                cmd,
-                lambda emit: self.release_ops.restart_dashboard(log_callback=emit),
-            )
-        raise ValueError(f"unknown ops action: {action}")
+            raise ValueError("ops confirmation plan digest mismatch")
+        return self._start_ops_job(
+            action,
+            str(plan["command"]),
+            lambda emit: self.release_ops.execute_action_plan(
+                plan, log_callback=emit
+            ),
+        )
 
     @staticmethod
     def _pypi_latest() -> str | None:
@@ -5003,7 +5061,7 @@ function renderReleaseOps(){
   const packages = v.packages || {};
   const pkgRows = Object.entries(packages).map(([name, ver]) => {
     const p = (releaseData.pypi || {})[name] || {};
-    const pypiBadge = p.present === true ? '<span class="status pass">PyPI 200</span>' : p.present === false ? '<span class="status fail">PyPI 404</span>' : '<span class="status warn">PyPI ?</span>';
+    const pypiBadge = p.availability === 'present' || p.present === true ? '<span class="status pass">PyPI 200</span>' : p.availability === 'absent' || p.present === false ? '<span class="status fail">PyPI 404</span>' : `<span class="status warn">${esc(p.status_code ? `PyPI HTTP ${p.status_code} unavailable` : `PyPI ${p.error||'unavailable'}`)}</span>`;
     return `<tr><td><b>${esc(name)}</b></td><td>${esc(ver)}</td><td>${pypiBadge}</td></tr>`;
   }).join('');
 
@@ -5042,7 +5100,7 @@ refreshSeats=async function(){try{const [inventory,bridge,release]=await Promise
 const refreshCentralBeforeSeats=refreshCentral;refreshCentral=async function(...args){await refreshCentralBeforeSeats(...args);if(initialSeatsRefreshPending&&navKind()==='seats'&&centralLabels.length)await refreshSeats()}
 async function suggestSeatSkills(){const form=document.querySelector('#seat-wizard'),status=document.querySelector('#seat-suggestions');try{const result=await configPost('/api/config/suggestions',seatPayload(form)),input=form.elements.skills,current=String(input.value||'').split(',').map(x=>x.trim()).filter(Boolean);input.value=[...new Set([...current,...result.skills])].join(',');status.textContent=result.skills.length?`Suggested: ${result.skills.join(', ')}`:'No mapped connectors found.'}catch(e){status.textContent=`Suggestions failed: ${e.message}`}}
 async function saveDispatch(event){event.preventDefault();const form=event.target,central=centralLabels[0],board=form.dataset.board,status=form.querySelector('.dispatch-status')||form.nextElementSibling;try{dispatchData[board]=await configPost(`/api/dispatch?${apiCentral(central)}`,{board_id:board,policy:{claim_ttl_s:Number(form.elements.claim_ttl_s.value),offer_ttl_s:Number(form.elements.offer_ttl_s.value),second_opinion:form.elements.second_opinion.checked,fallback_broadcast:form.elements.fallback_broadcast.checked}});status.textContent='Policy saved.';await refreshSeats()}catch(e){status.textContent=`Save failed: ${e.message}`}}
-bindSeats=function(){const wizard=document.querySelector('#seat-wizard');wizard?.addEventListener('submit',seatSubmit);if(wizard){const review=wizard.elements.can_review,work=wizard.elements.can_work,sync=()=>{const role=wizard.elements.role.value;if(!review.dataset.touched)review.checked=role==='reviewer';if(!work.dataset.touched)work.checked=role==='worker'};review.addEventListener('input',()=>review.dataset.touched='true');work.addEventListener('input',()=>work.dataset.touched='true');wizard.elements.role.addEventListener('change',sync)}document.querySelector('[data-seat-suggest]')?.addEventListener('click',suggestSeatSkills);document.querySelector('#seat-apply')?.addEventListener('click',applySeat);document.querySelector('#copy-session-prompt')?.addEventListener('click',async event=>{await navigator.clipboard.writeText(seatSessionPrompt);event.target.textContent='Copied'});document.querySelectorAll('.dispatch-form').forEach(form=>form.addEventListener('submit',saveDispatch));document.querySelectorAll('[data-ops-action]').forEach(btn=>{btn.addEventListener('click',async()=>{const action=btn.dataset.opsAction;const cmdKey=action==='publish'?'publish_from_tag':action==='stage'?'stage_central':action==='kickstart'?'kickstart_central':'restart_dashboard';const cmd=(releaseData?.commands||{})[cmdKey]||btn.dataset.cmd;if(!confirm(`Run command:\n${cmd}\n\nAre you sure?`))return;const out=document.querySelector('#ops-output');if(out)out.textContent=`Queuing ${action}…\nCommand: ${cmd}\n`;btn.disabled=true;try{let payload={action};if(action==='publish')payload={action:'publish_from_tag',tag:releaseData?.latest_tag};else if(action==='stage')payload={action:'stage_central'};else if(action==='kickstart')payload={action:'kickstart_central'};else if(action==='restart-dash')payload={action:'restart_dashboard'};const job=await configPost('/api/config/ops',payload);if(out)out.textContent=`Job ${job.job_id} queued:\n${job.command}\n\nStreaming output…\n`;const timer=setInterval(async()=>{try{const state=await fetchJson(`/api/config/jobs/${job.job_id}`);if(out&&state.logs){out.textContent=`Command: ${state.command||job.command}\nStatus: ${state.status}\n\n${state.logs.join('\n')}`}if(state.status==='succeeded'||state.status==='failed'){clearInterval(timer);btn.disabled=false;await refreshSeats()}}catch(e){clearInterval(timer);btn.disabled=false;if(out)out.textContent+=`\nPolling error: ${e.message}`}},1000)}catch(err){btn.disabled=false;if(out)out.textContent=`Request error: ${err.message}`}})});const host=document.querySelector('#central-sections');host.onclick=seatClick;host.querySelector('.page-head')?.addEventListener('click',seatGlobal)}
+bindSeats=function(){const wizard=document.querySelector('#seat-wizard');wizard?.addEventListener('submit',seatSubmit);if(wizard){const review=wizard.elements.can_review,work=wizard.elements.can_work,sync=()=>{const role=wizard.elements.role.value;if(!review.dataset.touched)review.checked=role==='reviewer';if(!work.dataset.touched)work.checked=role==='worker'};review.addEventListener('input',()=>review.dataset.touched='true');work.addEventListener('input',()=>work.dataset.touched='true');wizard.elements.role.addEventListener('change',sync)}document.querySelector('[data-seat-suggest]')?.addEventListener('click',suggestSeatSkills);document.querySelector('#seat-apply')?.addEventListener('click',applySeat);document.querySelector('#copy-session-prompt')?.addEventListener('click',async event=>{await navigator.clipboard.writeText(seatSessionPrompt);event.target.textContent='Copied'});document.querySelectorAll('.dispatch-form').forEach(form=>form.addEventListener('submit',saveDispatch));document.querySelectorAll('[data-ops-action]').forEach(btn=>{btn.addEventListener('click',async()=>{const action=btn.dataset.opsAction;const out=document.querySelector('#ops-output');btn.disabled=true;try{let request={action};if(action==='publish')request={action:'publish_from_tag',tag:releaseData?.latest_tag};else if(action==='stage')request={action:'stage_central'};else if(action==='kickstart')request={action:'kickstart_central'};else if(action==='restart-dash')request={action:'restart_dashboard'};if(out)out.textContent=`Resolving immutable ${action} plan…`;const plan=await configPost('/api/config/ops/plan',request);if(!confirm(`Run command:\n${plan.command}\n\nPlan digest: ${plan.digest}\nExpires in ${plan.expires_in_s}s. Are you sure?`)){btn.disabled=false;return}if(out)out.textContent=`Confirmed plan ${plan.plan_id}\nCommand: ${plan.command}\n`;const job=await configPost('/api/config/ops',{plan_id:plan.plan_id,digest:plan.digest});if(out)out.textContent=`Job ${job.job_id} queued:\n${job.command}\n\nStreaming output…\n`;const timer=setInterval(async()=>{try{const state=await fetchJson(`/api/config/jobs/${job.job_id}`);if(out&&state.logs){out.textContent=`Command: ${state.command||job.command}\nStatus: ${state.status}\n\n${state.logs.join('\n')}`}if(state.status==='succeeded'||state.status==='failed'){clearInterval(timer);btn.disabled=false;await refreshSeats()}}catch(e){clearInterval(timer);btn.disabled=false;if(out)out.textContent+=`\nPolling error: ${e.message}`}},1000)}catch(err){btn.disabled=false;if(out)out.textContent=`Request error: ${err.message}`}})});const host=document.querySelector('#central-sections');host.onclick=seatClick;host.querySelector('.page-head')?.addEventListener('click',seatGlobal)}
 const seatClickImportV1=seatClick;
 seatClick=async function(event){const action=event.target.closest('[data-seat-action]')?.dataset.seatAction;if(action!=='import')return seatClickImportV1(event);try{const result=await configPost('/api/config/import',{});seatActionMessage=`Imported ${(result.imported||[]).length} seat(s); Doctor started.`;await refreshSeats();if(result.doctor_job)watchConfigJob(result.doctor_job)}catch(e){seatActionMessage=`Import failed: ${e.message}`;renderHub()}}
 renderOverview=renderAttentionOverview;
@@ -5458,6 +5516,7 @@ def make_handler(
                 "/api/config/import",
                 "/api/config/bridge/install",
                 "/api/config/bridge/upgrade-all",
+                "/api/config/ops/plan",
                 "/api/config/ops",
                 "/api/config/registry/clone",
                 "/api/dispatch",
@@ -5553,9 +5612,18 @@ def make_handler(
                     if request != {}:
                         raise ValueError("bridge upgrade body must be an empty object")
                     body = _json_bytes(seats.upgrade_all())
-                elif route == "/api/config/ops":
+                elif route == "/api/config/ops/plan":
                     if not isinstance(request, dict) or "action" not in request:
-                        raise ValueError("ops request must be an object with an action")
+                        raise ValueError("ops plan request must be an object with an action")
+                    body = _json_bytes(seats.prepare_ops_action(**request))
+                elif route == "/api/config/ops":
+                    if not isinstance(request, dict) or set(request) != {
+                        "plan_id",
+                        "digest",
+                    }:
+                        raise ValueError(
+                            "ops request must contain only plan_id and digest"
+                        )
                     body = _json_bytes(seats.ops_action(**request))
                 elif route == "/api/config/registry/clone":
                     if not isinstance(request, dict) or set(request) != {"project"}:

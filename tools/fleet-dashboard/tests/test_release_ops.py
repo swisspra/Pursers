@@ -200,8 +200,9 @@ def test_restart_checklist_flags_older_bridge_processes(tmp_path: Path) -> None:
     def mock_runner(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         if "ps" in cmd:
             stdout = (
-                "  00:50   101 python -m pursers_wait_server\n"
-                "  05:00   102 python /bin/pursers-wait-bridge\n"
+                "  10:00   100   1 /Applications/Codex.app/Contents/MacOS/Codex\n"
+                "  00:50   101 100 python -m pursers_wait_server --agent-name worker-1\n"
+                "  05:00   102 100 python /bin/pursers-wait-bridge --agent-name worker-1\n"
             )
             return subprocess.CompletedProcess(cmd, 0, stdout=stdout)
         return subprocess.CompletedProcess(cmd, 1, stderr="error")
@@ -221,6 +222,120 @@ def test_restart_checklist_flags_older_bridge_processes(tmp_path: Path) -> None:
     assert codex_check["needs_restart"] is True
     assert 102 in codex_check["running_pids"]
     assert "PID 102 started before shim update" in codex_check["reason"]
+
+
+def test_restart_checklist_attributes_stale_bridge_to_only_its_host(tmp_path: Path) -> None:
+    bridge_installer = MagicMock()
+    bridge_installer.inspect.return_value = {"installed_version": "0.1.0a10"}
+    shim_file = tmp_path / "pursers-wait-bridge"
+    shim_file.write_text("#!/bin/sh\n", encoding="utf-8")
+    os.utime(shim_file, (99900, 99900))
+    bridge_installer._resolve.return_value = (shim_file, "path", [])
+    inventory = MagicMock()
+    inventory.load.return_value = {
+        "seats": [
+            {"host": "codex", "name": "codex-worker"},
+            {"host": "goose", "name": "goose-worker"},
+        ]
+    }
+
+    def mock_runner(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        assert cmd == ["ps", "-axo", "etime,pid,ppid,args"]
+        return subprocess.CompletedProcess(
+            cmd,
+            0,
+            stdout=(
+                "  10:00  10  1 /Applications/Codex.app/Contents/MacOS/Codex\n"
+                "  10:00  20  1 /usr/local/bin/goose session\n"
+                "  05:00  11 10 python -m pursers_wait_server\n"
+                "  00:20  21 20 python -m pursers_wait_server\n"
+                "  05:00  31  1 python -m pursers_wait_server\n"
+            ),
+        )
+
+    ops = ReleaseOpsManager(
+        root=tmp_path,
+        runner=mock_runner,
+        clock=lambda: 100000.0,
+        bridge_installer=bridge_installer,
+        inventory=inventory,
+        state_dir=tmp_path,
+    )
+
+    rows = {row["host"]: row for row in ops.get_restart_checklist()}
+    assert rows["codex"]["needs_restart"] is True
+    assert rows["codex"]["running_pids"] == [11]
+    assert rows["goose"]["needs_restart"] is False
+    assert rows["goose"]["running_pids"] == [21]
+    assert rows["unknown"]["attribution"] == "unknown"
+    assert rows["unknown"]["running_pids"] == [31]
+
+
+def test_exact_seat_marker_wins_with_codex_gui_and_cli_configured(tmp_path: Path) -> None:
+    bridge_installer = MagicMock()
+    bridge_installer.inspect.return_value = {"installed_version": "0.1.0a10"}
+    shim_file = tmp_path / "pursers-wait-bridge"
+    shim_file.write_text("#!/bin/sh\n", encoding="utf-8")
+    os.utime(shim_file, (99900, 99900))
+    bridge_installer._resolve.return_value = (shim_file, "path", [])
+    inventory = MagicMock()
+    inventory.load.return_value = {
+        "seats": [
+            {"host": "codex", "name": "codex-worker"},
+            {"host": "codex-cli", "name": "cli-worker"},
+        ]
+    }
+
+    def mock_runner(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            cmd,
+            0,
+            stdout=(
+                "  10:00  100   1 /Applications/Codex.app/Contents/MacOS/Codex\n"
+                "  05:00  101 100 python -m pursers_wait_server "
+                "--agent-name codex-worker\n"
+            ),
+        )
+
+    ops = ReleaseOpsManager(
+        root=tmp_path,
+        runner=mock_runner,
+        clock=lambda: 100000.0,
+        bridge_installer=bridge_installer,
+        inventory=inventory,
+        state_dir=tmp_path,
+    )
+
+    rows = {row["host"]: row for row in ops.get_restart_checklist()}
+    assert rows["codex"]["needs_restart"] is True
+    assert rows["codex"]["running_pids"] == [101]
+    assert rows["codex-cli"]["needs_restart"] is False
+    assert rows["codex-cli"]["running_pids"] == []
+    assert "unknown" not in rows
+
+
+def test_pypi_non_404_and_transport_failures_are_unavailable(tmp_path: Path) -> None:
+    def http_500(url: str, timeout: float) -> tuple[int, bytes]:
+        return 500, b"server error"
+
+    ops = ReleaseOpsManager(root=tmp_path, http_get=http_500, state_dir=tmp_path)
+    result = ops.get_pypi_status({"central": "1.2.3"})["central"]
+    assert result == {
+        "distribution": "pursers-central",
+        "version": "1.2.3",
+        "status_code": 500,
+        "present": None,
+        "availability": "unavailable",
+    }
+
+    def unavailable(url: str, timeout: float) -> tuple[int, bytes]:
+        raise TimeoutError("bounded request timed out")
+
+    ops.http_get = unavailable
+    result = ops.get_pypi_status({"central": "1.2.3"})["central"]
+    assert result["present"] is None
+    assert result["availability"] == "unavailable"
+    assert result["error"] == "TimeoutError: bounded request timed out"
 
 
 def test_publish_from_tag_fails_on_unavailable_origin(tmp_path: Path) -> None:
@@ -480,3 +595,137 @@ def test_kickstart_central_and_restart_dashboard(tmp_path: Path) -> None:
     assert res_dash["ok"] is True
     assert "launchctl kickstart -k" in res_dash["command"]
     assert "test.dashboard" in res_dash["command"]
+
+
+def test_confirmed_stage_plan_rejects_changed_profile_before_mutation(
+    tmp_path: Path,
+) -> None:
+    profile = tmp_path / "profile.env"
+    profile.write_text("CENTRAL_WHEEL=/old.whl\n", encoding="utf-8")
+    profile.chmod(0o600)
+    python = tmp_path / "python"
+    python.write_text("#!/bin/sh\n", encoding="utf-8")
+    wheel = tmp_path / "pursers_central-0.1.0a25-py3-none-any.whl"
+    wheel.write_bytes(b"trusted wheel")
+    digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
+    manifest = tmp_path / "release_versions.toml"
+    manifest.write_text('[packages]\ncentral = "0.1.0a25"\n', encoding="utf-8")
+    component_lock = tmp_path / "component-lock.json"
+    component_lock.write_text(
+        json.dumps(
+            {
+                "components": {
+                    "pursers-central": {
+                        "version": "0.1.0a25",
+                        "wheel_sha256": digest,
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    runner = MagicMock()
+    ops = ReleaseOpsManager(
+        root=tmp_path,
+        manifest_path=manifest,
+        component_lock_path=component_lock,
+        staging_root=tmp_path,
+        profile_env_path=profile,
+        central_venv_python=python,
+        runner=runner,
+        state_dir=tmp_path,
+    )
+    plan = ops.resolve_action_plan("stage_central")
+    profile.write_text("CENTRAL_WHEEL=/changed-after-confirm.whl\n", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="Confirmed Stage plan is stale"):
+        ops.execute_action_plan(plan)
+
+    runner.assert_not_called()
+    records = [
+        json.loads(line)
+        for line in (tmp_path / "config-actions.jsonl").read_text().splitlines()
+    ]
+    assert records[-1]["ok"] is False
+    assert records[-1]["rollback"]["reason"] == "no mutation"
+
+
+def test_runner_exception_is_persistently_audited(tmp_path: Path) -> None:
+    def missing_launchctl(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        raise FileNotFoundError("launchctl unavailable")
+
+    ops = ReleaseOpsManager(root=tmp_path, runner=missing_launchctl, state_dir=tmp_path)
+    with pytest.raises(FileNotFoundError, match="launchctl unavailable"):
+        ops.kickstart_central()
+
+    records = [
+        json.loads(line)
+        for line in (tmp_path / "config-actions.jsonl").read_text().splitlines()
+    ]
+    assert records[-1]["action"] == "ops:kickstart_central"
+    assert records[-1]["ok"] is False
+    assert "FileNotFoundError" in records[-1]["error"]
+
+
+def test_stage_rollback_failure_is_visible_and_audited(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    profile = tmp_path / "profile.env"
+    profile.write_text("CENTRAL_WHEEL=/old.whl\nCENTRAL_WHEEL_SHA256=old\n", encoding="utf-8")
+    profile.chmod(0o600)
+    python = tmp_path / "python"
+    python.write_text("#!/bin/sh\n", encoding="utf-8")
+    wheel = tmp_path / "pursers_central-0.1.0a25-py3-none-any.whl"
+    wheel.write_bytes(b"trusted wheel")
+    digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
+    manifest = tmp_path / "release_versions.toml"
+    manifest.write_text('[packages]\ncentral = "0.1.0a25"\n', encoding="utf-8")
+    component_lock = tmp_path / "component-lock.json"
+    component_lock.write_text(
+        json.dumps(
+            {
+                "components": {
+                    "pursers-central": {
+                        "version": "0.1.0a25",
+                        "wheel_sha256": digest,
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def pip_fails(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="pip failed")
+
+    ops = ReleaseOpsManager(
+        root=tmp_path,
+        manifest_path=manifest,
+        component_lock_path=component_lock,
+        staging_root=tmp_path,
+        profile_env_path=profile,
+        central_venv_python=python,
+        runner=pip_fails,
+        state_dir=tmp_path,
+    )
+    original_replace = ops._atomic_replace_bytes
+    calls = 0
+
+    def fail_profile_rollback(path: Path, content: bytes, **kwargs: Any) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 3:
+            raise OSError("profile rollback blocked")
+        original_replace(path, content, **kwargs)
+
+    monkeypatch.setattr(ops, "_atomic_replace_bytes", fail_profile_rollback)
+    logs: list[str] = []
+    with pytest.raises(RuntimeError, match="ROLLBACK FAILED: profile.env"):
+        ops.stage_central(log_callback=logs.append)
+
+    assert any("ROLLBACK FAILED: profile.env" in line for line in logs)
+    records = [
+        json.loads(line)
+        for line in (tmp_path / "config-actions.jsonl").read_text().splitlines()
+    ]
+    assert records[-1]["rollback"]["failures"]

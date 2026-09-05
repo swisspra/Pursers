@@ -246,18 +246,24 @@ class ReleaseOpsManager:
         return None
 
     def _journal(self, action: str, **fields: Any) -> None:
-        self.state_dir.mkdir(parents=True, exist_ok=True)
-        path = self.state_dir / "config-actions.jsonl"
-        cleaned_fields = {
-            key: _clean_text(str(val)) if isinstance(val, str) else val
-            for key, val in fields.items()
-        }
-        record = {
-            "at": datetime.now(timezone.utc).isoformat(),
-            "action": f"ops:{action}",
-            **cleaned_fields,
-        }
+        def clean(value: Any) -> Any:
+            if isinstance(value, str):
+                return _clean_text(value)
+            if isinstance(value, dict):
+                return {str(key): clean(val) for key, val in value.items()}
+            if isinstance(value, (list, tuple)):
+                return [clean(item) for item in value]
+            return value
+
         try:
+            self.state_dir.mkdir(parents=True, exist_ok=True)
+            path = self.state_dir / "config-actions.jsonl"
+            cleaned_fields = {key: clean(val) for key, val in fields.items()}
+            record = {
+                "at": datetime.now(timezone.utc).isoformat(),
+                "action": f"ops:{action}",
+                **cleaned_fields,
+            }
             descriptor = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
             with os.fdopen(descriptor, "a", encoding="utf-8") as stream:
                 stream.write(json.dumps(record, sort_keys=True) + "\n")
@@ -378,6 +384,11 @@ class ReleaseOpsManager:
             "profile_mode": stat.S_IMODE(profile_stat.st_mode),
             "profile_uid": profile_stat.st_uid,
             "profile_gid": profile_stat.st_gid,
+            "profile_sha256": hashlib.sha256(profile.read_bytes()).hexdigest(),
+            "manifest_sha256": hashlib.sha256(self.manifest_path.read_bytes()).hexdigest(),
+            "component_lock_sha256": hashlib.sha256(
+                self.component_lock_path.read_bytes()
+            ).hexdigest(),
             "python": python,
         }
 
@@ -392,6 +403,203 @@ class ReleaseOpsManager:
             f"{shlex.quote(str(plan['python']))} -m pip install --no-deps "
             f"{shlex.quote(str(plan['destination_wheel']))}"
         )
+
+    @staticmethod
+    def _tag_sort_key(tag_name: str) -> tuple[int, ...]:
+        clean = tag_name.lstrip("v")
+        match = re.match(r"^(\d+)\.(\d+)\.(\d+)(?:a(\d+))?", clean)
+        if match:
+            major, minor, patch, alpha = match.groups()
+            return (int(major), int(minor), int(patch), int(alpha or 999999))
+        return (0, 0, 0, 0)
+
+    def record_attempt(self, action: str, **fields: Any) -> None:
+        """Persist a scrubbed record for an ops plan or execution attempt."""
+        self._journal(action, **fields)
+
+    def resolve_action_plan(
+        self,
+        action: str,
+        *,
+        tag: str | None = None,
+    ) -> dict[str, Any]:
+        """Resolve one immutable action plan before operator confirmation."""
+        try:
+            if action == "publish_from_tag":
+                origin_tags = self.get_origin_tags()
+                if not origin_tags:
+                    raise RuntimeError(
+                        "Origin tags could not be retrieved from origin; publish refused."
+                    )
+                target_tag = tag or max(origin_tags, key=self._tag_sort_key)
+                if target_tag not in origin_tags:
+                    raise ValueError(
+                        f"Tag '{target_tag}' does not exist on origin; refused to publish."
+                    )
+                tag_commit = self.get_origin_tag_commit(target_tag)
+                if not tag_commit:
+                    raise RuntimeError(
+                        f"Origin commit for tag '{target_tag}' could not be resolved"
+                    )
+                return {
+                    "action": action,
+                    "tag": target_tag,
+                    "tag_commit": tag_commit,
+                    "command": (
+                        f"gh workflow run {PUBLISH_WORKFLOW_FILE} --ref "
+                        f"{shlex.quote(target_tag)}"
+                    ),
+                }
+            if action == "stage_central":
+                plan = self._resolve_stage_plan()
+                plan.update(
+                    action=action,
+                    command=self._format_stage_plan(plan),
+                )
+                return plan
+            if action in {"kickstart_central", "restart_dashboard"}:
+                uid = os.getuid() if hasattr(os, "getuid") else 501
+                label = (
+                    self.central_job_label
+                    if action == "kickstart_central"
+                    else self.dashboard_job_label
+                )
+                target = f"gui/{uid}/{label}"
+                return {
+                    "action": action,
+                    "uid": uid,
+                    "label": label,
+                    "target": target,
+                    "command": f"launchctl kickstart -k {target}",
+                }
+            raise ValueError(f"unknown ops action: {action}")
+        except Exception as exc:
+            self._journal(
+                action,
+                phase="plan",
+                ok=False,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            raise
+
+    @staticmethod
+    def plan_digest(plan: dict[str, Any]) -> str:
+        """Digest the operator-visible command and all execution invariants."""
+        encoded = json.dumps(
+            {key: str(value) if isinstance(value, Path) else value for key, value in plan.items()},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    def revalidate_action_plan(self, plan: dict[str, Any]) -> None:
+        """Fail closed if any resolved invariant changed after confirmation."""
+        action = plan.get("action")
+        if action == "stage_central":
+            profile = Path(plan["profile"])
+            python = Path(plan["python"])
+            source = Path(plan["source_wheel"])
+            destination = Path(plan["destination_wheel"])
+            trusted_root = self.staging_root.resolve()
+            expected_name = (
+                f"pursers_central-{plan['central_version']}-py3-none-any.whl"
+            )
+            checks = {
+                "configured profile path": (
+                    self.profile_env_path is not None
+                    and self.profile_env_path.resolve() == profile.resolve()
+                ),
+                "configured interpreter path": (
+                    self.central_venv_python is not None
+                    and self.central_venv_python.resolve() == python.resolve()
+                ),
+                "trusted source path": (
+                    source.resolve().parent == trusted_root
+                    and source.name == expected_name
+                ),
+                "fixed destination path": (
+                    destination.resolve()
+                    == (profile.parent / "wheels" / expected_name).resolve()
+                ),
+                "manifest bytes": (
+                    self.manifest_path.is_file()
+                    and hashlib.sha256(self.manifest_path.read_bytes()).hexdigest()
+                    == plan["manifest_sha256"]
+                ),
+                "component lock bytes": (
+                    self.component_lock_path.is_file()
+                    and hashlib.sha256(self.component_lock_path.read_bytes()).hexdigest()
+                    == plan["component_lock_sha256"]
+                ),
+                "profile bytes": (
+                    profile.is_file()
+                    and hashlib.sha256(profile.read_bytes()).hexdigest()
+                    == plan["profile_sha256"]
+                ),
+                "source digest": (
+                    source.is_file()
+                    and hashlib.sha256(source.read_bytes()).hexdigest()
+                    == plan["expected_sha"]
+                ),
+                "trusted digest": (
+                    self.get_trusted_central_sha(plan["central_version"])
+                    == plan["expected_sha"]
+                ),
+            }
+            failed = [name for name, ok in checks.items() if not ok]
+            if failed:
+                raise RuntimeError(
+                    "Confirmed Stage plan is stale; changed invariants: "
+                    + ", ".join(failed)
+                )
+            profile_stat = profile.stat()
+            if (
+                stat.S_IMODE(profile_stat.st_mode) != plan["profile_mode"]
+                or profile_stat.st_uid != plan["profile_uid"]
+                or profile_stat.st_gid != plan["profile_gid"]
+            ):
+                raise RuntimeError("Confirmed Stage plan is stale; profile metadata changed")
+            return
+        if action == "publish_from_tag":
+            current_commit = self.get_origin_tag_commit(str(plan["tag"]))
+            if current_commit != plan["tag_commit"]:
+                raise RuntimeError("Confirmed Publish plan is stale; origin tag changed")
+            return
+        if action in {"kickstart_central", "restart_dashboard"}:
+            uid = os.getuid() if hasattr(os, "getuid") else 501
+            label = (
+                self.central_job_label
+                if action == "kickstart_central"
+                else self.dashboard_job_label
+            )
+            target = f"gui/{uid}/{label}"
+            if (
+                plan.get("uid") != uid
+                or plan.get("label") != label
+                or plan.get("target") != target
+            ):
+                raise RuntimeError(f"Confirmed {action} plan is stale")
+            return
+        raise ValueError(f"unknown ops action: {action}")
+
+    def execute_action_plan(
+        self,
+        plan: dict[str, Any],
+        *,
+        log_callback: Callable[[str], None] | None = None,
+    ) -> dict[str, Any]:
+        action = str(plan.get("action"))
+        if action == "publish_from_tag":
+            return self.publish_from_tag(
+                str(plan["tag"]), plan=plan, log_callback=log_callback
+            )
+        if action == "stage_central":
+            return self.stage_central(plan=plan, log_callback=log_callback)
+        if action == "kickstart_central":
+            return self.kickstart_central(plan=plan, log_callback=log_callback)
+        if action == "restart_dashboard":
+            return self.restart_dashboard(plan=plan, log_callback=log_callback)
+        raise ValueError(f"unknown ops action: {action}")
 
     def get_origin_tags(self) -> list[str]:
         """Fetch real tag list from origin."""
@@ -450,15 +658,7 @@ class ReleaseOpsManager:
         if not tags:
             return None
 
-        def tag_sort_key(tag_name: str) -> tuple[int, ...]:
-            clean = tag_name.lstrip("v")
-            match = re.match(r"^(\d+)\.(\d+)\.(\d+)(?:a(\d+))?", clean)
-            if match:
-                major, minor, patch, alpha = match.groups()
-                return (int(major), int(minor), int(patch), int(alpha or 999999))
-            return (0, 0, 0, 0)
-
-        sorted_tags = sorted(tags, key=tag_sort_key, reverse=True)
+        sorted_tags = sorted(tags, key=self._tag_sort_key, reverse=True)
         return sorted_tags[0]
 
     def validate_publish_tag(self, tag: str) -> bool:
@@ -540,19 +740,25 @@ class ReleaseOpsManager:
             url = f"https://pypi.org/pypi/{dist_name}/{version}/json"
             try:
                 status, _ = self.http_get(url, 2.5)
-                present = (status == 200)
-                return pkg_key, {
+                result = {
                     "distribution": dist_name,
                     "version": version,
-                    "present": present,
                     "status_code": status,
                 }
+                if status == 200:
+                    result.update(present=True, availability="present")
+                elif status == 404:
+                    result.update(present=False, availability="absent")
+                else:
+                    result.update(present=None, availability="unavailable")
+                return pkg_key, result
             except Exception as exc:
                 return pkg_key, {
                     "distribution": dist_name,
                     "version": version,
                     "present": None,
-                    "error": type(exc).__name__,
+                    "availability": "unavailable",
+                    "error": _clean_text(f"{type(exc).__name__}: {exc}")[:240],
                 }
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
@@ -668,7 +874,7 @@ class ReleaseOpsManager:
         proc_output = ""
         try:
             proc = self.runner(
-                ["ps", "-axo", "etime,pid,args"],
+                ["ps", "-axo", "etime,pid,ppid,args"],
                 check=False,
                 text=True,
                 capture_output=True,
@@ -678,38 +884,28 @@ class ReleaseOpsManager:
         except Exception as exc:
             LOGGER.debug("ps execution failed: %s", exc)
 
-        running_bridges: list[dict[str, Any]] = []
-        host_processes: dict[str, list[dict[str, Any]]] = {}
+        processes: dict[int, dict[str, Any]] = {}
 
         for line in proc_output.splitlines():
             line = line.strip()
             if not line or line.startswith("ELAPSED"):
                 continue
-            parts = line.split(None, 2)
-            if len(parts) < 3:
+            parts = line.split(None, 3)
+            if len(parts) < 4:
                 continue
-            etime_str, pid_str, args_str = parts[0], parts[1], parts[2]
+            etime_str, pid_str, ppid_str, args_str = parts
             try:
                 pid = int(pid_str)
+                ppid = int(ppid_str)
             except ValueError:
                 continue
             elapsed_s = parse_elapsed_seconds(etime_str)
-
-            if "pursers-wait-bridge" in args_str or "pursers_wait_server" in args_str:
-                running_bridges.append({
-                    "pid": pid,
-                    "elapsed_s": elapsed_s,
-                    "command": args_str,
-                })
-
-            args_lower = args_str.lower()
-            for host, proc_name in HOST_PROCESS_NAMES.items():
-                if proc_name.lower() in args_lower:
-                    host_processes.setdefault(host, []).append({
-                        "pid": pid,
-                        "elapsed_s": elapsed_s,
-                        "command": args_str,
-                    })
+            processes[pid] = {
+                "pid": pid,
+                "ppid": ppid,
+                "elapsed_s": elapsed_s,
+                "command": args_str,
+            }
 
         configured_seats = []
         if self.inventory:
@@ -722,10 +918,74 @@ class ReleaseOpsManager:
         if configured_seats:
             known_hosts = {s.get("host") for s in configured_seats if s.get("host")}
 
+        def command_tokens(command: str) -> list[str]:
+            try:
+                return shlex.split(command)
+            except ValueError:
+                return command.split()
+
+        def seat_hosts(command: str) -> set[str]:
+            tokens = command_tokens(command)
+            joined = "\n".join(tokens)
+            matches: set[str] = set()
+            for seat in configured_seats:
+                name = seat.get("name")
+                host = seat.get("host")
+                if not isinstance(name, str) or not isinstance(host, str):
+                    continue
+                patterns = {
+                    name,
+                    f"--agent-name={name}",
+                    f"agent_name={name}",
+                    f"ONBOARD_AGENT_NAME={name}",
+                }
+                if any(token in patterns for token in tokens) or re.search(
+                    rf"(?:--agent-name|agent_name|ONBOARD_AGENT_NAME)[=\s]+{re.escape(name)}(?:\s|$)",
+                    joined,
+                ):
+                    matches.add(host)
+            return matches
+
+        def process_host(command: str) -> set[str]:
+            tokens = command_tokens(command)
+            executable_names = {Path(token).name for token in tokens[:2]}
+            return {
+                host
+                for host, process_name in HOST_PROCESS_NAMES.items()
+                if process_name in executable_names
+            } & {str(host) for host in known_hosts}
+
+        bridges_by_host: dict[str, list[dict[str, Any]]] = {
+            str(host): [] for host in known_hosts
+        }
+        unknown_bridges: list[dict[str, Any]] = []
+        for bridge in processes.values():
+            command = bridge["command"]
+            if "pursers-wait-bridge" not in command and "pursers_wait_server" not in command:
+                continue
+            seat_candidates = seat_hosts(command)
+            process_candidates: set[str] = set()
+            ancestor_pid = bridge["ppid"]
+            visited: set[int] = set()
+            for _ in range(8):
+                if ancestor_pid <= 0 or ancestor_pid in visited:
+                    break
+                visited.add(ancestor_pid)
+                ancestor = processes.get(ancestor_pid)
+                if ancestor is None:
+                    break
+                seat_candidates.update(seat_hosts(ancestor["command"]))
+                process_candidates.update(process_host(ancestor["command"]))
+                ancestor_pid = ancestor["ppid"]
+            candidates = seat_candidates or process_candidates
+            if len(candidates) == 1:
+                bridges_by_host.setdefault(candidates.pop(), []).append(bridge)
+            else:
+                unknown_bridges.append(bridge)
+
         checklist: list[dict[str, Any]] = []
         for host in sorted(known_hosts):
-            hosts_bridges = running_bridges
-            host_procs = host_processes.get(host, [])
+            hosts_bridges = bridges_by_host.get(str(host), [])
             needs_restart = False
             reasons = []
             stale_pids = []
@@ -737,15 +997,6 @@ class ReleaseOpsManager:
                         stale_pids.append(bp["pid"])
                         reasons.append(
                             f"Bridge PID {bp['pid']} started before shim update"
-                        )
-
-            if shim_age is not None and host_procs:
-                for hp in host_procs:
-                    if hp["elapsed_s"] > shim_age and not needs_restart:
-                        needs_restart = True
-                        stale_pids.append(hp["pid"])
-                        reasons.append(
-                            f"Host {host} PID {hp['pid']} started before shim update"
                         )
 
             seat_records = [s for s in configured_seats if s.get("host") == host]
@@ -763,9 +1014,32 @@ class ReleaseOpsManager:
             checklist.append({
                 "host": host,
                 "needs_restart": needs_restart,
+                "attribution": "proven" if hosts_bridges else "none",
                 "installed_bridge_version": installed_version,
-                "running_pids": stale_pids or [p["pid"] for p in host_procs],
-                "reason": "; ".join(reasons) if reasons else "Running current bridge shim",
+                "running_pids": [p["pid"] for p in hosts_bridges],
+                "reason": "; ".join(reasons) if reasons else (
+                    "Running current attributed bridge shim"
+                    if hosts_bridges
+                    else "No bridge process could be attributed to this host"
+                ),
+            })
+
+        if unknown_bridges:
+            stale_unknown = [
+                bridge["pid"]
+                for bridge in unknown_bridges
+                if shim_age is not None and bridge["elapsed_s"] > shim_age
+            ]
+            checklist.append({
+                "host": "unknown",
+                "needs_restart": bool(stale_unknown),
+                "attribution": "unknown",
+                "installed_bridge_version": installed_version,
+                "running_pids": [bridge["pid"] for bridge in unknown_bridges],
+                "reason": (
+                    "Bridge host attribution is unknown; inspect before restarting"
+                    + (f" (stale PIDs: {', '.join(map(str, stale_unknown))})" if stale_unknown else "")
+                ),
             })
 
         return checklist
@@ -815,42 +1089,57 @@ class ReleaseOpsManager:
         self,
         tag: str | None = None,
         *,
+        plan: dict[str, Any] | None = None,
         log_callback: Callable[[str], None] | None = None,
     ) -> dict[str, Any]:
         def emit(msg: str) -> None:
             if log_callback:
                 log_callback(msg)
 
-        # Fatal origin tag lookup
-        origin_tags = self.get_origin_tags()
-        if not origin_tags:
-            emit("Publish failed: Could not retrieve tags from origin.")
-            raise RuntimeError("Origin tags could not be retrieved from origin; publish refused.")
-
-        target_tag = tag or self.get_latest_tag()
-        if not target_tag:
-            emit("Publish failed: No tag available to publish.")
-            raise ValueError("No tag selected or available to publish")
-
-        if target_tag not in origin_tags:
-            emit(f"Publish failed: Tag '{target_tag}' does not exist on origin.")
-            raise ValueError(f"Tag '{target_tag}' does not exist on origin; refused to publish.")
-
-        cmd = ["gh", "workflow", "run", PUBLISH_WORKFLOW_FILE, "--ref", target_tag]
-        cmd_str = f"gh workflow run {PUBLISH_WORKFLOW_FILE} --ref {shlex.quote(target_tag)}"
-        emit(f"Running command: {cmd_str}")
-
-        proc = self.runner(cmd, check=False, text=True, capture_output=True, timeout=30)
+        try:
+            active_plan = plan or self.resolve_action_plan(
+                "publish_from_tag", tag=tag
+            )
+            self.revalidate_action_plan(active_plan)
+            target_tag = str(active_plan["tag"])
+            cmd_str = str(active_plan["command"])
+            cmd = ["gh", "workflow", "run", PUBLISH_WORKFLOW_FILE, "--ref", target_tag]
+            emit(f"Running command: {cmd_str}")
+            proc = self.runner(
+                cmd, check=False, text=True, capture_output=True, timeout=30
+            )
+        except Exception as exc:
+            emit(f"Publish failed: {exc}")
+            self._journal(
+                "publish_from_tag",
+                phase="execute",
+                ok=False,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            raise
         stdout = proc.stdout or ""
         stderr = proc.stderr or ""
         output = _clean_text((stdout + "\n" + stderr).strip())
         if proc.returncode != 0:
             emit(f"Publish workflow failed (code {proc.returncode}):\n{output}")
-            self._journal("publish_from_tag", tag=target_tag, ok=False, code=proc.returncode)
+            self._journal(
+                "publish_from_tag",
+                phase="execute",
+                tag=target_tag,
+                ok=False,
+                code=proc.returncode,
+                error=output,
+            )
             raise RuntimeError(f"Workflow trigger failed (exit {proc.returncode}):\n{output}")
 
         emit(f"Publish workflow successfully triggered for tag {target_tag}")
-        self._journal("publish_from_tag", tag=target_tag, ok=True, code=proc.returncode)
+        self._journal(
+            "publish_from_tag",
+            phase="execute",
+            tag=target_tag,
+            ok=True,
+            code=proc.returncode,
+        )
         LOGGER.info("ops publish_from_tag: tag=%s ok=True", target_tag)
         return {
             "ok": True,
@@ -862,6 +1151,7 @@ class ReleaseOpsManager:
     def stage_central(
         self,
         *,
+        plan: dict[str, Any] | None = None,
         log_callback: Callable[[str], None] | None = None,
     ) -> dict[str, Any]:
         """Full fail-closed Stage Central transaction: copy wheel, verify SHA-256 against trusted build metadata, atomically update profile.env pins with 0600 preservation, pip install --no-deps, rollback on failure."""
@@ -869,7 +1159,19 @@ class ReleaseOpsManager:
             if log_callback:
                 log_callback(msg)
 
-        plan = self._resolve_stage_plan()
+        try:
+            plan = plan or self.resolve_action_plan("stage_central")
+            self.revalidate_action_plan(plan)
+        except Exception as exc:
+            emit(f"Stage plan rejected: {exc}")
+            self._journal(
+                "stage_central",
+                phase="execute",
+                ok=False,
+                error=f"{type(exc).__name__}: {exc}",
+                rollback={"attempted": False, "reason": "no mutation"},
+            )
+            raise
         profile = plan["profile"]
         python = plan["python"]
         central_version = plan["central_version"]
@@ -952,7 +1254,14 @@ class ReleaseOpsManager:
                 raise RuntimeError(f"Pip install failed with code {proc.returncode}:\n{output}")
 
             emit("Step 5: Successfully installed Central wheel.")
-            self._journal("stage_central", wheel=str(dest_wheel), sha256=dest_sha, ok=True)
+            self._journal(
+                "stage_central",
+                phase="execute",
+                wheel=str(dest_wheel),
+                sha256=dest_sha,
+                ok=True,
+                rollback={"attempted": False},
+            )
             LOGGER.info("ops stage_central succeeded: %s", dest_wheel)
             return {
                 "ok": True,
@@ -966,6 +1275,8 @@ class ReleaseOpsManager:
         except Exception as exc:
             emit(f"ERROR during Stage Central: {exc}")
             emit("Rolling back profile.env and staged wheel...")
+            rollback_steps: list[dict[str, Any]] = []
+            rollback_failures: list[str] = []
             # Roll back profile.env
             try:
                 self._atomic_replace_bytes(
@@ -975,8 +1286,12 @@ class ReleaseOpsManager:
                     uid=original_uid,
                     gid=original_gid,
                 )
+                rollback_steps.append({"target": "profile.env", "ok": True})
             except Exception as rb_exc:
                 LOGGER.error("Failed rolling back profile.env: %s", rb_exc)
+                detail = f"profile.env: {type(rb_exc).__name__}: {rb_exc}"
+                rollback_failures.append(detail)
+                rollback_steps.append({"target": "profile.env", "ok": False, "error": detail})
 
             # Roll back destination wheel
             try:
@@ -992,28 +1307,73 @@ class ReleaseOpsManager:
                         uid=destination_uid,
                         gid=destination_gid,
                     )
+                rollback_steps.append({"target": "staged wheel", "ok": True})
             except Exception as rb_exc:
                 LOGGER.error("Failed restoring dest wheel: %s", rb_exc)
+                detail = f"staged wheel: {type(rb_exc).__name__}: {rb_exc}"
+                rollback_failures.append(detail)
+                rollback_steps.append({"target": "staged wheel", "ok": False, "error": detail})
 
-            self._journal("stage_central", ok=False, error=str(exc))
+            if rollback_failures:
+                rollback_message = "ROLLBACK FAILED: " + "; ".join(rollback_failures)
+                emit(rollback_message)
+            else:
+                rollback_message = "Rollback completed successfully"
+                emit(rollback_message)
+            self._journal(
+                "stage_central",
+                phase="execute",
+                ok=False,
+                error=f"{type(exc).__name__}: {exc}",
+                rollback={
+                    "attempted": True,
+                    "steps": rollback_steps,
+                    "failures": rollback_failures,
+                },
+            )
+            if rollback_failures:
+                raise RuntimeError(f"{exc}; {rollback_message}") from exc
             raise
 
     def kickstart_central(
         self,
         *,
+        plan: dict[str, Any] | None = None,
         log_callback: Callable[[str], None] | None = None,
     ) -> dict[str, Any]:
         def emit(msg: str) -> None:
             if log_callback:
                 log_callback(msg)
 
-        uid = os.getuid() if hasattr(os, "getuid") else 501
-        target = f"gui/{uid}/{self.central_job_label}"
+        try:
+            active_plan = plan or self.resolve_action_plan("kickstart_central")
+            self.revalidate_action_plan(active_plan)
+            target = str(active_plan["target"])
+            cmd_str = str(active_plan["command"])
+        except Exception as exc:
+            self._journal(
+                "kickstart_central",
+                phase="execute",
+                ok=False,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            raise
         cmd = ["launchctl", "kickstart", "-k", target]
-        cmd_str = f"launchctl kickstart -k {target}"
         emit(f"Running command: {cmd_str}")
 
-        proc = self.runner(cmd, check=False, text=True, capture_output=True, timeout=10)
+        try:
+            proc = self.runner(
+                cmd, check=False, text=True, capture_output=True, timeout=10
+            )
+        except Exception as exc:
+            self._journal(
+                "kickstart_central",
+                phase="execute",
+                target=target,
+                ok=False,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            raise
         stdout = proc.stdout or ""
         stderr = proc.stderr or ""
         output = _clean_text((stdout + "\n" + stderr).strip())
@@ -1035,19 +1395,42 @@ class ReleaseOpsManager:
     def restart_dashboard(
         self,
         *,
+        plan: dict[str, Any] | None = None,
         log_callback: Callable[[str], None] | None = None,
     ) -> dict[str, Any]:
         def emit(msg: str) -> None:
             if log_callback:
                 log_callback(msg)
 
-        uid = os.getuid() if hasattr(os, "getuid") else 501
-        target = f"gui/{uid}/{self.dashboard_job_label}"
+        try:
+            active_plan = plan or self.resolve_action_plan("restart_dashboard")
+            self.revalidate_action_plan(active_plan)
+            target = str(active_plan["target"])
+            cmd_str = str(active_plan["command"])
+        except Exception as exc:
+            self._journal(
+                "restart_dashboard",
+                phase="execute",
+                ok=False,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            raise
         cmd = ["launchctl", "kickstart", "-k", target]
-        cmd_str = f"launchctl kickstart -k {target}"
         emit(f"Running command: {cmd_str}")
 
-        proc = self.runner(cmd, check=False, text=True, capture_output=True, timeout=10)
+        try:
+            proc = self.runner(
+                cmd, check=False, text=True, capture_output=True, timeout=10
+            )
+        except Exception as exc:
+            self._journal(
+                "restart_dashboard",
+                phase="execute",
+                target=target,
+                ok=False,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            raise
         stdout = proc.stdout or ""
         stderr = proc.stderr or ""
         output = _clean_text((stdout + "\n" + stderr).strip())

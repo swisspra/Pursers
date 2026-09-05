@@ -34,11 +34,13 @@ without shell commands or credential exposure:
 
 - **Release card**: telemetry from `release_versions.toml`, latest git/origin tags,
   CI status for `main` and the tag commit (via `gh run list`), PyPI distribution
-  presence per package (JSON 200/404 via pypi.org), GitHub Release status,
+  presence per package (JSON 200 is present, 404 is absent, and every other
+  bounded HTTP/transport result is unavailable), GitHub Release status,
   and live Central version (`/healthz`) compared against staged `profile.env` pins.
-- **Seat restart checklist**: inspects running processes (`ps`) and wait-bridge
-  telemetry to detect bridge processes or hosts started before the installed
-  bridge shim version was updated, flagging hosts requiring an app restart.
+- **Seat restart checklist**: attributes each wait-bridge PID to a configured
+  host only from an exact seat marker or its process ancestry. Unprovable or
+  ambiguous processes are reported under `unknown` and never copied onto every
+  host. Only a stale bridge proven to belong to a host flags that host.
 - **Operator operations**:
   - `Publish from tag`: runs `gh workflow run publish-pypi.yml --ref <tag>`
   - `Stage Central`: resolves only the exact manifest version from the trusted
@@ -51,8 +53,15 @@ without shell commands or credential exposure:
   - `Restart dashboard`: restarts the fleet dashboard launchd service
 - **Safety model**:
   - All operations require loopback requests with same-origin validation and JSON payloads.
-  - Interactive actions require explicit browser confirmation showing the exact command.
-  - Every action appends an unprivileged audit record to `config-actions.jsonl` and the dashboard logger.
+  - Interactive actions first create a short-lived server-side plan. The browser
+    confirms its exact command and digest, then submits only that plan id/digest.
+    Plans are one-use; execution revalidates stored version, path, metadata, and
+    hash invariants instead of resolving replacement values after confirmation.
+  - Stage jobs are serialized, and duplicate publish triggers are refused while
+    an earlier job is queued or running.
+  - Every plan/execution attempt, resolution or subprocess failure, and rollback
+    outcome appends a scrubbed audit record to `config-actions.jsonl`. Rollback
+    failures remain visible in the job result with recovery-step details.
   - Sensitive tokens and authorization values are never requested, stored, or logged.
 
 ### Manual-edit appendix
