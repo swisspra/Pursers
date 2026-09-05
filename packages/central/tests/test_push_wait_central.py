@@ -6,7 +6,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -80,7 +80,7 @@ class PushWaitCentralTests(unittest.IsolatedAsyncioTestCase):
                 "board_member_add",
                 agent_name="admin-agent",
                 principal_id=principal.principal_id,
-                role="member",
+                role=("admin" if principal is self.coordinator else "member"),
             )
         self.worker_id = await self.join(self.worker, "worker-agent")
         self.other_id = await self.join(self.other, "other-agent")
@@ -285,7 +285,7 @@ class PushWaitCentralTests(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(MCPError):
                     await self.authorize_subscription(principal, uri)
 
-    async def test_assignment_and_nudge_publish_only_target_seat_cue(self) -> None:
+    async def test_assignment_publishes_only_target_seat_cue(self) -> None:
         ticket_id = await self.create_ticket()
 
         async def assign() -> object:
@@ -310,26 +310,6 @@ class PushWaitCentralTests(unittest.IsolatedAsyncioTestCase):
                 "assigned_to_agent_id"
             ],
             self.worker_id,
-        )
-
-        async def nudge() -> object:
-            self.principal = self.coordinator
-            return await self.call(
-                "agent_nudge",
-                agent_name="coordinator-agent",
-                ticket_id=ticket_id,
-                target_agent_id=self.worker_id,
-                coordinator_op_key="push-wait-nudge",
-                reason="targeted subscription test",
-                expires_at=(
-                    datetime.now(timezone.utc) + timedelta(minutes=5)
-                ).isoformat(),
-            )
-
-        nudged = await self.assert_target_only_cue(nudge)
-        self.assertEqual(
-            nudged.structured_content["event"]["recipient_identities"],
-            [self.worker_id],
         )
 
     async def test_assigned_creation_publishes_only_assignee_seat_cue(self) -> None:

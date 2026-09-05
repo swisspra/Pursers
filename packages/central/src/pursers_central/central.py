@@ -17,7 +17,7 @@ import secrets
 import time
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from functools import wraps
 from pathlib import Path
 from typing import Any, Iterable, Mapping
@@ -177,13 +177,9 @@ DEPRECATION_WARNING_UNIQUE_FIELDS = (
 DEPRECATION_WARNING_DEDUPE_MAX_ENTRIES = 4_096
 DEPRECATED_TOOLS = frozenset(
     {
-        "agent_nudge",
-        "board_get_briefing",
         "ticket_assign",
-        "ticket_terminate",
     }
 )
-DEPRECATED_READ_TOOLS = frozenset({"board_get_briefing"})
 REVIEW_CORE_OVERRIDE_FIELDS = frozenset(
     {"review_policy_at_verdict", "review_label", "review_verdict"}
 )
@@ -1528,7 +1524,6 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         ),
         middleware=[SubscriptionAuthorization(service)],
     )
-    deprecated_read_warnings: set[tuple[str, str, str, str]] = set()
     membership_role_default_notes: set[tuple[str, str, str]] = set()
 
     def tool() -> Any:
@@ -1591,52 +1586,35 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                     if board_id and isinstance(board_id, str):
                         principal = current_principal()
                         caller_name = str(agent_name or "unknown")
-                        if tool_name in DEPRECATED_READ_TOOLS:
-                            warning_key = (
-                                board_id,
-                                tool_name,
-                                principal.principal_id,
-                                caller_name,
-                            )
-                            if warning_key not in deprecated_read_warnings:
-                                deprecated_read_warnings.add(warning_key)
-                                log_runtime_event(
-                                    "deprecated_tool_warning",
-                                    board_id=board_id,
-                                    tool=tool_name,
-                                    caller_principal_id=principal.principal_id,
-                                    caller_agent_name=caller_name,
-                                )
-                        else:
-                            actor_agent = agent_id(
-                                board_id, principal.principal_id, caller_name
-                            )
-                            _warning, created = await append_once_and_publish(
-                                board_id,
-                                {"agent_id": actor_agent},
-                                "deprecated_tool_warning",
-                                f"board://{board_id}/tool/{tool_name}",
-                                [],
-                                ctx,
-                                unique_fields=DEPRECATION_WARNING_UNIQUE_FIELDS,
-                                tool=tool_name,
-                                caller_principal_id=principal.principal_id,
-                                caller_agent_name=caller_name,
-                                message=(
-                                    f"Tool '{tool_name}' is deprecated in a18 and "
-                                    "scheduled for removal in a19."
-                                ),
-                            )
-                            if created and isinstance(result, dict):
-                                cur_seq = latest_seq(board_id)
-                                if "latest_seq" in result:
-                                    result["latest_seq"] = cur_seq
-                                if (
-                                    "briefing" in result
-                                    and isinstance(result["briefing"], dict)
-                                    and "latest_seq" in result["briefing"]
-                                ):
-                                    result["briefing"]["latest_seq"] = cur_seq
+                        actor_agent = agent_id(
+                            board_id, principal.principal_id, caller_name
+                        )
+                        _warning, created = await append_once_and_publish(
+                            board_id,
+                            {"agent_id": actor_agent},
+                            "deprecated_tool_warning",
+                            f"board://{board_id}/tool/{tool_name}",
+                            [],
+                            ctx,
+                            unique_fields=DEPRECATION_WARNING_UNIQUE_FIELDS,
+                            tool=tool_name,
+                            caller_principal_id=principal.principal_id,
+                            caller_agent_name=caller_name,
+                            message=(
+                                f"Tool '{tool_name}' is deprecated and retained "
+                                "only as an admin coordination escape hatch."
+                            ),
+                        )
+                        if created and isinstance(result, dict):
+                            cur_seq = latest_seq(board_id)
+                            if "latest_seq" in result:
+                                result["latest_seq"] = cur_seq
+                            if (
+                                "briefing" in result
+                                and isinstance(result["briefing"], dict)
+                                and "latest_seq" in result["briefing"]
+                            ):
+                                result["briefing"]["latest_seq"] = cur_seq
 
                 return result
 
@@ -5286,7 +5264,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         expected_assigned_to_agent_id: str | None = None,
         expected_generation: str | None = None,
     ) -> dict[str, Any]:
-        """Atomically assign one still-open ticket under narrow coordination authority."""
+        """Atomically assign one open ticket as an admin with coordination scope."""
         board_id = require_id("board_id", board_id)
         ticket_id = require_id("ticket_id", ticket_id)
         assigned_to_agent_id = require_id(
@@ -5303,6 +5281,9 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         now = time.time()
 
         def assign(document: dict[str, Any]) -> dict[str, Any]:
+            service.resolve_board_context(
+                document, principal.principal_id, {"admin"}
+            )
             actor = coordinator_actor(document, principal, agent_name)
             profile = board_scrub_profile(document)
             safe_key = clean_text(
@@ -5397,141 +5378,6 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             ],
             coordinator_op_key=changed["op_key"],
             coordination_reason=changed["reason"],
-        )
-        return {
-            "ok": True,
-            "ticket": changed["ticket"],
-            "event": event,
-            "event_created": created,
-            "idempotent_replay": changed["replayed"],
-        }
-
-    @tool()
-    async def agent_nudge(
-        board_id: str,
-        agent_name: str,
-        ticket_id: str,
-        target_agent_id: str,
-        coordinator_op_key: str,
-        reason: str,
-        expires_at: str,
-        ctx: Context,
-        expected_generation: str | None = None,
-    ) -> dict[str, Any]:
-        """Emit one deduplicated ticket wake cue to one exact eligible seat."""
-        board_id = require_id("board_id", board_id)
-        ticket_id = require_id("ticket_id", ticket_id)
-        target_agent_id = require_id("target_agent_id", target_agent_id)
-        try:
-            parsed_expiry = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
-        except (AttributeError, ValueError) as exc:
-            raise ValueError("expires_at must be an ISO-8601 timestamp") from exc
-        if parsed_expiry.tzinfo is None:
-            raise ValueError("expires_at must include a timezone")
-        expiry_utc = parsed_expiry.astimezone(timezone.utc)
-        current_utc = datetime.now(timezone.utc)
-        if not current_utc < expiry_utc <= current_utc + timedelta(hours=1):
-            raise ValueError("expires_at must be within the next hour")
-        principal = current_principal()
-        require_scope(principal, COORDINATOR_SCOPE)
-
-        def nudge(document: dict[str, Any]) -> dict[str, Any]:
-            actor = coordinator_actor(document, principal, agent_name)
-            profile = board_scrub_profile(document)
-            safe_key = clean_text(
-                "coordinator_op_key", coordinator_op_key,
-                required=True, max_length=256, scrub_profile=profile,
-            )
-            safe_reason = clean_text(
-                "reason", reason, required=True, max_length=500,
-                scrub_profile=profile,
-            )
-            assert safe_key is not None and safe_reason is not None
-            ticket = document["tickets"].get(ticket_id)
-            if ticket is None:
-                raise ValueError("ticket not found")
-            raw_nudges = ticket.setdefault("coordinator_nudges", [])
-            if isinstance(raw_nudges, Mapping):
-                nudges = [
-                    dict(item)
-                    for item in raw_nudges.values()
-                    if isinstance(item, Mapping)
-                ]
-                ticket["coordinator_nudges"] = nudges
-            elif isinstance(raw_nudges, list):
-                nudges = raw_nudges
-            else:
-                raise ValueError("ticket coordinator nudge history is invalid")
-            prior = next(
-                (
-                    item
-                    for item in nudges
-                    if isinstance(item, Mapping) and item.get("op_key") == safe_key
-                ),
-                None,
-            )
-            if prior is not None:
-                if prior.get("target_agent_id") != target_agent_id:
-                    raise ValueError("idempotency key conflicts with prior nudge")
-                return {
-                    "actor": copy.deepcopy(actor),
-                    "ticket": copy.deepcopy(ticket),
-                    "op_key": safe_key,
-                    "reason": safe_reason,
-                    "replayed": True,
-                }
-            if ticket.get("status") != "open" or ticket.get("claimed_by_agent_id"):
-                raise ValueError(
-                    "nudge state precondition failed: ticket must remain open and unclaimed"
-                )
-            target = document["members"].get(target_agent_id)
-            if (
-                target is None
-                or target_agent_id == actor["agent_id"]
-                or target.get("lifecycle_status", "active") != "active"
-                or target.get("membership_role") not in {"member", "admin"}
-            ):
-                raise ValueError("nudge target is not an active eligible seat")
-            nudges.append({
-                "op_key": safe_key,
-                "reason": safe_reason,
-                "target_agent_id": target_agent_id,
-                "expires_at": expiry_utc.isoformat(),
-                "nudged_by_agent_id": actor["agent_id"],
-            })
-            return {
-                "actor": copy.deepcopy(actor),
-                "ticket": copy.deepcopy(ticket),
-                "op_key": safe_key,
-                "reason": safe_reason,
-                "replayed": False,
-            }
-
-        changed = service.mutate(board_id, nudge)
-        if changed["replayed"]:
-            return {
-                "ok": True,
-                "ticket": changed["ticket"],
-                "event": None,
-                "event_created": False,
-                "idempotent_replay": True,
-            }
-        uri = resource_uri(board_id, "ticket", ticket_id)
-        event, created = await append_once_and_publish(
-            board_id,
-            changed["actor"],
-            "coordinator_nudge",
-            uri,
-            [target_agent_id],
-            ctx,
-            unique_fields=("coordinator_op_key",),
-            ticket_id=ticket_id,
-            status_from="open",
-            status_to="open",
-            target_agent_id=target_agent_id,
-            coordinator_op_key=changed["op_key"],
-            coordination_reason=changed["reason"],
-            expires_at=expiry_utc.isoformat(),
         )
         return {
             "ok": True,
@@ -6690,113 +6536,6 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         }
 
     @tool()
-    async def ticket_terminate(
-        board_id: str,
-        agent_name: str,
-        ticket_id: str,
-        ctx: Context,
-        reason: str | None = None,
-        expected_generation: str | None = None,
-    ) -> dict[str, Any]:
-        """Force a live ticket terminal as its creator or a board reviewer."""
-        board_id = require_id("board_id", board_id)
-        ticket_id = require_id("ticket_id", ticket_id)
-        principal = current_principal()
-        require_scope(principal, "board:write")
-        now = time.time()
-
-        def terminate(document: dict[str, Any]) -> dict[str, Any]:
-            profile = board_scrub_profile(document)
-            allow_counts: dict[str, int] = {}
-            safe_reason = clean_text(
-                "reason", reason, required=reason is not None, max_length=2_000,
-                scrub_profile=profile, allow_counts=allow_counts,
-            )
-            actor, released, renewed = prepare_board_call(
-                document, principal, agent_name, now
-            )
-            ticket = document["tickets"].get(ticket_id)
-            if ticket is None:
-                raise ValueError("ticket not found")
-            if ticket.get("status") in TERMINAL_TICKET_STATES:
-                raise ValueError(f"ticket is already {ticket['status']}")
-            basis = None
-            if ticket.get("created_by_principal_id") == principal.principal_id:
-                basis = "creator principal"
-            elif board_role_allows_review(document, principal):
-                basis = "board:review"
-            if basis is None:
-                raise PermissionError(
-                    "terminate denied: requires creator or board:review"
-                )
-            old_status = str(ticket["status"])
-            ticket["status"] = "terminated"
-            ticket["terminated_by_agent_id"] = actor["agent_id"]
-            ticket["terminated_by_principal_id"] = principal.principal_id
-            ticket["terminate_permission"] = basis
-            ticket["terminated_at"] = iso_at(now)
-            ticket["updated_at"] = iso_at(now)
-            if safe_reason:
-                ticket["terminate_reason"] = safe_reason
-            for kind in ("work", "review"):
-                offer = ticket.pop(f"{kind}_offer", None)
-                if isinstance(offer, Mapping):
-                    released.append(
-                        {
-                            "kind": OFFER_REVOKED, "ticket_id": ticket_id,
-                            "offer_kind": kind,
-                            "offered_agent_id": offer.get("agent_id"),
-                            "offered_agent_name": offer.get("agent_name"),
-                            "offer_expires_at": offer.get("expires_at"),
-                            "dispatch_reason": "ticket_terminated",
-                            "recipients": [offer.get("agent_id")],
-                        }
-                    )
-            if dispatch_enabled(document):
-                ticket["dispatch_state"] = {
-                    "state": "terminated", "at": iso_at(now)
-                }
-            released.extend(redispatch_queue(document, now))
-            for key in (
-                "lease_expires_at_epoch", "lease_expires_at",
-                "lease_renewed_at", "ttl_s",
-            ):
-                ticket.pop(key, None)
-            scrub_audit = record_scrub_allows(
-                document, actor, now, allow_counts
-            )
-            return {
-                "actor": actor,
-                "ticket": copy.deepcopy(ticket),
-                "recipients": ticket_recipients(document, actor),
-                "old_status": old_status,
-                "released": released,
-                "renewed": renewed,
-                "permission": basis,
-                "scrub_audit": scrub_audit,
-            }
-
-        changed = service.mutate(board_id, terminate)
-        release_events = await publish_releases(
-            board_id, changed["released"], principal, ctx
-        )
-        uri = resource_uri(board_id, "ticket", ticket_id)
-        event = await append_and_publish(
-            board_id, changed["actor"], "ticket_status_changed", uri,
-            changed["recipients"], ctx, ticket_id=ticket_id,
-            status_from=changed["old_status"], status_to="terminated",
-        )
-        return {
-            "ok": True,
-            "ticket": changed["ticket"],
-            "permission": changed["permission"],
-            "event": event,
-            "release_events": release_events,
-            "implicitly_renewed": changed["renewed"],
-            "scrub_audit": changed["scrub_audit"],
-        }
-
-    @tool()
     async def ticket_list(
         board_id: str,
         status: str | None = None,
@@ -7626,31 +7365,6 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         }
 
     @tool()
-    async def board_get_briefing(
-        board_id: str,
-        ctx: Context,
-        token_budget: int = 4_000,
-        ticket_id: str | None = None,
-    ) -> dict[str, Any]:
-        """Return a pure, principal-filtered, token-bounded board briefing."""
-        board_id = require_id("board_id", board_id)
-        if ticket_id is not None:
-            require_id("ticket_id", ticket_id)
-        principal = current_principal()
-        require_scope(principal, "board:read")
-        document = service.load(board_id)
-        service.principal_members(document, principal.principal_id)
-        result = briefing_payload(
-            document, principal, token_budget, ticket_id=ticket_id
-        )
-        return {
-            "ok": True,
-            "board_id": board_id,
-            **result,
-            "latest_seq": latest_seq(board_id),
-        }
-
-    @tool()
     async def board_status(
         board_id: str, include_retired: bool = False
     ) -> dict[str, Any]:
@@ -8197,7 +7911,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 t.model_copy(
                     update={
                         "annotations": types.ToolAnnotations(
-                            title=f"[DEPRECATED] {t.name} is deprecated in a18 and scheduled for removal in a19"
+                            title=f"[DEPRECATED] {t.name} is an admin coordination escape hatch"
                         ),
                         "meta": {"deprecated": True},
                     }
@@ -8227,7 +7941,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 t.model_copy(
                     update={
                         "annotations": types.ToolAnnotations(
-                            title=f"[DEPRECATED] {t.name} is deprecated in a18 and scheduled for removal in a19"
+                            title=f"[DEPRECATED] {t.name} is an admin coordination escape hatch"
                         ),
                         "meta": {"deprecated": True},
                     }

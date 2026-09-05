@@ -7,6 +7,21 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Removed
+
+- `agent_nudge`; autonomous Dispatcher offers are the sole targeted wake path.
+- `board_get_briefing`; use bounded `board_status` and `board_snapshot` views.
+- `ticket_terminate`; use `ticket_cancel` for role-authorized cancellation.
+
+### Deprecated
+
+- `ticket_assign` remains callable only as the admin/`board:coordinate` escape
+  hatch and stays hidden from `tools/list` unless legacy capability negotiation
+  enables it. Calls return `_deprecated: true` and emit a durable, deduplicated
+  `deprecated_tool_warning`.
+- The Personal `memory_*` family remains active and visible because the Personal
+  app is its shipped caller.
+
 ## [5.0.0a20] - 2026-09-05
 
 This release includes `pursers-central==0.1.0a24`,
