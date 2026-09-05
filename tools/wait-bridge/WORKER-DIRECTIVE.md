@@ -68,6 +68,10 @@ Run this loop continuously. Each pass is one unit of work:
    Never claim an unoffered ticket. If the offer expires or is revoked, re-arm
    and wait for the next offer. Legacy boards continue broadcast behavior.
    `PURSERS_WAIT_MODE=poll` is compatibility-only.
+   - On first use, omitting `since_seq` resumes and advances Central's persisted
+     cursor. Large history is bounded with `compacted`, `dropped`, and
+     `event_counts`; `partial=true` means refetch current state and re-arm from
+     `new_seq`. A `cursor_ahead_clamped` warning is recoverable.
    - If it returns `timed_out=true`, no work arrived — **re-arm immediately**:
      call `a2a_wait` again with `since_seq` set to the returned `new_seq`. Keep
      re-arming. This is how you stay available for hours without a human poking

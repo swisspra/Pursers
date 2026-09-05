@@ -96,7 +96,7 @@ class FakeClient:
         return {"ticket": self.tickets[ticket_id]}
 
     async def ticket_list(self, **_arguments: Any):
-        return {"tickets": []}
+        return {"tickets": list(self.tickets.values())}
 
     async def lease_renew(self, ticket_id: str):
         self.renewed.append(ticket_id)
@@ -318,7 +318,7 @@ class PerCallWaitTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["events"][0]["ticket_id"], "TK-submitted")
         self.assertEqual(
             list_calls,
-            [{"include_closed": False, "limit": 100, "status": "submitted",
+            [{"include_closed": False, "limit": 500, "status": "submitted",
               "review_unclaimed_only": True}],
         )
 
