@@ -961,6 +961,65 @@ class DispatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fetched["work_offer_expirations"], 1)
         self.assertNotIn("work_offer", fetched)
 
+    async def test_work_offer_rehydrates_and_expires_promptly_after_central_restart(self) -> None:
+        await self.add_seat(self.worker_a, "worker-a", {"tier_max": 2})
+        self.principal = self.admin
+        await self.call(
+            "board_dispatch_policy_set", agent_name="admin-agent", offer_ttl_s=1
+        )
+        created = await self.create()
+        ticket_id = created.structured_content["ticket"]["ticket_id"]
+        self.assertIn("work_offer", created.structured_content["ticket"])
+
+        _mcp2, service2 = central.build_server(
+            "localhost", 8765, self.root / "data"
+        )
+        key = ("pursers", ticket_id, "work")
+        self.assertIn(key, service2.offer_deadline_tasks)
+
+        await asyncio.sleep(1.2)
+
+        doc = service2.load("pursers")
+        ticket = doc["tickets"][ticket_id]
+        self.assertNotIn("work_offer", ticket)
+        self.assertEqual(ticket["dispatch_state"]["state"], "broadcast")
+        self.assertEqual(ticket["dispatch_state"]["reason"], "no_candidates_remaining")
+
+    async def test_review_offer_rehydrates_and_expires_promptly_after_central_restart(self) -> None:
+        _worker = await self.add_seat(self.worker_a, "worker-a", {"tier_max": 2})
+        reviewer = await self.add_seat(
+            self.reviewer_a, "reviewer-a",
+            {"tier_max": 2, "can_work": False, "can_review": True},
+            role="reviewer",
+        )
+        self.principal = self.admin
+        await self.call(
+            "board_dispatch_policy_set", agent_name="admin-agent", offer_ttl_s=1
+        )
+        created = await self.create()
+        ticket_id = created.structured_content["ticket"]["ticket_id"]
+        self.principal = self.worker_a
+        await self.call("ticket_claim", agent_name="worker-a", ticket_id=ticket_id)
+        submitted = await self.call(
+            "ticket_submit", agent_name="worker-a", ticket_id=ticket_id, summary="done"
+        )
+        self.assertIn("review_offer", submitted.structured_content["ticket"])
+        self.assertEqual(submitted.structured_content["ticket"]["review_offer"]["agent_id"], reviewer)
+
+        _mcp2, service2 = central.build_server(
+            "localhost", 8765, self.root / "data"
+        )
+        key = ("pursers", ticket_id, "review")
+        self.assertIn(key, service2.offer_deadline_tasks)
+
+        await asyncio.sleep(1.2)
+
+        doc = service2.load("pursers")
+        ticket = doc["tickets"][ticket_id]
+        self.assertNotIn("review_offer", ticket)
+        self.assertEqual(ticket["dispatch_state"]["state"], "broadcast")
+        self.assertEqual(ticket["dispatch_state"]["reason"], "no_candidates_remaining")
+
 
 if __name__ == "__main__":
     unittest.main()

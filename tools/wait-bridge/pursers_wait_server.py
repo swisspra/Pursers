@@ -3481,6 +3481,17 @@ async def _wait_for_work_many(
         return _maintenance_due_in(now, remaining, flat_due, next_progress)
 
     final_poll: list[str] = list(active)
+    poll_heartbeat_interval = min(30.0, float(os.environ.get("PURSERS_POLL_HEARTBEAT_INTERVAL_S", "15.0")))
+    last_poll_heartbeats: dict[str, float] = {b: started for b in active}
+
+    async def poll_heartbeat_multi(board_id: str, now: float) -> None:
+        if now - last_poll_heartbeats.get(board_id, 0.0) >= poll_heartbeat_interval:
+            last_poll_heartbeats[board_id] = now
+            try:
+                await views[board_id].board_join(agent_name=call_agent_name)
+            except Exception:
+                pass
+
     if WAIT_MODE == "push":
         queue: asyncio.Queue[
             tuple[str, str, dict[str, Any] | str | None]
@@ -3572,6 +3583,8 @@ async def _wait_for_work_many(
                 now = time.monotonic()
                 await maintain(now)
                 if fallback and now >= next_poll:
+                    for b in fallback:
+                        await poll_heartbeat_multi(b, now)
                     relevant = await poll_selected(
                         [board_id for board_id in active if board_id in fallback]
                     )
@@ -3602,6 +3615,8 @@ async def _wait_for_work_many(
             )
             now = time.monotonic()
             await maintain(now)
+            for b in active:
+                await poll_heartbeat_multi(b, now)
             if _GLOBAL_KEEPALIVE is not None:
                 cues = _GLOBAL_KEEPALIVE.drain_cues(set(active))
                 if cues:
@@ -3870,6 +3885,18 @@ async def _wait_for_work(
                 f"poll for this call and retrying push on re-arm: {exc}"
             )
 
+    poll_heartbeat_interval = min(30.0, float(os.environ.get("PURSERS_POLL_HEARTBEAT_INTERVAL_S", "15.0")))
+    last_poll_heartbeat = started
+
+    async def poll_heartbeat(now: float) -> None:
+        nonlocal last_poll_heartbeat
+        if now - last_poll_heartbeat >= poll_heartbeat_interval:
+            last_poll_heartbeat = now
+            try:
+                await client.board_join(agent_name=call_agent_name)
+            except Exception:
+                pass
+
     # 3. Poll until relevant work appears or the budget runs out. This is the
     # default path and the whole-call fallback after any push failure.
     while True:
@@ -3887,6 +3914,7 @@ async def _wait_for_work(
 
         now = time.monotonic()
         await maintain(now)
+        await poll_heartbeat(now)
 
         if _GLOBAL_KEEPALIVE is not None:
             cues = _GLOBAL_KEEPALIVE.drain_cues({BOARD_ID})

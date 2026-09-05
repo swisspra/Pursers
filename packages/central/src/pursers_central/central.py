@@ -630,6 +630,8 @@ class CentralBoard:
         self.offer_deadline_tasks: dict[
             tuple[str, str, str], asyncio.Task[None]
         ] = {}
+        self._reap_callback: Any = None
+        self.mcp_server: Any = None
         # The JSON skeleton needs one service-wide boundary so a cold snapshot and
         # its journal watermark cannot split a domain-write/journal-append pair.
         self.tool_lock = asyncio.Lock()
@@ -639,6 +641,83 @@ class CentralBoard:
         self.expected_generation: contextvars.ContextVar[Any] = contextvars.ContextVar(
             "central_expected_generation", default=None
         )
+
+    def rehydrate_offer_deadlines(self) -> None:
+        try:
+            for doc in self.store.iter_documents("boards"):
+                board_id = doc.get("board_id")
+                if isinstance(board_id, str):
+                    self.rehydrate_board_offer_deadlines(board_id, doc)
+        except Exception:
+            pass
+
+    def rehydrate_board_offer_deadlines(
+        self, board_id: str, document: Mapping[str, Any]
+    ) -> None:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        now = time.time()
+        for ticket in document.get("tickets", {}).values():
+            ticket_id = ticket.get("ticket_id")
+            if not isinstance(ticket_id, str) or not ticket_id:
+                continue
+            for kind in ("work", "review"):
+                offer = ticket.get(f"{kind}_offer")
+                if not isinstance(offer, Mapping):
+                    continue
+                expires_at = offer.get("expires_at")
+                if not expires_at:
+                    continue
+                try:
+                    expires_epoch = datetime.fromisoformat(
+                        str(expires_at).replace("Z", "+00:00")
+                    ).timestamp()
+                except ValueError:
+                    continue
+                delay = max(0.001, expires_epoch - now)
+                key = (board_id, ticket_id, kind)
+                existing = self.offer_deadline_tasks.get(key)
+                if existing and not existing.done():
+                    continue
+
+                async def expire_rehydrated_offer(
+                    b_id: str, t_id: str, o_kind: str, target_epoch: float, wait_delay: float
+                ) -> None:
+                    pending_token = self.pending_notifications.set(None)
+                    generation_token = self.expected_generation.set(None)
+                    try:
+                        await asyncio.sleep(wait_delay)
+                        async with self.tool_lock:
+                            with self.board_operation(b_id):
+                                with self.transaction():
+                                    reap_fn = getattr(self, "_reap_callback", None)
+                                    if reap_fn is not None:
+                                        await reap_fn(b_id, max(time.time(), target_epoch))
+                    except asyncio.CancelledError:
+                        pass
+                    except Exception as exc:
+                        log_runtime_error(
+                            self.diagnostics,
+                            "offer_rehydrate_deadline_error",
+                            exc,
+                            include_traceback=True,
+                            board_id=b_id,
+                            ticket_id=t_id,
+                            offer_kind=o_kind,
+                        )
+                    finally:
+                        self.expected_generation.reset(generation_token)
+                        self.pending_notifications.reset(pending_token)
+                        running = asyncio.current_task()
+                        if self.offer_deadline_tasks.get((b_id, t_id, o_kind)) is running:
+                            self.offer_deadline_tasks.pop((b_id, t_id, o_kind), None)
+
+                self.offer_deadline_tasks[key] = loop.create_task(
+                    expire_rehydrated_offer(board_id, ticket_id, kind, expires_epoch, delay),
+                    name=f"offer-rehydrate-deadline:{board_id}:{ticket_id}:{kind}",
+                )
 
     def register_listener(self, board_id: str, agent_id: str) -> None:
         self.active_listeners.setdefault(board_id, set()).add(agent_id)
@@ -1113,7 +1192,9 @@ class CentralBoard:
         if document.get("board_id") != board_id:
             raise ValueError("board hash collision or corrupt document")
         self.ensure_schema(document)
-        return self._bootstrap_admin_on_load(board_id, document)
+        doc = self._bootstrap_admin_on_load(board_id, document)
+        self.rehydrate_board_offer_deadlines(board_id, doc)
+        return doc
 
     def _assert_expected_generation(self, document: dict[str, Any]) -> None:
         current = document.get("generation_token")
@@ -2281,6 +2362,30 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             expire_offer_at_deadline(),
             name=f"offer-deadline:{board_id}:{ticket_id}:{kind}",
         )
+
+    service.mcp_server = mcp
+
+    async def server_reap_callback(board_id: str, now: float) -> None:
+        def mutate_reap(doc: dict[str, Any]) -> dict[str, Any]:
+            released = reap_expired_offers_in_doc(doc, now)
+            return {"released": released}
+        result = service.mutate(board_id, mutate_reap)
+        released = result.get("released", [])
+        if released:
+            bus = getattr(mcp, "_subscriptions", None)
+            if bus is not None:
+                from mcp.server.subscriptions import ResourceUpdated
+                for item in released:
+                    t_id = item.get("ticket_id")
+                    if t_id:
+                        await bus.publish(ResourceUpdated(uri=f"board://{board_id}/ticket/{t_id}"))
+                    await bus.publish(ResourceUpdated(uri=f"board://{board_id}/journal"))
+                    for rec in item.get("recipients", []):
+                        if rec:
+                            await bus.publish(ResourceUpdated(uri=f"board://{board_id}/agent/{rec}"))
+
+    service._reap_callback = server_reap_callback
+    service.rehydrate_offer_deadlines()
 
     def latest_seq(board_id: str) -> int:
         # read_after exposes the watermark even when cursor zero predates retention.

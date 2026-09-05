@@ -1034,6 +1034,46 @@ class PushWaitTests(unittest.IsolatedAsyncioTestCase):
             sample = next(iter(document["model_wait"].values()))["returns"][0]
             self.assertEqual(sample["mode"], "poll")
 
+    async def test_degraded_poll_seat_remains_live_after_activity_window(self) -> None:
+        async with Client(self.mcp, mode="2026-07-28", cache=None) as raw:
+            client = await self._joined_client(raw, role="worker")
+            await client._call(
+                "board_dispatch_policy_set",
+                agent_name="push-actor",
+                offer_ttl_s=1,
+            )
+            attempted = asyncio.Event()
+            unavailable = UnavailableListenClient(attempted)
+            client._client = unavailable
+
+            with (
+                patch.object(wait_server, "WAIT_MODE", "push"),
+                patch.object(wait_server, "DEFAULT_POLL_INTERVAL_S", 0.05),
+                patch.dict(os.environ, {"PURSERS_POLL_HEARTBEAT_INTERVAL_S": "0.1"}),
+            ):
+                waiting = asyncio.create_task(
+                    wait_server._wait_for_work(
+                        client,
+                        since_seq=0,
+                        timeout_s=4,
+                        only_mine=False,
+                        project="pursers",
+                        wait_for="claimable",
+                    )
+                )
+                await asyncio.wait_for(attempted.wait(), timeout=1)
+                await asyncio.sleep(3.2)
+
+                created = await client.create_ticket("ticket after liveness window")
+                result = await asyncio.wait_for(waiting, timeout=2)
+
+            self.assertFalse(result["timed_out"])
+            self.assertEqual(result["mode"], "poll")
+            t_id = created["ticket"]["ticket_id"]
+            self.assertTrue(
+                any(event.get("ticket_id") == t_id for event in result["events"])
+            )
+
     async def test_poll_mode_never_opens_subscription(self) -> None:
         async with Client(self.mcp, mode="2026-07-28", cache=None) as raw:
             client = await self._joined_client(raw)
