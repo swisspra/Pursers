@@ -730,8 +730,14 @@ git commit -m "release: &lt;release_tag&gt;"
 release_commit="$(git rev-parse HEAD)"
 git show --stat --oneline "$release_commit"
 test -z "$(git status --porcelain)"</code></pre>
-      <p>Push the train, obtain review, and require both jobs in <code>.github/workflows/ci.yml</code>. The Python job builds the six checkout wheels, performs isolated wheel imports, checks/collects/runs/verifies all ten suites, and runs the leak scan. The dashboard job installs the locked npm tree and runs TypeScript without emitting files.</p>
+      <p>Push the train, obtain review, and require both jobs in <code>.github/workflows/ci.yml</code>. This block independently verifies the checked-out train branch and recomputes its release commit. Record the printed commit and immutable PR URL in the release change before pausing. The Python job builds the six checkout wheels, performs isolated wheel imports, checks/collects/runs/verifies all ten suites, and runs the leak scan. The dashboard job installs the locked npm tree and runs TypeScript without emitting files.</p>
       <pre><code>set -euo pipefail
+train_branch="train/&lt;product_version&gt;"
+test "$(git branch --show-current)" = "$train_branch"
+test -z "$(git status --porcelain)"
+release_commit="$(git rev-parse --verify "$train_branch^{commit}")"
+test "$release_commit" = "$(git rev-parse --verify "HEAD^{commit}")"
+
 git push -u origin train/&lt;product_version&gt;
 remote_head="$(git ls-remote --heads origin \
   refs/heads/train/&lt;product_version&gt; | awk '{print $1}')"
@@ -742,13 +748,24 @@ pr_url="$(gh pr create --base main --head train/&lt;product_version&gt; \
   --body-file &lt;pull_request_body&gt;)"
 pr_head="$(gh pr view "$pr_url" --json headRefOid --jq .headRefOid)"
 test "$pr_head" = "$release_commit"
-gh pr checks "$pr_url" --watch</code></pre>
-      <p>After the reviewed train is integrated, tag the exact verified commit. The tag-triggered release workflow builds all six wheels with the pinned toolchain, writes <code>SHA256SUMS.txt</code>, extracts non-empty CHANGELOG notes, and creates or completes the GitHub Release.</p>
+gh pr checks "$pr_url" --watch
+printf 'release_commit=%s\nrelease_pr_url=%s\n' "$release_commit" "$pr_url"</code></pre>
+      <p>After the reviewed train is integrated, start from a fresh shell and replace <code>&lt;release_pr_url&gt;</code> and <code>&lt;recorded_release_commit&gt;</code> with the immutable values recorded by the preceding stage. The block verifies that exact PR was merged, its head equals the recorded release commit, and its merge commit is present on <code>origin/main</code> before tagging. The tag-triggered release workflow builds all six wheels with the pinned toolchain, writes <code>SHA256SUMS.txt</code>, extracts non-empty CHANGELOG notes, and creates or completes the GitHub Release.</p>
       <pre><code>set -euo pipefail
+release_pr_url="&lt;release_pr_url&gt;"
+recorded_release_commit="&lt;recorded_release_commit&gt;"
+[[ "$recorded_release_commit" =~ ^[0-9a-f]{40}$ ]]
+
 git fetch origin main --tags
-verified_commit="$(gh pr view "$pr_url" --json mergeCommit --jq .mergeCommit.oid)"
+pr_state="$(gh pr view "$release_pr_url" --json state --jq .state)"
+test "$pr_state" = "MERGED"
+pr_head="$(gh pr view "$release_pr_url" --json headRefOid --jq .headRefOid)"
+test "$pr_head" = "$recorded_release_commit"
+verified_commit="$(gh pr view "$release_pr_url" \
+  --json mergeCommit --jq .mergeCommit.oid)"
 test -n "$verified_commit"
 git cat-file -e "$verified_commit^{commit}"
+git merge-base --is-ancestor "$verified_commit" origin/main
 git tag -s &lt;release_tag&gt; "$verified_commit"
 git push origin &lt;release_tag&gt;
 
