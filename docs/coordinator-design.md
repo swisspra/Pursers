@@ -80,10 +80,12 @@ For each board, build a bounded materialized view from:
   counts; pooled seats grouped by principal and name; busy, available, and
   stale classification; current ticket IDs; truncation and unavailable-board
   warnings.
-- `board_status`: exact status counts, agent projection, review policy, and
-  latest journal sequence.
-- `board_snapshot`: bounded agents and tickets with an exact journal splice
-  watermark and explicit omitted counts.
+- `board_status`: exact status counts, active-agent projection, review policy,
+  stale-after setting, and latest journal sequence. Pass `include_retired=true`
+  only for lifecycle administration.
+- `board_snapshot`: bounded active agents and tickets with an exact journal
+  splice watermark and explicit omitted counts. Fleet lifecycle administration
+  requests `include_retired=true` to populate its retired/stale drawer.
 - `ticket_list` and `ticket_get`: current ticket bodies and durable submission,
   rejection, abandonment, and review history.
 - `board_catchup` or `a2a_wait`: phase-2 wake cues only. Events are cues to
