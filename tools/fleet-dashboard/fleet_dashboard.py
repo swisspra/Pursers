@@ -25,7 +25,7 @@ import urllib.error
 import urllib.request
 import uuid
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -52,6 +52,7 @@ from seat_config import (  # noqa: I001
     SeatInventory,
     adapter_for,
     connector_skill_suggestions,
+    discover_managed_seats,
 )
 from release_ops import ReleaseOpsManager
 
@@ -3601,13 +3602,37 @@ class SeatConfigManager:
         bridge_installer: BridgeInstaller | None = None,
         doctor_factory: Callable[[], Doctor] = Doctor,
         latest_version: Callable[[], str | None] | None = None,
+    def __init__(
+        self,
+        inventory_path: str | Path | None = None,
+        *,
+        state_dir: str | Path = CONFIG_STATE_DIR,
+        bridge_installer: BridgeInstaller | None = None,
+        doctor_factory: Callable[[], Doctor] = Doctor,
+        latest_version: Callable[[], str | None] | None = None,
         release_ops_manager: ReleaseOpsManager | None = None,
+        discovered_configs: list[tuple[str, str | Path]] | None = None,
     ) -> None:
         self.state_dir = Path(state_dir).expanduser()
         self.inventory = SeatInventory(inventory_path or self.state_dir / "seats.json")
         self.bridge_installer = bridge_installer or BridgeInstaller()
         self.doctor_factory = doctor_factory
         self.latest_version = latest_version or self._pypi_latest
+        self.discovered_configs = tuple(
+            (host, Path(path).expanduser())
+            for host, path in (
+                discovered_configs
+                if discovered_configs is not None
+                else (
+                    ("codex", "~/.codex/config.toml"),
+                    ("goose", "~/.config/goose/config.yaml"),
+                    (
+                        "claude-desktop",
+                        "~/Library/Application Support/Claude/claude_desktop_config.json",
+                    ),
+                )
+            )
+        )
         self.release_ops = release_ops_manager or ReleaseOpsManager(
             state_dir=self.state_dir,
             bridge_installer=self.bridge_installer,
@@ -3872,24 +3897,129 @@ class SeatConfigManager:
                     .expanduser()
                     .is_file(),
                     "ca_file_exists": Path(desired.ca_file).expanduser().is_file(),
+                    "doctor_summary": self._doctor_summary(checks),
                 }
             )
         discovered = []
-        for host, path in (
-            ("codex", Path("~/.codex/config.toml").expanduser()),
-            ("goose", Path("~/.config/goose/config.yaml").expanduser()),
-            (
-                "claude-desktop",
-                Path(
-                    "~/Library/Application Support/Claude/claude_desktop_config.json"
-                ).expanduser(),
-            ),
-        ):
-            if path.is_file() and not any(
-                row.get("config_path") == str(path) for row in rows
-            ):
+        for host, path in self.discovered_configs:
+            if path.is_file():
                 discovered.append({"host": host, "config_path": str(path)})
-        return {"schema_version": 1, "seats": rows, "discovered_configs": discovered}
+        return {
+            "schema_version": 1,
+            "seats": rows,
+            "discovered_configs": discovered,
+            "import_review": self.import_review(),
+        }
+
+    @staticmethod
+    def _doctor_summary(checks: list[dict[str, Any]]) -> dict[str, str | None]:
+        order = {"PASS": 0, "WARN": 1, "FAIL": 2}
+
+        def status(*names: str) -> str | None:
+            values = [
+                row.get("status")
+                for row in checks
+                if row.get("check") in names and row.get("status") in order
+            ]
+            return max(values, key=order.get) if values else None
+
+        return {
+            "config": status("config", "host-timeout"),
+            "tokens": status("token-file", "token-env", "ca-file"),
+            "identity": status("split-identity", "identity"),
+            "runtime": status("host-runtime"),
+        }
+
+    def import_review(self) -> dict[str, Any]:
+        parsed, conflicts = discover_managed_seats(self.discovered_configs)
+        existing = {
+            row.get("name"): row
+            for row in self.inventory.load()["seats"]
+            if isinstance(row, dict) and isinstance(row.get("name"), str)
+        }
+        candidates: list[dict[str, Any]] = []
+        already_imported: list[dict[str, Any]] = []
+        for desired in parsed:
+            mapping = {
+                "name": desired.name,
+                "host": desired.host,
+                "role": desired.role,
+                "config_path": desired.config_path,
+                "bridge_connector_name": desired.connector_name,
+                "board_connector_name": desired.http_connector_name,
+                "home_board": desired.home_board,
+                "boards": desired.boards,
+                "tier_max": desired.tier_max,
+                "skills": list(desired.skills),
+                "can_review": desired.can_review,
+                "can_work": desired.can_work,
+                "model": desired.model,
+                "provider": desired.provider,
+                "token_source": "file" if desired.token_file else "environment",
+                "token_env_var": desired.token_env_var,
+            }
+            current = existing.get(desired.name)
+            if current is not None:
+                if asdict(self._desired(current)) == asdict(desired):
+                    already_imported.append(mapping)
+                else:
+                    conflicts.append(
+                        {
+                            "host": desired.host,
+                            "config_path": desired.config_path,
+                            "connector_name": desired.connector_name,
+                            "reason": f"inventory seat {desired.name} has different settings",
+                        }
+                    )
+                continue
+            candidates.append(
+                {
+                    **mapping,
+                    "zero_diff": not bool(adapter_for(desired).plan(desired)),
+                    "seat": asdict(desired),
+                }
+            )
+        return {
+            "candidates": candidates,
+            "conflicts": conflicts,
+            "already_imported": already_imported,
+        }
+
+    def import_discovered(self, names: Any = None) -> dict[str, Any]:
+        if names is not None and (
+            not isinstance(names, list)
+            or not all(isinstance(name, str) for name in names)
+        ):
+            raise ValueError("names must be a list")
+        review = self.import_review()
+        selected = set(names) if names is not None else None
+        available = {row["name"] for row in review["candidates"]}
+        if selected is not None and not selected <= available:
+            raise ValueError("names must select importable seats")
+        imported = []
+        for row in review["candidates"]:
+            if selected is not None and row["name"] not in selected:
+                continue
+            desired = self._desired(row["seat"])
+            self.inventory.upsert(
+                desired, bridge_version=self.bridge_installer.version, doctor=None
+            )
+            imported.append(
+                {key: value for key, value in row.items() if key != "seat"}
+            )
+        self._journal(
+            "import",
+            seats=[row["name"] for row in imported],
+            conflicts=len(review["conflicts"]),
+        )
+        doctor_job = (
+            self.doctor([row["name"] for row in imported]) if imported else None
+        )
+        return {
+            "imported": imported,
+            "conflicts": review["conflicts"],
+            "doctor_job": doctor_job,
+        }
 
     def bridge(self) -> dict[str, Any]:
         return self._bridge_inspection()
@@ -4584,13 +4714,18 @@ function renderReleaseOps(){
 seatPayload=function(form){const f=new FormData(form);return{host:f.get('host'),role:f.get('role'),name:f.get('name'),central_url:f.get('central_url'),home_board:f.get('home_board'),token_file:f.get('token_file'),ca_file:f.get('ca_file'),bridge_command:f.get('bridge_command'),config_path:f.get('config_path'),seat_dir:f.get('seat_dir')||null,repository:f.get('repository')||null,tier_max:Number(f.get('tier_max')),skills:String(f.get('skills')||'').split(',').map(x=>x.trim()).filter(Boolean),can_review:f.get('can_review')==='on',can_work:f.get('can_work')==='on',model:f.get('model')||null,provider:f.get('provider')||null}}
 seatForm=function(record={}){const role=record.role||'worker',tier=record.tier_max||2,review=record.can_review??(role==='reviewer'),work=record.can_work??(role==='worker');return `<form id="seat-wizard" class="seat-form"><label>Host<select name="host">${['codex','codex-cli','goose','claude-code','claude-desktop','headless'].map(x=>`<option ${record.host===x?'selected':''}>${esc(x)}</option>`).join('')}</select></label><label>Role<select name="role"><option ${role==='worker'?'selected':''}>worker</option><option ${role==='reviewer'?'selected':''}>reviewer</option><option ${role==='orchestrator'?'selected':''}>orchestrator</option><option ${role==='coordinator'?'selected':''}>coordinator</option></select></label><label>Name<input name="name" value="${esc(record.name||'')}" pattern="[A-Za-z0-9][A-Za-z0-9._-]{0,79}" required></label><label>Home board<input name="home_board" value="${esc(record.home_board||'pursers')}" required></label><label>Tier max<select name="tier_max">${[1,2,3].map(x=>`<option value="${x}" ${tier===x?'selected':''}>${x}</option>`).join('')}</select></label><label>Skills · comma separated<input name="skills" value="${esc((record.skills||[]).join(','))}" placeholder="git,browser"></label><label><span>Review work</span><input name="can_review" type="checkbox" ${review?'checked':''}></label><label><span>Execute work</span><input name="can_work" type="checkbox" ${work?'checked':''}></label><label>Model<input name="model" value="${esc(record.model||'')}" maxlength="200"></label><label>Provider<input name="provider" value="${esc(record.provider||'')}" maxlength="200"></label><button type="button" data-seat-suggest>Suggest skills from connectors</button><span id="seat-suggestions" class="meta"></span><label class="wide">Central URL<input name="central_url" type="url" value="${esc(record.central_url||'https://127.0.0.1:8766/mcp')}" required></label><label class="wide">Token file path · token never enters this page<input name="token_file" value="${esc(record.token_file||'')}" required></label><label class="wide">CA file path<input name="ca_file" value="${esc(record.ca_file||'')}" required></label><label class="wide">Bridge command<input name="bridge_command" value="${esc(record.bridge_command||seatBridge.command||'pursers-wait-bridge')}" required></label><label class="wide">Host config path<input name="config_path" value="${esc(record.config_path||'')}" required></label><label>Seat directory (Goose)<input name="seat_dir" value="${esc(record.seat_dir||'')}"></label><label>Repository (optional)<input name="repository" value="${esc(record.repository||'')}"></label><button class="primary-action wide" type="submit">Preview exact changes</button><p id="seat-form-status" class="muted wide">Capabilities are generated in every host's managed environment block. Runtime consumption requires Dispatch Part 2, which is not yet merged.</p></form>`}
 seatRows=function(){const configured=(seatData.seats||[]).map(s=>{const live=seatRegistry.seats?.[s.name]||{},offer=live.current_offer;return `<tr><td><b>${esc(s.host)}</b><div class="meta">${esc(s.role)}</div></td><td><span class="id">${esc(s.name)}</span><div class="meta">${esc(s.principal_label)}</div></td><td>tier ${esc(s.tier_max||2)} · review ${s.can_review?'yes':'no'} · work ${s.can_work===false?'no':'yes'}<div class="meta">${esc((s.skills||[]).join(', ')||'no skills')}</div></td><td><span class="status">${esc(live.status||'unknown')}</span></td><td>${offer?`<span class="id">${esc(offer.ticket_id)}</span><div class="meta">expires ${esc(fmt(offer.expires_at))}</div>`:'—'}</td><td>${esc(seatBridge.installed_version||'not installed')}<div class="meta">pinned ${esc(s.bridge_version||seatBridge.pinned_version||'unknown')}</div></td><td><div class="seat-actions"><button data-seat-action="doctor" data-name="${esc(s.name)}">Doctor</button><button data-seat-action="fix" data-name="${esc(s.name)}">Fix</button><button data-seat-action="prompt" data-name="${esc(s.name)}">Copy prompt</button><button data-seat-action="upgrade">Upgrade bridge</button>${s.host==='goose'?`<button data-seat-action="goose" data-name="${esc(s.name)}">Regenerate Goose</button>`:''}</div></td></tr>`}).join('');const discovered=(seatData.discovered_configs||[]).map(s=>`<tr><td><b>${esc(s.host)}</b><div class="meta">discovered</div></td><td><span class="muted">Not inventoried</span><div class="meta">${esc(s.config_path)}</div></td><td>—</td><td>setup needed</td><td>—</td><td>${esc(seatBridge.installed_version||'not installed')}</td><td><button data-seat-action="discover" data-host="${esc(s.host)}" data-path="${esc(s.config_path)}">Use in wizard</button></td></tr>`).join('');return configured+discovered}
+function seatDoctorBadges(s){return Object.entries(s.doctor_summary||{}).map(([name,status])=>`<span class="status">${esc(name)}: ${esc(status||'not run')}</span>`).join(' ')}
+seatRows=function(){return (seatData.seats||[]).map(s=>{const live=seatRegistry.seats?.[s.name]||{},offer=live.current_offer;return `<tr><td><b>${esc(s.host)}</b><div class="meta">${esc(s.role)}</div></td><td><span class="id">${esc(s.name)}</span><div class="meta">${esc(s.principal_label)}</div></td><td>tier ${esc(s.tier_max||2)} · review ${s.can_review?'yes':'no'} · work ${s.can_work===false?'no':'yes'}<div class="meta">${esc((s.skills||[]).join(', ')||'no skills')}</div></td><td><span class="status">${esc(live.status||'unknown')}</span><div class="meta">${seatDoctorBadges(s)}</div></td><td>${offer?`<span class="id">${esc(offer.ticket_id)}</span><div class="meta">expires ${esc(fmt(offer.expires_at))}</div>`:'—'}</td><td>${esc(seatBridge.installed_version||'not installed')}<div class="meta">pinned ${esc(s.bridge_version||seatBridge.pinned_version||'unknown')}</div></td><td><div class="seat-actions"><button data-seat-action="doctor" data-name="${esc(s.name)}">Doctor</button><button data-seat-action="fix" data-name="${esc(s.name)}">Fix</button><button data-seat-action="prompt" data-name="${esc(s.name)}">Copy prompt</button><button data-seat-action="upgrade">Upgrade bridge</button>${s.host==='goose'?`<button data-seat-action="goose" data-name="${esc(s.name)}">Regenerate Goose</button>`:''}</div></td></tr>`}).join('')}
+function seatImportReview(){const review=seatData.import_review||{},candidates=review.candidates||[],conflicts=review.conflicts||[],done=review.already_imported||[],mapping=s=>`${esc(s.role)} · ${esc(s.boards)}<div class="meta">tier ${esc(s.tier_max)} · review ${s.can_review?'yes':'no'} · work ${s.can_work?'yes':'no'} · ${esc((s.skills||[]).join(', ')||'no skills')}</div><div class="meta">wait ${esc(s.bridge_connector_name)} · board ${esc(s.board_connector_name)} · token ${esc(s.token_source)}</div>`,rows=[...candidates.map(s=>`<tr><td>${esc(s.host)}</td><td><span class="id">${esc(s.name)}</span><div class="meta">${esc(s.config_path)}</div></td><td>${mapping(s)}</td><td><span class="status">Will import</span><div class="meta">${s.zero_diff?'config matches · zero diff':'config drift detected'}</div></td></tr>`),...conflicts.map(s=>`<tr><td>${esc(s.host)}</td><td><span class="id">${esc(s.connector_name||'—')}</span><div class="meta">${esc(s.config_path)}</div></td><td>—</td><td><span class="error">Conflict</span><div class="meta">${esc(s.reason)}</div></td></tr>`),...done.map(s=>`<tr><td>${esc(s.host)}</td><td><span class="id">${esc(s.name)}</span><div class="meta">${esc(s.config_path)}</div></td><td>${mapping(s)}</td><td><span class="status">Already imported</span></td></tr>`)].join('');return `<section class="card pool"><div class="section-title"><div><h3>Import discovered seats</h3><p class="muted">Review managed Pursers mappings. Import updates inventory only; host configs are not rewritten.</p></div>${candidates.length?'<button class="primary-action" data-seat-action="import">Import and run Doctor</button>':''}</div><div class="table-scroll"><table><thead><tr><th>Host</th><th>Seat / config</th><th>Role / boards + capabilities</th><th>Review</th></tr></thead><tbody>${rows||'<tr><td colspan="4" class="empty">No managed Pursers seats discovered.</td></tr>'}</tbody></table></div></section>`}
 function dispatchPanels(){return (seatRegistry.boards||[]).map(board=>{const data=dispatchData[board.board_id];if(!data)return `<article class="card"><h3>${esc(board.label||board.board_id)}</h3><p class="muted">Dispatch data loading…</p></article>`;if(data.error)return `<article class="card"><h3>${esc(board.label||board.board_id)} dispatch</h3><p class="error">Dispatch unavailable: ${esc(data.error)}</p></article>`;const p=data.dispatch_policy||{};return `<article class="card"><h3>${esc(board.label||board.board_id)} dispatch</h3><form class="dispatch-form" data-board="${esc(board.board_id)}"><label>Claim TTL seconds<input name="claim_ttl_s" type="number" min="1" max="86400" value="${esc(data.claim_ttl_s||900)}"></label><label>Offer TTL seconds<input name="offer_ttl_s" type="number" min="1" max="86400" value="${esc(p.offer_ttl_s||120)}"></label><label><input name="second_opinion" type="checkbox" ${p.second_opinion?'checked':''}> Second opinion</label><label><input name="fallback_broadcast" type="checkbox" ${p.fallback_broadcast?'checked':''}> Fallback broadcast</label><button type="submit">Save policy</button></form><p class="meta dispatch-status"></p><h4>Unassignable</h4>${(data.unassignable_tickets||[]).map(x=>`<p><span class="id">${esc(x.ticket_id)}</span> ${esc(x.reason)}<span class="meta"> · missing ${(x.missing||[]).map(esc).join(', ')||'unknown'}</span></p>`).join('')||'<p class="empty">None</p>'}<h4>Current offers</h4>${(data.offers||[]).map(x=>`<p><span class="id">${esc(x.ticket_id)}</span> → ${esc(x.agent_name)}<span class="meta"> · expires ${esc(fmt(x.expires_at))}</span></p>`).join('')||'<p class="empty">None</p>'}<h4>Open ticket dispatch history</h4>${(data.open_tickets||[]).map(t=>`<div><b><span class="id">${esc(t.ticket_id)}</span> ${esc(t.title)}</b><div class="meta">state: ${esc(t.dispatch_state?.state||'none')}${t.dispatch_state?.reason?` · ${esc(t.dispatch_state.reason)}`:''}</div>${(t.dispatch_history||[]).map(h=>`<div class="meta">• ${esc(fmt(h.at))} · ${esc(h.state)} · ${esc(h.agent_name||h.agent_id||'—')}${h.reason?` · ${esc(h.reason)}`:''}</div>`).join('')||'<p class="empty">No dispatch history</p>'}</div>`).join('')||'<p class="empty">None</p>'}<details><summary>Recent offer timeline</summary>${(data.timeline||[]).map(x=>`<p>${esc(fmt(x.occurred_at))} · ${esc(x.kind)} · <span class="id">${esc(x.ticket_id||'—')}</span></p>`).join('')||'<p class="empty">No recent offer events.</p>'}</details></article>`}).join('')}
-renderSeats=function(){const installed=seatBridge.installed_version||'not installed',latest=seatBridge.latest_pypi_version||'unavailable',source=seatBridge.resolution_source||'unresolved',bridgeStatus=seatBridge.status||'unknown',bridgeMessage=seatBridge.message||'';return `${pageHead('Config','Seats and dispatch','Declare seat capabilities, verify drift, and inspect per-board offers.','<div class="seat-toolbar"><button data-seat-global="doctor">Doctor all</button><button data-seat-global="install">Install / upgrade bridge</button><button data-seat-global="upgrade-all">Upgrade all seats</button></div>')}${seatActionMessage?`<p class="status">${esc(seatActionMessage)} ${seatSessionPrompt?'<button id="copy-session-prompt">Copy session prompt</button>':''}</p>`:''}${renderReleaseOps()}<section class="card pool"><div class="section-title"><h3>Seat inventory</h3><span class="status">${(seatData.seats||[]).length} configured</span></div><div class="table-scroll"><table><thead><tr><th>Host / role</th><th>Name</th><th>Capabilities</th><th>State</th><th>Current offer</th><th>Bridge</th><th>Actions</th></tr></thead><tbody>${seatRows()||'<tr><td colspan="7" class="empty">No configured seats. Use the wizard.</td></tr>'}</tbody></table></div></section><div class="seat-layout"><div class="seat-stack"><section class="card pool"><h3>Add or update seat</h3>${seatForm()}</section><section id="seat-plan" class="card pool" ${seatPlan?'':'hidden'}><h3>Confirm changes</h3><p class="muted">Review the diff before applying. Existing files are backed up first.</p><pre class="seat-diff">${esc((seatPlan?.changes||[]).map(c=>`${c.description}\n${c.diff||c.action}`).join('\n')||'No changes required.')}</pre><button id="seat-apply" class="primary-action" ${seatPlan?'':'disabled'}>Confirm and apply</button></section></div><aside class="seat-stack"><section class="card pool"><h3>Wait bridge</h3><p><span class="status">${esc(bridgeStatus)}</span>${bridgeMessage?` ${esc(bridgeMessage)}`:''}</p><p>Installed <b>${esc(installed)}</b></p><p class="meta">Pinned ${esc(seatBridge.pinned_version||'unknown')} · PyPI latest ${esc(latest)} · ${esc(source)}</p></section><section class="card pool"><h3>Doctor</h3><div id="seat-doctor">${seatDoctorResult?doctorResult(seatDoctorResult):'<p class="muted">Doctor compares declared capabilities with Central.</p>'}</div></section></aside></div><section class="pool"><div class="section-title"><h3>Dispatch by board</h3><span class="status">policy · gaps · offers</span></div><div class="grid">${dispatchPanels()}</div></section>`}
+renderSeats=function(){const installed=seatBridge.installed_version||'not installed',latest=seatBridge.latest_pypi_version||'unavailable',source=seatBridge.resolution_source||'unresolved',bridgeStatus=seatBridge.status||'unknown',bridgeMessage=seatBridge.message||'';return `${pageHead('Config','Seats and dispatch','Declare seat capabilities, verify drift, and inspect per-board offers.','<div class="seat-toolbar"><button data-seat-global="doctor">Doctor all</button><button data-seat-global="install">Install / upgrade bridge</button><button data-seat-global="upgrade-all">Upgrade all seats</button></div>')}${seatActionMessage?`<p class="status">${esc(seatActionMessage)} ${seatSessionPrompt?'<button id="copy-session-prompt">Copy session prompt</button>':''}</p>`:''}${renderReleaseOps()}${seatImportReview()}<section class="card pool"><div class="section-title"><h3>Seat inventory</h3><span class="status">${(seatData.seats||[]).length} configured</span></div><div class="table-scroll"><table><thead><tr><th>Host / role</th><th>Name</th><th>Capabilities</th><th>State / Doctor</th><th>Current offer</th><th>Bridge</th><th>Actions</th></tr></thead><tbody>${seatRows()||'<tr><td colspan="7" class="empty">No configured seats. Use the wizard.</td></tr>'}</tbody></table></div></section><div class="seat-layout"><div class="seat-stack"><section class="card pool"><h3>Add or update seat</h3>${seatForm()}</section><section id="seat-plan" class="card pool" ${seatPlan?'':'hidden'}><h3>Confirm changes</h3><p class="muted">Review the diff before applying. Existing files are backed up first.</p><pre class="seat-diff">${esc((seatPlan?.changes||[]).map(c=>`${c.description}\n${c.diff||c.action}`).join('\n')||'No changes required.')}</pre><button id="seat-apply" class="primary-action" ${seatPlan?'':'disabled'}>Confirm and apply</button></section></div><aside class="seat-stack"><section class="card pool"><h3>Wait bridge</h3><p><span class="status">${esc(bridgeStatus)}</span>${bridgeMessage?` ${esc(bridgeMessage)}`:''}</p><p>Installed <b>${esc(installed)}</b></p><p class="meta">Pinned ${esc(seatBridge.pinned_version||'unknown')} · PyPI latest ${esc(latest)} · ${esc(source)}</p></section><section class="card pool"><h3>Doctor</h3><div id="seat-doctor">${seatDoctorResult?doctorResult(seatDoctorResult):'<p class="muted">Doctor compares declared capabilities with Central.</p>'}</div></section></aside></div><section class="pool"><div class="section-title"><h3>Dispatch by board</h3><span class="status">policy · gaps · offers</span></div><div class="grid">${dispatchPanels()}</div></section>`}
 refreshSeats=async function(){try{const [inventory,bridge,release]=await Promise.all([fetchJson('/api/config/seats'),fetchJson('/api/config/bridge'),fetchJson('/api/config/release')]);seatData=inventory;seatBridge=bridge;releaseData=release;const central=centralLabels[0];if(central){initialSeatsRefreshPending=false;seatRegistry=await fetchJson(`/api/config/registry?${apiCentral(central)}`);const boards=seatRegistry.boards||[],results=await Promise.allSettled(boards.map(async b=>[b.board_id,await fetchJson(`/api/dispatch?${apiCentral(central)}&board_id=${encodeURIComponent(b.board_id)}`)]));for(let i=0;i<results.length;i++){const result=results[i],board=boards[i];if(result.status==='fulfilled')dispatchData[result.value[0]]=result.value[1];else dispatchData[board.board_id]={error:result.reason?.message||'request failed'}}}if(navKind()==='seats')renderHub()}catch(e){if(navKind()==='seats')document.querySelector('#central-sections').innerHTML=`<p class="error">Config unavailable: ${esc(e.message)}</p>`}}
 const refreshCentralBeforeSeats=refreshCentral;refreshCentral=async function(...args){await refreshCentralBeforeSeats(...args);if(initialSeatsRefreshPending&&navKind()==='seats'&&centralLabels.length)await refreshSeats()}
 async function suggestSeatSkills(){const form=document.querySelector('#seat-wizard'),status=document.querySelector('#seat-suggestions');try{const result=await configPost('/api/config/suggestions',seatPayload(form)),input=form.elements.skills,current=String(input.value||'').split(',').map(x=>x.trim()).filter(Boolean);input.value=[...new Set([...current,...result.skills])].join(',');status.textContent=result.skills.length?`Suggested: ${result.skills.join(', ')}`:'No mapped connectors found.'}catch(e){status.textContent=`Suggestions failed: ${e.message}`}}
 async function saveDispatch(event){event.preventDefault();const form=event.target,central=centralLabels[0],board=form.dataset.board,status=form.querySelector('.dispatch-status')||form.nextElementSibling;try{dispatchData[board]=await configPost(`/api/dispatch?${apiCentral(central)}`,{board_id:board,policy:{claim_ttl_s:Number(form.elements.claim_ttl_s.value),offer_ttl_s:Number(form.elements.offer_ttl_s.value),second_opinion:form.elements.second_opinion.checked,fallback_broadcast:form.elements.fallback_broadcast.checked}});status.textContent='Policy saved.';await refreshSeats()}catch(e){status.textContent=`Save failed: ${e.message}`}}
 bindSeats=function(){const wizard=document.querySelector('#seat-wizard');wizard?.addEventListener('submit',seatSubmit);if(wizard){const review=wizard.elements.can_review,work=wizard.elements.can_work,sync=()=>{const role=wizard.elements.role.value;if(!review.dataset.touched)review.checked=role==='reviewer';if(!work.dataset.touched)work.checked=role==='worker'};review.addEventListener('input',()=>review.dataset.touched='true');work.addEventListener('input',()=>work.dataset.touched='true');wizard.elements.role.addEventListener('change',sync)}document.querySelector('[data-seat-suggest]')?.addEventListener('click',suggestSeatSkills);document.querySelector('#seat-apply')?.addEventListener('click',applySeat);document.querySelector('#copy-session-prompt')?.addEventListener('click',async event=>{await navigator.clipboard.writeText(seatSessionPrompt);event.target.textContent='Copied'});document.querySelectorAll('.dispatch-form').forEach(form=>form.addEventListener('submit',saveDispatch));document.querySelectorAll('[data-ops-action]').forEach(btn=>{btn.addEventListener('click',async()=>{const action=btn.dataset.opsAction;const cmdKey=action==='publish'?'publish_from_tag':action==='stage'?'stage_central':action==='kickstart'?'kickstart_central':'restart_dashboard';const cmd=(releaseData?.commands||{})[cmdKey]||btn.dataset.cmd;if(!confirm(`Run command:\n${cmd}\n\nAre you sure?`))return;const out=document.querySelector('#ops-output');if(out)out.textContent=`Queuing ${action}…\nCommand: ${cmd}\n`;btn.disabled=true;try{let payload={action};if(action==='publish')payload={action:'publish_from_tag',tag:releaseData?.latest_tag};else if(action==='stage')payload={action:'stage_central'};else if(action==='kickstart')payload={action:'kickstart_central'};else if(action==='restart-dash')payload={action:'restart_dashboard'};const job=await configPost('/api/config/ops',payload);if(out)out.textContent=`Job ${job.job_id} queued:\n${job.command}\n\nStreaming output…\n`;const timer=setInterval(async()=>{try{const state=await fetchJson(`/api/config/jobs/${job.job_id}`);if(out&&state.logs){out.textContent=`Command: ${state.command||job.command}\nStatus: ${state.status}\n\n${state.logs.join('\n')}`}if(state.status==='succeeded'||state.status==='failed'){clearInterval(timer);btn.disabled=false;await refreshSeats()}}catch(e){clearInterval(timer);btn.disabled=false;if(out)out.textContent+=`\nPolling error: ${e.message}`}},1000)}catch(err){btn.disabled=false;if(out)out.textContent=`Request error: ${err.message}`}})});const host=document.querySelector('#central-sections');host.onclick=seatClick;host.querySelector('.page-head')?.addEventListener('click',seatGlobal)}
+const seatClickImportV1=seatClick;
+seatClick=async function(event){const action=event.target.closest('[data-seat-action]')?.dataset.seatAction;if(action!=='import')return seatClickImportV1(event);try{const result=await configPost('/api/config/import',{});seatActionMessage=`Imported ${(result.imported||[]).length} seat(s); Doctor started.`;await refreshSeats();if(result.doctor_job)watchConfigJob(result.doctor_job)}catch(e){seatActionMessage=`Import failed: ${e.message}`;renderHub()}}
 renderOverview=renderAttentionOverview;
 renderBoardsHub=renderAttentionBoardsHub;
 const attentionHubClickV1=hubClick;
@@ -4998,6 +5133,7 @@ def make_handler(
                 "/api/config/apply",
                 "/api/config/prompt",
                 "/api/config/doctor",
+                "/api/config/import",
                 "/api/config/bridge/install",
                 "/api/config/bridge/upgrade-all",
                 "/api/config/ops",
@@ -5077,6 +5213,10 @@ def make_handler(
                     if not isinstance(request, dict) or not set(request) <= {"names"}:
                         raise ValueError("request may contain only names")
                     body = _json_bytes(seats.doctor(request.get("names")))
+                elif route == "/api/config/import":
+                    if not isinstance(request, dict) or not set(request) <= {"names"}:
+                        raise ValueError("request may contain only names")
+                    body = _json_bytes(seats.import_discovered(request.get("names")))
                 elif route == "/api/config/bridge/install":
                     if request != {}:
                         raise ValueError("bridge install body must be an empty object")

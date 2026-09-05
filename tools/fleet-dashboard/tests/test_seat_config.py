@@ -724,6 +724,129 @@ def test_inventory_and_doctor_redact_token_and_report_push(
     assert stat.S_IMODE(inventory.path.stat().st_mode) == 0o600
 
 
+def test_discover_managed_seats_imports_codex_goose_and_claude_desktop(
+    tmp_path: Path,
+) -> None:
+    configs = []
+    expected = {}
+    for host, adapter_type in (
+        ("codex", seat_config.CodexAdapter),
+        ("goose", seat_config.GooseAdapter),
+        ("claude-desktop", seat_config.ClaudeDesktopAdapter),
+    ):
+        config = tmp_path / f"{host}.config"
+        target = desired(
+            tmp_path / host,
+            host,
+            name=f"{host}-imported",
+            config_path=str(config),
+            bridge_name=f"wait-{host}",
+        )
+        adapter = adapter_type(config)
+        adapter.apply(adapter.plan(target))
+        configs.append((host, config))
+        expected[target.name] = target
+
+    seats, conflicts = seat_config.discover_managed_seats(configs)
+
+    assert conflicts == []
+    assert {seat.name for seat in seats} == set(expected)
+    for seat in seats:
+        target = expected[seat.name]
+        assert seat.host == target.host
+        assert seat.role == target.role
+        assert seat.connector_name == target.connector_name
+        assert seat.home_board == target.home_board
+        assert seat.boards == "registry"
+        assert seat.token_file == target.token_file
+        assert seat.token_env_var == target.token_env_var
+        assert seat_config.adapter_for(seat).plan(seat) == []
+
+
+def test_discover_managed_seats_reports_duplicate_name_conflicts(tmp_path: Path) -> None:
+    configs = []
+    for host, adapter_type in (
+        ("codex", seat_config.CodexAdapter),
+        ("goose", seat_config.GooseAdapter),
+    ):
+        config = tmp_path / f"{host}.config"
+        target = desired(
+            tmp_path / host,
+            host,
+            name="duplicate-worker",
+            config_path=str(config),
+        )
+        adapter = adapter_type(config)
+        adapter.apply(adapter.plan(target))
+        configs.append((host, config))
+
+    seats, conflicts = seat_config.discover_managed_seats(configs)
+
+    assert seats == []
+    assert len(conflicts) == 2
+    assert {row["reason"] for row in conflicts} == {
+        "duplicate seat name duplicate-worker"
+    }
+
+
+def test_discover_managed_seat_uses_explicit_boards_and_token_env(
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / "claude.json"
+    secret = "TOKEN_MUST_NOT_APPEAR"
+    config.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "wait-custom": {
+                        "command": "/opt/pursers-wait-bridge",
+                        "env": {
+                            "ONBOARD_AGENT_NAME": "custom-worker",
+                            "PURSERS_ROLE": "worker",
+                            "ONBOARD_CENTRAL_URL": "https://central.example/mcp",
+                            "ONBOARD_BOARD_ID": "pursers",
+                            "ONBOARD_CENTRAL_TOKEN": secret,
+                            "PURSERS_BOARDS": "home",
+                        },
+                    }
+                }
+            }
+        )
+    )
+
+    seats, conflicts = seat_config.discover_managed_seats(
+        (("claude-desktop", config),)
+    )
+
+    assert conflicts == []
+    assert seats[0].boards == "home"
+    assert seats[0].token_file == ""
+    assert seats[0].token_env_var == "ONBOARD_CENTRAL_TOKEN"
+    assert secret not in repr(seats[0])
+
+
+def test_claude_desktop_doctor_reports_identity_and_runtime_start(
+    tmp_path: Path,
+) -> None:
+    target = desired(tmp_path, "claude-desktop")
+    adapter = seat_config.ClaudeDesktopAdapter(target.config_path)
+    adapter.apply(adapter.plan(target))
+    doctor = seat_config.Doctor(
+        runtime_probe=lambda _desired, _inspection, _timeout: (True, "started"),
+        live_probe=lambda _desired, _timeout: {
+            "mode": "push",
+            "registry_boards": ["pursers"],
+            "skipped_boards": {},
+        },
+        pypi_fetcher=lambda: "0.1.0a10",
+    )
+
+    checks = {row.check: row for row in doctor.run(target)}
+
+    assert checks["identity"].status == "PASS"
+    assert checks["host-runtime"].status == "PASS"
+
+
 def test_default_live_probe_checks_status_subscription_and_registry_boards(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
