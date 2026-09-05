@@ -73,7 +73,12 @@ class BulkClient:
 
     async def ticket_list(self, **arguments: Any) -> dict[str, Any]:
         self.calls.append(("ticket_list", dict(arguments)))
-        return {"tickets": self.tickets[: int(arguments.get("limit", 100))]}
+        tickets = self.tickets[: int(arguments.get("limit", 100))]
+        return {
+            "tickets": tickets,
+            "count": len(tickets),
+            "total_matching": len(self.tickets),
+        }
 
     async def ticket_get(self, _ticket_id: str) -> dict[str, Any]:
         raise AssertionError("batched catch-up must not call ticket_get")
@@ -148,7 +153,8 @@ class CatchupPerformanceTests(unittest.IsolatedAsyncioTestCase):
         self.assertLess(time.monotonic() - started, 0.1)
         self.assertTrue(result["partial"])
         self.assertFalse(result["timed_out"])
-        self.assertEqual(result["new_seq"], 100)
+        self.assertEqual(result["events"], [])
+        self.assertEqual(result["new_seq"], 0)
 
     async def test_single_slow_catchup_is_bounded_by_wait_deadline(self) -> None:
         client = BulkClient()
@@ -169,6 +175,74 @@ class CatchupPerformanceTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result["timed_out"])
         self.assertEqual(result["events"], [])
         self.assertEqual(result["new_seq"], 17)
+
+    async def test_slow_ticket_projection_is_bounded_by_wait_deadline(self) -> None:
+        client = BulkClient(count=100)
+
+        async def slow_ticket_list(**arguments: Any) -> dict[str, Any]:
+            client.calls.append(("ticket_list", dict(arguments)))
+            await asyncio.sleep(0.2)
+            return {"tickets": [], "count": 0, "total_matching": 0}
+
+        client.ticket_list = slow_ticket_list  # type: ignore[method-assign]
+        with patch.object(wait_server, "clamp_timeout", return_value=0.03):
+            started = time.monotonic()
+            result = await wait_server._wait_for_work(
+                client, since_seq=0, timeout_s=1, only_mine=False
+            )
+        self.assertLess(time.monotonic() - started, 0.1)
+        self.assertTrue(result["partial"])
+        self.assertFalse(result["timed_out"])
+        self.assertEqual(result["events"], [])
+        self.assertEqual(result["new_seq"], 0)
+        self.assertEqual(
+            [name for name, _arguments in client.calls],
+            ["board_catchup", "ticket_list"],
+        )
+
+    async def test_failed_ticket_projection_never_falls_back_per_event(self) -> None:
+        client = BulkClient(count=100)
+
+        async def fail_ticket_list(**arguments: Any) -> dict[str, Any]:
+            client.calls.append(("ticket_list", dict(arguments)))
+            raise BoardClientError("synthetic projection failure")
+
+        client.ticket_list = fail_ticket_list  # type: ignore[method-assign]
+        result = await wait_server._wait_for_work(
+            client, since_seq=0, timeout_s=1, only_mine=False
+        )
+        self.assertTrue(result["partial"])
+        self.assertEqual(result["events"], [])
+        self.assertEqual(result["new_seq"], 0)
+        self.assertEqual(
+            [name for name, _arguments in client.calls],
+            ["board_catchup", "ticket_list"],
+        )
+
+    async def test_truncated_projection_stops_before_unresolved_page(self) -> None:
+        client = BulkClient(count=600)
+
+        result = await wait_server._wait_for_work(
+            client, since_seq=None, timeout_s=1, only_mine=False
+        )
+
+        self.assertTrue(result["partial"])
+        self.assertFalse(result["timed_out"])
+        self.assertEqual(result["new_seq"], 500)
+        self.assertEqual(client.persisted_cursor, 500)
+        self.assertEqual(len(result["events"]), wait_server.REPLAY_EVENT_LIMIT)
+        self.assertEqual(result["events"][0]["ticket_id"], "TK-0301")
+        self.assertEqual(result["events"][-1]["ticket_id"], "TK-0500")
+        self.assertNotIn("TK-0501", {event["ticket_id"] for event in result["events"]})
+        self.assertEqual(result["dropped"], 300)
+        self.assertIn(
+            {
+                "code": "ticket_projection_truncated",
+                "returned": 500,
+                "total_matching": 600,
+            },
+            result["warnings"],
+        )
 
     async def test_submitted_ticket_claimed_by_other_reviewer_does_not_wake(self) -> None:
         client = BulkClient(count=0)
