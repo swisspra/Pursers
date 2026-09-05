@@ -1652,8 +1652,15 @@ def test_write_reports_isolates_failed_board_and_mirrors_degraded_finding(
         agent_name = "coordinator-test"
 
         def __init__(
-            self, _url: str, _token: str, board_id: str, *, agent_name: str
+            self,
+            _url: str,
+            _token: str,
+            board_id: str,
+            *,
+            agent_name: str,
+            role: str,
         ) -> None:
+            assert role == "coordinator"
             self.board_id = board_id
 
         async def __aenter__(self) -> "FakeBoardClient":
@@ -1750,6 +1757,49 @@ def action(kind: str, index: int = 0) -> coordinator.Action:
         op_key=f"coord-op-{kind}-{index}",
         reason="deterministic test decision",
     )
+
+
+def test_mutate_action_declares_coordinator_role(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import pursers_client
+
+    captured: dict[str, Any] = {}
+
+    class FakeBoardClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            captured["args"] = args
+            captured["kwargs"] = kwargs
+
+        async def __aenter__(self) -> "FakeBoardClient":
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+        async def _call(
+            self, name: str, arguments: dict[str, Any]
+        ) -> dict[str, bool]:
+            captured["call"] = (name, arguments)
+            return {"ok": True}
+
+    monkeypatch.setattr(pursers_client, "BoardClient", FakeBoardClient)
+
+    result = asyncio.run(
+        coordinator.mutate_action(
+            "https://board.invalid/mcp",
+            "TOKEN_PLACEHOLDER",
+            "coordinator-test",
+            action("assign"),
+            NOW,
+        )
+    )
+
+    assert result == {"ok": True}
+    assert captured["kwargs"] == {
+        "agent_name": "coordinator-test",
+        "role": "coordinator",
+    }
 
 
 def test_shadow_mode_emits_would_findings_and_makes_zero_mutation_calls() -> None:

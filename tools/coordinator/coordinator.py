@@ -2837,7 +2837,11 @@ async def mutate_action(
     from pursers_client import BoardClient
 
     async with BoardClient(
-        url, token, action.board_id, agent_name=agent_name
+        url,
+        token,
+        action.board_id,
+        agent_name=agent_name,
+        role="coordinator",
     ) as client:
         if action.kind == "assign":
             return await client._call(  # noqa: SLF001 - phase-2 primitive wrapper.
@@ -3333,7 +3337,11 @@ async def write_reports(
             continue
         try:
             async with BoardClient(
-                url, token, board_id, agent_name=agent_name
+                url,
+                token,
+                board_id,
+                agent_name=agent_name,
+                role="coordinator",
             ) as client:
                 await client.board_state_update(
                     STATE_KEY,
@@ -3357,7 +3365,13 @@ async def write_reports(
         and previous_home.get("last_weekly_digest") != week
     )
     if write_daily or write_weekly:
-        async with BoardClient(url, token, home_board, agent_name=agent_name) as client:
+        async with BoardClient(
+            url,
+            token,
+            home_board,
+            agent_name=agent_name,
+            role="coordinator",
+        ) as client:
             if write_daily:
                 await client.memory_write(
                     f"Coordinator daily digest {today}",
@@ -3376,7 +3390,13 @@ async def write_reports(
                 )
     home_state = home_audit_state(home_board, states, now)
     if home_state is not None and targets:
-        async with BoardClient(url, token, home_board, agent_name=agent_name) as client:
+        async with BoardClient(
+            url,
+            token,
+            home_board,
+            agent_name=agent_name,
+            role="coordinator",
+        ) as client:
             await client.board_state_update(
                 STATE_KEY,
                 json.dumps(home_state, sort_keys=True, separators=(",", ":")),
