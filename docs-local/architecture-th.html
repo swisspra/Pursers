@@ -149,7 +149,7 @@
   <header class="page">
     <p class="eyebrow">Team briefing · Pursers v5</p>
     <h1>จาก “ความจำร่วม” สู่<br><span>ระบบส่งต่องานที่ตรวจสอบได้</span></h1>
-    <p class="lead">ภาพรวม Pursers 5.0.0a19: subscription-first push-wait ทุก seat, host-aware re-arm, project registry, worker pool และ independent review</p>
+    <p class="lead">ภาพรวม Pursers 5.0.0a20: subscription-first push-wait ทุก seat, host-aware re-arm, project registry, worker pool และ independent review</p>
     <div class="meta">
       <span class="pill">Central + SQLite</span>
       <span class="pill">MCP v2</span>
@@ -307,7 +307,7 @@
         </article>
         <article class="card">
           <h3>board_state ใช้ scrub profile ของ board</h3>
-          <p>Central 0.1.0a23 ใช้ scrub profile ของบอร์ดกับ <code>board_state_update</code> บอร์ด <code>internal</code> จึงเก็บ registry ที่มี absolute <code>work_dir</code> ได้ ขณะที่บอร์ด <code>strict</code> ยังปฏิเสธ path ลักษณะ home directory</p>
+          <p>Central 0.1.0a24 ใช้ scrub profile ของบอร์ดกับ <code>board_state_update</code> บอร์ด <code>internal</code> จึงเก็บ registry ที่มี absolute <code>work_dir</code> ได้ ขณะที่บอร์ด <code>strict</code> ยังปฏิเสธ path ลักษณะ home directory</p>
         </article>
         <article class="card">
           <h3>ขอบเขตข้อมูลกับขอบเขตไฟล์</h3>
@@ -651,15 +651,15 @@
 
     <section id="release">
       <h2>Build และ release: จาก source ถึง PyPI มี hash chain</h2>
-      <p class="section-intro">ชุด pre-release ที่เอกสารนี้อธิบายคือ <code>v5.0.0a19</code> ซึ่งรวม subscription-first push-wait ที่ release แล้ว ตรวจ manifest และ checksum ที่ operator อนุมัติก่อนติดตั้ง</p>
+      <p class="section-intro">ชุด pre-release ที่เอกสารนี้อธิบายคือ <code>v5.0.0a20</code> ซึ่งรวม subscription-first push-wait ที่ release แล้ว ตรวจ manifest และ checksum ที่ operator อนุมัติก่อนติดตั้ง</p>
 
       <div class="version-grid" aria-label="เวอร์ชัน distribution ปัจจุบัน">
-        <article class="card"><b>5.0.0a19</b><small>pursers · meta installer</small></article>
-        <article class="card"><b>5.0.0a19</b><small>pursers-personal</small></article>
-        <article class="card"><b>0.1.0a23</b><small>pursers-central</small></article>
-        <article class="card"><b>0.1.0a16</b><small>pursers-client</small></article>
+        <article class="card"><b>5.0.0a20</b><small>pursers · meta installer</small></article>
+        <article class="card"><b>5.0.0a20</b><small>pursers-personal</small></article>
+        <article class="card"><b>0.1.0a24</b><small>pursers-central</small></article>
+        <article class="card"><b>0.1.0a17</b><small>pursers-client</small></article>
         <article class="card"><b>5.0.0a3</b><small>pursers-personal-import</small></article>
-        <article class="card"><b>0.1.0a9</b><small>pursers-wait-bridge</small></article>
+        <article class="card"><b>0.1.0a10</b><small>pursers-wait-bridge</small></article>
       </div>
 
       <div class="detail-grid">
@@ -667,7 +667,7 @@
           <h3>ติดตั้งจาก PyPI</h3>
           <pre><code>pip install pursers
 uvx pursers-wait-bridge</code></pre>
-          <p>ชุด released นี้ pin Central <code>0.1.0a23</code>, Client <code>0.1.0a16</code> และ Personal <code>5.0.0a19</code> แบบ exact dependency; ตรวจ manifest ก่อนติดตั้ง</p>
+          <p>ชุด released นี้ pin Central <code>0.1.0a24</code>, Client <code>0.1.0a17</code> และ Personal <code>5.0.0a20</code> แบบ exact dependency; ตรวจ manifest ก่อนติดตั้ง</p>
         </article>
         <article class="card">
           <h3>Trusted Publishing</h3>
@@ -759,7 +759,7 @@ uvx pursers-wait-bridge</code></pre>
       <ul>
         <li><code>packages/central/src/pursers_central/central.py</code> — loopback binding, JWT verifier, journal notification, ticket/review tools</li>
         <li><code>packages/central/src/pursers_central/jwt_verifier.py</code> — RS256-only JWKS verification และ required claims แบบ fail-closed</li>
-        <li><code>packages/central/tests/test_board_state_scrub_profile.py</code> — <code>board_state_update</code> ใช้ scrub profile ของ board ใน Central 0.1.0a23</li>
+        <li><code>packages/central/tests/test_board_state_scrub_profile.py</code> — <code>board_state_update</code> ใช้ scrub profile ของ board ใน Central 0.1.0a24</li>
         <li><code>packages/central/src/pursers_central/transactional_sqlite.py</code> และ <code>sqlite_store.py</code> — SQLite transaction และ WAL-backed storage</li>
         <li><code>tools/wait-bridge/pursers_wait_server.py</code> และ <code>README.md</code> — subscription-first wait, host profiles, per-call identity, multi-board cursor, explicit poll fallback และ lease-only renewal</li>
         <li><code>tools/wait-bridge/registry_admin.py</code> — schema validation, safe mutation และ read-back verification ของ project registry</li>
@@ -774,7 +774,7 @@ uvx pursers-wait-bridge</code></pre>
   </main>
 
   <footer>
-    <div class="page">Pursers architecture briefing · v5.0.0a19 release · เอกสาร standalone ไม่มี external asset, CDN หรือ JavaScript · ใช้ placeholder แทน credential และ path ส่วนบุคคล</div>
+    <div class="page">Pursers architecture briefing · v5.0.0a20 release · เอกสาร standalone ไม่มี external asset, CDN หรือ JavaScript · ใช้ placeholder แทน credential และ path ส่วนบุคคล</div>
   </footer>
 </body>
 </html>

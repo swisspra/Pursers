@@ -7,6 +7,45 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [5.0.0a20] - 2026-09-05
+
+This release includes `pursers-central==0.1.0a24`,
+`pursers-client==0.1.0a17`, `pursers-personal-import==5.0.0a3`,
+`pursers-personal==5.0.0a20`, `pursers==5.0.0a20`, and
+`pursers-wait-bridge==0.1.0a10`.
+
+### Package summary
+
+- **Central 0.1.0a24 and Client 0.1.0a17:** share one complete event-kind
+  vocabulary, including claim-TTL, dispatch, deprecation, and review-lease
+  events. Unknown requested kinds are dropped with one warning while known
+  kinds remain subscribed, so vocabulary drift cannot disable push-wait.
+- **Wait Bridge 0.1.0a10:** subscribes only to event kinds accepted by both the
+  client and Central. Subscription failures are retained in bridge stats until
+  a healthy push return clears them.
+- **Personal and meta 5.0.0a20:** ship the updated component pins, dashboard,
+  documentation, and regenerated component lock; Personal Import remains at
+  5.0.0a3.
+- **Fleet Dashboard tooling:** surfaces bridge subscription failures in Needs
+  attention as `push unavailable: <reason>` instead of leaving them only in
+  stderr.
+
+### Migration
+
+- The deprecated-tool compatibility path (`PURSERS_LEGACY_TOOLS` and
+  `capabilities.legacy_tools`) remains available in a20. Its removal is tracked
+  separately and is not part of this release.
+
+### Fixed
+
+- Restored subscription-first push-wait after claim-TTL cues introduced an
+  event-kind mismatch that made deployed bridges fall back to polling.
+- Made future event-kind skew fail open without discarding known subscriptions,
+  and added cross-package plus real-Central coverage for the full bridge kind
+  set.
+- Exposed per-seat push failures through bounded bridge stats and Fleet Needs
+  attention, with automatic clearing after a healthy push return.
+
 ## [5.0.0a19] - 2026-09-05
 
 This release includes `pursers-central==0.1.0a23`,
