@@ -117,6 +117,8 @@ class Action:
     threshold_window: int
     op_key: str
     reason: str
+    expected_work_offer_agent_id: str | None = None
+    expected_work_offer_expires_at: str | None = None
 
 
 @dataclass
@@ -932,10 +934,10 @@ def _finding_next_action(
         "privacy-scan-truncated": f"Run another bounded privacy scan cycle for {board_id} before declaring coverage complete.",
         "review-backlog": f"Review {ticket_id} on {board_id} with an available reviewer seat.",
         "board-degraded": f"Restore the journal subscription and reads for {board_id}, then confirm one healthy refresh.",
-        "would_nudge": f"Review the proposed nudge for {ticket_id} before enabling active mode.",
-        "would_assign": f"Review the proposed assignment for {ticket_id} before enabling active mode.",
-        "nudge": f"Verify the nudged seat acknowledges {ticket_id} on {board_id}.",
-        "assign": f"Verify the assigned seat claims {ticket_id} on {board_id}.",
+        "would_nudge": f"Review the proposed stage-one dispatcher preference for {ticket_id} before enabling active mode.",
+        "would_assign": f"Review the proposed stage-two dispatcher preference for {ticket_id} before enabling active mode.",
+        "nudge": f"Verify the stage-one preferred seat receives the next offer for {ticket_id} on {board_id}.",
+        "assign": f"Verify the stage-two preferred seat receives the next offer for {ticket_id} on {board_id}.",
         "mutation_failed": f"Review the failed coordinator mutation for {ticket_id} before retrying.",
         "coordinator_circuit_open": f"Resolve the coordinator mutation failures on {board_id} before restoring active mode.",
     }
@@ -1524,6 +1526,17 @@ def plan_actions(
         age = age_seconds(ticket.get("created_at"), now) or 0
         window = max(1, int(age // threshold))
         ticket_id = str(ticket.get("ticket_id"))
+        work_offer = ticket.get("work_offer")
+        expected_offer_agent = (
+            str(work_offer.get("agent_id"))
+            if isinstance(work_offer, Mapping) and work_offer.get("agent_id")
+            else None
+        )
+        expected_offer_expiry = (
+            str(work_offer.get("expires_at"))
+            if isinstance(work_offer, Mapping) and work_offer.get("expires_at")
+            else None
+        )
         eligible = [
             agent
             for agent in eligible_by_board.get(board_id, [])
@@ -1551,7 +1564,9 @@ def plan_actions(
                         action_op_key(
                             board_id, ticket_id, "assign", stage, window, target_id
                         ),
-                        "Oldest fleet-fair starved ticket reached twice its threshold.",
+                        "Oldest fleet-fair starved ticket reached twice its threshold; prefer one eligible seat.",
+                        expected_offer_agent,
+                        expected_offer_expiry,
                     )
                 )
                 assignment_planned.add(board_id)
@@ -1582,10 +1597,13 @@ def plan_actions(
                     action_op_key(
                         board_id, ticket_id, "nudge", stage, window, target_id
                     ),
-                    "Open ticket reached its starvation threshold; wake an idle eligible seat.",
+                    "Open ticket reached its starvation threshold; prefer one idle eligible seat.",
+                    expected_offer_agent,
+                    expected_offer_expiry,
                 )
             )
             planned_nudges[f"{board_id}\x00{target_id}"] += 1
+            break
     return actions
 
 
@@ -1602,6 +1620,7 @@ def action_finding(action: Action, kind: str, mode: str, **extra: Any) -> dict[s
         threshold_seconds=action.threshold_seconds,
         threshold_window=action.threshold_window,
         coordinator_op_key=action.op_key,
+        mutation="dispatcher_preference",
         mode=mode,
         **extra,
     )
@@ -2845,6 +2864,16 @@ async def mutate_action(
         return await client.ticket_update(
             action.ticket_id,
             prefer_agents=[action.target_agent_id],
+            coordinator_op_key=action.op_key,
+            coordination_reason=action.reason,
+            expected_status="open",
+            expected_unassigned=True,
+            expected_work_offer_present=(
+                action.expected_work_offer_agent_id is not None
+                or action.expected_work_offer_expires_at is not None
+            ),
+            expected_work_offer_agent_id=action.expected_work_offer_agent_id,
+            expected_work_offer_expires_at=action.expected_work_offer_expires_at,
         )
 
 

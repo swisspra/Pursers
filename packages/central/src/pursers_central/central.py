@@ -5155,6 +5155,13 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         skills_required: list[str] | None = None,
         exclude_agents: list[str] | None = None,
         prefer_agents: list[str] | None = None,
+        coordinator_op_key: str | None = None,
+        coordination_reason: str | None = None,
+        expected_status: str | None = None,
+        expected_unassigned: bool | None = None,
+        expected_work_offer_present: bool | None = None,
+        expected_work_offer_agent_id: str | None = None,
+        expected_work_offer_expires_at: str | None = None,
         expected_generation: str | None = None,
     ) -> dict[str, Any]:
         """Update dispatch requirements on a live ticket."""
@@ -5169,12 +5176,50 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             raise ValueError("at least one dispatch field is required")
         principal = current_principal()
         coordinate_only = require_board_write_or_coordinate(principal)
+        coordinator_request = any(
+            value is not None
+            for value in (
+                coordinator_op_key,
+                coordination_reason,
+                expected_status,
+                expected_unassigned,
+                expected_work_offer_present,
+                expected_work_offer_agent_id,
+                expected_work_offer_expires_at,
+            )
+        )
+        if coordinator_request:
+            require_scope(principal, COORDINATOR_SCOPE)
+            if coordinator_op_key is None or coordination_reason is None:
+                raise ValueError(
+                    "coordinator_op_key and coordination_reason are required"
+                )
+            if expected_status != "open" or expected_unassigned is not True:
+                raise ValueError(
+                    "coordinator preference requires expected open/unassigned state"
+                )
+            if type(expected_work_offer_present) is not bool:
+                raise ValueError("expected_work_offer_present must be a boolean")
+            if expected_work_offer_present and (
+                expected_work_offer_agent_id is None
+                or expected_work_offer_expires_at is None
+            ):
+                raise ValueError(
+                    "present work-offer expectation requires agent_id and expires_at"
+                )
+            if not expected_work_offer_present and (
+                expected_work_offer_agent_id is not None
+                or expected_work_offer_expires_at is not None
+            ):
+                raise ValueError(
+                    "absent work-offer expectation cannot include offer fields"
+                )
         now = time.time()
 
         def update(document: dict[str, Any]) -> dict[str, Any]:
             profile = board_scrub_profile(document)
             allow_counts: dict[str, int] = {}
-            if coordinate_only:
+            if coordinate_only or coordinator_request:
                 actor = coordinator_actor(document, principal, agent_name)
                 released, renewed = [], []
             else:
@@ -5188,23 +5233,73 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             if (
                 ticket.get("created_by_principal_id") != principal.principal_id
                 and membership.get("role") != "admin"
-                and not coordinate_only
+                and not (coordinate_only or coordinator_request)
             ):
                 raise PermissionError("ticket update requires creator or board admin")
-            if ticket.get("status") not in ACTIVE_TICKET_STATES:
-                raise ValueError(f"ticket is {ticket.get('status')}")
-            if tier is not None:
-                ticket["tier"] = tier
+            cleaned_lists: dict[str, list[str]] = {}
             for field, value in (
                 ("skills_required", skills_required),
                 ("exclude_agents", exclude_agents),
                 ("prefer_agents", prefer_agents),
             ):
                 if value is not None:
-                    ticket[field] = sorted(set(clean_list(
+                    cleaned_lists[field] = sorted(set(clean_list(
                         field, value, max_length=100, scrub_profile=profile,
                         allow_counts=allow_counts,
                     )))
+            safe_key = None
+            safe_reason = None
+            if coordinator_request:
+                safe_key = clean_text(
+                    "coordinator_op_key", coordinator_op_key,
+                    required=True, max_length=256, scrub_profile=profile,
+                )
+                safe_reason = clean_text(
+                    "coordination_reason", coordination_reason,
+                    required=True, max_length=500, scrub_profile=profile,
+                )
+                assert safe_key is not None and safe_reason is not None
+                prior = ticket.get("coordinator_dispatch_preference")
+                if isinstance(prior, Mapping) and prior.get("op_key") == safe_key:
+                    if prior.get("prefer_agents") != cleaned_lists.get("prefer_agents"):
+                        raise ValueError(
+                            "idempotency key conflicts with prior coordinator preference"
+                        )
+                    return {
+                        "ticket": copy.deepcopy(ticket),
+                        "released": [],
+                        "renewed": renewed,
+                        "scrub_audit": None,
+                        "replayed": True,
+                    }
+                offer = ticket.get("work_offer")
+                offer_present = isinstance(offer, Mapping)
+                current_offer_agent = (
+                    offer.get("agent_id") if offer_present else None
+                )
+                current_offer_expiry = (
+                    offer.get("expires_at") if offer_present else None
+                )
+                if (
+                    ticket.get("status") != expected_status
+                    or ticket.get("claimed_by_agent_id") is not None
+                    or ticket.get("assigned_to_agent_id") is not None
+                    or ticket.get("assigned_to")
+                    or offer_present != expected_work_offer_present
+                    or current_offer_agent != expected_work_offer_agent_id
+                    or current_offer_expiry != expected_work_offer_expires_at
+                ):
+                    raise ValueError(
+                        "coordinator preference state precondition failed: ticket "
+                        "must remain open, unclaimed, unassigned, and at the "
+                        "expected work offer"
+                    )
+            if ticket.get("status") not in ACTIVE_TICKET_STATES:
+                raise ValueError(f"ticket is {ticket.get('status')}")
+            if tier is not None:
+                ticket["tier"] = tier
+            for field, value in cleaned_lists.items():
+                ticket[field] = value
             kind = "work" if ticket.get("status") == "open" else (
                 "review" if ticket.get("status") == "submitted" else None
             )
@@ -5226,10 +5321,19 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 if dispatched is not None:
                     released.append(dispatched)
             ticket["updated_at"] = iso_at(now)
+            if coordinator_request:
+                ticket["coordinator_dispatch_preference"] = {
+                    "op_key": safe_key,
+                    "reason": safe_reason,
+                    "prefer_agents": cleaned_lists.get("prefer_agents"),
+                    "updated_at": iso_at(now),
+                    "updated_by_agent_id": actor["agent_id"],
+                }
             return {
                 "ticket": copy.deepcopy(ticket), "released": released,
                 "renewed": renewed,
                 "scrub_audit": record_scrub_allows(document, actor, now, allow_counts),
+                "replayed": False,
             }
 
         result = service.mutate(board_id, update)
@@ -5237,6 +5341,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         return {
             "ok": True, "ticket": project_ticket(board_id, result["ticket"]),
             "dispatch_events": events,
+            "idempotent_replay": result["replayed"],
             "implicitly_renewed": result["renewed"],
             "scrub_audit": result["scrub_audit"],
         }

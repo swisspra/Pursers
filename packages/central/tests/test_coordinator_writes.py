@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import os
 import sys
@@ -7,6 +8,7 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 
@@ -150,6 +152,29 @@ class CoordinatorWriteTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(created.is_error)
         return created.structured_content["ticket"]["ticket_id"]
+
+    def preference_payload(
+        self, ticket_id: str, op_key: str
+    ) -> dict[str, object]:
+        ticket = self.service.load("pursers")["tickets"][ticket_id]
+        offer = ticket.get("work_offer")
+        offer_present = isinstance(offer, dict)
+        return {
+            "agent_name": "coordinator-1",
+            "ticket_id": ticket_id,
+            "prefer_agents": [self.worker_id],
+            "coordinator_op_key": op_key,
+            "coordination_reason": "deterministic starvation preference",
+            "expected_status": "open",
+            "expected_unassigned": True,
+            "expected_work_offer_present": offer_present,
+            "expected_work_offer_agent_id": (
+                offer.get("agent_id") if offer_present else None
+            ),
+            "expected_work_offer_expires_at": (
+                offer.get("expires_at") if offer_present else None
+            ),
+        }
 
     async def test_coordinate_only_join_accepts_every_admitted_membership(self) -> None:
         admitted = (
@@ -310,6 +335,131 @@ class CoordinatorWriteTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(updated.is_error)
         ticket = updated.structured_content["ticket"]
         self.assertEqual(ticket["prefer_agents"], [self.worker_id])
+
+    async def test_coordinator_preference_replay_has_no_mutation_or_offer_churn(
+        self,
+    ) -> None:
+        ticket_id = await self.create_ticket("idempotent coordinator preference")
+        payload = self.preference_payload(ticket_id, "coord-preference-replay")
+        self.principal = central.Principal(
+            self.coordinator.principal_id,
+            self.coordinator.canonical,
+            frozenset({"board:read", "board:write", "board:coordinate"}),
+        )
+
+        first = await self.call("ticket_update", **payload)
+        after_first = copy.deepcopy(
+            self.service.load("pursers")["tickets"][ticket_id]
+        )
+        seq_after_first = self.service.journal.read_after("pursers", 0, 1)[
+            "latest_cursor"
+        ]
+        second = await self.call("ticket_update", **payload)
+        after_second = self.service.load("pursers")["tickets"][ticket_id]
+        seq_after_second = self.service.journal.read_after("pursers", 0, 1)[
+            "latest_cursor"
+        ]
+
+        self.assertFalse(first.structured_content["idempotent_replay"])
+        self.assertTrue(second.structured_content["idempotent_replay"])
+        self.assertEqual(second.structured_content["dispatch_events"], [])
+        self.assertEqual(after_second, after_first)
+        self.assertEqual(seq_after_second, seq_after_first)
+
+    async def test_coordinator_preference_loses_offer_generation_race(
+        self,
+    ) -> None:
+        ticket_id = await self.create_ticket("offer generation race preference")
+        payload = self.preference_payload(ticket_id, "coord-preference-offer-race")
+        expires_at = (
+            datetime.now(timezone.utc) + timedelta(minutes=5)
+        ).isoformat()
+
+        def replace_offer(document: dict[str, Any]) -> dict[str, bool]:
+            ticket = document["tickets"][ticket_id]
+            ticket["work_offer"] = {
+                "agent_id": self.worker_id,
+                "expires_at": expires_at,
+                "expires_at_epoch": (
+                    datetime.now(timezone.utc) + timedelta(minutes=5)
+                ).timestamp(),
+            }
+            return {"ok": True}
+
+        self.service.mutate("pursers", replace_offer)
+        before = copy.deepcopy(self.service.load("pursers")["tickets"][ticket_id])
+        before_seq = self.service.journal.read_after("pursers", 0, 1)[
+            "latest_cursor"
+        ]
+        self.principal = self.coordinator
+
+        with self.assertRaisesRegex(ToolError, "state precondition failed"):
+            await self.call("ticket_update", **payload)
+
+        self.assertEqual(self.service.load("pursers")["tickets"][ticket_id], before)
+        self.assertEqual(
+            self.service.journal.read_after("pursers", 0, 1)["latest_cursor"],
+            before_seq,
+        )
+
+    async def test_coordinator_preference_loses_claim_race_without_mutation(
+        self,
+    ) -> None:
+        ticket_id = await self.create_ticket("claim race preference")
+        payload = self.preference_payload(ticket_id, "coord-preference-claim-race")
+        self.principal = self.worker
+        claimed = await self.call(
+            "ticket_claim", agent_name="worker-agent", ticket_id=ticket_id
+        )
+        self.assertFalse(claimed.is_error)
+        before = copy.deepcopy(self.service.load("pursers")["tickets"][ticket_id])
+        before_seq = self.service.journal.read_after("pursers", 0, 1)[
+            "latest_cursor"
+        ]
+
+        self.principal = self.coordinator
+        with self.assertRaisesRegex(ToolError, "state precondition failed"):
+            await self.call("ticket_update", **payload)
+
+        self.assertEqual(self.service.load("pursers")["tickets"][ticket_id], before)
+        self.assertEqual(
+            self.service.journal.read_after("pursers", 0, 1)["latest_cursor"],
+            before_seq,
+        )
+
+    async def test_coordinator_preference_loses_submission_race_without_mutation(
+        self,
+    ) -> None:
+        ticket_id = await self.create_ticket("submission race preference")
+        payload = self.preference_payload(
+            ticket_id, "coord-preference-submission-race"
+        )
+        self.principal = self.worker
+        claimed = await self.call(
+            "ticket_claim", agent_name="worker-agent", ticket_id=ticket_id
+        )
+        self.assertFalse(claimed.is_error)
+        submitted = await self.call(
+            "ticket_submit",
+            agent_name="worker-agent",
+            ticket_id=ticket_id,
+            summary="submission wins coordinator snapshot race",
+        )
+        self.assertFalse(submitted.is_error)
+        before = copy.deepcopy(self.service.load("pursers")["tickets"][ticket_id])
+        before_seq = self.service.journal.read_after("pursers", 0, 1)[
+            "latest_cursor"
+        ]
+
+        self.principal = self.coordinator
+        with self.assertRaisesRegex(ToolError, "state precondition failed"):
+            await self.call("ticket_update", **payload)
+
+        self.assertEqual(self.service.load("pursers")["tickets"][ticket_id], before)
+        self.assertEqual(
+            self.service.journal.read_after("pursers", 0, 1)["latest_cursor"],
+            before_seq,
+        )
 
     async def test_assignment_is_atomic_targeted_and_idempotent(self) -> None:
         ticket_id = await self.create_ticket()

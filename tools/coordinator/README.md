@@ -8,9 +8,12 @@ leaving worker claim, submission, and independent review paths unchanged.
 
 `--mode shadow` is the default. It computes the same decisions as active mode
 and writes `would_nudge` / `would_assign` findings, but performs zero workflow
-mutations. `--mode active` updates the ticket's `prefer_agents` through
-`ticket_update` so the dispatcher can offer work to the selected seat, and
-records each outcome in `coordinator_findings` and the digest.
+mutations. `--mode active` makes one atomic `ticket_update` per planned ticket,
+setting a single deterministic `prefer_agents` target so the dispatcher can
+offer work to that seat. Central checks the planned ticket and work-offer state
+and deduplicates the operation key before changing the ticket or replacing an
+offer. The coordinator records each outcome in `coordinator_findings` and the
+digest.
 
 Mode is a process-start flag and cannot be toggled at runtime. The kill switch
 is either:
@@ -49,16 +52,19 @@ last local cursor. Other healthy boards remain subscribed.
 ## Policy and safeguards
 
 - Normal tickets starve at 30 minutes; critical tickets at 10 minutes.
-- At one threshold, the coordinator refreshes dispatcher preference toward an
-  idle eligible seat.
-- At exactly twice the threshold, the oldest fleet-fair ticket is preferred to
-  the least-loaded eligible seat. Critical work ranks before other priorities.
+- At one threshold, the coordinator chooses one deterministic idle eligible
+  seat and refreshes the ticket's dispatcher preference once.
+- At exactly twice the threshold, the oldest fleet-fair ticket is strongly
+  preferred to one least-loaded eligible seat. Critical work ranks before
+  other priorities; this remains a dispatcher preference, not an assignment.
 - Seats with three proven drops in seven days remain eligible but rank last.
 - Central revokes any stale offer and lets the dispatcher issue the replacement
   offer. Ordinary `ticket_created` and reopened-ticket events remain visible to
   all admitted workers through open-backlog catch-up.
-- Operation keys are deterministic across restarts. Limits are one assignment
-  per board per 10 minutes and three nudges per seat per hour.
+- Operation keys are deterministic and server-deduplicated across restarts.
+  Each planning pass makes at most one preference mutation per ticket. Stage
+  two is limited to one ticket per board per 10 minutes; stage one is limited
+  to three selected-ticket preference refreshes per seat per hour.
 - Three consecutive mutation failures open the circuit breaker and change the
   process's effective mode to shadow.
 
@@ -123,4 +129,7 @@ For dispatch controls, an admitted active `coordinator` or `orchestrator` seat
 with `board:coordinate` may call `ticket_update` on any live ticket; it need not
 be the ticket creator or an `admin` member. `board_dispatch_policy_set` remains
 limited to an `admin` board membership. Other admin-only configuration tools
-keep their existing `board:write` requirements.
+keep their existing `board:write` requirements. The shipped coordinator uses
+the stricter keyed preference form: it requires an open, unclaimed, unassigned
+snapshot and an exact current work-offer match; stale or replayed plans do not
+revoke or reissue offers.

@@ -1802,8 +1802,63 @@ def test_mutate_action_declares_coordinator_role(
     }
     assert captured["call"] == (
         "TK-0",
-        {"prefer_agents": ["AI-target"]},
+        {
+            "prefer_agents": ["AI-target"],
+            "coordinator_op_key": "coord-op-assign-0",
+            "coordination_reason": "deterministic test decision",
+            "expected_status": "open",
+            "expected_unassigned": True,
+            "expected_work_offer_present": False,
+            "expected_work_offer_agent_id": None,
+            "expected_work_offer_expires_at": None,
+        },
     )
+
+
+def test_stage_one_chooses_one_worker_and_executes_one_mutation() -> None:
+    snapshot = {
+        "board-a": {
+            "agents": [
+                {
+                    "agent_id": "AI-first",
+                    "agent_name": "worker-first",
+                    "last_activity_at": ago(2),
+                    "status": "active",
+                    "membership_role": "member",
+                },
+                {
+                    "agent_id": "AI-second",
+                    "agent_name": "worker-second",
+                    "last_activity_at": ago(1),
+                    "status": "active",
+                    "membership_role": "member",
+                },
+            ],
+            "tickets": [
+                {
+                    "ticket_id": "TK-stage-one",
+                    "status": "open",
+                    "priority": "medium",
+                    "created_at": ago(1_800),
+                }
+            ],
+        }
+    }
+    actions = coordinator.plan_actions(
+        snapshot, {"board-a": {"drop_history": []}}, {}, NOW
+    )
+    calls: list[coordinator.Action] = []
+
+    async def mutate(item: coordinator.Action) -> dict[str, bool]:
+        calls.append(item)
+        return {"ok": True}
+
+    runtime = coordinator.RuntimeState.for_mode("active")
+    asyncio.run(coordinator.execute_actions(actions, mutate, runtime, NOW, {}))
+
+    assert len(actions) == 1
+    assert actions[0].target_agent_id == "AI-first"
+    assert calls == actions
 
 
 def test_shadow_mode_emits_would_findings_and_makes_zero_mutation_calls() -> None:

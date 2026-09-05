@@ -499,6 +499,13 @@ class BoardClient:
         skills_required: list[str] | None = None,
         exclude_agents: list[str] | None = None,
         prefer_agents: list[str] | None = None,
+        coordinator_op_key: str | None = None,
+        coordination_reason: str | None = None,
+        expected_status: str | None = None,
+        expected_unassigned: bool | None = None,
+        expected_work_offer_present: bool | None = None,
+        expected_work_offer_agent_id: str | None = None,
+        expected_work_offer_expires_at: str | None = None,
     ) -> dict[str, Any]:
         arguments: dict[str, Any] = {
             "agent_name": self.agent_name,
@@ -509,6 +516,13 @@ class BoardClient:
             "skills_required": skills_required,
             "exclude_agents": exclude_agents,
             "prefer_agents": prefer_agents,
+            "coordinator_op_key": coordinator_op_key,
+            "coordination_reason": coordination_reason,
+            "expected_status": expected_status,
+            "expected_unassigned": expected_unassigned,
+            "expected_work_offer_present": expected_work_offer_present,
+            "expected_work_offer_agent_id": expected_work_offer_agent_id,
+            "expected_work_offer_expires_at": expected_work_offer_expires_at,
         }
         arguments.update({key: value for key, value in optional.items() if value is not None})
         result = await self._call("ticket_update", arguments)

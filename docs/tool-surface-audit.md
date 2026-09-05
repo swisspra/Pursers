@@ -187,7 +187,7 @@ The ticket specification authorizes immediate code removal only under strictly d
 1. **Central Tools (39):**
    - Every single one of the 39 Central tools has either active repository callers (in `packages/client`, `packages/personal`, `tools/coordinator`, `tools/wait-bridge`), unit/integration test assertions, documentation references, or recorded telemetry in the past 7 days.
    - For example:
-     - `agent_nudge`: 0 calls in 7 days; the shipped coordinator now uses dispatcher preferences instead, while compatibility tests and docs still cover the deprecated Central tool.
+     - `agent_nudge`: 0 calls in 7 days; the shipped coordinator now performs one atomic, preconditioned, operation-key-deduplicated dispatcher preference update per planned ticket, while compatibility tests and docs still cover the deprecated Central tool.
      - `ticket_terminate`: 1 call in 7 days; Personal now exposes only `ticket_cancel`, while Central/client compatibility remains scheduled for separate removal.
      - `ticket_unclaim`: 138 calls in 7 days; active test coverage in `test_ticket_unclaim.py`.
      - `board_get_briefing`: Referenced by the Personal dashboard read path,
