@@ -16,6 +16,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   consume invites or change membership. Coordinate-only credentials may update
   ticket dispatch requirements under the existing creator/admin rule, while
   dispatch-policy changes remain restricted to admin memberships.
+- Codex and Goose wait bridges no longer depend on GUI hosts forwarding the
+  HTTP connector token into stdio subprocesses. Managed configs carry the
+  token-file value in their private env block, startup distinguishes a missing
+  connector token from a real mismatch, and Doctor probes the host launch plus
+  Central-resolved principal identity without exposing token contents.
 
 ## [5.0.0a18] - 2026-09-05
 

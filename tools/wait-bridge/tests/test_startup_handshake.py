@@ -60,6 +60,22 @@ class StartupHandshakeTests(unittest.IsolatedAsyncioTestCase):
         ):
             self.assertIsNone(wait_server._split_identity_failure())
 
+    async def test_missing_connector_token_has_actionable_configuration_error(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "PURSERS_REQUIRE_TOKEN_MATCH": "1",
+                "PURSERS_BOARD_CONNECTOR_TOKEN": "",
+            },
+        ):
+            failure = wait_server._split_identity_failure()
+        self.assertIsNotNone(failure)
+        self.assertEqual(
+            str(failure),
+            "board join failed (configuration): connector token not visible to the "
+            "bridge process; see Codex env forwarding",
+        )
+
     async def test_healthy_connection_is_joined_lazily_and_closed_by_owner(
         self,
     ) -> None:
