@@ -44,7 +44,6 @@ COORDINATOR_NAME = "coordinator-1"
 ASSIGN_RATE_SECONDS = 600
 NUDGE_RATE_SECONDS = 3_600
 MAX_NUDGES_PER_SEAT = 3
-NUDGE_EXPIRY_SECONDS = 600
 INTAKE_RATE_LIMIT = 5
 INTAKE_RATE_WINDOW_SECONDS = 3_600
 INTAKE_BREAKER_FAILURES = 3
@@ -2843,29 +2842,9 @@ async def mutate_action(
         agent_name=agent_name,
         role="coordinator",
     ) as client:
-        if action.kind == "assign":
-            return await client._call(  # noqa: SLF001 - phase-2 primitive wrapper.
-                "ticket_assign",
-                {
-                    "agent_name": agent_name,
-                    "ticket_id": action.ticket_id,
-                    "assigned_to_agent_id": action.target_agent_id,
-                    "expected_status": "open",
-                    "expected_assigned_to_agent_id": None,
-                    "coordinator_op_key": action.op_key,
-                    "reason": action.reason,
-                },
-            )
-        return await client._call(  # noqa: SLF001 - phase-2 primitive wrapper.
-            "agent_nudge",
-            {
-                "agent_name": agent_name,
-                "ticket_id": action.ticket_id,
-                "target_agent_id": action.target_agent_id,
-                "coordinator_op_key": action.op_key,
-                "reason": action.reason,
-                "expires_at": (now + timedelta(seconds=NUDGE_EXPIRY_SECONDS)).isoformat(),
-            },
+        return await client.ticket_update(
+            action.ticket_id,
+            prefer_agents=[action.target_agent_id],
         )
 
 

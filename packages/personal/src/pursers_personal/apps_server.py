@@ -67,7 +67,6 @@ CHAT_TOOL_NAMES = frozenset(
         "ticket_review",
         "lease_renew",
         "ticket_cancel",
-        "ticket_terminate",
         "memory_write",
         "memory_read",
         "memory_search",
@@ -2179,16 +2178,6 @@ def build_dashboard_server(
         ticket_id: str, reason: str | None = None
     ) -> dict[str, Any]:
         return await state._rpc("ticket_cancel", ticket_id, reason=reason)
-
-    @apps.tool(
-        resource_uri=UI_URI,
-        description="Terminate a ticket with an optional reason.",
-        visibility=MODEL_ONLY,
-    )
-    async def ticket_terminate(
-        ticket_id: str, reason: str | None = None
-    ) -> dict[str, Any]:
-        return await state._rpc("ticket_terminate", ticket_id, reason=reason)
 
     @apps.tool(
         resource_uri=UI_URI,

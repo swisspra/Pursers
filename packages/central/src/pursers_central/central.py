@@ -178,19 +178,11 @@ DEPRECATED_TOOLS = frozenset(
     {
         "agent_nudge",
         "board_get_briefing",
-        "memory_checkpoint",
-        "memory_handoff",
-        "memory_links",
-        "memory_read",
-        "memory_search",
-        "memory_unpin",
         "ticket_assign",
         "ticket_terminate",
     }
 )
-DEPRECATED_READ_TOOLS = frozenset(
-    {"board_get_briefing", "memory_read", "memory_search", "memory_links"}
-)
+DEPRECATED_READ_TOOLS = frozenset({"board_get_briefing"})
 REVIEW_CORE_OVERRIDE_FIELDS = frozenset(
     {"review_policy_at_verdict", "review_label", "review_verdict"}
 )
@@ -5024,6 +5016,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             if (
                 ticket.get("created_by_principal_id") != principal.principal_id
                 and membership.get("role") != "admin"
+                and not coordinate_only
             ):
                 raise PermissionError("ticket update requires creator or board admin")
             if ticket.get("status") not in ACTIVE_TICKET_STATES:

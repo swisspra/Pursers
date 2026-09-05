@@ -1777,10 +1777,10 @@ def test_mutate_action_declares_coordinator_role(
         async def __aexit__(self, *_args: Any) -> None:
             return None
 
-        async def _call(
-            self, name: str, arguments: dict[str, Any]
+        async def ticket_update(
+            self, ticket_id: str, **arguments: Any
         ) -> dict[str, bool]:
-            captured["call"] = (name, arguments)
+            captured["call"] = (ticket_id, arguments)
             return {"ok": True}
 
     monkeypatch.setattr(pursers_client, "BoardClient", FakeBoardClient)
@@ -1800,6 +1800,10 @@ def test_mutate_action_declares_coordinator_role(
         "agent_name": "coordinator-test",
         "role": "coordinator",
     }
+    assert captured["call"] == (
+        "TK-0",
+        {"prefer_agents": ["AI-target"]},
+    )
 
 
 def test_shadow_mode_emits_would_findings_and_makes_zero_mutation_calls() -> None:

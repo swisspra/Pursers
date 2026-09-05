@@ -296,6 +296,21 @@ class CoordinatorWriteTests(unittest.IsolatedAsyncioTestCase):
         ):
             self.assertFalse(result.is_error)
 
+    async def test_coordinate_only_ticket_update_targets_preferred_worker(self) -> None:
+        ticket_id = await self.create_ticket("coordinator dispatch update")
+        self.principal = self.coordinator
+
+        updated = await self.call(
+            "ticket_update",
+            agent_name="coordinator-1",
+            ticket_id=ticket_id,
+            prefer_agents=[self.worker_id],
+        )
+
+        self.assertFalse(updated.is_error)
+        ticket = updated.structured_content["ticket"]
+        self.assertEqual(ticket["prefer_agents"], [self.worker_id])
+
     async def test_assignment_is_atomic_targeted_and_idempotent(self) -> None:
         ticket_id = await self.create_ticket()
         await self.join_other_worker()

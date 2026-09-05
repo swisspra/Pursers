@@ -18,7 +18,7 @@ This document delivers:
 2. **Repository caller inventory** covering all in-repo packages, tools, client libraries, dashboard apps, runtimes, and documentation.
 3. **Classification of all 45 tools** (39 Central tools + 6 Wait-Bridge tools) and seat-kit CLI verbs into five categories: `KEEP`, `CONSOLIDATE`, `SUPERSEDED`, `LEGACY FALLBACK`, and `UNKNOWN`.
 4. **Consolidation architecture** for overlapping read projections (`board_snapshot`, `board_get_briefing`, `board_status`, and `board_onboard`).
-5. **Deprecation mechanics implementation** for a18: hiding 10 deprecated tools from `tools/list` by default while retaining runtime callability, opt-in capability negotiation (`capabilities={"legacy_tools": true}` and `PURSERS_LEGACY_TOOLS=1`), standard `ToolAnnotations` deprecation hints with `_meta`, and one-time sequenced journal warnings per caller with durable deduplication across restarts.
+5. **Deprecation mechanics implementation** for a18: hiding 4 deprecated tools from `tools/list` by default while retaining runtime callability, opt-in capability negotiation (`capabilities={"legacy_tools": true}` and `PURSERS_LEGACY_TOOLS=1`), standard `ToolAnnotations` deprecation hints with `_meta`, and one-time sequenced journal warnings per caller with durable deduplication across restarts.
 6. **Zero-risk removal assessment** proving why immediate deletion in a18 is zero-risk only when callers and telemetry are strictly zero.
 7. **Ticket-ready actionable removal backlog** for the a19 train.
 
@@ -71,12 +71,12 @@ This document delivers:
 | `board_watch` | Bridge | 5 files | 0 | None | None (0 calls recorded in 7d window) | **KEEP** | Active Core | Adds priority tickets/tags to orchestrator digest stream. |
 | `journal_compact` | Central | 2 files | 0 | None | None (0 calls recorded in 7d window) | **KEEP** | Active Core | Compaction maintenance for derivable telemetry; retains durable audit. |
 | `lease_renew` | Central | 19 files | 8 | worker: 8 | 2026-08-31 (daily aggregate) | **KEEP** | Active Core | Heartbeat renewal tool for active work and review leases. |
-| `memory_checkpoint` | Central | 3 files | 0 | None | None (0 calls recorded in 7d window) | **UNKNOWN** | Hide a18, Flag a19 | Unused by model seats in 7 days. Move behind capability flag. |
-| `memory_handoff` | Central | 4 files | 0 | None | None (0 calls recorded in 7d window) | **UNKNOWN** | Hide a18, Flag a19 | Unused by model seats in 7 days. Move behind capability flag. |
-| `memory_links` | Central | 8 files | 0 | None | None (0 calls recorded in 7d window) | **UNKNOWN** | Hide a18, Flag a19 | 0 model seat calls in 7 days. Used internally by Personal UI app only. |
-| `memory_read` | Central | 7 files | 0 | None | None (0 calls recorded in 7d window) | **UNKNOWN** | Hide a18, Flag a19 | 0 model seat calls in 7 days. Move behind capability flag. |
-| `memory_search` | Central | 7 files | 0 | None | None (0 calls recorded in 7d window) | **UNKNOWN** | Hide a18, Flag a19 | 0 model seat calls in 7 days. Move behind capability flag. |
-| `memory_unpin` | Central | 3 files | 0 | None | None (0 calls recorded in 7d window) | **UNKNOWN** | Hide a18, Flag a19 | 0 model seat calls in 7 days. Move behind capability flag. |
+| `memory_checkpoint` | Central | 3 files | 0 | None | Personal app caller inventory | **KEEP** | Active Personal | Personal exposes the checkpoint workflow to model-visible app tools. Model-seat telemetry did not measure app calls. |
+| `memory_handoff` | Central | 4 files | 0 | None | Personal app caller inventory | **KEEP** | Active Personal | Personal exposes the handoff workflow to model-visible app tools. Model-seat telemetry did not measure app calls. |
+| `memory_links` | Central | 8 files | 0 | None | Personal dashboard live caller | **KEEP** | Active Personal | Powers the Personal UI link projection and is also exposed as an app tool. |
+| `memory_read` | Central | 7 files | 0 | None | Personal app caller inventory | **KEEP** | Active Personal | Personal exposes bounded memory reading to model-visible app tools. |
+| `memory_search` | Central | 7 files | 0 | None | Personal app caller inventory | **KEEP** | Active Personal | Personal exposes bounded memory search to model-visible app tools. |
+| `memory_unpin` | Central | 3 files | 0 | None | Personal app caller inventory | **KEEP** | Active Personal | Personal exposes memory unpinning to model-visible app tools. |
 | `memory_write` | Central | 11 files | 102 | coordinator: 6, worker: 96 | 2026-09-04T00:05:32Z (journal event) | **KEEP** | Active Core | 102 calls in 7-day window. Retained as visible core tool per measured traffic. |
 | `project_registry_get`| Bridge| 6 files | 0 | None | None (0 calls recorded in 7d window) | **KEEP** | Active Core | Parses multi-project repository roots from board state for CLI seats. |
 | `ticket_assign` | Central | 6 files | 3 | coordinator: 3 | 2026-09-01T16:00:54Z (journal event) | **SUPERSEDED** | Hide a18, Admin a19 | Superseded by Dispatcher assignment. Retain only as privileged escape hatch. |
@@ -96,15 +96,15 @@ This document delivers:
 
 ## 3. Summary Counts per Decision
 
-*Note: Counts below match the Master Inventory table identically (31 + 4 + 3 + 1 + 6 = 45).*
+*Note: Counts below match the Master Inventory table identically (37 + 4 + 3 + 1 + 0 = 45).*
 
 | Classification Decision | Count | Percentage | Description |
 |---|---|---|---|
-| **KEEP** | 31 | 68.9% | Active core tools essential for ticket lifecycle, review governance, board membership, push-wait, and orchestration (25 Central + 6 Wait-Bridge). |
+| **KEEP** | 37 | 82.2% | Active core and Personal app tools essential for ticket lifecycle, memory UI, review governance, board membership, push-wait, and orchestration (31 Central + 6 Wait-Bridge). |
 | **CONSOLIDATE** | 4 | 8.9% | Overlapping read views (`board_snapshot`, `board_status`, `board_onboard`, `board_get_briefing`) targeted for a unified 2-view projection model. |
 | **SUPERSEDED** | 3 | 6.7% | Replaced tools (`agent_nudge`, `ticket_assign`, `ticket_terminate`) with alternative modern fleet mechanisms. |
 | **LEGACY FALLBACK** | 1 | 2.2% | Polling fallback mechanism (`board_catchup`) maintained for environments without push-wait. |
-| **UNKNOWN** | 6 | 13.3% | Specialized memory tools (`memory_read`, `memory_search`, `memory_unpin`, `memory_links`, `memory_checkpoint`, `memory_handoff`) with 0 model read calls in 7 days. |
+| **UNKNOWN** | 0 | 0.0% | No tools remain unclassified after accounting for Personal app callers. |
 | **TOTAL** | **45** | **100.0%** | **39 Central tools + 6 Wait-Bridge tools** |
 
 ---
@@ -132,18 +132,17 @@ Four distinct tools project overlapping aspects of board state:
 - **`board_catchup` Refactoring:** Polling via `board_catchup` generates massive traffic (123,983 calls in 7 days from legacy cron scripts). In a18, keep `board_catchup` as a fallback. In a19, remove `touch=true` and `ack` mutation modes, restricting `board_catchup` to a read-only un-mutating refetch.
 
 ### 4.3. Specialized `memory_*` Family
-The memory family consists of seven tools.
-- **Telemetry Reality:** In the last 7 days, `memory_write` recorded **102 live calls** (96 by workers, 6 by coordinator), documenting critical investigation findings and handoffs. Per reviewer instruction, `memory_write` remains an active visible tool.
-- Conversely, autonomous worker and reviewer seats made **zero** calls to `memory_read`, `memory_search`, `memory_unpin`, `memory_links`, `memory_checkpoint`, or `memory_handoff`.
-- In modern workflow doctrine, ticket specifications, review history, and commit notes carry all necessary task state.
-- **Plan:** Hide the 6 unused memory tools from `tools/list` in a18. In a19, move them behind an explicit capability declaration `capabilities={"memory_tools": true}` or relocate them to a dedicated modular extension.
+The memory family consists of seven tools and is classified **KEEP**.
+- **Telemetry correction:** The original measurement covered model seats, not MCP Apps. `memory_write` recorded **102 live model-seat calls**, while the other six tools showed zero model-seat calls.
+- **Personal caller inventory:** `packages/personal/src/pursers_personal/apps_server.py` allow-lists and exposes all six tools. `memory_links` additionally powers the dashboard's bounded link projection. These are shipped callers, so the zero model-seat count cannot support deprecation or removal.
+- **Decision:** Keep all seven memory tools visible by default. Remove the six read/workflow tools from `DEPRECATED_TOOLS`; do not emit deprecation warnings for legitimate Personal traffic.
 
 ---
 
 ## 5. Deprecation Mechanics Implementation (a18)
 
 ### 5.1. The Hide-Unless-Legacy Mechanism
-In a18, exactly 10 deprecated tools remain fully callable at runtime for backward compatibility, but are omitted from MCP `tools/list` unless the calling seat explicitly opts in.
+In a18, exactly 4 deprecated tools remain fully callable at runtime for backward compatibility, but are omitted from MCP `tools/list` unless the calling seat explicitly opts in.
 
 **Central Implementation (`packages/central/src/pursers_central/central.py`):**
 1. **`DEPRECATED_TOOLS` Set:**
@@ -151,12 +150,6 @@ In a18, exactly 10 deprecated tools remain fully callable at runtime for backwar
    DEPRECATED_TOOLS = frozenset({
        "agent_nudge",
        "board_get_briefing",
-       "memory_checkpoint",
-       "memory_handoff",
-       "memory_links",
-       "memory_read",
-       "memory_search",
-       "memory_unpin",
        "ticket_assign",
        "ticket_terminate",
    })
@@ -179,7 +172,7 @@ In a18, exactly 10 deprecated tools remain fully callable at runtime for backwar
 ### 5.2. Post-Authorization Deprecation Warnings & Durable Dedupe
 When a deprecated tool is called at runtime:
 1. **Post-Authorization Execution:** The tool function executes first. If the caller lacks authorization (e.g. outsider on unjoined board), `PermissionError` is raised before any warning logic is reached. Denied calls produce **zero** mutations and **zero** journal events.
-2. **Read tools never mutate domain state:** successful calls to `board_get_briefing`, `memory_read`, `memory_search`, and `memory_links` emit a process-local, one-time machine-log event only. They do not change the board document, journal, or cursor.
+2. **Deprecated reads never mutate domain state:** successful calls to `board_get_briefing` emit a process-local, one-time machine-log event only. They do not change the board document, journal, or cursor. The active memory reads no longer enter this deprecation path.
 3. **Durable write-tool deduplication:** for deprecated write tools, Central atomically keys the warning by `tool + caller_principal_id + caller_agent_name` in the journal transaction. The journal keeps at most 4,096 identities and evicts the oldest sequence first. A new write-tool warning uses `append_once_and_publish`; its bounded summary survives restart and compaction.
 4. **Result Metadata:** The returned dictionary carries `_deprecated: True` and `deprecated: True` as an additional compatibility signal.
 
@@ -194,8 +187,8 @@ The ticket specification authorizes immediate code removal only under strictly d
 1. **Central Tools (39):**
    - Every single one of the 39 Central tools has either active repository callers (in `packages/client`, `packages/personal`, `tools/coordinator`, `tools/wait-bridge`), unit/integration test assertions, documentation references, or recorded telemetry in the past 7 days.
    - For example:
-     - `agent_nudge`: 0 calls in 7 days, but referenced in `test_coordinator_writes.py` and `docs/coordinator-design.md`. Deleting it now would break unit test imports and coordinator test suites.
-     - `ticket_terminate`: 1 call in 7 days; referenced in `test_coordinator_writes.py` and `packages/client/client.py`.
+     - `agent_nudge`: 0 calls in 7 days; the shipped coordinator now uses dispatcher preferences instead, while compatibility tests and docs still cover the deprecated Central tool.
+     - `ticket_terminate`: 1 call in 7 days; Personal now exposes only `ticket_cancel`, while Central/client compatibility remains scheduled for separate removal.
      - `ticket_unclaim`: 138 calls in 7 days; active test coverage in `test_ticket_unclaim.py`.
      - `board_get_briefing`: Referenced by the Personal dashboard read path,
        `test_response_bounds.py`, and `client.py`; Personal migrates in a18.
@@ -230,9 +223,9 @@ The following ticket-ready backlog items are scheduled for execution during the 
    - Remove `board_get_briefing` from `central.py` and `client.py`.
    - Update `test_response_bounds.py` to assert bounded `board_status` instead.
 
-4. **[TK-a19-04] Central: Move unused `memory_*` family behind modular extension**
-   - Extract `memory_checkpoint`, `memory_handoff`, `memory_links`, `memory_read`, `memory_search`, `memory_unpin` into an optional extension or require capability `capabilities={"memory_tools": true}`.
-   - Remove default registration from core `central.py`.
+4. **[WITHDRAWN] Keep the `memory_*` family visible for Personal**
+   - Personal is the intended caller for `memory_checkpoint`, `memory_handoff`, `memory_links`, `memory_read`, `memory_search`, and `memory_unpin`.
+   - Reconsider modularization only with an app migration plan and replacement projection coverage.
 
 5. **[TK-a19-05] Central: Trim `board_catchup` touch and ack modes**
    - Make `board_catchup` strictly read-only (`touch=False`, ignore `ack`).
@@ -246,14 +239,8 @@ The following ticket-ready backlog items are scheduled for execution during the 
 
 ## 8. Summary of a18 Hidden Tools List
 
-The exact 10 tools hidden by default in a18:
+The exact 4 tools hidden by default in a18:
 1. `agent_nudge`
 2. `board_get_briefing`
-3. `memory_checkpoint`
-4. `memory_handoff`
-5. `memory_links`
-6. `memory_read`
-7. `memory_search`
-8. `memory_unpin`
-9. `ticket_assign`
-10. `ticket_terminate`
+3. `ticket_assign`
+4. `ticket_terminate`
