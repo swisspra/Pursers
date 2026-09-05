@@ -936,8 +936,10 @@ def _seat_capabilities() -> dict[str, Any] | None:
     return capabilities
 
 
-def _declared_role() -> str:
-    role = os.environ.get("PURSERS_ROLE", "worker").strip().lower()
+def _declared_role() -> str | None:
+    role = os.environ.get("PURSERS_ROLE", "").strip().lower()
+    if not role:
+        return None
     if role not in SEAT_ROLES:
         raise ValueError(
             "PURSERS_ROLE must be worker, reviewer, orchestrator, or coordinator"
@@ -1078,10 +1080,9 @@ class _BoardView:
         capabilities: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         selected = self.agent_name if agent_name is None else agent_name
-        arguments: dict[str, Any] = {
-            "agent_name": selected,
-            "role": self.role,
-        }
+        arguments: dict[str, Any] = {"agent_name": selected}
+        if self.role is not None:
+            arguments["role"] = self.role
         if task_focus is not None:
             arguments["task_focus"] = task_focus
         caps = dict(capabilities or {})

@@ -57,6 +57,34 @@ async def test_default_board_join_preserves_existing_behavior(monkeypatch) -> No
 
 
 @pytest.mark.anyio
+async def test_board_join_can_defer_role_to_central(monkeypatch) -> None:
+    board = BoardClient(
+        "https://central.example/mcp",
+        "TOKEN_PLACEHOLDER",
+        "board-multi-name",
+        agent_name="membership-defaulted",
+        role=None,
+    )
+    captured: dict[str, Any] = {}
+
+    async def call_refresh(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        captured.update({"tool": name, "arguments": arguments})
+        return {**joined(arguments["agent_name"]), "role": "reviewer"}
+
+    monkeypatch.setattr(board, "_call_refresh", call_refresh)
+
+    result = await board.board_join()
+
+    assert captured == {
+        "tool": "board_join",
+        "arguments": {"agent_name": "membership-defaulted"},
+    }
+    assert result["role"] == "reviewer"
+    assert board.identity is not None
+    assert board.identity.role == "reviewer"
+
+
+@pytest.mark.anyio
 async def test_explicit_board_join_returns_identity_without_mutation(monkeypatch) -> None:
     board = client()
     original_identity = JoinedIdentity(

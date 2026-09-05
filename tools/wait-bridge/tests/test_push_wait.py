@@ -48,7 +48,7 @@ import pursers_wait_server as wait_server  # noqa: E402
 class InProcessBoardClient:
     """Minimal BoardClient-compatible adapter over a real in-process Central."""
 
-    def __init__(self, raw_client: Client, role: str = "reviewer") -> None:
+    def __init__(self, raw_client: Client, role: str | None = "reviewer") -> None:
         self._raw_client = raw_client
         self._client: Any = raw_client
         self.agent_name = "push-listener"
@@ -69,9 +69,11 @@ class InProcessBoardClient:
         task_focus: str | None = None,
     ) -> dict[str, Any]:
         selected = self.agent_name if agent_name is None else agent_name
-        joined = await self._call(
-            "board_join", agent_name=selected, role=role or self.role
-        )
+        arguments: dict[str, Any] = {"agent_name": selected}
+        selected_role = self.role if role is None else role
+        if selected_role is not None:
+            arguments["role"] = selected_role
+        joined = await self._call("board_join", **arguments)
         identity = JoinedIdentity(
             joined["board_id"],
             joined["agent_id"],
@@ -689,6 +691,54 @@ class PushWaitTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             result["events"][0]["ticket_id"], created["ticket"]["ticket_id"]
         )
+
+    async def test_auto_wait_uses_membership_defaulted_reviewer_role(self) -> None:
+        reviewer = central.Principal(
+            "PR-membership-reviewer", "membership-reviewer",
+            frozenset({"board:read", "board:review"}),
+        )
+        async with Client(self.mcp, mode="2026-07-28", cache=None) as raw:
+            self.principal = central.Principal(
+                self.principal.principal_id,
+                self.principal.canonical,
+                frozenset({"board:read", "board:write", "board:review"}),
+            )
+            admin_client = await self._joined_client(raw, role="worker")
+            await admin_client._call(
+                "board_member_add", agent_name="push-actor",
+                principal_id=reviewer.principal_id, role="reviewer",
+            )
+
+            self.principal = reviewer
+            review_client = InProcessBoardClient(raw, role=None)
+            review_client.agent_name = "membership-reviewer"
+            joined = await review_client.board_join()
+            self.assertEqual(joined["role"], "reviewer")
+
+            self.principal = central.Principal(
+                "PR-push-test", "push-test-canonical",
+                frozenset({"board:read", "board:write", "board:review"}),
+            )
+            created = await admin_client.create_ticket(
+                "membership-defaulted reviewer fixture"
+            )
+            ticket_id = created["ticket"]["ticket_id"]
+            await admin_client.claim_ticket(ticket_id)
+            await admin_client.submit_ticket(ticket_id)
+
+            self.principal = reviewer
+            result = await wait_server._wait_for_work(
+                review_client,
+                since_seq=0,
+                timeout_s=1,
+                only_mine=False,
+                project="pursers",
+                wait_for="auto",
+            )
+
+        self.assertEqual(review_client.identity.role, "reviewer")
+        self.assertFalse(result["timed_out"])
+        self.assertEqual(result["events"][0]["ticket_id"], ticket_id)
     async def test_push_task_stops_after_first_real_cue_without_cleanup_error(
         self,
     ) -> None:

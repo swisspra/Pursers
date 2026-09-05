@@ -106,6 +106,9 @@ class DispatchTests(unittest.IsolatedAsyncioTestCase):
         self.principal = self.admin
         worker = await self.call("board_join", agent_name="admin-worker-default")
         self.assertEqual(worker.structured_content["role"], "worker")
+        self.assertTrue(
+            worker.structured_content["role_defaulted_from_membership"]
+        )
         self.assertTrue(worker.structured_content["capabilities"]["can_work"])
         self.assertFalse(worker.structured_content["capabilities"]["can_review"])
 
@@ -128,9 +131,51 @@ class DispatchTests(unittest.IsolatedAsyncioTestCase):
         self.principal = self.admin
         await self.call(
             "board_member_add", agent_name="admin-agent",
+            principal_id=self.reviewer_a.principal_id, role="reviewer",
+        )
+        self.principal = self.reviewer_a
+        with patch.object(central, "log_runtime_event") as runtime_event:
+            inferred_reviewer = await self.call(
+                "board_join", agent_name="membership-reviewer"
+            )
+            repeated = await self.call(
+                "board_join", agent_name="membership-reviewer"
+            )
+        self.assertEqual(inferred_reviewer.structured_content["role"], "reviewer")
+        self.assertEqual(repeated.structured_content["role"], "reviewer")
+        self.assertFalse(
+            inferred_reviewer.structured_content["capabilities"]["can_work"]
+        )
+        self.assertTrue(
+            inferred_reviewer.structured_content["capabilities"]["can_review"]
+        )
+        self.assertEqual(runtime_event.call_count, 1)
+        runtime_event.assert_called_once_with(
+            "board_join_role_defaulted_from_membership",
+            board_id="pursers",
+            principal_id=self.reviewer_a.principal_id,
+            agent_name="membership-reviewer",
+            membership_role="reviewer",
+            effective_role="reviewer",
+        )
+        explicit_worker = await self.call(
+            "board_join", agent_name="membership-reviewer", role="worker"
+        )
+        self.assertEqual(explicit_worker.structured_content["role"], "worker")
+        self.assertFalse(
+            explicit_worker.structured_content["role_defaulted_from_membership"]
+        )
+
+        self.principal = self.admin
+        await self.call(
+            "board_member_add", agent_name="admin-agent",
             principal_id=self.worker_a.principal_id, role="member",
         )
         self.principal = self.worker_a
+        member_default = await self.call(
+            "board_join", agent_name="worker-a-default"
+        )
+        self.assertEqual(member_default.structured_content["role"], "worker")
         with self.assertRaisesRegex(ToolError, "board:review"):
             await self.call(
                 "board_join", agent_name="worker-a-reviewer", role="reviewer"
