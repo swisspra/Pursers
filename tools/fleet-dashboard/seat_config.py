@@ -1472,8 +1472,15 @@ class BridgeInstaller:
 class PromptRenderer:
     def render(self, desired: DesiredSeat) -> str:
         host_note = {
-            "codex": "This name is bound to this Codex window; never reuse it in another window.",
-            "codex-cli": "This name is bound to this Codex CLI session.",
+            "codex": (
+                "This name is bound to this Codex window; never reuse it in another window. "
+                "Codex uses a per-call agent naming model: each session passes its own agent_name "
+                "to a2a_wait while the bridge process startup identity serves as a control identity."
+            ),
+            "codex-cli": (
+                "This name is bound to this Codex CLI session. "
+                "Each session passes its own per-call agent_name to a2a_wait."
+            ),
             "goose": "Run from the generated Goose seat folder and use its pinned interpreter.",
             "claude-desktop": (
                 "Claude Desktop uses a 200s bridge block under its 240s host deadline."
@@ -1766,13 +1773,24 @@ def _default_live_probe(desired: DesiredSeat, timeout_s: float) -> dict[str, Any
 
     async def probe() -> dict[str, Any]:
         subscribed = asyncio.Event()
-        async with BoardClient(
-            desired.central_url,
-            token,
-            desired.home_board,
-            agent_name=desired.name,
-            role=desired.role,
-        ) as client:
+        try:
+            client_cm = BoardClient(
+                desired.central_url,
+                token,
+                desired.home_board,
+                agent_name=desired.name,
+                role=desired.role,
+                capabilities={"can_work": False, "can_review": False},
+            )
+        except TypeError:
+            client_cm = BoardClient(
+                desired.central_url,
+                token,
+                desired.home_board,
+                agent_name=desired.name,
+                role=desired.role,
+            )
+        async with client_cm as client:
             status = await client.board_status()
             state = await client.board_state_get("project_registry")
             registry_boards = [desired.home_board]
@@ -1827,13 +1845,24 @@ def _default_live_probe(desired: DesiredSeat, timeout_s: float) -> dict[str, Any
             skipped: dict[str, str] = {}
             for board in registry_boards[1:]:
                 try:
-                    async with BoardClient(
-                        desired.central_url,
-                        token,
-                        board,
-                        agent_name=desired.name,
-                        role=desired.role,
-                    ) as board_client:
+                    try:
+                        board_client_cm = BoardClient(
+                            desired.central_url,
+                            token,
+                            board,
+                            agent_name=desired.name,
+                            role=desired.role,
+                            capabilities={"can_work": False, "can_review": False},
+                        )
+                    except TypeError:
+                        board_client_cm = BoardClient(
+                            desired.central_url,
+                            token,
+                            board,
+                            agent_name=desired.name,
+                            role=desired.role,
+                        )
+                    async with board_client_cm as board_client:
                         await board_client.board_status()
                     available.append(board)
                 except Exception as exc:
