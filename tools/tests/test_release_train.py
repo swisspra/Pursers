@@ -38,19 +38,19 @@ def test_explicit_bump_rewrites_fixture_consumers_without_touching_disk(
     target = release_train.bumped_versions(
         current,
         (
-            "product=5.0.0a19",
-            "central=0.1.0a23",
+            "product=5.0.0a20",
+            "central=0.1.0a24",
             "client=0.1.0a17",
             "import=5.0.0a4",
-            "wait_bridge=0.1.0a9",
+            "wait_bridge=0.1.0a10",
         ),
         None,
     )
 
     planned = release_train.plan_bump(root, current, target)
 
-    assert "5.0.0a19" in planned[root / "packages/pursers/pyproject.toml"]
-    assert "pursers-central==0.1.0a23" in planned[
+    assert "5.0.0a20" in planned[root / "packages/pursers/pyproject.toml"]
+    assert "pursers-central==0.1.0a24" in planned[
         root / "packages/personal/pyproject.toml"
     ]
     assert "pursers-client==0.1.0a17" in planned[
@@ -59,24 +59,24 @@ def test_explicit_bump_rewrites_fixture_consumers_without_touching_disk(
     assert "pursers-client==0.1.0a17" in planned[
         root / "packages/central/pyproject.toml"
     ]
-    assert 'SOURCE_VERSION = "0.1.0a9"' in planned[
+    assert 'SOURCE_VERSION = "0.1.0a10"' in planned[
         root / "tools/wait-bridge/pursers_wait_server.py"
     ]
-    assert "## [5.0.0a19] - " in planned[root / "CHANGELOG.md"]
-    assert "5.0.0a19" not in (root / "packages/pursers/pyproject.toml").read_text()
+    assert "## [5.0.0a20] - " in planned[root / "CHANGELOG.md"]
+    assert "5.0.0a20" not in (root / "packages/pursers/pyproject.toml").read_text()
 
 
 def test_next_patch_alpha_advances_every_component() -> None:
     current = load_versions(ROOT / "tools/release_versions.toml")
     target = release_train.bumped_versions(current, (), "patch-alpha")
-    assert target.product == "5.0.0a19"
+    assert target.product == "5.0.0a20"
     assert target.packages == {
-        "pursers": "5.0.0a19",
-        "central": "0.1.0a23",
+        "pursers": "5.0.0a20",
+        "central": "0.1.0a24",
         "client": "0.1.0a17",
-        "personal": "5.0.0a19",
+        "personal": "5.0.0a20",
         "import": "5.0.0a4",
-        "wait_bridge": "0.1.0a9",
+        "wait_bridge": "0.1.0a10",
     }
 
 
@@ -127,10 +127,10 @@ def test_check_detects_wait_bridge_source_constant_drift(tmp_path: Path) -> None
     source = root / "tools/wait-bridge/pursers_wait_server.py"
     source.write_text(
         source.read_text().replace(
-            'SOURCE_VERSION = "0.1.0a8"', 'SOURCE_VERSION = "0.1.0a7"'
+            'SOURCE_VERSION = "0.1.0a9"', 'SOURCE_VERSION = "0.1.0a8"'
         )
     )
 
     errors = release_train.check(root, manifest)
 
-    assert any("SOURCE_VERSION '0.1.0a7' != '0.1.0a8'" in error for error in errors)
+    assert any("SOURCE_VERSION '0.1.0a8' != '0.1.0a9'" in error for error in errors)

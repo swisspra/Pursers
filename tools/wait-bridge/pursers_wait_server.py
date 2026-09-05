@@ -89,7 +89,7 @@ from backlog import (
     ticket_is_relevant,
 )
 
-SOURCE_VERSION = "0.1.0a8"
+SOURCE_VERSION = "0.1.0a9"
 
 
 def _source_version() -> str:
