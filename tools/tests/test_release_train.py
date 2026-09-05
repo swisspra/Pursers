@@ -38,45 +38,45 @@ def test_explicit_bump_rewrites_fixture_consumers_without_touching_disk(
     target = release_train.bumped_versions(
         current,
         (
-            "product=5.0.0a18",
-            "central=0.1.0a22",
-            "client=0.1.0a16",
+            "product=5.0.0a19",
+            "central=0.1.0a23",
+            "client=0.1.0a17",
             "import=5.0.0a4",
-            "wait_bridge=0.1.0a8",
+            "wait_bridge=0.1.0a9",
         ),
         None,
     )
 
     planned = release_train.plan_bump(root, current, target)
 
-    assert "5.0.0a18" in planned[root / "packages/pursers/pyproject.toml"]
-    assert "pursers-central==0.1.0a22" in planned[
+    assert "5.0.0a19" in planned[root / "packages/pursers/pyproject.toml"]
+    assert "pursers-central==0.1.0a23" in planned[
         root / "packages/personal/pyproject.toml"
     ]
-    assert "pursers-client==0.1.0a16" in planned[
+    assert "pursers-client==0.1.0a17" in planned[
         root / "tools/wait-bridge/pyproject.toml"
     ]
-    assert "pursers-client==0.1.0a16" in planned[
+    assert "pursers-client==0.1.0a17" in planned[
         root / "packages/central/pyproject.toml"
     ]
-    assert 'SOURCE_VERSION = "0.1.0a8"' in planned[
+    assert 'SOURCE_VERSION = "0.1.0a9"' in planned[
         root / "tools/wait-bridge/pursers_wait_server.py"
     ]
-    assert "## [5.0.0a18] - " in planned[root / "CHANGELOG.md"]
-    assert "5.0.0a18" not in (root / "packages/pursers/pyproject.toml").read_text()
+    assert "## [5.0.0a19] - " in planned[root / "CHANGELOG.md"]
+    assert "5.0.0a19" not in (root / "packages/pursers/pyproject.toml").read_text()
 
 
 def test_next_patch_alpha_advances_every_component() -> None:
     current = load_versions(ROOT / "tools/release_versions.toml")
     target = release_train.bumped_versions(current, (), "patch-alpha")
-    assert target.product == "5.0.0a18"
+    assert target.product == "5.0.0a19"
     assert target.packages == {
-        "pursers": "5.0.0a18",
-        "central": "0.1.0a22",
-        "client": "0.1.0a16",
-        "personal": "5.0.0a18",
+        "pursers": "5.0.0a19",
+        "central": "0.1.0a23",
+        "client": "0.1.0a17",
+        "personal": "5.0.0a19",
         "import": "5.0.0a4",
-        "wait_bridge": "0.1.0a8",
+        "wait_bridge": "0.1.0a9",
     }
 
 
@@ -86,14 +86,14 @@ def test_check_detects_fixture_dependency_drift(tmp_path: Path) -> None:
     pyproject = root / "tools/wait-bridge/pyproject.toml"
     pyproject.write_text(
         pyproject.read_text().replace(
+            "pursers-client==0.1.0a16",
             "pursers-client==0.1.0a15",
-            "pursers-client==0.1.0a14",
         )
     )
 
     errors = release_train.check(root, manifest)
 
-    assert any("missing pursers-client==0.1.0a15" in error for error in errors)
+    assert any("missing pursers-client==0.1.0a16" in error for error in errors)
 
 
 def test_check_detects_central_client_dependency_drift(tmp_path: Path) -> None:
@@ -102,15 +102,15 @@ def test_check_detects_central_client_dependency_drift(tmp_path: Path) -> None:
     pyproject = root / "packages/central/pyproject.toml"
     pyproject.write_text(
         pyproject.read_text().replace(
+            "pursers-client==0.1.0a16",
             "pursers-client==0.1.0a15",
-            "pursers-client==0.1.0a14",
         )
     )
 
     errors = release_train.check(root, manifest)
 
     assert any(
-        "packages/central/pyproject.toml: missing pursers-client==0.1.0a15" in error
+        "packages/central/pyproject.toml: missing pursers-client==0.1.0a16" in error
         for error in errors
     )
 
@@ -127,10 +127,10 @@ def test_check_detects_wait_bridge_source_constant_drift(tmp_path: Path) -> None
     source = root / "tools/wait-bridge/pursers_wait_server.py"
     source.write_text(
         source.read_text().replace(
-            'SOURCE_VERSION = "0.1.0a7"', 'SOURCE_VERSION = "0.1.0a6"'
+            'SOURCE_VERSION = "0.1.0a8"', 'SOURCE_VERSION = "0.1.0a7"'
         )
     )
 
     errors = release_train.check(root, manifest)
 
-    assert any("SOURCE_VERSION '0.1.0a6' != '0.1.0a7'" in error for error in errors)
+    assert any("SOURCE_VERSION '0.1.0a7' != '0.1.0a8'" in error for error in errors)
