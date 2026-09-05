@@ -3502,6 +3502,188 @@ def test_seat_config_manager_plan_apply_backup_restart_and_no_token_leak(
     assert secret not in journal
 
 
+def test_seat_config_manager_reviews_imports_and_doctors_discovered_seats(
+    tmp_path: Path,
+) -> None:
+    discovered = []
+    before = {}
+    for host, adapter_type in (
+        ("codex", dashboard.adapter_for),
+        ("goose", dashboard.adapter_for),
+        ("claude-desktop", dashboard.adapter_for),
+    ):
+        root = tmp_path / host
+        root.mkdir()
+        token = root / "seat.jwt"
+        token.write_text("header.synthetic.signature")
+        config = root / "config"
+        desired = dashboard.DesiredSeat(
+            host=host,
+            role="worker",
+            name=f"{host}-worker",
+            central_url="https://central.example/mcp",
+            home_board="pursers",
+            token_file=str(token),
+            ca_file=str(root / "ca.pem"),
+            bridge_command=str(root / "pursers-wait-bridge"),
+            config_path=str(config),
+        )
+        adapter = adapter_type(desired)
+        adapter.apply(adapter.plan(desired))
+        discovered.append((host, config))
+        before[config] = config.read_text()
+
+    class Bridge:
+        version = "0.1.0a10"
+
+        def inspect(self) -> dict:
+            return {"version": self.version, "command": None}
+
+    doctor_done = threading.Event()
+    doctor_calls = []
+
+    class FakeDoctor:
+        def run(self, desired: dashboard.DesiredSeat) -> list:
+            doctor_calls.append(desired.name)
+            if len(doctor_calls) == 3:
+                doctor_done.set()
+            return [SimpleNamespace(seat=desired.name, check="config", status="PASS", message="matches")]
+
+    manager = dashboard.SeatConfigManager(
+        tmp_path / "state/seats.json",
+        state_dir=tmp_path / "state",
+        bridge_installer=Bridge(),
+        latest_version=lambda: None,
+        doctor_factory=FakeDoctor,
+        discovered_configs=discovered,
+    )
+
+    review = manager.import_review()
+    assert review["conflicts"] == []
+    assert len(review["candidates"]) == 3
+    assert all(row["zero_diff"] for row in review["candidates"])
+    assert all(row["boards"] == "registry" for row in review["candidates"])
+    assert all(row["tier_max"] == 2 for row in review["candidates"])
+    assert all(row["can_work"] is True for row in review["candidates"])
+    assert all(row["bridge_connector_name"] for row in review["candidates"])
+
+    result = manager.import_discovered()
+
+    assert {row["name"] for row in result["imported"]} == {
+        "codex-worker",
+        "goose-worker",
+        "claude-desktop-worker",
+    }
+    assert result["doctor_job"]["status"] == "queued"
+    assert doctor_done.wait(2)
+    for _ in range(200):
+        if manager.job(result["doctor_job"]["job_id"])["status"] == "succeeded":
+            break
+        threading.Event().wait(0.01)
+    assert manager.job(result["doctor_job"]["job_id"])["status"] == "succeeded"
+    assert len(manager.inventory.load()["seats"]) == 3
+    assert manager.import_review()["candidates"] == []
+    assert len(manager.import_review()["already_imported"]) == 3
+    assert all(path.read_text() == content for path, content in before.items())
+
+    conflicting = dashboard.DesiredSeat.from_dict(
+        {
+            **manager.inventory.load()["seats"][0],
+            "central_url": "https://different.example/mcp",
+        }
+    )
+    manager.inventory.upsert(conflicting, bridge_version="0.1.0a10")
+    conflict_review = manager.import_review()
+    assert any("different settings" in row["reason"] for row in conflict_review["conflicts"])
+
+
+def test_import_review_pairs_shared_codex_connectors_and_ignores_auxiliary(
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / "config.toml"
+    seats = []
+    for role, name, bridge_name, board_name, token_env in (
+        (
+            "worker",
+            "codex-worker",
+            "pursers-wait-codex-worker",
+            "pursers-dev",
+            "ONBOARD_CENTRAL_TOKEN",
+        ),
+        (
+            "reviewer",
+            "codex-reviewer",
+            "pursers-wait-codex-reviewer",
+            "pursers-review",
+            "PURSERS_REVIEW_TOKEN",
+        ),
+    ):
+        token = tmp_path / f"{name}.jwt"
+        token.write_text(f"header.{name}.signature")
+        desired = dashboard.DesiredSeat(
+            host="codex",
+            role=role,
+            name=name,
+            central_url="https://central.example/mcp",
+            home_board="pursers",
+            token_file=str(token),
+            token_env_var=token_env,
+            ca_file=str(tmp_path / "ca.pem"),
+            bridge_command=str(tmp_path / "pursers-wait-bridge"),
+            config_path=str(config),
+            bridge_name=bridge_name,
+            board_connector_name=board_name,
+        )
+        adapter = dashboard.adapter_for(desired)
+        adapter.apply(adapter.plan(desired))
+        seats.append(desired)
+
+    claude_config = tmp_path / "claude.json"
+    claude_config.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "pursers-personal": {
+                        "command": "pursers-personal",
+                        "env": {"ONBOARD_AGENT_NAME": "auxiliary-session"},
+                    }
+                }
+            }
+        )
+    )
+
+    class Bridge:
+        version = "0.1.0a10"
+
+        def inspect(self) -> dict:
+            return {"version": self.version, "command": None}
+
+    manager = dashboard.SeatConfigManager(
+        tmp_path / "state/seats.json",
+        state_dir=tmp_path / "state",
+        bridge_installer=Bridge(),
+        latest_version=lambda: None,
+        discovered_configs=[
+            ("codex", config),
+            ("claude-desktop", claude_config),
+        ],
+    )
+
+    review = manager.import_review()
+
+    assert review["conflicts"] == []
+    assert {row["name"] for row in review["candidates"]} == {
+        "codex-worker",
+        "codex-reviewer",
+    }
+    mappings = {row["name"]: row for row in review["candidates"]}
+    assert mappings["codex-worker"]["board_connector_name"] == "pursers-dev"
+    assert mappings["codex-worker"]["token_env_var"] == "ONBOARD_CENTRAL_TOKEN"
+    assert mappings["codex-reviewer"]["board_connector_name"] == "pursers-review"
+    assert mappings["codex-reviewer"]["token_env_var"] == "PURSERS_REVIEW_TOKEN"
+    assert all(row["zero_diff"] for row in mappings.values())
+
+
 def test_seat_config_registry_coverage_uses_live_fleet_seats(tmp_path: Path) -> None:
     class Bridge:
         version = "0.1.0a10"
@@ -3735,6 +3917,10 @@ def test_config_api_and_ui_contract_are_separate_from_coordinator_config() -> No
             calls.append(("doctor", names))
             return {"job_id": "b" * 32, "status": "queued"}
 
+        def import_discovered(self, names: object) -> dict:
+            calls.append(("import", names))
+            return {"imported": [], "conflicts": [], "doctor_job": None}
+
         def install_bridge(self) -> dict:
             calls.append(("install", {}))
             return {"job_id": "c" * 32, "status": "queued"}
@@ -3789,6 +3975,7 @@ def test_config_api_and_ui_contract_are_separate_from_coordinator_config() -> No
         assert post("/api/config/apply", {"plan_id": "a" * 32})["backup_path"]
         assert post("/api/config/prompt", {"name": "fixture"})["prompt"]
         assert post("/api/config/doctor", {"names": ["fixture"]})["status"] == "queued"
+        assert post("/api/config/import", {})["imported"] == []
         assert post("/api/config/bridge/install", {})["job_id"] == "c" * 32
         assert post("/api/config/bridge/upgrade-all", {})["job_id"] == "d" * 32
         with urllib.request.urlopen(base + "/api/config/jobs/" + "b" * 32) as response:
@@ -3808,6 +3995,7 @@ def test_config_api_and_ui_contract_are_separate_from_coordinator_config() -> No
         ("apply", "a" * 32),
         ("prompt", {"name": "fixture"}),
         ("doctor", ["fixture"]),
+        ("import", None),
         ("install", {}),
         ("upgrade-all", {}),
         ("job", "b" * 32),
@@ -3824,6 +4012,10 @@ def test_config_api_and_ui_contract_are_separate_from_coordinator_config() -> No
     assert "operator checkout is read-only for seats" in dashboard.HTML
     assert "Resolved via" in dashboard.HTML
     assert "setInterval(async()=>" in dashboard.HTML
+    assert "Import discovered seats" in dashboard.HTML
+    assert "Import and run Doctor" in dashboard.HTML
+    assert "/api/config/import" in dashboard.HTML
+    assert "doctor_summary" in dashboard.HTML
     assert ",1000)" in dashboard.HTML
     assert "/api/config" in dashboard.HTML  # original coordinator route remains.
 

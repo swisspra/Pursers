@@ -30,7 +30,7 @@ SHA-256 `1a0981ec6cc47aed8eeb5e8f488bef260ab6b5fd5c7c88e2cd99604654103e1a`.
 | `ONBOARD_BOARD_ID` | no | Board ID; defaults to `pursers`. |
 | `ONBOARD_AGENT_NAME` | no | Base board identity; defaults to `pursers-wait-bridge`. |
 | `ONBOARD_AGENT_INSTANCE` | no | Stable per-instance suffix, such as `window-a`. |
-| `PURSERS_ROLE` | no | Declared seat role: `worker` (default), `reviewer`, `orchestrator`, or `coordinator`. |
+| `PURSERS_ROLE` | no | Explicit seat role: `worker`, `reviewer`, `orchestrator`, or `coordinator`. When omitted, Central maps reviewer membership to `reviewer`; admin/member membership maps to `worker`. |
 | `PURSERS_WAIT_MODE` | no | `push` (default) or explicit compatibility `poll`; a subscription error polls only that board for the current call and push is retried on re-arm. |
 | `PURSERS_HOST` | no | `codex` (default), `codex-cli`, `goose`, `claude-code`, `claude-desktop`, or `headless`; selects the safe call ceiling. |
 | `PURSERS_HOST_TIMEOUT_S` | no | Explicit host/runner deadline in seconds; overrides the named profile. |
@@ -58,7 +58,8 @@ bridge process and one Central connection serve multiple session identities:
 a2a_wait(since_seq=0, project="PROJECT_PLACEHOLDER", agent_name="session-a")
 ```
 
-`wait_for="auto"` is the default: a seat declared as `reviewer` waits for
+`wait_for="auto"` is the default: the effective role returned by Central is
+used, so a seat declared or membership-defaulted as `reviewer` waits for
 `submitted` tickets, while a `worker` waits for `claimable` tickets.
 Coordinator and orchestrator seats must select an explicit view. Token scopes
 authorize actions but never select the wait mode. Callers
@@ -387,13 +388,27 @@ file that contains a token.
 ## Worker loop
 
 Call `a2a_wait` with the last returned `new_seq`. On entry, it drains new
-journal events and scans the first 100 currently open tickets, so work older
-than the cursor still wakes the worker. Backlog cues use
+journal events in pages and resolves ticket relevance with one bounded active
+ticket projection plus keyed batches only for IDs missing from a truncated
+projection. The bridge verifies Central's echoed `ticket_ids` filter before
+treating missing keyed results as authoritative, so older Centrals that ignore
+the filter cannot stall replay. It also scans the currently open ticket
+projection, so work older than the cursor still wakes the worker. Backlog cues use
 `source="backlog_scan"`, carry no fabricated journal sequence, and leave
 `new_seq` governed only by the real journal. An unchanged backlog ticket is
 surfaced once per bridge process and then suppressed until a journal change;
 a bridge restart may surface it once again. `reason` reports `journal`,
-`backlog`, or `timeout`. On `timed_out=true`, re-arm
+`backlog`, or `timeout`. A replay over 200 events is reduced to the latest
+event per ticket and capped at 200 returned events; `compacted`, `dropped`, and
+`event_counts` describe that summary. Omitting `since_seq` starts from and
+advances Central's persisted cursor so a restart does not replay the same
+history. Persisted-cursor pages are acknowledged as they are fully received.
+Projection truncation, timeout, or failure therefore returns the processed
+cursor and emits candidate cues with `projection_state="unprojected"`, plus a
+`ticket_projection_unprojected` warning, instead of replaying the same page.
+`partial=true` identifies that bounded projection state or a catch-up deadline.
+A cursor beyond the journal head is clamped and reported under `warnings`
+instead of failing. On `timed_out=true`, re-arm
 immediately. Every event is a cue to refetch and claim current board state.
 The bridge renews held leases only while `a2a_wait` is blocking; long-running
 work must call Central's `lease_renew` directly.

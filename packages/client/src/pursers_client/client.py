@@ -139,7 +139,7 @@ class BoardClient:
         board_id: str,
         *,
         agent_name: str = "pursers-client",
-        role: str = "worker",
+        role: str | None = "worker",
         reconnect_delay_s: float = 0.05,
         claim_ttl_s: int | None = None,
         capabilities: dict[str, Any] | None = None,
@@ -148,7 +148,9 @@ class BoardClient:
         self.token = token
         self.board_id = board_id
         self.agent_name = agent_name
-        if role not in {"worker", "reviewer", "orchestrator", "coordinator"}:
+        if role is not None and role not in {
+            "worker", "reviewer", "orchestrator", "coordinator"
+        }:
             raise ValueError(
                 "role must be worker, reviewer, orchestrator, or coordinator"
             )
@@ -302,10 +304,10 @@ class BoardClient:
         capabilities: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         selected_name = self.agent_name if agent_name is None else agent_name
-        arguments: dict[str, Any] = {
-            "agent_name": selected_name,
-            "role": self.role if role is None else role,
-        }
+        arguments: dict[str, Any] = {"agent_name": selected_name}
+        selected_role = self.role if role is None else role
+        if selected_role is not None:
+            arguments["role"] = selected_role
         if claim_ttl_s is not None:
             arguments["claim_ttl_s"] = claim_ttl_s
         if agent_platform is not None:
@@ -349,8 +351,10 @@ class BoardClient:
         arguments: dict[str, Any] = {
             "agent_name": self.agent_name,
             "token_budget": token_budget,
-            "role": self.role if role is None else role,
         }
+        selected_role = self.role if role is None else role
+        if selected_role is not None:
+            arguments["role"] = selected_role
         caps = dict(capabilities or {})
         if os.environ.get("PURSERS_LEGACY_TOOLS") == "1":
             caps.setdefault("legacy_tools", True)
@@ -630,6 +634,7 @@ class BoardClient:
         include_closed: bool = False,
         limit: int = 100,
         review_unclaimed_only: bool = False,
+        ticket_ids: list[str] | None = None,
     ) -> dict[str, Any]:
         arguments: dict[str, Any] = {
             "agent_name": self.agent_name,
@@ -641,6 +646,8 @@ class BoardClient:
             arguments["status"] = status
         if assigned_to is not None:
             arguments["assigned_to"] = assigned_to
+        if ticket_ids is not None:
+            arguments["ticket_ids"] = ticket_ids
         return await self._call("ticket_list", arguments)
 
     async def memory_write(

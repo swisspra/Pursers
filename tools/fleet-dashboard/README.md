@@ -11,6 +11,15 @@ a redacted unified diff, and **Confirm and apply** creates timestamped backups
 before atomic writes. Restart the selected host when the result shows **NEEDS
 RESTART**.
 
+If existing Codex, Goose, or Claude Desktop configs already contain managed
+Pursers blocks, **Import discovered seats** shows the exact host, seat,
+connector, role, board, and credential-reference mapping before import. Rows
+with duplicate names or settings that disagree with inventory are marked as
+conflicts. **Import and run Doctor** adds only conflict-free rows to
+`seats.json`, never rewrites the host configs, and immediately runs Doctor on
+the imported seats. Imported seats use `boards=registry` unless their managed
+environment explicitly declares `PURSERS_BOARDS` or `ONBOARD_BOARDS`.
+
 The same page inventories seats, shows installed/pinned/latest bridge versions,
 runs Doctor for one or all seats, upgrades the bridge in a background job, and
 shows read-only project-registry coverage. Long jobs expose a job id and are
@@ -54,6 +63,8 @@ token literal, a host-equivalent bridge launch using only the configured env
 block, Goose seat interpreter and hints, clean clone freshness, a five-second
 push subscription, registry visibility, and whether a host restart is needed.
 A reported `poll` mode is a warning and remains an explicit fallback only.
+The inventory table keeps compact per-seat badges for config, token/CA,
+identity, and host-runtime results after Doctor completes.
 
 For Codex seats, the generated wait bridge and HTTP board connector use one
 seat token. The adapter copies the token file value into the wait bridge's

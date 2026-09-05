@@ -174,6 +174,7 @@
         <li><a href="#memories">Use memories</a></li>
         <li><a href="#dashboard">Set up seats and read dashboards</a></li>
         <li><a href="#security">Handle JWTs and secrets</a></li>
+        <li><a href="#operations-runbook">Resume fleet operations after the a21 pause</a></li>
       </ol>
     </nav>
 
@@ -640,6 +641,417 @@ memory_search(
         </tbody>
       </table>
       <div class="success"><strong>The setup is ready when</strong> the host sees the tools, the expected identity joins, a worker can claim a test ticket, a separate reviewer can approve it, and the dashboard agrees with the board tools.</div>
+    </section>
+
+    <section id="operations-runbook">
+      <p class="eyebrow" style="color:#2f6f9f">10 · Operations handoff</p>
+      <h2>Resume fleet operations after the a21 pause</h2>
+      <p>This is the single operational runbook for a returning operator or a new coordinator. Run it from the repository root at the operator-approved integration commit. Values in angle brackets are placeholders; never paste a real token, principal, operator identity, or home-directory path into this document, a command transcript, ticket notes, or Git.</p>
+      <div class="warning"><strong>Release boundary:</strong> read <code>tools/release_versions.toml</code> at the exact candidate commit and use those values. Do not infer a version from this page, reuse wheels from another commit, rebuild an already-published version, or publish from a moving branch. PyPI versions are immutable.</div>
+
+      <div class="note" lang="th">
+        <strong>สรุปภาษาไทย:</strong> ก่อนเปิด fleet อีกครั้ง ให้ยืนยัน commit/tag และ hash ของ wheel จาก release เดียวกัน อัปเดต Central, wait bridge และ Personal ตามลำดับ แล้ว restart ทุก seat จากนั้นรัน Doctor จน identity, role, token และ push subscription ตรงกัน Worker รับเฉพาะงานที่ offer ให้ตนเอง, reviewer ต้องใช้ principal/token คนละชุด, coordinator ห้าม claim งาน และทุก host ต้องใช้ token เดียวกันระหว่าง board connector กับ wait bridge ของ seat นั้น หากพบ <code>poll</code>, lease หลุด, identity ซ้ำ หรือ cursor ผิด ให้หยุดแจกงานใหม่และแก้ตามตาราง troubleshooting ด้านล่างก่อน
+      </div>
+
+      <h3>1. Architecture and authority at a21</h3>
+      <table>
+        <thead><tr><th>Component</th><th>Operational responsibility</th></tr></thead>
+        <tbody>
+          <tr><td>Central</td><td>JWT authorization, board admission, ticket state, journal, registry state, dispatch offers, work/review leases, review policy, and durable attribution.</td></tr>
+          <tr><td>Python client</td><td>The typed HTTP/MCP client and shared event vocabulary used by Central, the bridge, generated seats, Personal, and runtimes.</td></tr>
+          <tr><td>Wait bridge</td><td>A blocking stdio MCP server. It subscribes to journal and seat cues, routes registry-board cursor maps, and renews only discovered held leases. Poll mode is a compatibility fallback.</td></tr>
+          <tr><td>Personal app</td><td>Profile lifecycle, loopback Central integration, chat-facing tools, and the read-only MCP Apps dashboard.</td></tr>
+          <tr><td>Fleet Dashboard</td><td>Loopback operations UI for fleet state, seat config plan/apply, bridge install, and Doctor. It never returns token contents to the browser.</td></tr>
+          <tr><td>Seat kit</td><td>Generates or upgrades self-contained worker/reviewer CLIs, prompts, and host hints while preserving the project clone and unmanaged files.</td></tr>
+          <tr><td>Worker runtime</td><td>Runs a continuously re-arming headless worker or reviewer against an OpenAI-compatible endpoint with work-directory jailing and private secret files.</td></tr>
+        </tbody>
+      </table>
+
+      <p>The current shared event contract groups the journal kinds below. Legacy client aliases <code>ticket_assigned</code>, <code>ticket_submitted</code>, and <code>ticket_resubmitted</code> remain recognized, but current Central uses the authoritative status-change event.</p>
+      <ul>
+        <li><strong>Ticket and coordination:</strong> <code>ticket_created</code>, <code>ticket_status_changed</code>, <code>memory_written</code>, <code>coordinator_assignment</code>, and <code>coordinator_nudge</code>.</li>
+        <li><strong>Dispatch:</strong> <code>ticket_offered</code>, <code>review_offered</code>, <code>offer_expired</code>, <code>offer_revoked</code>, and <code>dispatch_unassignable</code>.</li>
+        <li><strong>Review and leases:</strong> <code>ticket_review_claimed</code>, <code>review_lease_expired</code>, <code>review_lease_released</code>, <code>board_review_policy_changed</code>, and <code>board_claim_ttl_changed</code>.</li>
+        <li><strong>Admission and lifecycle:</strong> <code>board_membership_changed</code>, <code>board_invite_created</code>, and <code>agent_lifecycle_changed</code>.</li>
+        <li><strong>Governance:</strong> <code>board_scrub_profile_changed</code> and <code>deprecated_tool_warning</code>.</li>
+      </ul>
+
+      <table>
+        <thead><tr><th>Seat role</th><th>Minimum action scope</th><th>Operating rule</th></tr></thead>
+        <tbody>
+          <tr><td>Worker</td><td><code>board:read</code> + <code>board:write</code></td><td><code>can_work=true</code>, <code>can_review=false</code>; claims, edits, renews, tests, and submits one ticket.</td></tr>
+          <tr><td>Reviewer</td><td><code>board:read</code> + <code>board:review</code></td><td><code>can_work=false</code>, <code>can_review=true</code>; uses an independent principal/token and never edits or approves its own work.</td></tr>
+          <tr><td>Orchestrator</td><td><code>board:read</code> + <code>board:coordinate</code></td><td>No work/review capability; reads and acknowledges <code>board_digest</code>, watches tickets, and never calls <code>a2a_wait</code> or claims.</td></tr>
+          <tr><td>Coordinator</td><td><code>board:read</code> + <code>board:write</code> + <code>board:coordinate</code></td><td>No work/review capability; operates policy, dispatch, findings, and integration. If intake is enabled, use a separate <code>board:read board:intake</code> credential without <code>board:write</code>.</td></tr>
+        </tbody>
+      </table>
+      <p><strong>One token per seat</strong> means the wait bridge and board connector for that seat resolve to the same principal. A reviewer has its own token, separate from every worker. Do not make a worker/reviewer hybrid by changing only <code>agent_name</code>; the declared role and token scopes are independently validated.</p>
+      <p>The default tool surface stays deliberately small. Use <code>board_status</code> for a hot bounded summary and <code>board_snapshot</code> for cold recovery; <code>memory_write</code> remains a core tool. Deprecated compatibility tools stay hidden unless a deliberately legacy seat declares <code>legacy_tools</code> or the bridge has <code>PURSERS_LEGACY_TOOLS=1</code>. Do not enable that switch fleet-wide during ordinary operation.</p>
+
+      <h3>2. Cut, verify, tag, release, and publish one train</h3>
+      <p>Run every command block in sections 2 and 3 in Bash. Each block enables fail-fast options before its first gate; stop the procedure when a block exits nonzero. Create the train from a clean approved integration ref. <code>release_train.py bump</code> updates version consumers and regenerates the component lock; do not hand-edit generated pins. Review every generated change, then commit it before pushing the train.</p>
+      <pre><code>set -euo pipefail
+git fetch origin --tags
+git switch -c train/&lt;product_version&gt; &lt;integration_ref&gt;
+test -z "$(git status --porcelain)"
+
+python3 tools/release_train.py bump \
+  --set product=&lt;product_version&gt; \
+  --set central=&lt;central_version&gt; \
+  --set client=&lt;client_version&gt; \
+  --set personal=&lt;personal_version&gt; \
+  --set import=&lt;import_version&gt; \
+  --set wait_bridge=&lt;wait_bridge_version&gt;</code></pre>
+      <p>The bump already regenerates the component lock. If a manual regeneration is required, do it now in a new empty wheel directory, before tests, review, staging, and the release commit. The script verifies a temporary environment from the exact build-toolchain pins in <code>tools/release_versions.toml</code>.</p>
+      <pre><code>set -euo pipefail
+mkdir &lt;empty_wheel_dir&gt;
+python3 tools/regenerate_component_lock.py \
+  --wheel-dir &lt;empty_wheel_dir&gt;
+python3 tools/release_train.py check</code></pre>
+      <pre><code>set -euo pipefail
+python3 tools/release_train.py check
+python3 tools/ci_manifest.py check
+python3 tools/ci_manifest.py collect --output &lt;collection_report&gt;
+python3 tools/ci_manifest.py run
+python3 tools/ci_manifest.py verify --input &lt;collection_report&gt;
+python3 tools/leak_scan.py
+git diff --check
+
+# Review the complete generated train before staging it.
+git status --short
+git diff --stat
+git diff
+
+# The branch was clean before bump, so these are the reviewed generated files.
+git diff --name-only -z | xargs -0 git add --
+git diff --cached --check
+git diff --cached --stat
+git commit -m "release: &lt;release_tag&gt;"
+release_commit="$(git rev-parse HEAD)"
+git show --stat --oneline "$release_commit"
+test -z "$(git status --porcelain)"</code></pre>
+      <p>Push the train, obtain review, and require both jobs in <code>.github/workflows/ci.yml</code>. This block independently verifies the checked-out train branch and recomputes its release commit. Record the printed commit and immutable PR URL in the release change before pausing. The Python job builds the six checkout wheels, performs isolated wheel imports, checks/collects/runs/verifies all ten suites, and runs the leak scan. The dashboard job installs the locked npm tree and runs TypeScript without emitting files.</p>
+      <pre><code>set -euo pipefail
+train_branch="train/&lt;product_version&gt;"
+test "$(git branch --show-current)" = "$train_branch"
+test -z "$(git status --porcelain)"
+release_commit="$(git rev-parse --verify "$train_branch^{commit}")"
+test "$release_commit" = "$(git rev-parse --verify "HEAD^{commit}")"
+
+git push -u origin train/&lt;product_version&gt;
+remote_head="$(git ls-remote --heads origin \
+  refs/heads/train/&lt;product_version&gt; | awk '{print $1}')"
+test "$remote_head" = "$release_commit"
+
+pr_url="$(gh pr create --base main --head train/&lt;product_version&gt; \
+  --title "Release &lt;release_tag&gt;" \
+  --body-file &lt;pull_request_body&gt;)"
+pr_head="$(gh pr view "$pr_url" --json headRefOid --jq .headRefOid)"
+test "$pr_head" = "$release_commit"
+gh pr checks "$pr_url" --watch
+printf 'release_commit=%s\nrelease_pr_url=%s\n' "$release_commit" "$pr_url"</code></pre>
+      <p>After the reviewed train is integrated, start from a fresh shell and replace <code>&lt;release_pr_url&gt;</code> and <code>&lt;recorded_release_commit&gt;</code> with the immutable values recorded by the preceding stage. The block verifies that exact PR was merged, its head equals the recorded release commit, and its merge commit is present on <code>origin/main</code> before tagging. The tag-triggered release workflow builds all six wheels with the pinned toolchain, writes <code>SHA256SUMS.txt</code>, extracts non-empty CHANGELOG notes, and creates or completes the GitHub Release.</p>
+      <pre><code>set -euo pipefail
+release_pr_url="&lt;release_pr_url&gt;"
+recorded_release_commit="&lt;recorded_release_commit&gt;"
+[[ "$recorded_release_commit" =~ ^[0-9a-f]{40}$ ]]
+
+git fetch origin main --tags
+pr_state="$(gh pr view "$release_pr_url" --json state --jq .state)"
+test "$pr_state" = "MERGED"
+pr_head="$(gh pr view "$release_pr_url" --json headRefOid --jq .headRefOid)"
+test "$pr_head" = "$recorded_release_commit"
+verified_commit="$(gh pr view "$release_pr_url" \
+  --json mergeCommit --jq .mergeCommit.oid)"
+test -n "$verified_commit"
+git cat-file -e "$verified_commit^{commit}"
+git merge-base --is-ancestor "$verified_commit" origin/main
+git tag -s &lt;release_tag&gt; "$verified_commit"
+git push origin &lt;release_tag&gt;
+
+gh run list --workflow release.yml \
+  --branch &lt;release_tag&gt; --limit 1
+gh run watch &lt;release_run_id&gt; --exit-status</code></pre>
+      <p>Publish only from that immutable tag. The manual workflow uses GitHub OIDC Trusted Publishing and separate <code>pypi</code> and <code>pypi-bridge</code> environments; it carries no PyPI API token.</p>
+      <pre><code>set -euo pipefail
+gh workflow run publish-pypi.yml --ref &lt;release_tag&gt;
+gh run list --workflow publish-pypi.yml \
+  --branch &lt;release_tag&gt; --limit 1
+gh run watch &lt;publish_run_id&gt; --exit-status</code></pre>
+      <p>Confirm all six expected distributions on PyPI and compare the GitHub Release wheels against <code>SHA256SUMS.txt</code>. If any published artifact is wrong, advance the affected version and cut another train; never replace an existing PyPI version.</p>
+
+      <h3>3. Promote Central, bridge, Personal, and seats</h3>
+      <p>Stage Central before touching the running service. The release-tag checkout is authoritative for component versions and dependency ranges. The resolver commands below supply the exact PyJWT and uvicorn pins for this train; record their output in the deployment change. On each host, the <code>tools/central_scaffold.py init</code> artifacts are the deployment inventory: <code>&lt;central_instance_root&gt;/.pursers-central-instance.json</code> supplies the label, <code>profile.env</code> supplies Central runtime values, and the loaded <code>&lt;launch_agents_dir&gt;/&lt;central_launchd_label&gt;.plist</code> is the authoritative current service definition (the plist under the instance root is only its scaffold seed). <code>&lt;launch_agents_dir&gt;</code>, <code>&lt;ca_bundle&gt;</code>, and <code>&lt;central_health_url&gt;</code> are explicit operator-owned paths/URL; stop if any cannot be resolved rather than guessing.</p>
+      <pre><code>set -euo pipefail
+# Verify every downloaded release artifact, including both installed wheels.
+(cd &lt;release_download_dir&gt; &amp;&amp; shasum -a 256 -c SHA256SUMS.txt)
+central_wheel="&lt;release_download_dir&gt;/&lt;central_wheel_filename&gt;"
+client_wheel="&lt;release_download_dir&gt;/&lt;client_wheel_filename&gt;"
+
+central_version="$(python3 -c \
+  'import sys,tomllib; print(tomllib.load(open(sys.argv[1], "rb"))["packages"]["central"])' \
+  tools/release_versions.toml)"
+client_version="$(python3 -c \
+  'import sys,tomllib; print(tomllib.load(open(sys.argv[1], "rb"))["packages"]["client"])' \
+  tools/release_versions.toml)"
+
+# Resolve once from the verified wheels and their release-tag metadata.
+python3 -m venv &lt;central_pin_resolver_venv&gt;
+&lt;central_pin_resolver_venv&gt;/bin/python -m pip install \
+  --disable-pip-version-check --no-input "$client_wheel" "$central_wheel"
+mcp_runtime_version="$(&lt;central_pin_resolver_venv&gt;/bin/python -c \
+  'import importlib.metadata as m; print(m.version("mcp"))')"
+jwt_runtime_version="$(&lt;central_pin_resolver_venv&gt;/bin/python -c \
+  'import importlib.metadata as m; print(m.version("PyJWT"))')"
+server_runtime_version="$(&lt;central_pin_resolver_venv&gt;/bin/python -c \
+  'import importlib.metadata as m; print(m.version("uvicorn"))')"
+printf 'mcp=%s\nPyJWT=%s\nuvicorn=%s\n' \
+  "$mcp_runtime_version" "$jwt_runtime_version" "$server_runtime_version"
+
+python3 -m venv &lt;central_next_venv&gt;
+&lt;central_next_venv&gt;/bin/python -m pip install \
+  --disable-pip-version-check --no-input \
+  "mcp[cli]==$mcp_runtime_version" \
+  "PyJWT[crypto]==$jwt_runtime_version" \
+  "uvicorn==$server_runtime_version"
+&lt;central_next_venv&gt;/bin/python -m pip install \
+  --disable-pip-version-check --no-input --no-deps \
+  "$client_wheel" "$central_wheel"
+
+&lt;central_next_venv&gt;/bin/python - \
+  "$central_version" "$client_version" "$mcp_runtime_version" \
+  "$jwt_runtime_version" "$server_runtime_version" &lt;&lt;'PY'
+import importlib.metadata as metadata
+import sys
+
+expected = {
+    "pursers-central": sys.argv[1],
+    "pursers-client": sys.argv[2],
+    "mcp": sys.argv[3],
+    "PyJWT": sys.argv[4],
+    "uvicorn": sys.argv[5],
+}
+actual = {name: metadata.version(name) for name in expected}
+assert actual == expected, (actual, expected)
+print(actual)
+PY</code></pre>
+      <p>Build a versioned candidate plist from that inventory, with <code>ProgramArguments[0]</code> pointing directly to <code>&lt;central_next_venv&gt;/bin/python</code>. The fail-fast switch does not run two Central processes against the same SQLite directory. After the old job is booted out, any candidate copy, bootstrap, loaded-state, or health failure boots out the candidate, restores the saved plist, bootstraps the previous service, and verifies its loaded program. A failed rollback exits with a distinct hard-error status.</p>
+      <pre><code>set -Eeuo pipefail
+central_launchd_label="$(python3 -c \
+  'import json,sys; print(json.load(open(sys.argv[1]))["name"])' \
+  &lt;central_instance_root&gt;/.pursers-central-instance.json)"
+central_candidate_plist="&lt;central_instance_root&gt;/${central_launchd_label}-&lt;release_tag&gt;.plist"
+central_loaded_plist="&lt;launch_agents_dir&gt;/${central_launchd_label}.plist"
+central_previous_plist="${central_loaded_plist}.previous"
+
+set -a
+. &lt;central_instance_root&gt;/profile.env
+set +a
+python3 - "$central_loaded_plist" "$central_candidate_plist" \
+  "&lt;central_next_venv&gt;" &lt;&lt;'PY'
+import os
+import plistlib
+import sys
+from pathlib import Path
+
+source, candidate, next_venv = sys.argv[1:]
+with open(source, "rb") as stream:
+    service = plistlib.load(stream)
+required = (
+    "CENTRAL_AUTH_MODE", "CENTRAL_ADMISSION", "STORE_BACKEND",
+    "CENTRAL_JWT_ISSUER", "CENTRAL_JWT_AUDIENCE", "CENTRAL_JWKS_PATH",
+    "CENTRAL_JWT_CLOCK_SKEW",
+)
+service["ProgramArguments"] = [
+    str(Path(next_venv) / "bin" / "python"),
+    "-m", "pursers_central.pursers_central_runtime",
+    "--host", os.environ["CENTRAL_HOST"],
+    "--port", os.environ["CENTRAL_PORT"],
+    "--data-dir", os.environ["CENTRAL_DATA_DIR"],
+]
+environment = dict(service.get("EnvironmentVariables", {}))
+environment.update({key: os.environ[key] for key in required})
+service["EnvironmentVariables"] = environment
+with open(candidate, "wb") as stream:
+    plistlib.dump(service, stream, sort_keys=True)
+PY
+
+plutil -lint "$central_candidate_plist"
+cp "$central_loaded_plist" "$central_previous_plist"
+
+central_switch_started=false
+rollback_central() {
+  local failed=0 previous_program="" rollback_state
+  rollback_state="${central_previous_plist}.launchctl-state"
+
+  if launchctl print "gui/$(id -u)/$central_launchd_label" \
+      &gt;/dev/null 2&gt;&amp;1; then
+    if ! launchctl bootout "gui/$(id -u)/$central_launchd_label"; then
+      failed=1
+    fi
+  fi
+  if ! cp "$central_previous_plist" "$central_loaded_plist"; then
+    failed=1
+  fi
+  if (( failed == 0 )) &amp;&amp; ! plutil -lint "$central_loaded_plist"; then
+    failed=1
+  fi
+  if (( failed == 0 )) &amp;&amp; ! previous_program="$(plutil -extract ProgramArguments.0 raw -o - \
+      "$central_loaded_plist")"; then
+    failed=1
+  fi
+  if (( failed == 0 )) &amp;&amp; \
+      ! launchctl bootstrap "gui/$(id -u)" "$central_loaded_plist"; then
+    failed=1
+  fi
+  if (( failed == 0 )) &amp;&amp; \
+      ! launchctl print "gui/$(id -u)/$central_launchd_label" \
+      &gt; "$rollback_state"; then
+    failed=1
+  fi
+  if (( failed == 0 )) &amp;&amp; \
+      ! python3 - "$rollback_state" "$previous_program" &lt;&lt;'PY'
+import pathlib
+import sys
+
+state = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+assert sys.argv[2] in state, "rollback loaded another ProgramArguments target"
+PY
+  then
+    failed=1
+  fi
+  if (( failed == 0 )) &amp;&amp; \
+      ! curl --fail --silent --show-error --cacert &lt;ca_bundle&gt; \
+        &lt;central_health_url&gt;; then
+    failed=1
+  fi
+  if (( failed != 0 )); then
+    printf '%s\n' 'FATAL: Central rollback failed; manual recovery required' &gt;&amp;2
+    return 1
+  fi
+  printf '%s\n' 'Central candidate failed; previous service restored and verified' &gt;&amp;2
+}
+
+on_central_switch_error() {
+  local original_status=$?
+  trap - ERR
+  if [[ "$central_switch_started" == true ]]; then
+    if ! rollback_central; then
+      exit 70
+    fi
+  fi
+  exit "$original_status"
+}
+trap on_central_switch_error ERR
+
+launchctl bootout "gui/$(id -u)/$central_launchd_label"
+central_switch_started=true
+cp "$central_candidate_plist" "$central_loaded_plist"
+launchctl bootstrap "gui/$(id -u)" "$central_loaded_plist"
+
+loaded_program="$(plutil -extract ProgramArguments.0 raw -o - \
+  "$central_loaded_plist")"
+test "$loaded_program" = "&lt;central_next_venv&gt;/bin/python"
+launchctl print "gui/$(id -u)/$central_launchd_label" \
+  &gt; "&lt;launchctl_state_file&gt;"
+python3 - "&lt;launchctl_state_file&gt;" "&lt;central_next_venv&gt;/bin/python" &lt;&lt;'PY'
+import pathlib
+import sys
+
+state = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+assert sys.argv[2] in state, "loaded launchd ProgramArguments use another venv"
+PY
+
+curl --fail --silent --show-error \
+  --cacert &lt;ca_bundle&gt; \
+  &lt;central_health_url&gt;
+central_switch_started=false
+trap - ERR</code></pre>
+      <p>Upgrade the persistent wait-bridge tool next. Managed host configs point at its resolved shim; they do not launch daily work through <code>uvx</code>.</p>
+      <pre><code>set -euo pipefail
+env -u SSL_CERT_FILE uv tool install --force \
+  "pursers-wait-bridge==&lt;wait_bridge_version&gt;"
+pursers-wait-bridge --version
+python3 tools/fleet-dashboard/seat_config.py doctor --json</code></pre>
+      <p>Upgrade each persistent Personal venv to the exact product set, verify it, then restart only the owned service.</p>
+      <pre><code>set -euo pipefail
+&lt;personal_venv&gt;/bin/python -m pip install --upgrade \
+  "pursers==&lt;product_version&gt;"
+&lt;personal_venv&gt;/bin/pursers-personal --version
+&lt;personal_venv&gt;/bin/pursers-personal doctor \
+  --project &lt;work_dir&gt;
+&lt;personal_venv&gt;/bin/pursers-personal restart \
+  --project &lt;work_dir&gt; --activate</code></pre>
+      <p>Finally restart every configured host so it reloads the new shim and environment: fully quit/reopen Codex, Goose, and Claude Desktop; restart Claude Code sessions; and stop/relaunch each headless runtime under its service manager. Run Doctor again after restart. A process that merely remained open has not taken the upgrade.</p>
+
+      <h3>4. Configure one seat on each host</h3>
+      <p>Start the loopback Fleet Dashboard and use <strong>Config → Add or update seat → Preview exact changes → Confirm and apply</strong>. Apply creates timestamped backups. The CLI below is the supported headless inspection/fix path.</p>
+      <pre><code>python3 tools/fleet-dashboard/fleet_dashboard.py \
+  --token-file &lt;dashboard_token_file&gt; \
+  --home-board &lt;home_board&gt;
+
+python3 tools/fleet-dashboard/seat_config.py doctor --json
+python3 tools/fleet-dashboard/seat_config.py doctor --fix --json</code></pre>
+      <table>
+        <thead><tr><th>Host</th><th>Required setup</th></tr></thead>
+        <tbody>
+          <tr><td>Codex</td><td>Create a worker connector pair and a reviewer connector pair. Each pair uses one token; the reviewer token is independent. Codex does not reliably forward shell environment to stdio servers, so the managed wait-bridge env contains the token literal and must remain mode 0600. The HTTP board connector reads the matching token environment variable. Set <code>tool_timeout_sec = 620</code>; every session passes its stable <code>agent_name</code> on each board call that accepts it.</td></tr>
+          <tr><td>Goose</td><td>Use a seat-kit directory and <code>--client goose</code>. The generated <code>bin/board.sh</code>, <code>AGENTS.md</code>, and <code>.goosehints</code> carry the same role, identity, registry wait, and governance contract.</td></tr>
+          <tr><td>Claude Desktop</td><td>Use a coordinator token and <code>PURSERS_ROLE=orchestrator</code>. Read <code>board_digest</code>, acknowledge it, and watch priority tickets. Do not wait, claim, review, or edit ticket work from this seat.</td></tr>
+          <tr><td>Headless</td><td>Provision a worker or independent reviewer, keep the TOML and referenced secret files mode 0600, and run the runtime with the config path. The runtime owns registry routing, worktrees, lease renewal, and immediate timeout re-arm.</td></tr>
+        </tbody>
+      </table>
+      <pre><code>python3 tools/seat-kit/seat_new.py \
+  --role &lt;worker_or_reviewer&gt; \
+  --name &lt;seat_name&gt; \
+  --dest &lt;seat_dir&gt; \
+  --central-url https://&lt;central_host&gt;/mcp \
+  --token-file &lt;seat_token_file&gt; \
+  --ca-file &lt;ca_bundle&gt; \
+  --repo &lt;repository_url&gt; \
+  --board &lt;home_board&gt; \
+  --client goose
+
+chmod 600 &lt;headless_config&gt; &lt;seat_token_file&gt;
+python3 tools/worker-runtime/pursers_worker.py \
+  &lt;headless_config&gt;</code></pre>
+
+      <h3>5. Dispatcher, offers, and leases</h3>
+      <ul>
+        <li>A seat declares <code>tier_max</code>, skills, <code>can_work</code>, <code>can_review</code>, host, model, and provider at join/reconnect. The ticket declares tier, required skills, preferred/excluded agents, and any assignment.</li>
+        <li>An eligible seat must be admitted, have lifecycle <code>active</code>, match role/tier/skills and assignment constraints, and not already hold work, a review lease, or another live offer. A reviewer must have reviewer/admin board membership and must be independent from the submitter.</li>
+        <li>Inactive seats become <code>stale</code> after the board's configured <code>stale_after_days</code> threshold; a live work or review lease protects a seat from automatic staling. Retired/stale seats are excluded from dispatch and Fleet counts. A later authenticated join returns a stale, retired, or handed-off identity to <code>active</code>.</li>
+        <li>Central offers work to one eligible seat, records <code>dispatch_state</code>, and appends each offered/expired/revoked/broadcast/unassignable transition to <code>dispatch_history</code>. Default offer TTL is 120 seconds. With fallback enabled, three expired offers move the ticket to broadcast.</li>
+        <li>Read <code>dispatch_history</code> oldest-to-newest: confirm the offer kind, exact agent ID/name, expiry, and terminal reason. <code>offer_limit_reached</code> means broadcast fallback; <code>no_eligible_worker</code> or <code>no_eligible_reviewer</code> means the capability/membership pool has no candidate.</li>
+        <li>Work and review claims use the board claim TTL, 900 seconds by default. The bridge renews discovered held leases at about 40% of TTL, but workers outside a blocking wait still renew explicitly before a long operation. If renewal fails, stop editing and refetch the ticket.</li>
+      </ul>
+
+      <h3>6. Troubleshooting</h3>
+      <table>
+        <thead><tr><th>Symptom</th><th>Likely cause</th><th>Fix</th></tr></thead>
+        <tbody>
+          <tr><td><code>split identity</code></td><td>The wait bridge literal and HTTP connector token resolve to different principals.</td><td>Regenerate the connector pair from one seat token file, set the board connector's token environment variable from that same file, restart the host, then run Doctor. Never fix this by changing only <code>agent_name</code>.</td></tr>
+          <tr><td><code>board role not authorized</code></td><td>The declared <code>PURSERS_ROLE</code> is incompatible with token scopes or the principal is not admitted with the required membership.</td><td>Inspect the intended role, mint/use the correctly scoped seat token, admit that principal to the board, and reapply the seat. Do not broaden a worker into a reviewer.</td></tr>
+          <tr><td>Push degraded to <code>poll</code></td><td>The subscription/listen handshake failed, a CA/token/URL is wrong, or bridge/client/Central event vocabularies are out of sync.</td><td>Run Doctor, compare installed and pinned bridge versions, inspect the bounded push-unavailable reason, correct TLS/auth/version drift, restart, and require a five-second push probe. Use poll only as a declared temporary fallback and report it in work notes.</td></tr>
+          <tr><td>Lease churn or lost claim</td><td>TTL is shorter than the renew schedule, the holder stopped renewing, Central restarted, or identity changed.</td><td>Stop edits, call <code>ticket_get</code>, verify holder/principal and <code>ttl_s</code>, reclaim only if current state permits, and renew about every five minutes during manual work. Check claim-TTL changes and the current Central service before resuming.</td></tr>
+          <tr><td>Phantom or duplicate identities</td><td>A seat name/instance changed across restarts, or old config still launches another connector.</td><td>Restore one stable seat name, inspect inventory and Doctor, stop obsolete processes, then use <code>agent_retire</code> on the exact inert identity only after confirming it has no live work or review lease.</td></tr>
+          <tr><td>Submission notes rejected or truncated</td><td>Notes exceeded the 5,000-character contract.</td><td>Keep the required fields and concise real test tails. The client truncates at a line boundary and returns metadata; move full logs to an approved artifact instead of claiming the omitted text was submitted.</td></tr>
+          <tr><td>Cursor ahead of journal</td><td>A cursor map came from another board, a restored state is newer than Central, or journal state was replaced.</td><td>Keep cursors per board. The released a21 bridge can surface this as an error; do not claim automatic clamping unless that bridge change has passed review and is present in the deployed version. On the board connector, call <code>board_catchup(board_id="&lt;board_id&gt;", agent_name="&lt;seat_name&gt;", cursor=0, limit=1, max_events=1, ack=false, touch=false)</code>, read <code>latest_cursor</code>, replace only that board's entry in the whole cursor map, refetch ticket state, and re-arm the wait.</td></tr>
+          <tr><td>Codex bridge has no token</td><td>Codex did not forward a shell variable into its stdio subprocess.</td><td>Use the Config adapter so the private managed bridge env contains the token literal, keep the config mode 0600, verify literal/file principal equality with Doctor, and restart Codex.</td></tr>
+        </tbody>
+      </table>
+
+      <h3>7. Restart checklist</h3>
+      <ol class="steps">
+        <li><strong>Freeze intake and dispatch.</strong> Do not create or offer new work during the upgrade. Record the approved integration commit, release tag, manifest, six wheel names, and checksums.</li>
+        <li><strong>Finish release verification.</strong> Require all CI jobs, verify the signed tag and GitHub Release, then publish from that tag and confirm every expected immutable PyPI version.</li>
+        <li><strong>Promote in dependency order.</strong> Stage and hash-check Central, switch the versioned venv, kickstart and health-check it; then upgrade the persistent bridge shim and each Personal venv.</li>
+        <li><strong>Restart every host.</strong> Reload Codex, Goose, Claude Desktop/Code, and headless services. Do not assume an open process discovered the new binary.</li>
+        <li><strong>Run Doctor.</strong> Require matching principal IDs, declared roles/capabilities, exact installed/pinned versions, readable private files, registry coverage, no config drift, and a real push subscription. Treat <code>poll</code> as a warning.</li>
+        <li><strong>Exercise one governed ticket.</strong> A worker receives its own offer, claims, renews, submits exact evidence, and an independent reviewer claims and decides it. Confirm the Fleet Dashboard and <code>dispatch_history</code> agree.</li>
+        <li><strong>Resume the coordinator.</strong> Start in shadow/read-only mode, inspect registry and findings, acknowledge the current digest, then re-enable approved intake/dispatch policy. Keep the kill switch and rollback service definition ready.</li>
+      </ol>
+      <div class="success"><strong>Resume is complete only when</strong> the deployed hashes and three expected Central pins match the release, health and Doctor pass, all seats were restarted, waits report push, no identity is split, and the independent-review smoke ticket closes with truthful evidence.</div>
     </section>
   </main>
 

@@ -282,6 +282,36 @@ class MultiBoardWaitTests(unittest.IsolatedAsyncioTestCase):
         lists = [call[1] for call in transport.calls if call[0] == "ticket_list"]
         self.assertEqual(lists, ["alpha", "beta"])
 
+    async def test_registry_wait_compacts_500_events_with_bounded_calls(self) -> None:
+        transport = FakeTransport(["alpha"])
+        for sequence in range(1, 501):
+            transport.add_event("alpha", f"TK-{sequence:04d}", sequence)
+
+        result = await wait_server._wait_for_work_many(
+            FakeRootClient(transport),
+            boards=["alpha"],
+            since_seq={"alpha": 0},
+            timeout_s=1,
+            only_mine=False,
+        )
+
+        data_calls = [
+            call for call in transport.calls
+            if call[0] in {"board_catchup", "ticket_list", "ticket_get"}
+        ]
+        self.assertLess(len(data_calls), 20)
+        self.assertEqual(
+            [name for name, _board, _arguments in data_calls],
+            ["board_catchup", "ticket_list"],
+        )
+        self.assertEqual(result["new_seq"], {"alpha": 500})
+        self.assertEqual(result["compacted"], {"alpha": True})
+        self.assertEqual(result["dropped"], {"alpha": 300})
+        self.assertEqual(
+            result["event_counts"], {"alpha": {"ticket_created": 500}}
+        )
+        self.assertEqual(len(result["events"]), wait_server.REPLAY_EVENT_LIMIT)
+
     async def test_reviewer_auto_ignores_open_registry_backlog(self) -> None:
         transport = FakeTransport(["alpha"])
         transport.roles["alpha"] = "reviewer"
