@@ -7,20 +7,69 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [5.0.0a21] - 2026-09-06
+
+This release includes `pursers-central==0.1.0a25`,
+`pursers-client==0.1.0a18`, `pursers-personal-import==5.0.0a3`,
+`pursers-personal==5.0.0a21`, `pursers==5.0.0a21`, and
+`pursers-wait-bridge==0.1.0a11`.
+
+### Package summary
+
+- **Central 0.1.0a25:** adds agent retirement and automatic stale-seat
+  lifecycle handling; dispatches only to live seats with fair rotation,
+  durable offer deadlines, and visible dispatch history; defaults joins from
+  reviewer membership; and enforces the reduced tool surface.
+- **Client 0.1.0a18:** bounds oversized submit notes with explicit truncation
+  metadata and carries the current registry, lifecycle, and tool contracts.
+- **Wait Bridge 0.1.0a11:** batches large catch-up windows with monotonic
+  progress, compaction and cursor clamping, and returns deadline-bounded partial
+  results without losing the next cursor.
+- **Personal and meta 5.0.0a21:** keep the Personal `memory_*` API active for its
+  shipped UI caller, remove `ticket_terminate`, and ship the regenerated
+  component lock. Personal Import remains at 5.0.0a3.
+- **Fleet Dashboard tooling:** adds Config-page seat import, Doctor for one or
+  all seats, fleet-clone registry ownership, and a loopback Release & Operations
+  panel for release status, immutable confirmed plans, Central staging,
+  publish dispatch, kickstart, dashboard restart, and seat restart checks.
+- **Seat kit:** generates fleet-owned clone workflows and refuses the operator
+  checkout as a worker directory.
+- **Coordinator:** reports live-seat dispatch rotation, rehydrated offer
+  deadlines, and dispatch history in Needs attention.
+- **Worker runtime:** follows the same live-seat, fleet-clone, reduced-tool, and
+  bounded wait/submit contracts as interactive seats.
+
+### Added
+
+- Added the local Fleet operations runbook and the Config-page import/Doctor
+  workflow for one seat or the full fleet.
+- Added the Release & Operations panel with read-only tag, CI, PyPI, GitHub
+  Release, Central-version, and restart telemetry plus guarded operator jobs.
+
+### Changed
+
+- Dispatcher offers now target live seats only, rotate fairly, preserve
+  server-side offer deadlines across ASGI restarts, and expose dispatch history.
+- `a2a_wait` catch-up is batched and compacted with guaranteed progress,
+  deadline-honoring partial returns, and cursor clamping.
+- `agent_retire` and automatic stale-seat retirement make retire-all-inert
+  explicit; `board_join` derives its default role from reviewer membership.
+- The Personal `memory_*` family remains supported because the Personal UI is a
+  shipped caller. `ticket_assign` is retained only as an admin escape hatch.
+
 ### Removed
 
 - `agent_nudge`; autonomous Dispatcher offers are the sole targeted wake path.
 - `board_get_briefing`; use bounded `board_status` and `board_snapshot` views.
 - `ticket_terminate`; use `ticket_cancel` for role-authorized cancellation.
 
-### Deprecated
+### Migration
 
-- `ticket_assign` remains callable only as the admin/`board:coordinate` escape
-  hatch and stays hidden from `tools/list` unless legacy capability negotiation
-  enables it. Calls return `_deprecated: true` and emit a durable, deduplicated
-  `deprecated_tool_warning`.
-- The Personal `memory_*` family remains active and visible because the Personal
-  app is its shipped caller.
+- Set `fleet_clone_dir` for each project in the Config page Registry card and
+  run seats only from that fleet-owned clone, never the operator checkout.
+- `PURSERS_LEGACY_TOOLS` no longer restores `agent_nudge`,
+  `board_get_briefing`, or `ticket_terminate`; migrate callers to Dispatcher
+  offers, `board_status` / `board_snapshot`, and `ticket_cancel` respectively.
 
 ## [5.0.0a20] - 2026-09-05
 
