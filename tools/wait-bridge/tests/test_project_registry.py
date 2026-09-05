@@ -69,6 +69,64 @@ def context_for(client: FakeRegistryClient) -> SimpleNamespace:
 
 
 class ProjectRegistryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_registry_route_enrichment_refuses_operator_checkout(self) -> None:
+        operator_registry = {
+            "schema_version": 1,
+            "projects": {
+                "alpha": {
+                    "board_id": "alpha",
+                    "work_dir": "/workspace/operator",
+                    "work_dir_owner": "operator",
+                    "status": "active",
+                },
+            },
+        }
+        result = wait_server._enrich_registry_routes(
+            {"events": [{"board_id": "alpha", "ticket_id": "TK-unsafe"}]},
+            operator_registry,
+            claimable=True,
+        )
+
+        event = result["events"][0]
+        self.assertEqual(event["work_dir"], "/workspace/operator")
+        self.assertTrue(event["claim_refused"])
+        self.assertEqual(event["claim_refusal_code"], "operator_checkout_read_only")
+        self.assertEqual(
+            event["claim_refusal_reason"],
+            "operator checkout is read-only for seats",
+        )
+
+        operator_registry["projects"]["alpha"]["fleet_clone_dir"] = "/fleet/alpha"
+        result = wait_server._enrich_registry_routes(
+            {"events": [{"board_id": "alpha", "ticket_id": "TK-safe"}]},
+            operator_registry,
+            claimable=True,
+        )
+        self.assertEqual(result["events"][0]["work_dir"], "/fleet/alpha")
+        self.assertNotIn("claim_refused", result["events"][0])
+
+        operator_registry["projects"]["alpha-clone"] = {
+            "board_id": "alpha",
+            "work_dir": "/workspace/other-operator",
+            "work_dir_owner": "operator",
+            "fleet_clone_dir": "/fleet/other-alpha",
+            "status": "active",
+        }
+        result = wait_server._enrich_registry_routes(
+            {
+                "events": [
+                    {
+                        "board_id": "alpha",
+                        "ticket_id": "TK-ambiguous",
+                        "work_dir": "/workspace/operator",
+                    }
+                ]
+            },
+            operator_registry,
+            claimable=True,
+        )
+        self.assertTrue(result["events"][0]["claim_refused"])
+
     async def test_registry_parse_active_filter_dedupe_and_home_inclusion(self) -> None:
         client = FakeRegistryClient(json.dumps(REGISTRY))
 

@@ -85,6 +85,7 @@ KEYCHAIN_SERVICE = "pursers-worker"
 REVIEWER_AUTH_ERROR = (
     "reviewer mode requires a dedicated board reviewer principal/token"
 )
+OPERATOR_CHECKOUT_REFUSAL = "operator checkout is read-only for seats"
 
 
 @dataclass(frozen=True)
@@ -804,6 +805,17 @@ class PursersBoardAPI:
         )
 
     async def claim(self, board_id: str, ticket_id: str) -> dict[str, Any]:
+        if self.config.role == "worker":
+            try:
+                project = await self._project(board_id)
+            except (BoardClientError, ValueError):
+                project = None
+            if (
+                project is not None
+                and project.get("work_dir_owner", "operator") == "operator"
+                and not project.get("fleet_clone_dir")
+            ):
+                raise RuntimeError(OPERATOR_CHECKOUT_REFUSAL)
         result = await (await self._view(board_id))._call(
             "ticket_claim",
             {"agent_name": self.config.agent_name, "ticket_id": ticket_id},
@@ -831,12 +843,21 @@ class PursersBoardAPI:
         return str(view.identity.principal_id)
 
     async def work_dir(self, board_id: str) -> Path:
+        project = await self._project(board_id)
+        if (
+            project.get("work_dir_owner", "operator") == "operator"
+            and not project.get("fleet_clone_dir")
+        ):
+            raise RuntimeError(OPERATOR_CHECKOUT_REFUSAL)
+        return Path(project.get("fleet_clone_dir") or project["work_dir"]).resolve()
+
+    async def _project(self, board_id: str) -> dict[str, Any]:
         self.registry = self.registry or await self.wait_bridge._read_project_registry(
             self.client
         )
         for project in self.registry["projects"].values():
             if project["board_id"] == board_id and project["status"] == "active":
-                return Path(project["work_dir"]).resolve()
+                return project
         raise ValueError(f"no active project registry entry for board {board_id}")
 
     async def renew(self, board_id: str, ticket_id: str) -> None:
@@ -911,7 +932,14 @@ class PursersBoardAPI:
         for project in self.registry['projects'].values():
             if project['status'] != 'active':
                 continue
-            work_dir = Path(project['work_dir']).resolve()
+            if (
+                project.get('work_dir_owner', 'operator') == 'operator'
+                and not project.get('fleet_clone_dir')
+            ):
+                continue
+            work_dir = Path(
+                project.get('fleet_clone_dir') or project['work_dir']
+            ).resolve()
             if work_dir in seen:
                 continue
             seen.add(work_dir)

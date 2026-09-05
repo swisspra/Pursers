@@ -167,7 +167,13 @@ def parse_registry(result: Any) -> dict[str, Any]:
         raise DoctorError("project_registry projects must be an object")
     normalized: dict[str, Any] = {"schema_version": 1, "projects": {}}
     required = {"board_id", "work_dir", "status"}
-    optional = {"integration_ref", "git_repo", "public"}
+    optional = {
+        "integration_ref",
+        "git_repo",
+        "public",
+        "work_dir_owner",
+        "fleet_clone_dir",
+    }
     for name, raw in projects.items():
         if not isinstance(name, str) or not name.strip() or name != name.strip():
             raise DoctorError("project_registry project names must be trimmed strings")
@@ -188,6 +194,21 @@ def parse_registry(result: Any) -> dict[str, Any]:
             raise DoctorError(f"project {name!r} status must be active or paused")
         if not os.path.isabs(work_dir):
             raise DoctorError(f"project {name!r} work_dir must be absolute")
+        owner = raw.get("work_dir_owner", "operator")
+        if owner not in {"operator", "fleet"}:
+            raise DoctorError(
+                f"project {name!r} work_dir_owner must be operator or fleet"
+            )
+        fleet_clone_dir = raw.get("fleet_clone_dir")
+        if fleet_clone_dir is not None and (
+            not isinstance(fleet_clone_dir, str)
+            or not fleet_clone_dir.strip()
+            or fleet_clone_dir != fleet_clone_dir.strip()
+            or not os.path.isabs(fleet_clone_dir)
+        ):
+            raise DoctorError(
+                f"project {name!r} fleet_clone_dir must be absolute"
+            )
         if "git_repo" in raw and type(raw["git_repo"]) is not bool:
             raise DoctorError(f"project {name!r} git_repo must be boolean")
         normalized["projects"][name] = dict(raw)
@@ -215,9 +236,27 @@ def check_project(
     token: str,
     git_runner: GitRunner,
 ) -> None:
-    path = Path(str(entry["work_dir"]))
+    operator_owned = entry.get("work_dir_owner", "operator") == "operator"
+    fleet_clone_dir = entry.get("fleet_clone_dir")
+    path = Path(str(fleet_clone_dir or entry["work_dir"]))
+    if operator_owned and not fleet_clone_dir:
+        _add(
+            checks,
+            "FAIL",
+            f"seat-workdir:{name}",
+            "operator checkout is read-only for seats; fleet_clone_dir is missing",
+            token,
+        )
+    else:
+        _add(
+            checks,
+            "PASS",
+            f"seat-workdir:{name}",
+            f"seat work tree: {path}",
+            token,
+        )
     if not path.is_dir():
-        _add(checks, "FAIL", f"project:{name}", f"work_dir missing: {path}", token)
+        _add(checks, "FAIL", f"project:{name}", f"seat work_dir missing: {path}", token)
         return
     if entry.get("git_repo") is False:
         _add(

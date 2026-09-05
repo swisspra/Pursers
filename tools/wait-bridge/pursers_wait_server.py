@@ -78,6 +78,7 @@ from pursers_client import (
     JoinedIdentity,
     SUBMITTED_RELEVANT_KINDS,
     parse_project_registry,
+    registry_work_dirs,
 )
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
@@ -1386,6 +1387,44 @@ def _registry_boards(registry: dict[str, Any]) -> list[str]:
             selected.append(board_id)
             seen.add(board_id)
     return selected
+
+
+def _enrich_registry_routes(
+    result: dict[str, Any], registry: dict[str, Any], *, claimable: bool
+) -> dict[str, Any]:
+    """Attach safe seat routing and refuse operator-checkout worker claims."""
+    if not isinstance(result.get("events"), list):
+        return result
+    routed = registry_work_dirs(registry)
+    operator: dict[str, set[str]] = {}
+    for project in registry["projects"].values():
+        if (
+            project["status"] == "active"
+            and project.get("work_dir_owner", "operator") == "operator"
+        ):
+            operator.setdefault(project["board_id"], set()).add(project["work_dir"])
+    events = []
+    for event in result.get("events", []):
+        enriched = dict(event)
+        board_id = enriched.get("board_id")
+        work_dir = enriched.get("work_dir") or routed.get(board_id)
+        if work_dir is not None:
+            enriched["work_dir"] = work_dir
+        if (
+            claimable
+            and isinstance(work_dir, str)
+            and any(
+                Path(work_dir).resolve() == Path(operator_dir).resolve()
+                for operator_dir in operator.get(str(board_id), set())
+            )
+        ):
+            enriched["claim_refused"] = True
+            enriched["claim_refusal_code"] = "operator_checkout_read_only"
+            enriched["claim_refusal_reason"] = (
+                "operator checkout is read-only for seats"
+            )
+        events.append(enriched)
+    return {**result, "events": events}
 
 
 class LeaseKeepalive:
@@ -3067,7 +3106,7 @@ async def _a2a_wait_impl(
                     f"project_registry unavailable; using {BOARD_ID!r} only: {exc}"
                 ),
             }
-        return await _wait_for_work_many(
+        result = await _wait_for_work_many(
             client,
             boards=_registry_boards(registry),
             since_seq=since_seq,
@@ -3078,6 +3117,17 @@ async def _a2a_wait_impl(
             wait_for=wait_for,
             progress_callback=progress_callback,
             push_unavailable_callback=push_unavailable_callback,
+        )
+        return _enrich_registry_routes(
+            result,
+            registry,
+            claimable=(
+                _normalize_wait_for(wait_for) == WAIT_FOR_CLAIMABLE
+                or (
+                    _normalize_wait_for(wait_for) == WAIT_FOR_AUTO
+                    and _declared_role() == "worker"
+                )
+            ),
         )
     if isinstance(boards, str):
         raise ValueError('boards must be a list of board IDs or "registry"')

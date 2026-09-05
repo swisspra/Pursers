@@ -21,6 +21,7 @@ HOME_BOARD_ID = "pursers"
 REGISTRY_KEY = "project_registry"
 SCHEMA_VERSION = 1
 VALID_STATUSES = frozenset({"active", "paused"})
+VALID_WORK_DIR_OWNERS = frozenset({"operator", "fleet"})
 
 
 class RegistryError(RuntimeError):
@@ -57,13 +58,17 @@ def validate_registry(document: Any) -> dict[str, Any]:
 
     for name, entry in projects.items():
         _require_clean_string(name, "project name")
-        if not isinstance(entry, dict) or set(entry) != {
-            "board_id",
-            "work_dir",
-            "status",
-        }:
+        required = {"board_id", "work_dir", "status"}
+        optional = {"work_dir_owner", "fleet_clone_dir"}
+        if (
+            not isinstance(entry, dict)
+            or not required <= set(entry)
+            or not set(entry) <= required | optional
+        ):
             raise RegistryError(
-                f"project {name!r} must contain exactly board_id, work_dir, and status"
+                f"project {name!r} must contain exactly board_id, work_dir, and "
+                "status plus optional work_dir_owner and fleet_clone_dir; "
+                "only work_dir_owner and fleet_clone_dir are optional"
             )
         _require_clean_string(entry["board_id"], f"project {name!r} board_id")
         work_dir = _require_clean_string(entry["work_dir"], f"project {name!r} work_dir")
@@ -74,6 +79,20 @@ def validate_registry(document: Any) -> dict[str, Any]:
             raise RegistryError(
                 f"project {name!r} status must be active or paused"
             )
+        owner = entry.get("work_dir_owner", "operator")
+        if owner not in VALID_WORK_DIR_OWNERS:
+            raise RegistryError(
+                f"project {name!r} work_dir_owner must be operator or fleet"
+            )
+        fleet_clone_dir = entry.get("fleet_clone_dir")
+        if fleet_clone_dir is not None:
+            fleet_clone_dir = _require_clean_string(
+                fleet_clone_dir, f"project {name!r} fleet_clone_dir"
+            )
+            if not os.path.isabs(fleet_clone_dir):
+                raise RegistryError(
+                    f"project {name!r} fleet_clone_dir must be an absolute path"
+                )
 
     return copy.deepcopy(document)
 
@@ -153,6 +172,11 @@ def build_parser() -> argparse.ArgumentParser:
     add.add_argument("name")
     add.add_argument("--board-id", required=True)
     add.add_argument("--work-dir", required=True)
+    add.add_argument(
+        "--work-dir-owner",
+        choices=sorted(VALID_WORK_DIR_OWNERS),
+    )
+    add.add_argument("--fleet-clone-dir")
     add.add_argument("--status", choices=sorted(VALID_STATUSES), default="active")
     add.add_argument(
         "--force",
@@ -188,6 +212,13 @@ async def execute(args: argparse.Namespace, client: RegistryClient) -> None:
             "work_dir": work_dir,
             "status": args.status,
         }
+        if args.work_dir_owner is not None:
+            projects[name]["work_dir_owner"] = args.work_dir_owner
+        if args.fleet_clone_dir is not None:
+            clone_dir = _require_clean_string(args.fleet_clone_dir, "fleet_clone_dir")
+            if not os.path.isabs(clone_dir):
+                raise RegistryError("fleet_clone_dir must be an absolute path")
+            projects[name]["fleet_clone_dir"] = clone_dir
     else:
         if name not in projects:
             raise RegistryError(f"unknown project {name!r}")

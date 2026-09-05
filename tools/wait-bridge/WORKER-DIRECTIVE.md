@@ -173,9 +173,15 @@ one board's cursor for another. Each returned event includes `board_id`,
 `resynced` is also per-board, and boards that could not be joined are reported
 under `skipped_boards` without aborting the other boards.
 
-After claiming a ticket, use `project_registry_get()` to resolve its project's
-`work_dir`. That absolute directory is the **only authorized tree** for the
-ticket. Keep the claim, lease renewal, submission, and review on the event's
+### Where you work
+
+After an offer cue, use `project_registry_get()` to resolve its project's
+`fleet_clone_dir`. That fleet-owned clone (or a seat-owned clone made from it)
+is the **only authorized tree** for the ticket. The registry's operator-owned
+`work_dir` is read-only for seats. If `fleet_clone_dir` is absent and routing
+would use that operator checkout, do not claim; surface
+`operator_checkout_read_only` / `operator checkout is read-only for seats` to
+the operator. Keep the claim, lease renewal, submission, and review on the event's
 `board_id`: a heartbeat renews a held claim only on the board that owns it.
 The one-ticket-at-a-time loop and every governance rule in this directive apply
 unchanged on every board.

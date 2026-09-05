@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import urllib.error
 import urllib.request
 import uuid
@@ -93,6 +94,99 @@ def test_registry_projects_authoritative_work_dirs() -> None:
         "home-board": "/repo/home",
         "board-active": "/repo/active",
     }
+
+
+def test_registry_projects_route_to_fleet_clone() -> None:
+    result = dashboard.parse_project_work_dirs(
+        registry(
+            {
+                "Active": {
+                    "board_id": "board-active",
+                    "status": "active",
+                    "work_dir": "/repo/operator",
+                    "fleet_clone_dir": "/fleet/active",
+                },
+            }
+        ),
+        "home-board",
+    )
+
+    assert result == {
+        "home-board": None,
+        "board-active": "/fleet/active",
+    }
+
+
+def test_prepare_fleet_clone_tracks_origin_main_detached(tmp_path: Path) -> None:
+    origin = tmp_path / "origin.git"
+    operator = tmp_path / "operator"
+    subprocess.run(["git", "init", "--bare", str(origin)], check=True, capture_output=True)
+    subprocess.run(["git", "clone", str(origin), str(operator)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(operator), "config", "user.name", "Test"], check=True)
+    subprocess.run(["git", "-C", str(operator), "config", "user.email", "test@example.invalid"], check=True)
+    (operator / "README.md").write_text("one\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(operator), "add", "README.md"], check=True)
+    subprocess.run(["git", "-C", str(operator), "commit", "-m", "initial"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(operator), "branch", "-M", "main"], check=True)
+    subprocess.run(["git", "-C", str(operator), "push", "-u", "origin", "main"], check=True, capture_output=True)
+
+    manager = dashboard.SeatConfigManager(
+        state_dir=tmp_path / "fleet", latest_version=lambda: None
+    )
+    payload = {
+        "registry": {
+            "schema_version": 1,
+            "projects": {
+                "Alpha Project": {
+                    "board_id": "alpha",
+                    "work_dir": str(operator),
+                    "status": "active",
+                }
+            },
+        },
+        "expected_sha256": "a" * 64,
+    }
+
+    prepared = manager.prepare_fleet_clone(payload, "Alpha Project")
+    clone = Path(prepared["registry"]["projects"]["Alpha Project"]["fleet_clone_dir"])
+    assert clone != operator
+    assert prepared["registry"]["projects"]["Alpha Project"]["work_dir_owner"] == "operator"
+    assert prepared["expected_sha256"] == "a" * 64
+    assert prepared["clone"] == {
+        "path": str(clone),
+        "status": "ready",
+        "dirty": False,
+        "detached": True,
+        "ahead": 0,
+        "behind": 0,
+    }
+    assert subprocess.run(
+        ["git", "-C", str(clone), "remote", "get-url", "origin"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip() == str(origin)
+
+    (operator / "README.md").write_text("two\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(operator), "commit", "-am", "second"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(operator), "push", "origin", "main"], check=True, capture_output=True)
+    refreshed = manager.prepare_fleet_clone(
+        {"registry": prepared["registry"], "expected_sha256": "b" * 64},
+        "Alpha Project",
+    )
+    assert refreshed["clone"]["ahead"] == 0
+    assert refreshed["clone"]["behind"] == 0
+    assert subprocess.run(
+        ["git", "-C", str(clone), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout == subprocess.run(
+        ["git", "-C", str(operator), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
 
 
 def test_agents_group_by_principal_and_name_across_board_specific_ids() -> None:
@@ -3466,6 +3560,65 @@ def test_seat_config_registry_coverage_uses_live_fleet_seats(tmp_path: Path) -> 
     }
 
 
+def test_seat_config_doctor_reports_operator_checkout(tmp_path: Path) -> None:
+    class Bridge:
+        version = "0.1.0a10"
+
+        def inspect(self) -> dict:
+            return {"version": self.version, "command": None}
+
+    class EmptyDoctor:
+        def run(self, _desired: object) -> list:
+            return []
+
+    manager = dashboard.SeatConfigManager(
+        tmp_path / "seats.json",
+        state_dir=tmp_path,
+        bridge_installer=Bridge(),
+        doctor_factory=EmptyDoctor,
+        latest_version=lambda: None,
+    )
+    desired = dashboard.DesiredSeat(
+        host="codex",
+        role="worker",
+        name="worker-one",
+        central_url="https://127.0.0.1:8766/mcp",
+        home_board="pursers",
+        token_file=str(tmp_path / "token"),
+        ca_file=str(tmp_path / "ca.pem"),
+        bridge_command="/tmp/pursers-wait-bridge",
+        config_path=str(tmp_path / "config.toml"),
+    )
+    manager.inventory.upsert(desired, bridge_version=Bridge.version)
+    job = manager.doctor(
+        ["worker-one"],
+        {
+            "registry": {
+                "schema_version": 1,
+                "projects": {
+                    "Alpha": {
+                        "board_id": "alpha",
+                        "work_dir": "/operator/alpha",
+                        "status": "active",
+                    }
+                },
+            }
+        },
+    )
+    deadline = time.monotonic() + 2
+    while (result := manager.job(job["job_id"]))["status"] not in {
+        "succeeded",
+        "failed",
+    } and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    assert result["status"] == "succeeded"
+    working_tree = result["result"]["seats"][0]["checks"][0]
+    assert working_tree["check"] == "working-tree"
+    assert working_tree["status"] == "FAIL"
+    assert "operator checkout is read-only for seats" in working_tree["message"]
+
+
 def test_config_api_and_ui_contract_are_separate_from_coordinator_config() -> None:
     calls: list[tuple[str, object]] = []
 
@@ -3475,6 +3628,21 @@ def test_config_api_and_ui_contract_are_separate_from_coordinator_config() -> No
 
         def get(self) -> dict:
             return {"boards": []}
+
+        def get_project_registry(self) -> dict:
+            return {
+                "registry": {"schema_version": 1, "projects": {}},
+                "expected_sha256": "a" * 64,
+            }
+
+        def save_project_registry(
+            self, value: object, expected_sha256: object
+        ) -> dict:
+            calls.append(("save-registry", (value, expected_sha256)))
+            return {
+                "registry": value,
+                "expected_sha256": "b" * 64,
+            }
 
     class Seats:
         def seats(self) -> dict:
@@ -3494,8 +3662,19 @@ def test_config_api_and_ui_contract_are_separate_from_coordinator_config() -> No
                 ),
             }
 
-        def registry(self, fleet: dict) -> dict:
-            return {"boards": [], "read_only": True}
+        def registry(self, fleet: dict, registry_payload: dict) -> dict:
+            return {"boards": [], "projects": [], "read_only": False}
+
+        def prepare_fleet_clone(
+            self, registry_payload: dict, project: object
+        ) -> dict:
+            calls.append(("prepare-clone", project))
+            return {
+                "registry": registry_payload["registry"],
+                "expected_sha256": registry_payload["expected_sha256"],
+                "project": project,
+                "clone": {"status": "ready"},
+            }
 
         def plan(self, request: object) -> dict:
             calls.append(("plan", request))
@@ -3509,7 +3688,7 @@ def test_config_api_and_ui_contract_are_separate_from_coordinator_config() -> No
             calls.append(("prompt", request))
             return {"prompt": "session prompt"}
 
-        def doctor(self, names: object) -> dict:
+        def doctor(self, names: object, registry_payload: dict) -> dict:
             calls.append(("doctor", names))
             return {"job_id": "b" * 32, "status": "queued"}
 
@@ -3560,7 +3739,9 @@ def test_config_api_and_ui_contract_are_separate_from_coordinator_config() -> No
                 ),
             }
         with urllib.request.urlopen(base + "/api/config/registry") as response:
-            assert json.load(response)["read_only"] is True
+            assert json.load(response)["read_only"] is False
+        clone = post("/api/config/registry/clone", {"project": "fixture"})
+        assert clone["clone"]["status"] == "ready"
         assert post("/api/config/plan", {"name": "fixture"})["plan_id"] == "a" * 32
         assert post("/api/config/apply", {"plan_id": "a" * 32})["backup_path"]
         assert post("/api/config/prompt", {"name": "fixture"})["prompt"]
@@ -3575,6 +3756,11 @@ def test_config_api_and_ui_contract_are_separate_from_coordinator_config() -> No
         thread.join()
 
     assert calls == [
+        ("prepare-clone", "fixture"),
+        (
+            "save-registry",
+            ({"schema_version": 1, "projects": {}}, "a" * 64),
+        ),
         ("plan", {"name": "fixture"}),
         ("apply", "a" * 32),
         ("prompt", {"name": "fixture"}),
@@ -3591,6 +3777,8 @@ def test_config_api_and_ui_contract_are_separate_from_coordinator_config() -> No
     assert "resolution_source" in dashboard.HTML
     assert "seatBridge.status" in dashboard.HTML
     assert "seatBridge.message" in dashboard.HTML
+    assert "Create fleet clone" in dashboard.HTML
+    assert "operator checkout is read-only for seats" in dashboard.HTML
     assert "Resolved via" in dashboard.HTML
     assert "setInterval(async()=>" in dashboard.HTML
     assert ",1000)" in dashboard.HTML

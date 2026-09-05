@@ -39,7 +39,11 @@ import tomllib
 _CLIENT_SRC = Path(__file__).resolve().parents[2] / "packages" / "client" / "src"
 if (_CLIENT_SRC / "pursers_client").is_dir():
     sys.path.insert(0, str(_CLIENT_SRC))
-from pursers_client import BoardClient, BoardClientError
+from pursers_client import (
+    BoardClient,
+    BoardClientError,
+    parse_project_registry as parse_client_project_registry,
+)
 
 _DASHBOARD_DIR = Path(__file__).resolve().parent
 if str(_DASHBOARD_DIR) not in sys.path:
@@ -48,6 +52,7 @@ from seat_config import (  # noqa: I001
     BridgeInstaller,
     DesiredSeat,
     Doctor,
+    DoctorCheck,
     PromptRenderer,
     SeatInventory,
     adapter_for,
@@ -1820,7 +1825,7 @@ def parse_project_work_dirs(
         board_id = project.get("board_id")
         if not isinstance(board_id, str) or not board_id:
             continue
-        work_dir = project.get("work_dir")
+        work_dir = project.get("fleet_clone_dir") or project.get("work_dir")
         work_dirs[board_id] = work_dir if isinstance(work_dir, str) and work_dir else None
     return work_dirs
 
@@ -2881,6 +2886,50 @@ class FleetFetcher:
         )
         return parse_project_registry(registry, self.config.home_board)
 
+    async def fetch_project_registry(self) -> dict[str, Any]:
+        """Return validated registry data plus a CAS digest for Config writes."""
+        async with self._client(self.config.home_board) as client:
+            result = await client.board_state_get(key="project_registry")
+        state = result.get("state") if isinstance(result, dict) else None
+        raw = state.get("value") if isinstance(state, dict) else None
+        if not isinstance(raw, str):
+            raise ValueError("project_registry state value is missing")
+        try:
+            registry = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise ValueError("project_registry state value is not valid JSON") from exc
+        parse_client_project_registry(result)
+        return {
+            "registry": registry,
+            "expected_sha256": hashlib.sha256(raw.encode("utf-8")).hexdigest(),
+        }
+
+    async def save_project_registry(
+        self, value: Any, expected_sha256: Any
+    ) -> dict[str, Any]:
+        if not isinstance(expected_sha256, str) or not re.fullmatch(
+            r"[0-9a-f]{64}", expected_sha256
+        ):
+            raise ValueError("expected_sha256 must be a lowercase SHA-256 digest")
+        encoded = json.dumps(value, sort_keys=True, separators=(",", ":"))
+        parse_client_project_registry({"state": {"value": encoded}})
+        async with self._client(self.config.home_board) as client:
+            result = await client._call(  # noqa: SLF001 - CAS is not in old clients.
+                "board_state_update",
+                {
+                    "agent_name": self.config.agent_name,
+                    "key": "project_registry",
+                    "value": encoded,
+                    "expected_sha256": expected_sha256,
+                },
+            )
+        return {
+            "ok": True,
+            "registry": value,
+            "result": result,
+            "expected_sha256": hashlib.sha256(encoded.encode("utf-8")).hexdigest(),
+        }
+
     async def _board_event_feed(
         self,
         client: FleetClient,
@@ -3572,12 +3621,14 @@ class SeatConfigManager:
         bridge_installer: BridgeInstaller | None = None,
         doctor_factory: Callable[[], Doctor] = Doctor,
         latest_version: Callable[[], str | None] | None = None,
+        git_runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
     ) -> None:
         self.state_dir = Path(state_dir).expanduser()
         self.inventory = SeatInventory(inventory_path or self.state_dir / "seats.json")
         self.bridge_installer = bridge_installer or BridgeInstaller()
         self.doctor_factory = doctor_factory
         self.latest_version = latest_version or self._pypi_latest
+        self.git_runner = git_runner
         self._plans: dict[str, tuple[DesiredSeat, list[Any]]] = {}
         self._jobs: dict[str, dict[str, Any]] = {}
         self._lock = threading.Lock()
@@ -3829,7 +3880,129 @@ class SeatConfigManager:
         self._journal("prompt", seat=desired.name)
         return {"seat": desired.name, "prompt": PromptRenderer().render(desired)}
 
-    def registry(self, fleet: dict[str, Any]) -> dict[str, Any]:
+    def _fleet_clone_default(self, project_name: str) -> Path:
+        slug = re.sub(r"[^a-z0-9]+", "-", project_name.casefold()).strip("-")
+        slug = (slug or "project")[:40]
+        suffix = hashlib.sha256(project_name.encode("utf-8")).hexdigest()[:8]
+        return self.state_dir.expanduser().resolve() / "clones" / f"{slug}-{suffix}"
+
+    def _git(
+        self, cwd: Path, *arguments: str, check: bool = False
+    ) -> subprocess.CompletedProcess[str]:
+        return self.git_runner(
+            ["git", *arguments],
+            cwd=cwd,
+            check=check,
+            text=True,
+            capture_output=True,
+            timeout=60,
+        )
+
+    def _clone_state(self, path: Path) -> dict[str, Any]:
+        if not path.exists():
+            return {
+                "path": str(path),
+                "status": "missing",
+                "dirty": False,
+                "detached": None,
+                "ahead": None,
+                "behind": None,
+            }
+        inside = self._git(path, "rev-parse", "--is-inside-work-tree")
+        if inside.returncode or inside.stdout.strip() != "true":
+            return {"path": str(path), "status": "invalid", "dirty": None}
+        dirty = bool(self._git(path, "status", "--porcelain").stdout.strip())
+        symbolic = self._git(path, "symbolic-ref", "-q", "HEAD")
+        counts = self._git(
+            path, "rev-list", "--left-right", "--count", "HEAD...origin/main"
+        )
+        ahead = behind = None
+        if counts.returncode == 0:
+            parts = counts.stdout.split()
+            if len(parts) == 2 and all(item.isdigit() for item in parts):
+                ahead, behind = (int(parts[0]), int(parts[1]))
+        return {
+            "path": str(path),
+            "status": "dirty" if dirty else "ready",
+            "dirty": dirty,
+            "detached": symbolic.returncode != 0,
+            "ahead": ahead,
+            "behind": behind,
+        }
+
+    def prepare_fleet_clone(
+        self, registry_payload: Any, project_name: Any
+    ) -> dict[str, Any]:
+        if not isinstance(registry_payload, dict):
+            raise ValueError("project_registry payload is missing")
+        registry = copy.deepcopy(registry_payload.get("registry"))
+        expected = registry_payload.get("expected_sha256")
+        if not isinstance(registry, dict) or not isinstance(
+            registry.get("projects"), dict
+        ):
+            raise ValueError("project_registry is malformed")
+        if not isinstance(project_name, str) or project_name not in registry["projects"]:
+            raise ValueError("project is not registered")
+        entry = registry["projects"][project_name]
+        source = Path(entry["work_dir"]).expanduser().resolve()
+        target = Path(
+            entry.get("fleet_clone_dir") or self._fleet_clone_default(project_name)
+        ).expanduser().resolve()
+        if source == target:
+            raise ValueError("fleet_clone_dir must differ from the operator checkout")
+        for other_name, other_entry in registry["projects"].items():
+            other_target = other_entry.get("fleet_clone_dir")
+            if (
+                other_name != project_name
+                and isinstance(other_target, str)
+                and Path(other_target).expanduser().resolve() == target
+            ):
+                raise ValueError("fleet_clone_dir is already assigned to another project")
+        remote = self._git(source, "remote", "get-url", "origin")
+        if remote.returncode or not remote.stdout.strip():
+            raise ValueError("operator checkout has no origin remote")
+        origin = remote.stdout.strip()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if not target.exists():
+            self.git_runner(
+                [
+                    "git",
+                    "clone",
+                    "--no-checkout",
+                    "--origin",
+                    "origin",
+                    "--",
+                    origin,
+                    str(target),
+                ],
+                cwd=target.parent,
+                check=True,
+                text=True,
+                capture_output=True,
+                timeout=120,
+            )
+        state = self._clone_state(target)
+        if state["status"] == "invalid":
+            raise ValueError("fleet_clone_dir exists but is not a git repository")
+        if state.get("dirty"):
+            raise ValueError("fleet clone is dirty; refusing to overwrite local changes")
+        clone_origin = self._git(target, "remote", "get-url", "origin")
+        if clone_origin.returncode or clone_origin.stdout.strip() != origin:
+            raise ValueError("fleet clone origin differs from the operator checkout")
+        self._git(target, "fetch", "--prune", "origin", "main", check=True)
+        self._git(target, "checkout", "--detach", "origin/main", check=True)
+        entry["work_dir_owner"] = "operator"
+        entry["fleet_clone_dir"] = str(target)
+        return {
+            "registry": registry,
+            "expected_sha256": expected,
+            "project": project_name,
+            "clone": self._clone_state(target),
+        }
+
+    def registry(
+        self, fleet: dict[str, Any], registry_payload: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
         names = {row.get("name") for row in self.seats()["seats"]}
         covered: dict[str, set[str]] = {}
         live_seats: dict[str, dict[str, Any]] = {}
@@ -3858,7 +4031,46 @@ class SeatConfigManager:
                     "configured_seats": len(names),
                 }
             )
-        return {"boards": boards, "seats": live_seats, "read_only": True}
+        projects = []
+        registry = (
+            registry_payload.get("registry")
+            if isinstance(registry_payload, dict)
+            else None
+        )
+        for name, entry in (
+            registry.get("projects", {}).items() if isinstance(registry, dict) else []
+        ):
+            if not isinstance(entry, dict):
+                continue
+            clone_path = Path(
+                entry.get("fleet_clone_dir") or self._fleet_clone_default(name)
+            ).expanduser().resolve()
+            projects.append(
+                {
+                    "name": name,
+                    "board_id": entry.get("board_id"),
+                    "status": entry.get("status"),
+                    "work_dir": entry.get("work_dir"),
+                    "work_dir_owner": entry.get("work_dir_owner", "operator"),
+                    "fleet_clone_dir": entry.get("fleet_clone_dir"),
+                    "default_fleet_clone_dir": str(self._fleet_clone_default(name)),
+                    "clone": self._clone_state(clone_path),
+                    "operator_checkout_seats": (
+                        sorted(name for name in names if isinstance(name, str))
+                        if entry.get("work_dir_owner", "operator") == "operator"
+                        and not entry.get("fleet_clone_dir")
+                        else []
+                    ),
+                }
+            )
+        result = {
+            "boards": boards,
+            "seats": live_seats,
+            "read_only": registry_payload is None,
+        }
+        if registry_payload is not None:
+            result["projects"] = projects
+        return result
 
     def _start_job(self, action: str, target: Callable[[], Any]) -> dict[str, str]:
         job_id = uuid.uuid4().hex
@@ -3897,7 +4109,9 @@ class SeatConfigManager:
                 raise KeyError(job_id)
             return dict(value)
 
-    def doctor(self, names: Any = None) -> dict[str, str]:
+    def doctor(
+        self, names: Any = None, registry_payload: dict[str, Any] | None = None
+    ) -> dict[str, str]:
         if names is not None and (
             not isinstance(names, list) or not all(isinstance(v, str) for v in names)
         ):
@@ -3908,9 +4122,40 @@ class SeatConfigManager:
             if names is not None:
                 records = [row for row in records if row.get("name") in names]
             reports = []
+            registry = (
+                registry_payload.get("registry")
+                if isinstance(registry_payload, dict)
+                else None
+            )
+            unsafe_projects = [
+                name
+                for name, entry in (
+                    registry.get("projects", {}).items()
+                    if isinstance(registry, dict)
+                    else []
+                )
+                if isinstance(entry, dict)
+                and entry.get("status") == "active"
+                and entry.get("work_dir_owner", "operator") == "operator"
+                and not entry.get("fleet_clone_dir")
+            ]
             for record in records:
                 desired = self._desired(record)
-                report = self._report(self.doctor_factory().run(desired))
+                checks = self.doctor_factory().run(desired)
+                checks.append(
+                    DoctorCheck(
+                        desired.name,
+                        "working-tree",
+                        "FAIL" if unsafe_projects else "PASS",
+                        (
+                            "operator checkout is read-only for seats; missing "
+                            "fleet clones: " + ", ".join(sorted(unsafe_projects))
+                            if unsafe_projects
+                            else "all active projects route to fleet-owned clones"
+                        ),
+                    )
+                )
+                report = self._report(checks)
                 self.inventory.upsert(
                     desired, bridge_version=self.bridge_installer.version, doctor=report
                 )
@@ -4029,6 +4274,28 @@ class DashboardCache:
     def get_config(self, central: str | None = None) -> dict[str, Any]:
         label = self.resolve_central(central)
         return self._labeled(asyncio.run(self.fetchers[label].fetch_config()), label)
+
+    def get_project_registry(
+        self, central: str | None = None
+    ) -> dict[str, Any]:
+        label = self.resolve_central(central)
+        return self._labeled(
+            asyncio.run(self.fetchers[label].fetch_project_registry()), label
+        )
+
+    def save_project_registry(
+        self,
+        value: Any,
+        expected_sha256: Any,
+        central: str | None = None,
+    ) -> dict[str, Any]:
+        label = self.resolve_central(central)
+        return self._labeled(
+            asyncio.run(
+                self.fetchers[label].save_project_registry(value, expected_sha256)
+            ),
+            label,
+        )
 
     def get_overhead_thresholds(
         self, central: str | None = None
@@ -4432,6 +4699,11 @@ seatForm=function(record={}){const role=record.role||'worker',tier=record.tier_m
 seatRows=function(){const configured=(seatData.seats||[]).map(s=>{const live=seatRegistry.seats?.[s.name]||{},offer=live.current_offer;return `<tr><td><b>${esc(s.host)}</b><div class="meta">${esc(s.role)}</div></td><td><span class="id">${esc(s.name)}</span><div class="meta">${esc(s.principal_label)}</div></td><td>tier ${esc(s.tier_max||2)} · review ${s.can_review?'yes':'no'} · work ${s.can_work===false?'no':'yes'}<div class="meta">${esc((s.skills||[]).join(', ')||'no skills')}</div></td><td><span class="status">${esc(live.status||'unknown')}</span></td><td>${offer?`<span class="id">${esc(offer.ticket_id)}</span><div class="meta">expires ${esc(fmt(offer.expires_at))}</div>`:'—'}</td><td>${esc(seatBridge.installed_version||'not installed')}<div class="meta">pinned ${esc(s.bridge_version||seatBridge.pinned_version||'unknown')}</div></td><td><div class="seat-actions"><button data-seat-action="doctor" data-name="${esc(s.name)}">Doctor</button><button data-seat-action="fix" data-name="${esc(s.name)}">Fix</button><button data-seat-action="prompt" data-name="${esc(s.name)}">Copy prompt</button><button data-seat-action="upgrade">Upgrade bridge</button>${s.host==='goose'?`<button data-seat-action="goose" data-name="${esc(s.name)}">Regenerate Goose</button>`:''}</div></td></tr>`}).join('');const discovered=(seatData.discovered_configs||[]).map(s=>`<tr><td><b>${esc(s.host)}</b><div class="meta">discovered</div></td><td><span class="muted">Not inventoried</span><div class="meta">${esc(s.config_path)}</div></td><td>—</td><td>setup needed</td><td>—</td><td>${esc(seatBridge.installed_version||'not installed')}</td><td><button data-seat-action="discover" data-host="${esc(s.host)}" data-path="${esc(s.config_path)}">Use in wizard</button></td></tr>`).join('');return configured+discovered}
 function dispatchPanels(){return (seatRegistry.boards||[]).map(board=>{const data=dispatchData[board.board_id];if(!data)return `<article class="card"><h3>${esc(board.label||board.board_id)}</h3><p class="muted">Dispatch data loading…</p></article>`;if(data.error)return `<article class="card"><h3>${esc(board.label||board.board_id)} dispatch</h3><p class="error">Dispatch unavailable: ${esc(data.error)}</p></article>`;const p=data.dispatch_policy||{};return `<article class="card"><h3>${esc(board.label||board.board_id)} dispatch</h3><form class="dispatch-form" data-board="${esc(board.board_id)}"><label>Claim TTL seconds<input name="claim_ttl_s" type="number" min="1" max="86400" value="${esc(data.claim_ttl_s||900)}"></label><label>Offer TTL seconds<input name="offer_ttl_s" type="number" min="1" max="86400" value="${esc(p.offer_ttl_s||120)}"></label><label><input name="second_opinion" type="checkbox" ${p.second_opinion?'checked':''}> Second opinion</label><label><input name="fallback_broadcast" type="checkbox" ${p.fallback_broadcast?'checked':''}> Fallback broadcast</label><button type="submit">Save policy</button></form><p class="meta dispatch-status"></p><h4>Unassignable</h4>${(data.unassignable_tickets||[]).map(x=>`<p><span class="id">${esc(x.ticket_id)}</span> ${esc(x.reason)}<span class="meta"> · missing ${(x.missing||[]).map(esc).join(', ')||'unknown'}</span></p>`).join('')||'<p class="empty">None</p>'}<h4>Current offers</h4>${(data.offers||[]).map(x=>`<p><span class="id">${esc(x.ticket_id)}</span> → ${esc(x.agent_name)}<span class="meta"> · expires ${esc(fmt(x.expires_at))}</span></p>`).join('')||'<p class="empty">None</p>'}<details><summary>Recent offer timeline</summary>${(data.timeline||[]).map(x=>`<p>${esc(fmt(x.occurred_at))} · ${esc(x.kind)} · <span class="id">${esc(x.ticket_id||'—')}</span></p>`).join('')||'<p class="empty">No recent offer events.</p>'}</details></article>`}).join('')}
 renderSeats=function(){const installed=seatBridge.installed_version||'not installed',latest=seatBridge.latest_pypi_version||'unavailable',source=seatBridge.resolution_source||'unresolved',bridgeStatus=seatBridge.status||'unknown',bridgeMessage=seatBridge.message||'';return `${pageHead('Config','Seats and dispatch','Declare seat capabilities, verify drift, and inspect per-board offers.','<div class="seat-toolbar"><button data-seat-global="doctor">Doctor all</button><button data-seat-global="install">Install / upgrade bridge</button><button data-seat-global="upgrade-all">Upgrade all seats</button></div>')}${seatActionMessage?`<p class="status">${esc(seatActionMessage)} ${seatSessionPrompt?'<button id="copy-session-prompt">Copy session prompt</button>':''}</p>`:''}<section class="card pool"><div class="section-title"><h3>Seat inventory</h3><span class="status">${(seatData.seats||[]).length} configured</span></div><div class="table-scroll"><table><thead><tr><th>Host / role</th><th>Name</th><th>Capabilities</th><th>State</th><th>Current offer</th><th>Bridge</th><th>Actions</th></tr></thead><tbody>${seatRows()||'<tr><td colspan="7" class="empty">No configured seats. Use the wizard.</td></tr>'}</tbody></table></div></section><div class="seat-layout"><div class="seat-stack"><section class="card pool"><h3>Add or update seat</h3>${seatForm()}</section><section id="seat-plan" class="card pool" ${seatPlan?'':'hidden'}><h3>Confirm changes</h3><p class="muted">Review the diff before applying. Existing files are backed up first.</p><pre class="seat-diff">${esc((seatPlan?.changes||[]).map(c=>`${c.description}\n${c.diff||c.action}`).join('\n')||'No changes required.')}</pre><button id="seat-apply" class="primary-action" ${seatPlan?'':'disabled'}>Confirm and apply</button></section></div><aside class="seat-stack"><section class="card pool"><h3>Wait bridge</h3><p><span class="status">${esc(bridgeStatus)}</span>${bridgeMessage?` ${esc(bridgeMessage)}`:''}</p><p>Installed <b>${esc(installed)}</b></p><p class="meta">Pinned ${esc(seatBridge.pinned_version||'unknown')} · PyPI latest ${esc(latest)} · ${esc(source)}</p></section><section class="card pool"><h3>Doctor</h3><div id="seat-doctor">${seatDoctorResult?doctorResult(seatDoctorResult):'<p class="muted">Doctor compares declared capabilities with Central.</p>'}</div></section></aside></div><section class="pool"><div class="section-title"><h3>Dispatch by board</h3><span class="status">policy · gaps · offers</span></div><div class="grid">${dispatchPanels()}</div></section>`}
+function registryClonePanel(){const rows=(seatRegistry.projects||[]).map(p=>{const c=p.clone||{},unsafe=(p.operator_checkout_seats||[]).length>0;return `<div class="card"><h4>${esc(p.name)} <span class="status">${esc(p.board_id||'')}</span></h4><p class="meta">Operator checkout · ${esc(p.work_dir||'missing')}</p><p class="meta">Fleet clone · ${esc(p.fleet_clone_dir||p.default_fleet_clone_dir||'missing')}</p><p><span class="status">${esc(c.status||'unknown')}</span> · dirty ${c.dirty===null?'—':c.dirty?'yes':'no'} · detached ${c.detached===null?'—':c.detached?'yes':'no'} · ahead ${esc(c.ahead??'—')} / behind ${esc(c.behind??'—')}</p>${unsafe?`<p class="error">${esc(p.operator_checkout_seats.join(', '))}: operator checkout is read-only for seats</p>`:''}<button data-registry-clone="${esc(p.name)}">${p.fleet_clone_dir?'Fetch and detach origin/main':'Create fleet clone'}</button></div>`}).join('');return `<section class="pool"><div class="section-title"><h3>Registry work trees</h3><span class="status">fleet-owned clones</span></div><div class="grid">${rows||'<p class="empty">No registry projects.</p>'}</div></section>`}
+const renderSeatsBeforeRegistry=renderSeats;
+renderSeats=function(){return renderSeatsBeforeRegistry()+registryClonePanel()}
+const seatClickBeforeRegistry=seatClick;
+seatClick=async function(event){const button=event.target.closest('[data-registry-clone]');if(!button)return seatClickBeforeRegistry(event);button.disabled=true;seatActionMessage=`Preparing fleet clone for ${button.dataset.registryClone}…`;try{await configPost(`/api/config/registry/clone?${apiCentral(centralLabels[0])}`,{project:button.dataset.registryClone});seatActionMessage=`Fleet clone ready for ${button.dataset.registryClone}`;await refreshSeats()}catch(e){seatActionMessage=`Fleet clone failed: ${e.message}`;renderHub()}}
 refreshSeats=async function(){try{const [inventory,bridge]=await Promise.all([fetchJson('/api/config/seats'),fetchJson('/api/config/bridge')]);seatData=inventory;seatBridge=bridge;const central=centralLabels[0];if(central){initialSeatsRefreshPending=false;seatRegistry=await fetchJson(`/api/config/registry?${apiCentral(central)}`);const boards=seatRegistry.boards||[],results=await Promise.allSettled(boards.map(async b=>[b.board_id,await fetchJson(`/api/dispatch?${apiCentral(central)}&board_id=${encodeURIComponent(b.board_id)}`)]));for(let i=0;i<results.length;i++){const result=results[i],board=boards[i];if(result.status==='fulfilled')dispatchData[result.value[0]]=result.value[1];else dispatchData[board.board_id]={error:result.reason?.message||'request failed'}}}if(navKind()==='seats')renderHub()}catch(e){if(navKind()==='seats')document.querySelector('#central-sections').innerHTML=`<p class="error">Config unavailable: ${esc(e.message)}</p>`}}
 const refreshCentralBeforeSeats=refreshCentral;refreshCentral=async function(...args){await refreshCentralBeforeSeats(...args);if(initialSeatsRefreshPending&&navKind()==='seats'&&centralLabels.length)await refreshSeats()}
 async function suggestSeatSkills(){const form=document.querySelector('#seat-wizard'),status=document.querySelector('#seat-suggestions');try{const result=await configPost('/api/config/suggestions',seatPayload(form)),input=form.elements.skills,current=String(input.value||'').split(',').map(x=>x.trim()).filter(Boolean);input.value=[...new Set([...current,...result.skills])].join(',');status.textContent=result.skills.length?`Suggested: ${result.skills.join(', ')}`:'No mapped connectors found.'}catch(e){status.textContent=`Suggestions failed: ${e.message}`}}
@@ -4659,7 +4931,10 @@ def make_handler(
             if route == "/api/config/registry":
                 try:
                     body = _json_bytes(
-                        seats.registry(cache_call("get", central=central))
+                        seats.registry(
+                            cache_call("get", central=central),
+                            cache_call("get_project_registry", central=central),
+                        )
                     )
                 except Exception as exc:  # noqa: BLE001 - bounded type only.
                     self._send(
@@ -4835,6 +5110,7 @@ def make_handler(
                 "/api/config/doctor",
                 "/api/config/bridge/install",
                 "/api/config/bridge/upgrade-all",
+                "/api/config/registry/clone",
                 "/api/dispatch",
                 "/api/agents/retire",
                 "/api/agents/retire-inert",
@@ -4910,7 +5186,12 @@ def make_handler(
                 elif route == "/api/config/doctor":
                     if not isinstance(request, dict) or not set(request) <= {"names"}:
                         raise ValueError("request may contain only names")
-                    body = _json_bytes(seats.doctor(request.get("names")))
+                    body = _json_bytes(
+                        seats.doctor(
+                            request.get("names"),
+                            cache_call("get_project_registry", central=central),
+                        )
+                    )
                 elif route == "/api/config/bridge/install":
                     if request != {}:
                         raise ValueError("bridge install body must be an empty object")
@@ -4919,6 +5200,29 @@ def make_handler(
                     if request != {}:
                         raise ValueError("bridge upgrade body must be an empty object")
                     body = _json_bytes(seats.upgrade_all())
+                elif route == "/api/config/registry/clone":
+                    if not isinstance(request, dict) or set(request) != {"project"}:
+                        raise ValueError("request must contain only project")
+                    prepared = seats.prepare_fleet_clone(
+                        cache_call("get_project_registry", central=central),
+                        request["project"],
+                    )
+                    saved = cache_call(
+                        "save_project_registry",
+                        prepared["registry"],
+                        prepared["expected_sha256"],
+                        central=central,
+                    )
+                    body = _json_bytes(
+                        {
+                            "ok": True,
+                            "project": prepared["project"],
+                            "clone": prepared["clone"],
+                            "registry": saved["registry"],
+                            "expected_sha256": saved["expected_sha256"],
+                            "central": label,
+                        }
+                    )
                 elif route == "/api/dispatch":
                     if not isinstance(request, dict) or set(request) != {
                         "board_id",

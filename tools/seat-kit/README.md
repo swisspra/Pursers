@@ -165,11 +165,17 @@ event per board. The timeout covers that catch-up work. When more history
 remains, `new_seq` stops at the last processed event; immediate re-arms deliver
 the remainder without loss or duplicate delivery.
 
-Each event carries `board_id` and registered `work_dir`. Route `get`, `claim`,
+Each event carries `board_id` and the registered `fleet_clone_dir` when one is
+configured (otherwise the legacy `work_dir`). Route `get`, `claim`,
 `renew`, `submit`, and review verbs with `--board <id>`. On `timed_out=true`,
 re-arm immediately by passing the complete JSON `new_seq` map to `--since`.
 Use `--boards home` for the legacy one-board/scalar-cursor path; an explicit
 comma-separated list overrides registry selection.
+
+Worker claims are refused with `operator_checkout_read_only` whenever routing
+would select an operator-owned `work_dir`. Create the project's fleet clone in
+the dashboard Config page first; reviewers continue to verify in temporary
+clones.
 
 **Poll fallback:** Pass `--poll` to explicitly select a 2-second
 `board_catchup(..., touch=False)` loop. Push mode never falls back to polling

@@ -889,8 +889,68 @@ async def _execute(args: argparse.Namespace) -> None:
         target_board = getattr(args, "board", None) or board_id
         board_work_dirs = work_dirs_for_registry(registry) if registry else {}
         project_work_dirs = project_work_dirs_for_registry(registry) if registry else {}
+        operator_board_dirs: dict[str, str] = {}
+        operator_project_dirs: dict[str, str] = {}
+        if registry and isinstance(registry.get("projects"), dict):
+            operator_candidates: dict[str, set[str]] = {}
+            for name, entry in registry["projects"].items():
+                if (
+                    entry["status"] != "active"
+                    or entry.get("work_dir_owner", "operator") != "operator"
+                ):
+                    continue
+                operator_candidates.setdefault(entry["board_id"], set()).add(
+                    entry["work_dir"]
+                )
+                operator_project_dirs[name.casefold()] = entry["work_dir"]
+                operator_project_dirs[Path(entry["work_dir"]).name.casefold()] = (
+                    entry["work_dir"]
+                )
+            operator_board_dirs = {
+                selected_board: next(iter(paths))
+                for selected_board, paths in operator_candidates.items()
+                if len(paths) == 1
+            }
+        seat_repo = Path(__file__).resolve().parents[1] / str(REPO_LEAF or "")
+        if registry and REPO_LEAF and (seat_repo / ".git").exists():
+            own_key = str(REPO_LEAF).casefold()
+            for name, entry in registry.get("projects", {}).items():
+                aliases = {name.casefold(), Path(entry["work_dir"]).name.casefold()}
+                if own_key not in aliases:
+                    continue
+                for alias in aliases:
+                    if project_work_dirs.get(alias) == entry["work_dir"]:
+                        project_work_dirs[alias] = str(seat_repo)
+                if board_work_dirs.get(entry["board_id"]) == entry["work_dir"]:
+                    board_work_dirs[entry["board_id"]] = str(seat_repo)
 
         async def run(target: Any) -> None:
+            def ticket_route(value: dict[str, Any]) -> tuple[str | None, str | None]:
+                ticket = value.get("ticket", {})
+                project = str(ticket.get("target_url", "")).split(
+                    "/", 1
+                )[0].casefold()
+                return (
+                    project_work_dirs.get(
+                        project, board_work_dirs.get(target_board)
+                    ),
+                    operator_project_dirs.get(
+                        project, operator_board_dirs.get(target_board)
+                    ),
+                )
+
+            def refuse_operator_checkout(ticket_id: str) -> None:
+                _print({
+                    "ok": False,
+                    "board_id": target_board,
+                    "ticket_id": ticket_id,
+                    "claim_refused": True,
+                    "error": {
+                        "code": "operator_checkout_read_only",
+                        "message": "operator checkout is read-only for seats",
+                    },
+                })
+
             def emit(value: dict[str, Any]) -> None:
                 ticket = value.get("ticket", {})
                 project = str(ticket.get("target_url", "")).split("/", 1)[0].casefold()
@@ -915,6 +975,15 @@ async def _execute(args: argparse.Namespace) -> None:
                     emit(await target.ticket_get(args.ticket_id))
                     return
                 if args.command == "claim":
+                    ticket_result = await target.ticket_get(args.ticket_id)
+                    routed, operator_dir = ticket_route(ticket_result)
+                    if (
+                        routed
+                        and operator_dir
+                        and Path(routed).resolve() == Path(operator_dir).resolve()
+                    ):
+                        refuse_operator_checkout(args.ticket_id)
+                        return
                     result = await target.ticket_claim(args.ticket_id)
                     error = result.get("error", {})
                     if error.get("code") == "claim_not_offered":
@@ -960,6 +1029,15 @@ async def _execute(args: argparse.Namespace) -> None:
                     emit(await target.ticket_get(args.ticket_id))
                     return
                 if args.command == "review-claim":
+                    ticket_result = await target.ticket_get(args.ticket_id)
+                    routed, operator_dir = ticket_route(ticket_result)
+                    if (
+                        routed
+                        and operator_dir
+                        and Path(routed).resolve() == Path(operator_dir).resolve()
+                    ):
+                        refuse_operator_checkout(args.ticket_id)
+                        return
                     result = await target.ticket_review_claim(args.ticket_id)
                     error = result.get("error", {})
                     if error.get("code") == "review_not_offered":
@@ -984,8 +1062,16 @@ async def _execute(args: argparse.Namespace) -> None:
                     routed = project_work_dirs.get(
                         project, board_work_dirs.get(target_board)
                     )
+                    operator_dir = operator_project_dirs.get(
+                        project, operator_board_dirs.get(target_board)
+                    )
+                    if (
+                        routed
+                        and operator_dir
+                        and Path(routed).resolve() == Path(operator_dir).resolve()
+                    ):
+                        raise RuntimeError("operator checkout is read-only for seats")
                     seat_root = Path(__file__).resolve().parents[1]
-                    seat_repo = seat_root / str(REPO_LEAF or "")
                     source_repo = (
                         Path(routed)
                         if routed and (Path(routed) / ".git").exists()
@@ -1180,9 +1266,9 @@ bin/board.sh wait --since '<cursor-or-json-map>' [--boards registry|home|<id,id>
         loop = """Run this loop continuously:
 
 1. **WAIT** -- `bin/board.sh wait --since '<cursor-or-json-map>'` subscribes to every active registry board and returns only this seat's offer, held-ticket events, or legacy fallback broadcast. Re-arm with the entire returned `new_seq` map.
-2. **UNDERSTAND** -- Use the offer's `ticket_id`, `board_id`, and registered `work_dir`; never guess or use another project tree.
+2. **UNDERSTAND** -- Use the offer's `ticket_id`, `board_id`, and registered fleet clone `work_dir`; never guess or use the operator checkout.
 3. **CLAIM** -- Claim only a ticket offered to this seat. Never claim an unoffered ticket. If the offer expired, was revoked, or belongs to another seat, go back to WAIT.
-4. **DO** -- Work only in the returned `work_dir`. Run `bin/board.sh renew <TK> --board <id>` every ~10 minutes.
+4. **DO** -- Work only in the returned fleet clone (or this seat's own clone). The operator checkout is read-only for seats. Run `bin/board.sh renew <TK> --board <id>` every ~10 minutes.
 5. **SUBMIT** -- `bin/board.sh submit <TK> <summary> <notes> <files-csv> --board <id>`. Notes are capped at 5000 characters; trim test tails to the evidence needed. The helper truncates oversized notes at a line boundary and reports it.
 6. **AWAIT REVIEW** -- Keep the same ticket slot occupied. WAIT, then GET that ticket after a cue. If rejected, follow fix instructions and resubmit; if approved/closed, release the slot.
 7. **RE-ARM** -- Return to WAIT for the next ticket only after approval/closure.

@@ -163,6 +163,8 @@ key `project_registry`. Its value is JSON with this schema:
     "project-a": {
       "board_id": "project-a-board",
       "work_dir": "/ABSOLUTE/PATH/TO/PROJECT-A",
+      "work_dir_owner": "operator",
+      "fleet_clone_dir": "/ABSOLUTE/PATH/TO/PURSERS-FLEET/clones/project-a",
       "status": "active"
     },
     "project-b": {
@@ -177,7 +179,9 @@ key `project_registry`. Its value is JSON with this schema:
 `board_state_update` receives that serialized JSON string as `value`.
 `project_registry_get()` reads the home board and returns the parsed object
 directly in the same `{schema_version, projects}` shape, so a worker can map a
-claimed ticket's board to its `work_dir`.
+claimed ticket's board to its `fleet_clone_dir`. An omitted `work_dir_owner`
+defaults to `operator`; seats must not claim work routed to that checkout until
+a fleet-owned clone is configured.
 
 ### Registry administration CLI
 
@@ -191,7 +195,9 @@ is never printed.
 ```sh
 python tools/wait-bridge/registry_admin.py show
 python tools/wait-bridge/registry_admin.py add project-a \
-  --board-id project-a-board --work-dir /ABSOLUTE/PATH/TO/PROJECT-A
+  --board-id project-a-board --work-dir /ABSOLUTE/PATH/TO/PROJECT-A \
+  --work-dir-owner operator \
+  --fleet-clone-dir /ABSOLUTE/PATH/TO/PURSERS-FLEET/clones/project-a
 python tools/wait-bridge/registry_admin.py pause project-a
 python tools/wait-bridge/registry_admin.py activate project-a
 python tools/wait-bridge/registry_admin.py remove project-a

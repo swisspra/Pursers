@@ -49,6 +49,7 @@ class FakeBackend:
                 "alpha": {
                     "board_id": "alpha-board",
                     "work_dir": str(work_dir),
+                    "work_dir_owner": "fleet",
                     "status": "active",
                 }
             },
@@ -207,6 +208,31 @@ class RegistryDoctorTests(unittest.TestCase):
         unresolved = self.report(bad_ref, git_runner=fail_ref)
         self.assertEqual(rows(unresolved)["project:alpha"]["status"], "FAIL")
         self.assertIn("not resolvable", rows(unresolved)["project:alpha"]["detail"])
+
+    def test_operator_checkout_is_refused_until_fleet_clone_is_configured(self) -> None:
+        backend = self.backend()
+        entry = backend.registry["projects"]["alpha"]
+        entry["work_dir_owner"] = "operator"
+
+        unsafe = rows(self.report(backend))
+        self.assertEqual(unsafe["seat-workdir:alpha"]["status"], "FAIL")
+        self.assertIn(
+            "operator checkout is read-only for seats",
+            unsafe["seat-workdir:alpha"]["detail"],
+        )
+
+        clone = self.root / "fleet-clone"
+        clone.mkdir()
+        entry["fleet_clone_dir"] = str(clone)
+        seen: list[Path] = []
+
+        def git_runner(path: Path, _arguments: Any) -> subprocess.CompletedProcess[str]:
+            seen.append(path)
+            return completed()
+
+        safe = rows(self.report(backend, git_runner=git_runner))
+        self.assertEqual(safe["seat-workdir:alpha"]["status"], "PASS")
+        self.assertEqual(set(seen), {clone})
 
     def test_board_access_and_snapshot_failures_are_fail(self) -> None:
         backend = self.backend()

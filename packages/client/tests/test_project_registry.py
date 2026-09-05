@@ -13,6 +13,9 @@ from pursers_client import (
     SUBMITTED_RELEVANT_KINDS,
     active_registry_boards,
     parse_project_registry,
+    registry_operator_work_dirs,
+    registry_project_operator_work_dirs,
+    registry_project_work_dirs,
     registry_work_dirs,
 )
 
@@ -35,9 +38,31 @@ def test_registry_parser_active_boards_and_work_dirs() -> None:
     assert registry_work_dirs(parsed)["fullplatts"] == "/repo/other"
 
 
+def test_registry_routes_seats_to_fleet_clone_and_retains_operator_checkout() -> None:
+    parsed = parse_project_registry(state({
+        "schema_version": 1,
+        "projects": {
+            "Alpha": {
+                "board_id": "alpha",
+                "work_dir": "/repo/operator",
+                "work_dir_owner": "operator",
+                "fleet_clone_dir": "/fleet/alpha",
+                "status": "active",
+            },
+        },
+    }))
+
+    assert registry_work_dirs(parsed) == {"alpha": "/fleet/alpha"}
+    assert registry_project_work_dirs(parsed)["alpha"] == "/fleet/alpha"
+    assert registry_operator_work_dirs(parsed) == {"alpha": "/repo/operator"}
+    assert registry_project_operator_work_dirs(parsed)["alpha"] == "/repo/operator"
+
+
 @pytest.mark.parametrize("value", [
     {"schema_version": 2, "projects": {}},
     {"schema_version": 1, "projects": {"bad": {"board_id": "x", "work_dir": "relative", "status": "active"}}},
+    {"schema_version": 1, "projects": {"bad": {"board_id": "x", "work_dir": "/repo/x", "work_dir_owner": "human", "status": "active"}}},
+    {"schema_version": 1, "projects": {"bad": {"board_id": "x", "work_dir": "/repo/x", "fleet_clone_dir": "relative", "status": "active"}}},
 ])
 def test_registry_parser_rejects_invalid_schema(value: object) -> None:
     with pytest.raises(ValueError, match="project_registry"):
