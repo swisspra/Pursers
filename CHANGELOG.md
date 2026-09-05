@@ -17,15 +17,18 @@ This release includes `pursers-central==0.1.0a22`,
 ### Package summary
 
 - **Central 0.1.0a22:** adds dispatch-aware offers, explicit seat roles,
-  orchestrator digests, and the audited legacy-tool visibility policy.
+  orchestrator digests, live claim-TTL controls, successor continuation hints,
+  and the audited legacy-tool visibility policy.
 - **Client 0.1.0a16:** declares seat capabilities and roles, handles targeted
   offer waits, and keeps wait-bridge and connector token identity aligned.
 - **Wait Bridge 0.1.0a8:** adds orchestrator mode and role-safe push waits while
-  hiding deprecated tools unless legacy compatibility is enabled.
+  hiding deprecated tools unless legacy compatibility is enabled; a process-wide
+  keepalive now renews work and review leases outside active waits.
 - **Personal and meta 5.0.0a18:** ship the matching dashboard, setup, Doctor,
   packaging, and release-lock updates; Personal Import remains at 5.0.0a3.
 - **Fleet Dashboard and seat-kit tooling:** add capability and dispatch controls,
-  explicit role generation, split-identity diagnostics, and reviewer safeguards.
+  explicit role generation, split-identity diagnostics, claim-TTL editing,
+  lease-lapse attention, and reviewer safeguards.
 
 ### Migration
 
@@ -53,6 +56,9 @@ This release includes `pursers-central==0.1.0a22`,
 - Instant non-blocking MCP tools for leaders/orchestrators (Claude Desktop, Claude Code): `board_digest` (returns tickets, new tickets, status transitions, review details, and `branch_and_commit` note on close), `board_digest_ack` (advances the acknowledged cursor), `board_watch`, and `board_unwatch`.
 - Best-effort MCP resource updates (`board://<home_board_id>/digest`) emitted whenever new events arrive in the digest buffer.
 - Persistent orchestrator state file (`~/.pursers/wait-bridge/orchestrator_state_<board>.json`) preserving cursors and event buffer across bridge restarts.
+- Process-wide work/review lease keepalive independent of `a2a_wait`, with
+  full holder-identity checks, live claim-TTL rescheduling, one-shot loss cues,
+  and successor branch/commit continuation hints.
 - Seat config and Fleet Dashboard UI support for role `orchestrator` with custom prompt renderer preventing `a2a_wait` and ticket claims.
 
 ### Deprecated
