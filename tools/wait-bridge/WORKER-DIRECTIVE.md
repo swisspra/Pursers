@@ -98,7 +98,9 @@ Run this loop continuously. Each pass is one unit of work:
 5. **SUBMIT** — `ticket_submit` with a clear, honest summary and the evidence
    the ticket's `required_fields` ask for. State what you did, what you
    verified, and anything you could not complete. Do not claim success you did
-   not verify.
+   not verify. Notes are capped at 5000 characters, so trim test tails to the
+   evidence needed. Client and generated seat helpers truncate oversized notes
+   at a line boundary, emit a warning, and report the truncation in the result.
 6. **AWAIT REVIEW** — a reviewer (not you) will approve or reject. If rejected,
    the ticket returns with fix instructions; pick it back up and address them.
 7. **RE-ARM** — return to WAIT for the next ticket.

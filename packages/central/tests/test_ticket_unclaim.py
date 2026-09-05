@@ -222,6 +222,28 @@ class TicketUnclaimTests(unittest.IsolatedAsyncioTestCase):
                 "ticket_unclaim", agent_name="admin-agent", ticket_id=ticket_id
             )
 
+    async def test_ticket_submit_notes_accepts_5000_and_rejects_5001(self) -> None:
+        ticket_id = await self.create_and_claim()
+        accepted = await self.call(
+            "ticket_submit",
+            agent_name="member-agent",
+            ticket_id=ticket_id,
+            summary="within notes limit",
+            notes="n" * 5_000,
+        )
+        self.assertFalse(accepted.is_error)
+        self.assertEqual(len(accepted.structured_content["ticket"]["notes"]), 5_000)
+
+        ticket_id = await self.create_and_claim()
+        with self.assertRaisesRegex(ToolError, "notes must be at most 5000 characters"):
+            await self.call(
+                "ticket_submit",
+                agent_name="member-agent",
+                ticket_id=ticket_id,
+                summary="over notes limit",
+                notes="n" * 5_001,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

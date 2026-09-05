@@ -70,6 +70,7 @@ from typing import Any
 ROLE = '{role}'
 REPO_LEAF = {repo_leaf}
 DEFAULT_WAIT_S = {wait_timeout}
+TICKET_SUBMIT_NOTES_MAX_CHARS = 5_000
 APPROVE_OVERRIDE_ENV = "PURSERS_ALLOW_FORCE_APPROVE_WITHOUT_EVIDENCE"
 SHA_RE = re.compile(r"(?<![0-9a-fA-F])[0-9a-fA-F]{40}(?![0-9a-fA-F])")
 PYTEST_SUCCESS_RE = re.compile(
@@ -178,6 +179,32 @@ def _seat_capabilities() -> dict[str, Any]:
         if value:
             capabilities[field] = value
     return capabilities
+
+
+def _truncate_submit_notes(notes: str) -> tuple[str, dict[str, Any] | None]:
+    if len(notes) <= TICKET_SUBMIT_NOTES_MAX_CHARS:
+        return notes, None
+    marker = ""
+    boundary = 0
+    for _ in range(10):
+        budget = max(0, TICKET_SUBMIT_NOTES_MAX_CHARS - len(marker) - 1)
+        boundary = notes.rfind("\n", 0, budget + 1)
+        if boundary < 0:
+            boundary = budget
+        omitted = len(notes) - boundary
+        next_marker = f"…[truncated {omitted} chars]"
+        if next_marker == marker:
+            break
+        marker = next_marker
+    truncated = f"{notes[:boundary]}\n{marker}" if boundary else marker
+    return truncated, {
+        "field": "notes",
+        "limit": TICKET_SUBMIT_NOTES_MAX_CHARS,
+        "original_chars": len(notes),
+        "submitted_chars": len(truncated),
+        "truncated_chars": len(notes) - boundary,
+        "marker": marker,
+    }
 
 
 def _operator_marker_patterns() -> tuple[list[re.Pattern[str]], Path]:
@@ -904,10 +931,21 @@ async def _execute(args: argparse.Namespace) -> None:
                     files = [item.strip() for item in args.files_csv.split(",") if item.strip()]
                     if not files:
                         raise ValueError("files-csv must contain at least one path")
-                    emit(await target.ticket_submit(
-                        args.ticket_id, summary=args.summary, notes=args.notes,
+                    notes, truncation = _truncate_submit_notes(args.notes)
+                    if truncation is not None:
+                        print(
+                            "board.sh: warning: ticket_submit notes exceeded 5000 "
+                            f"characters; truncated {truncation['truncated_chars']} "
+                            "characters",
+                            file=sys.stderr,
+                        )
+                    result = await target.ticket_submit(
+                        args.ticket_id, summary=args.summary, notes=notes,
                         files_changed=files, stay_active=True,
-                    ))
+                    )
+                    if truncation is not None:
+                        result["input_truncation"] = {"notes": truncation}
+                    emit(result)
                     return
             else:
                 if args.command == "list":
@@ -1145,7 +1183,7 @@ bin/board.sh wait --since '<cursor-or-json-map>' [--boards registry|home|<id,id>
 2. **UNDERSTAND** -- Use the offer's `ticket_id`, `board_id`, and registered `work_dir`; never guess or use another project tree.
 3. **CLAIM** -- Claim only a ticket offered to this seat. Never claim an unoffered ticket. If the offer expired, was revoked, or belongs to another seat, go back to WAIT.
 4. **DO** -- Work only in the returned `work_dir`. Run `bin/board.sh renew <TK> --board <id>` every ~10 minutes.
-5. **SUBMIT** -- `bin/board.sh submit <TK> <summary> <notes> <files-csv> --board <id>`.
+5. **SUBMIT** -- `bin/board.sh submit <TK> <summary> <notes> <files-csv> --board <id>`. Notes are capped at 5000 characters; trim test tails to the evidence needed. The helper truncates oversized notes at a line boundary and reports it.
 6. **AWAIT REVIEW** -- Keep the same ticket slot occupied. WAIT, then GET that ticket after a cue. If rejected, follow fix instructions and resubmit; if approved/closed, release the slot.
 7. **RE-ARM** -- Return to WAIT for the next ticket only after approval/closure.
 
