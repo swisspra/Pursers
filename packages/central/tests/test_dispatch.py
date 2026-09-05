@@ -296,6 +296,63 @@ class DispatchTests(unittest.IsolatedAsyncioTestCase):
             "agent_lifecycle_changed",
         )
 
+    async def test_least_privilege_reviewer_can_self_retire_only(self) -> None:
+        reviewer = central.Principal(
+            "PR-review-only",
+            "review-only",
+            frozenset({"board:read", "board:review"}),
+        )
+        reviewer_id = await self.add_seat(
+            reviewer,
+            "review-only",
+            {"tier_max": 2, "can_work": False, "can_review": True},
+            role="reviewer",
+        )
+        worker_id = await self.add_seat(
+            self.worker_a, "worker-a", {"tier_max": 2}
+        )
+
+        self.principal = reviewer
+        retired = await self.call("agent_retire", agent_name="review-only")
+        self.assertTrue(retired.structured_content["changed"])
+        self.assertEqual(
+            retired.structured_content["agent"]["lifecycle_status"], "retired"
+        )
+
+        self.principal = self.admin
+        status = await self.call("board_status")
+        self.assertNotIn(
+            reviewer_id,
+            {item["agent_id"] for item in status.structured_content["agents"]},
+        )
+        status_all = await self.call("board_status", include_retired=True)
+        reviewer_row = next(
+            item for item in status_all.structured_content["agents"]
+            if item["agent_id"] == reviewer_id
+        )
+        self.assertEqual(reviewer_row["lifecycle_status"], "retired")
+
+        self.principal = reviewer
+        rejoined = await self.call(
+            "board_join",
+            agent_name="review-only",
+            role="reviewer",
+            capabilities={
+                "tier_max": 2,
+                "can_work": False,
+                "can_review": True,
+            },
+        )
+        self.assertEqual(rejoined.structured_content["agent_id"], reviewer_id)
+        self.assertEqual(rejoined.structured_content["lifecycle_status"], "active")
+
+        with self.assertRaisesRegex(ToolError, "board:coordinate authorization"):
+            await self.call(
+                "agent_retire",
+                agent_name="review-only",
+                target_agent_id=worker_id,
+            )
+
     async def test_retire_rejects_agent_with_live_claim(self) -> None:
         await self.add_seat(self.worker_a, "worker-a", {"tier_max": 2})
         created = await self.create()

@@ -3953,18 +3953,14 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         if target_agent_id is not None:
             target_agent_id = require_id("target_agent_id", target_agent_id)
         principal = current_principal()
-        require_board_write_or_coordinate(principal)
+        require_scope(principal, "board:read")
         now = time.time()
 
         def retire(document: dict[str, Any]) -> dict[str, Any]:
-            actor, released, renewed = prepare_board_call(
-                document, principal, agent_name, now
-            )
+            actor = service.member(document, principal, agent_name)
             target_id = target_agent_id or actor["agent_id"]
-            target = document["members"].get(target_id)
-            if target is None:
-                raise ValueError("target agent not found")
             if target_id != actor["agent_id"]:
+                require_board_write_or_coordinate(principal)
                 membership = service.resolve_board_context(
                     document, principal.principal_id
                 )
@@ -3976,6 +3972,12 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                     raise PermissionError(
                         "retiring another agent requires board admin or coordinator"
                     )
+            target = document["members"].get(target_id)
+            if target is None:
+                raise ValueError("target agent not found")
+            actor, released, renewed = prepare_board_call(
+                document, principal, agent_name, now
+            )
             if member_has_live_lease(document, target_id, now):
                 raise ValueError("agent has an active work or review lease")
             released.extend(
