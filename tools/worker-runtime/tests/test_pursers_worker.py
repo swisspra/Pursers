@@ -175,6 +175,41 @@ class BlockingBoard(FakeBoard):
             raise
 
 
+def test_pursers_board_api_refuses_operator_checkout_before_claim() -> None:
+    api = object.__new__(worker_module.PursersBoardAPI)
+    api.config = SimpleNamespace(role="worker", agent_name="worker-one")
+    api.registry = {
+        "schema_version": 1,
+        "projects": {
+            "alpha": {
+                "board_id": "board-one",
+                "work_dir": "/operator/alpha",
+                "work_dir_owner": "operator",
+                "status": "active",
+            }
+        },
+    }
+    view_called = False
+
+    async def view(_board_id: str) -> Any:
+        nonlocal view_called
+        view_called = True
+        raise AssertionError("ticket_claim must not run")
+
+    api._view = view
+
+    with pytest.raises(
+        RuntimeError, match="operator checkout is read-only for seats"
+    ):
+        asyncio.run(api.claim("board-one", "TK-unsafe"))
+    with pytest.raises(
+        RuntimeError, match="operator checkout is read-only for seats"
+    ):
+        asyncio.run(api.work_dir("board-one"))
+    assert asyncio.run(api.work_specs()) == []
+    assert view_called is False
+
+
 class FakeLLMServer:
     def __init__(self, responses: list[dict[str, Any]]) -> None:
         self.responses = list(responses)
@@ -3631,6 +3666,7 @@ def test_board_api_exposes_registry_refs_and_only_own_active_claims(
             }
 
     first = tmp_path / "first"
+    first_clone = tmp_path / "fleet" / "first"
     second = tmp_path / "second"
     selected = replace(config(tmp_path, "http://unused"), boards=("alpha",))
     api = worker_module.PursersBoardAPI(selected, "TOKEN_PLACEHOLDER")
@@ -3640,6 +3676,7 @@ def test_board_api_exposes_registry_refs_and_only_own_active_claims(
             "first": {
                 "board_id": "alpha",
                 "work_dir": str(first),
+                "fleet_clone_dir": str(first_clone),
                 "status": "active",
                 "integration_ref": "develop",
             },
@@ -3653,7 +3690,8 @@ def test_board_api_exposes_registry_refs_and_only_own_active_claims(
     api.views = {"alpha": View()}
 
     assert asyncio.run(api.integration_ref("alpha")) == "develop"
-    assert asyncio.run(api.work_specs()) == [(first.resolve(), "develop")]
+    assert asyncio.run(api.work_dir("alpha")) == first_clone.resolve()
+    assert asyncio.run(api.work_specs()) == [(first_clone.resolve(), "develop")]
     assert asyncio.run(api.active_claims()) == {("alpha", "TK-own")}
 
 

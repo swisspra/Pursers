@@ -109,6 +109,34 @@ class RegistryAdminTests(unittest.TestCase):
         self.assertEqual(client.get_calls, 2)
         self.assertEqual(client.writes[0][0], registry_admin.REGISTRY_KEY)
 
+    def test_add_accepts_fleet_clone_routing_fields(self) -> None:
+        client = FakeClient()
+
+        invoke(
+            client,
+            "add",
+            "beta",
+            "--board-id",
+            "beta-board",
+            "--work-dir",
+            "/operator/beta",
+            "--work-dir-owner",
+            "operator",
+            "--fleet-clone-dir",
+            "/fleet/beta",
+        )
+
+        self.assertEqual(
+            client.document()["projects"]["beta"],
+            {
+                "board_id": "beta-board",
+                "work_dir": "/operator/beta",
+                "work_dir_owner": "operator",
+                "fleet_clone_dir": "/fleet/beta",
+                "status": "active",
+            },
+        )
+
     def test_duplicate_add_requires_force_and_force_replaces(self) -> None:
         client = FakeClient()
         arguments = (
