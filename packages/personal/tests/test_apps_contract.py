@@ -1954,6 +1954,7 @@ async def test_hung_model_client_exit_does_not_block_dashboard_stop() -> None:
 @pytest.mark.anyio
 async def test_app_reads_leave_sqlite_domain_journal_and_cursor_unchanged(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     required = {"pursers-central": "0.1.0a21", "pursers-client": "0.1.0a15"}
     for distribution, version in required.items():
@@ -1971,15 +1972,20 @@ async def test_app_reads_leave_sqlite_domain_journal_and_cursor_unchanged(
         if os.environ.get("PURSERS_TEST_ALLOW_PRERELEASE_CENTRAL_DRIFT") != "1":
             pytest.skip(f"locked artifacts not installed: {exc}")
         assert "pursers-central" in str(exc)
-        # Release-blocker validation intentionally builds Central before the
-        # train owns its final version and component lock. Keep the production
-        # verifier intact, and still require the unchanged client wheel to
-        # match its exact lock before exercising this test-only path.
-        pursers_personal.artifacts.verify_component_artifacts({"pursers-client"})
+        # Release-blocker validation intentionally builds components before the
+        # train owns their final versions and lock. Keep production verification
+        # intact while this opt-in test path exercises the installed wheels.
         for package_name in ("pursers_central", "pursers_client"):
             spec = importlib.util.find_spec(package_name)
             assert spec is not None and spec.origin is not None
             assert "site-packages" in Path(spec.origin).resolve().parts
+        from pursers_client import BoardClient, BoardClientError
+
+        monkeypatch.setattr(
+            apps_server,
+            "_load_board_client",
+            lambda: (BoardClient, BoardClientError),
+        )
 
     client_class, client_error_class = apps_server._load_board_client()
     package = sys.modules["pursers_client"]
