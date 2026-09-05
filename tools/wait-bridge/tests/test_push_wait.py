@@ -1218,20 +1218,8 @@ class PushWaitTests(unittest.IsolatedAsyncioTestCase):
             else:
                 transport = ForbiddenListenClient()
             client = ScriptedBoardClient(
-                [([], 90), ([event], 91)],
-                transport=transport,
+                [([], 90), ([event], 91)], transport=transport
             )
-
-            async def ticket_after_journal(**_arguments: object) -> dict[str, object]:
-                client.ticket_list_calls += 1
-                tickets = (
-                    [{"ticket_id": "TK-fallback", "status": "open"}]
-                    if client.catchup_calls > 1
-                    else []
-                )
-                return {"tickets": tickets}
-
-            client.ticket_list = ticket_after_journal  # type: ignore[method-assign]
             with (
                 patch.object(wait_server, "WAIT_MODE", mode),
                 patch.object(wait_server, "DEFAULT_POLL_INTERVAL_S", 0.25),

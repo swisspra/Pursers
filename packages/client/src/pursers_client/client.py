@@ -630,7 +630,6 @@ class BoardClient:
         include_closed: bool = False,
         limit: int = 100,
         review_unclaimed_only: bool = False,
-        ticket_ids: list[str] | None = None,
     ) -> dict[str, Any]:
         arguments: dict[str, Any] = {
             "agent_name": self.agent_name,
@@ -642,8 +641,6 @@ class BoardClient:
             arguments["status"] = status
         if assigned_to is not None:
             arguments["assigned_to"] = assigned_to
-        if ticket_ids is not None:
-            arguments["ticket_ids"] = ticket_ids
         return await self._call("ticket_list", arguments)
 
     async def memory_write(

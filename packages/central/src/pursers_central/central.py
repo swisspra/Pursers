@@ -6780,31 +6780,18 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         limit: int = 100,
         agent_name: str | None = None,
         review_unclaimed_only: bool = False,
-        ticket_ids: list[str] | None = None,
     ) -> dict[str, Any]:
-        """List authorized tickets with bounded server-side filters."""
+        """List authorized tickets with server-side status and assignee filters."""
         board_id = require_id("board_id", board_id)
         if status is not None and status not in ACTIVE_TICKET_STATES | TERMINAL_TICKET_STATES:
             raise ValueError("unsupported ticket status")
         if not 1 <= limit <= 500:
             raise ValueError("limit must be between 1 and 500")
-        selected_ticket_ids: set[str] | None = None
-        if ticket_ids is not None:
-            if not isinstance(ticket_ids, list) or not 1 <= len(ticket_ids) <= 500:
-                raise ValueError("ticket_ids must contain between 1 and 500 IDs")
-            selected_ticket_ids = {
-                require_id("ticket_id", ticket_id) for ticket_id in ticket_ids
-            }
         principal = current_principal()
         require_scope(principal, "board:read")
         document = service.load(board_id)
         service.principal_members(document, principal.principal_id)
         tickets = list(document["tickets"].values())
-        if selected_ticket_ids is not None:
-            tickets = [
-                item for item in tickets
-                if item.get("ticket_id") in selected_ticket_ids
-            ]
         now = time.time()
         reviewer_agent_id = (
             agent_id(board_id, principal.principal_id, agent_name)
@@ -6880,8 +6867,6 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 "assigned_to": assigned_to,
                 "include_closed": include_closed,
                 "review_unclaimed_only": review_unclaimed_only,
-                "ticket_ids": sorted(selected_ticket_ids)
-                if selected_ticket_ids is not None else None,
             },
             "latest_seq": latest_seq(board_id),
         }

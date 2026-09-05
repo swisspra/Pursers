@@ -198,27 +198,6 @@ class DispatchTests(unittest.IsolatedAsyncioTestCase):
             **extra,
         )
 
-    async def test_ticket_list_filters_a_bounded_set_of_ticket_ids(self) -> None:
-        for ticket_id in ("TK-projection-a", "TK-projection-b", "TK-projection-c"):
-            await self.create(ticket_id=ticket_id)
-
-        listed = await self.call(
-            "ticket_list",
-            ticket_ids=["TK-projection-c", "TK-projection-a", "TK-missing"],
-            limit=3,
-        )
-
-        payload = listed.structured_content
-        self.assertEqual(
-            [ticket["ticket_id"] for ticket in payload["tickets"]],
-            ["TK-projection-a", "TK-projection-c"],
-        )
-        self.assertEqual(payload["total_matching"], 2)
-        self.assertEqual(
-            payload["filters"]["ticket_ids"],
-            ["TK-missing", "TK-projection-a", "TK-projection-c"],
-        )
-
     async def test_work_offer_uses_lowest_sufficient_tier_and_targeted_event(self) -> None:
         tier_three = await self.add_seat(
             self.worker_a, "worker-a", {"tier_max": 3, "skills": ["python"]}
