@@ -74,6 +74,9 @@ Run this loop continuously. Each pass is one unit of work:
      you each time.
 2. **CLAIM** — `ticket_claim` the returned ticket. If the claim fails (another
    worker won the race), go back to WAIT — do not fight for it.
+   - If the claim result or cue contains `continuation`, inspect its
+     `prior_holder` and fetch the reported `branch_and_commit` before changing
+     files. Continue verified prior work instead of restarting it.
    - Creators may tag difficulty as `tier:light`, `tier:standard`, or
      `tier:heavy`; no tier tag means `standard`. Headless workers must leave
      tickets above their configured `claim.max_tier` untouched, and prefer a
@@ -81,10 +84,11 @@ Run this loop continuously. Each pass is one unit of work:
 3. **UNDERSTAND** — read the ticket and any linked memories/briefing. If it was
    rejected before, read the fix instructions and address them.
 4. **DO** — perform the work in your project directory via the file-editing MCP.
-   **Renew your own claim during long work.** If `a2a_wait` starts while this
-   identity already holds a ticket, the bridge renews that entry-snapshot lease
-   at `min(300s, ttl/3)` without polling for claims. It does **not** run while
-   you are executing work outside `a2a_wait`; call `lease_renew` yourself then.
+   The bridge keeps discovered work and review leases alive in the background,
+   renewing at about 40% of the board's current claim TTL even while you work
+   outside `a2a_wait`. A `lease_keepalive_failed` cue means the claim was lost;
+   stop editing and refetch the ticket. Manual `lease_renew` remains safe before
+   unusually long or disruptive operations.
 5. **SUBMIT** — `ticket_submit` with a clear, honest summary and the evidence
    the ticket's `required_fields` ask for. State what you did, what you
    verified, and anything you could not complete. Do not claim success you did
@@ -132,6 +136,12 @@ Run this loop continuously. Each pass is one unit of work:
 - **Reviewer:** decide per deployment — a human reviewing through the board, or
   a dedicated reviewer seat with its **own separate principal/token**. Never the
   worker itself, and never the worker's token.
+- **Live claim TTL:** an admin or coordinator may change the board claim TTL
+  without restarting Central. New claims and every renewal use the current
+  value; each lease response records its effective `ttl_s`, so the bridge can
+  safely reschedule keepalive at about 40% after a shorter TTL is published.
+  The former startup-only environment guard prevented operational tuning and is
+  no longer needed because lease arithmetic remains explicit per response.
 - **What the current central (a6) actually enforces — do not overclaim:**
   attribution is real and automatic (your name is on every journal event).
   Mandatory review, reviewer-must-differ, and per-project permission are **not**

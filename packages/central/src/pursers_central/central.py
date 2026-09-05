@@ -77,6 +77,9 @@ ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,80}$")
 DEFAULT_CLAIM_TTL_S = 900
 MIN_CLAIM_TTL_S = 1
 MAX_CLAIM_TTL_S = 86_400
+BRANCH_AND_COMMIT_RE = re.compile(
+    r"(?im)^\s*branch_and_commit\s*:\s*(.+?)\s*$"
+)
 PRE_SUBMISSION_STATES = frozenset({"claimed", "in_progress", "creating_report"})
 ACTIVE_TICKET_STATES = frozenset(
     {"open", "claimed", "in_progress", "creating_report", "submitted", "reviewing", "in_review"}
@@ -131,6 +134,10 @@ SCRUB_EVENT_FIELDS = frozenset(
         "fixture_provenance",
         "recipient_identities",
     }
+)
+CLAIM_TTL_EVENT_KINDS = frozenset({"board_claim_ttl_changed"})
+CLAIM_TTL_EVENT_FIELDS = frozenset(
+    {"claim_ttl_from", "claim_ttl_to", "fixture_provenance", "recipient_identities"}
 )
 REVIEW_POLICIES = frozenset({"strict", "workflow"})
 REVIEW_EVENT_KINDS = frozenset({"board_review_policy_changed"}) | REVIEW_LEASE_KINDS
@@ -406,6 +413,7 @@ class CentralJournal(Journal):
             CORE_JOURNAL_KINDS
             | ADMISSION_EVENT_KINDS
             | SCRUB_EVENT_KINDS
+            | CLAIM_TTL_EVENT_KINDS
             | REVIEW_EVENT_KINDS
             | DISPATCH_EVENT_KINDS
             | DEPRECATION_EVENT_KINDS
@@ -418,6 +426,7 @@ class CentralJournal(Journal):
             CORE_JOURNAL_FIELDS
             | ADMISSION_EVENT_FIELDS
             | SCRUB_EVENT_FIELDS
+            | CLAIM_TTL_EVENT_FIELDS
             | REVIEW_EVENT_FIELDS
             | COORDINATOR_EVENT_FIELDS
             | DISPATCH_EVENT_FIELDS
@@ -470,6 +479,7 @@ class CentralJournal(Journal):
             CORE_JOURNAL_KINDS
             | ADMISSION_EVENT_KINDS
             | SCRUB_EVENT_KINDS
+            | CLAIM_TTL_EVENT_KINDS
             | REVIEW_EVENT_KINDS
             | DISPATCH_EVENT_KINDS
             | DEPRECATION_EVENT_KINDS
@@ -484,6 +494,7 @@ class CentralJournal(Journal):
             CORE_JOURNAL_FIELDS
             | ADMISSION_EVENT_FIELDS
             | SCRUB_EVENT_FIELDS
+            | CLAIM_TTL_EVENT_FIELDS
             | REVIEW_EVENT_FIELDS
             | COORDINATOR_EVENT_FIELDS
             | DISPATCH_EVENT_FIELDS
@@ -2104,6 +2115,37 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         projected["payload_ref"] = resource_uri(board_id, "ticket", ticket["ticket_id"])
         return projected
 
+    def continuation_hint(ticket: Mapping[str, Any]) -> dict[str, Any] | None:
+        prior_name = ticket.get("last_claimed_by")
+        prior_agent_id = ticket.get("last_claimed_by_agent_id")
+        branch_and_commit = None
+        for submission in reversed(ticket.get("submission_history", [])):
+            if not isinstance(submission, Mapping):
+                continue
+            notes = submission.get("notes")
+            if not isinstance(notes, str):
+                continue
+            match = BRANCH_AND_COMMIT_RE.search(notes)
+            if match:
+                branch_and_commit = match.group(1).strip()
+                break
+        if not prior_name and not prior_agent_id and not branch_and_commit:
+            return None
+        prior_holder = None
+        if prior_name or prior_agent_id:
+            prior_holder = {
+                "agent_name": prior_name,
+                "agent_id": prior_agent_id,
+                "principal_id": ticket.get("last_claimed_by_principal_id"),
+                "claimed_at": ticket.get("last_claimed_at"),
+                "release_reason": ticket.get("last_release_reason"),
+            }
+        return {
+            "prior_holder": prior_holder,
+            "branch_and_commit": branch_and_commit,
+            "abandoned_count": int(ticket.get("abandoned_count", 0) or 0),
+        }
+
     def project_agents(document: dict[str, Any]) -> list[dict[str, Any]]:
         service.ensure_schema(document)
         lease_by_agent: dict[str, list[str]] = {}
@@ -2849,7 +2891,9 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         configured_ttl = claim_ttl(document)
         if claim_ttl_s is not None:
             if document["members"] and claim_ttl_s != configured_ttl:
-                raise ValueError("claim_ttl_s is immutable after the first board member joins")
+                raise ValueError(
+                    "claim_ttl_s changes require board_claim_ttl_set after the first board member joins"
+                )
             document["config"]["claim_ttl_s"] = claim_ttl_s
             configured_ttl = claim_ttl_s
         released = reap_expired(document, now) if allow_workflow_side_effects else []
@@ -2907,6 +2951,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         if allow_workflow_side_effects and dispatch_enabled(document):
             released.extend(redispatch_queue(document, now))
         renewed: list[str] = []
+        renewed_leases: list[dict[str, Any]] = []
         for ticket in (
             document["tickets"].values() if allow_workflow_side_effects else ()
         ):
@@ -2916,11 +2961,37 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             ):
                 renew_claim(ticket, now, configured_ttl)
                 renewed.append(ticket["ticket_id"])
+                renewed_leases.append(
+                    {
+                        "ticket_id": ticket["ticket_id"],
+                        "lease_kind": "work",
+                        "ttl_s": ticket["ttl_s"],
+                        "lease_expires_at": ticket["lease_expires_at"],
+                    }
+                )
+            review_lease = ticket.get("review_lease")
+            if (
+                ticket.get("status") == "submitted"
+                and isinstance(review_lease, dict)
+                and review_lease.get("reviewer_agent_id") == identity_id
+            ):
+                renew_review_lease(review_lease, now, configured_ttl)
+                ticket["updated_at"] = iso_at(now)
+                renewed.append(ticket["ticket_id"])
+                renewed_leases.append(
+                    {
+                        "ticket_id": ticket["ticket_id"],
+                        "lease_kind": "review",
+                        "ttl_s": review_lease["ttl_s"],
+                        "lease_expires_at": review_lease["expires_at"],
+                    }
+                )
         return {
             "actor": member,
             "rejoined": rejoined,
             "released": released,
             "renewed": renewed,
+            "renewed_leases": renewed_leases,
             "claim_ttl_s": configured_ttl,
         }
 
@@ -3312,6 +3383,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 "member_count": len(document["members"]),
                 "claim_ttl_s": joined["claim_ttl_s"],
                 "renewed_ticket_ids": joined["renewed"],
+                "renewed_leases": joined["renewed_leases"],
                 "released": joined["released"],
                 "admission_change": admission_change,
                 "admission_recipients": service.admitted_agent_ids(
@@ -3390,6 +3462,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 "rejoined": joined["rejoined"],
                 "released": joined["released"],
                 "renewed": joined["renewed"],
+                "renewed_leases": joined["renewed_leases"],
                 "claim_ttl_s": joined["claim_ttl_s"],
                 "generation_token": document.get("generation_token"),
                 "generation_revision": int(document.get("generation_revision", 0)),
@@ -3438,6 +3511,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             "rejoined": result["rejoined"],
             "claim_ttl_s": result["claim_ttl_s"],
             "renewed_ticket_ids": result["renewed"],
+            "renewed_leases": result["renewed_leases"],
             "release_events": release_events,
             "admission_event": admission_event,
             "snapshot": snapshot,
@@ -3731,6 +3805,71 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             "dispatch_policy": result["current"],
             "previous_dispatch_policy": result["previous"],
             "changed": result["current"] != result["previous"],
+        }
+
+    @tool()
+    async def board_claim_ttl_set(
+        board_id: str,
+        agent_name: str,
+        claim_ttl_s: int,
+        ctx: Context,
+        expected_generation: str | None = None,
+    ) -> dict[str, Any]:
+        """Set the live per-board claim TTL as an admin or coordinator seat."""
+        board_id = require_id("board_id", board_id)
+        agent_name = require_id("agent_name", agent_name)
+        if (
+            isinstance(claim_ttl_s, bool)
+            or not isinstance(claim_ttl_s, int)
+            or not MIN_CLAIM_TTL_S <= claim_ttl_s <= MAX_CLAIM_TTL_S
+        ):
+            raise ValueError(
+                f"claim_ttl_s must be between {MIN_CLAIM_TTL_S} and {MAX_CLAIM_TTL_S}"
+            )
+        principal = current_principal()
+        now = time.time()
+
+        def set_ttl(document: dict[str, Any]) -> dict[str, Any]:
+            if "board:write" in principal.scopes:
+                actor = require_admin_actor(document, principal, agent_name)
+            else:
+                actor = coordinator_actor(document, principal, agent_name)
+                if actor.get("role") not in {"coordinator", "orchestrator"}:
+                    raise PermissionError(
+                        "claim TTL changes require an active coordinator seat"
+                    )
+            previous = claim_ttl(document)
+            document["config"]["claim_ttl_s"] = claim_ttl_s
+            actor["last_activity_at"] = iso_at(now)
+            return {
+                "actor": copy.deepcopy(actor),
+                "recipients": service.admitted_agent_ids(
+                    document, actor["agent_id"]
+                ),
+                "previous": previous,
+                "current": claim_ttl_s,
+            }
+
+        result = service.mutate(board_id, set_ttl)
+        event = None
+        if result["current"] != result["previous"]:
+            event = await append_and_publish(
+                board_id,
+                result["actor"],
+                "board_claim_ttl_changed",
+                f"board://{board_id}/config/claim-ttl",
+                result["recipients"],
+                ctx,
+                claim_ttl_from=result["previous"],
+                claim_ttl_to=result["current"],
+            )
+        return {
+            "ok": True,
+            "board_id": board_id,
+            "claim_ttl_s": result["current"],
+            "previous_claim_ttl_s": result["previous"],
+            "changed": result["current"] != result["previous"],
+            "event": event,
         }
 
     @tool()
@@ -4778,6 +4917,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             ticket = document["tickets"].get(ticket_id)
             if ticket is None:
                 raise ValueError("ticket not found")
+            continuation = continuation_hint(ticket)
             if ticket.get("status") == "claimed":
                 if (
                     ticket.get("claimed_by_agent_id") != actor["agent_id"]
@@ -4795,6 +4935,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                     "status_to": "in_progress",
                     "released": released,
                     "renewed": renewed,
+                    "continuation": continuation,
                 }
             assigned_identity = ticket.get("assigned_to_agent_id")
             requested = ticket.get("assigned_to")
@@ -4880,6 +5021,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 "status_to": "claimed",
                 "released": released,
                 "renewed": renewed,
+                "continuation": continuation,
             }
 
         changed = service.mutate(board_id, claim)
@@ -4897,6 +5039,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             "ticket": changed["ticket"],
             "lease_expires_at": changed["ticket"]["lease_expires_at"],
             "ttl_s": changed["ticket"]["ttl_s"],
+            "continuation": changed["continuation"],
             "event": event,
             "release_events": release_events,
             "implicitly_renewed": changed["renewed"],
@@ -5673,6 +5816,9 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             if retryable_rejection:
                 ticket["last_claimed_by_agent_id"] = ticket.get("claimed_by_agent_id")
                 ticket["last_claimed_by_principal_id"] = ticket.get("claimed_by_principal_id")
+                ticket["last_claimed_by"] = ticket.get("claimed_by")
+                ticket["last_claimed_at"] = ticket.get("claimed_at")
+                ticket["last_release_reason"] = "review rejected"
                 for key in (
                     "claimed_by_agent_id",
                     "claimed_by_principal_id",
@@ -6919,6 +7065,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             "ok": True,
             "board_id": board_id,
             "agents": agents,
+            "claim_ttl_s": claim_ttl(document),
             "scrub_profile": board_scrub_profile(document),
             "review_policy": current_review_policy,
             "dispatch_policy": dispatch_policy(document),

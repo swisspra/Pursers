@@ -4,6 +4,7 @@ Wait only with one blocking a2a_wait(since_seq=<whole cursor map>, timeout_s={ti
 On timed_out=true with no events, immediately re-arm with the returned whole new_seq map. Do not poll ticket_list, board_catchup, or ticket_get for work and do not sleep.
 The board offers work to one eligible seat. Claim or review only a ticket offered to this seat; never claim an unoffered ticket. If an offer expires or is revoked, return to wait.
 After an offer cue, use its ticket and board, then {action}.
+If the claim result or cue includes continuation, inspect prior_holder and fetch its branch_and_commit before editing so verified prior work is continued rather than restarted.
 If a claim race is lost, return directly to a2a_wait. Poll mode is explicit fallback only; report it in submission/review notes if observed.
 Never review your own work, never push main, stay in the registered work_dir for the event's board_id, and report evidence faithfully.
 {host_note}

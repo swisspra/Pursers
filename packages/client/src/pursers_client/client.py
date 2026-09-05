@@ -358,6 +358,15 @@ class BoardClient:
             },
         )
 
+    async def board_claim_ttl_set(self, claim_ttl_s: int) -> dict[str, Any]:
+        return await self._call(
+            "board_claim_ttl_set",
+            {
+                "agent_name": self.agent_name,
+                "claim_ttl_s": claim_ttl_s,
+            },
+        )
+
     async def board_snapshot(
         self,
         *,

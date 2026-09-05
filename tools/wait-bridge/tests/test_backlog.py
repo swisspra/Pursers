@@ -157,6 +157,36 @@ class BacklogTests(unittest.TestCase):
         self.assertEqual([event["ticket_id"] for event in events], ["TK-review-mine"])
         self.assertEqual(events[0]["kind"], "review_offered")
 
+    def test_backlog_cue_includes_successor_continuation(self) -> None:
+        ticket = self.ticket(
+            last_claimed_by="prior-worker",
+            last_claimed_by_agent_id="AI-prior",
+            last_release_reason="lease expired",
+            abandoned_count=2,
+            submission_history=[
+                {
+                    "notes": (
+                        "test_output: pass\n"
+                        "branch_and_commit: codex/TK-open @ " + "a" * 40
+                    )
+                }
+            ],
+        )
+
+        event = backlog_events(
+            [ticket], "AI-me", only_mine=True, project="pursers"
+        )[0]
+
+        self.assertEqual(
+            event["continuation"]["branch_and_commit"],
+            "codex/TK-open @ " + "a" * 40,
+        )
+        self.assertEqual(
+            event["continuation"]["prior_holder"]["agent_name"],
+            "prior-worker",
+        )
+        self.assertEqual(event["continuation"]["abandoned_count"], 2)
+
 
 if __name__ == "__main__":
     unittest.main()
