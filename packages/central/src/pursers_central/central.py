@@ -104,6 +104,7 @@ MEMORY_TYPES = frozenset(
 )
 PINNED_SUMMARY_MAX_CHARS = 180
 ADMISSION_ROLES = frozenset({"admin", "member", "reviewer"})
+COORDINATOR_MEMBERSHIP_ROLES = ADMISSION_ROLES
 SEAT_ROLES = frozenset({"worker", "reviewer", "orchestrator", "coordinator"})
 INVITE_ROLES = frozenset({"member", "reviewer"})
 DEFAULT_INVITE_TTL_S = 3_600
@@ -2564,7 +2565,9 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         document: dict[str, Any], principal: Principal, agent_name: str
     ) -> dict[str, Any]:
         require_scope(principal, COORDINATOR_SCOPE)
-        service.resolve_board_context(document, principal.principal_id, {"member"})
+        service.resolve_board_context(
+            document, principal.principal_id, COORDINATOR_MEMBERSHIP_ROLES
+        )
         actor = service.member(document, principal, agent_name)
         if actor.get("lifecycle_status", "active") != "active":
             raise PermissionError("coordinator seat is not active")
@@ -3375,7 +3378,9 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                         "coordinator authorization cannot change board membership"
                     )
                 service.resolve_board_context(
-                    document, principal.principal_id, {"member"}
+                    document,
+                    principal.principal_id,
+                    COORDINATOR_MEMBERSHIP_ROLES,
                 )
                 admission_change = None
             else:
@@ -3464,7 +3469,9 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             now = time.time()
             if coordinate_only:
                 service.resolve_board_context(
-                    document, principal.principal_id, {"member"}
+                    document,
+                    principal.principal_id,
+                    COORDINATOR_MEMBERSHIP_ROLES,
                 )
                 admission_change = None
             else:
@@ -3806,7 +3813,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         if not isinstance(second_opinion, bool) or not isinstance(fallback_broadcast, bool):
             raise ValueError("second_opinion and fallback_broadcast must be boolean")
         principal = current_principal()
-        require_scope(principal, "board:write")
+        require_board_write_or_coordinate(principal)
         now = time.time()
 
         def set_policy(document: dict[str, Any]) -> dict[str, Any]:
@@ -4419,7 +4426,9 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                     )
             if intake_only:
                 service.resolve_board_context(
-                    document, principal.principal_id, {"member"}
+                    document,
+                    principal.principal_id,
+                    COORDINATOR_MEMBERSHIP_ROLES,
                 )
                 actor = service.member(document, principal, agent_name)
                 released, renewed = [], []
@@ -4583,15 +4592,19 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         if all(value is None for value in (tier, skills_required, exclude_agents, prefer_agents)):
             raise ValueError("at least one dispatch field is required")
         principal = current_principal()
-        require_scope(principal, "board:write")
+        coordinate_only = require_board_write_or_coordinate(principal)
         now = time.time()
 
         def update(document: dict[str, Any]) -> dict[str, Any]:
             profile = board_scrub_profile(document)
             allow_counts: dict[str, int] = {}
-            actor, released, renewed = prepare_board_call(
-                document, principal, agent_name, now
-            )
+            if coordinate_only:
+                actor = coordinator_actor(document, principal, agent_name)
+                released, renewed = [], []
+            else:
+                actor, released, renewed = prepare_board_call(
+                    document, principal, agent_name, now
+                )
             ticket = document["tickets"].get(ticket_id)
             if ticket is None:
                 raise ValueError("ticket not found")
@@ -6400,7 +6413,9 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             safe_tickets = cleaned_lists.get("related_tickets", [])
             if coordinate_only:
                 service.resolve_board_context(
-                    document, principal.principal_id, {"member"}
+                    document,
+                    principal.principal_id,
+                    COORDINATOR_MEMBERSHIP_ROLES,
                 )
                 actor = service.member(document, principal, agent_name)
                 released, renewed = [], []
@@ -7146,7 +7161,9 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                     raise ValueError("state precondition failed")
             if authority != "write":
                 service.resolve_board_context(
-                    document, principal.principal_id, {"member"}
+                    document,
+                    principal.principal_id,
+                    COORDINATOR_MEMBERSHIP_ROLES,
                 )
                 actor = service.member(document, principal, agent_name)
                 released, renewed = [], []
