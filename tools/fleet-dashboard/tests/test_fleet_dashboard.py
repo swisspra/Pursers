@@ -4226,7 +4226,7 @@ def test_dispatch_timeline_reads_cross_seat_central_projection(
         "STORE_BACKEND": "sqlite",
     }.items():
         monkeypatch.setenv(key, value)
-    mcp, _service = central.build_server("localhost", 8765, tmp_path / "central")
+    mcp, service = central.build_server("localhost", 8765, tmp_path / "central")
     review_scopes = frozenset({"board:read", "board:write", "board:review"})
     work_scopes = frozenset({"board:read", "board:write"})
     admin = central.Principal("PR-admin", "admin", review_scopes)
@@ -4284,12 +4284,14 @@ def test_dispatch_timeline_reads_cross_seat_central_projection(
         worker_b_id = await add_seat(
             worker_b, "worker-b", {"tier_max": 2, "can_work": True}
         )
-        await add_seat(
+        reviewer_id = await add_seat(
             reviewer,
             "reviewer",
             {"tier_max": 2, "can_work": False, "can_review": True},
             role="reviewer",
         )
+        service.register_listener("pursers", worker_a_id)
+        service.register_listener("pursers", reviewer_id)
         await call(
             "board_dispatch_policy_set",
             admin,

@@ -82,6 +82,7 @@ ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,80}$")
 DEFAULT_CLAIM_TTL_S = 900
 MIN_CLAIM_TTL_S = 1
 MAX_CLAIM_TTL_S = 86_400
+DISPATCH_ACTIVITY_WINDOW_MULTIPLIER = 3.0
 BRANCH_AND_COMMIT_RE = re.compile(
     r"(?im)^\s*branch_and_commit\s*:\s*(.+?)\s*$"
 )
@@ -626,6 +627,9 @@ class CentralBoard:
         self.cursors = CursorStore(self.store)
         self.active_listeners: dict[str, set[str]] = {}
         self.last_seen_activity: dict[tuple[str, str], float] = {}
+        self.offer_deadline_tasks: dict[
+            tuple[str, str, str], asyncio.Task[None]
+        ] = {}
         # The JSON skeleton needs one service-wide boundary so a cold snapshot and
         # its journal watermark cannot split a domain-write/journal-append pair.
         self.tool_lock = asyncio.Lock()
@@ -652,7 +656,7 @@ class CentralBoard:
         if agent_id in self.active_listeners.get(board_id, set()):
             return True
         last_seen = self.last_seen_activity.get((board_id, agent_id))
-        window = max(1800.0, 3.0 * float(offer_ttl_s))
+        window = DISPATCH_ACTIVITY_WINDOW_MULTIPLIER * float(offer_ttl_s)
         if last_seen is not None and (0.0 <= now - last_seen <= window or now < last_seen):
             return True
         raw_activity = member.get("last_activity_at")
@@ -1947,7 +1951,8 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         )
         selected, _ = candidates[0]
         selected["last_offered_at"] = iso_at(now)
-        expires_epoch = now + int(policy.get("offer_ttl_s", DEFAULT_OFFER_TTL_S))
+        offer_ttl_s = int(policy.get("offer_ttl_s", DEFAULT_OFFER_TTL_S))
+        expires_epoch = now + offer_ttl_s
         offer = {
             "ticket_id": ticket["ticket_id"], "kind": kind,
             "agent_id": selected["agent_id"], "agent_name": selected["agent_name"],
@@ -1965,6 +1970,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             "offered_agent_id": selected["agent_id"],
             "offered_agent_name": selected["agent_name"],
             "offer_expires_at": offer["expires_at"],
+            "offer_ttl_s": offer_ttl_s,
             "recipients": [selected["agent_id"]],
         }
 
@@ -2145,6 +2151,8 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                         dispatch_reason=item.get("dispatch_reason"),
                     )
                 )
+                if item.get("kind") in {TICKET_OFFERED, REVIEW_OFFERED}:
+                    schedule_offer_deadline(board_id, item, principal, ctx)
                 continue
             if item.get("kind") == "review":
                 events.append(
@@ -2212,6 +2220,67 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         if released and ctx is not None and principal is not None:
             return await publish_releases(board_id, released, principal, ctx)
         return released
+
+    def schedule_offer_deadline(
+        board_id: str,
+        item: Mapping[str, Any],
+        principal: Principal,
+        ctx: Context,
+    ) -> None:
+        ticket_id = str(item.get("ticket_id", ""))
+        kind = str(item.get("offer_kind", ""))
+        expires_at = item.get("offer_expires_at")
+        if not ticket_id or kind not in {"work", "review"} or not expires_at:
+            return
+        try:
+            expires_epoch = datetime.fromisoformat(
+                str(expires_at).replace("Z", "+00:00")
+            ).timestamp()
+        except ValueError:
+            return
+        delay_s = float(item.get("offer_ttl_s", 0))
+        if delay_s <= 0:
+            return
+        key = (board_id, ticket_id, kind)
+        previous = service.offer_deadline_tasks.get(key)
+        current = asyncio.current_task()
+        if previous is not None and previous is not current and not previous.done():
+            previous.cancel()
+
+        async def expire_offer_at_deadline() -> None:
+            pending_token = service.pending_notifications.set(None)
+            generation_token = service.expected_generation.set(None)
+            try:
+                await asyncio.sleep(delay_s)
+                async with service.tool_lock:
+                    with service.board_operation(board_id):
+                        with service.transaction():
+                            await check_and_reap_expired(
+                                board_id, max(time.time(), expires_epoch), principal, ctx
+                            )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log_runtime_error(
+                    service.diagnostics,
+                    "offer_deadline_error",
+                    exc,
+                    include_traceback=True,
+                    board_id=board_id,
+                    ticket_id=ticket_id,
+                    offer_kind=kind,
+                )
+            finally:
+                service.expected_generation.reset(generation_token)
+                service.pending_notifications.reset(pending_token)
+                running = asyncio.current_task()
+                if service.offer_deadline_tasks.get(key) is running:
+                    service.offer_deadline_tasks.pop(key, None)
+
+        service.offer_deadline_tasks[key] = asyncio.create_task(
+            expire_offer_at_deadline(),
+            name=f"offer-deadline:{board_id}:{ticket_id}:{kind}",
+        )
 
     def latest_seq(board_id: str) -> int:
         # read_after exposes the watermark even when cursor zero predates retention.
@@ -7468,9 +7537,6 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         require_scope(principal, "board:read")
         document = service.load(board_id)
         actor = service.member(document, principal, agent_name)
-        now_catchup = time.time()
-        service.record_agent_activity(board_id, actor["agent_id"], now_catchup)
-        await check_and_reap_expired(board_id, now_catchup, principal, ctx)
         acknowledged_cursor = service.cursors.get(
             principal.principal_id, agent_name, board_id
         )

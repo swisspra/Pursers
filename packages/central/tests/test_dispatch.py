@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import asyncio
+import copy
 import os
+import sqlite3
 import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from typing import Any
+from unittest.mock import AsyncMock, patch
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
@@ -67,6 +71,15 @@ class DispatchTests(unittest.IsolatedAsyncioTestCase):
 
     async def call(self, name: str, **arguments: object):
         return await self.mcp.call_tool(name, {"board_id": "pursers", **arguments})
+
+    def persisted_documents(self) -> list[tuple[str, str, int]]:
+        connection = sqlite3.connect(self.service.store.db_path)
+        try:
+            return connection.execute(
+                "SELECT path, doc, version FROM documents ORDER BY path"
+            ).fetchall()
+        finally:
+            connection.close()
 
     async def add_seat(
         self,
@@ -746,6 +759,8 @@ class DispatchTests(unittest.IsolatedAsyncioTestCase):
             t3["work_offer"]["agent_id"],
         }
         self.assertEqual(assigned, {worker_1, worker_2, worker_3})
+        for worker_id in assigned:
+            self.service.register_listener("pursers", worker_id)
 
         first_holder = t1["work_offer"]["agent_id"]
         base_time = central.time.time()
@@ -768,28 +783,168 @@ class DispatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(t1_fetched3["dispatch_state"]["reason"], {"no_candidates_remaining", "offer_limit_reached"})
         self.assertNotIn("work_offer", t1_fetched3)
 
-    async def test_prompt_expiry_without_unrelated_mutations(self) -> None:
+    async def test_offer_deadline_expires_without_followup_board_call(self) -> None:
         await self.add_seat(self.worker_a, "worker-a", {"tier_max": 2})
         self.principal = self.admin
         await self.call(
             "board_dispatch_policy_set", agent_name="admin-agent", offer_ttl_s=1
         )
-        with patch.object(central.time, "time", return_value=1000.0):
-            created = await self.create()
+        created = await self.create()
         ticket_id = created.structured_content["ticket"]["ticket_id"]
         self.assertIn("work_offer", created.structured_content["ticket"])
 
-        self.principal = self.worker_a
-        with patch.object(central.time, "time", return_value=1002.0):
-            page = await self.call(
-                "board_catchup", agent_name="worker-a", cursor=0, touch=False
-            )
-        event_kinds = [ev["kind"] for ev in page.structured_content.get("events", [])]
-        self.assertIn(OFFER_EXPIRED, event_kinds)
+        deadline = self.service.offer_deadline_tasks[
+            ("pursers", ticket_id, "work")
+        ]
+        await asyncio.wait_for(asyncio.shield(deadline), timeout=2.0)
 
-        fetched = await self.call("ticket_get", ticket_id=ticket_id)
-        self.assertEqual(fetched.structured_content["ticket"]["dispatch_state"]["state"], "broadcast")
-        self.assertEqual(fetched.structured_content["ticket"]["dispatch_state"]["reason"], "no_candidates_remaining")
+        ticket = self.service.load("pursers")["tickets"][ticket_id]
+        self.assertEqual(ticket["dispatch_state"]["state"], "broadcast")
+        self.assertEqual(
+            ticket["dispatch_state"]["reason"], "no_candidates_remaining"
+        )
+        self.assertNotIn("work_offer", ticket)
+        events = self.service.journal.read_after("pursers", 0, 1000)["events"]
+        self.assertIn(OFFER_EXPIRED, [event["kind"] for event in events])
+
+    async def test_review_offer_deadline_expires_without_followup_board_call(
+        self,
+    ) -> None:
+        await self.add_seat(self.worker_a, "worker-a", {"tier_max": 2})
+        await self.add_seat(
+            self.reviewer_a,
+            "reviewer-a",
+            {"tier_max": 2, "can_work": False, "can_review": True},
+            role="reviewer",
+        )
+        self.principal = self.admin
+        await self.call(
+            "board_dispatch_policy_set", agent_name="admin-agent", offer_ttl_s=1
+        )
+        created = await self.create()
+        ticket_id = created.structured_content["ticket"]["ticket_id"]
+        self.principal = self.worker_a
+        await self.call("ticket_claim", agent_name="worker-a", ticket_id=ticket_id)
+        submitted = await self.call(
+            "ticket_submit", agent_name="worker-a", ticket_id=ticket_id,
+            summary="ready",
+        )
+        self.assertIn("review_offer", submitted.structured_content["ticket"])
+
+        deadline = self.service.offer_deadline_tasks[
+            ("pursers", ticket_id, "review")
+        ]
+        await asyncio.wait_for(asyncio.shield(deadline), timeout=2.0)
+
+        ticket = self.service.load("pursers")["tickets"][ticket_id]
+        self.assertEqual(ticket["status"], "submitted")
+        self.assertEqual(ticket["dispatch_state"]["state"], "broadcast")
+        self.assertEqual(
+            ticket["dispatch_state"]["reason"], "no_candidates_remaining"
+        )
+        self.assertNotIn("review_offer", ticket)
+        events = self.service.journal.read_after("pursers", 0, 1000)["events"]
+        expired = [
+            event for event in events
+            if event["kind"] == OFFER_EXPIRED
+            and event.get("offer_kind") == "review"
+        ]
+        self.assertEqual(len(expired), 1)
+
+    async def test_touch_false_with_expired_offer_is_strictly_pure(self) -> None:
+        worker_id = await self.add_seat(
+            self.worker_a, "worker-a", {"tier_max": 2}
+        )
+        self.principal = self.admin
+        await self.call(
+            "board_dispatch_policy_set", agent_name="admin-agent", offer_ttl_s=60
+        )
+        created = await self.create()
+        ticket_id = created.structured_content["ticket"]["ticket_id"]
+
+        def expire_offer(document: dict[str, Any]) -> dict[str, Any]:
+            ticket = document["tickets"][ticket_id]
+            offer = ticket["work_offer"]
+            offer["expires_at_epoch"] = 0
+            offer["expires_at"] = "1970-01-01T00:00:00+00:00"
+            return {}
+
+        self.service.mutate(
+            "pursers", expire_offer, require_generation=False
+        )
+        self.service.cursors.ack(
+            self.worker_a.principal_id, "worker-a", "pursers", 1
+        )
+        before_documents = self.persisted_documents()
+        before_board = copy.deepcopy(self.service.load("pursers"))
+        before_latest = self.service.journal.read_after("pursers", 0, 1)[
+            "latest_cursor"
+        ]
+        before_cursor = self.service.cursors.get(
+            self.worker_a.principal_id, "worker-a", "pursers"
+        )
+        before_activity = copy.deepcopy(self.service.last_seen_activity)
+
+        self.principal = self.worker_a
+        with patch.object(
+            central.Context, "notify_resource_updated", new_callable=AsyncMock
+        ) as notify:
+            result = await self.call(
+                "board_catchup",
+                agent_name="worker-a",
+                cursor=0,
+                ack=True,
+                touch=False,
+                expected_generation="GEN-stale-reader-token",
+            )
+
+        self.assertFalse(result.is_error)
+        self.assertFalse(result.structured_content["touched"])
+        notify.assert_not_awaited()
+        self.assertEqual(self.persisted_documents(), before_documents)
+        self.assertEqual(self.service.load("pursers"), before_board)
+        self.assertEqual(
+            self.service.journal.read_after("pursers", 0, 1)["latest_cursor"],
+            before_latest,
+        )
+        self.assertEqual(
+            self.service.cursors.get(
+                self.worker_a.principal_id, "worker-a", "pursers"
+            ),
+            before_cursor,
+        )
+        self.assertEqual(self.service.last_seen_activity, before_activity)
+        ticket = before_board["tickets"][ticket_id]
+        self.assertEqual(ticket["work_offer"]["agent_id"], worker_id)
+        self.assertEqual(ticket["work_offer"]["expires_at_epoch"], 0)
+
+    async def test_recent_activity_outside_offer_window_is_not_live(self) -> None:
+        worker_id = await self.add_seat(
+            self.worker_a, "stale-worker", {"tier_max": 2}
+        )
+        self.principal = self.admin
+        await self.call(
+            "board_dispatch_policy_set", agent_name="admin-agent", offer_ttl_s=10
+        )
+        now = central.time.time()
+        stale_at = now - 31.0
+
+        def make_stale(document: dict[str, Any]) -> dict[str, Any]:
+            member = document["members"][worker_id]
+            member["last_activity_at"] = central.iso_at(stale_at)
+            return {}
+
+        self.service.mutate("pursers", make_stale, require_generation=False)
+        self.service.record_agent_activity("pursers", worker_id, stale_at)
+
+        with patch.object(central.time, "time", return_value=now):
+            created = await self.create()
+        ticket = created.structured_content["ticket"]
+        self.assertNotIn("work_offer", ticket)
+        self.assertEqual(ticket["dispatch_state"]["state"], "unassignable")
+        self.assertEqual(
+            ticket["dispatch_state"]["reason"], "no_eligible_worker"
+        )
 
     async def test_immediate_broadcast_fallback_when_no_candidates_remain(self) -> None:
         await self.add_seat(self.worker_a, "only-worker", {"tier_max": 2})
