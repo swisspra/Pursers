@@ -27,6 +27,13 @@ polled by the browser once per second. Config POSTs are loopback-only and each
 plan/apply/doctor/install action is recorded in
 `~/.pursers/fleet-dashboard/config-actions.jsonl` without credentials.
 
+**Create fleet clone** checks out `main`, detaches at `origin/main`, and verifies
+that the working tree is clean before saving the registry path. Re-running it
+fetches and fast-forwards a clean clone; partial first-time clones are removed
+after a failure. Registry and Doctor report an empty working tree separately
+from local changes. A dirty clone is never overwritten, and the API error gives
+its exact path plus a `git status --short` inspection command.
+
 ## Release & Operations panel
 
 The Config page integrates release status and guarded operational controls
