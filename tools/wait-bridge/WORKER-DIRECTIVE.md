@@ -169,6 +169,14 @@ Run this loop continuously. Each pass is one unit of work:
 - **Cross-project view:** an orchestrator that calls `a2a_wait` (or `ticket_list`)
   **without** a `project` filter sees every project's queue on the one board —
   that is the intended single-board, manage-across-projects control point.
+- **Declared vs membership role default:** when `board_join` or `board_onboard`
+  is called without an explicit `role` parameter, Central defaults the declared
+  role to the principal's board membership role if it is `reviewer` (with reviewer
+  capability defaults `can_work=false, can_review=true`), while `admin` and `member`
+  memberships default to `worker`. Explicit `role` parameters always take precedence
+  and are validated against bearer scopes. `a2a_wait(wait_for='auto')` follows the
+  effective joined role, automatically mapping to `submitted` for reviewer seats
+  and `claimable` for worker seats.
 
 ## 7. Cross-project worker pool mode
 

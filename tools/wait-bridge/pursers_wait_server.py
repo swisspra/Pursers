@@ -936,8 +936,10 @@ def _seat_capabilities() -> dict[str, Any] | None:
     return capabilities
 
 
-def _declared_role() -> str:
-    role = os.environ.get("PURSERS_ROLE", "worker").strip().lower()
+def _declared_role() -> str | None:
+    role = os.environ.get("PURSERS_ROLE", "").strip().lower()
+    if not role:
+        return None
     if role not in SEAT_ROLES:
         raise ValueError(
             "PURSERS_ROLE must be worker, reviewer, orchestrator, or coordinator"
@@ -1080,8 +1082,9 @@ class _BoardView:
         selected = self.agent_name if agent_name is None else agent_name
         arguments: dict[str, Any] = {
             "agent_name": selected,
-            "role": self.role,
         }
+        if self.role is not None:
+            arguments["role"] = self.role
         if task_focus is not None:
             arguments["task_focus"] = task_focus
         caps = dict(capabilities or {})
@@ -1092,12 +1095,14 @@ class _BoardView:
         joined = await self._call(
             "board_join", arguments, refresh=True
         )
+        effective = joined.get("effective_role") or joined.get("role", "worker")
+        self.role = effective
         self.identity = JoinedIdentity(
             joined["board_id"],
             joined["agent_id"],
             joined["principal_id"],
             joined["agent_name"],
-            joined["role"],
+            effective,
         )
         return {**joined, "identity": self.identity}
 
@@ -3700,9 +3705,14 @@ async def _wait_for_work_many(
             raise BoardClientError("server returned an unexpected per-board agent_id")
         views[board_id] = view
         agent_ids[board_id] = expected_id
+        effective_role = (
+            joined.get("effective_role")
+            or joined.get("role")
+            or (view.identity.role if view.identity is not None else None)
+        )
         wait_for_by_board[board_id] = _resolve_wait_for(
             requested_wait_for,
-            view.identity.role if view.identity is not None else None,
+            effective_role,
         )
         held_by_board[board_id] = {}
         lease_due_by_board[board_id] = {}
@@ -4105,7 +4115,7 @@ async def _wait_for_work(
             _GLOBAL_KEEPALIVE.observe_join(BOARD_ID, joined)
         if joined.get("agent_id") != my_agent_id:
             raise BoardClientError("server returned an unexpected per-call agent_id")
-        role = joined.get("role", role)
+        role = joined.get("effective_role") or joined.get("role", role)
     budget = clamp_timeout(timeout_s, role)
     deadline = started + budget
     selected_wait_for = _resolve_wait_for(wait_for, role)

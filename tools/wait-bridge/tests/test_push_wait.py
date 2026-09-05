@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import io
 import json
 import os
@@ -45,18 +46,41 @@ import central  # noqa: E402
 import pursers_wait_server as wait_server  # noqa: E402
 
 
+_CURRENT_PRINCIPAL: contextvars.ContextVar[central.Principal | None] = contextvars.ContextVar(
+    "_CURRENT_PRINCIPAL", default=None
+)
+
+
 class InProcessBoardClient:
     """Minimal BoardClient-compatible adapter over a real in-process Central."""
 
-    def __init__(self, raw_client: Client, role: str = "reviewer") -> None:
+    def __init__(
+        self,
+        raw_client: Client,
+        role: str | None = "reviewer",
+        principal: central.Principal | None = None,
+    ) -> None:
         self._raw_client = raw_client
+        self.principal = principal
         self._client: Any = raw_client
         self.agent_name = "push-listener"
         self.role = role
         self.identity: JoinedIdentity | None = None
 
+    async def call_tool(self, name: str, *args: Any, **kwargs: Any) -> Any:
+        token = (
+            _CURRENT_PRINCIPAL.set(self.principal)
+            if self.principal is not None
+            else None
+        )
+        try:
+            return await self._raw_client.call_tool(name, *args, **kwargs)
+        finally:
+            if token is not None:
+                _CURRENT_PRINCIPAL.reset(token)
+
     async def _call(self, name: str, **arguments: Any) -> dict[str, Any]:
-        result = await self._raw_client.call_tool(
+        result = await self.call_tool(
             name, {"board_id": wait_server.BOARD_ID, **arguments}
         )
         return BoardClient._decode(result)
@@ -67,20 +91,29 @@ class InProcessBoardClient:
         agent_name: str | None = None,
         role: str | None = None,
         task_focus: str | None = None,
+        capabilities: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         selected = self.agent_name if agent_name is None else agent_name
-        joined = await self._call(
-            "board_join", agent_name=selected, role=role or self.role
-        )
+        selected_role = role if role is not None else self.role
+        kwargs: dict[str, Any] = {"agent_name": selected}
+        if selected_role is not None:
+            kwargs["role"] = selected_role
+        if task_focus is not None:
+            kwargs["task_focus"] = task_focus
+        if capabilities is not None:
+            kwargs["capabilities"] = capabilities
+        joined = await self._call("board_join", **kwargs)
+        effective = joined.get("effective_role") or joined.get("role", "worker")
         identity = JoinedIdentity(
             joined["board_id"],
             joined["agent_id"],
             joined["principal_id"],
             joined["agent_name"],
-            joined["role"],
+            effective,
         )
-        if agent_name is None:
+        if agent_name is None or self.identity is None:
             self.identity = identity
+            self.role = effective
         return joined
 
     async def board_catchup(self, **arguments: Any) -> dict[str, Any]:
@@ -96,10 +129,12 @@ class InProcessBoardClient:
     async def lease_renew(self, ticket_id: str) -> dict[str, Any]:
         return await self._call("lease_renew", ticket_id=ticket_id)
 
-    async def create_ticket(self, title: str) -> dict[str, Any]:
+    async def create_ticket(
+        self, title: str, agent_name: str = "push-actor"
+    ) -> dict[str, Any]:
         return await self._call(
             "ticket_create",
-            agent_name="push-actor",
+            agent_name=agent_name,
             title=title,
             description="synthetic wait-bridge push fixture",
             target_url="pursers/tools/wait-bridge",
@@ -439,7 +474,12 @@ class PushWaitTests(unittest.IsolatedAsyncioTestCase):
             frozenset({"board:read", "board:write", "board:review"}),
         )
         self.original_current_principal = central.current_principal
-        central.current_principal = lambda: self.principal
+        def resolve_principal() -> central.Principal:
+            p = _CURRENT_PRINCIPAL.get()
+            if p is not None:
+                return p
+            return self.principal
+        central.current_principal = resolve_principal
 
     def tearDown(self) -> None:
         central.current_principal = self.original_current_principal
@@ -1265,6 +1305,83 @@ class PushWaitTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(push_listens, 1)
         self.assertEqual(poll_listens, 0)
+
+    async def test_a2a_wait_auto_mapping_follows_effective_role(self) -> None:
+        reviewer_principal = central.Principal(
+            "PR-auto-reviewer",
+            "auto-reviewer-canonical",
+            frozenset({"board:read", "board:review"}),
+        )
+        worker_principal = central.Principal(
+            "PR-auto-worker",
+            "auto-worker-canonical",
+            frozenset({"board:read", "board:write"}),
+        )
+
+        async with Client(self.mcp, mode="2026-07-28", cache=None) as raw:
+            admin_client = InProcessBoardClient(raw, role="worker", principal=self.principal)
+            await admin_client.board_join(agent_name="admin-agent", role="worker")
+            await admin_client._call(
+                "board_member_add",
+                agent_name="admin-agent",
+                principal_id=reviewer_principal.principal_id,
+                role="reviewer",
+            )
+            await admin_client._call(
+                "board_member_add",
+                agent_name="admin-agent",
+                principal_id=worker_principal.principal_id,
+                role="member",
+            )
+
+            reviewer_client = InProcessBoardClient(raw, role=None, principal=reviewer_principal)
+            reviewer_client.agent_name = "auto-reviewer"
+            joined = await reviewer_client.board_join(agent_name="auto-reviewer")
+            self.assertEqual(joined["role"], "reviewer")
+            self.assertEqual(joined["effective_role"], "reviewer")
+
+            worker_client = InProcessBoardClient(raw, role="worker", principal=worker_principal)
+            worker_client.agent_name = "auto-worker"
+            await worker_client.board_join(agent_name="auto-worker", role="worker")
+
+            with (
+                patch.object(wait_server, "WAIT_MODE", "poll"),
+                patch.object(wait_server, "DEFAULT_POLL_INTERVAL_S", 0.05),
+                patch.object(wait_server, "AGENT_NAME", "auto-reviewer"),
+                patch.dict(os.environ, {"PURSERS_ROLE": ""}),
+            ):
+                created_t = await worker_client.create_ticket("ticket to submit", agent_name="auto-worker")
+                t_id = created_t["ticket"]["ticket_id"]
+
+                waiting = asyncio.create_task(
+                    wait_server._wait_for_work(
+                        reviewer_client,
+                        since_seq=0,
+                        timeout_s=4,
+                        only_mine=False,
+                        agent_name="auto-reviewer",
+                        wait_for="auto",
+                    )
+                )
+                await asyncio.sleep(0.2)
+                # Open ticket did NOT wake up the reviewer waiter because wait_for="auto" mapped to "submitted"
+                self.assertFalse(waiting.done())
+
+                claimed = await worker_client._call("ticket_claim", agent_name="auto-worker", ticket_id=t_id)
+                self.assertTrue(claimed.get("ok"), str(claimed))
+                await worker_client._call(
+                    "ticket_submit",
+                    agent_name="auto-worker",
+                    ticket_id=t_id,
+                    summary="done",
+                    notes="notes",
+                    files_changed=[],
+                )
+
+                result = await asyncio.wait_for(waiting, timeout=2)
+                self.assertFalse(result["timed_out"])
+                ticket_ids = [e.get("ticket_id") for e in result["events"]]
+                self.assertIn(t_id, ticket_ids)
 
 
 if __name__ == "__main__":

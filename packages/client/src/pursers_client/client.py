@@ -139,7 +139,7 @@ class BoardClient:
         board_id: str,
         *,
         agent_name: str = "pursers-client",
-        role: str = "worker",
+        role: str | None = "worker",
         reconnect_delay_s: float = 0.05,
         claim_ttl_s: int | None = None,
         capabilities: dict[str, Any] | None = None,
@@ -148,7 +148,7 @@ class BoardClient:
         self.token = token
         self.board_id = board_id
         self.agent_name = agent_name
-        if role not in {"worker", "reviewer", "orchestrator", "coordinator"}:
+        if role is not None and role not in {"worker", "reviewer", "orchestrator", "coordinator"}:
             raise ValueError(
                 "role must be worker, reviewer, orchestrator, or coordinator"
             )
@@ -302,10 +302,12 @@ class BoardClient:
         capabilities: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         selected_name = self.agent_name if agent_name is None else agent_name
+        selected_role = self.role if role is None else role
         arguments: dict[str, Any] = {
             "agent_name": selected_name,
-            "role": self.role if role is None else role,
         }
+        if selected_role is not None:
+            arguments["role"] = selected_role
         if claim_ttl_s is not None:
             arguments["claim_ttl_s"] = claim_ttl_s
         if agent_platform is not None:
@@ -322,12 +324,15 @@ class BoardClient:
             if agent_name is None
             else self._call_refresh_uncached("board_join", arguments)
         )
+        effective_role = joined.get("effective_role") or joined.get("role")
+        if self.role is None and agent_name is None and effective_role is not None:
+            self.role = effective_role
         identity = JoinedIdentity(
             joined["board_id"],
             joined["agent_id"],
             joined["principal_id"],
             joined["agent_name"],
-            joined["role"],
+            joined.get("role") or effective_role or "worker",
         )
         if agent_name is None:
             self.identity = identity
@@ -346,11 +351,13 @@ class BoardClient:
         role: str | None = None,
         capabilities: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        selected_role = self.role if role is None else role
         arguments: dict[str, Any] = {
             "agent_name": self.agent_name,
             "token_budget": token_budget,
-            "role": self.role if role is None else role,
         }
+        if selected_role is not None:
+            arguments["role"] = selected_role
         caps = dict(capabilities or {})
         if os.environ.get("PURSERS_LEGACY_TOOLS") == "1":
             caps.setdefault("legacy_tools", True)
@@ -365,12 +372,15 @@ class BoardClient:
         }
         arguments.update({key: value for key, value in optional.items() if value is not None})
         result = await self._call_refresh("board_onboard", arguments)
+        effective_role = result.get("effective_role") or result.get("role")
+        if self.role is None and effective_role is not None:
+            self.role = effective_role
         self.identity = JoinedIdentity(
             result["board_id"],
             result["agent_id"],
             result["principal_id"],
             result["agent_name"],
-            result["role"],
+            result.get("role") or effective_role or "worker",
         )
         return result
 

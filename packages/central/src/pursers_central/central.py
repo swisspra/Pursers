@@ -650,6 +650,36 @@ class CentralBoard:
         self.expected_generation: contextvars.ContextVar[Any] = contextvars.ContextVar(
             "central_expected_generation", default=None
         )
+        self.default_role_membership_logged: set[tuple[str, str, str]] = set()
+
+    def resolve_seat_role(
+        self,
+        document: dict[str, Any],
+        principal: Principal,
+        role: str | None,
+        invite_token: str | None = None,
+    ) -> tuple[str, bool, str | None]:
+        existing_membership = document.get("principal_memberships", {}).get(
+            principal.principal_id
+        )
+        membership_role = (
+            existing_membership.get("role")
+            if isinstance(existing_membership, Mapping)
+            else None
+        )
+        if membership_role is None and invite_token:
+            digest = invite_digest(document["board_id"], invite_token)
+            invite = document.get("invites", {}).get(digest)
+            if isinstance(invite, Mapping):
+                membership_role = invite.get("role")
+
+        if role is not None:
+            return role, False, membership_role
+
+        if membership_role == "reviewer":
+            return "reviewer", True, membership_role
+
+        return "worker", False, membership_role
 
     def register_listener(self, board_id: str, agent_id: str) -> None:
         self.active_listeners.setdefault(board_id, set()).add(agent_id)
@@ -3703,7 +3733,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         agent_platform: str | None = None,
         task_focus: str | None = None,
         invite_token: str | None = None,
-        role: str = "worker",
+        role: str | None = None,
         capabilities: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Join one explicit board under the verified bearer principal."""
@@ -3714,12 +3744,6 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 f"claim_ttl_s must be between {MIN_CLAIM_TTL_S} and {MAX_CLAIM_TTL_S}"
             )
         principal = current_principal()
-        role = validate_seat_role(principal, role)
-        coordinate_only = role in {"orchestrator", "coordinator"}
-        if coordinate_only and claim_ttl_s is not None:
-            raise PermissionError(
-                "coordinator authorization cannot change board claim policy"
-            )
         safe_platform = clean_text("agent_platform", agent_platform, max_length=80)
         safe_focus = clean_text("task_focus", task_focus, max_length=500)
         if invite_token is not None and (
@@ -3732,6 +3756,16 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
 
         def join(document: dict[str, Any]) -> dict[str, Any]:
             now = time.time()
+            effective_role, role_defaulted_from_membership, membership_role = (
+                service.resolve_seat_role(document, principal, role, invite_token)
+            )
+            validated_role = validate_seat_role(principal, effective_role)
+            coordinate_only = validated_role in {"orchestrator", "coordinator"}
+            if coordinate_only and claim_ttl_s is not None:
+                raise PermissionError(
+                    "coordinator authorization cannot change board claim policy"
+                )
+
             if coordinate_only:
                 if invite_token is not None:
                     raise PermissionError(
@@ -3745,14 +3779,27 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 admission_change = None
             else:
                 admission_change = ensure_join_admission(
-                    document, principal, now, invite_token, role
+                    document, principal, now, invite_token, validated_role
                 )
             joined = join_member(
                 document, principal, agent_name, now, claim_ttl_s,
-                safe_platform, safe_focus, role, capabilities,
+                safe_platform, safe_focus, validated_role, capabilities,
                 allow_workflow_side_effects=not coordinate_only,
             )
             member = joined["actor"]
+            if role_defaulted_from_membership:
+                note_key = (board_id, principal.principal_id, agent_name)
+                if note_key not in service.default_role_membership_logged:
+                    service.default_role_membership_logged.add(note_key)
+                    log_runtime_event(
+                        "board_join_role_defaulted_from_membership",
+                        board_id=board_id,
+                        principal_id=principal.principal_id,
+                        agent_name=agent_name,
+                        effective_role=validated_role,
+                        membership_role=membership_role,
+                        note="default declared role set from principal board membership",
+                    )
             return {
                 "ok": True,
                 "board_id": board_id,
@@ -3761,6 +3808,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 "principal_id": principal.principal_id,
                 "identity_tuple": [board_id, principal.principal_id, agent_name],
                 "role": member["role"],
+                "effective_role": member["role"],
                 "membership_role": member["membership_role"],
                 "lifecycle_status": member["lifecycle_status"],
                 "capabilities": member_capabilities(member),
@@ -3777,7 +3825,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 "admission_recipients": service.admitted_agent_ids(
                     document, member["agent_id"]
                 ),
-                "capabilities": member.get("capabilities", {}),
+                **({"note": "role defaulted to reviewer from board membership", "role_default_note": "role defaulted to reviewer from board membership"} if role_defaulted_from_membership else {}),
             }
 
         result = service.mutate(board_id, join, require_generation=False)
@@ -3810,7 +3858,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         ticket_id: str | None = None,
         snapshot_limit: int = DEFAULT_SNAPSHOT_LIMIT,
         snapshot_max_bytes: int = DEFAULT_SNAPSHOT_MAX_BYTES,
-        role: str = "worker",
+        role: str | None = None,
         capabilities: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Join or reactivate an identity and return a compact bounded board briefing."""
@@ -3826,13 +3874,16 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         if ticket_id is not None:
             ticket_id = require_id("ticket_id", ticket_id)
         principal = current_principal()
-        role = validate_seat_role(principal, role)
-        coordinate_only = role in {"orchestrator", "coordinator"}
         safe_platform = clean_text("agent_platform", agent_platform, max_length=80)
         safe_focus = clean_text("task_focus", task_focus, max_length=500)
 
         def onboard(document: dict[str, Any]) -> dict[str, Any]:
             now = time.time()
+            effective_role, role_defaulted_from_membership, membership_role = (
+                service.resolve_seat_role(document, principal, role, None)
+            )
+            validated_role = validate_seat_role(principal, effective_role)
+            coordinate_only = validated_role in {"orchestrator", "coordinator"}
             if coordinate_only:
                 service.resolve_board_context(
                     document,
@@ -3842,18 +3893,32 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 admission_change = None
             else:
                 admission_change = ensure_join_admission(
-                    document, principal, now, None, role
+                    document, principal, now, None, validated_role
                 )
             joined = join_member(
                 document, principal, agent_name, now, claim_ttl_s,
-                safe_platform, safe_focus, role, capabilities,
+                safe_platform, safe_focus, validated_role, capabilities,
                 allow_workflow_side_effects=not coordinate_only,
             )
+            if role_defaulted_from_membership:
+                note_key = (board_id, principal.principal_id, agent_name)
+                if note_key not in service.default_role_membership_logged:
+                    service.default_role_membership_logged.add(note_key)
+                    log_runtime_event(
+                        "board_join_role_defaulted_from_membership",
+                        board_id=board_id,
+                        principal_id=principal.principal_id,
+                        agent_name=agent_name,
+                        effective_role=validated_role,
+                        membership_role=membership_role,
+                        note="default declared role set from principal board membership",
+                    )
             briefing = briefing_payload(
                 document, principal, token_budget, ticket_id=ticket_id
             )
             return {
                 "actor": copy.deepcopy(joined["actor"]),
+                "effective_role": validated_role,
                 "rejoined": joined["rejoined"],
                 "released": joined["released"],
                 "lifecycle_change": joined["lifecycle_change"],
@@ -3867,6 +3932,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 "admission_recipients": service.admitted_agent_ids(
                     document, joined["actor"]["agent_id"]
                 ),
+                **({"note": "role defaulted to reviewer from board membership", "role_default_note": "role defaulted to reviewer from board membership"} if role_defaulted_from_membership else {}),
             }
 
         result = service.mutate(board_id, onboard, require_generation=False)
@@ -3905,6 +3971,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             "agent_name": agent_name,
             "principal_id": principal.principal_id,
             "role": result["actor"]["role"],
+            "effective_role": result["actor"]["role"],
             "membership_role": result["actor"]["membership_role"],
             "lifecycle_status": result["actor"]["lifecycle_status"],
             "capabilities": member_capabilities(result["actor"]),
@@ -3920,6 +3987,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             "snapshot": snapshot,
             "briefing": briefing,
             "capabilities": result["actor"].get("capabilities", {}),
+            **({"role_default_note": result["note"]} if "note" in result else {}),
         }
 
     @tool()

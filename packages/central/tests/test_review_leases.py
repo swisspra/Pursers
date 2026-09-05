@@ -355,6 +355,49 @@ class ReviewLeaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(released.structured_content["event"]["kind"], REVIEW_LEASE_KINDS)
         self.assertNotIn("review_lease", released.structured_content["ticket"])
 
+    async def test_reviewer_membership_join_without_role_defaults_to_reviewer(self) -> None:
+        self.principal = self.reviewer_a
+        result = await self.call("board_join", agent_name="reviewer-default-role")
+        self.assertFalse(result.is_error)
+        content = result.structured_content
+        self.assertEqual(content["role"], "reviewer")
+        self.assertEqual(content["effective_role"], "reviewer")
+        self.assertEqual(content["membership_role"], "reviewer")
+        self.assertFalse(content["capabilities"]["can_work"])
+        self.assertTrue(content["capabilities"]["can_review"])
+        self.assertIn("role_default_note", content)
+
+    async def test_explicit_role_overrides_membership_default(self) -> None:
+        self.principal = self.reviewer_a
+        result = await self.call(
+            "board_join",
+            agent_name="reviewer-explicit-worker",
+            role="worker",
+        )
+        self.assertFalse(result.is_error)
+        content = result.structured_content
+        self.assertEqual(content["role"], "worker")
+        self.assertEqual(content["effective_role"], "worker")
+        self.assertEqual(content["membership_role"], "reviewer")
+        self.assertTrue(content["capabilities"]["can_work"])
+        self.assertFalse(content["capabilities"]["can_review"])
+        self.assertNotIn("role_default_note", content)
+
+    async def test_admin_and_member_without_role_default_to_worker(self) -> None:
+        self.principal = self.admin
+        admin_join = await self.call("board_join", agent_name="admin-default-role")
+        self.assertFalse(admin_join.is_error)
+        self.assertEqual(admin_join.structured_content["role"], "worker")
+        self.assertEqual(admin_join.structured_content["effective_role"], "worker")
+        self.assertEqual(admin_join.structured_content["membership_role"], "admin")
+
+        self.principal = self.worker
+        member_join = await self.call("board_join", agent_name="member-default-role")
+        self.assertFalse(member_join.is_error)
+        self.assertEqual(member_join.structured_content["role"], "worker")
+        self.assertEqual(member_join.structured_content["effective_role"], "worker")
+        self.assertEqual(member_join.structured_content["membership_role"], "member")
+
 
 if __name__ == "__main__":
     unittest.main()
