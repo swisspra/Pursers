@@ -3732,35 +3732,40 @@ class SeatConfigManager:
         return {"job_id": job_id, "action": action, "command": command, "status": "queued"}
 
     def ops_action(self, action: str, **kwargs: Any) -> dict[str, Any]:
-        previews = self.release_ops.get_preview_commands(kwargs.get("tag"))
         if action in {"publish", "publish_from_tag"}:
             unknown = set(kwargs) - {"tag"}
             if unknown:
                 raise ValueError(f"unknown parameters for {action}: {unknown}")
             tag = kwargs.get("tag")
+            previews = self.release_ops.get_preview_commands(tag)
             cmd = previews["publish_from_tag"]
+            if not isinstance(cmd, str):
+                raise RuntimeError("Publish unavailable: no origin release tag resolved")
             return self._start_ops_job(
                 "publish_from_tag",
                 cmd,
                 lambda emit: self.release_ops.publish_from_tag(tag, log_callback=emit),
             )
         if action in {"stage", "stage_central"}:
-            unknown = set(kwargs) - {"wheel_path"}
+            unknown = set(kwargs)
             if unknown:
                 raise ValueError(f"unknown parameters for {action}: {unknown}")
-            wheel_path = kwargs.get("wheel_path")
+            previews = self.release_ops.get_preview_commands()
             cmd = previews["stage_central"]
+            if not isinstance(cmd, str):
+                raise RuntimeError(
+                    "Stage Central unavailable: trusted wheel, digest, profile, or interpreter did not resolve"
+                )
             return self._start_ops_job(
                 "stage_central",
                 cmd,
-                lambda emit: self.release_ops.stage_central(
-                    wheel_path=wheel_path, log_callback=emit
-                ),
+                lambda emit: self.release_ops.stage_central(log_callback=emit),
             )
         if action in {"kickstart", "kickstart_central"}:
             unknown = set(kwargs)
             if unknown:
                 raise ValueError(f"unknown parameters for {action}: {unknown}")
+            previews = self.release_ops.get_preview_commands()
             cmd = previews["kickstart_central"]
             return self._start_ops_job(
                 "kickstart_central",
@@ -3771,6 +3776,7 @@ class SeatConfigManager:
             unknown = set(kwargs)
             if unknown:
                 raise ValueError(f"unknown parameters for {action}: {unknown}")
+            previews = self.release_ops.get_preview_commands()
             cmd = previews["restart_dashboard"]
             return self._start_ops_job(
                 "restart_dashboard",
@@ -5014,8 +5020,10 @@ function renderReleaseOps(){
 
   const checklist = releaseData.restart_checklist || [];
   const checklistRows = checklist.map(c => `<tr><td><b>${esc(c.host)}</b></td><td>${c.needs_restart ? '<span class="status fail">RESTART NEEDED</span>' : '<span class="status pass">OK</span>'}</td><td>${esc(c.reason)}</td><td>${esc((c.running_pids||[]).join(', ')||'—')}</td></tr>`).join('');
+  const commands = releaseData.commands || {};
+  const opsButton = (action,label,key,cls='') => { const command=commands[key]; return `<button type="button" class="${cls}" data-ops-action="${action}" ${command?`data-cmd="${esc(command)}"`:'disabled title="Required trusted configuration is unavailable"'}>${label}</button>` };
 
-  return `<section class="card pool" id="release-ops-card"><div class="section-title"><h3>Release & Operations</h3><span class="status">${esc(v.product ? 'Product ' + v.product : 'Release')}</span></div><div class="ops-grid-2"><div><h4>Release card</h4><p class="meta">Latest tag: <b>${esc(tag)}</b> · GitHub Release: ${ghBadge}</p><p class="meta">CI: main ${ciMain} · tag ${ciTag}</p><p class="meta">Central: live <b>${esc(cv.live_version||'unreachable')}</b> · staged <b>${esc(cv.staged_version||'none')}</b> · ${cvBadge}</p><div class="table-scroll" style="margin-top:8px"><table><thead><tr><th>Package</th><th>Version</th><th>PyPI</th></tr></thead><tbody>${pkgRows||'<tr><td colspan="3" class="empty">No packages</td></tr>'}</tbody></table></div></div><div><h4>Operations</h4><p class="muted">Guarded loopback operator actions with explicit confirmation.</p><div class="ops-button-group"><button type="button" class="approve" data-ops-action="publish" data-cmd="gh workflow run publish-pypi.yml --ref ${esc(tag)}">Publish from tag</button><button type="button" data-ops-action="stage" data-cmd="Preflight hash check &amp; pip install --no-deps CENTRAL_WHEEL">Stage Central</button><button type="button" data-ops-action="kickstart" data-cmd="launchctl kickstart -k gui/UID/com.onboard.central">Kickstart Central</button><button type="button" data-ops-action="restart-dash" data-cmd="launchctl kickstart -k gui/UID/com.pursers.fleet-dashboard">Restart dashboard</button></div><pre class="ops-output" id="ops-output">Ready.</pre></div></div><div style="margin-top:16px"><h4>Seat restart checklist</h4><p class="muted">Hosts running bridge processes older than the installed shim version requiring restart.</p><div class="table-scroll"><table><thead><tr><th>Host</th><th>Restart status</th><th>Reason</th><th>Running PIDs</th></tr></thead><tbody>${checklistRows||'<tr><td colspan="4" class="empty">No seats configured.</td></tr>'}</tbody></table></div></div></section>`;
+  return `<section class="card pool" id="release-ops-card"><div class="section-title"><h3>Release & Operations</h3><span class="status">${esc(v.product ? 'Product ' + v.product : 'Release')}</span></div><div class="ops-grid-2"><div><h4>Release card</h4><p class="meta">Latest tag: <b>${esc(tag)}</b> · GitHub Release: ${ghBadge}</p><p class="meta">CI: main ${ciMain} · tag ${ciTag}</p><p class="meta">Central: live <b>${esc(cv.live_version||'unreachable')}</b> · staged <b>${esc(cv.staged_version||'none')}</b> · ${cvBadge}</p><div class="table-scroll" style="margin-top:8px"><table><thead><tr><th>Package</th><th>Version</th><th>PyPI</th></tr></thead><tbody>${pkgRows||'<tr><td colspan="3" class="empty">No packages</td></tr>'}</tbody></table></div></div><div><h4>Operations</h4><p class="muted">Guarded loopback operator actions with explicit confirmation.</p><div class="ops-button-group">${opsButton('publish','Publish from tag','publish_from_tag','approve')}${opsButton('stage','Stage Central','stage_central')}${opsButton('kickstart','Kickstart Central','kickstart_central')}${opsButton('restart-dash','Restart dashboard','restart_dashboard')}</div><pre class="ops-output" id="ops-output">Ready.</pre></div></div><div style="margin-top:16px"><h4>Seat restart checklist</h4><p class="muted">Hosts running bridge processes older than the installed shim version requiring restart.</p><div class="table-scroll"><table><thead><tr><th>Host</th><th>Restart status</th><th>Reason</th><th>Running PIDs</th></tr></thead><tbody>${checklistRows||'<tr><td colspan="4" class="empty">No seats configured.</td></tr>'}</tbody></table></div></div></section>`;
 }
 seatPayload=function(form){const f=new FormData(form);return{host:f.get('host'),role:f.get('role'),name:f.get('name'),central_url:f.get('central_url'),home_board:f.get('home_board'),token_file:f.get('token_file'),ca_file:f.get('ca_file'),bridge_command:f.get('bridge_command'),config_path:f.get('config_path'),seat_dir:f.get('seat_dir')||null,repository:f.get('repository')||null,tier_max:Number(f.get('tier_max')),skills:String(f.get('skills')||'').split(',').map(x=>x.trim()).filter(Boolean),can_review:f.get('can_review')==='on',can_work:f.get('can_work')==='on',model:f.get('model')||null,provider:f.get('provider')||null}}
 seatForm=function(record={}){const role=record.role||'worker',tier=record.tier_max||2,review=record.can_review??(role==='reviewer'),work=record.can_work??(role==='worker');return `<form id="seat-wizard" class="seat-form"><label>Host<select name="host">${['codex','codex-cli','goose','claude-code','claude-desktop','headless'].map(x=>`<option ${record.host===x?'selected':''}>${esc(x)}</option>`).join('')}</select></label><label>Role<select name="role"><option ${role==='worker'?'selected':''}>worker</option><option ${role==='reviewer'?'selected':''}>reviewer</option><option ${role==='orchestrator'?'selected':''}>orchestrator</option><option ${role==='coordinator'?'selected':''}>coordinator</option></select></label><label>Name<input name="name" value="${esc(record.name||'')}" pattern="[A-Za-z0-9][A-Za-z0-9._-]{0,79}" required></label><label>Home board<input name="home_board" value="${esc(record.home_board||'pursers')}" required></label><label>Tier max<select name="tier_max">${[1,2,3].map(x=>`<option value="${x}" ${tier===x?'selected':''}>${x}</option>`).join('')}</select></label><label>Skills · comma separated<input name="skills" value="${esc((record.skills||[]).join(','))}" placeholder="git,browser"></label><label><span>Review work</span><input name="can_review" type="checkbox" ${review?'checked':''}></label><label><span>Execute work</span><input name="can_work" type="checkbox" ${work?'checked':''}></label><label>Model<input name="model" value="${esc(record.model||'')}" maxlength="200"></label><label>Provider<input name="provider" value="${esc(record.provider||'')}" maxlength="200"></label><button type="button" data-seat-suggest>Suggest skills from connectors</button><span id="seat-suggestions" class="meta"></span><label class="wide">Central URL<input name="central_url" type="url" value="${esc(record.central_url||'https://127.0.0.1:8766/mcp')}" required></label><label class="wide">Token file path · token never enters this page<input name="token_file" value="${esc(record.token_file||'')}" required></label><label class="wide">CA file path<input name="ca_file" value="${esc(record.ca_file||'')}" required></label><label class="wide">Bridge command<input name="bridge_command" value="${esc(record.bridge_command||seatBridge.command||'pursers-wait-bridge')}" required></label><label class="wide">Host config path<input name="config_path" value="${esc(record.config_path||'')}" required></label><label>Seat directory (Goose)<input name="seat_dir" value="${esc(record.seat_dir||'')}"></label><label>Repository (optional)<input name="repository" value="${esc(record.repository||'')}"></label><button class="primary-action wide" type="submit">Preview exact changes</button><p id="seat-form-status" class="muted wide">Capabilities are generated in every host's managed environment block. Runtime consumption requires Dispatch Part 2, which is not yet merged.</p></form>`}

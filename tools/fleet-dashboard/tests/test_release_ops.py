@@ -181,9 +181,7 @@ def test_release_card_status_and_pypi_checks(tmp_path: Path) -> None:
     assert "commands" in status
     assert "publish_from_tag" in status["commands"]
     assert "stage_central" in status["commands"]
-    # Verify no placeholders in preview command
-    assert "<wheel>" not in status["commands"]["stage_central"]
-    assert "<version>" not in status["commands"]["stage_central"]
+    assert status["commands"]["stage_central"] is None
 
 
 def test_restart_checklist_flags_older_bridge_processes(tmp_path: Path) -> None:
@@ -301,14 +299,26 @@ def test_stage_central_transaction_wheel_copy_pin_update_and_mode_preservation(t
         root=tmp_path,
         manifest_path=manifest,
         component_lock_path=component_lock,
+        staging_root=tmp_path,
         profile_env_path=profile,
         central_venv_python=python,
         runner=mock_runner,
         state_dir=tmp_path,
     )
 
+    preview = ops.get_preview_commands()["stage_central"]
+    assert isinstance(preview, str)
+    assert str(source_wheel) in preview
+    assert str(tmp_path / "wheels" / source_wheel.name) in preview
+    assert str(profile) in preview
+    assert str(python) in preview
+    assert expected_sha in preview
+    assert "mode=0600" in preview
+    assert "/path/to" not in preview
+    assert "<wheel>" not in preview
+
     logs: list[str] = []
-    result = ops.stage_central(wheel_path=source_wheel, log_callback=logs.append)
+    result = ops.stage_central(log_callback=logs.append)
     assert result["ok"] is True
     assert result["sha256"] == expected_sha
 
@@ -319,12 +329,21 @@ def test_stage_central_transaction_wheel_copy_pin_update_and_mode_preservation(t
 
     # Verify profile.env pins were updated and mode 0600 preserved
     assert profile.stat().st_mode & 0o777 == 0o600
+    assert profile.stat().st_uid == os.getuid()
+    assert profile.stat().st_gid == os.getgid()
     updated_profile = profile.read_text(encoding="utf-8")
     assert f"CENTRAL_WHEEL={dest_wheel}" in updated_profile
     assert f"CENTRAL_WHEEL_SHA256={expected_sha}" in updated_profile
 
     # Verify pip install --no-deps was called with destination wheel
-    assert pip_calls[0] == [str(python), "-m", "pip", "install", "--no-deps", str(dest_wheel)]
+    assert pip_calls[-1] == [str(python), "-m", "pip", "install", "--no-deps", str(dest_wheel)]
+
+    # Callers cannot redirect Stage to an arbitrary path, even with an exact name.
+    arbitrary = tmp_path / "outside" / source_wheel.name
+    arbitrary.parent.mkdir()
+    arbitrary.write_bytes(wheel_content)
+    with pytest.raises(TypeError, match="wheel_path"):
+        ops.stage_central(wheel_path=arbitrary)  # type: ignore[call-arg]
 
 
 def test_stage_central_refuses_mismatched_wheel_and_hash_mismatch(tmp_path: Path) -> None:
@@ -358,23 +377,24 @@ def test_stage_central_refuses_mismatched_wheel_and_hash_mismatch(tmp_path: Path
         root=tmp_path,
         manifest_path=manifest,
         component_lock_path=component_lock,
+        staging_root=tmp_path,
         profile_env_path=profile,
         central_venv_python=python,
         state_dir=tmp_path,
     )
 
-    # 1. Refuse mismatched version wheel
+    # 1. Refuse mismatched version wheel: no exact manifest artifact resolves.
     wrong_ver = tmp_path / "pursers_central-0.1.0a24-py3-none-any.whl"
     wrong_ver.write_bytes(b"content")
-    with pytest.raises(ValueError, match="does not match exact manifest version"):
-        ops.stage_central(wheel_path=wrong_ver)
+    with pytest.raises(RuntimeError, match="Could not find exact wheel"):
+        ops.stage_central()
     assert profile.read_text(encoding="utf-8") == original_profile
 
     # 2. Refuse hash mismatch before mutation
     correct_name = tmp_path / "pursers_central-0.1.0a25-py3-none-any.whl"
     correct_name.write_bytes(b"bad-content")
     with pytest.raises(ValueError, match="Preflight digest mismatch"):
-        ops.stage_central(wheel_path=correct_name)
+        ops.stage_central()
     assert profile.read_text(encoding="utf-8") == original_profile
     assert not (tmp_path / "wheels" / correct_name.name).exists()
 
@@ -418,6 +438,7 @@ def test_stage_central_rollback_on_pip_install_failure(tmp_path: Path) -> None:
         root=tmp_path,
         manifest_path=manifest,
         component_lock_path=component_lock,
+        staging_root=tmp_path,
         profile_env_path=profile,
         central_venv_python=python,
         runner=mock_failing_runner,
@@ -425,7 +446,7 @@ def test_stage_central_rollback_on_pip_install_failure(tmp_path: Path) -> None:
     )
 
     with pytest.raises(RuntimeError, match="Pip install failed"):
-        ops.stage_central(wheel_path=source_wheel)
+        ops.stage_central()
 
     # Assert profile.env rolled back to original content and mode 0600
     assert profile.read_text(encoding="utf-8") == original_profile

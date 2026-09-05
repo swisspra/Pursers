@@ -5586,6 +5586,12 @@ def test_seat_config_manager_ops_action_parameter_rejections_and_jobs(tmp_path: 
     with pytest.raises(ValueError, match="unknown parameters for stage_central"):
         manager.ops_action("stage_central", venv_python="/bin/sh")
 
+    with pytest.raises(ValueError, match="unknown parameters for stage_central"):
+        manager.ops_action(
+            "stage_central",
+            wheel_path="/tmp/pursers_central-0.1.0a24-py3-none-any.whl",
+        )
+
     with pytest.raises(ValueError, match="unknown parameters for kickstart_central"):
         manager.ops_action("kickstart_central", job_label="com.evil.service")
 

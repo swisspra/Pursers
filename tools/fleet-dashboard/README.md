@@ -41,7 +41,12 @@ without shell commands or credential exposure:
   bridge shim version was updated, flagging hosts requiring an app restart.
 - **Operator operations**:
   - `Publish from tag`: runs `gh workflow run publish-pypi.yml --ref <tag>`
-  - `Stage Central`: performs preflight hash verification and installs the wheel `--no-deps`
+  - `Stage Central`: resolves only the exact manifest version from the trusted
+    staging root, verifies its independent build-metadata digest before mutation,
+    preserves `profile.env` mode and ownership during a durable atomic pin update,
+    installs the staged wheel `--no-deps`, and rolls back pins/artifacts on failure.
+    Request-supplied wheel paths are rejected, and the button stays disabled until
+    the wheel, digest, profile, and interpreter form a concrete confirmation plan.
   - `Kickstart Central`: restarts the Central service via `launchctl kickstart -k`
   - `Restart dashboard`: restarts the fleet dashboard launchd service
 - **Safety model**:

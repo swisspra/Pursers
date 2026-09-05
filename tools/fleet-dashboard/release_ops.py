@@ -16,8 +16,8 @@ import logging
 import os
 import re
 import shlex
-import shutil
 import ssl
+import stat
 import subprocess
 import time
 import urllib.error
@@ -281,7 +281,7 @@ class ReleaseOpsManager:
                 comp = data.get("components", {}).get("pursers-central", {})
                 if comp.get("version") == central_version:
                     sha = comp.get("wheel_sha256")
-                    if isinstance(sha, str) and len(sha) == 64:
+                    if isinstance(sha, str) and re.fullmatch(r"[0-9a-f]{64}", sha):
                         return sha
             except Exception as exc:
                 LOGGER.debug("failed reading component-lock.json: %s", exc)
@@ -290,14 +290,107 @@ class ReleaseOpsManager:
     def resolve_staging_central_wheel(self, central_version: str) -> Path:
         """Resolve ONLY the exact manifest Central version from an explicitly trusted/configured staging root."""
         expected_wheel_name = f"pursers_central-{central_version}-py3-none-any.whl"
-        candidate_dirs = [self.staging_root, self.root / "dist"]
-        for cdir in candidate_dirs:
-            if cdir.is_dir():
-                target = cdir / expected_wheel_name
-                if target.is_file():
-                    return target
+        trusted_root = self.staging_root.resolve()
+        target = (trusted_root / expected_wheel_name).resolve()
+        if target.parent == trusted_root and target.is_file():
+            return target
         raise RuntimeError(
-            f"Could not find exact wheel '{expected_wheel_name}' in trusted staging root {self.staging_root}"
+            f"Could not find exact wheel '{expected_wheel_name}' in trusted staging root {trusted_root}"
+        )
+
+    @staticmethod
+    def _fsync_directory(path: Path) -> None:
+        descriptor = os.open(path, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+    @classmethod
+    def _atomic_replace_bytes(
+        cls,
+        path: Path,
+        content: bytes,
+        *,
+        mode: int,
+        uid: int,
+        gid: int,
+    ) -> None:
+        """Durably replace a file while preserving its security metadata."""
+        temporary = path.with_name(f".{path.name}.tmp.{time.time_ns()}")
+        descriptor = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            mode,
+        )
+        try:
+            os.fchmod(descriptor, mode)
+            os.fchown(descriptor, uid, gid)
+            with os.fdopen(descriptor, "wb", closefd=False) as stream:
+                stream.write(content)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.close(descriptor)
+            descriptor = -1
+            os.replace(temporary, path)
+            cls._fsync_directory(path.parent)
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+            if temporary.exists():
+                temporary.unlink()
+
+    def _resolve_stage_plan(self) -> dict[str, Any]:
+        """Resolve every concrete Stage input before confirmation or mutation."""
+        profile = self.profile_env_path
+        python = self.central_venv_python
+        if not profile or not profile.is_file():
+            raise RuntimeError(f"Configured profile.env not found at {profile}")
+        if not python or not python.is_file():
+            raise RuntimeError(f"Configured Central venv python not found at {python}")
+
+        manifest = self.load_manifest_versions()
+        central_version = manifest.get("packages", {}).get("central")
+        if not isinstance(central_version, str) or not central_version:
+            raise RuntimeError("release_versions.toml missing [packages].central version")
+        source_wheel = self.resolve_staging_central_wheel(central_version)
+        expected_sha = self.get_trusted_central_sha(central_version)
+        if not expected_sha:
+            raise RuntimeError(
+                "Trusted build metadata (component-lock.json) missing valid "
+                f"wheel_sha256 for pursers-central {central_version}"
+            )
+        computed_sha = hashlib.sha256(source_wheel.read_bytes()).hexdigest()
+        if computed_sha != expected_sha:
+            raise ValueError(
+                f"Preflight digest mismatch for {source_wheel.name}: "
+                f"candidate={computed_sha} != trusted={expected_sha}"
+            )
+
+        destination = profile.parent / "wheels" / source_wheel.name
+        profile_stat = profile.stat()
+        return {
+            "central_version": central_version,
+            "source_wheel": source_wheel,
+            "destination_wheel": destination,
+            "expected_sha": expected_sha,
+            "profile": profile,
+            "profile_mode": stat.S_IMODE(profile_stat.st_mode),
+            "profile_uid": profile_stat.st_uid,
+            "profile_gid": profile_stat.st_gid,
+            "python": python,
+        }
+
+    @staticmethod
+    def _format_stage_plan(plan: dict[str, Any]) -> str:
+        return (
+            f"copy {shlex.quote(str(plan['source_wheel']))} -> "
+            f"{shlex.quote(str(plan['destination_wheel']))}; "
+            f"verify sha256={plan['expected_sha']}; atomically update "
+            f"{shlex.quote(str(plan['profile']))} preserving "
+            f"mode={plan['profile_mode']:04o} uid={plan['profile_uid']} gid={plan['profile_gid']}; "
+            f"{shlex.quote(str(plan['python']))} -m pip install --no-deps "
+            f"{shlex.quote(str(plan['destination_wheel']))}"
         )
 
     def get_origin_tags(self) -> list[str]:
@@ -677,40 +770,24 @@ class ReleaseOpsManager:
 
         return checklist
 
-    def get_preview_commands(self, tag: str | None = None) -> dict[str, str]:
-        """Generate concrete preview commands without placeholders."""
-        latest_tag = tag or self.get_latest_tag() or "none"
+    def get_preview_commands(self, tag: str | None = None) -> dict[str, str | None]:
+        """Generate previews only when every action input resolves concretely."""
+        latest_tag = tag or self.get_latest_tag()
         uid = os.getuid() if hasattr(os, "getuid") else 501
-        profile = self.profile_env_path
-        python = self.central_venv_python
-        manifest = self.load_manifest_versions()
-        central_version = manifest.get("packages", {}).get("central", "0.0.0")
-
-        # Resolve exact source and destination wheel
         try:
-            source_wheel = self.resolve_staging_central_wheel(central_version)
-            source_wheel_str = str(source_wheel)
+            stage_preview: str | None = self._format_stage_plan(
+                self._resolve_stage_plan()
+            )
         except Exception:
-            source_wheel_str = str(self.staging_root / f"pursers_central-{central_version}-py3-none-any.whl")
-
-        if profile:
-            dest_wheel_str = str(profile.parent / "wheels" / f"pursers_central-{central_version}-py3-none-any.whl")
-            profile_str = str(profile)
-        else:
-            dest_wheel_str = f"/path/to/wheels/pursers_central-{central_version}-py3-none-any.whl"
-            profile_str = "/path/to/profile.env"
-
-        python_str = str(python) if python else "/path/to/venv/bin/python"
-        expected_sha = self.get_trusted_central_sha(central_version) or "trusted-sha256"
+            stage_preview = None
 
         return {
-            "publish_from_tag": f"gh workflow run {PUBLISH_WORKFLOW_FILE} --ref {shlex.quote(latest_tag)}",
-            "stage_central": (
-                f"cp {shlex.quote(source_wheel_str)} {shlex.quote(dest_wheel_str)} && "
-                f'test "$(shasum -a 256 {shlex.quote(dest_wheel_str)} | cut -d\' \' -f1)" = "{expected_sha}" && '
-                f"atomically update {shlex.quote(profile_str)} (mode 0600) && "
-                f"{shlex.quote(python_str)} -m pip install --no-deps {shlex.quote(dest_wheel_str)}"
+            "publish_from_tag": (
+                f"gh workflow run {PUBLISH_WORKFLOW_FILE} --ref {shlex.quote(latest_tag)}"
+                if latest_tag
+                else None
             ),
+            "stage_central": stage_preview,
             "kickstart_central": f"launchctl kickstart -k gui/{uid}/{self.central_job_label}",
             "restart_dashboard": f"launchctl kickstart -k gui/{uid}/{self.dashboard_job_label}",
         }
@@ -785,7 +862,6 @@ class ReleaseOpsManager:
     def stage_central(
         self,
         *,
-        wheel_path: str | Path | None = None,
         log_callback: Callable[[str], None] | None = None,
     ) -> dict[str, Any]:
         """Full fail-closed Stage Central transaction: copy wheel, verify SHA-256 against trusted build metadata, atomically update profile.env pins with 0600 preservation, pip install --no-deps, rollback on failure."""
@@ -793,85 +869,56 @@ class ReleaseOpsManager:
             if log_callback:
                 log_callback(msg)
 
-        profile = self.profile_env_path
-        python = self.central_venv_python
-
-        if not profile or not profile.is_file():
-            raise RuntimeError(f"Configured profile.env not found at {profile}")
-        if not python or not python.is_file():
-            raise RuntimeError(f"Configured Central venv python not found at {python}")
-
-        # Get exact manifest Central version
-        manifest = self.load_manifest_versions()
-        central_version = manifest.get("packages", {}).get("central")
-        if not central_version:
-            raise RuntimeError("release_versions.toml missing [packages].central version")
-
-        # Resolve trusted wheel digest from component-lock.json
-        expected_sha = self.get_trusted_central_sha(central_version)
-        if not expected_sha:
-            raise RuntimeError(
-                f"Trusted build metadata (component-lock.json) missing valid wheel_sha256 for pursers-central {central_version}"
-            )
+        plan = self._resolve_stage_plan()
+        profile = plan["profile"]
+        python = plan["python"]
+        central_version = plan["central_version"]
+        expected_sha = plan["expected_sha"]
+        source_wheel = plan["source_wheel"]
+        dest_wheel = plan["destination_wheel"]
 
         emit(f"Step 1: Manifest central version: {central_version}")
         emit(f"Step 1: Trusted expected SHA-256 from build metadata: {expected_sha}")
-
-        # Resolve exact wheel from trusted staging root (reject arbitrary paths or mismatched versions)
-        if wheel_path:
-            specified = Path(wheel_path).resolve()
-            expected_name = f"pursers_central-{central_version}-py3-none-any.whl"
-            if specified.name != expected_name:
-                raise ValueError(
-                    f"Rejected wheel {specified.name}: does not match exact manifest version {central_version}"
-                )
-            if not specified.is_file():
-                raise FileNotFoundError(f"Specified wheel not found: {specified}")
-            source_wheel = specified
-        else:
-            source_wheel = self.resolve_staging_central_wheel(central_version)
-
         emit(f"Step 2: Resolved trusted source wheel: {source_wheel}")
-
-        # Preflight hash check on source wheel BEFORE mutating anything
-        source_bytes = source_wheel.read_bytes()
-        computed_sha = hashlib.sha256(source_bytes).hexdigest()
-        if computed_sha != expected_sha:
-            emit(f"FATAL: Source wheel SHA-256 mismatch! Found: {computed_sha}, expected: {expected_sha}")
-            raise ValueError(
-                f"Preflight digest mismatch for {source_wheel.name}: candidate={computed_sha} != trusted={expected_sha}"
-            )
-        emit(f"Step 2: Preflight SHA-256 verified successfully against trusted build metadata.")
-
-        # Staging destination
-        staging_dir = profile.parent / "wheels"
-        staging_dir.mkdir(parents=True, exist_ok=True)
-        dest_wheel = staging_dir / source_wheel.name
+        emit("Step 2: Preflight SHA-256 verified successfully against trusted build metadata.")
 
         # Prepare for transaction and rollback
-        profile_backup = profile.read_text(encoding="utf-8")
+        profile_backup = profile.read_bytes()
         dest_wheel_backup: bytes | None = dest_wheel.read_bytes() if dest_wheel.is_file() else None
-        original_mode = profile.stat().st_mode & 0o777
+        destination_stat = dest_wheel.stat() if dest_wheel.is_file() else None
+        original_mode = plan["profile_mode"]
+        original_uid = plan["profile_uid"]
+        original_gid = plan["profile_gid"]
+        destination_mode = (
+            stat.S_IMODE(destination_stat.st_mode) if destination_stat else 0o600
+        )
+        destination_uid = destination_stat.st_uid if destination_stat else original_uid
+        destination_gid = destination_stat.st_gid if destination_stat else original_gid
+        dest_wheel.parent.mkdir(parents=True, exist_ok=True)
 
         try:
-            # Copy wheel to staging location
+            # Copy and verify to a temporary file, then durably install it.
             emit(f"Step 3: Copying wheel to staging location {dest_wheel}")
-            shutil.copy2(source_wheel, dest_wheel)
-
-            # Preflight verify copied destination wheel
-            dest_bytes = dest_wheel.read_bytes()
+            dest_bytes = source_wheel.read_bytes()
             dest_sha = hashlib.sha256(dest_bytes).hexdigest()
             if dest_sha != expected_sha:
                 raise RuntimeError(
                     f"Destination wheel hash mismatch after copy: {dest_sha} != {expected_sha}"
                 )
+            self._atomic_replace_bytes(
+                dest_wheel,
+                dest_bytes,
+                mode=destination_mode,
+                uid=destination_uid,
+                gid=destination_gid,
+            )
 
-            # Atomically update profile.env pins while strictly preserving 0600 mode
+            # Atomically update profile.env pins while preserving mode and ownership.
             emit("Step 4: Atomically updating profile.env pins with permission preservation")
             new_lines = []
             wheel_set = False
             sha_set = False
-            for line in profile_backup.splitlines():
+            for line in profile_backup.decode("utf-8").splitlines():
                 if line.startswith("CENTRAL_WHEEL="):
                     new_lines.append(f"CENTRAL_WHEEL={shlex.quote(str(dest_wheel))}")
                     wheel_set = True
@@ -885,13 +932,13 @@ class ReleaseOpsManager:
             if not sha_set:
                 new_lines.append(f"CENTRAL_WHEEL_SHA256={shlex.quote(dest_sha)}")
 
-            temp_profile = profile.with_suffix(f".tmp.{time.time_ns()}")
-            descriptor = os.open(temp_profile, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, original_mode)
-            with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-                stream.write("\n".join(new_lines) + "\n")
-            os.replace(temp_profile, profile)
-            # Guarantee mode is preserved
-            os.chmod(profile, original_mode)
+            self._atomic_replace_bytes(
+                profile,
+                ("\n".join(new_lines) + "\n").encode("utf-8"),
+                mode=original_mode,
+                uid=original_uid,
+                gid=original_gid,
+            )
 
             # Install copied wheel into Central venv with --no-deps
             emit(f"Step 5: Installing {dest_wheel.name} into Central venv with --no-deps")
@@ -921,12 +968,13 @@ class ReleaseOpsManager:
             emit("Rolling back profile.env and staged wheel...")
             # Roll back profile.env
             try:
-                temp_restore = profile.with_suffix(f".rollback.{time.time_ns()}")
-                desc = os.open(temp_restore, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, original_mode)
-                with os.fdopen(desc, "w", encoding="utf-8") as stream:
-                    stream.write(profile_backup)
-                os.replace(temp_restore, profile)
-                os.chmod(profile, original_mode)
+                self._atomic_replace_bytes(
+                    profile,
+                    profile_backup,
+                    mode=original_mode,
+                    uid=original_uid,
+                    gid=original_gid,
+                )
             except Exception as rb_exc:
                 LOGGER.error("Failed rolling back profile.env: %s", rb_exc)
 
@@ -935,8 +983,15 @@ class ReleaseOpsManager:
                 if dest_wheel_backup is None:
                     if dest_wheel.is_file():
                         dest_wheel.unlink()
+                        self._fsync_directory(dest_wheel.parent)
                 else:
-                    dest_wheel.write_bytes(dest_wheel_backup)
+                    self._atomic_replace_bytes(
+                        dest_wheel,
+                        dest_wheel_backup,
+                        mode=destination_mode,
+                        uid=destination_uid,
+                        gid=destination_gid,
+                    )
             except Exception as rb_exc:
                 LOGGER.error("Failed restoring dest wheel: %s", rb_exc)
 
