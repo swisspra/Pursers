@@ -381,10 +381,12 @@ file that contains a token.
 ## Worker loop
 
 Call `a2a_wait` with the last returned `new_seq`. On entry, it drains new
-journal events in pages and resolves ticket relevance from one bounded ticket
-projection per page, rather than refetching once per event. It also scans the
-currently open ticket projection, so work older
-than the cursor still wakes the worker. Backlog cues use
+journal events in pages and resolves ticket relevance with one bounded active
+ticket projection plus keyed batches only for IDs missing from a truncated
+projection. The bridge verifies Central's echoed `ticket_ids` filter before
+treating missing keyed results as authoritative, so older Centrals that ignore
+the filter cannot stall replay. It also scans the currently open ticket
+projection, so work older than the cursor still wakes the worker. Backlog cues use
 `source="backlog_scan"`, carry no fabricated journal sequence, and leave
 `new_seq` governed only by the real journal. An unchanged backlog ticket is
 surfaced once per bridge process and then suppressed until a journal change;
@@ -393,9 +395,13 @@ a bridge restart may surface it once again. `reason` reports `journal`,
 event per ticket and capped at 200 returned events; `compacted`, `dropped`, and
 `event_counts` describe that summary. Omitting `since_seq` starts from and
 advances Central's persisted cursor so a restart does not replay the same
-history. `partial=true` returns the cursor reached when catch-up consumes the
-call deadline. A cursor beyond the journal head is clamped and reported under
-`warnings` instead of failing. On `timed_out=true`, re-arm
+history. Persisted-cursor pages are acknowledged as they are fully received.
+Projection truncation, timeout, or failure therefore returns the processed
+cursor and emits candidate cues with `projection_state="unprojected"`, plus a
+`ticket_projection_unprojected` warning, instead of replaying the same page.
+`partial=true` identifies that bounded projection state or a catch-up deadline.
+A cursor beyond the journal head is clamped and reported under `warnings`
+instead of failing. On `timed_out=true`, re-arm
 immediately. Every event is a cue to refetch and claim current board state.
 The bridge renews held leases only while `a2a_wait` is blocking; long-running
 work must call Central's `lease_renew` directly.

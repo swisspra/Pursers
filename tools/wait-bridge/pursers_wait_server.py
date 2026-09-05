@@ -156,6 +156,7 @@ DEFAULT_CLAIM_TTL_S = 900
 MAX_LEASE_RENEW_INTERVAL_S = 300.0
 PROGRESS_INTERVAL_S = 300.0
 CATCHUP_PAGE_LIMIT = 500
+CATCHUP_PAGE_MAX_BYTES = 750_000
 REPLAY_EVENT_LIMIT = 200
 BACKLOG_SCAN_LIMIT = 100
 CLAIMABLE_RELEVANT_KINDS = frozenset(
@@ -2611,10 +2612,12 @@ async def _catchup_all(
     prefer_pure: bool = False,
     deadline: float | None = None,
 ) -> dict[str, Any]:
-    """Fully drain board_catchup pages from cursor. ack=False: this tool owns
-    since_seq/new_seq itself via the caller's explicit round trip rather than
-    the server's per-(principal,agent) cursor, so it never perturbs cursor
-    state any other tool on this identity may depend on.
+    """Fully drain board_catchup pages from cursor.
+
+    Explicit cursors use ``ack=False`` because the caller owns their round trip.
+    An omitted cursor uses Central's persisted cursor and acknowledges each
+    fully received page immediately. This guarantees durable forward progress
+    even when the later active-ticket projection is incomplete or times out.
 
     Returns events, cursor, resync, partial, and warning metadata. resynced=True means the journal
     was compacted past our cursor and we had to jump forward to the server's
@@ -2649,7 +2652,8 @@ async def _catchup_all(
         catchup_args: dict[str, Any] = {
             "limit": CATCHUP_PAGE_LIMIT,
             "max_events": CATCHUP_PAGE_LIMIT,
-            "ack": False,
+            "max_bytes": CATCHUP_PAGE_MAX_BYTES,
+            "ack": persisted_cursor,
         }
         if not persisted_cursor or pages_read:
             catchup_args["cursor"] = current_cursor
@@ -2673,6 +2677,7 @@ async def _catchup_all(
                     "cursor": 0,
                     "limit": 1,
                     "max_events": 1,
+                    "max_bytes": CATCHUP_PAGE_MAX_BYTES,
                     "ack": False,
                 }
                 if explicit_name:
@@ -2787,7 +2792,7 @@ async def _ticket_projection(
         return None, False, {"code": "ticket_projection_timeout"}
     arguments: dict[str, Any] = {
         "include_closed": False,
-        "limit": len(ticket_ids) if ticket_ids else CATCHUP_PAGE_LIMIT,
+        "limit": CATCHUP_PAGE_LIMIT,
     }
     if ticket_ids:
         arguments["ticket_ids"] = sorted(ticket_ids)
@@ -2804,17 +2809,37 @@ async def _ticket_projection(
             "code": "ticket_projection_failed",
             "detail": str(exc),
         }
-    tickets = list(listed.get("tickets", []))
+    raw_tickets = list(listed.get("tickets", []))
+    tickets = raw_tickets
+    keyed_filter_supported = True
+    if ticket_ids:
+        requested_ids = sorted(ticket_ids)
+        filters = listed.get("filters")
+        keyed_filter_supported = bool(
+            isinstance(filters, dict)
+            and filters.get("ticket_ids") == requested_ids
+        )
+        tickets = [
+            ticket for ticket in raw_tickets
+            if isinstance(ticket, dict) and ticket.get("ticket_id") in ticket_ids
+        ]
     try:
-        total = int(listed.get("total_matching", len(tickets)))
+        total = int(listed.get("total_matching", len(raw_tickets)))
     except (TypeError, ValueError):
-        total = len(tickets) + 1
-    complete = total <= len(tickets)
+        total = len(raw_tickets) + 1
+    complete = keyed_filter_supported and total <= len(raw_tickets)
     warning = None
-    if not complete:
+    if ticket_ids and not keyed_filter_supported:
+        warning = {
+            "code": "ticket_projection_key_filter_unavailable",
+            "returned": len(raw_tickets),
+            "requested": len(ticket_ids),
+            "total_matching": total,
+        }
+    elif not complete:
         warning = {
             "code": "ticket_projection_truncated",
-            "returned": len(tickets),
+            "returned": len(raw_tickets),
             "total_matching": total,
         }
     return tickets, complete, warning
@@ -2842,104 +2867,72 @@ async def _project_catchup_pages(
     caught: dict[str, Any],
     wait_for: str,
     deadline: float,
-) -> tuple[list[dict[str, Any]], int, dict[str, Any] | None]:
-    """Resolve each journal page with one keyed, deadline-bounded projection."""
-    tickets: list[dict[str, Any]] = []
-    resolved_pages = 0
-    for page in caught.get("pages", []):
-        candidate_ids = _page_candidate_ticket_ids(page, wait_for)
-        if candidate_ids:
-            projected, complete, warning = await _ticket_projection(
-                client,
-                wait_for,
-                deadline,
-                ticket_ids=candidate_ids,
-            )
-            if warning is not None or projected is None or not complete:
-                detail = dict(warning or {"code": "ticket_projection_incomplete"})
-                detail["cursor_before"] = int(page["cursor_before"])
-                return tickets, resolved_pages, detail
-            tickets.extend(projected)
-        resolved_pages += 1
-    return tickets, resolved_pages, None
+) -> tuple[list[dict[str, Any]], set[str], list[dict[str, Any]]]:
+    """Project all caught pages with one global scan plus bounded keyed gaps.
 
+    Older Central deployments may silently ignore ``ticket_ids``. The echoed
+    filter is therefore required before absence from a keyed result is treated
+    as authoritative. Any unresolved IDs are surfaced as unprojected events;
+    they never prevent the journal cursor from advancing.
+    """
+    candidate_ids = {
+        ticket_id
+        for page in caught.get("pages", [])
+        for ticket_id in _page_candidate_ticket_ids(page, wait_for)
+    }
+    if not candidate_ids:
+        return [], set(), []
 
-def _resolved_catchup_pages(
-    caught: dict[str, Any],
-    tickets: list[dict[str, Any]] | None,
-    projection_complete: bool,
-    wait_for: str,
-    *,
-    max_pages: int | None = None,
-) -> tuple[list[dict[str, Any]], int, list[dict[str, Any]]]:
-    """Keep only whole journal pages whose candidate ticket state is known."""
+    warnings: list[dict[str, Any]] = []
+    projected, complete, warning = await _ticket_projection(
+        client, wait_for, deadline
+    )
+    if warning is not None:
+        warnings.append(warning)
     tickets_by_id = {
         ticket["ticket_id"]: ticket
-        for ticket in tickets or []
-        if isinstance(ticket, dict) and isinstance(ticket.get("ticket_id"), str)
+        for ticket in projected or []
+        if isinstance(ticket, dict)
+        and isinstance(ticket.get("ticket_id"), str)
     }
-    safe_events: list[dict[str, Any]] = []
-    safe_pages: list[dict[str, Any]] = []
-    cursor = int(caught.get("base_cursor", 0))
-    pages = list(caught.get("pages", []))
-    if max_pages is not None:
-        pages = pages[:max_pages]
-    for page in pages:
-        candidates = _page_candidate_ticket_ids(page, wait_for)
-        if not projection_complete and not candidates.issubset(tickets_by_id):
+    if projected is None:
+        unresolved = set(candidate_ids)
+    elif complete:
+        unresolved = set()
+    else:
+        unresolved = candidate_ids - tickets_by_id.keys()
+
+    while projected is not None and unresolved:
+        requested = set(sorted(unresolved)[:CATCHUP_PAGE_LIMIT])
+        keyed, keyed_complete, keyed_warning = await _ticket_projection(
+            client, wait_for, deadline, ticket_ids=requested
+        )
+        if keyed_warning is not None:
+            warnings.append(keyed_warning)
+        if keyed is None:
             break
-        safe_events.extend(page["events"])
-        safe_pages.append(page)
-        cursor = int(page["cursor_after"])
-    return safe_events, cursor, safe_pages
+        returned_ids: set[str] = set()
+        for ticket in keyed:
+            ticket_id = ticket.get("ticket_id") if isinstance(ticket, dict) else None
+            if isinstance(ticket_id, str) and ticket_id in requested:
+                tickets_by_id[ticket_id] = ticket
+                returned_ids.add(ticket_id)
+        unresolved.difference_update(returned_ids)
+        if keyed_complete:
+            unresolved.difference_update(requested)
+        elif requested.issubset(returned_ids):
+            continue
+        else:
+            break
 
-
-async def _ack_catchup_pages(
-    client: BoardClient,
-    pages: list[dict[str, Any]],
-    agent_name: str,
-    explicit_name: bool,
-    deadline: float,
-) -> tuple[int | None, int, dict[str, Any] | None]:
-    """Acknowledge only pages already resolved against the ticket projection."""
-    if not pages:
-        return None, 0, None
-    acknowledged = int(pages[0]["cursor_before"])
-    count = 0
-    for page in pages:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            return acknowledged, count, {"code": "catchup_ack_timeout"}
-        arguments: dict[str, Any] = {
-            "cursor": int(page["cursor_before"]),
-            "limit": CATCHUP_PAGE_LIMIT,
-            "max_events": CATCHUP_PAGE_LIMIT,
-            "ack": True,
-        }
-        if explicit_name:
-            arguments["agent_name"] = agent_name
-        try:
-            result = await asyncio.wait_for(
-                client.board_catchup(**arguments), timeout=remaining
-            )
-        except TimeoutError:
-            return acknowledged, count, {"code": "catchup_ack_timeout"}
-        except Exception as exc:
-            return acknowledged, count, {
-                "code": "catchup_ack_failed",
-                "detail": str(exc),
+    if unresolved:
+        warnings.append(
+            {
+                "code": "ticket_projection_unprojected",
+                "count": len(unresolved),
             }
-        expected = int(page["cursor_after"])
-        actual = int(result["next_cursor"])
-        if actual != expected:
-            return acknowledged, count, {
-                "code": "catchup_ack_mismatch",
-                "expected_cursor": expected,
-                "actual_cursor": actual,
-            }
-        acknowledged = actual
-        count += 1
-    return acknowledged, count, None
+        )
+    return list(tickets_by_id.values()), unresolved, warnings
 
 
 def _normalize_wait_for(wait_for: str) -> str:
@@ -3188,6 +3181,7 @@ async def _filter_relevant(
     project: str | None,
     wait_for: str = WAIT_FOR_CLAIMABLE,
     tickets: list[dict[str, Any]] | None = None,
+    unprojected_ticket_ids: set[str] | None = None,
 ) -> list[dict]:
     candidates = [
         event for event in events
@@ -3200,8 +3194,12 @@ async def _filter_relevant(
         for ticket in tickets or []
         if isinstance(ticket, dict) and isinstance(ticket.get("ticket_id"), str)
     }
+    unprojected = unprojected_ticket_ids or set()
     out = []
     for ev in candidates:
+        if ev.get("ticket_id") in unprojected:
+            out.append({**ev, "projection_state": "unprojected"})
+            continue
         if await _is_relevant(
             client, ev, my_agent_id, only_mine, project, wait_for,
             tickets_by_id=tickets_by_id,
@@ -3796,58 +3794,30 @@ async def _wait_for_work_many(
             resynced[board_id] = True
         meta["warnings"].extend(caught["warnings"])
         active_tickets: list[dict[str, Any]] | None = None
-        projection_complete = False
         projection_warning: dict[str, Any] | None = None
-        resolved_page_count: int | None = None
+        unprojected_ticket_ids: set[str] = set()
         if caught["events"]:
             (
                 active_tickets,
-                resolved_page_count,
-                projection_warning,
+                unprojected_ticket_ids,
+                projection_warnings,
             ) = await _project_catchup_pages(
                 views[board_id], caught, wait_for_by_board[board_id], deadline
             )
-            projection_complete = True
-            if projection_warning is not None:
-                meta["warnings"].append(projection_warning)
+            meta["warnings"].extend(projection_warnings)
         elif backlog:
             (
                 active_tickets,
-                projection_complete,
+                _projection_complete,
                 projection_warning,
             ) = await _ticket_projection(
                 views[board_id], wait_for_by_board[board_id], deadline
             )
             if projection_warning is not None:
                 meta["warnings"].append(projection_warning)
-        events, safe_cursor, safe_pages = _resolved_catchup_pages(
-            caught,
-            active_tickets,
-            projection_complete,
-            wait_for_by_board[board_id],
-            max_pages=resolved_page_count,
-        )
-        projection_partial = len(safe_pages) < len(caught["pages"])
-        if caught["persisted_cursor"] and safe_pages:
-            acknowledged, acked_pages, ack_warning = await _ack_catchup_pages(
-                views[board_id],
-                safe_pages,
-                call_agent_name,
-                True,
-                deadline,
-            )
-            if ack_warning is not None:
-                meta["warnings"].append(ack_warning)
-                safe_pages = safe_pages[:acked_pages]
-                events = [
-                    event for page in safe_pages for event in page["events"]
-                ]
-                safe_cursor = (
-                    int(acknowledged)
-                    if acknowledged is not None
-                    else int(caught["base_cursor"])
-                )
-                projection_partial = True
+        events = list(caught["events"])
+        safe_cursor = int(caught["cursor"])
+        projection_partial = bool(unprojected_ticket_ids)
         cursors[board_id] = safe_cursor
         meta["partial"] = bool(
             caught["partial"]
@@ -3863,6 +3833,7 @@ async def _wait_for_work_many(
             proj,
             wait_for_by_board[board_id],
             tickets=active_tickets,
+            unprojected_ticket_ids=unprojected_ticket_ids,
         )
         if events and (len(events) > REPLAY_EVENT_LIMIT or implicit_cursor):
             compacted = _compact_events(relevant)
@@ -4180,56 +4151,28 @@ async def _wait_for_work(
             resynced = True
         catchup_meta["warnings"].extend(caught["warnings"])
         last_active_tickets = None
-        projection_complete = False
         projection_warning: dict[str, Any] | None = None
-        resolved_page_count: int | None = None
+        unprojected_ticket_ids: set[str] = set()
         if caught["events"]:
             (
                 last_active_tickets,
-                resolved_page_count,
-                projection_warning,
+                unprojected_ticket_ids,
+                projection_warnings,
             ) = await _project_catchup_pages(
                 client, caught, selected_wait_for, deadline
             )
-            projection_complete = True
-            if projection_warning is not None:
-                catchup_meta["warnings"].append(projection_warning)
+            catchup_meta["warnings"].extend(projection_warnings)
         elif scan_backlog:
             (
                 last_active_tickets,
-                projection_complete,
+                _projection_complete,
                 projection_warning,
             ) = await _ticket_projection(client, selected_wait_for, deadline)
             if projection_warning is not None:
                 catchup_meta["warnings"].append(projection_warning)
-        events, safe_cursor, safe_pages = _resolved_catchup_pages(
-            caught,
-            last_active_tickets,
-            projection_complete,
-            selected_wait_for,
-            max_pages=resolved_page_count,
-        )
-        projection_partial = len(safe_pages) < len(caught["pages"])
-        if caught["persisted_cursor"] and safe_pages:
-            acknowledged, acked_pages, ack_warning = await _ack_catchup_pages(
-                client,
-                safe_pages,
-                call_agent_name,
-                explicit_name,
-                deadline,
-            )
-            if ack_warning is not None:
-                catchup_meta["warnings"].append(ack_warning)
-                safe_pages = safe_pages[:acked_pages]
-                events = [
-                    event for page in safe_pages for event in page["events"]
-                ]
-                safe_cursor = (
-                    int(acknowledged)
-                    if acknowledged is not None
-                    else int(caught["base_cursor"])
-                )
-                projection_partial = True
+        events = list(caught["events"])
+        safe_cursor = int(caught["cursor"])
+        projection_partial = bool(unprojected_ticket_ids)
         cursor = safe_cursor
         catchup_meta["partial"] = bool(
             caught["partial"]
@@ -4245,6 +4188,7 @@ async def _wait_for_work(
             proj,
             selected_wait_for,
             tickets=last_active_tickets,
+            unprojected_ticket_ids=unprojected_ticket_ids,
         )
         if events and (len(events) > REPLAY_EVENT_LIMIT or implicit_cursor):
             compacted = _compact_events(relevant)
