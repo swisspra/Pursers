@@ -18,6 +18,29 @@ polled by the browser once per second. Config POSTs are loopback-only and each
 plan/apply/doctor/install action is recorded in
 `~/.pursers/fleet-dashboard/config-actions.jsonl` without credentials.
 
+## Release & Operations panel
+
+The Config page integrates release status and guarded operational controls
+without shell commands or credential exposure:
+
+- **Release card**: telemetry from `release_versions.toml`, latest git/origin tags,
+  CI status for `main` and the tag commit (via `gh run list`), PyPI distribution
+  presence per package (JSON 200/404 via pypi.org), GitHub Release status,
+  and live Central version (`/healthz`) compared against staged `profile.env` pins.
+- **Seat restart checklist**: inspects running processes (`ps`) and wait-bridge
+  telemetry to detect bridge processes or hosts started before the installed
+  bridge shim version was updated, flagging hosts requiring an app restart.
+- **Operator operations**:
+  - `Publish from tag`: runs `gh workflow run publish-pypi.yml --ref <tag>`
+  - `Stage Central`: performs preflight hash verification and installs the wheel `--no-deps`
+  - `Kickstart Central`: restarts the Central service via `launchctl kickstart -k`
+  - `Restart dashboard`: restarts the fleet dashboard launchd service
+- **Safety model**:
+  - All operations require loopback requests with same-origin validation and JSON payloads.
+  - Interactive actions require explicit browser confirmation showing the exact command.
+  - Every action appends an unprivileged audit record to `config-actions.jsonl` and the dashboard logger.
+  - Sensitive tokens and authorization values are never requested, stored, or logged.
+
 ### Manual-edit appendix
 
 Direct editing remains available for recovery and headless use. Back up the

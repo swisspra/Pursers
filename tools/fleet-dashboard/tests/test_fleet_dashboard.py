@@ -3525,6 +3525,14 @@ def test_config_api_and_ui_contract_are_separate_from_coordinator_config() -> No
             calls.append(("job", job_id))
             return {"job_id": job_id, "status": "succeeded", "result": {}}
 
+        def release_status(self) -> dict:
+            calls.append(("release_status", {}))
+            return {"latest_tag": "v5.0.0a20", "versions": {"product": "5.0.0a20"}}
+
+        def ops_action(self, action: str, **kwargs: Any) -> dict:
+            calls.append(("ops_action", action, kwargs))
+            return {"ok": True, "action": action, "command": f"cmd {action}"}
+
     server = dashboard.ThreadingHTTPServer(
         ("127.0.0.1", 0), dashboard.make_handler(Cache(), seat_manager=Seats())
     )
@@ -3561,12 +3569,15 @@ def test_config_api_and_ui_contract_are_separate_from_coordinator_config() -> No
             }
         with urllib.request.urlopen(base + "/api/config/registry") as response:
             assert json.load(response)["read_only"] is True
+        with urllib.request.urlopen(base + "/api/config/release") as response:
+            assert json.load(response)["latest_tag"] == "v5.0.0a20"
         assert post("/api/config/plan", {"name": "fixture"})["plan_id"] == "a" * 32
         assert post("/api/config/apply", {"plan_id": "a" * 32})["backup_path"]
         assert post("/api/config/prompt", {"name": "fixture"})["prompt"]
         assert post("/api/config/doctor", {"names": ["fixture"]})["status"] == "queued"
         assert post("/api/config/bridge/install", {})["job_id"] == "c" * 32
         assert post("/api/config/bridge/upgrade-all", {})["job_id"] == "d" * 32
+        assert post("/api/config/ops", {"action": "publish_from_tag", "tag": "v5.0.0a20"})["ok"] is True
         with urllib.request.urlopen(base + "/api/config/jobs/" + "b" * 32) as response:
             assert json.load(response)["status"] == "succeeded"
     finally:
@@ -3575,15 +3586,25 @@ def test_config_api_and_ui_contract_are_separate_from_coordinator_config() -> No
         thread.join()
 
     assert calls == [
+        ("release_status", {}),
         ("plan", {"name": "fixture"}),
         ("apply", "a" * 32),
         ("prompt", {"name": "fixture"}),
         ("doctor", ["fixture"]),
         ("install", {}),
         ("upgrade-all", {}),
+        ("ops_action", "publish_from_tag", {"tag": "v5.0.0a20"}),
         ("job", "b" * 32),
     ]
     assert 'href="#/seats"' in dashboard.HTML
+    assert "Release & Operations" in dashboard.HTML
+    assert "Release card" in dashboard.HTML
+    assert "Seat restart checklist" in dashboard.HTML
+    assert "data-ops-action=" in dashboard.HTML
+    assert "Publish from tag" in dashboard.HTML
+    assert "Stage Central" in dashboard.HTML
+    assert "Kickstart Central" in dashboard.HTML
+    assert "Restart dashboard" in dashboard.HTML
     assert "Preview exact changes" in dashboard.HTML
     assert "Copy session prompt" in dashboard.HTML
     assert "Token file path · token never enters this page" in dashboard.HTML
@@ -5030,3 +5051,90 @@ def test_attention_state_persists_across_manager_instances(tmp_path: Path) -> No
 
     assert second.attention_state() == {"items": value}
     assert (state_dir / "attention-state.json").stat().st_mode & 0o777 == 0o600
+
+
+def test_config_ops_endpoint_guards_and_execution() -> None:
+    calls: list[tuple[str, dict]] = []
+
+    class Cache:
+        def resolve_central(self, value: str | None) -> str:
+            return value or "default"
+
+    class Seats:
+        def release_status(self) -> dict:
+            calls.append(("release_status", {}))
+            return {"schema_version": 1, "latest_tag": "v5.0.0a20"}
+
+        def ops_action(self, action: str, **kwargs: Any) -> dict:
+            calls.append(("ops_action", {"action": action, **kwargs}))
+            return {"ok": True, "action": action, "command": f"cmd {action}", "output": "ok"}
+
+    server = dashboard.ThreadingHTTPServer(
+        ("127.0.0.1", 0), dashboard.make_handler(Cache(), seat_manager=Seats())
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+
+    def post(path: str, payload: object, headers: dict | None = None) -> tuple[int, dict]:
+        req_headers = {"Content-Type": "application/json", "Origin": base}
+        if headers:
+            req_headers.update(headers)
+        request = urllib.request.Request(
+            base + path,
+            data=json.dumps(payload).encode(),
+            headers=req_headers,
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request) as response:
+                return response.status, json.load(response)
+        except urllib.error.HTTPError as exc:
+            return exc.code, {}
+
+    try:
+        # Cross origin rejected
+        status, _ = post("/api/config/ops", {"action": "stage_central"}, {"Origin": "https://attacker.invalid"})
+        assert status == 403
+
+        # text/plain rejected
+        status, _ = post("/api/config/ops", {"action": "stage_central"}, {"Content-Type": "text/plain"})
+        assert status == 415
+
+        # Invalid host rejected
+        status, _ = post("/api/config/ops", {"action": "stage_central"}, {"Host": "attacker.invalid"})
+        assert status == 403
+
+        # Missing action rejected
+        status, _ = post("/api/config/ops", {})
+        assert status == 503 or status == 400
+
+        # Successful ops calls
+        status, res = post("/api/config/ops", {"action": "publish_from_tag", "tag": "v5.0.0a20"})
+        assert status == 200
+        assert res["ok"] is True
+        assert res["action"] == "publish_from_tag"
+
+        status, res = post("/api/config/ops", {"action": "stage_central"})
+        assert status == 200
+        assert res["ok"] is True
+
+        status, res = post("/api/config/ops", {"action": "kickstart_central"})
+        assert status == 200
+        assert res["ok"] is True
+
+        status, res = post("/api/config/ops", {"action": "restart_dashboard"})
+        assert status == 200
+        assert res["ok"] is True
+
+        # GET /api/config/release
+        with urllib.request.urlopen(base + "/api/config/release") as response:
+            assert response.status == 200
+            assert json.load(response)["latest_tag"] == "v5.0.0a20"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+    actions = [c[1].get("action") for c in calls if c[0] == "ops_action"]
+    assert actions == ["publish_from_tag", "stage_central", "kickstart_central", "restart_dashboard"]
