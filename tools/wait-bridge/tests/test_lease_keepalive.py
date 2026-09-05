@@ -88,6 +88,52 @@ class ClaimOnDiscoveryKeepalive(NoDiscoveryKeepalive):
 
 
 class LeaseKeepaliveTests(unittest.IsolatedAsyncioTestCase):
+    def test_join_and_claim_results_populate_full_holder_identity(self) -> None:
+        keepalive = NoDiscoveryKeepalive(Connection(RawClient()))
+        keepalive.observe_join(
+            "pursers",
+            {
+                "agent_name": "keepalive-seat",
+                "agent_id": "AI-ours",
+                "principal_id": "PR-ours",
+                "claim_ttl_s": 30,
+                "renewed_leases": [
+                    {"ticket_id": "TK-joined", "lease_kind": "work", "ttl_s": 30}
+                ],
+            },
+        )
+        keepalive.observe_claim(
+            "pursers",
+            {
+                "ok": True,
+                "ticket": {
+                    "ticket_id": "TK-work",
+                    "claimed_by": "keepalive-seat",
+                    "claimed_by_agent_id": "AI-ours",
+                    "claimed_by_principal_id": "PR-ours",
+                },
+            },
+        )
+        keepalive.observe_claim(
+            "pursers",
+            {
+                "ok": True,
+                "ticket": {"ticket_id": "TK-review"},
+                "review_lease": {
+                    "reviewer_agent_name": "keepalive-seat",
+                    "reviewer_agent_id": "AI-ours",
+                    "reviewer_principal_id": "PR-ours",
+                    "ttl_s": 30,
+                },
+            },
+            lease_kind="review",
+        )
+
+        for ticket_id in ("TK-joined", "TK-work", "TK-review"):
+            tracked = keepalive.leases[("pursers", ticket_id)]
+            self.assertEqual(tracked["agent_id"], "AI-ours")
+            self.assertEqual(tracked["principal_id"], "PR-ours")
+
     async def test_background_renews_outside_wait_and_stops_on_terminal(self) -> None:
         client = RawClient()
         keepalive = NoDiscoveryKeepalive(Connection(client))
@@ -152,6 +198,74 @@ class LeaseKeepaliveTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0.5)
         self.assertEqual(keepalive.drain_cues({"pursers"}), [])
         await keepalive.stop()
+
+    async def test_same_name_different_work_identity_stops_retrying(self) -> None:
+        client = RawClient(
+            fail=True,
+            ticket={
+                "ticket_id": "TK-reclaimed-work",
+                "status": "claimed",
+                "claimed_by": "keepalive-seat",
+                "claimed_by_agent_id": "AI-other",
+                "claimed_by_principal_id": "PR-other",
+            },
+        )
+        keepalive = NoDiscoveryKeepalive(Connection(client))
+        keepalive.observe_lease(
+            "pursers",
+            "TK-reclaimed-work",
+            {
+                "lease_kind": "work",
+                "ttl_s": 30,
+                "agent_name": "keepalive-seat",
+                "agent_id": "AI-ours",
+                "principal_id": "PR-ours",
+            },
+        )
+
+        await keepalive._renew("pursers", "TK-reclaimed-work")
+        await keepalive._renew("pursers", "TK-reclaimed-work")
+
+        self.assertNotIn(("pursers", "TK-reclaimed-work"), keepalive.leases)
+        self.assertEqual(
+            len([call for call in client.calls if call[0] == "lease_renew"]), 1
+        )
+        self.assertEqual(len(keepalive.drain_cues({"pursers"})), 1)
+
+    async def test_same_name_different_review_identity_stops_retrying(self) -> None:
+        client = RawClient(
+            fail=True,
+            ticket={
+                "ticket_id": "TK-reclaimed-review",
+                "status": "submitted",
+                "review_lease": {
+                    "reviewer_agent_name": "keepalive-seat",
+                    "reviewer_agent_id": "AI-other",
+                    "reviewer_principal_id": "PR-other",
+                },
+            },
+        )
+        keepalive = NoDiscoveryKeepalive(Connection(client))
+        keepalive.observe_lease(
+            "pursers",
+            "TK-reclaimed-review",
+            {
+                "lease_kind": "review",
+                "ttl_s": 30,
+                "agent_name": "keepalive-seat",
+                "agent_id": "AI-ours",
+                "principal_id": "PR-ours",
+            },
+        )
+
+        await keepalive._renew("pursers", "TK-reclaimed-review")
+        await keepalive._renew("pursers", "TK-reclaimed-review")
+
+        self.assertNotIn(("pursers", "TK-reclaimed-review"), keepalive.leases)
+        self.assertEqual(
+            len([call for call in client.calls if call[0] == "lease_renew"]), 1
+        )
+        self.assertEqual(len(keepalive.drain_cues({"pursers"})), 1)
 
     async def test_join_reconciles_released_lease_and_failure_classifies_submit(
         self,

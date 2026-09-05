@@ -1315,6 +1315,8 @@ class LeaseKeepalive:
             ]
         renewed_keys: set[tuple[str, str]] = set()
         joined_agent_name = str(result.get("agent_name") or AGENT_NAME)
+        joined_agent_id = result.get("agent_id")
+        joined_principal_id = result.get("principal_id")
         for lease in leases:
             if not isinstance(lease, dict):
                 continue
@@ -1324,12 +1326,19 @@ class LeaseKeepalive:
                 self.observe_lease(
                     board_id,
                     ticket_id,
-                    {**lease, "agent_name": joined_agent_name},
+                    {
+                        **lease,
+                        "agent_name": joined_agent_name,
+                        "agent_id": joined_agent_id,
+                        "principal_id": joined_principal_id,
+                    },
                 )
         for key, tracked in list(self.leases.items()):
             if (
                 key[0] == board_id
                 and tracked.get("agent_name") == joined_agent_name
+                and tracked.get("agent_id") == joined_agent_id
+                and tracked.get("principal_id") == joined_principal_id
                 and key not in renewed_keys
             ):
                 self.leases.pop(key, None)
@@ -1357,6 +1366,16 @@ class LeaseKeepalive:
                 if isinstance(review_lease, dict)
                 else ticket.get("claimed_by")
             ),
+            "agent_id": (
+                review_lease.get("reviewer_agent_id")
+                if isinstance(review_lease, dict)
+                else ticket.get("claimed_by_agent_id")
+            ),
+            "principal_id": (
+                review_lease.get("reviewer_principal_id")
+                if isinstance(review_lease, dict)
+                else ticket.get("claimed_by_principal_id")
+            ),
         }
         self.observe_lease(board_id, ticket_id, lease)
 
@@ -1372,6 +1391,8 @@ class LeaseKeepalive:
             "lease_kind": lease.get("lease_kind", "work"),
             "ttl_s": int(ttl_s),
             "agent_name": lease.get("agent_name") or AGENT_NAME,
+            "agent_id": lease.get("agent_id"),
+            "principal_id": lease.get("principal_id"),
             "due": time.monotonic() + self.interval(ttl_s),
         }
         self.changed.set()
@@ -1525,8 +1546,14 @@ class LeaseKeepalive:
                     still_held = bool(
                         ticket.get("status") == "submitted"
                         and isinstance(review_lease, dict)
+                        and isinstance(lease.get("agent_id"), str)
+                        and isinstance(lease.get("principal_id"), str)
                         and review_lease.get("reviewer_agent_name")
                         == lease["agent_name"]
+                        and review_lease.get("reviewer_agent_id")
+                        == lease["agent_id"]
+                        and review_lease.get("reviewer_principal_id")
+                        == lease["principal_id"]
                     )
                     intentional_stop = not still_held and ticket.get("status") in {
                         "open", "closed", "rejected", "canceled", "terminated"
@@ -1539,7 +1566,12 @@ class LeaseKeepalive:
                 else:
                     still_held = bool(
                         ticket.get("status") in CLAIMED_STATES
+                        and isinstance(lease.get("agent_id"), str)
+                        and isinstance(lease.get("principal_id"), str)
                         and ticket.get("claimed_by") == lease["agent_name"]
+                        and ticket.get("claimed_by_agent_id") == lease["agent_id"]
+                        and ticket.get("claimed_by_principal_id")
+                        == lease["principal_id"]
                     )
                     intentional_stop = bool(
                         ticket.get("status") in {
@@ -2649,6 +2681,8 @@ async def _is_relevant(
                     "lease_kind": "review",
                     "ttl_s": review_lease.get("ttl_s"),
                     "agent_name": review_lease.get("reviewer_agent_name"),
+                    "agent_id": review_lease.get("reviewer_agent_id"),
+                    "principal_id": review_lease.get("reviewer_principal_id"),
                 },
             )
     dispatch_state = ticket.get("dispatch_state")
