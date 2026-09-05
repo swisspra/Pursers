@@ -71,7 +71,6 @@ def test_load_manifest_versions(tmp_path: Path) -> None:
 def test_origin_tag_resolution_and_local_tag_divergence(tmp_path: Path) -> None:
     def mock_runner(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         if "ls-remote" in cmd:
-            # Origin has v5.0.0a22 and v5.0.0a21
             stdout = (
                 "aaaaaaaa11111111\trefs/tags/v5.0.0a21\n"
                 "bbbbbbbb22222222\trefs/tags/v5.0.0a22\n"
@@ -79,13 +78,11 @@ def test_origin_tag_resolution_and_local_tag_divergence(tmp_path: Path) -> None:
             )
             return subprocess.CompletedProcess(cmd, 0, stdout=stdout)
         if "tag" in cmd and "-l" in cmd:
-            # Local tag has only v5.0.0a19
             return subprocess.CompletedProcess(cmd, 0, stdout="v5.0.0a19\n")
         return subprocess.CompletedProcess(cmd, 1, stderr="error")
 
     ops = ReleaseOpsManager(root=tmp_path, runner=mock_runner)
     latest = ops.get_latest_tag()
-    # Must resolve from origin (v5.0.0a22), NOT local (v5.0.0a19)
     assert latest == "v5.0.0a22"
     assert ops.validate_publish_tag("v5.0.0a22") is True
     assert ops.validate_publish_tag("v9.9.9") is False
@@ -102,15 +99,14 @@ def test_ci_status_queries_intended_workflow(tmp_path: Path) -> None:
                 0,
                 stdout=json.dumps([{"status": "completed", "conclusion": "success", "url": "https://ci/1"}]),
             )
-        if "rev-list" in cmd:
-            return subprocess.CompletedProcess(cmd, 0, stdout="sha123\n")
+        if "ls-remote" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, stdout="sha123\trefs/tags/v5.0.0a20\n")
         return subprocess.CompletedProcess(cmd, 0, stdout="")
 
     ops = ReleaseOpsManager(root=tmp_path, runner=mock_runner)
     status = ops.get_ci_status("v5.0.0a20")
     assert status["main"]["conclusion"] == "success"
     assert status["tag"]["conclusion"] == "success"
-    # Verify both main and commit queries passed --workflow ci.yml
     for call in gh_calls:
         assert "--workflow" in call
         idx = call.index("--workflow")
@@ -133,8 +129,6 @@ def test_release_card_status_and_pypi_checks(tmp_path: Path) -> None:
     def mock_runner(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         if "ls-remote" in cmd:
             return subprocess.CompletedProcess(cmd, 0, stdout="sha1\trefs/tags/v5.0.0a20\n")
-        if "rev-list" in cmd:
-            return subprocess.CompletedProcess(cmd, 0, stdout="1122334455667788\n")
         if "run" in cmd and "list" in cmd:
             return subprocess.CompletedProcess(
                 cmd,
@@ -187,6 +181,9 @@ def test_release_card_status_and_pypi_checks(tmp_path: Path) -> None:
     assert "commands" in status
     assert "publish_from_tag" in status["commands"]
     assert "stage_central" in status["commands"]
+    # Verify no placeholders in preview command
+    assert "<wheel>" not in status["commands"]["stage_central"]
+    assert "<version>" not in status["commands"]["stage_central"]
 
 
 def test_restart_checklist_flags_older_bridge_processes(tmp_path: Path) -> None:
@@ -228,6 +225,17 @@ def test_restart_checklist_flags_older_bridge_processes(tmp_path: Path) -> None:
     assert "PID 102 started before shim update" in codex_check["reason"]
 
 
+def test_publish_from_tag_fails_on_unavailable_origin(tmp_path: Path) -> None:
+    def mock_runner(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if "ls-remote" in cmd:
+            return subprocess.CompletedProcess(cmd, 1, stderr="fatal: remote error\n")
+        return subprocess.CompletedProcess(cmd, 0, stdout="Workflow triggered\n")
+
+    ops = ReleaseOpsManager(root=tmp_path, runner=mock_runner, state_dir=tmp_path)
+    with pytest.raises(RuntimeError, match="could not be retrieved from origin"):
+        ops.publish_from_tag("v5.0.0a20")
+
+
 def test_publish_from_tag_validates_origin_tag(tmp_path: Path) -> None:
     calls: list[list[str]] = []
 
@@ -239,11 +247,9 @@ def test_publish_from_tag_validates_origin_tag(tmp_path: Path) -> None:
 
     ops = ReleaseOpsManager(root=tmp_path, runner=mock_runner, state_dir=tmp_path)
 
-    # Unknown tag rejected
     with pytest.raises(ValueError, match="does not exist on origin"):
         ops.publish_from_tag("v9.9.9")
 
-    # Valid origin tag runs workflow
     result = ops.publish_from_tag("v5.0.0a20")
     assert result["ok"] is True
     assert "gh workflow run publish-pypi.yml --ref v5.0.0a20" in result["command"]
@@ -251,12 +257,13 @@ def test_publish_from_tag_validates_origin_tag(tmp_path: Path) -> None:
     assert calls[0] == ["gh", "workflow", "run", "publish-pypi.yml", "--ref", "v5.0.0a20"]
 
 
-def test_stage_central_transaction_wheel_copy_and_pin_update(tmp_path: Path) -> None:
+def test_stage_central_transaction_wheel_copy_pin_update_and_mode_preservation(tmp_path: Path) -> None:
     profile = tmp_path / "profile.env"
     profile.write_text(
         "CENTRAL_WHEEL=/old/path.whl\nCENTRAL_WHEEL_SHA256=oldsha\n",
         encoding="utf-8",
     )
+    profile.chmod(0o600)
     python = tmp_path / "python"
     python.write_text("#!/bin/sh\n", encoding="utf-8")
     python.chmod(0o755)
@@ -271,6 +278,18 @@ def test_stage_central_transaction_wheel_copy_and_pin_update(tmp_path: Path) -> 
         'product = "5.0.0a21"\n[packages]\npursers = "5.0.0a21"\ncentral = "0.1.0a25"\n',
         encoding="utf-8",
     )
+    component_lock = tmp_path / "component-lock.json"
+    component_lock.write_text(
+        json.dumps({
+            "components": {
+                "pursers-central": {
+                    "version": "0.1.0a25",
+                    "wheel_sha256": expected_sha,
+                }
+            }
+        }),
+        encoding="utf-8",
+    )
 
     pip_calls: list[list[str]] = []
 
@@ -281,6 +300,7 @@ def test_stage_central_transaction_wheel_copy_and_pin_update(tmp_path: Path) -> 
     ops = ReleaseOpsManager(
         root=tmp_path,
         manifest_path=manifest,
+        component_lock_path=component_lock,
         profile_env_path=profile,
         central_venv_python=python,
         runner=mock_runner,
@@ -297,7 +317,8 @@ def test_stage_central_transaction_wheel_copy_and_pin_update(tmp_path: Path) -> 
     assert dest_wheel.is_file()
     assert dest_wheel.read_bytes() == wheel_content
 
-    # Verify profile.env pins were atomically updated
+    # Verify profile.env pins were updated and mode 0600 preserved
+    assert profile.stat().st_mode & 0o777 == 0o600
     updated_profile = profile.read_text(encoding="utf-8")
     assert f"CENTRAL_WHEEL={dest_wheel}" in updated_profile
     assert f"CENTRAL_WHEEL_SHA256={expected_sha}" in updated_profile
@@ -305,11 +326,113 @@ def test_stage_central_transaction_wheel_copy_and_pin_update(tmp_path: Path) -> 
     # Verify pip install --no-deps was called with destination wheel
     assert pip_calls[0] == [str(python), "-m", "pip", "install", "--no-deps", str(dest_wheel)]
 
-    # Verify incremental logs were emitted
-    assert any("Step 2: Copying" in line for line in logs)
-    assert any("Step 3: Preflight SHA-256" in line for line in logs)
-    assert any("Step 4: Atomically updating" in line for line in logs)
-    assert any("Step 5 succeeded" in line for line in logs)
+
+def test_stage_central_refuses_mismatched_wheel_and_hash_mismatch(tmp_path: Path) -> None:
+    profile = tmp_path / "profile.env"
+    original_profile = "CENTRAL_WHEEL=/old.whl\nCENTRAL_WHEEL_SHA256=oldsha\n"
+    profile.write_text(original_profile, encoding="utf-8")
+    profile.chmod(0o600)
+    python = tmp_path / "python"
+    python.write_text("#!/bin/sh\n", encoding="utf-8")
+    python.chmod(0o755)
+
+    manifest = tmp_path / "release_versions.toml"
+    manifest.write_text(
+        'product = "5.0.0a21"\n[packages]\npursers = "5.0.0a21"\ncentral = "0.1.0a25"\n',
+        encoding="utf-8",
+    )
+    component_lock = tmp_path / "component-lock.json"
+    component_lock.write_text(
+        json.dumps({
+            "components": {
+                "pursers-central": {
+                    "version": "0.1.0a25",
+                    "wheel_sha256": "a" * 64,
+                }
+            }
+        }),
+        encoding="utf-8",
+    )
+
+    ops = ReleaseOpsManager(
+        root=tmp_path,
+        manifest_path=manifest,
+        component_lock_path=component_lock,
+        profile_env_path=profile,
+        central_venv_python=python,
+        state_dir=tmp_path,
+    )
+
+    # 1. Refuse mismatched version wheel
+    wrong_ver = tmp_path / "pursers_central-0.1.0a24-py3-none-any.whl"
+    wrong_ver.write_bytes(b"content")
+    with pytest.raises(ValueError, match="does not match exact manifest version"):
+        ops.stage_central(wheel_path=wrong_ver)
+    assert profile.read_text(encoding="utf-8") == original_profile
+
+    # 2. Refuse hash mismatch before mutation
+    correct_name = tmp_path / "pursers_central-0.1.0a25-py3-none-any.whl"
+    correct_name.write_bytes(b"bad-content")
+    with pytest.raises(ValueError, match="Preflight digest mismatch"):
+        ops.stage_central(wheel_path=correct_name)
+    assert profile.read_text(encoding="utf-8") == original_profile
+    assert not (tmp_path / "wheels" / correct_name.name).exists()
+
+
+def test_stage_central_rollback_on_pip_install_failure(tmp_path: Path) -> None:
+    profile = tmp_path / "profile.env"
+    original_profile = "CENTRAL_WHEEL=/old.whl\nCENTRAL_WHEEL_SHA256=oldsha\n"
+    profile.write_text(original_profile, encoding="utf-8")
+    profile.chmod(0o600)
+    python = tmp_path / "python"
+    python.write_text("#!/bin/sh\n", encoding="utf-8")
+    python.chmod(0o755)
+
+    source_wheel = tmp_path / "pursers_central-0.1.0a25-py3-none-any.whl"
+    wheel_content = b"fake-wheel-binary"
+    source_wheel.write_bytes(wheel_content)
+    expected_sha = hashlib.sha256(wheel_content).hexdigest()
+
+    manifest = tmp_path / "release_versions.toml"
+    manifest.write_text(
+        'product = "5.0.0a21"\n[packages]\npursers = "5.0.0a21"\ncentral = "0.1.0a25"\n',
+        encoding="utf-8",
+    )
+    component_lock = tmp_path / "component-lock.json"
+    component_lock.write_text(
+        json.dumps({
+            "components": {
+                "pursers-central": {
+                    "version": "0.1.0a25",
+                    "wheel_sha256": expected_sha,
+                }
+            }
+        }),
+        encoding="utf-8",
+    )
+
+    def mock_failing_runner(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(cmd, 1, stdout="pip failed", stderr="error")
+
+    ops = ReleaseOpsManager(
+        root=tmp_path,
+        manifest_path=manifest,
+        component_lock_path=component_lock,
+        profile_env_path=profile,
+        central_venv_python=python,
+        runner=mock_failing_runner,
+        state_dir=tmp_path,
+    )
+
+    with pytest.raises(RuntimeError, match="Pip install failed"):
+        ops.stage_central(wheel_path=source_wheel)
+
+    # Assert profile.env rolled back to original content and mode 0600
+    assert profile.read_text(encoding="utf-8") == original_profile
+    assert profile.stat().st_mode & 0o777 == 0o600
+    # Destination wheel removed
+    dest_wheel = tmp_path / "wheels" / source_wheel.name
+    assert not dest_wheel.exists()
 
 
 def test_kickstart_central_and_restart_dashboard(tmp_path: Path) -> None:
