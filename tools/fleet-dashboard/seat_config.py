@@ -870,7 +870,11 @@ def discover_managed_seats(
                     continue
                 for connector, server in servers.items():
                     env = server.get("env") if isinstance(server, dict) else None
-                    if not isinstance(env, dict) or not env.get("ONBOARD_AGENT_NAME"):
+                    if (
+                        not isinstance(env, dict)
+                        or not env.get("ONBOARD_AGENT_NAME")
+                        or not env.get("PURSERS_ROLE")
+                    ):
                         continue
                     role = str(env.get("PURSERS_ROLE") or "")
                     central_url = env.get("ONBOARD_CENTRAL_URL")
@@ -889,7 +893,13 @@ def discover_managed_seats(
                             matches.append(
                                 (board_name, board_server["bearer_token_env_var"])
                             )
-                    if len(matches) > 1:
+                    default_board = (
+                        "pursers-review" if role == "reviewer" else "pursers-dev"
+                    )
+                    conventional = [row for row in matches if row[0] == default_board]
+                    if len(conventional) == 1:
+                        matches = conventional
+                    elif len(matches) > 1:
                         conflict(
                             host,
                             path,
@@ -897,9 +907,6 @@ def discover_managed_seats(
                             "multiple matching board connectors",
                         )
                         continue
-                    default_board = (
-                        "pursers-review" if role == "reviewer" else "pursers-dev"
-                    )
                     env_token_vars = [
                         key for key in env if re.search(r"(?:^|_)TOKEN$", key)
                     ]
@@ -957,7 +964,11 @@ def discover_managed_seats(
                 )
                 for connector, server in servers.items():
                     env = server.get("env") if isinstance(server, dict) else None
-                    if not isinstance(env, dict) or not env.get("ONBOARD_AGENT_NAME"):
+                    if (
+                        not isinstance(env, dict)
+                        or not env.get("ONBOARD_AGENT_NAME")
+                        or not env.get("PURSERS_ROLE")
+                    ):
                         continue
                     token_vars = [
                         key for key in env if re.search(r"(?:^|_)TOKEN$", key)

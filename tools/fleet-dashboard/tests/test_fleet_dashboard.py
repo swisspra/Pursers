@@ -3503,6 +3503,93 @@ def test_seat_config_manager_reviews_imports_and_doctors_discovered_seats(
     assert any("different settings" in row["reason"] for row in conflict_review["conflicts"])
 
 
+def test_import_review_pairs_shared_codex_connectors_and_ignores_auxiliary(
+    tmp_path: Path,
+) -> None:
+    config = tmp_path / "config.toml"
+    seats = []
+    for role, name, bridge_name, board_name, token_env in (
+        (
+            "worker",
+            "codex-worker",
+            "pursers-wait-codex-worker",
+            "pursers-dev",
+            "ONBOARD_CENTRAL_TOKEN",
+        ),
+        (
+            "reviewer",
+            "codex-reviewer",
+            "pursers-wait-codex-reviewer",
+            "pursers-review",
+            "PURSERS_REVIEW_TOKEN",
+        ),
+    ):
+        token = tmp_path / f"{name}.jwt"
+        token.write_text(f"header.{name}.signature")
+        desired = dashboard.DesiredSeat(
+            host="codex",
+            role=role,
+            name=name,
+            central_url="https://central.example/mcp",
+            home_board="pursers",
+            token_file=str(token),
+            token_env_var=token_env,
+            ca_file=str(tmp_path / "ca.pem"),
+            bridge_command=str(tmp_path / "pursers-wait-bridge"),
+            config_path=str(config),
+            bridge_name=bridge_name,
+            board_connector_name=board_name,
+        )
+        adapter = dashboard.adapter_for(desired)
+        adapter.apply(adapter.plan(desired))
+        seats.append(desired)
+
+    claude_config = tmp_path / "claude.json"
+    claude_config.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "pursers-personal": {
+                        "command": "pursers-personal",
+                        "env": {"ONBOARD_AGENT_NAME": "auxiliary-session"},
+                    }
+                }
+            }
+        )
+    )
+
+    class Bridge:
+        version = "0.1.0a10"
+
+        def inspect(self) -> dict:
+            return {"version": self.version, "command": None}
+
+    manager = dashboard.SeatConfigManager(
+        tmp_path / "state/seats.json",
+        state_dir=tmp_path / "state",
+        bridge_installer=Bridge(),
+        latest_version=lambda: None,
+        discovered_configs=[
+            ("codex", config),
+            ("claude-desktop", claude_config),
+        ],
+    )
+
+    review = manager.import_review()
+
+    assert review["conflicts"] == []
+    assert {row["name"] for row in review["candidates"]} == {
+        "codex-worker",
+        "codex-reviewer",
+    }
+    mappings = {row["name"]: row for row in review["candidates"]}
+    assert mappings["codex-worker"]["board_connector_name"] == "pursers-dev"
+    assert mappings["codex-worker"]["token_env_var"] == "ONBOARD_CENTRAL_TOKEN"
+    assert mappings["codex-reviewer"]["board_connector_name"] == "pursers-review"
+    assert mappings["codex-reviewer"]["token_env_var"] == "PURSERS_REVIEW_TOKEN"
+    assert all(row["zero_diff"] for row in mappings.values())
+
+
 def test_seat_config_registry_coverage_uses_live_fleet_seats(tmp_path: Path) -> None:
     class Bridge:
         version = "0.1.0a10"
