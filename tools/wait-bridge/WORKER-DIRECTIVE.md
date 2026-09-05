@@ -11,6 +11,12 @@ your accountability are now defined here, not by a folder path.
 > subprocess) can now carry **many** identities at once: each session passes its
 > own `agent_name` per call to `a2a_wait` (see §1), so several conversations in
 > the same app act as distinct board agents without colliding.
+>
+> On hosts using per-call agent names (Codex multi-session), the bridge's startup
+> join under `ONBOARD_AGENT_NAME` (e.g. `purser-codex-1`) serves as a non-working
+> control identity (`can_work=false, can_review=false`). Work and review offers
+> are dispatched only to the per-call session names (`pursers-codex-1`,
+> `pursers-codex-2`, etc.) that actively invoke `a2a_wait`.
 
 ---
 
