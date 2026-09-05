@@ -2,12 +2,48 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 
 CLAIMABLE_STATES = frozenset({"open"})
 WAIT_FOR_CLAIMABLE = "claimable"
 WAIT_FOR_SUBMITTED = "submitted"
+BRANCH_AND_COMMIT_RE = re.compile(
+    r"(?im)^\s*branch_and_commit\s*:\s*(.+?)\s*$"
+)
+
+
+def continuation_hint(ticket: dict[str, Any]) -> dict[str, Any] | None:
+    branch_and_commit = None
+    for submission in reversed(ticket.get("submission_history", [])):
+        if not isinstance(submission, dict):
+            continue
+        notes = submission.get("notes")
+        if isinstance(notes, str):
+            match = BRANCH_AND_COMMIT_RE.search(notes)
+            if match:
+                branch_and_commit = match.group(1).strip()
+                break
+    prior_name = ticket.get("last_claimed_by")
+    prior_agent_id = ticket.get("last_claimed_by_agent_id")
+    if not prior_name and not prior_agent_id and not branch_and_commit:
+        return None
+    return {
+        "prior_holder": (
+            {
+                "agent_name": prior_name,
+                "agent_id": prior_agent_id,
+                "principal_id": ticket.get("last_claimed_by_principal_id"),
+                "claimed_at": ticket.get("last_claimed_at"),
+                "release_reason": ticket.get("last_release_reason"),
+            }
+            if prior_name or prior_agent_id
+            else None
+        ),
+        "branch_and_commit": branch_and_commit,
+        "abandoned_count": int(ticket.get("abandoned_count", 0) or 0),
+    }
 
 
 def _review_is_available(
@@ -158,5 +194,8 @@ def backlog_events(
         payload_ref = ticket.get("payload_ref")
         if payload_ref:
             event["payload_ref"] = payload_ref
+        continuation = continuation_hint(ticket)
+        if continuation is not None:
+            event["continuation"] = continuation
         events.append(event)
     return events

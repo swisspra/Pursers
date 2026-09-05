@@ -215,6 +215,25 @@ async def test_review_lease_calls_carry_the_seat_identity(monkeypatch) -> None:
 
 
 @pytest.mark.anyio
+async def test_claim_ttl_set_carries_admin_seat_identity(monkeypatch) -> None:
+    board = client()
+    captured: dict[str, Any] = {}
+
+    async def call(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        captured.update({"tool": name, "arguments": arguments})
+        return {"ok": True, "claim_ttl_s": 120}
+
+    monkeypatch.setattr(board, "_call", call)
+    result = await board.board_claim_ttl_set(120)
+
+    assert result["claim_ttl_s"] == 120
+    assert captured == {
+        "tool": "board_claim_ttl_set",
+        "arguments": {"agent_name": "env-default", "claim_ttl_s": 120},
+    }
+
+
+@pytest.mark.anyio
 async def test_interleaved_per_call_joins_do_not_clobber_state(monkeypatch) -> None:
     board = client()
     original_identity = JoinedIdentity(

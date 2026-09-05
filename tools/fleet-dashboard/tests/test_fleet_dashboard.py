@@ -4102,6 +4102,7 @@ def test_dispatch_fetcher_projects_policy_gaps_offers_and_timeline() -> None:
         async def board_status(self) -> dict:
             return {
                 "latest_seq": 8,
+                "claim_ttl_s": 900,
                 "dispatch_policy": {
                     "offer_ttl_s": 120,
                     "second_opinion": True,
@@ -4167,6 +4168,7 @@ def test_dispatch_fetcher_projects_policy_gaps_offers_and_timeline() -> None:
     result = asyncio.run(fetcher.fetch_dispatch("pursers"))
 
     assert result["dispatch_policy"]["offer_ttl_s"] == 120
+    assert result["claim_ttl_s"] == 900
     assert result["offers"][0]["agent_name"] == "worker-low"
     assert result["unassignable_tickets"][0]["missing"] == [
         "tier_max>=3",
@@ -4356,7 +4358,7 @@ def test_dispatch_timeline_reads_cross_seat_central_projection(
 
 
 def test_dispatch_policy_save_validates_and_forwards_exact_contract() -> None:
-    calls: list[dict] = []
+    calls: list[tuple[str, object]] = []
 
     class Client:
         async def __aenter__(self) -> Self:
@@ -4377,8 +4379,12 @@ def test_dispatch_policy_save_validates_and_forwards_exact_contract() -> None:
             )
 
         async def board_dispatch_policy_set(self, **kwargs: object) -> dict:
-            calls.append(dict(kwargs))
+            calls.append(("dispatch", dict(kwargs)))
             return {"dispatch_policy": dict(kwargs)}
+
+        async def board_claim_ttl_set(self, claim_ttl_s: int) -> dict:
+            calls.append(("claim_ttl", claim_ttl_s))
+            return {"claim_ttl_s": claim_ttl_s, "previous_claim_ttl_s": 900}
 
     config = dashboard.Config(
         url="https://127.0.0.1:8766/mcp",
@@ -4390,6 +4396,7 @@ def test_dispatch_policy_save_validates_and_forwards_exact_contract() -> None:
     )
     fetcher = dashboard.FleetFetcher(config, client_factory=lambda *_a, **_k: Client())
     policy = {
+        "claim_ttl_s": 300,
         "offer_ttl_s": 60,
         "second_opinion": False,
         "fallback_broadcast": True,
@@ -4397,8 +4404,23 @@ def test_dispatch_policy_save_validates_and_forwards_exact_contract() -> None:
 
     result = asyncio.run(fetcher.save_dispatch("pursers", policy))
 
-    assert result["dispatch_policy"] == policy
-    assert calls == [policy]
+    assert result["dispatch_policy"] == {
+        "offer_ttl_s": 60,
+        "second_opinion": False,
+        "fallback_broadcast": True,
+    }
+    assert result["claim_ttl_s"] == 300
+    assert calls == [
+        (
+            "dispatch",
+            {
+                "offer_ttl_s": 60,
+                "second_opinion": False,
+                "fallback_broadcast": True,
+            },
+        ),
+        ("claim_ttl", 300),
+    ]
     with pytest.raises(ValueError, match="dispatch policy fields"):
         asyncio.run(fetcher.save_dispatch("pursers", {**policy, "extra": True}))
 
@@ -4412,6 +4434,8 @@ def test_capability_and_dispatch_ui_contract_is_present() -> None:
     assert "/api/dispatch" in dashboard.HTML
     assert "Dispatch unavailable:" in dashboard.HTML
     assert "Current offer" in dashboard.HTML
+    assert 'name="claim_ttl_s"' in dashboard.HTML
+    assert "Lease lapsed ${t.abandoned_count} times" in dashboard.HTML
     assert "Runtime consumption requires Dispatch Part 2" in dashboard.HTML
     assert ">coordinator</option>" in dashboard.HTML
     assert "review.checked=role==='reviewer'" in dashboard.HTML

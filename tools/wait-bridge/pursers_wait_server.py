@@ -18,9 +18,9 @@ THE TOOL
          scan current claimable or submitted tickets older than the cursor.
          If relevant work is found on either path, return immediately.
       2. Otherwise wait on journal and per-seat subscriptions. Poll only when
-         explicitly selected or when listen fails for this call. Entry-snapshot
-         held tickets receive lease_renew at min(300s, ttl/3); idle seats issue
-         no Central calls while blocked.
+         explicitly selected or when listen fails for this call. A process-wide
+         keepalive renews discovered work and review leases at about 40% of the
+         board TTL, including while the seat is working outside a2a_wait.
       3. Return a bounded shape including reason=journal|backlog|timeout.
          timed_out=True is the re-arm cue: call again with since_seq=new_seq.
 
@@ -85,6 +85,7 @@ from backlog import (
     WAIT_FOR_CLAIMABLE,
     WAIT_FOR_SUBMITTED,
     backlog_events,
+    continuation_hint,
     ticket_is_relevant,
 )
 
@@ -1249,6 +1250,207 @@ def _registry_boards(registry: dict[str, Any]) -> list[str]:
     return selected
 
 
+class LeaseKeepalive:
+    """Renew work and review leases for the lifetime of the bridge process."""
+
+    def __init__(self, connection: DeferredBoardConnection) -> None:
+        self.connection = connection
+        self.leases: dict[tuple[str, str], dict[str, Any]] = {}
+        self.board_ttls: dict[str, int] = {}
+        self.cues: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        self.changed = asyncio.Event()
+        self.stopped = asyncio.Event()
+        self.task: asyncio.Task[None] | None = None
+        self.failed: set[tuple[str, str]] = set()
+
+    @staticmethod
+    def interval(ttl_s: Any) -> float:
+        try:
+            ttl = max(1, int(ttl_s))
+        except (TypeError, ValueError):
+            ttl = DEFAULT_CLAIM_TTL_S
+        return max(0.4, ttl * 0.4)
+
+    def start(self) -> None:
+        if self.task is None or self.task.done():
+            self.task = asyncio.create_task(
+                self._run(), name="pursers-lease-keepalive"
+            )
+
+    async def stop(self) -> None:
+        self.stopped.set()
+        self.changed.set()
+        if self.task is not None:
+            await asyncio.gather(self.task, return_exceptions=True)
+
+    def observe_join(self, board_id: str, result: dict[str, Any]) -> None:
+        ttl_s = result.get("claim_ttl_s", DEFAULT_CLAIM_TTL_S)
+        try:
+            self.board_ttls[board_id] = max(1, int(ttl_s))
+        except (TypeError, ValueError):
+            self.board_ttls[board_id] = DEFAULT_CLAIM_TTL_S
+        leases = result.get("renewed_leases")
+        if not isinstance(leases, list):
+            leases = [
+                {"ticket_id": ticket_id, "lease_kind": "work", "ttl_s": ttl_s}
+                for ticket_id in result.get("renewed_ticket_ids", [])
+            ]
+        for lease in leases:
+            if not isinstance(lease, dict):
+                continue
+            ticket_id = lease.get("ticket_id")
+            if isinstance(ticket_id, str) and ticket_id:
+                self.observe_lease(board_id, ticket_id, lease)
+
+    def observe_claim(
+        self, board_id: str, result: dict[str, Any], *, lease_kind: str = "work"
+    ) -> None:
+        ticket = result.get("ticket")
+        ticket_id = ticket.get("ticket_id") if isinstance(ticket, dict) else None
+        if not isinstance(ticket_id, str) or not result.get("ok", True):
+            return
+        lease = {
+            "ticket_id": ticket_id,
+            "lease_kind": lease_kind,
+            "ttl_s": result.get("ttl_s") or ticket.get("ttl_s"),
+        }
+        self.observe_lease(board_id, ticket_id, lease)
+
+    def observe_lease(
+        self, board_id: str, ticket_id: str, lease: dict[str, Any]
+    ) -> None:
+        ttl_s = lease.get("ttl_s") or self.board_ttls.get(
+            board_id, DEFAULT_CLAIM_TTL_S
+        )
+        key = (board_id, ticket_id)
+        self.failed.discard(key)
+        self.leases[key] = {
+            "lease_kind": lease.get("lease_kind", "work"),
+            "ttl_s": int(ttl_s),
+            "due": time.monotonic() + self.interval(ttl_s),
+        }
+        self.changed.set()
+
+    def observe_event(self, board_id: str, event: dict[str, Any]) -> None:
+        ticket_id = event.get("ticket_id")
+        if not isinstance(ticket_id, str):
+            return
+        status_to = event.get("status_to")
+        kind = event.get("kind")
+        if status_to in {
+            "open", "submitted", "closed", "rejected", "canceled", "terminated"
+        } or kind in {
+            "review_lease_released", "review_lease_expired"
+        }:
+            self.leases.pop((board_id, ticket_id), None)
+            self.changed.set()
+
+    async def forward_cues(
+        self,
+        queue: asyncio.Queue[tuple[str, str, dict[str, Any] | str | None]],
+        boards: set[str],
+    ) -> None:
+        while True:
+            cue = await self.cues.get()
+            board_id = str(cue.get("board_id") or BOARD_ID)
+            if board_id in boards:
+                await queue.put((board_id, "keepalive", cue))
+            else:
+                await self.cues.put(cue)
+                await asyncio.sleep(0)
+
+    def drain_cues(self, boards: set[str]) -> list[dict[str, Any]]:
+        selected: list[dict[str, Any]] = []
+        deferred: list[dict[str, Any]] = []
+        while True:
+            try:
+                cue = self.cues.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            if str(cue.get("board_id") or BOARD_ID) in boards:
+                selected.append(cue)
+            else:
+                deferred.append(cue)
+        for cue in deferred:
+            self.cues.put_nowait(cue)
+        return selected
+
+    async def _discover(self) -> None:
+        client = await self.connection.client()
+        try:
+            boards = _registry_boards(await _read_project_registry(client))
+        except Exception:
+            boards = [BOARD_ID]
+        capabilities = _seat_capabilities()
+        for board_id in boards:
+            try:
+                joined = await _BoardView(client, board_id).board_join(
+                    agent_name=AGENT_NAME, capabilities=capabilities
+                )
+                self.observe_join(board_id, joined)
+            except Exception as exc:
+                _log(f"lease keepalive discovery failed for {board_id}: {exc}")
+
+    async def _renew(self, board_id: str, ticket_id: str) -> None:
+        key = (board_id, ticket_id)
+        lease = self.leases.get(key)
+        if lease is None:
+            return
+        try:
+            client = await self.connection.client()
+            result = await _BoardView(client, board_id).lease_renew(ticket_id)
+            lease["ttl_s"] = int(result.get("ttl_s") or lease["ttl_s"])
+            lease["due"] = time.monotonic() + self.interval(lease["ttl_s"])
+            self.failed.discard(key)
+            _log(
+                f"lease keepalive: renewed board={board_id} ticket={ticket_id} "
+                f"through {result.get('lease_expires_at')}"
+            )
+        except Exception as exc:
+            self.leases.pop(key, None)
+            if key not in self.failed:
+                self.failed.add(key)
+                await self.cues.put(
+                    {
+                        "kind": "lease_keepalive_failed",
+                        "source": "bridge_keepalive",
+                        "board_id": board_id,
+                        "ticket_id": ticket_id,
+                        "lease_kind": lease["lease_kind"],
+                        "error": str(exc),
+                    }
+                )
+                _log(
+                    f"lease keepalive lost board={board_id} ticket={ticket_id}: {exc}"
+                )
+
+    async def _run(self) -> None:
+        next_discovery = 0.0
+        while not self.stopped.is_set():
+            now = time.monotonic()
+            if now >= next_discovery:
+                try:
+                    await self._discover()
+                except Exception as exc:
+                    _log(f"lease keepalive discovery deferred: {exc}")
+                ttl = min(self.board_ttls.values(), default=DEFAULT_CLAIM_TTL_S)
+                next_discovery = time.monotonic() + self.interval(ttl)
+            now = time.monotonic()
+            due_keys = [
+                key for key, lease in self.leases.items() if lease["due"] <= now
+            ]
+            for board_id, ticket_id in due_keys:
+                await self._renew(board_id, ticket_id)
+            deadlines = [next_discovery, *[v["due"] for v in self.leases.values()]]
+            wait_s = max(0.01, min(deadlines) - time.monotonic())
+            self.changed.clear()
+            try:
+                async with asyncio.timeout(wait_s):
+                    await self.changed.wait()
+            except TimeoutError:
+                pass
+
+
 def _home_cursor(since_seq: int | dict[str, int]) -> int:
     if isinstance(since_seq, dict):
         return max(0, int(since_seq.get(BOARD_ID, 0)))
@@ -1884,6 +2086,7 @@ class OrchestratorEngine:
 
 
 _GLOBAL_ENGINE: OrchestratorEngine | None = None
+_GLOBAL_KEEPALIVE: LeaseKeepalive | None = None
 
 
 def _get_orchestrator_engine() -> OrchestratorEngine | None:
@@ -1906,12 +2109,14 @@ class SessionCaptureMiddleware:
 @asynccontextmanager
 async def _lifespan(server: MCPServer) -> AsyncIterator[dict[str, Any]]:
     """Create local state before initialize; start background subscription if orchestrator."""
-    global _GLOBAL_ENGINE
+    global _GLOBAL_ENGINE, _GLOBAL_KEEPALIVE
     meter = BridgeStats(bridge_stats_path())
     connection = DeferredBoardConnection(meter)
     engine = OrchestratorEngine(connection, meter, orchestrator_state_path())
+    keepalive = LeaseKeepalive(connection)
     engine.load_state()
     _GLOBAL_ENGINE = engine
+    _GLOBAL_KEEPALIVE = keepalive
 
     role = _declared_role()
     if role == "orchestrator":
@@ -1921,11 +2126,14 @@ async def _lifespan(server: MCPServer) -> AsyncIterator[dict[str, Any]]:
             "connection": connection,
             "meter": meter,
             "orchestrator_engine": engine,
+            "lease_keepalive": keepalive,
         }
     finally:
+        await keepalive.stop()
         await engine.stop_subscriber()
         await connection.close()
         _GLOBAL_ENGINE = None
+        _GLOBAL_KEEPALIVE = None
 
 
 BRIDGE_DEPRECATED_TOOLS: frozenset[str] = frozenset()
@@ -1957,7 +2165,9 @@ async def _client_for_tool(ctx: Context) -> BoardClient:
     if client is not None:
         return client
     connection: DeferredBoardConnection = lifespan["connection"]
-    return await connection.client()
+    client = await connection.client()
+    lifespan["lease_keepalive"].start()
+    return client
 
 
 async def _engine_for_tool(ctx: Context) -> OrchestratorEngine:
@@ -2229,6 +2439,9 @@ async def _is_relevant(
     project: str | None,
     wait_for: str = WAIT_FOR_CLAIMABLE,
 ) -> bool:
+    board_id = getattr(client, "board_id", BOARD_ID)
+    if _GLOBAL_KEEPALIVE is not None:
+        _GLOBAL_KEEPALIVE.observe_event(board_id, event)
     if not _event_matches_wait(event, wait_for):
         return False
     ticket_id = event.get("ticket_id")
@@ -2259,6 +2472,25 @@ async def _is_relevant(
             return not only_mine and project is None
         raise
     ticket = result.get("ticket", {})
+    if _GLOBAL_KEEPALIVE is not None and isinstance(ticket, dict):
+        if ticket.get("claimed_by_agent_id") == my_agent_id:
+            _GLOBAL_KEEPALIVE.observe_claim(
+                board_id,
+                {"ok": True, "ticket": ticket, "ttl_s": ticket.get("ttl_s")},
+            )
+        review_lease = ticket.get("review_lease")
+        if (
+            isinstance(review_lease, dict)
+            and review_lease.get("reviewer_agent_id") == my_agent_id
+        ):
+            _GLOBAL_KEEPALIVE.observe_lease(
+                board_id,
+                str(ticket_id),
+                {
+                    "lease_kind": "review",
+                    "ttl_s": review_lease.get("ttl_s"),
+                },
+            )
     dispatch_state = ticket.get("dispatch_state")
     if isinstance(dispatch_state, dict):
         state = dispatch_state.get("state")
@@ -2319,6 +2551,10 @@ async def _is_relevant(
                 "tier": ticket.get("tier", 2),
                 "skills_required": list(ticket.get("skills_required") or []),
             }
+    if relevant:
+        continuation = continuation_hint(ticket)
+        if continuation is not None:
+            event["continuation"] = continuation
     return relevant
 
 
@@ -2772,6 +3008,8 @@ async def _wait_for_work_many(
                 task_focus=task_focus,
                 capabilities=capabilities,
             )
+            if _GLOBAL_KEEPALIVE is not None:
+                _GLOBAL_KEEPALIVE.observe_join(board_id, joined)
         except BoardClientError as exc:
             skipped[board_id] = str(exc)
             continue
@@ -2812,6 +3050,11 @@ async def _wait_for_work_many(
             "resynced": dict(resynced),
             "skipped_boards": dict(skipped),
         }
+
+    if _GLOBAL_KEEPALIVE is not None:
+        keepalive_cues = _GLOBAL_KEEPALIVE.drain_cues(set(active))
+        if keepalive_cues:
+            return response(keepalive_cues, False)
 
     async def poll_board(board_id: str, *, backlog: bool = False) -> list[dict]:
         events, next_cursor, did_resync = await _catchup_all(
@@ -2911,6 +3154,14 @@ async def _wait_for_work_many(
             )
             for board_id in active
         }
+        cue_task = (
+            asyncio.create_task(
+                _GLOBAL_KEEPALIVE.forward_cues(queue, set(active)),
+                name="pursers-lease-cue-forwarder",
+            )
+            if _GLOBAL_KEEPALIVE is not None
+            else None
+        )
         fallback: set[str] = set()
         try:
             next_poll = time.monotonic() + DEFAULT_POLL_INTERVAL_S
@@ -2969,6 +3220,8 @@ async def _wait_for_work_many(
                             f"board={board_id!r}; polling this board for the "
                             f"remainder of this call and retrying push on re-arm: {detail}"
                         )
+                    elif kind == "keepalive" and isinstance(detail, dict):
+                        found.append(detail)
                 if found:
                     return response(found, False)
 
@@ -2985,6 +3238,9 @@ async def _wait_for_work_many(
             for task in tasks.values():
                 task.cancel()
             await asyncio.gather(*tasks.values(), return_exceptions=True)
+            if cue_task is not None:
+                cue_task.cancel()
+                await asyncio.gather(cue_task, return_exceptions=True)
         # Healthy subscriptions are authoritative wake cues. Refetching an
         # uncued healthy board here would break selective push semantics.
         final_poll = [board_id for board_id in active if board_id in fallback]
@@ -3002,6 +3258,10 @@ async def _wait_for_work_many(
             )
             now = time.monotonic()
             await maintain(now)
+            if _GLOBAL_KEEPALIVE is not None:
+                cues = _GLOBAL_KEEPALIVE.drain_cues(set(active))
+                if cues:
+                    return response(cues, False)
             offset = cycle % len(active)
             interleaved = active[offset:] + active[:offset]
             cycle += 1
@@ -3060,12 +3320,26 @@ async def _wait_for_work(
     role = getattr(client.identity, "role", "worker")
     if explicit_name:
         joined = await _join_for_call(client, call_agent_name, True)
+        if _GLOBAL_KEEPALIVE is not None:
+            _GLOBAL_KEEPALIVE.observe_join(BOARD_ID, joined)
         if joined.get("agent_id") != my_agent_id:
             raise BoardClientError("server returned an unexpected per-call agent_id")
         role = joined.get("role", role)
     budget = clamp_timeout(timeout_s, role)
     deadline = started + budget
     selected_wait_for = _resolve_wait_for(wait_for, role)
+    if _GLOBAL_KEEPALIVE is not None:
+        cues = _GLOBAL_KEEPALIVE.drain_cues({BOARD_ID})
+        if cues:
+            return {
+                "new_seq": cursor,
+                "events": cues,
+                "waited_s": 0.0,
+                "timed_out": False,
+                "mode": "push",
+                "reason": "journal",
+                "resynced": resynced,
+            }
 
     async def poll_once() -> list[dict]:
         nonlocal cursor, resynced
@@ -3159,6 +3433,11 @@ async def _wait_for_work(
                 ) is True,
             )
             pending_event = asyncio.create_task(anext(events))
+            pending_cue = (
+                asyncio.create_task(_GLOBAL_KEEPALIVE.cues.get())
+                if _GLOBAL_KEEPALIVE is not None
+                else None
+            )
             try:
                 while True:
                     now = time.monotonic()
@@ -3176,12 +3455,31 @@ async def _wait_for_work(
                     wait_slice = _maintenance_due_in(
                         now, remaining, lease_due, next_progress
                     )
-                    done, _ = await asyncio.wait(
-                        {pending_event}, timeout=wait_slice
-                    )
+                    pending = {pending_event}
+                    if pending_cue is not None:
+                        pending.add(pending_cue)
+                    done, _ = await asyncio.wait(pending, timeout=wait_slice)
                     if not done:
                         await maintain(time.monotonic())
                         continue
+                    if pending_cue is not None and pending_cue in done:
+                        cue = pending_cue.result()
+                        if str(cue.get("board_id") or BOARD_ID) == BOARD_ID:
+                            return {
+                                "new_seq": cursor,
+                                "events": [cue],
+                                "waited_s": round(time.monotonic() - started, 2),
+                                "timed_out": False,
+                                "mode": "push",
+                                "reason": "journal",
+                                "resynced": resynced,
+                            }
+                        _GLOBAL_KEEPALIVE.cues.put_nowait(cue)
+                        pending_cue = asyncio.create_task(
+                            _GLOBAL_KEEPALIVE.cues.get()
+                        )
+                        if pending_event not in done:
+                            continue
                     event = pending_event.result()
                     actual_mode = "push"
                     found: list[dict[str, Any]] = []
@@ -3214,6 +3512,9 @@ async def _wait_for_work(
             finally:
                 pending_event.cancel()
                 await asyncio.gather(pending_event, return_exceptions=True)
+                if pending_cue is not None:
+                    pending_cue.cancel()
+                    await asyncio.gather(pending_cue, return_exceptions=True)
                 await events.aclose()
         except Exception as exc:
             actual_mode = "poll"
@@ -3239,6 +3540,19 @@ async def _wait_for_work(
 
         now = time.monotonic()
         await maintain(now)
+
+        if _GLOBAL_KEEPALIVE is not None:
+            cues = _GLOBAL_KEEPALIVE.drain_cues({BOARD_ID})
+            if cues:
+                return {
+                    "new_seq": cursor,
+                    "events": cues,
+                    "waited_s": round(time.monotonic() - started, 2),
+                    "timed_out": False,
+                    "mode": actual_mode,
+                    "reason": "journal",
+                    "resynced": resynced,
+                }
 
         relevant = await poll_once()
         if relevant:
