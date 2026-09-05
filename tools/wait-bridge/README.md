@@ -32,6 +32,7 @@ SHA-256 `1a0981ec6cc47aed8eeb5e8f488bef260ab6b5fd5c7c88e2cd99604654103e1a`.
 | `ONBOARD_AGENT_INSTANCE` | no | Stable per-instance suffix, such as `window-a`. |
 | `PURSERS_ROLE` | no | Explicit seat role: `worker`, `reviewer`, `orchestrator`, or `coordinator`. When omitted, Central maps reviewer membership to `reviewer`; admin/member membership maps to `worker`. |
 | `PURSERS_WAIT_MODE` | no | `push` (default) or explicit compatibility `poll`; a subscription error polls only that board for the current call and push is retried on re-arm. |
+| `PURSERS_KEEPALIVE_IDLE_LIMIT_S` | no | Maximum seconds since this stdio session's last model tool call before background lease renewal pauses. Defaults to three times each claim's live TTL. |
 | `PURSERS_HOST` | no | `codex` (default), `codex-cli`, `goose`, `claude-code`, `claude-desktop`, or `headless`; selects the safe call ceiling. |
 | `PURSERS_HOST_TIMEOUT_S` | no | Explicit host/runner deadline in seconds; overrides the named profile. |
 | `PURSERS_TIER_MAX` | no | Maximum dispatch tier (`1`-`3`) declared when the seat joins. |
@@ -148,9 +149,14 @@ mode, each accessible board subscribes independently to
 `board://<board_id>/journal` and `board://<board_id>/agent/<agent_id>`; an
 authoritative event advances only its board, while a failed subscription
 degrades only that board to polling for the current call. The entry backlog
-scan also snapshots leases held by the exact derived agent ID. During the live
-wait there is no discovery poll: only those ticket IDs receive `lease_renew`,
-at `min(300s, ttl/3)`.
+scan also snapshots leases held by the exact derived agent ID. Background
+keepalive renews only those exact ticket IDs at about 40% of their current TTL.
+It continues outside `a2a_wait` only while this stdio session has model tool
+activity within the configured idle limit. An in-progress `a2a_wait` is live
+activity. After the limit (default: three claim TTLs), renewal pauses, logs and
+returns a `lease_keepalive_paused` cue with `keepalive paused: model idle`, and
+lets the lease lapse. The next tool call resumes renewal only if the same
+authenticated identity still holds the lease.
 
 ## Project registry
 
@@ -410,8 +416,10 @@ cursor and emits candidate cues with `projection_state="unprojected"`, plus a
 A cursor beyond the journal head is clamped and reported under `warnings`
 instead of failing. On `timed_out=true`, re-arm
 immediately. Every event is a cue to refetch and claim current board state.
-The bridge renews held leases only while `a2a_wait` is blocking; long-running
-work must call Central's `lease_renew` directly.
+The bridge renews held leases while an `a2a_wait` is blocking and for a bounded
+idle window after other tool calls on the same stdio session. Long-running work
+should still call Central's `lease_renew` directly; Central records whether the
+latest renewal came from the model or the bridge keepalive.
 
 The requested `timeout_s` is capped at `host_timeout - margin`, where
 `margin=min(60,max(30,ceil(10% of host_timeout)))`; Claude Desktop uses at

@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -171,6 +172,54 @@ class LeaseKeepaliveTests(unittest.IsolatedAsyncioTestCase):
             len([call for call in client.calls if call[0] == "lease_renew"]), 1
         )
         await keepalive.stop()
+
+    async def test_idle_keepalive_pauses_and_resumes_on_model_interaction(
+        self,
+    ) -> None:
+        client = RawClient()
+        with patch.dict(
+            os.environ, {"PURSERS_KEEPALIVE_IDLE_LIMIT_S": "0.05"}
+        ):
+            keepalive = NoDiscoveryKeepalive(Connection(client))
+        keepalive.observe_lease(
+            "pursers",
+            "TK-idle",
+            {"lease_kind": "work", "ttl_s": 1},
+        )
+        keepalive.last_model_interaction -= 1
+
+        await keepalive._renew("pursers", "TK-idle")
+
+        self.assertEqual(
+            [call for call in client.calls if call[0] == "lease_renew"], []
+        )
+        cues = keepalive.drain_cues({"pursers"})
+        self.assertEqual(len(cues), 1)
+        self.assertEqual(cues[0]["kind"], "lease_keepalive_paused")
+        self.assertEqual(cues[0]["reason"], "keepalive paused: model idle")
+        self.assertIn(("pursers", "TK-idle"), keepalive.leases)
+
+        keepalive.observe_model_interaction()
+        await keepalive._renew("pursers", "TK-idle")
+
+        renewals = [call for call in client.calls if call[0] == "lease_renew"]
+        self.assertEqual(len(renewals), 1)
+        self.assertEqual(renewals[0][1]["renewal_source"], "keepalive")
+        self.assertEqual(keepalive.drain_cues({"pursers"}), [])
+
+    def test_active_wait_is_liveness_evidence(self) -> None:
+        with patch.dict(
+            os.environ, {"PURSERS_KEEPALIVE_IDLE_LIMIT_S": "0.05"}
+        ):
+            keepalive = NoDiscoveryKeepalive(Connection(RawClient()))
+        keepalive.last_model_interaction -= 1
+        self.assertFalse(keepalive.model_is_live(1))
+
+        keepalive.begin_wait()
+        try:
+            self.assertTrue(keepalive.model_is_live(1))
+        finally:
+            keepalive.end_wait()
 
     async def test_lost_claim_surfaces_once(self) -> None:
         client = RawClient(

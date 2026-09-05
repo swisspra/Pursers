@@ -21,7 +21,8 @@ THE TOOL
       2. Otherwise wait on journal and per-seat subscriptions. Poll only when
          explicitly selected or when listen fails for this call. A process-wide
          keepalive renews discovered work and review leases at about 40% of the
-         board TTL, including while the seat is working outside a2a_wait.
+         board TTL only while this model session has recent tool activity or an
+         a2a_wait request is still in progress.
       3. Bound large replays by compacting to the latest event per ticket, and
          return partial progress if catch-up consumes the call deadline.
          reason is journal|backlog|partial|timeout.
@@ -154,6 +155,7 @@ CONNECTOR_TOKEN_ENV = "PURSERS_BOARD_CONNECTOR_TOKEN"
 DEFAULT_TIMEOUT_S = 180
 DEFAULT_POLL_INTERVAL_S = 2.0
 DEFAULT_CLAIM_TTL_S = 900
+DEFAULT_KEEPALIVE_IDLE_TTL_MULTIPLIER = 3
 MAX_LEASE_RENEW_INTERVAL_S = 300.0
 PROGRESS_INTERVAL_S = 300.0
 CATCHUP_PAGE_LIMIT = 500
@@ -1079,6 +1081,7 @@ class _BoardView:
         agent_name: str | None = None,
         task_focus: str | None = None,
         capabilities: dict[str, Any] | None = None,
+        renewal_source: str | None = None,
     ) -> dict[str, Any]:
         selected = self.agent_name if agent_name is None else agent_name
         arguments: dict[str, Any] = {"agent_name": selected}
@@ -1091,6 +1094,8 @@ class _BoardView:
             caps.setdefault("legacy_tools", True)
         if caps or capabilities is not None:
             arguments["capabilities"] = caps
+        if renewal_source is not None:
+            arguments["renewal_source"] = renewal_source
         joined = await self._call(
             "board_join", arguments, refresh=True
         )
@@ -1114,14 +1119,21 @@ class _BoardView:
         return await self._call("ticket_list", arguments)
 
     async def lease_renew(
-        self, ticket_id: str, *, agent_name: str | None = None
+        self,
+        ticket_id: str,
+        *,
+        agent_name: str | None = None,
+        renewal_source: str | None = None,
     ) -> dict[str, Any]:
+        arguments: dict[str, Any] = {
+            "ticket_id": ticket_id,
+            "agent_name": self.agent_name if agent_name is None else agent_name,
+        }
+        if renewal_source is not None:
+            arguments["renewal_source"] = renewal_source
         return await self._call(
             "lease_renew",
-            {
-                "ticket_id": ticket_id,
-                "agent_name": self.agent_name if agent_name is None else agent_name,
-            },
+            arguments,
         )
 
 
@@ -1440,7 +1452,7 @@ def _enrich_registry_routes(
 
 
 class LeaseKeepalive:
-    """Renew work and review leases for the lifetime of the bridge process."""
+    """Renew leases only while the model session provides liveness evidence."""
 
     def __init__(self, connection: DeferredBoardConnection) -> None:
         self.connection = connection
@@ -1452,7 +1464,60 @@ class LeaseKeepalive:
         self.task: asyncio.Task[None] | None = None
         self.subscription_task: asyncio.Task[None] | None = None
         self.failed: set[tuple[str, str]] = set()
+        self.idle_paused: set[tuple[str, str]] = set()
         self.next_discovery = 0.0
+        self.last_model_interaction = time.monotonic()
+        self.active_waits = 0
+        self.model_refresh_pending = False
+        self.idle_limit_override = self._idle_limit_override()
+
+    @staticmethod
+    def _idle_limit_override() -> float | None:
+        raw = os.environ.get("PURSERS_KEEPALIVE_IDLE_LIMIT_S")
+        if raw is None or not raw.strip():
+            return None
+        try:
+            value = float(raw)
+        except ValueError:
+            _log("invalid PURSERS_KEEPALIVE_IDLE_LIMIT_S; using 3 x claim TTL")
+            return None
+        if not math.isfinite(value) or value <= 0:
+            _log("invalid PURSERS_KEEPALIVE_IDLE_LIMIT_S; using 3 x claim TTL")
+            return None
+        return value
+
+    def idle_limit(self, ttl_s: Any) -> float:
+        if self.idle_limit_override is not None:
+            return self.idle_limit_override
+        try:
+            ttl = max(1, int(ttl_s))
+        except (TypeError, ValueError):
+            ttl = DEFAULT_CLAIM_TTL_S
+        return float(ttl * DEFAULT_KEEPALIVE_IDLE_TTL_MULTIPLIER)
+
+    def model_is_live(self, ttl_s: Any, *, now: float | None = None) -> bool:
+        if self.active_waits > 0:
+            return True
+        observed = time.monotonic() if now is None else now
+        return observed - self.last_model_interaction <= self.idle_limit(ttl_s)
+
+    def observe_model_interaction(self) -> None:
+        self.last_model_interaction = time.monotonic()
+        self.model_refresh_pending = True
+        self.idle_paused.clear()
+        now = time.monotonic()
+        for lease in self.leases.values():
+            lease["due"] = min(float(lease["due"]), now)
+        self.next_discovery = 0.0
+        self.changed.set()
+
+    def begin_wait(self) -> None:
+        self.active_waits += 1
+        self.observe_model_interaction()
+
+    def end_wait(self) -> None:
+        self.active_waits = max(0, self.active_waits - 1)
+        self.observe_model_interaction()
 
     @staticmethod
     def interval(ttl_s: Any) -> float:
@@ -1521,6 +1586,7 @@ class LeaseKeepalive:
                 and key not in renewed_keys
             ):
                 self.leases.pop(key, None)
+                self.idle_paused.discard(key)
 
     def observe_claim(
         self, board_id: str, result: dict[str, Any], *, lease_kind: str = "work"
@@ -1566,6 +1632,7 @@ class LeaseKeepalive:
         )
         key = (board_id, ticket_id)
         self.failed.discard(key)
+        self.idle_paused.discard(key)
         self.leases[key] = {
             "lease_kind": lease.get("lease_kind", "work"),
             "ttl_s": int(ttl_s),
@@ -1600,6 +1667,7 @@ class LeaseKeepalive:
             "review_lease_released", "review_lease_expired"
         }:
             self.leases.pop((board_id, ticket_id), None)
+            self.idle_paused.discard((board_id, ticket_id))
             self.changed.set()
 
     def signal_board_change(self) -> None:
@@ -1643,6 +1711,7 @@ class LeaseKeepalive:
 
     async def _discover(self) -> None:
         client = await self.connection.client()
+        selected_source = "model" if self.model_refresh_pending else "keepalive"
         try:
             boards = _registry_boards(await _read_project_registry(client))
         except Exception:
@@ -1653,11 +1722,15 @@ class LeaseKeepalive:
         for board_id in boards:
             try:
                 joined = await _BoardView(client, board_id).board_join(
-                    agent_name=AGENT_NAME, capabilities=capabilities
+                    agent_name=AGENT_NAME,
+                    capabilities=capabilities,
+                    renewal_source=selected_source,
                 )
                 self.observe_join(board_id, joined)
             except Exception as exc:
                 _log(f"lease keepalive discovery failed for {board_id}: {exc}")
+        if selected_source == "model":
+            self.model_refresh_pending = False
 
     @staticmethod
     def _open_listen(client: BoardClient, resources: list[str]) -> Any:
@@ -1703,14 +1776,37 @@ class LeaseKeepalive:
         lease = self.leases.get(key)
         if lease is None:
             return
+        now = time.monotonic()
+        if not self.model_is_live(lease["ttl_s"], now=now):
+            lease["due"] = now + self.interval(lease["ttl_s"])
+            if key not in self.idle_paused:
+                self.idle_paused.add(key)
+                cue = {
+                    "kind": "lease_keepalive_paused",
+                    "source": "bridge_keepalive",
+                    "board_id": board_id,
+                    "ticket_id": ticket_id,
+                    "lease_kind": lease["lease_kind"],
+                    "reason": "keepalive paused: model idle",
+                    "idle_limit_s": self.idle_limit(lease["ttl_s"]),
+                }
+                await self.cues.put(cue)
+                _log(
+                    f"keepalive paused: model idle board={board_id} "
+                    f"ticket={ticket_id}"
+                )
+            return
         try:
             client = await self.connection.client()
             result = await _BoardView(client, board_id).lease_renew(
-                ticket_id, agent_name=str(lease["agent_name"])
+                ticket_id,
+                agent_name=str(lease["agent_name"]),
+                renewal_source="keepalive",
             )
             lease["ttl_s"] = int(result.get("ttl_s") or lease["ttl_s"])
             lease["due"] = time.monotonic() + self.interval(lease["ttl_s"])
             self.failed.discard(key)
+            self.idle_paused.discard(key)
             _log(
                 f"lease keepalive: renewed board={board_id} ticket={ticket_id} "
                 f"through {result.get('lease_expires_at')}"
@@ -1772,6 +1868,7 @@ class LeaseKeepalive:
             if intentional_stop:
                 self.leases.pop(key, None)
                 self.failed.discard(key)
+                self.idle_paused.discard(key)
                 return
             if still_held:
                 lease["due"] = time.monotonic() + min(
@@ -1779,6 +1876,7 @@ class LeaseKeepalive:
                 )
             else:
                 self.leases.pop(key, None)
+                self.idle_paused.discard(key)
             if key not in self.failed:
                 self.failed.add(key)
                 await self.cues.put(
@@ -1799,11 +1897,12 @@ class LeaseKeepalive:
         while not self.stopped.is_set():
             now = time.monotonic()
             if now >= self.next_discovery:
-                try:
-                    await self._discover()
-                except Exception as exc:
-                    _log(f"lease keepalive discovery deferred: {exc}")
                 ttl = min(self.board_ttls.values(), default=DEFAULT_CLAIM_TTL_S)
+                if self.model_is_live(ttl, now=now):
+                    try:
+                        await self._discover()
+                    except Exception as exc:
+                        _log(f"lease keepalive discovery deferred: {exc}")
                 self.next_discovery = time.monotonic() + self.interval(ttl)
             now = time.monotonic()
             due_keys = [
@@ -2467,9 +2566,18 @@ def _get_orchestrator_engine() -> OrchestratorEngine | None:
     return _GLOBAL_ENGINE
 
 
+def _get_lease_keepalive() -> LeaseKeepalive | None:
+    return _GLOBAL_KEEPALIVE
+
+
 class SessionCaptureMiddleware:
-    def __init__(self, engine_getter: Callable[[], OrchestratorEngine | None]) -> None:
+    def __init__(
+        self,
+        engine_getter: Callable[[], OrchestratorEngine | None],
+        keepalive_getter: Callable[[], LeaseKeepalive | None] = _get_lease_keepalive,
+    ) -> None:
         self.engine_getter = engine_getter
+        self.keepalive_getter = keepalive_getter
 
     async def __call__(self, ctx: Any, call_next: Any) -> Any:
         session = getattr(ctx, "session", None)
@@ -2477,7 +2585,21 @@ class SessionCaptureMiddleware:
             engine = self.engine_getter()
             if engine is not None:
                 engine.sessions.add(session)
-        return await call_next(ctx)
+        keepalive = self.keepalive_getter()
+        if keepalive is None or getattr(ctx, "method", None) != "tools/call":
+            return await call_next(ctx)
+        raw: Any = getattr(ctx, "params", None)
+        if hasattr(raw, "model_dump"):
+            raw = raw.model_dump(by_alias=True, exclude_none=True)
+        tool_name = raw.get("name") if isinstance(raw, dict) else None
+        if tool_name != "a2a_wait":
+            keepalive.observe_model_interaction()
+            return await call_next(ctx)
+        keepalive.begin_wait()
+        try:
+            return await call_next(ctx)
+        finally:
+            keepalive.end_wait()
 
 
 @asynccontextmanager
@@ -2513,7 +2635,9 @@ async def _lifespan(server: MCPServer) -> AsyncIterator[dict[str, Any]]:
 BRIDGE_DEPRECATED_TOOLS: frozenset[str] = frozenset()
 
 mcp = MCPServer("Pursers Wait Bridge", version=VERSION, lifespan=_lifespan)
-mcp._lowlevel_server.middleware.append(SessionCaptureMiddleware(_get_orchestrator_engine))
+mcp._lowlevel_server.middleware.append(
+    SessionCaptureMiddleware(_get_orchestrator_engine, _get_lease_keepalive)
+)
 
 _original_bridge_list_tools = mcp.list_tools
 
