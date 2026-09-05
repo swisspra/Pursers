@@ -40,7 +40,7 @@ for import_root in (CLIENT_SRC, WAIT_ROOT):
     if str(import_root) not in sys.path:
         sys.path.insert(0, str(import_root))
 
-from pursers_client import BoardClient  # noqa: E402
+from pursers_client import BoardClient, BoardClientError  # noqa: E402
 
 wait_bridge: Any | None = None
 
@@ -82,6 +82,9 @@ AUTH_SCHEME_PARTS = ("Bea", "rer")
 SANDBOX_EXEC = Path("/usr/bin/sandbox-exec")
 SECURITY_CLI = Path("/usr/bin/security")
 KEYCHAIN_SERVICE = "pursers-worker"
+REVIEWER_AUTH_ERROR = (
+    "reviewer mode requires a dedicated board reviewer principal/token"
+)
 
 
 @dataclass(frozen=True)
@@ -731,12 +734,18 @@ class PursersBoardAPI:
             token,
             self.wait_bridge.BOARD_ID,
             agent_name=config.agent_name,
+            role=config.role,
         )
         self.registry: dict[str, Any] | None = None
         self.views: dict[str, Any] = {}
 
     async def __aenter__(self) -> PursersBoardAPI:
-        await self.client.__aenter__()
+        try:
+            await self.client.__aenter__()
+        except BoardClientError as exc:
+            if self._reviewer_role_denied(exc):
+                raise PermissionError(REVIEWER_AUTH_ERROR) from exc
+            raise
         return self
 
     async def __aexit__(self, *args: Any) -> None:
@@ -752,21 +761,30 @@ class PursersBoardAPI:
         view = self.views.get(board_id)
         if view is None:
             view = self.wait_bridge._BoardView(self.client, board_id)
-            await view.board_join(
-                agent_name=self.config.agent_name,
-                task_focus=(
-                    f"worker-runtime role={self.config.role} "
-                    f"max_tier={self.config.max_tier}"
-                ),
-            )
+            try:
+                await view.board_join(
+                    agent_name=self.config.agent_name,
+                    task_focus=(
+                        f"worker-runtime role={self.config.role} "
+                        f"max_tier={self.config.max_tier}"
+                    ),
+                )
+            except BoardClientError as exc:
+                if self._reviewer_role_denied(exc):
+                    raise PermissionError(REVIEWER_AUTH_ERROR) from exc
+                raise
             if self.config.role == "reviewer" and (
                 view.identity is None or view.identity.role != "reviewer"
             ):
-                raise PermissionError(
-                    "reviewer mode requires a dedicated board reviewer principal/token"
-                )
+                raise PermissionError(REVIEWER_AUTH_ERROR)
             self.views[board_id] = view
         return view
+
+    def _reviewer_role_denied(self, exc: BaseException) -> bool:
+        if self.config.role != "reviewer":
+            return False
+        detail = str(exc).lower()
+        return "board role not authorized" in detail or "board:review" in detail
 
     async def wait(self, cursors: dict[str, int]) -> dict[str, Any]:
         return await self.wait_bridge._wait_for_work_many(

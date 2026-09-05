@@ -707,6 +707,53 @@ def test_board_api_configures_profile_before_import_and_passes_wait_timeout(
     assert result["timed_out"] is True
 
 
+@pytest.mark.parametrize("role", ["worker", "reviewer"])
+def test_board_api_constructs_client_with_declared_role(
+    role: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    class RecordingClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            captured["args"] = args
+            captured["kwargs"] = kwargs
+
+    monkeypatch.setattr(worker_module, "BoardClient", RecordingClient)
+    selected = config(tmp_path, "http://unused", role=role)
+
+    worker_module.PursersBoardAPI(selected, "TOKEN_PLACEHOLDER")
+
+    assert captured["kwargs"]["role"] == role
+
+
+def test_board_api_maps_reviewer_role_denial_to_operator_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    class RejectingClient:
+        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+            pass
+
+        async def __aenter__(self) -> None:
+            raise worker_module.BoardClientError("board role not authorized")
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+    monkeypatch.setattr(worker_module, "BoardClient", RejectingClient)
+    api = worker_module.PursersBoardAPI(
+        config(tmp_path, "http://unused", role="reviewer"),
+        "TOKEN_PLACEHOLDER",
+    )
+
+    with pytest.raises(
+        PermissionError,
+        match="reviewer mode requires a dedicated board reviewer principal/token",
+    ):
+        asyncio.run(api.__aenter__())
+
+
 def test_board_api_explicit_poll_fallback_is_still_available(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -1100,6 +1147,7 @@ def test_real_bridge_and_central_stay_cue_driven_for_ten_minutes(
                         "TOKEN_PLACEHOLDER",
                         "pursers",
                         agent_name=selected.agent_name,
+                        role=selected.role,
                     )
                     client._client = transport
                     client.identity = worker_module.wait_bridge.JoinedIdentity(
