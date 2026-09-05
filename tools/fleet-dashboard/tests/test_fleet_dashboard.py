@@ -1507,6 +1507,41 @@ def test_overhead_projects_model_visible_wait_cost_separately() -> None:
     ]
 
 
+def test_overhead_surfaces_push_unavailable_warning(tmp_path: Path) -> None:
+    path = tmp_path / "stats.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 4,
+                "days": {},
+                "push_unavailable": {
+                    "seat": {
+                        "board_id": "pursers",
+                        "agent_name": "worker-one",
+                        "reason": "unknown event kinds: ['board_claim_ttl_changed']",
+                        "observed_at": "2030-01-10T12:00:00+00:00",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = dashboard.read_overhead_stats(
+        path, now=datetime(2030, 1, 10, 12, 30, tzinfo=timezone.utc)
+    )
+
+    assert result["push_unavailable"] == [
+        {
+            "board_id": "pursers",
+            "agent_name": "worker-one",
+            "reason": "unknown event kinds: ['board_claim_ttl_changed']",
+            "observed_at": "2030-01-10T12:00:00+00:00",
+            "warning": "push unavailable: unknown event kinds: ['board_claim_ttl_changed']",
+        }
+    ]
+
+
 def test_session_pressure_thresholds_trend_and_worst_first_sorting() -> None:
     def cycle(board: str, agent: str, latest_bytes: int, samples: list[int]) -> dict:
         return {
@@ -4874,6 +4909,7 @@ def test_attention_and_truncation_controls_are_rendered() -> None:
     assert "sessionStorage" not in dashboard.HTML
     assert "/api/attention" in dashboard.HTML
     assert "data-attention-action=\"ack\"" in dashboard.HTML
+    assert "push unavailable: ${p.reason}" in dashboard.HTML
     assert "Snooze 24h" in dashboard.HTML
     assert "snapshot truncated to ${esc(tr.returned)} of ${esc(tr.total)} tickets" in dashboard.HTML
     assert "tokens / return" in dashboard.HTML

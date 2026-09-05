@@ -42,13 +42,17 @@ types.ToolAnnotations.model_fields["deprecated"] = FieldInfo(
 types.ToolAnnotations.model_rebuild(force=True)
 types.Tool.model_rebuild(force=True)
 from pursers_client import (
-    DISPATCH_KINDS,
+    ADMISSION_EVENT_KINDS,
+    CLAIM_TTL_EVENT_KINDS,
+    DEPRECATION_EVENT_KINDS,
+    DISPATCH_EVENT_KINDS,
     OFFER_EXPIRED,
     OFFER_REVOKED,
     REVIEW_OFFERED,
     REVIEW_LEASE_EXPIRED,
-    REVIEW_LEASE_KINDS,
     REVIEW_LEASE_RELEASED,
+    REVIEW_EVENT_KINDS,
+    SCRUB_EVENT_KINDS,
     TICKET_REVIEW_CLAIMED,
     TICKET_OFFERED,
 )
@@ -110,9 +114,6 @@ INVITE_ROLES = frozenset({"member", "reviewer"})
 DEFAULT_INVITE_TTL_S = 3_600
 MIN_INVITE_TTL_S = 1
 MAX_INVITE_TTL_S = 604_800
-ADMISSION_EVENT_KINDS = frozenset(
-    {"board_membership_changed", "board_invite_created"}
-)
 ADMISSION_EVENT_FIELDS = frozenset(
     {
         "admission_action",
@@ -128,7 +129,6 @@ ADMISSION_EVENT_FIELDS = frozenset(
     }
 )
 SCRUB_PROFILES = frozenset({"strict", "internal"})
-SCRUB_EVENT_KINDS = frozenset({"board_scrub_profile_changed"})
 SCRUB_EVENT_FIELDS = frozenset(
     {
         "scrub_profile_from",
@@ -137,13 +137,10 @@ SCRUB_EVENT_FIELDS = frozenset(
         "recipient_identities",
     }
 )
-CLAIM_TTL_EVENT_KINDS = frozenset({"board_claim_ttl_changed"})
 CLAIM_TTL_EVENT_FIELDS = frozenset(
     {"claim_ttl_from", "claim_ttl_to", "fixture_provenance", "recipient_identities"}
 )
 REVIEW_POLICIES = frozenset({"strict", "workflow"})
-REVIEW_EVENT_KINDS = frozenset({"board_review_policy_changed"}) | REVIEW_LEASE_KINDS
-DEPRECATION_EVENT_KINDS = frozenset({"deprecated_tool_warning"})
 DEPRECATION_EVENT_FIELDS = frozenset(
     {
         "tool",
@@ -204,7 +201,6 @@ REVIEW_EVENT_FIELDS = frozenset(
         "recipient_identities",
     }
 )
-DISPATCH_EVENT_KINDS = DISPATCH_KINDS | frozenset({"dispatch_unassignable"})
 DISPATCH_EVENT_FIELDS = frozenset(
     {
         "ticket_id",

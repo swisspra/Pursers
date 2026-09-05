@@ -8,17 +8,10 @@ from datetime import datetime, timezone
 from typing import Any
 
 from locked_store import LockedJsonStore
+from pursers_client import CORE_EVENT_KINDS
 
 
-KINDS = frozenset(
-    {
-        "ticket_status_changed",
-        "ticket_created",
-        "memory_written",
-        "coordinator_assignment",
-        "coordinator_nudge",
-    }
-)
+KINDS = CORE_EVENT_KINDS
 MIN_COMPACTION_RETAIN_LAST = 500
 SEMANTIC_FIELDS = frozenset(
     {

@@ -1125,6 +1125,7 @@ def read_overhead_stats(
         "sessions": [],
         "seats": [],
         "model_wait": [],
+        "push_unavailable": [],
         "bounds": {
             "days": OVERHEAD_DAYS,
             "seats": MAX_OVERHEAD_SEATS,
@@ -1140,7 +1141,7 @@ def read_overhead_stats(
         return empty
     except (OSError, UnicodeError, ValueError):
         return {**empty, "source_status": "malformed"}
-    if not isinstance(document, dict) or document.get("schema_version") not in {1, 2, 3}:
+    if not isinstance(document, dict) or document.get("schema_version") not in {1, 2, 3, 4}:
         return {**empty, "source_status": "malformed"}
     raw_days = document.get("days")
     if not isinstance(raw_days, dict):
@@ -1470,12 +1471,46 @@ def read_overhead_stats(
             item["agent_name"],
         )
     )
+    push_unavailable = []
+    raw_push_unavailable = document.get("push_unavailable")
+    if isinstance(raw_push_unavailable, dict):
+        for raw in raw_push_unavailable.values():
+            if not isinstance(raw, dict):
+                continue
+            board_id = raw.get("board_id")
+            agent_name = raw.get("agent_name")
+            reason = raw.get("reason")
+            observed_at = raw.get("observed_at")
+            if (
+                not isinstance(board_id, str)
+                or not board_id
+                or not isinstance(agent_name, str)
+                or not agent_name
+                or not isinstance(reason, str)
+                or not reason
+                or _parse_time(observed_at) is None
+            ):
+                continue
+            push_unavailable.append(
+                {
+                    "board_id": _clip(board_id, MAX_LABEL_CHARS),
+                    "agent_name": _clip(agent_name, MAX_LABEL_CHARS),
+                    "reason": _clip(reason, 500),
+                    "observed_at": observed_at,
+                    "warning": f"push unavailable: {_clip(reason, 500)}",
+                }
+            )
+    push_unavailable.sort(
+        key=lambda item: (item["observed_at"], item["board_id"], item["agent_name"]),
+        reverse=True,
+    )
     result = {
         **empty,
         "source_status": "ok",
         "sessions": sessions[:MAX_OVERHEAD_SEATS],
         "seats": rows[:MAX_OVERHEAD_SEATS],
         "model_wait": model_wait_rows[:MAX_OVERHEAD_SEATS],
+        "push_unavailable": push_unavailable[:MAX_OVERHEAD_SEATS],
         "truncated_sessions": max(0, len(sessions) - MAX_OVERHEAD_SEATS),
         "truncated_seats": max(0, len(rows) - MAX_OVERHEAD_SEATS),
     }
@@ -1487,6 +1522,8 @@ def read_overhead_stats(
         result["truncated_sessions"] += 1
     while len(_json_bytes(result)) > API_MAX_BYTES and result["model_wait"]:
         result["model_wait"].pop()
+    while len(_json_bytes(result)) > API_MAX_BYTES and result["push_unavailable"]:
+        result["push_unavailable"].pop()
     return result
 
 
@@ -4196,7 +4233,7 @@ let attentionState={},attentionStateLoaded=false,attentionStateSaved='';
 function loadAttentionState(){return attentionState}
 async function saveAttentionState(value){attentionState=value;if(!attentionStateLoaded)return;const encoded=JSON.stringify(value);if(encoded===attentionStateSaved)return;const response=await fetch('/api/attention',{method:'POST',headers:{'Content-Type':'application/json'},body:encoded});if(!response.ok)throw new Error(`attention state HTTP ${response.status}`);attentionStateSaved=encoded}
 async function refreshAttentionState(){try{const result=await fetchJson('/api/attention');attentionState=result.items&&typeof result.items==='object'?result.items:{};attentionStateSaved=JSON.stringify(attentionState);attentionStateLoaded=true;if(navKind()==='overview')renderHub()}catch(_error){attentionStateLoaded=false}}
-function attentionCandidates(){const rows=[];for(const [central,d] of Object.entries(fleetData)){for(const b of d.boards||[]){for(const f of b.coordinator_findings?.items||[]){rows.push({key:`finding|${central}|${b.board_id}|${f.kind}|${f.ticket_id||''}`,fingerprint:`${f.level}|${f.kind}|${f.text}`,type:'finding',central,board:b,level:f.level||'info',title:f.kind,text:f.text,ticket_id:f.ticket_id})}for(const t of b.tickets||[]){const age=Date.now()-new Date(t.updated_at||Date.now()).getTime();if(t.status==='open'&&age>1800000)rows.push({key:`starved|${central}|${b.board_id}|${t.id}`,fingerprint:'open-over-30m',type:'starved',central,board:b,level:'warn',title:'Starved ticket',text:t.title,ticket_id:t.id,age});if((t.abandoned_count||0)>0)rows.push({key:`lease-lapsed|${central}|${b.board_id}|${t.id}`,fingerprint:`lease-lapsed-${t.abandoned_count}`,type:'lease-lapsed',central,board:b,level:'warn',title:`Lease lapsed ${t.abandoned_count} times`,text:t.title,ticket_id:t.id,age})}}for(const p of hubOverhead[central]?.sessions||[]){if(p.pressure==='ok')continue;rows.push({key:`context|${central}|${p.board_id}|${p.agent_name}`,fingerprint:`${p.pressure}|${p.mode||'unknown'}|${p.reason||''}`,type:'context',central,board:{board_id:p.board_id,label:p.board_id},level:p.pressure==='compact'||p.pressure==='anomaly'?'critical':'warn',title:p.pressure==='anomaly'?'Context stats anomaly':`Context ${p.pressure}`,text:p.pressure==='anomaly'?`${p.agent_name} · raw wait-return record requires inspection`:`${p.agent_name} · ${p.estimated_tokens_per_return??p.latest_estimated_tokens} tokens / return · ${p.estimated_tokens_per_hour??'—'} / hour · ${p.mode||'unknown'}${p.reason?' · '+p.reason:''}`})}}return rows}
+function attentionCandidates(){const rows=[];for(const [central,d] of Object.entries(fleetData)){for(const b of d.boards||[]){for(const f of b.coordinator_findings?.items||[]){rows.push({key:`finding|${central}|${b.board_id}|${f.kind}|${f.ticket_id||''}`,fingerprint:`${f.level}|${f.kind}|${f.text}`,type:'finding',central,board:b,level:f.level||'info',title:f.kind,text:f.text,ticket_id:f.ticket_id})}for(const t of b.tickets||[]){const age=Date.now()-new Date(t.updated_at||Date.now()).getTime();if(t.status==='open'&&age>1800000)rows.push({key:`starved|${central}|${b.board_id}|${t.id}`,fingerprint:'open-over-30m',type:'starved',central,board:b,level:'warn',title:'Starved ticket',text:t.title,ticket_id:t.id,age});if((t.abandoned_count||0)>0)rows.push({key:`lease-lapsed|${central}|${b.board_id}|${t.id}`,fingerprint:`lease-lapsed-${t.abandoned_count}`,type:'lease-lapsed',central,board:b,level:'warn',title:`Lease lapsed ${t.abandoned_count} times`,text:t.title,ticket_id:t.id,age})}}for(const p of hubOverhead[central]?.sessions||[]){if(p.pressure==='ok')continue;rows.push({key:`context|${central}|${p.board_id}|${p.agent_name}`,fingerprint:`${p.pressure}|${p.mode||'unknown'}|${p.reason||''}`,type:'context',central,board:{board_id:p.board_id,label:p.board_id},level:p.pressure==='compact'||p.pressure==='anomaly'?'critical':'warn',title:p.pressure==='anomaly'?'Context stats anomaly':`Context ${p.pressure}`,text:p.pressure==='anomaly'?`${p.agent_name} · raw wait-return record requires inspection`:`${p.agent_name} · ${p.estimated_tokens_per_return??p.latest_estimated_tokens} tokens / return · ${p.estimated_tokens_per_hour??'—'} / hour · ${p.mode||'unknown'}${p.reason?' · '+p.reason:''}`})}for(const p of hubOverhead[central]?.push_unavailable||[]){rows.push({key:`push-unavailable|${central}|${p.board_id}|${p.agent_name}`,fingerprint:`${p.reason}|${p.observed_at}`,type:'push-unavailable',central,board:{board_id:p.board_id,label:p.board_id},level:'critical',title:'Push unavailable',text:p.warning||`push unavailable: ${p.reason}`})}}return rows}
 function reconcileAttention(){const now=new Date(),before=loadAttentionState(),next={},visible=[];for(const item of attentionCandidates()){if(!item.key||next[item.key])continue;const old=before[item.key],same=old?.fingerprint===item.fingerprint;const row={fingerprint:item.fingerprint,first_seen:same&&old.first_seen?old.first_seen:now.toISOString(),last_seen:now.toISOString(),acknowledged:same&&old.acknowledged===true,snooze_until:same?old.snooze_until||null:null};next[item.key]=row;const snoozed=row.snooze_until&&new Date(row.snooze_until)>now;if(!row.acknowledged&&!snoozed)visible.push({...item,...row})}saveAttentionState(next).catch(()=>{});window.__fleetAttentionPanel={generated_at:now.toISOString(),items:visible.map(x=>({key:x.key,type:x.type,central:x.central,board_id:x.board.board_id,ticket_id:x.ticket_id||null,first_seen:x.first_seen,last_seen:x.last_seen}))};return visible}
 function attentionRow(x){const link=x.ticket_id?`<a class="id" href="${ticketHref(x.central,x.board.board_id,x.ticket_id)}">${esc(x.ticket_id)}</a>`:`<a href="${centralHref(x.central,'overhead')}">Inspect</a>`;return `<div class="finding-row"><span class="severity ${esc(x.level)}"></span><div><b>${esc(x.title)}</b><p>${esc(x.text)}</p><span class="meta">${esc(x.central)} · ${esc(x.board.label)} · first seen ${esc(fmt(x.first_seen))}</span><div class="attention-actions"><button type="button" data-attention-action="ack" data-attention-key="${esc(x.key)}">Acknowledge</button><button type="button" data-attention-action="snooze" data-attention-key="${esc(x.key)}">Snooze 24h</button></div></div>${link}</div>`}
 function renderAttentionOverview(){const centrals=centralLabels.map(label=>{const d=fleetData[label],error=fleetErrors[label];if(!d)return `<article class="health-card"><div class="signal"><span class="signal-dot bad"></span><b>${esc(label)}</b></div><p class="error">${esc(error||'Connecting…')}</p></article>`;const s=d.pool_summary||{},heartbeat=(d.boards||[]).map(b=>b.coordinator_heartbeat).filter(Boolean).sort().at(-1),tc={open:0,claimed:0,submitted:0,closed_today:0};for(const b of d.boards||[])for(const k in tc)tc[k]+=numberCount((b.counts||{})[k]);return `<article class="health-card"><div class="signal"><span class="signal-dot"></span><b>${esc(label)}</b><span class="status">central up</span></div><p class="meta">Coordinator heartbeat ${esc(heartbeat?fmt(heartbeat):'not observed')}</p><div class="health-metrics"><span>Busy<b>${esc(s.busy||0)}</b></span><span>Ready<b>${esc(s.available||0)}</b></span><span>Stale<b>${esc(s.stale||0)}</b></span></div><div class="health-metrics"><span>Open<b>${esc(tc.open)}</b></span><span>Claimed<b>${esc(tc.claimed)}</b></span><span>Submitted${tc.submitted?' ⚠':''}<b>${esc(tc.submitted)}</b></span><span>Closed today<b>${esc(tc.closed_today)}</b></span></div></article>`}).join('');const surfaced=reconcileAttention().sort((a,b)=>(b.level==='critical')-(a.level==='critical')||(b.age||0)-(a.age||0)),attention=surfaced.slice(0,10);return `${pageHead('Home','Fleet overview','Health and attention across every central.')}<section class="health-grid">${centrals||'<div class="skeleton"></div>'}</section><div class="section-title"><h3>Needs attention</h3><span class="status">${surfaced.length} surfaced</span></div><section class="attention-card">${attention.map(attentionRow).join('')||'<p class="empty">Nothing needs attention. The fleet is calm.</p>'}</section>`}

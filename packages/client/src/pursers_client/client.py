@@ -6,6 +6,7 @@ import asyncio
 import inspect
 import json
 import os
+import warnings
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Callable, Iterable
@@ -15,7 +16,11 @@ from mcp import Client
 from mcp.client.streamable_http import streamable_http_client
 from mcp.client.subscriptions import SubscriptionLost
 
-from .events import DISPATCH_KINDS, REVIEW_LEASE_KINDS, SUBMITTED_RELEVANT_KINDS
+from .events import (
+    DISPATCH_KINDS,
+    KNOWN_EVENT_KINDS,
+    REVIEW_LEASE_KINDS,
+)
 
 
 class BoardClientError(RuntimeError):
@@ -36,7 +41,6 @@ DEFAULT_EVENT_KINDS = frozenset(
         "ticket_assigned",
     }
 ) | REVIEW_LEASE_KINDS | DISPATCH_KINDS
-KNOWN_EVENT_KINDS = DEFAULT_EVENT_KINDS | SUBMITTED_RELEVANT_KINDS | {"memory_written", "deprecated_tool_warning"}
 GENERATION_META_KEY = "io.onboard/expected-generation"
 # Cleanup is best-effort after this bound so a broken transport cannot wedge a
 # host shutdown or mask the original __aenter__ failure indefinitely.
@@ -1024,7 +1028,12 @@ class BoardClient:
         selected_kinds = frozenset(kinds) if kinds is not None else DEFAULT_EVENT_KINDS
         unknown = selected_kinds - KNOWN_EVENT_KINDS
         if unknown:
-            raise ValueError(f"unknown event kinds: {sorted(unknown)}")
+            warnings.warn(
+                f"dropping unknown event kinds: {sorted(unknown)}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            selected_kinds -= unknown
         explicit_uris = tuple(resource_subscriptions or ())
         for uri in explicit_uris:
             self.watch_resource(str(uri))

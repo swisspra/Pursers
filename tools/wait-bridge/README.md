@@ -407,11 +407,13 @@ For a per-call identity, the entry snapshot exact-filters
 scope, not per agent identity, so exact ticket selection prevents accidental
 renewals by the bridge but is not a server-side identity-isolation guarantee.
 
-`bridge-stats.json` schema 3 keeps old bridge-to-Central request/response bytes
+`bridge-stats.json` schema 4 keeps old bridge-to-Central request/response bytes
 under `days` and legacy poll samples under `poll_cycles`. Model-visible cost is
 separate under `model_wait`: per-seat UTC-hour counts of `a2a_wait` returns and
 the exact serialized result bytes inserted into model context. The fleet
 dashboard shows current-hour returns/bytes and 24-hour cue/timeout outcomes.
+Subscription failures are retained under `push_unavailable` until that seat
+records a healthy push return, so poll fallback is visible outside stderr.
 
 Run the bridge tests with:
 
