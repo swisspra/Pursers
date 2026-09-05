@@ -56,8 +56,16 @@ class LeaseKeepaliveTests(unittest.IsolatedAsyncioTestCase):
         client = RawClient()
         keepalive = NoDiscoveryKeepalive(Connection(client))
         keepalive.board_ttls["pursers"] = 1
-        keepalive.observe_lease(
-            "pursers", "TK-held", {"lease_kind": "work", "ttl_s": 1}
+        keepalive.observe_claim(
+            "pursers",
+            {
+                "ok": True,
+                "ttl_s": 1,
+                "ticket": {
+                    "ticket_id": "TK-held",
+                    "claimed_by": "keepalive-seat",
+                },
+            },
         )
         keepalive.start()
         await asyncio.sleep(0.5)

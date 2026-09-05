@@ -5788,6 +5788,9 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             if retryable_rejection:
                 ticket["last_claimed_by_agent_id"] = ticket.get("claimed_by_agent_id")
                 ticket["last_claimed_by_principal_id"] = ticket.get("claimed_by_principal_id")
+                ticket["last_claimed_by"] = ticket.get("claimed_by")
+                ticket["last_claimed_at"] = ticket.get("claimed_at")
+                ticket["last_release_reason"] = "review rejected"
                 for key in (
                     "claimed_by_agent_id",
                     "claimed_by_principal_id",

@@ -84,8 +84,9 @@ class LegacyToolsTests(unittest.IsolatedAsyncioTestCase):
                     core, tool_names, f"Active tool {core} must be visible"
                 )
 
-            # Count check: 43 total - 10 deprecated = 33 active tools
-            self.assertEqual(len(tool_names), 33)
+            # Count check: 44 total - 10 deprecated = 34 active tools
+            self.assertEqual(len(tool_names), 34)
+            self.assertIn("board_claim_ttl_set", tool_names)
 
     async def test_authenticated_two_connection_seat_scoped_capability_and_rejoin(self) -> None:
         """Legacy visibility is strictly seat/session scoped: two seats under same principal remain isolated."""
@@ -131,14 +132,14 @@ class LegacyToolsTests(unittest.IsolatedAsyncioTestCase):
             res_legacy = await c_legacy.list_tools()
             res_modern = await c_modern.list_tools()
 
-            # legacy-seat sees all 43 tools
-            self.assertEqual(len(res_legacy.tools), 43)
+            # legacy-seat sees all 44 tools
+            self.assertEqual(len(res_legacy.tools), 44)
             legacy_names = {t.name for t in res_legacy.tools}
             for dep in central.DEPRECATED_TOOLS:
                 self.assertIn(dep, legacy_names)
 
-            # modern-seat under same principal remains strictly on the 33-tool surface
-            self.assertEqual(len(res_modern.tools), 33)
+            # modern-seat under same principal remains strictly on the 34-tool surface
+            self.assertEqual(len(res_modern.tools), 34)
             modern_names = {t.name for t in res_modern.tools}
             for dep in central.DEPRECATED_TOOLS:
                 self.assertNotIn(dep, modern_names)
@@ -162,9 +163,9 @@ class LegacyToolsTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertFalse(rejoin.is_error)
 
-            # Now legacy-seat immediately drops to the 33-tool surface
+            # Now legacy-seat immediately drops to the 34-tool surface
             res_rejoin = await c_legacy.list_tools()
-            self.assertEqual(len(res_rejoin.tools), 33)
+            self.assertEqual(len(res_rejoin.tools), 34)
             rejoin_names = {t.name for t in res_rejoin.tools}
             for dep in central.DEPRECATED_TOOLS:
                 self.assertNotIn(dep, rejoin_names)
@@ -175,7 +176,7 @@ class LegacyToolsTests(unittest.IsolatedAsyncioTestCase):
             async with Client(self.mcp, mode="2026-07-28", cache=None) as client:
                 res = await client.list_tools()
                 tool_names = {t.name for t in res.tools}
-                self.assertEqual(len(tool_names), 43)
+                self.assertEqual(len(tool_names), 44)
                 for dep in central.DEPRECATED_TOOLS:
                     self.assertIn(dep, tool_names)
 
@@ -200,7 +201,7 @@ class LegacyToolsTests(unittest.IsolatedAsyncioTestCase):
                 }
             )
 
-        self.assertEqual(len(result.tools), 33)
+        self.assertEqual(len(result.tools), 34)
         self.assertTrue(
             central.DEPRECATED_TOOLS.isdisjoint(
                 {tool.name for tool in result.tools}

@@ -979,8 +979,16 @@ class _BoardView:
     async def ticket_list(self, **arguments: Any) -> dict[str, Any]:
         return await self._call("ticket_list", arguments)
 
-    async def lease_renew(self, ticket_id: str) -> dict[str, Any]:
-        return await self._call("lease_renew", {"ticket_id": ticket_id})
+    async def lease_renew(
+        self, ticket_id: str, *, agent_name: str | None = None
+    ) -> dict[str, Any]:
+        return await self._call(
+            "lease_renew",
+            {
+                "ticket_id": ticket_id,
+                "agent_name": self.agent_name if agent_name is None else agent_name,
+            },
+        )
 
 
 async def _join_for_call(
@@ -1300,7 +1308,11 @@ class LeaseKeepalive:
                 continue
             ticket_id = lease.get("ticket_id")
             if isinstance(ticket_id, str) and ticket_id:
-                self.observe_lease(board_id, ticket_id, lease)
+                self.observe_lease(
+                    board_id,
+                    ticket_id,
+                    {**lease, "agent_name": result.get("agent_name") or AGENT_NAME},
+                )
 
     def observe_claim(
         self, board_id: str, result: dict[str, Any], *, lease_kind: str = "work"
@@ -1309,10 +1321,22 @@ class LeaseKeepalive:
         ticket_id = ticket.get("ticket_id") if isinstance(ticket, dict) else None
         if not isinstance(ticket_id, str) or not result.get("ok", True):
             return
+        review_lease = result.get("review_lease")
+        if lease_kind == "review" and not isinstance(review_lease, dict):
+            review_lease = ticket.get("review_lease")
         lease = {
             "ticket_id": ticket_id,
             "lease_kind": lease_kind,
-            "ttl_s": result.get("ttl_s") or ticket.get("ttl_s"),
+            "ttl_s": (
+                review_lease.get("ttl_s")
+                if isinstance(review_lease, dict)
+                else result.get("ttl_s") or ticket.get("ttl_s")
+            ),
+            "agent_name": (
+                review_lease.get("reviewer_agent_name")
+                if isinstance(review_lease, dict)
+                else ticket.get("claimed_by")
+            ),
         }
         self.observe_lease(board_id, ticket_id, lease)
 
@@ -1327,6 +1351,7 @@ class LeaseKeepalive:
         self.leases[key] = {
             "lease_kind": lease.get("lease_kind", "work"),
             "ttl_s": int(ttl_s),
+            "agent_name": lease.get("agent_name") or AGENT_NAME,
             "due": time.monotonic() + self.interval(ttl_s),
         }
         self.changed.set()
@@ -1350,14 +1375,18 @@ class LeaseKeepalive:
         queue: asyncio.Queue[tuple[str, str, dict[str, Any] | str | None]],
         boards: set[str],
     ) -> None:
-        while True:
-            cue = await self.cues.get()
-            board_id = str(cue.get("board_id") or BOARD_ID)
-            if board_id in boards:
-                await queue.put((board_id, "keepalive", cue))
-            else:
-                await self.cues.put(cue)
-                await asyncio.sleep(0)
+        deferred: list[dict[str, Any]] = []
+        try:
+            while True:
+                cue = await self.cues.get()
+                board_id = str(cue.get("board_id") or BOARD_ID)
+                if board_id in boards:
+                    await queue.put((board_id, "keepalive", cue))
+                else:
+                    deferred.append(cue)
+        finally:
+            for cue in deferred:
+                self.cues.put_nowait(cue)
 
     def drain_cues(self, boards: set[str]) -> list[dict[str, Any]]:
         selected: list[dict[str, Any]] = []
@@ -1398,7 +1427,9 @@ class LeaseKeepalive:
             return
         try:
             client = await self.connection.client()
-            result = await _BoardView(client, board_id).lease_renew(ticket_id)
+            result = await _BoardView(client, board_id).lease_renew(
+                ticket_id, agent_name=str(lease["agent_name"])
+            )
             lease["ttl_s"] = int(result.get("ttl_s") or lease["ttl_s"])
             lease["due"] = time.monotonic() + self.interval(lease["ttl_s"])
             self.failed.discard(key)
@@ -2489,6 +2520,7 @@ async def _is_relevant(
                 {
                     "lease_kind": "review",
                     "ttl_s": review_lease.get("ttl_s"),
+                    "agent_name": review_lease.get("reviewer_agent_name"),
                 },
             )
     dispatch_state = ticket.get("dispatch_state")
