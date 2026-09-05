@@ -624,6 +624,8 @@ class CentralBoard:
             raise ValueError("Personal Central requires invite admission")
         self.journal = CentralJournal(self.store)
         self.cursors = CursorStore(self.store)
+        self.active_listeners: dict[str, set[str]] = {}
+        self.last_seen_activity: dict[tuple[str, str], float] = {}
         # The JSON skeleton needs one service-wide boundary so a cold snapshot and
         # its journal watermark cannot split a domain-write/journal-append pair.
         self.tool_lock = asyncio.Lock()
@@ -633,6 +635,35 @@ class CentralBoard:
         self.expected_generation: contextvars.ContextVar[Any] = contextvars.ContextVar(
             "central_expected_generation", default=None
         )
+
+    def register_listener(self, board_id: str, agent_id: str) -> None:
+        self.active_listeners.setdefault(board_id, set()).add(agent_id)
+
+    def unregister_listener(self, board_id: str, agent_id: str) -> None:
+        if board_id in self.active_listeners:
+            self.active_listeners[board_id].discard(agent_id)
+
+    def record_agent_activity(self, board_id: str, agent_id: str, now: float) -> None:
+        self.last_seen_activity[(board_id, agent_id)] = now
+
+    def is_agent_live(
+        self, board_id: str, agent_id: str, member: Mapping[str, Any], now: float, offer_ttl_s: int,
+    ) -> bool:
+        if agent_id in self.active_listeners.get(board_id, set()):
+            return True
+        last_seen = self.last_seen_activity.get((board_id, agent_id))
+        window = max(1800.0, 3.0 * float(offer_ttl_s))
+        if last_seen is not None and (0.0 <= now - last_seen <= window or now < last_seen):
+            return True
+        raw_activity = member.get("last_activity_at")
+        if raw_activity:
+            try:
+                epoch = datetime.fromisoformat(str(raw_activity).replace("Z", "+00:00")).timestamp()
+                if 0.0 <= now - epoch <= window or now < epoch:
+                    return True
+            except ValueError:
+                pass
+        return False
 
     def has_seat_legacy_capability(
         self, principal_id: str | None, agent_name: str | None
@@ -1408,9 +1439,24 @@ class SubscriptionAuthorization:
             uris = notifications.get("resourceSubscriptions") or notifications.get("resource_subscriptions") or []
             principal = current_principal()
             require_scope(principal, "board:read")
+            registered_agents: list[tuple[str, str]] = []
             for uri in uris:
                 if not self.service.subscription_allowed(str(uri), principal.principal_id):
                     raise MCPError(INVALID_REQUEST, "subscription denied: principal is not a board member")
+                parsed = urlparse(str(uri))
+                if parsed.scheme == "board" and parsed.netloc and parsed.path.startswith("/agent/"):
+                    segments = parsed.path.split("/")
+                    if len(segments) == 3 and segments[1] == "agent":
+                        registered_agents.append((parsed.netloc, segments[2]))
+            now = time.time()
+            for board_id, agent_id in registered_agents:
+                self.service.register_listener(board_id, agent_id)
+                self.service.record_agent_activity(board_id, agent_id, now)
+            try:
+                return await call_next(ctx)
+            finally:
+                for board_id, agent_id in registered_agents:
+                    self.service.unregister_listener(board_id, agent_id)
         return await call_next(ctx)
 
 
@@ -1809,6 +1855,14 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         preferred = list(ticket.get("prefer_agents", []))
         assigned = ticket.get("assigned_to_agent_id") if kind == "work" else None
         requested_assignment = ticket.get("assigned_to") if kind == "work" else None
+        expired_for_this_ticket = {
+            entry["agent_id"]
+            for entry in ticket.get("dispatch_history", [])
+            if isinstance(entry, Mapping)
+            and entry.get("state") == "expired"
+            and entry.get("kind") == kind
+            and entry.get("agent_id")
+        }
         candidates: list[tuple[dict[str, Any], dict[str, Any]]] = []
         for member in document.get("members", {}).values():
             membership = document.get("principal_memberships", {}).get(member.get("principal_id"))
@@ -1821,6 +1875,8 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             ):
                 continue
             if agent_matches(excluded, member):
+                continue
+            if not member.get("capabilities_explicit"):
                 continue
             caps = member_capabilities(member)
             if int(caps["tier_max"]) < required_tier or not required_skills.issubset(caps["skills"]):
@@ -1842,6 +1898,13 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 excluding_ticket_id=str(ticket["ticket_id"]),
             ):
                 continue
+            if member.get("agent_id") in expired_for_this_ticket:
+                continue
+            if not service.is_agent_live(
+                document["board_id"], str(member["agent_id"]), member, now,
+                int(policy.get("offer_ttl_s", DEFAULT_OFFER_TTL_S)),
+            ):
+                continue
             candidates.append((member, caps))
         avoid = (
             ticket.get("last_claimed_by_agent_id") or ticket.get("last_work_offered_agent_id")
@@ -1857,6 +1920,11 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         if alternatives:
             candidates = alternatives
         if not candidates:
+            if attempts > 0 and policy.get("fallback_broadcast", True):
+                state = {"state": "broadcast", "kind": kind, "reason": "no_candidates_remaining"}
+                ticket["dispatch_state"] = state
+                ticket.setdefault("dispatch_history", []).append({**state, "at": iso_at(now)})
+                return None
             reason = f"no_eligible_{'worker' if kind == 'work' else 'reviewer'}"
             state = {"state": "unassignable", "kind": kind, "reason": reason}
             if ticket.get("dispatch_state") == state:
@@ -1872,11 +1940,13 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             key=lambda pair: (
                 0 if agent_matches(preferred, pair[0]) else 1,
                 int(pair[1]["tier_max"]) - required_tier,
+                str(pair[0].get("last_offered_at", "")),
                 str(pair[0].get("last_work_at", pair[0].get("joined_at", ""))),
                 str(pair[0]["agent_id"]),
             )
         )
         selected, _ = candidates[0]
+        selected["last_offered_at"] = iso_at(now)
         expires_epoch = now + int(policy.get("offer_ttl_s", DEFAULT_OFFER_TTL_S))
         offer = {
             "ticket_id": ticket["ticket_id"], "kind": kind,
@@ -1915,7 +1985,9 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             ticket.setdefault("dispatch_history", []).append(
                 {
                     "state": "expired", "kind": kind,
-                    "agent_id": expired.get("agent_id"), "at": iso_at(now),
+                    "agent_id": expired.get("agent_id"),
+                    "agent_name": expired.get("agent_name"),
+                    "at": iso_at(now),
                 }
             )
             events.append(
@@ -2038,6 +2110,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         if actor.get("lifecycle_status", "active") == "handed_off":
             raise PermissionError("agent handed off; call board_onboard or board_join before more work")
         actor["last_activity_at"] = iso_at(now)
+        service.record_agent_activity(document["board_id"], actor["agent_id"], now)
         renewed: list[str] = []
         ttl_s = claim_ttl(document)
         for ticket in document["tickets"].values():
@@ -2109,6 +2182,36 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 )
             )
         return events
+
+    def reap_expired_offers_in_doc(document: dict[str, Any], now: float) -> list[dict[str, Any]]:
+        released = reap_expired(document, now)
+        if dispatch_enabled(document):
+            released.extend(redispatch_queue(document, now))
+        return released
+
+    async def check_and_reap_expired(
+        board_id: str, now: float, principal: Principal | None = None, ctx: Context | None = None,
+    ) -> list[dict[str, Any]]:
+        document = service.load(board_id)
+        has_expired = False
+        for ticket in document.get("tickets", {}).values():
+            for key in ("work_offer", "review_offer"):
+                offer = ticket.get(key)
+                if isinstance(offer, Mapping) and float(offer.get("expires_at_epoch", 0)) <= now:
+                    has_expired = True
+                    break
+            if has_expired:
+                break
+        if not has_expired:
+            return []
+        def mutate_reap(doc: dict[str, Any]) -> dict[str, Any]:
+            released = reap_expired_offers_in_doc(doc, now)
+            return {"released": released}
+        result = service.mutate(board_id, mutate_reap)
+        released = result.get("released", [])
+        if released and ctx is not None and principal is not None:
+            return await publish_releases(board_id, released, principal, ctx)
+        return released
 
     def latest_seq(board_id: str) -> int:
         # read_after exposes the watermark even when cursor zero predates retention.
@@ -7365,6 +7468,9 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         require_scope(principal, "board:read")
         document = service.load(board_id)
         actor = service.member(document, principal, agent_name)
+        now_catchup = time.time()
+        service.record_agent_activity(board_id, actor["agent_id"], now_catchup)
+        await check_and_reap_expired(board_id, now_catchup, principal, ctx)
         acknowledged_cursor = service.cursors.get(
             principal.principal_id, agent_name, board_id
         )

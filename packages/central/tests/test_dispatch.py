@@ -165,6 +165,10 @@ class DispatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("board:review", admin["scopes"])
 
         await self.call(
+            "agent_capabilities_set", agent_name="admin-worker-default",
+            capabilities={"tier_max": 2},
+        )
+        await self.call(
             "board_dispatch_policy_set", agent_name="admin-agent", offer_ttl_s=60
         )
         non_workers = [reviewer_id, *coordination_ids]
@@ -672,6 +676,135 @@ class DispatchTests(unittest.IsolatedAsyncioTestCase):
             DISPATCH_KINDS,
             frozenset({TICKET_OFFERED, OFFER_EXPIRED, OFFER_REVOKED, REVIEW_OFFERED}),
         )
+
+    async def test_dashboard_viewer_and_probe_identities_are_never_offered(self) -> None:
+        self.principal = self.admin
+        await self.call("board_dispatch_policy_set", agent_name="admin-agent", offer_ttl_s=60)
+        viewer = await self.add_seat(
+            self.worker_a, "fleet-dashboard-viewer",
+            {"can_work": False, "can_review": False},
+        )
+        self.principal = self.admin
+        await self.call(
+            "board_member_add", agent_name="admin-agent",
+            principal_id=self.worker_b.principal_id, role="member",
+        )
+        self.principal = self.worker_b
+        probe_res = await self.call("board_join", agent_name="probe-agent")
+        probe = probe_res.structured_content["agent_id"]
+
+        real_principal = central.Principal("PR-real-worker", "real-worker", frozenset({"board:read", "board:write"}))
+        real = await self.add_seat(real_principal, "real-worker", {"tier_max": 2})
+
+        created = await self.create()
+        ticket = created.structured_content["ticket"]
+        self.assertEqual(ticket["work_offer"]["agent_id"], real)
+        self.assertNotIn(ticket["work_offer"]["agent_id"], {viewer, probe})
+
+        self.principal = self.admin
+        updated = await self.call(
+            "ticket_update", agent_name="admin-agent", ticket_id=ticket["ticket_id"],
+            exclude_agents=[real],
+        )
+        up_ticket = updated.structured_content["ticket"]
+        self.assertEqual(up_ticket["dispatch_state"]["state"], "unassignable")
+        self.assertNotIn("work_offer", up_ticket)
+
+    async def test_startup_bridge_identity_on_codex_is_never_offered(self) -> None:
+        self.principal = self.admin
+        await self.call("board_dispatch_policy_set", agent_name="admin-agent", offer_ttl_s=60)
+        startup = await self.add_seat(
+            self.worker_a, "purser-codex-1",
+            {"can_work": False, "can_review": False},
+        )
+        self.principal = self.worker_a
+        session_res = await self.call(
+            "board_join", agent_name="pursers-codex-1",
+            capabilities={"tier_max": 2},
+        )
+        session_worker = session_res.structured_content["agent_id"]
+        created = await self.create()
+        ticket = created.structured_content["ticket"]
+        self.assertEqual(ticket["work_offer"]["agent_id"], session_worker)
+        self.assertNotEqual(ticket["work_offer"]["agent_id"], startup)
+
+    async def test_rotation_and_per_ticket_skip(self) -> None:
+        worker_1 = await self.add_seat(self.worker_a, "worker-1", {"tier_max": 2})
+        worker_2 = await self.add_seat(self.worker_b, "worker-2", {"tier_max": 2})
+        princ_c = central.Principal("PR-worker-c", "worker-c", frozenset({"board:read", "board:write"}))
+        worker_3 = await self.add_seat(princ_c, "worker-3", {"tier_max": 2})
+        self.principal = self.admin
+        await self.call(
+            "board_dispatch_policy_set", agent_name="admin-agent", offer_ttl_s=10
+        )
+        t1 = (await self.create()).structured_content["ticket"]
+        t2 = (await self.create()).structured_content["ticket"]
+        t3 = (await self.create()).structured_content["ticket"]
+        assigned = {
+            t1["work_offer"]["agent_id"],
+            t2["work_offer"]["agent_id"],
+            t3["work_offer"]["agent_id"],
+        }
+        self.assertEqual(assigned, {worker_1, worker_2, worker_3})
+
+        first_holder = t1["work_offer"]["agent_id"]
+        base_time = central.time.time()
+        with patch.object(central.time, "time", return_value=base_time + 20):
+            await self.call("board_reap")
+        t1_fetched = (await self.call("ticket_get", ticket_id=t1["ticket_id"])).structured_content["ticket"]
+        self.assertNotEqual(t1_fetched["work_offer"]["agent_id"], first_holder)
+        second_holder = t1_fetched["work_offer"]["agent_id"]
+
+        with patch.object(central.time, "time", return_value=base_time + 40):
+            await self.call("board_reap")
+        t1_fetched2 = (await self.call("ticket_get", ticket_id=t1["ticket_id"])).structured_content["ticket"]
+        third_holder = t1_fetched2["work_offer"]["agent_id"]
+        self.assertNotIn(third_holder, {first_holder, second_holder})
+
+        with patch.object(central.time, "time", return_value=base_time + 60):
+            await self.call("board_reap")
+        t1_fetched3 = (await self.call("ticket_get", ticket_id=t1["ticket_id"])).structured_content["ticket"]
+        self.assertEqual(t1_fetched3["dispatch_state"]["state"], "broadcast")
+        self.assertIn(t1_fetched3["dispatch_state"]["reason"], {"no_candidates_remaining", "offer_limit_reached"})
+        self.assertNotIn("work_offer", t1_fetched3)
+
+    async def test_prompt_expiry_without_unrelated_mutations(self) -> None:
+        await self.add_seat(self.worker_a, "worker-a", {"tier_max": 2})
+        self.principal = self.admin
+        await self.call(
+            "board_dispatch_policy_set", agent_name="admin-agent", offer_ttl_s=1
+        )
+        with patch.object(central.time, "time", return_value=1000.0):
+            created = await self.create()
+        ticket_id = created.structured_content["ticket"]["ticket_id"]
+        self.assertIn("work_offer", created.structured_content["ticket"])
+
+        self.principal = self.worker_a
+        with patch.object(central.time, "time", return_value=1002.0):
+            page = await self.call(
+                "board_catchup", agent_name="worker-a", cursor=0, touch=False
+            )
+        event_kinds = [ev["kind"] for ev in page.structured_content.get("events", [])]
+        self.assertIn(OFFER_EXPIRED, event_kinds)
+
+        fetched = await self.call("ticket_get", ticket_id=ticket_id)
+        self.assertEqual(fetched.structured_content["ticket"]["dispatch_state"]["state"], "broadcast")
+        self.assertEqual(fetched.structured_content["ticket"]["dispatch_state"]["reason"], "no_candidates_remaining")
+
+    async def test_immediate_broadcast_fallback_when_no_candidates_remain(self) -> None:
+        await self.add_seat(self.worker_a, "only-worker", {"tier_max": 2})
+        self.principal = self.admin
+        await self.call("board_dispatch_policy_set", agent_name="admin-agent", offer_ttl_s=10)
+        t = (await self.create()).structured_content["ticket"]
+        self.assertIn("work_offer", t)
+        base_time = central.time.time()
+        with patch.object(central.time, "time", return_value=base_time + 20):
+            await self.call("board_reap")
+        fetched = (await self.call("ticket_get", ticket_id=t["ticket_id"])).structured_content["ticket"]
+        self.assertEqual(fetched["dispatch_state"]["state"], "broadcast")
+        self.assertEqual(fetched["dispatch_state"]["reason"], "no_candidates_remaining")
+        self.assertEqual(fetched["work_offer_expirations"], 1)
+        self.assertNotIn("work_offer", fetched)
 
 
 if __name__ == "__main__":

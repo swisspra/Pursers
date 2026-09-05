@@ -1260,6 +1260,9 @@ class DeferredBoardConnection:
         ],
         stop: asyncio.Event,
     ) -> None:
+        startup_caps = _seat_capabilities()
+        if _host_name() in {"codex", "codex-cli"}:
+            startup_caps = {"can_work": False, "can_review": False}
         client = MeteredBoardClient(
             CENTRAL_URL,
             CENTRAL_TOKEN,
@@ -1267,15 +1270,15 @@ class DeferredBoardConnection:
             agent_name=AGENT_NAME,
             role=_declared_role(),
             meter=self.meter,
+            capabilities=startup_caps,
         )
         entered = False
         try:
             try:
                 async with asyncio.timeout(self.JOIN_TIMEOUT_S):
                     await client.__aenter__()
-                    capabilities = _seat_capabilities()
-                    if capabilities is not None:
-                        await client.board_join(capabilities=capabilities)
+                    if startup_caps is not None and hasattr(client, "board_join"):
+                        await client.board_join(capabilities=startup_caps)
                 entered = True
             except asyncio.CancelledError:
                 raise
@@ -1597,6 +1600,8 @@ class LeaseKeepalive:
         except Exception:
             boards = [BOARD_ID]
         capabilities = _seat_capabilities()
+        if _host_name() in {"codex", "codex-cli"}:
+            capabilities = {"can_work": False, "can_review": False}
         for board_id in boards:
             try:
                 joined = await _BoardView(client, board_id).board_join(

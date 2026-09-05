@@ -1083,13 +1083,23 @@ class LiveDashboard:
             while not self._stopping:
                 try:
                     await self._probe_central()
-                    connection = self._client_class(
-                        self.config.central_url,
-                        self.config.token,
-                        self.config.board_id,
-                        agent_name=self.config.agent_name,
-                        reconnect_delay_s=self.config.reconnect_min_s,
-                    )
+                    try:
+                        connection = self._client_class(
+                            self.config.central_url,
+                            self.config.token,
+                            self.config.board_id,
+                            agent_name=self.config.agent_name,
+                            reconnect_delay_s=self.config.reconnect_min_s,
+                            capabilities={"can_work": False, "can_review": False},
+                        )
+                    except TypeError:
+                        connection = self._client_class(
+                            self.config.central_url,
+                            self.config.token,
+                            self.config.board_id,
+                            agent_name=self.config.agent_name,
+                            reconnect_delay_s=self.config.reconnect_min_s,
+                        )
                     async with AsyncExitStack() as connection_stack:
                         async with asyncio.timeout(self.config.request_timeout_s):
                             client = await connection_stack.enter_async_context(
