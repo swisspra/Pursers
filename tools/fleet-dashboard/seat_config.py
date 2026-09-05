@@ -619,6 +619,7 @@ class DesiredSeat:
     can_work: bool | None = None
     model: str | None = None
     provider: str | None = None
+    boards: str = "registry"
 
     def __post_init__(self) -> None:
         if self.host not in HOST_PROFILES:
@@ -633,6 +634,17 @@ class DesiredSeat:
             raise ValueError("home board must be a safe 1-80 character identifier")
         if not ENV_NAME.fullmatch(self.token_env_var):
             raise ValueError("token env var must be a safe identifier")
+        if not isinstance(self.boards, str):
+            raise ValueError("boards must be a string")
+        explicit_boards = self.boards.split(",")
+        if self.boards not in {"registry", "home"} and (
+            not explicit_boards
+            or any(
+                not board or not SAFE_NAME.fullmatch(board)
+                for board in explicit_boards
+            )
+        ):
+            raise ValueError("boards must be registry, home, or comma-separated IDs")
         if self.board_connector_name is not None and not SAFE_NAME.fullmatch(
             self.board_connector_name
         ):
@@ -712,6 +724,289 @@ def capability_env(desired: DesiredSeat) -> dict[str, str]:
         "provider": desired.provider or "",
     }
     return {CAPABILITY_ENV[key]: value for key, value in values.items()}
+
+
+def _managed_bool(env: dict[str, Any], key: str, default: bool) -> bool:
+    value = env.get(key)
+    if value is None or value == "":
+        return default
+    normalized = str(value).strip().casefold()
+    if normalized in {"1", "true", "yes"}:
+        return True
+    if normalized in {"0", "false", "no"}:
+        return False
+    raise ValueError(f"{key} must be boolean")
+
+
+def _managed_seat_from_env(
+    *,
+    host: str,
+    config_path: Path,
+    connector_name: str,
+    env: dict[str, Any],
+    command: str,
+    token_env_var: str | None = None,
+    board_connector_name: str | None = None,
+    personal_command: str | None = None,
+) -> DesiredSeat:
+    """Build an inventory seat from a secret-free managed host env block."""
+    required = {
+        "name": env.get("ONBOARD_AGENT_NAME"),
+        "role": env.get("PURSERS_ROLE"),
+        "central_url": env.get("ONBOARD_CENTRAL_URL"),
+        "home_board": env.get("ONBOARD_BOARD_ID"),
+    }
+    missing = [
+        key
+        for key, value in required.items()
+        if not isinstance(value, str) or not value
+    ]
+    if missing:
+        raise ValueError("managed block missing " + ", ".join(missing))
+    bridge_command = env.get("PURSERS_BRIDGE_COMMAND") or command
+    if not isinstance(bridge_command, str) or not bridge_command:
+        raise ValueError("managed block missing bridge_command")
+    token_file = env.get("ONBOARD_CENTRAL_TOKEN_FILE", "")
+    token_file = str(token_file) if token_file else ""
+    if not token_file and not token_env_var:
+        raise ValueError("managed block missing token file or token env var")
+    selected_token_env = token_env_var or "ONBOARD_CENTRAL_TOKEN"
+    role = str(required["role"])
+    tier_raw = env.get("PURSERS_TIER_MAX", 2)
+    try:
+        tier_max = int(tier_raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("PURSERS_TIER_MAX must be an integer") from exc
+    skills = tuple(
+        item.strip().lower()
+        for item in str(env.get("PURSERS_SKILLS", "")).split(",")
+        if item.strip()
+    )
+    boards = str(env.get("PURSERS_BOARDS") or env.get("ONBOARD_BOARDS") or "registry")
+    return DesiredSeat(
+        host=host,
+        role=role,
+        name=str(required["name"]),
+        central_url=str(required["central_url"]),
+        home_board=str(required["home_board"]),
+        token_file=token_file,
+        ca_file=str(env.get("SSL_CERT_FILE") or ""),
+        bridge_command=bridge_command,
+        config_path=str(config_path),
+        token_env_var=selected_token_env,
+        bridge_name=connector_name,
+        board_connector_name=board_connector_name,
+        personal_command=personal_command or "pursers-personal",
+        tier_max=tier_max,
+        skills=skills,
+        can_review=_managed_bool(env, "PURSERS_CAN_REVIEW", role == "reviewer"),
+        can_work=_managed_bool(env, "PURSERS_CAN_WORK", role == "worker"),
+        model=str(env["PURSERS_MODEL"]) if env.get("PURSERS_MODEL") else None,
+        provider=str(env["PURSERS_PROVIDER"]) if env.get("PURSERS_PROVIDER") else None,
+        boards=boards,
+    )
+
+
+def _goose_managed_extensions(text: str) -> list[tuple[str, str, dict[str, str]]]:
+    lines = text.splitlines()
+    results: list[tuple[str, str, dict[str, str]]] = []
+    for index, line in enumerate(lines):
+        match = re.fullmatch(r"  ([A-Za-z0-9._-]+):\s*", line)
+        if not match:
+            continue
+        end = len(lines)
+        for cursor in range(index + 1, len(lines)):
+            if re.fullmatch(r"  [A-Za-z0-9._-]+:\s*", lines[cursor]):
+                end = cursor
+                break
+        block = lines[index + 1 : end]
+        if not any(MANAGED_COMMENT in item for item in block):
+            continue
+        command = ""
+        env: dict[str, str] = {}
+        in_env = False
+        for item in block:
+            if item.startswith("    cmd:"):
+                command = _decode_managed_scalar(item.split(":", 1)[1])
+                in_env = False
+            elif item == "    envs:":
+                in_env = True
+            elif item.startswith("    ") and not item.startswith("      "):
+                in_env = False
+            elif in_env and item.startswith("      ") and ":" in item:
+                key, raw = item.strip().split(":", 1)
+                env[key] = _decode_managed_scalar(raw)
+        if env.get("ONBOARD_AGENT_NAME") and env.get("PURSERS_ROLE"):
+            results.append((match.group(1), command, env))
+    return results
+
+
+def discover_managed_seats(
+    discovered_configs: Sequence[tuple[str, str | Path]],
+) -> tuple[list[DesiredSeat], list[dict[str, str]]]:
+    """Parse managed Pursers blocks without returning credential values."""
+    seats: list[DesiredSeat] = []
+    conflicts: list[dict[str, str]] = []
+
+    def conflict(host: str, path: Path, connector: str, reason: str) -> None:
+        conflicts.append(
+            {
+                "host": host,
+                "config_path": str(path),
+                "connector_name": connector,
+                "reason": reason,
+            }
+        )
+
+    for host, raw_path in discovered_configs:
+        path = Path(raw_path).expanduser()
+        if not path.is_file():
+            continue
+        try:
+            if host in {"codex", "codex-cli"}:
+                document = tomllib.loads(path.read_text(encoding="utf-8"))
+                servers = document.get("mcp_servers", {})
+                if not isinstance(servers, dict):
+                    continue
+                for connector, server in servers.items():
+                    env = server.get("env") if isinstance(server, dict) else None
+                    if (
+                        not isinstance(env, dict)
+                        or not env.get("ONBOARD_AGENT_NAME")
+                        or not env.get("PURSERS_ROLE")
+                    ):
+                        continue
+                    role = str(env.get("PURSERS_ROLE") or "")
+                    central_url = env.get("ONBOARD_CENTRAL_URL")
+                    home_board = env.get("ONBOARD_BOARD_ID")
+                    matches = []
+                    for board_name, board_server in servers.items():
+                        if board_name == connector or not isinstance(board_server, dict):
+                            continue
+                        headers = board_server.get("env_http_headers", {})
+                        if (
+                            board_server.get("url") == central_url
+                            and isinstance(headers, dict)
+                            and headers.get("ONBOARD_BOARD_ID") == home_board
+                            and isinstance(board_server.get("bearer_token_env_var"), str)
+                        ):
+                            matches.append(
+                                (board_name, board_server["bearer_token_env_var"])
+                            )
+                    default_board = (
+                        "pursers-review" if role == "reviewer" else "pursers-dev"
+                    )
+                    conventional = [row for row in matches if row[0] == default_board]
+                    if len(conventional) == 1:
+                        matches = conventional
+                    elif len(matches) > 1:
+                        conflict(
+                            host,
+                            path,
+                            str(connector),
+                            "multiple matching board connectors",
+                        )
+                        continue
+                    env_token_vars = [
+                        key for key in env if re.search(r"(?:^|_)TOKEN$", key)
+                    ]
+                    board_name, token_env = (
+                        matches[0]
+                        if matches
+                        else (
+                            default_board,
+                            env_token_vars[0] if env_token_vars else None,
+                        )
+                    )
+                    try:
+                        seats.append(
+                            _managed_seat_from_env(
+                                host=host,
+                                config_path=path,
+                                connector_name=str(connector),
+                                env=env,
+                                command=str(server.get("command") or ""),
+                                token_env_var=token_env,
+                                board_connector_name=str(board_name),
+                            )
+                        )
+                    except ValueError as exc:
+                        conflict(host, path, str(connector), str(exc))
+            elif host == "goose":
+                text = path.read_text(encoding="utf-8")
+                for connector, command, env in _goose_managed_extensions(text):
+                    token_vars = [
+                        key
+                        for key in env
+                        if re.search(r"(?:^|_)TOKEN$", key)
+                    ]
+                    try:
+                        seats.append(
+                            _managed_seat_from_env(
+                                host=host,
+                                config_path=path,
+                                connector_name=connector,
+                                env=env,
+                                command=command,
+                                token_env_var=token_vars[0] if token_vars else None,
+                            )
+                        )
+                    except ValueError as exc:
+                        conflict(host, path, connector, str(exc))
+            elif host == "claude-desktop":
+                document = _json_document(path)
+                servers = document.get("mcpServers", {})
+                if not isinstance(servers, dict):
+                    continue
+                personal = servers.get("pursers-personal", {})
+                personal_command = (
+                    personal.get("command") if isinstance(personal, dict) else None
+                )
+                for connector, server in servers.items():
+                    env = server.get("env") if isinstance(server, dict) else None
+                    if (
+                        not isinstance(env, dict)
+                        or not env.get("ONBOARD_AGENT_NAME")
+                        or not env.get("PURSERS_ROLE")
+                    ):
+                        continue
+                    token_vars = [
+                        key for key in env if re.search(r"(?:^|_)TOKEN$", key)
+                    ]
+                    try:
+                        seats.append(
+                            _managed_seat_from_env(
+                                host=host,
+                                config_path=path,
+                                connector_name=str(connector),
+                                env=env,
+                                command=str(server.get("command") or ""),
+                                token_env_var=(
+                                    token_vars[0] if token_vars else None
+                                ),
+                                personal_command=(
+                                    str(personal_command) if personal_command else None
+                                ),
+                            )
+                        )
+                    except ValueError as exc:
+                        conflict(host, path, str(connector), str(exc))
+        except (OSError, UnicodeError, ValueError) as exc:
+            conflict(host, path, "", f"invalid configuration: {type(exc).__name__}")
+
+    by_name: dict[str, list[DesiredSeat]] = {}
+    for seat in seats:
+        by_name.setdefault(seat.name, []).append(seat)
+    duplicate_names = {name for name, rows in by_name.items() if len(rows) > 1}
+    for name in sorted(duplicate_names):
+        for seat in by_name[name]:
+            conflict(
+                seat.host,
+                Path(seat.config_path),
+                seat.connector_name,
+                f"duplicate seat name {name}",
+            )
+    return [seat for seat in seats if seat.name not in duplicate_names], conflicts
 
 
 def connector_skill_suggestions(inspection: dict[str, Any]) -> list[str]:
@@ -1512,6 +1807,11 @@ class PromptRenderer:
         template = (Path(__file__).with_name("seat_prompt_template.txt")).read_text(
             encoding="utf-8"
         )
+        board_selector = (
+            json.dumps(desired.boards)
+            if desired.boards in {"registry", "home"}
+            else json.dumps(desired.boards.split(","))
+        )
         return template.format(
             name=desired.name,
             role=desired.role,
@@ -1519,6 +1819,7 @@ class PromptRenderer:
             timeout_s=desired.profile.block_s,
             action=action,
             wait_for=("claimable" if desired.role == "worker" else "submitted"),
+            boards=board_selector,
             host_note=f"{host_note}\n{capability_note}",
         )
 
@@ -1647,6 +1948,26 @@ def _host_launch_spec(
         return command, list(args), {str(key): str(value) for key, value in env.items()}
     if desired.host == "goose":
         return _goose_launch_spec(desired, inspection)
+    if desired.host == "claude-desktop":
+        server = (
+            inspection.get("document", {})
+            .get("mcpServers", {})
+            .get(desired.connector_name, {})
+        )
+        command = server.get("command")
+        args = server.get("args")
+        env = server.get("env")
+        if (
+            not isinstance(command, str)
+            or not isinstance(args, list)
+            or not isinstance(env, dict)
+        ):
+            raise ValueError("managed Claude Desktop bridge configuration is incomplete")
+        if not all(isinstance(item, str) for item in args):
+            raise ValueError("managed Claude Desktop bridge arguments are invalid")
+        return command, list(args), {
+            str(key): str(value) for key, value in env.items()
+        }
     raise ValueError(f"runtime bridge probe is unsupported for {desired.host}")
 
 
@@ -2046,48 +2367,70 @@ class Doctor:
                 )
             )
 
-        if desired.host in {"codex", "codex-cli", "goose"}:
-            try:
-                bridge_token = Path(desired.token_file).expanduser().read_text(
-                    encoding="utf-8"
-                ).strip()
-            except OSError:
-                bridge_token = ""
-            configured_token = _configured_connector_token(desired, inspection)
-            literal_ok = bool(
-                bridge_token
-                and configured_token
-                and hmac.compare_digest(bridge_token, configured_token)
-            )
-            status, connector_token, source = _env_value(
-                desired.token_env_var, self.runner
-            )
-            identity_ok = False
-            identity_source = "Central"
-            if status == "PASS" and bridge_token and connector_token:
-                try:
-                    bridge_principal, connector_principal = self.identity_probe(
-                        desired, bridge_token, connector_token, 5.0
-                    )
-                    identity_ok = hmac.compare_digest(
-                        bridge_principal, connector_principal
-                    )
-                except Exception:
-                    identity_ok = False
-            rows.append(
-                self._check(
-                    desired,
-                    "split-identity",
-                    "PASS" if literal_ok and identity_ok else "FAIL",
-                    (
-                        f"one Central principal; config literal matches token file; "
-                        f"source={source}; check={identity_source}"
-                        if literal_ok and identity_ok
-                        else "split identity: token file, managed literal, or connector "
-                        f"principal differs; source={source}"
-                    ),
+        if desired.host in {"codex", "codex-cli", "goose", "claude-desktop"}:
+            if desired.host == "claude-desktop":
+                configured_name = (
+                    inspection.get("document", {})
+                    .get("mcpServers", {})
+                    .get(desired.connector_name, {})
+                    .get("env", {})
+                    .get("ONBOARD_AGENT_NAME")
                 )
-            )
+                identity_ok = configured_name == desired.name
+                rows.append(
+                    self._check(
+                        desired,
+                        "identity",
+                        "PASS" if identity_ok else "FAIL",
+                        (
+                            "managed agent identity matches seat"
+                            if identity_ok
+                            else "managed agent identity differs from seat"
+                        ),
+                    )
+                )
+            else:
+                try:
+                    bridge_token = Path(desired.token_file).expanduser().read_text(
+                        encoding="utf-8"
+                    ).strip()
+                except OSError:
+                    bridge_token = ""
+                configured_token = _configured_connector_token(desired, inspection)
+                literal_ok = bool(
+                    bridge_token
+                    and configured_token
+                    and hmac.compare_digest(bridge_token, configured_token)
+                )
+                status, connector_token, source = _env_value(
+                    desired.token_env_var, self.runner
+                )
+                identity_ok = False
+                identity_source = "Central"
+                if status == "PASS" and bridge_token and connector_token:
+                    try:
+                        bridge_principal, connector_principal = self.identity_probe(
+                            desired, bridge_token, connector_token, 5.0
+                        )
+                        identity_ok = hmac.compare_digest(
+                            bridge_principal, connector_principal
+                        )
+                    except Exception:
+                        identity_ok = False
+                rows.append(
+                    self._check(
+                        desired,
+                        "split-identity",
+                        "PASS" if literal_ok and identity_ok else "FAIL",
+                        (
+                            f"one Central principal; config literal matches token file; "
+                            f"source={source}; check={identity_source}"
+                            if literal_ok and identity_ok
+                            else "split identity: token file, managed literal, or connector "
+                            f"principal differs; source={source}"
+                        ),
+                    )
+                )
             try:
                 runtime_ok, runtime_message = self.runtime_probe(
                     desired, inspection, 5.0
