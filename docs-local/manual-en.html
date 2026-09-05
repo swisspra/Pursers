@@ -689,9 +689,10 @@ memory_search(
       <p>The default tool surface stays deliberately small. Use <code>board_status</code> for a hot bounded summary and <code>board_snapshot</code> for cold recovery; <code>memory_write</code> remains a core tool. Deprecated compatibility tools stay hidden unless a deliberately legacy seat declares <code>legacy_tools</code> or the bridge has <code>PURSERS_LEGACY_TOOLS=1</code>. Do not enable that switch fleet-wide during ordinary operation.</p>
 
       <h3>2. Cut, verify, tag, release, and publish one train</h3>
-      <p>Create the train from the approved integration ref. <code>release_train.py bump</code> updates version consumers and regenerates the component lock; do not hand-edit generated pins.</p>
+      <p>Create the train from a clean approved integration ref. <code>release_train.py bump</code> updates version consumers and regenerates the component lock; do not hand-edit generated pins. Review every generated change, then commit it before pushing the train.</p>
       <pre><code>git fetch origin --tags
 git switch -c train/&lt;product_version&gt; &lt;integration_ref&gt;
+test -z "$(git status --porcelain)"
 
 python3 tools/release_train.py bump \
   --set product=&lt;product_version&gt; \
@@ -699,30 +700,51 @@ python3 tools/release_train.py bump \
   --set client=&lt;client_version&gt; \
   --set personal=&lt;personal_version&gt; \
   --set import=&lt;import_version&gt; \
-  --set wait_bridge=&lt;wait_bridge_version&gt;
-
-python3 tools/release_train.py check
+  --set wait_bridge=&lt;wait_bridge_version&gt;</code></pre>
+      <p>The bump already regenerates the component lock. If a manual regeneration is required, do it now in a new empty wheel directory, before tests, review, staging, and the release commit. The script verifies a temporary environment from the exact build-toolchain pins in <code>tools/release_versions.toml</code>.</p>
+      <pre><code>mkdir &lt;empty_wheel_dir&gt;
+python3 tools/regenerate_component_lock.py \
+  --wheel-dir &lt;empty_wheel_dir&gt;
+python3 tools/release_train.py check</code></pre>
+      <pre><code>python3 tools/release_train.py check
 python3 tools/ci_manifest.py check
 python3 tools/ci_manifest.py collect --output &lt;collection_report&gt;
 python3 tools/ci_manifest.py run
 python3 tools/ci_manifest.py verify --input &lt;collection_report&gt;
 python3 tools/leak_scan.py
-git diff --check</code></pre>
-      <p>Use a new empty wheel directory when a manual lock regeneration is required. The script creates and verifies a temporary environment from the exact build-toolchain pins in <code>tools/release_versions.toml</code>.</p>
-      <pre><code>mkdir &lt;empty_wheel_dir&gt;
-python3 tools/regenerate_component_lock.py \
-  --wheel-dir &lt;empty_wheel_dir&gt;
-python3 tools/release_train.py check</code></pre>
+git diff --check
+
+# Review the complete generated train before staging it.
+git status --short
+git diff --stat
+git diff
+
+# The branch was clean before bump, so these are the reviewed generated files.
+git diff --name-only -z | xargs -0 git add --
+git diff --cached --check
+git diff --cached --stat
+git commit -m "release: &lt;release_tag&gt;"
+release_commit="$(git rev-parse HEAD)"
+git show --stat --oneline "$release_commit"
+test -z "$(git status --porcelain)"</code></pre>
       <p>Push the train, obtain review, and require both jobs in <code>.github/workflows/ci.yml</code>. The Python job builds the six checkout wheels, performs isolated wheel imports, checks/collects/runs/verifies all ten suites, and runs the leak scan. The dashboard job installs the locked npm tree and runs TypeScript without emitting files.</p>
       <pre><code>git push -u origin train/&lt;product_version&gt;
-gh pr create --base main --head train/&lt;product_version&gt; \
+remote_head="$(git ls-remote --heads origin \
+  refs/heads/train/&lt;product_version&gt; | awk '{print $1}')"
+test "$remote_head" = "$release_commit"
+
+pr_url="$(gh pr create --base main --head train/&lt;product_version&gt; \
   --title "Release &lt;release_tag&gt;" \
-  --body-file &lt;pull_request_body&gt;
-gh pr checks &lt;pull_request_number&gt; --watch</code></pre>
+  --body-file &lt;pull_request_body&gt;)"
+pr_head="$(gh pr view "$pr_url" --json headRefOid --jq .headRefOid)"
+test "$pr_head" = "$release_commit"
+gh pr checks "$pr_url" --watch</code></pre>
       <p>After the reviewed train is integrated, tag the exact verified commit. The tag-triggered release workflow builds all six wheels with the pinned toolchain, writes <code>SHA256SUMS.txt</code>, extracts non-empty CHANGELOG notes, and creates or completes the GitHub Release.</p>
       <pre><code>git fetch origin main --tags
-git rev-parse origin/main
-git tag -s &lt;release_tag&gt; &lt;verified_commit&gt;
+verified_commit="$(gh pr view "$pr_url" --json mergeCommit --jq .mergeCommit.oid)"
+test -n "$verified_commit"
+git cat-file -e "$verified_commit^{commit}"
+git tag -s &lt;release_tag&gt; "$verified_commit"
 git push origin &lt;release_tag&gt;
 
 gh run list --workflow release.yml \
@@ -736,40 +758,125 @@ gh run watch &lt;publish_run_id&gt; --exit-status</code></pre>
       <p>Confirm all six expected distributions on PyPI and compare the GitHub Release wheels against <code>SHA256SUMS.txt</code>. If any published artifact is wrong, advance the affected version and cut another train; never replace an existing PyPI version.</p>
 
       <h3>3. Promote Central, bridge, Personal, and seats</h3>
-      <p>Stage Central before touching the running service. Download the Central and Client wheels from the approved GitHub Release, then verify the wheel hash before creating the venv. Resolve <code>&lt;central_version&gt;</code> and <code>&lt;client_version&gt;</code> from <code>tools/release_versions.toml</code> at the release tag. Resolve <code>&lt;mcp_runtime_version&gt;</code> from the exact <code>mcp[cli]==</code> dependency in <code>packages/central/pyproject.toml</code> at that tag. The approved deployment inventory is authoritative for the exact <code>&lt;jwt_runtime_version&gt;</code> and <code>&lt;server_runtime_version&gt;</code>; both must satisfy the <code>PyJWT[crypto]</code> and <code>uvicorn</code> ranges in that same Central metadata. Record the three resolved runtime pins in the deployment change. The remaining path and launchd placeholders also come from deployment inventory.</p>
-      <pre><code>central_sha="$(shasum -a 256 "&lt;central_wheel&gt;" | cut -d' ' -f1)"
-test "$central_sha" = "&lt;central_wheel_sha256&gt;"
+      <p>Stage Central before touching the running service. The release-tag checkout is authoritative for component versions and dependency ranges. The resolver commands below supply the exact PyJWT and uvicorn pins for this train; record their output in the deployment change. On each host, the <code>tools/central_scaffold.py init</code> artifacts are the deployment inventory: <code>&lt;central_instance_root&gt;/.pursers-central-instance.json</code> supplies the label, <code>profile.env</code> supplies Central runtime values, and the loaded <code>&lt;launch_agents_dir&gt;/&lt;central_launchd_label&gt;.plist</code> is the authoritative current service definition (the plist under the instance root is only its scaffold seed). <code>&lt;launch_agents_dir&gt;</code>, <code>&lt;ca_bundle&gt;</code>, and <code>&lt;central_health_url&gt;</code> are explicit operator-owned paths/URL; stop if any cannot be resolved rather than guessing.</p>
+      <pre><code># Verify every downloaded release artifact, including both installed wheels.
+(cd &lt;release_download_dir&gt; &amp;&amp; shasum -a 256 -c SHA256SUMS.txt)
+central_wheel="&lt;release_download_dir&gt;/&lt;central_wheel_filename&gt;"
+client_wheel="&lt;release_download_dir&gt;/&lt;client_wheel_filename&gt;"
+
+central_version="$(python3 -c \
+  'import sys,tomllib; print(tomllib.load(open(sys.argv[1], "rb"))["packages"]["central"])' \
+  tools/release_versions.toml)"
+client_version="$(python3 -c \
+  'import sys,tomllib; print(tomllib.load(open(sys.argv[1], "rb"))["packages"]["client"])' \
+  tools/release_versions.toml)"
+
+# Resolve once from the verified wheels and their release-tag metadata.
+python3 -m venv &lt;central_pin_resolver_venv&gt;
+&lt;central_pin_resolver_venv&gt;/bin/python -m pip install \
+  --disable-pip-version-check --no-input "$client_wheel" "$central_wheel"
+mcp_runtime_version="$(&lt;central_pin_resolver_venv&gt;/bin/python -c \
+  'import importlib.metadata as m; print(m.version("mcp"))')"
+jwt_runtime_version="$(&lt;central_pin_resolver_venv&gt;/bin/python -c \
+  'import importlib.metadata as m; print(m.version("PyJWT"))')"
+server_runtime_version="$(&lt;central_pin_resolver_venv&gt;/bin/python -c \
+  'import importlib.metadata as m; print(m.version("uvicorn"))')"
+printf 'mcp=%s\nPyJWT=%s\nuvicorn=%s\n' \
+  "$mcp_runtime_version" "$jwt_runtime_version" "$server_runtime_version"
 
 python3 -m venv &lt;central_next_venv&gt;
 &lt;central_next_venv&gt;/bin/python -m pip install \
   --disable-pip-version-check --no-input \
-  "mcp[cli]==&lt;mcp_runtime_version&gt;" \
-  "PyJWT[crypto]==&lt;jwt_runtime_version&gt;" \
-  "uvicorn==&lt;server_runtime_version&gt;"
+  "mcp[cli]==$mcp_runtime_version" \
+  "PyJWT[crypto]==$jwt_runtime_version" \
+  "uvicorn==$server_runtime_version"
 &lt;central_next_venv&gt;/bin/python -m pip install \
   --disable-pip-version-check --no-input --no-deps \
-  "&lt;client_wheel&gt;" "&lt;central_wheel&gt;"
+  "$client_wheel" "$central_wheel"
 
-&lt;central_next_venv&gt;/bin/python - &lt;&lt;'PY'
+&lt;central_next_venv&gt;/bin/python - \
+  "$central_version" "$client_version" "$mcp_runtime_version" \
+  "$jwt_runtime_version" "$server_runtime_version" &lt;&lt;'PY'
 import importlib.metadata as metadata
+import sys
 
 expected = {
-    "pursers-central": "&lt;central_version&gt;",
-    "pursers-client": "&lt;client_version&gt;",
-    "mcp": "&lt;mcp_runtime_version&gt;",
-    "PyJWT": "&lt;jwt_runtime_version&gt;",
-    "uvicorn": "&lt;server_runtime_version&gt;",
+    "pursers-central": sys.argv[1],
+    "pursers-client": sys.argv[2],
+    "mcp": sys.argv[3],
+    "PyJWT": sys.argv[4],
+    "uvicorn": sys.argv[5],
 }
 actual = {name: metadata.version(name) for name in expected}
 assert actual == expected, (actual, expected)
 print(actual)
 PY</code></pre>
-      <p>Point the versioned service definition at <code>&lt;central_next_venv&gt;</code>, preserve the existing data directory and JWT environment, then validate and restart the service. Do not run two Central processes against the same SQLite directory.</p>
-      <pre><code>plutil -lint &lt;central_launchd_plist&gt;
-launchctl kickstart -k gui/$(id -u)/&lt;central_launchd_label&gt;
+      <p>Build a versioned candidate plist from that inventory, with <code>ProgramArguments[0]</code> pointing directly to <code>&lt;central_next_venv&gt;/bin/python</code>. The bootout/copy/bootstrap sequence switches the definition without running two Central processes against the same SQLite directory; its failure branch restores the prior plist.</p>
+      <pre><code>central_launchd_label="$(python3 -c \
+  'import json,sys; print(json.load(open(sys.argv[1]))["name"])' \
+  &lt;central_instance_root&gt;/.pursers-central-instance.json)"
+central_candidate_plist="&lt;central_instance_root&gt;/${central_launchd_label}-&lt;release_tag&gt;.plist"
+central_loaded_plist="&lt;launch_agents_dir&gt;/${central_launchd_label}.plist"
+central_previous_plist="${central_loaded_plist}.previous"
+
+set -a
+. &lt;central_instance_root&gt;/profile.env
+set +a
+python3 - "$central_loaded_plist" "$central_candidate_plist" \
+  "&lt;central_next_venv&gt;" &lt;&lt;'PY'
+import os
+import plistlib
+import sys
+from pathlib import Path
+
+source, candidate, next_venv = sys.argv[1:]
+with open(source, "rb") as stream:
+    service = plistlib.load(stream)
+required = (
+    "CENTRAL_AUTH_MODE", "CENTRAL_ADMISSION", "STORE_BACKEND",
+    "CENTRAL_JWT_ISSUER", "CENTRAL_JWT_AUDIENCE", "CENTRAL_JWKS_PATH",
+    "CENTRAL_JWT_CLOCK_SKEW",
+)
+service["ProgramArguments"] = [
+    str(Path(next_venv) / "bin" / "python"),
+    "-m", "pursers_central.pursers_central_runtime",
+    "--host", os.environ["CENTRAL_HOST"],
+    "--port", os.environ["CENTRAL_PORT"],
+    "--data-dir", os.environ["CENTRAL_DATA_DIR"],
+]
+environment = dict(service.get("EnvironmentVariables", {}))
+environment.update({key: os.environ[key] for key in required})
+service["EnvironmentVariables"] = environment
+with open(candidate, "wb") as stream:
+    plistlib.dump(service, stream, sort_keys=True)
+PY
+
+plutil -lint "$central_candidate_plist"
+cp "$central_loaded_plist" "$central_previous_plist"
+launchctl bootout "gui/$(id -u)/$central_launchd_label"
+cp "$central_candidate_plist" "$central_loaded_plist"
+if ! launchctl bootstrap "gui/$(id -u)" "$central_loaded_plist"; then
+  cp "$central_previous_plist" "$central_loaded_plist"
+  launchctl bootstrap "gui/$(id -u)" "$central_loaded_plist"
+  exit 1
+fi
+
+loaded_program="$(plutil -extract ProgramArguments.0 raw -o - \
+  "$central_loaded_plist")"
+test "$loaded_program" = "&lt;central_next_venv&gt;/bin/python"
+launchctl print "gui/$(id -u)/$central_launchd_label" \
+  &gt; "&lt;launchctl_state_file&gt;"
+python3 - "&lt;launchctl_state_file&gt;" "&lt;central_next_venv&gt;/bin/python" &lt;&lt;'PY'
+import pathlib
+import sys
+
+state = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+assert sys.argv[2] in state, "loaded launchd ProgramArguments use another venv"
+PY
+
 curl --fail --silent --show-error \
   --cacert &lt;ca_bundle&gt; \
-  https://&lt;central_host&gt;/healthz</code></pre>
+  &lt;central_health_url&gt;</code></pre>
       <p>Upgrade the persistent wait-bridge tool next. Managed host configs point at its resolved shim; they do not launch daily work through <code>uvx</code>.</p>
       <pre><code>env -u SSL_CERT_FILE uv tool install --force \
   "pursers-wait-bridge==&lt;wait_bridge_version&gt;"
