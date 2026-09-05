@@ -642,6 +642,12 @@ class CentralBoard:
             "central_expected_generation", default=None
         )
 
+    def cancel_offer_deadline(self, board_id: str, ticket_id: str, kind: str) -> None:
+        key = (board_id, ticket_id, kind)
+        task = self.offer_deadline_tasks.pop(key, None)
+        if task is not None and not task.done():
+            task.cancel()
+
     def rehydrate_offer_deadlines(self) -> None:
         try:
             for doc in self.store.iter_documents("boards"):
@@ -696,8 +702,10 @@ class CentralBoard:
                                     if reap_fn is not None:
                                         await reap_fn(b_id, max(time.time(), target_epoch))
                     except asyncio.CancelledError:
-                        pass
+                        raise
                     except Exception as exc:
+                        if "closed database" in str(exc).lower():
+                            return
                         log_runtime_error(
                             self.diagnostics,
                             "offer_rehydrate_deadline_error",
@@ -1747,6 +1755,19 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                     await ctx.notify_resource_updated(seat_uri)
                 else:
                     pending.append((ctx, seat_uri))
+        else:
+            mcp_srv = getattr(service, "mcp_server", None)
+            bus = getattr(mcp_srv, "_subscriptions", None) if mcp_srv is not None else None
+            if bus is not None:
+                from mcp.server.subscriptions import ResourceUpdated
+                journal_uri = f"board://{board_id}/journal"
+                await bus.publish(ResourceUpdated(uri=payload_ref))
+                await bus.publish(ResourceUpdated(uri=journal_uri))
+                for agent_id in sorted(set(recipients)):
+                    if not isinstance(agent_id, str) or not agent_id:
+                        continue
+                    seat_uri = f"board://{board_id}/agent/{agent_id}"
+                    await bus.publish(ResourceUpdated(uri=seat_uri))
         return event
 
     async def append_once_and_publish(
@@ -1777,23 +1798,37 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             raise
         except Exception as exc:
             raise MCPError(INTERNAL_ERROR, "Internal server error") from exc
-        if created and ctx is not None:
-            pending = service.pending_notifications.get()
-            journal_uri = f"board://{board_id}/journal"
-            if pending is None:
-                await ctx.notify_resource_updated(payload_ref)
-                await ctx.notify_resource_updated(journal_uri)
-            else:
-                pending.append((ctx, payload_ref))
-                pending.append((ctx, journal_uri))
-            for agent_id in sorted(set(recipients)):
-                if not isinstance(agent_id, str) or not agent_id:
-                    continue
-                seat_uri = f"board://{board_id}/agent/{agent_id}"
+        if created:
+            if ctx is not None:
+                pending = service.pending_notifications.get()
+                journal_uri = f"board://{board_id}/journal"
                 if pending is None:
-                    await ctx.notify_resource_updated(seat_uri)
+                    await ctx.notify_resource_updated(payload_ref)
+                    await ctx.notify_resource_updated(journal_uri)
                 else:
-                    pending.append((ctx, seat_uri))
+                    pending.append((ctx, payload_ref))
+                    pending.append((ctx, journal_uri))
+                for agent_id in sorted(set(recipients)):
+                    if not isinstance(agent_id, str) or not agent_id:
+                        continue
+                    seat_uri = f"board://{board_id}/agent/{agent_id}"
+                    if pending is None:
+                        await ctx.notify_resource_updated(seat_uri)
+                    else:
+                        pending.append((ctx, seat_uri))
+            else:
+                mcp_srv = getattr(service, "mcp_server", None)
+                bus = getattr(mcp_srv, "_subscriptions", None) if mcp_srv is not None else None
+                if bus is not None:
+                    from mcp.server.subscriptions import ResourceUpdated
+                    journal_uri = f"board://{board_id}/journal"
+                    await bus.publish(ResourceUpdated(uri=payload_ref))
+                    await bus.publish(ResourceUpdated(uri=journal_uri))
+                    for agent_id in sorted(set(recipients)):
+                        if not isinstance(agent_id, str) or not agent_id:
+                            continue
+                        seat_uri = f"board://{board_id}/agent/{agent_id}"
+                        await bus.publish(ResourceUpdated(uri=seat_uri))
         return event, created
 
     async def publish_admission_event(
@@ -2212,18 +2247,19 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
     async def publish_releases(
         board_id: str,
         released: list[dict[str, Any]],
-        principal: Principal,
-        ctx: Context,
+        principal: Principal | None = None,
+        ctx: Context | None = None,
     ) -> list[dict[str, Any]]:
         events: list[dict[str, Any]] = []
-        reaper = {"agent_id": f"board-reaper:{principal.principal_id}"}
+        reaper = {"agent_id": f"board-reaper:{principal.principal_id}" if principal is not None else f"board-reaper:{board_id}"}
         for item in released:
             if item.get("kind") in DISPATCH_EVENT_KINDS:
-                events.append(
-                    await append_and_publish(
+                if item.get("kind") in {OFFER_EXPIRED, TICKET_OFFERED, REVIEW_OFFERED}:
+                    event, created = await append_once_and_publish(
                         board_id, reaper, item["kind"],
                         resource_uri(board_id, "ticket", item["ticket_id"]),
-                        [value for value in item["recipients"] if value], ctx,
+                        [value for value in item.get("recipients", []) if value], ctx,
+                        unique_fields=("ticket_id", "offer_kind", "offered_agent_id", "offer_expires_at"),
                         ticket_id=item["ticket_id"],
                         offer_kind=item.get("offer_kind"),
                         offered_agent_id=item.get("offered_agent_id"),
@@ -2231,7 +2267,21 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                         offer_expires_at=item.get("offer_expires_at"),
                         dispatch_reason=item.get("dispatch_reason"),
                     )
-                )
+                    events.append(event)
+                else:
+                    events.append(
+                        await append_and_publish(
+                            board_id, reaper, item["kind"],
+                            resource_uri(board_id, "ticket", item["ticket_id"]),
+                            [value for value in item.get("recipients", []) if value], ctx,
+                            ticket_id=item["ticket_id"],
+                            offer_kind=item.get("offer_kind"),
+                            offered_agent_id=item.get("offered_agent_id"),
+                            offered_agent_name=item.get("offered_agent_name"),
+                            offer_expires_at=item.get("offer_expires_at"),
+                            dispatch_reason=item.get("dispatch_reason"),
+                        )
+                    )
                 if item.get("kind") in {TICKET_OFFERED, REVIEW_OFFERED}:
                     schedule_offer_deadline(board_id, item, principal, ctx)
                 continue
@@ -2242,7 +2292,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                         reaper,
                         REVIEW_LEASE_EXPIRED,
                         resource_uri(board_id, "ticket", item["ticket_id"]),
-                        item["recipients"],
+                        item.get("recipients", []),
                         ctx,
                         ticket_id=item["ticket_id"],
                         status_from="submitted",
@@ -2260,7 +2310,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                     reaper,
                     "ticket_status_changed",
                     resource_uri(board_id, "ticket", item["ticket_id"]),
-                    item["recipients"],
+                    item.get("recipients", []),
                     ctx,
                     ticket_id=item["ticket_id"],
                     status_from=item["status_from"],
@@ -2298,15 +2348,15 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             return {"released": released}
         result = service.mutate(board_id, mutate_reap)
         released = result.get("released", [])
-        if released and ctx is not None and principal is not None:
+        if released:
             return await publish_releases(board_id, released, principal, ctx)
         return released
 
     def schedule_offer_deadline(
         board_id: str,
         item: Mapping[str, Any],
-        principal: Principal,
-        ctx: Context,
+        principal: Principal | None = None,
+        ctx: Context | None = None,
     ) -> None:
         ticket_id = str(item.get("ticket_id", ""))
         kind = str(item.get("offer_kind", ""))
@@ -2342,6 +2392,8 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
+                if "closed database" in str(exc).lower():
+                    return
                 log_runtime_error(
                     service.diagnostics,
                     "offer_deadline_error",
@@ -2365,24 +2417,8 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
 
     service.mcp_server = mcp
 
-    async def server_reap_callback(board_id: str, now: float) -> None:
-        def mutate_reap(doc: dict[str, Any]) -> dict[str, Any]:
-            released = reap_expired_offers_in_doc(doc, now)
-            return {"released": released}
-        result = service.mutate(board_id, mutate_reap)
-        released = result.get("released", [])
-        if released:
-            bus = getattr(mcp, "_subscriptions", None)
-            if bus is not None:
-                from mcp.server.subscriptions import ResourceUpdated
-                for item in released:
-                    t_id = item.get("ticket_id")
-                    if t_id:
-                        await bus.publish(ResourceUpdated(uri=f"board://{board_id}/ticket/{t_id}"))
-                    await bus.publish(ResourceUpdated(uri=f"board://{board_id}/journal"))
-                    for rec in item.get("recipients", []):
-                        if rec:
-                            await bus.publish(ResourceUpdated(uri=f"board://{board_id}/agent/{rec}"))
+    async def server_reap_callback(board_id: str, now: float) -> list[dict[str, Any]]:
+        return await check_and_reap_expired(board_id, now, principal=None, ctx=None)
 
     service._reap_callback = server_reap_callback
     service.rehydrate_offer_deadlines()
@@ -5336,6 +5372,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         release_events = await publish_releases(board_id, changed["released"], principal, ctx)
         if "error" in changed:
             return {"ok": False, "error": changed["error"], "release_events": release_events}
+        service.cancel_offer_deadline(board_id, ticket_id, "work")
         uri = resource_uri(board_id, "ticket", ticket_id)
         event = await append_and_publish(
             board_id, changed["actor"], "ticket_status_changed", uri, changed["recipients"], ctx,
@@ -5835,6 +5872,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         )
         if "error" in changed:
             return {"ok": False, "error": changed["error"], "release_events": release_events}
+        service.cancel_offer_deadline(board_id, ticket_id, "review")
         event = None
         if changed["created"]:
             event = await append_and_publish(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import io
 import json
 import os
@@ -45,18 +46,41 @@ import central  # noqa: E402
 import pursers_wait_server as wait_server  # noqa: E402
 
 
+_CURRENT_PRINCIPAL: contextvars.ContextVar[central.Principal | None] = contextvars.ContextVar(
+    "_CURRENT_PRINCIPAL", default=None
+)
+
+
 class InProcessBoardClient:
     """Minimal BoardClient-compatible adapter over a real in-process Central."""
 
-    def __init__(self, raw_client: Client, role: str = "reviewer") -> None:
+    def __init__(
+        self,
+        raw_client: Client,
+        role: str = "reviewer",
+        principal: central.Principal | None = None,
+    ) -> None:
         self._raw_client = raw_client
+        self.principal = principal
         self._client: Any = raw_client
         self.agent_name = "push-listener"
         self.role = role
         self.identity: JoinedIdentity | None = None
 
+    async def call_tool(self, name: str, *args: Any, **kwargs: Any) -> Any:
+        token = (
+            _CURRENT_PRINCIPAL.set(self.principal)
+            if self.principal is not None
+            else None
+        )
+        try:
+            return await self._raw_client.call_tool(name, *args, **kwargs)
+        finally:
+            if token is not None:
+                _CURRENT_PRINCIPAL.reset(token)
+
     async def _call(self, name: str, **arguments: Any) -> dict[str, Any]:
-        result = await self._raw_client.call_tool(
+        result = await self.call_tool(
             name, {"board_id": wait_server.BOARD_ID, **arguments}
         )
         return BoardClient._decode(result)
@@ -67,11 +91,15 @@ class InProcessBoardClient:
         agent_name: str | None = None,
         role: str | None = None,
         task_focus: str | None = None,
+        capabilities: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         selected = self.agent_name if agent_name is None else agent_name
-        joined = await self._call(
-            "board_join", agent_name=selected, role=role or self.role
-        )
+        args: dict[str, Any] = {"agent_name": selected, "role": role or self.role}
+        if task_focus is not None:
+            args["task_focus"] = task_focus
+        if capabilities is not None:
+            args["capabilities"] = capabilities
+        joined = await self._call("board_join", **args)
         identity = JoinedIdentity(
             joined["board_id"],
             joined["agent_id"],
@@ -79,7 +107,7 @@ class InProcessBoardClient:
             joined["agent_name"],
             joined["role"],
         )
-        if agent_name is None:
+        if agent_name is None or self.identity is None:
             self.identity = identity
         return joined
 
@@ -96,10 +124,12 @@ class InProcessBoardClient:
     async def lease_renew(self, ticket_id: str) -> dict[str, Any]:
         return await self._call("lease_renew", ticket_id=ticket_id)
 
-    async def create_ticket(self, title: str) -> dict[str, Any]:
+    async def create_ticket(
+        self, title: str, agent_name: str = "push-actor"
+    ) -> dict[str, Any]:
         return await self._call(
             "ticket_create",
-            agent_name="push-actor",
+            agent_name=agent_name,
             title=title,
             description="synthetic wait-bridge push fixture",
             target_url="pursers/tools/wait-bridge",
@@ -216,22 +246,34 @@ class UnavailableListenContext(AbstractAsyncContextManager[Any]):
 
 
 class UnavailableListenClient:
-    def __init__(self, attempted: asyncio.Event) -> None:
+    def __init__(self, attempted: asyncio.Event, raw_client: Any = None) -> None:
         self.attempted = attempted
         self.listen_calls = 0
+        self._raw_client = raw_client
 
     def listen(self, **_arguments: Any) -> UnavailableListenContext:
         self.listen_calls += 1
         return UnavailableListenContext(self.attempted)
 
+    def __getattr__(self, name: str) -> Any:
+        if self._raw_client is not None:
+            return getattr(self._raw_client, name)
+        raise AttributeError(name)
+
 
 class ForbiddenListenClient:
-    def __init__(self) -> None:
+    def __init__(self, raw_client: Any = None) -> None:
         self.listen_calls = 0
+        self._raw_client = raw_client
 
     def listen(self, **_arguments: Any) -> AbstractAsyncContextManager[Any]:
         self.listen_calls += 1
         raise AssertionError("poll mode must not call listen")
+
+    def __getattr__(self, name: str) -> Any:
+        if self._raw_client is not None:
+            return getattr(self._raw_client, name)
+        raise AttributeError(name)
 
 
 class StubSubscription:
@@ -439,7 +481,12 @@ class PushWaitTests(unittest.IsolatedAsyncioTestCase):
             frozenset({"board:read", "board:write", "board:review"}),
         )
         self.original_current_principal = central.current_principal
-        central.current_principal = lambda: self.principal
+        def resolve_principal() -> central.Principal:
+            p = _CURRENT_PRINCIPAL.get()
+            if p is not None:
+                return p
+            return self.principal
+        central.current_principal = resolve_principal
 
     def tearDown(self) -> None:
         central.current_principal = self.original_current_principal
@@ -1035,44 +1082,150 @@ class PushWaitTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(sample["mode"], "poll")
 
     async def test_degraded_poll_seat_remains_live_after_activity_window(self) -> None:
+        admin_principal = self.principal
+        waiter_principal = central.Principal(
+            "PR-degraded-waiter",
+            "degraded-waiter-canonical",
+            frozenset({"board:read", "board:write"}),
+        )
+
         async with Client(self.mcp, mode="2026-07-28", cache=None) as raw:
-            client = await self._joined_client(raw, role="worker")
-            await client._call(
+            admin_client = InProcessBoardClient(raw, role="worker", principal=admin_principal)
+            admin_client.agent_name = "admin-agent"
+            await admin_client.board_join(
+                agent_name="admin-agent",
+                role="worker",
+                capabilities={"can_work": False, "can_review": False},
+            )
+            await admin_client._call(
+                "board_member_add",
+                agent_name="admin-agent",
+                principal_id=waiter_principal.principal_id,
+                role="member",
+            )
+            await admin_client._call(
                 "board_dispatch_policy_set",
-                agent_name="push-actor",
+                agent_name="admin-agent",
                 offer_ttl_s=1,
             )
+
+            waiter_client = InProcessBoardClient(raw, role="worker", principal=waiter_principal)
+            waiter_client.agent_name = "waiting-worker"
+            joined = await waiter_client.board_join(
+                agent_name="waiting-worker",
+                role="worker",
+                capabilities={"tier_max": 2, "can_work": True, "can_review": False},
+            )
+            waiter_id = joined["agent_id"]
+
             attempted = asyncio.Event()
-            unavailable = UnavailableListenClient(attempted)
-            client._client = unavailable
+            unavailable = UnavailableListenClient(attempted, raw_client=waiter_client)
+            waiter_client._client = unavailable
 
             with (
                 patch.object(wait_server, "WAIT_MODE", "push"),
                 patch.object(wait_server, "DEFAULT_POLL_INTERVAL_S", 0.05),
+                patch.object(wait_server, "AGENT_NAME", "waiting-worker"),
                 patch.dict(os.environ, {"PURSERS_POLL_HEARTBEAT_INTERVAL_S": "0.1"}),
             ):
                 waiting = asyncio.create_task(
                     wait_server._wait_for_work(
-                        client,
+                        waiter_client,
                         since_seq=0,
-                        timeout_s=4,
+                        timeout_s=6,
                         only_mine=False,
                         project="pursers",
+                        agent_name="waiting-worker",
                         wait_for="claimable",
                     )
                 )
                 await asyncio.wait_for(attempted.wait(), timeout=1)
-                await asyncio.sleep(3.2)
+                await asyncio.sleep(3.5)
 
-                created = await client.create_ticket("ticket after liveness window")
-                result = await asyncio.wait_for(waiting, timeout=2)
+                created = await admin_client.create_ticket(
+                    "ticket after liveness window", agent_name="admin-agent"
+                )
+                result = await asyncio.wait_for(waiting, timeout=3)
 
             self.assertFalse(result["timed_out"])
             self.assertEqual(result["mode"], "poll")
-            t_id = created["ticket"]["ticket_id"]
-            self.assertTrue(
-                any(event.get("ticket_id") == t_id for event in result["events"])
+            ticket = created["ticket"]
+            self.assertIn("work_offer", ticket)
+            self.assertEqual(ticket["work_offer"]["agent_id"], waiter_id)
+            self.assertEqual(ticket["work_offer"]["agent_name"], "waiting-worker")
+
+    async def test_degraded_poll_seat_remains_live_after_activity_window_multi_board(self) -> None:
+        admin_principal = self.principal
+        waiter_principal = central.Principal(
+            "PR-degraded-waiter-multi",
+            "degraded-waiter-multi-canonical",
+            frozenset({"board:read", "board:write"}),
+        )
+
+        async with Client(self.mcp, mode="2026-07-28", cache=None) as raw:
+            admin_client = InProcessBoardClient(raw, role="worker", principal=admin_principal)
+            admin_client.agent_name = "admin-agent"
+            await admin_client.board_join(
+                agent_name="admin-agent",
+                role="worker",
+                capabilities={"can_work": False, "can_review": False},
             )
+            await admin_client._call(
+                "board_member_add",
+                agent_name="admin-agent",
+                principal_id=waiter_principal.principal_id,
+                role="member",
+            )
+            await admin_client._call(
+                "board_dispatch_policy_set",
+                agent_name="admin-agent",
+                offer_ttl_s=1,
+            )
+
+            waiter_client = InProcessBoardClient(raw, role="worker", principal=waiter_principal)
+            waiter_client.agent_name = "waiting-worker"
+            joined = await waiter_client.board_join(
+                agent_name="waiting-worker",
+                role="worker",
+                capabilities={"tier_max": 2, "can_work": True, "can_review": False},
+            )
+            waiter_id = joined["agent_id"]
+
+            attempted = asyncio.Event()
+            unavailable = UnavailableListenClient(attempted, raw_client=waiter_client)
+            waiter_client._client = unavailable
+
+            with (
+                patch.object(wait_server, "WAIT_MODE", "push"),
+                patch.object(wait_server, "DEFAULT_POLL_INTERVAL_S", 0.05),
+                patch.object(wait_server, "AGENT_NAME", "waiting-worker"),
+                patch.dict(os.environ, {"PURSERS_POLL_HEARTBEAT_INTERVAL_S": "0.1"}),
+            ):
+                waiting = asyncio.create_task(
+                    wait_server._wait_for_work_many(
+                        waiter_client,
+                        boards=[wait_server.BOARD_ID],
+                        since_seq=0,
+                        timeout_s=6,
+                        only_mine=False,
+                        project="pursers",
+                        agent_name="waiting-worker",
+                        wait_for="claimable",
+                    )
+                )
+                await asyncio.wait_for(attempted.wait(), timeout=1)
+                await asyncio.sleep(3.5)
+
+                created = await admin_client.create_ticket(
+                    "ticket after multi-board liveness window", agent_name="admin-agent"
+                )
+                result = await asyncio.wait_for(waiting, timeout=3)
+
+            self.assertFalse(result["timed_out"])
+            ticket = created["ticket"]
+            self.assertIn("work_offer", ticket)
+            self.assertEqual(ticket["work_offer"]["agent_id"], waiter_id)
+            self.assertEqual(ticket["work_offer"]["agent_name"], "waiting-worker")
 
     async def test_poll_mode_never_opens_subscription(self) -> None:
         async with Client(self.mcp, mode="2026-07-28", cache=None) as raw:
