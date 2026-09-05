@@ -1529,6 +1529,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         middleware=[SubscriptionAuthorization(service)],
     )
     deprecated_read_warnings: set[tuple[str, str, str, str]] = set()
+    membership_role_default_notes: set[tuple[str, str, str]] = set()
 
     def tool() -> Any:
         """Register tools while preserving intentional client-facing failures."""
@@ -3703,7 +3704,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         agent_platform: str | None = None,
         task_focus: str | None = None,
         invite_token: str | None = None,
-        role: str = "worker",
+        role: str | None = None,
         capabilities: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Join one explicit board under the verified bearer principal."""
@@ -3714,9 +3715,13 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 f"claim_ttl_s must be between {MIN_CLAIM_TTL_S} and {MAX_CLAIM_TTL_S}"
             )
         principal = current_principal()
-        role = validate_seat_role(principal, role)
-        coordinate_only = role in {"orchestrator", "coordinator"}
-        if coordinate_only and claim_ttl_s is not None:
+        requested_role = (
+            validate_seat_role(principal, role) if role is not None else None
+        )
+        if (
+            requested_role in {"orchestrator", "coordinator"}
+            and claim_ttl_s is not None
+        ):
             raise PermissionError(
                 "coordinator authorization cannot change board claim policy"
             )
@@ -3732,6 +3737,21 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
 
         def join(document: dict[str, Any]) -> dict[str, Any]:
             now = time.time()
+            service.ensure_schema(document)
+            membership = document["principal_memberships"].get(
+                principal.principal_id
+            )
+            defaulted_from_membership = (
+                requested_role is None and membership is not None
+            )
+            effective_role = requested_role or (
+                "reviewer"
+                if isinstance(membership, Mapping)
+                and membership.get("role") == "reviewer"
+                else "worker"
+            )
+            effective_role = validate_seat_role(principal, effective_role)
+            coordinate_only = effective_role in {"orchestrator", "coordinator"}
             if coordinate_only:
                 if invite_token is not None:
                     raise PermissionError(
@@ -3745,11 +3765,11 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 admission_change = None
             else:
                 admission_change = ensure_join_admission(
-                    document, principal, now, invite_token, role
+                    document, principal, now, invite_token, effective_role
                 )
             joined = join_member(
                 document, principal, agent_name, now, claim_ttl_s,
-                safe_platform, safe_focus, role, capabilities,
+                safe_platform, safe_focus, effective_role, capabilities,
                 allow_workflow_side_effects=not coordinate_only,
             )
             member = joined["actor"]
@@ -3777,10 +3797,23 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 "admission_recipients": service.admitted_agent_ids(
                     document, member["agent_id"]
                 ),
+                "role_defaulted_from_membership": defaulted_from_membership,
                 "capabilities": member.get("capabilities", {}),
             }
 
         result = service.mutate(board_id, join, require_generation=False)
+        if result["role_defaulted_from_membership"]:
+            note_key = (board_id, principal.principal_id, agent_name)
+            if note_key not in membership_role_default_notes:
+                membership_role_default_notes.add(note_key)
+                log_runtime_event(
+                    "board_join_role_defaulted_from_membership",
+                    board_id=board_id,
+                    principal_id=principal.principal_id,
+                    agent_name=agent_name,
+                    membership_role=result["membership_role"],
+                    effective_role=result["role"],
+                )
         result["release_events"] = await publish_releases(
             board_id, result.pop("released"), principal, ctx
         )

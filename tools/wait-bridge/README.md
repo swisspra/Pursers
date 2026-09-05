@@ -30,7 +30,7 @@ SHA-256 `1a0981ec6cc47aed8eeb5e8f488bef260ab6b5fd5c7c88e2cd99604654103e1a`.
 | `ONBOARD_BOARD_ID` | no | Board ID; defaults to `pursers`. |
 | `ONBOARD_AGENT_NAME` | no | Base board identity; defaults to `pursers-wait-bridge`. |
 | `ONBOARD_AGENT_INSTANCE` | no | Stable per-instance suffix, such as `window-a`. |
-| `PURSERS_ROLE` | no | Declared seat role: `worker` (default), `reviewer`, `orchestrator`, or `coordinator`. |
+| `PURSERS_ROLE` | no | Explicit seat role: `worker`, `reviewer`, `orchestrator`, or `coordinator`. When omitted, Central maps reviewer membership to `reviewer`; admin/member membership maps to `worker`. |
 | `PURSERS_WAIT_MODE` | no | `push` (default) or explicit compatibility `poll`; a subscription error polls only that board for the current call and push is retried on re-arm. |
 | `PURSERS_HOST` | no | `codex` (default), `codex-cli`, `goose`, `claude-code`, `claude-desktop`, or `headless`; selects the safe call ceiling. |
 | `PURSERS_HOST_TIMEOUT_S` | no | Explicit host/runner deadline in seconds; overrides the named profile. |
@@ -58,7 +58,8 @@ bridge process and one Central connection serve multiple session identities:
 a2a_wait(since_seq=0, project="PROJECT_PLACEHOLDER", agent_name="session-a")
 ```
 
-`wait_for="auto"` is the default: a seat declared as `reviewer` waits for
+`wait_for="auto"` is the default: the effective role returned by Central is
+used, so a seat declared or membership-defaulted as `reviewer` waits for
 `submitted` tickets, while a `worker` waits for `claimable` tickets.
 Coordinator and orchestrator seats must select an explicit view. Token scopes
 authorize actions but never select the wait mode. Callers
