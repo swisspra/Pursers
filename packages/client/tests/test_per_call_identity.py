@@ -169,6 +169,37 @@ async def test_bounded_read_parameters_are_forwarded(monkeypatch) -> None:
 
 
 @pytest.mark.anyio
+async def test_ticket_submit_truncates_notes_at_line_boundary(monkeypatch) -> None:
+    board = client()
+    captured: dict[str, Any] = {}
+
+    async def call(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        captured.update({"tool": name, "arguments": arguments})
+        return {"ok": True}
+
+    monkeypatch.setattr(board, "_call", call)
+    notes = "\n".join(f"line-{index:03d}-" + "x" * 90 for index in range(60))
+
+    with pytest.warns(RuntimeWarning, match="exceeded 5000 characters"):
+        result = await board.ticket_submit("TK-long-notes", notes=notes)
+
+    submitted = captured["arguments"]["notes"]
+    metadata = result["input_truncation"]["notes"]
+    assert captured["tool"] == "ticket_submit"
+    assert len(submitted) <= 5_000
+    assert submitted.endswith(metadata["marker"])
+    assert submitted[: -len(metadata["marker"])].endswith("\n")
+    assert metadata == {
+        "field": "notes",
+        "limit": 5_000,
+        "original_chars": len(notes),
+        "submitted_chars": len(submitted),
+        "truncated_chars": metadata["truncated_chars"],
+        "marker": f"…[truncated {metadata['truncated_chars']} chars]",
+    }
+
+
+@pytest.mark.anyio
 async def test_review_lease_calls_carry_the_seat_identity(monkeypatch) -> None:
     board = client()
     calls: list[tuple[str, dict[str, Any]]] = []

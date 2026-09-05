@@ -1201,6 +1201,52 @@ def test_reviewer_wait_submitted_wakes_on_real_central_event(
     asyncio.run(exercise())
 
 
+def test_generated_submit_truncates_notes_and_reports_warning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    captured: dict[str, object] = {}
+
+    class Client:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def board_join(self) -> dict[str, object]:
+            return {"ok": True}
+
+        async def ticket_submit(self, ticket_id: str, **arguments: object):
+            captured.update({"ticket_id": ticket_id, **arguments})
+            return {"ok": True}
+
+    dest = seat_new.generate(args(tmp_path / "seat", client="goose"))
+    generated = load_generated(dest / "bin" / "board.py", "board_submit_notes")
+    monkeypatch.setattr(generated, "_load_client", lambda: Client)
+    monkeypatch.setenv("ONBOARD_CENTRAL_URL", "http://central.invalid/mcp")
+    monkeypatch.setenv("ONBOARD_CENTRAL_TOKEN", "test-token")
+    monkeypatch.setenv("ONBOARD_BOARD_ID", "pursers")
+    monkeypatch.setenv("ONBOARD_AGENT_NAME", "worker-agent")
+    notes = "\n".join(f"line-{index:03d}-" + "x" * 90 for index in range(60))
+    parsed = generated._parser().parse_args(
+        ["submit", "TK-long-notes", "ready", notes, "changed.py"]
+    )
+
+    asyncio.run(generated._execute(parsed))
+
+    streams = capsys.readouterr()
+    result = json.loads(streams.out)
+    submitted = captured["notes"]
+    metadata = result["input_truncation"]["notes"]
+    assert len(submitted) <= 5_000
+    assert submitted.endswith(metadata["marker"])
+    assert metadata["truncated_chars"] > 0
+    assert "warning: ticket_submit notes exceeded 5000 characters" in streams.err
+
+
 def test_generated_main_real_listen_event_exits_zero_without_stderr(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
