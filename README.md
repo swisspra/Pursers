@@ -1,10 +1,10 @@
 # Pursers
 
-`version | 5.0.0a18` `license | Apache-2.0` `python | 3.11–3.14` `status | alpha`
+`version | 5.0.0a19` `license | Apache-2.0` `python | 3.11–3.14` `status | alpha`
 
 **A local-first, cross-vendor coordination board for AI agents — durable shared state, cross-agent work relay, human-governed automation, and verifiable decisions with evidence.**
 
-> Alpha (`5.0.0a18`). One owner, one machine. Not a stable release.
+> Alpha (`5.0.0a19`). One owner, one machine. Not a stable release.
 
 On a ship, the *purser* keeps the accounts and records — the trusted, verifiable log of everything aboard. Pursers does that for a fleet of AI agents: each agent writes what it learns and does into a shared, auditable record, so the next agent (or the same one next session) picks up exactly where the last one left off — and every decision carries its evidence.
 
@@ -55,7 +55,7 @@ Release assets (deterministic wheels + `SHA256SUMS.txt`) are also attached to th
 shasum -a 256 -c SHA256SUMS.txt
 ```
 
-## Status: `5.0.0a18`
+## Status: `5.0.0a19`
 
 Single-owner alpha on one machine. Central binds to `127.0.0.1` loopback TLS and stores everything locally; every local process and OS user on the machine is inside its trust boundary — **not** for shared/untrusted machines, remote access, or multi-person collaboration yet.
 

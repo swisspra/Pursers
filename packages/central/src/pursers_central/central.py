@@ -42,13 +42,17 @@ types.ToolAnnotations.model_fields["deprecated"] = FieldInfo(
 types.ToolAnnotations.model_rebuild(force=True)
 types.Tool.model_rebuild(force=True)
 from pursers_client import (
-    DISPATCH_KINDS,
+    ADMISSION_EVENT_KINDS,
+    CLAIM_TTL_EVENT_KINDS,
+    DEPRECATION_EVENT_KINDS,
+    DISPATCH_EVENT_KINDS,
     OFFER_EXPIRED,
     OFFER_REVOKED,
     REVIEW_OFFERED,
     REVIEW_LEASE_EXPIRED,
-    REVIEW_LEASE_KINDS,
     REVIEW_LEASE_RELEASED,
+    REVIEW_EVENT_KINDS,
+    SCRUB_EVENT_KINDS,
     TICKET_REVIEW_CLAIMED,
     TICKET_OFFERED,
 )
@@ -110,9 +114,6 @@ INVITE_ROLES = frozenset({"member", "reviewer"})
 DEFAULT_INVITE_TTL_S = 3_600
 MIN_INVITE_TTL_S = 1
 MAX_INVITE_TTL_S = 604_800
-ADMISSION_EVENT_KINDS = frozenset(
-    {"board_membership_changed", "board_invite_created"}
-)
 ADMISSION_EVENT_FIELDS = frozenset(
     {
         "admission_action",
@@ -128,7 +129,6 @@ ADMISSION_EVENT_FIELDS = frozenset(
     }
 )
 SCRUB_PROFILES = frozenset({"strict", "internal"})
-SCRUB_EVENT_KINDS = frozenset({"board_scrub_profile_changed"})
 SCRUB_EVENT_FIELDS = frozenset(
     {
         "scrub_profile_from",
@@ -137,13 +137,10 @@ SCRUB_EVENT_FIELDS = frozenset(
         "recipient_identities",
     }
 )
-CLAIM_TTL_EVENT_KINDS = frozenset({"board_claim_ttl_changed"})
 CLAIM_TTL_EVENT_FIELDS = frozenset(
     {"claim_ttl_from", "claim_ttl_to", "fixture_provenance", "recipient_identities"}
 )
 REVIEW_POLICIES = frozenset({"strict", "workflow"})
-REVIEW_EVENT_KINDS = frozenset({"board_review_policy_changed"}) | REVIEW_LEASE_KINDS
-DEPRECATION_EVENT_KINDS = frozenset({"deprecated_tool_warning"})
 DEPRECATION_EVENT_FIELDS = frozenset(
     {
         "tool",
@@ -204,7 +201,6 @@ REVIEW_EVENT_FIELDS = frozenset(
         "recipient_identities",
     }
 )
-DISPATCH_EVENT_KINDS = DISPATCH_KINDS | frozenset({"dispatch_unassignable"})
 DISPATCH_EVENT_FIELDS = frozenset(
     {
         "ticket_id",
@@ -630,6 +626,9 @@ class CentralBoard:
         self.cursors = CursorStore(self.store)
         self.active_listeners: dict[str, set[str]] = {}
         self.last_seen_activity: dict[tuple[str, str], float] = {}
+        self._offer_reaper_tasks: dict[str, asyncio.Task[Any]] = {}
+        self._reap_callback: Any = None
+        self.mcp_server: Any = None
         # The JSON skeleton needs one service-wide boundary so a cold snapshot and
         # its journal watermark cannot split a domain-write/journal-append pair.
         self.tool_lock = asyncio.Lock()
@@ -639,6 +638,29 @@ class CentralBoard:
         self.expected_generation: contextvars.ContextVar[Any] = contextvars.ContextVar(
             "central_expected_generation", default=None
         )
+
+    def schedule_offer_reaper(self, board_id: str, delay: float) -> None:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        existing = self._offer_reaper_tasks.get(board_id)
+        if existing and not existing.done():
+            existing.cancel()
+
+        async def _reap_worker():
+            try:
+                await asyncio.sleep(max(0.001, delay))
+                now = time.time()
+                reap_fn = getattr(self, "_reap_callback", None)
+                if reap_fn is not None:
+                    await reap_fn(board_id, now)
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
+
+        self._offer_reaper_tasks[board_id] = loop.create_task(_reap_worker())
 
     def register_listener(self, board_id: str, agent_id: str) -> None:
         self.active_listeners.setdefault(board_id, set()).add(agent_id)
@@ -651,12 +673,19 @@ class CentralBoard:
         self.last_seen_activity[(board_id, agent_id)] = now
 
     def is_agent_live(
-        self, board_id: str, agent_id: str, member: Mapping[str, Any], now: float, offer_ttl_s: int,
+        self,
+        board_id: str,
+        agent_id: str,
+        member: Mapping[str, Any],
+        now: float,
+        offer_ttl_s: int,
+        policy: Mapping[str, Any] | None = None,
     ) -> bool:
         if agent_id in self.active_listeners.get(board_id, set()):
             return True
         last_seen = self.last_seen_activity.get((board_id, agent_id))
-        window = max(1800.0, 3.0 * float(offer_ttl_s))
+        configured = float(policy.get("liveness_window_s", 0)) if policy else 0.0
+        window = configured if configured > 0 else 3.0 * float(offer_ttl_s)
         if last_seen is not None and (0.0 <= now - last_seen <= window or now < last_seen):
             return True
         raw_activity = member.get("last_activity_at")
@@ -1907,6 +1936,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             if not service.is_agent_live(
                 document["board_id"], str(member["agent_id"]), member, now,
                 int(policy.get("offer_ttl_s", DEFAULT_OFFER_TTL_S)),
+                policy=policy,
             ):
                 continue
             candidates.append((member, caps))
@@ -1963,6 +1993,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         ticket.setdefault("dispatch_history", []).append(
             {"state": "offered", **copy.deepcopy(offer)}
         )
+        service.schedule_offer_reaper(document["board_id"], max(0.001, expires_epoch - now))
         return {
             "kind": TICKET_OFFERED if kind == "work" else REVIEW_OFFERED,
             "ticket_id": ticket["ticket_id"], "offer_kind": kind,
@@ -2216,6 +2247,28 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         if released and ctx is not None and principal is not None:
             return await publish_releases(board_id, released, principal, ctx)
         return released
+
+    service.mcp_server = mcp
+
+    async def server_reap_callback(board_id: str, now: float) -> None:
+        def mutate_reap(doc: dict[str, Any]) -> dict[str, Any]:
+            released = reap_expired_offers_in_doc(doc, now)
+            return {"released": released}
+        result = service.mutate(board_id, mutate_reap)
+        released = result.get("released", [])
+        if released:
+            bus = getattr(mcp, "_subscriptions", None)
+            if bus is not None:
+                from mcp.server.subscriptions import ResourceUpdated
+                for item in released:
+                    t_id = item.get("ticket_id")
+                    if t_id:
+                        await bus.publish(ResourceUpdated(uri=f"board://{board_id}/ticket/{t_id}"))
+                    await bus.publish(ResourceUpdated(uri=f"board://{board_id}/journal"))
+                    for rec in item.get("recipients", []):
+                        if rec:
+                            await bus.publish(ResourceUpdated(uri=f"board://{board_id}/agent/{rec}"))
+    service._reap_callback = server_reap_callback
 
     def latest_seq(board_id: str) -> int:
         # read_after exposes the watermark even when cursor zero predates retention.
@@ -7472,9 +7525,6 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         require_scope(principal, "board:read")
         document = service.load(board_id)
         actor = service.member(document, principal, agent_name)
-        now_catchup = time.time()
-        service.record_agent_activity(board_id, actor["agent_id"], now_catchup)
-        await check_and_reap_expired(board_id, now_catchup, principal, ctx)
         acknowledged_cursor = service.cursors.get(
             principal.principal_id, agent_name, board_id
         )

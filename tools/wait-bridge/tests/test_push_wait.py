@@ -30,6 +30,9 @@ os.environ.setdefault("ONBOARD_CENTRAL_TOKEN", "TOKEN_PLACEHOLDER")
 
 from mcp import Client  # noqa: E402
 from pursers_client import (  # noqa: E402
+    CENTRAL_EVENT_KINDS,
+    CORE_EVENT_KINDS,
+    KNOWN_EVENT_KINDS,
     REVIEW_LEASE_EXPIRED,
     REVIEW_LEASE_KINDS,
     REVIEW_LEASE_RELEASED,
@@ -367,6 +370,11 @@ class PushWaitTests(unittest.IsolatedAsyncioTestCase):
             wait_server.SUBMITTED_RELEVANT_KINDS, SUBMITTED_RELEVANT_KINDS
         )
         self.assertLessEqual(REVIEW_LEASE_KINDS, wait_server.RELEVANT_KINDS)
+
+    def test_bridge_subscription_vocabulary_is_known_and_central_emitted(self) -> None:
+        self.assertLessEqual(wait_server.SUBSCRIPTION_KINDS, KNOWN_EVENT_KINDS)
+        self.assertLessEqual(wait_server.SUBSCRIPTION_KINDS, CENTRAL_EVENT_KINDS)
+        self.assertEqual(central.CORE_JOURNAL_KINDS, CORE_EVENT_KINDS)
 
     async def test_release_and_expiry_wake_blocked_push_reviewer(self) -> None:
         for sequence, kind in enumerate(
@@ -775,6 +783,7 @@ class PushWaitTests(unittest.IsolatedAsyncioTestCase):
 
                 events = board.events(
                     from_cursor=0,
+                    kinds=wait_server.SUBSCRIPTION_KINDS,
                     only_mine=False,
                     resource_subscriptions=(
                         f"board://{wait_server.BOARD_ID}/journal",
@@ -973,6 +982,10 @@ class PushWaitTests(unittest.IsolatedAsyncioTestCase):
             attempted = asyncio.Event()
             unavailable = UnavailableListenClient(attempted)
             client._client = unavailable
+            failures: list[tuple[str, str]] = []
+
+            async def record_failure(board_id: str, reason: str) -> None:
+                failures.append((board_id, reason))
 
             with (
                 patch.object(wait_server, "WAIT_MODE", "push"),
@@ -986,6 +999,7 @@ class PushWaitTests(unittest.IsolatedAsyncioTestCase):
                         only_mine=False,
                         project="pursers",
                         wait_for="claimable",
+                        push_unavailable_callback=record_failure,
                     )
                 )
                 await asyncio.wait_for(attempted.wait(), timeout=1)
@@ -993,6 +1007,15 @@ class PushWaitTests(unittest.IsolatedAsyncioTestCase):
                 result = await asyncio.wait_for(waiting, timeout=1)
 
             self.assertEqual(unavailable.listen_calls, 1)
+            self.assertEqual(
+                failures,
+                [
+                    (
+                        wait_server.BOARD_ID,
+                        "synthetic subscriptions/listen unavailable",
+                    )
+                ],
+            )
             self.assertFalse(result["timed_out"])
             self.assertEqual(result["mode"], "poll")
             self.assertTrue(

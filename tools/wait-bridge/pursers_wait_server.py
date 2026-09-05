@@ -65,6 +65,8 @@ from collections.abc import Awaitable, Callable
 from typing import Any, AsyncIterator
 
 from pursers_client import (
+    CENTRAL_EVENT_KINDS,
+    CLAIM_TTL_EVENT_KINDS,
     OFFER_EXPIRED,
     OFFER_REVOKED,
     REVIEW_OFFERED,
@@ -89,7 +91,7 @@ from backlog import (
     ticket_is_relevant,
 )
 
-SOURCE_VERSION = "0.1.0a8"
+SOURCE_VERSION = "0.1.0a9"
 
 
 def _source_version() -> str:
@@ -159,8 +161,9 @@ CLAIMABLE_RELEVANT_KINDS = frozenset(
     }
 )
 RELEVANT_KINDS = CLAIMABLE_RELEVANT_KINDS | SUBMITTED_RELEVANT_KINDS
-KEEPALIVE_SIGNAL_KINDS = frozenset({"board_claim_ttl_changed"})
+KEEPALIVE_SIGNAL_KINDS = CLAIM_TTL_EVENT_KINDS
 RELEVANT_KINDS = RELEVANT_KINDS | KEEPALIVE_SIGNAL_KINDS
+SUBSCRIPTION_KINDS = RELEVANT_KINDS & CENTRAL_EVENT_KINDS
 WAIT_FOR_AUTO = "auto"
 WAIT_FOR_VALUES = frozenset(
     {WAIT_FOR_AUTO, WAIT_FOR_CLAIMABLE, WAIT_FOR_SUBMITTED}
@@ -170,8 +173,10 @@ _BACKLOG_SEEN: OrderedDict[tuple[str, str, str], str] = OrderedDict()
 CLAIMED_STATES = frozenset({"claimed", "in_progress", "creating_report"})
 HANDOFF_REJOIN_MESSAGE = "call board_onboard or board_join before more work"
 PROJECT_REGISTRY_KEY = "project_registry"
-STATS_SCHEMA_VERSION = 3
+STATS_SCHEMA_VERSION = 4
 STATS_RETENTION_DAYS = 7
+PUSH_UNAVAILABLE_LIMIT = 64
+PUSH_UNAVAILABLE_REASON_CHARS = 500
 POLL_SAMPLE_LIMIT = 24
 WAIT_HOUR_RETENTION = 48
 WAIT_RETURN_SAMPLE_LIMIT = 256
@@ -317,8 +322,27 @@ class BridgeStats:
                     str(result.get("mode") or "unknown"),
                     str(result.get("reason") or outcome),
                 )
+                modes = result.get("mode_by_board")
+                if isinstance(modes, dict):
+                    for selected_board, mode in modes.items():
+                        if isinstance(selected_board, str) and mode == "push":
+                            self._set_push_unavailable_sync(
+                                selected_board, agent_name, None
+                            )
+                elif result.get("mode") == "push":
+                    self._set_push_unavailable_sync(board_id, agent_name, None)
         except Exception as exc:  # noqa: BLE001 - metering never breaks work.
             _log(f"wait-return stats write failed: {type(exc).__name__}")
+
+    async def record_push_unavailable(
+        self, board_id: str, agent_name: str, reason: str
+    ) -> None:
+        """Persist the latest subscription failure for Fleet attention."""
+        try:
+            async with self._lock:
+                self._set_push_unavailable_sync(board_id, agent_name, reason)
+        except Exception as exc:  # noqa: BLE001 - metering never breaks work.
+            _log(f"push-unavailable stats write failed: {type(exc).__name__}")
 
     async def record_digest_call(
         self,
@@ -424,6 +448,11 @@ class BridgeStats:
                     if isinstance(document.get("model_wait"), dict)
                     else {}
                 ),
+                "push_unavailable": (
+                    document.get("push_unavailable")
+                    if isinstance(document.get("push_unavailable"), dict)
+                    else {}
+                ),
             }
             temporary_name: str | None = None
             try:
@@ -507,6 +536,11 @@ class BridgeStats:
                 "model_wait": (
                     document.get("model_wait")
                     if isinstance(document.get("model_wait"), dict)
+                    else {}
+                ),
+                "push_unavailable": (
+                    document.get("push_unavailable")
+                    if isinstance(document.get("push_unavailable"), dict)
                     else {}
                 ),
             }
@@ -618,6 +652,94 @@ class BridgeStats:
                     else {}
                 ),
                 "model_wait": model_wait,
+                "push_unavailable": (
+                    document.get("push_unavailable")
+                    if isinstance(document.get("push_unavailable"), dict)
+                    else {}
+                ),
+            }
+            temporary_name: str | None = None
+            try:
+                with tempfile.NamedTemporaryFile(
+                    "w",
+                    encoding="utf-8",
+                    dir=self.path.parent,
+                    prefix=f".{self.path.name}.",
+                    delete=False,
+                ) as stream:
+                    temporary_name = stream.name
+                    json.dump(
+                        output,
+                        stream,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    stream.write("\n")
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(temporary_name, self.path)
+                temporary_name = None
+            finally:
+                if temporary_name is not None:
+                    Path(temporary_name).unlink(missing_ok=True)
+        finally:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+            finally:
+                os.close(descriptor)
+
+    def _set_push_unavailable_sync(
+        self, board_id: str, agent_name: str, reason: str | None
+    ) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = self.path.with_suffix(self.path.suffix + ".lock")
+        descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            try:
+                document = json.loads(self.path.read_text(encoding="utf-8"))
+            except (FileNotFoundError, UnicodeError, ValueError, OSError):
+                document = {}
+            if not isinstance(document, dict):
+                document = {}
+            rows = document.get("push_unavailable")
+            rows = rows if isinstance(rows, dict) else {}
+            seat_key = json.dumps([board_id, agent_name], separators=(",", ":"))
+            if reason is None:
+                rows.pop(seat_key, None)
+            else:
+                clean_reason = " ".join(str(reason).split())[
+                    :PUSH_UNAVAILABLE_REASON_CHARS
+                ]
+                rows[seat_key] = {
+                    "board_id": board_id,
+                    "agent_name": agent_name,
+                    "reason": clean_reason or "unknown subscription failure",
+                    "observed_at": self.clock().astimezone(timezone.utc).isoformat(),
+                }
+                rows = dict(
+                    sorted(
+                        rows.items(),
+                        key=lambda item: str(
+                            item[1].get("observed_at", "")
+                            if isinstance(item[1], dict)
+                            else ""
+                        ),
+                    )[-PUSH_UNAVAILABLE_LIMIT:]
+                )
+            output = {
+                "schema_version": STATS_SCHEMA_VERSION,
+                "days": document.get("days")
+                if isinstance(document.get("days"), dict)
+                else {},
+                "poll_cycles": document.get("poll_cycles")
+                if isinstance(document.get("poll_cycles"), dict)
+                else {},
+                "model_wait": document.get("model_wait")
+                if isinstance(document.get("model_wait"), dict)
+                else {},
+                "push_unavailable": rows,
             }
             temporary_name: str | None = None
             try:
@@ -2882,6 +3004,7 @@ async def _a2a_wait_impl(
     boards: list[str] | str | None = None,
     wait_for: str = WAIT_FOR_AUTO,
     progress_callback: Callable[[float, float], Awaitable[None]] | None = None,
+    push_unavailable_callback: Callable[[str, str], Awaitable[None]] | None = None,
 ) -> dict[str, Any]:
     """Block until pursers board work arrives, or until timeout_s elapses.
 
@@ -2941,6 +3064,7 @@ async def _a2a_wait_impl(
                 agent_name=agent_name,
                 wait_for=wait_for,
                 progress_callback=progress_callback,
+                push_unavailable_callback=push_unavailable_callback,
             )
             return {
                 **result,
@@ -2958,6 +3082,7 @@ async def _a2a_wait_impl(
             agent_name=agent_name,
             wait_for=wait_for,
             progress_callback=progress_callback,
+            push_unavailable_callback=push_unavailable_callback,
         )
     if isinstance(boards, str):
         raise ValueError('boards must be a list of board IDs or "registry"')
@@ -2972,6 +3097,7 @@ async def _a2a_wait_impl(
             agent_name=agent_name,
             wait_for=wait_for,
             progress_callback=progress_callback,
+            push_unavailable_callback=push_unavailable_callback,
         )
     if isinstance(since_seq, dict):
         raise ValueError("since_seq must be an integer when boards is omitted")
@@ -2984,6 +3110,7 @@ async def _a2a_wait_impl(
         agent_name=agent_name,
         wait_for=wait_for,
         progress_callback=progress_callback,
+        push_unavailable_callback=push_unavailable_callback,
     )
 
 
@@ -3001,6 +3128,7 @@ async def a2a_wait(
     """Wait for work and record one model-visible return."""
     client = await _client_for_tool(ctx)
     meter = getattr(client, "meter", None)
+
     async def progress(elapsed: float, total: float) -> None:
         await ctx.report_progress(
             elapsed,
@@ -3009,6 +3137,13 @@ async def a2a_wait(
         )
 
     async def run() -> dict[str, Any]:
+        async def report_push_unavailable(board_id: str, reason: str) -> None:
+            if meter is not None:
+                selected_agent = AGENT_NAME if agent_name is None else agent_name
+                await meter.record_push_unavailable(
+                    board_id, selected_agent, reason
+                )
+
         return await _a2a_wait_impl(
             client,
             since_seq,
@@ -3019,6 +3154,7 @@ async def a2a_wait(
             boards,
             wait_for,
             progress,
+            report_push_unavailable,
         )
     if meter is None:
         return await run()
@@ -3114,7 +3250,7 @@ async def _event_stream(
         events = event_client.events(
             from_cursor=from_cursor,
             only_mine=False,
-            kinds=RELEVANT_KINDS,
+        kinds=SUBSCRIPTION_KINDS,
             resource_subscriptions=resources,
             acknowledge=False,
             touch=False if pure_catchup else None,
@@ -3181,6 +3317,7 @@ async def _wait_for_work_many(
     task_focus: str | None = None,
     wait_for: str = WAIT_FOR_AUTO,
     progress_callback: Callable[[float, float], Awaitable[None]] | None = None,
+    push_unavailable_callback: Callable[[str, str], Awaitable[None]] | None = None,
 ) -> dict[str, Any]:
     """Wait across independent board cursors and identities on one transport."""
     board_order = _normalize_boards(boards)
@@ -3420,6 +3557,8 @@ async def _wait_for_work_many(
                     elif kind == "failed":
                         fallback.add(board_id)
                         mode_by_board[board_id] = "poll"
+                        if push_unavailable_callback is not None:
+                            await push_unavailable_callback(board_id, str(detail))
                         _log(
                             "WARNING: subscriptions/listen unavailable for "
                             f"board={board_id!r}; polling this board for the "
@@ -3494,6 +3633,7 @@ async def _wait_for_work(
     agent_name: str | None = None,
     wait_for: str = WAIT_FOR_AUTO,
     progress_callback: Callable[[float, float], Awaitable[None]] | None = None,
+    push_unavailable_callback: Callable[[str, str], Awaitable[None]] | None = None,
 ) -> dict[str, Any]:
     """Testable wait implementation with identity kept entirely call-local."""
     budget = clamp_timeout(timeout_s)
@@ -3723,6 +3863,8 @@ async def _wait_for_work(
                 await events.aclose()
         except Exception as exc:
             actual_mode = "poll"
+            if push_unavailable_callback is not None:
+                await push_unavailable_callback(BOARD_ID, str(exc))
             _log(
                 "WARNING: subscriptions/listen unavailable; falling back to "
                 f"poll for this call and retrying push on re-arm: {exc}"

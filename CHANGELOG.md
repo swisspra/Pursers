@@ -7,6 +7,34 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [5.0.0a19] - 2026-09-05
+
+This release includes `pursers-central==0.1.0a23`,
+`pursers-client==0.1.0a16`, `pursers-personal-import==5.0.0a3`,
+`pursers-personal==5.0.0a19`, `pursers==5.0.0a19`, and
+`pursers-wait-bridge==0.1.0a9`.
+
+### Package summary
+
+- **Central 0.1.0a23:** admits existing `admin`, `member`, and `reviewer`
+  memberships at coordinator/orchestrator joins and applies the same membership
+  rule to narrow `board:coordinate` and `board:intake` operations.
+- **Wait Bridge 0.1.0a9:** distinguishes a connector token that is absent from
+  one that resolves to a different principal, while preserving the existing
+  split-identity fail-closed behavior.
+- **Personal and meta 5.0.0a19:** ship the matching package pins, dashboard,
+  documentation, and component lock; Client remains at 0.1.0a16 and Personal
+  Import remains at 5.0.0a3.
+- **Fleet Dashboard tooling:** writes the connector token-file value into managed
+  Codex and Goose bridge environments, and Doctor verifies the literal, both
+  Central-resolved principals, and the exact stdio launch environment.
+
+### Migration
+
+- The deprecated-tool compatibility path (`PURSERS_LEGACY_TOOLS` and
+  `capabilities.legacy_tools`) is retained through a19; physical removal moves
+  to a20.
+
 ### Fixed
 
 - Coordinator and orchestrator joins now admit existing `admin`, `member`, and
@@ -50,6 +78,7 @@ This release includes `pursers-central==0.1.0a22`,
 - Use one token identity per seat for both its wait bridge and board connector.
 - Set `PURSERS_LEGACY_TOOLS=1` only when deprecated tools are still required;
   this compatibility path remains available through a18 and is removed in a19.
+- **a19 addendum:** compatibility is retained through a19; removal moves to a20.
 
 ### Added
 

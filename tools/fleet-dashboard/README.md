@@ -123,6 +123,8 @@ Each central gets its own summary, board group, agent pool, cache, error state,
 detail routes, findings, overhead route, and coordinator config target. The
 browser requests and renders each central independently with a four-second
 timeout, so an unavailable or nonresponsive central does not hide healthy ones.
+When bridge stats report a subscription failure, Needs attention shows
+`push unavailable: <reason>` until a later healthy push return clears it.
 In multi-central mode, overhead is read only from that entry's `stats_path`; an
 entry without one reports its overhead unavailable instead of using another
 trust domain's global stats. Tokens remain server-side. Without `--centrals`,

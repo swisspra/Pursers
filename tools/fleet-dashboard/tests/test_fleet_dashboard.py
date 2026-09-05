@@ -1507,6 +1507,41 @@ def test_overhead_projects_model_visible_wait_cost_separately() -> None:
     ]
 
 
+def test_overhead_surfaces_push_unavailable_warning(tmp_path: Path) -> None:
+    path = tmp_path / "stats.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 4,
+                "days": {},
+                "push_unavailable": {
+                    "seat": {
+                        "board_id": "pursers",
+                        "agent_name": "worker-one",
+                        "reason": "unknown event kinds: ['board_claim_ttl_changed']",
+                        "observed_at": "2030-01-10T12:00:00+00:00",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = dashboard.read_overhead_stats(
+        path, now=datetime(2030, 1, 10, 12, 30, tzinfo=timezone.utc)
+    )
+
+    assert result["push_unavailable"] == [
+        {
+            "board_id": "pursers",
+            "agent_name": "worker-one",
+            "reason": "unknown event kinds: ['board_claim_ttl_changed']",
+            "observed_at": "2030-01-10T12:00:00+00:00",
+            "warning": "push unavailable: unknown event kinds: ['board_claim_ttl_changed']",
+        }
+    ]
+
+
 def test_session_pressure_thresholds_trend_and_worst_first_sorting() -> None:
     def cycle(board: str, agent: str, latest_bytes: int, samples: list[int]) -> dict:
         return {
@@ -3246,7 +3281,7 @@ def test_seat_config_manager_plan_apply_backup_restart_and_no_token_leak(
     ca.write_text("CA")
 
     class Bridge:
-        version = "0.1.0a8"
+        version = "0.1.0a9"
 
         def inspect(self) -> dict:
             return {
@@ -3268,7 +3303,7 @@ def test_seat_config_manager_plan_apply_backup_restart_and_no_token_leak(
         tmp_path / "state/seats.json",
         state_dir=tmp_path / "state",
         bridge_installer=Bridge(),
-        latest_version=lambda: "0.1.0a8",
+        latest_version=lambda: "0.1.0a9",
     )
     desired = {
         "host": "codex",
@@ -3297,7 +3332,7 @@ def test_seat_config_manager_plan_apply_backup_restart_and_no_token_leak(
     assert Path(result["backup_path"]).read_text() == f'api_token = "{secret}"\n'
     manager.inventory.upsert(
         dashboard.DesiredSeat.from_dict(desired),
-        bridge_version="0.1.0a8",
+        bridge_version="0.1.0a9",
         doctor={
             "overall": "WARN",
             "checks": [
@@ -3314,10 +3349,10 @@ def test_seat_config_manager_plan_apply_backup_restart_and_no_token_leak(
     assert row["principal_label"] == "worker"
     assert row["needs_restart"] is True
     bridge = manager.bridge()
-    assert bridge["installed_version"] == "0.1.0a8"
+    assert bridge["installed_version"] == "0.1.0a9"
     assert bridge["reported_version"] == "0.1.0a1"
-    assert bridge["pinned_version"] == "0.1.0a8"
-    assert bridge["latest_pypi_version"] == "0.1.0a8"
+    assert bridge["pinned_version"] == "0.1.0a9"
+    assert bridge["latest_pypi_version"] == "0.1.0a9"
     assert bridge["resolution_source"] == "well-known:uv-tool"
     journal = (tmp_path / "state/config-actions.jsonl").read_text()
     assert secret not in journal
@@ -3325,7 +3360,7 @@ def test_seat_config_manager_plan_apply_backup_restart_and_no_token_leak(
 
 def test_seat_config_registry_coverage_uses_live_fleet_seats(tmp_path: Path) -> None:
     class Bridge:
-        version = "0.1.0a8"
+        version = "0.1.0a9"
 
         def inspect(self) -> dict:
             return {"version": self.version, "command": None}
@@ -3347,7 +3382,7 @@ def test_seat_config_registry_coverage_uses_live_fleet_seats(tmp_path: Path) -> 
         bridge_command="/tmp/pursers-wait-bridge",
         config_path=str(tmp_path / "config.toml"),
     )
-    manager.inventory.upsert(desired, bridge_version="0.1.0a8")
+    manager.inventory.upsert(desired, bridge_version="0.1.0a9")
 
     result = manager.registry(
         {
@@ -3397,15 +3432,15 @@ def test_config_api_and_ui_contract_are_separate_from_coordinator_config() -> No
 
         def bridge(self) -> dict:
             return {
-                "installed_version": "0.1.0a8",
+                "installed_version": "0.1.0a9",
                 "reported_version": "0.1.0a6",
-                "package_metadata_version": "0.1.0a8",
-                "pinned_version": "0.1.0a8",
-                "latest_pypi_version": "0.1.0a8",
+                "package_metadata_version": "0.1.0a9",
+                "pinned_version": "0.1.0a9",
+                "latest_pypi_version": "0.1.0a9",
                 "resolution_source": "config:codex",
                 "status": "WARN",
                 "message": (
-                    "version string stale; reported=0.1.0a6; package=0.1.0a8"
+                    "version string stale; reported=0.1.0a6; package=0.1.0a9"
                 ),
             }
 
@@ -3463,15 +3498,15 @@ def test_config_api_and_ui_contract_are_separate_from_coordinator_config() -> No
         with urllib.request.urlopen(base + "/api/config/bridge") as response:
             bridge = json.load(response)
             assert bridge == {
-                "installed_version": "0.1.0a8",
+                "installed_version": "0.1.0a9",
                 "reported_version": "0.1.0a6",
-                "package_metadata_version": "0.1.0a8",
-                "pinned_version": "0.1.0a8",
-                "latest_pypi_version": "0.1.0a8",
+                "package_metadata_version": "0.1.0a9",
+                "pinned_version": "0.1.0a9",
+                "latest_pypi_version": "0.1.0a9",
                 "resolution_source": "config:codex",
                 "status": "WARN",
                 "message": (
-                    "version string stale; reported=0.1.0a6; package=0.1.0a8"
+                    "version string stale; reported=0.1.0a6; package=0.1.0a9"
                 ),
             }
         with urllib.request.urlopen(base + "/api/config/registry") as response:
@@ -4283,6 +4318,13 @@ def test_dispatch_timeline_reads_cross_seat_central_projection(
         await call("board_reap", admin)
 
         state["now"] = 2000.0
+        await call(
+            "board_join",
+            reviewer,
+            agent_name="reviewer",
+            role="reviewer",
+            capabilities={"tier_max": 2, "can_work": False, "can_review": True},
+        )
         review_target = await call(
             "ticket_create",
             admin,
@@ -4874,6 +4916,7 @@ def test_attention_and_truncation_controls_are_rendered() -> None:
     assert "sessionStorage" not in dashboard.HTML
     assert "/api/attention" in dashboard.HTML
     assert "data-attention-action=\"ack\"" in dashboard.HTML
+    assert "push unavailable: ${p.reason}" in dashboard.HTML
     assert "Snooze 24h" in dashboard.HTML
     assert "snapshot truncated to ${esc(tr.returned)} of ${esc(tr.total)} tickets" in dashboard.HTML
     assert "tokens / return" in dashboard.HTML
