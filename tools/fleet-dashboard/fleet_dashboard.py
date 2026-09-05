@@ -3602,14 +3602,6 @@ class SeatConfigManager:
         bridge_installer: BridgeInstaller | None = None,
         doctor_factory: Callable[[], Doctor] = Doctor,
         latest_version: Callable[[], str | None] | None = None,
-    def __init__(
-        self,
-        inventory_path: str | Path | None = None,
-        *,
-        state_dir: str | Path = CONFIG_STATE_DIR,
-        bridge_installer: BridgeInstaller | None = None,
-        doctor_factory: Callable[[], Doctor] = Doctor,
-        latest_version: Callable[[], str | None] | None = None,
         release_ops_manager: ReleaseOpsManager | None = None,
         discovered_configs: list[tuple[str, str | Path]] | None = None,
     ) -> None:
