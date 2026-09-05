@@ -4037,33 +4037,19 @@ class SeatConfigManager:
         fleet_clone = project_entry.get("fleet_clone_dir")
         if isinstance(fleet_clone, str) and fleet_clone.strip():
             return Path(fleet_clone).expanduser().resolve()
-        if desired.seat_dir:
-            seat_path = Path(desired.seat_dir).expanduser().resolve()
-            operator_dir = (
-                Path(project_entry["work_dir"]).expanduser().resolve()
-                if project_entry.get("work_dir")
-                else None
-            )
-            if seat_path != operator_dir:
-                if desired.repository:
-                    try:
-                        seat_new = _load_seat_new()
-                        repo_leaf = seat_new._repo_leaf(desired.repository)
-                        clone = seat_path / repo_leaf
-                        if (clone / ".git").exists() or clone.is_dir():
-                            return clone.resolve()
-                    except Exception:
-                        pass
-                clone = seat_path / project_name
-                if (clone / ".git").exists() or clone.is_dir():
-                    return clone.resolve()
-                if seat_path.is_dir():
-                    for child in seat_path.iterdir():
-                        if child.name.casefold() == project_name.casefold() and (
-                            (child / ".git").exists() or child.is_dir()
-                        ):
-                            return child.resolve()
         work_dir = project_entry.get("work_dir")
+        if desired.seat_dir and desired.repository and isinstance(work_dir, str):
+            try:
+                repo_leaf = _load_seat_new()._repo_leaf(desired.repository)
+            except ValueError:
+                repo_leaf = ""
+            project_aliases = {
+                project_name.casefold(),
+                Path(work_dir).name.casefold(),
+            }
+            clone = Path(desired.seat_dir).expanduser() / repo_leaf
+            if repo_leaf.casefold() in project_aliases and (clone / ".git").exists():
+                return clone.resolve()
         if isinstance(work_dir, str) and work_dir.strip():
             return Path(work_dir).expanduser().resolve()
         return None

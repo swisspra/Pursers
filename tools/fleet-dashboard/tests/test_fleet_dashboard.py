@@ -3604,6 +3604,7 @@ def test_seat_config_doctor_reports_operator_checkout(tmp_path: Path) -> None:
         bridge_command="/tmp/pursers-wait-bridge",
         config_path=str(tmp_path / "config2.yaml"),
         seat_dir=str(seat_two_dir),
+        repository="https://example.invalid/Alpha.git",
     )
     manager.inventory.upsert(desired_two, bridge_version=Bridge.version)
 
@@ -3615,13 +3616,21 @@ def test_seat_config_doctor_reports_operator_checkout(tmp_path: Path) -> None:
                     "board_id": "alpha",
                     "work_dir": "/operator/alpha",
                     "status": "active",
-                }
+                },
+                "Beta": {
+                    "board_id": "beta",
+                    "work_dir": "/operator/beta",
+                    "fleet_clone_dir": "/fleet/beta",
+                    "status": "active",
+                },
             },
         }
     }
     reg = manager.registry(fleet={}, registry_payload=registry_payload)
     alpha_proj = next(p for p in reg["projects"] if p["name"] == "Alpha")
     assert alpha_proj["operator_checkout_seats"] == ["worker-one"]
+    beta_proj = next(p for p in reg["projects"] if p["name"] == "Beta")
+    assert beta_proj["operator_checkout_seats"] == []
 
     job = manager.doctor(
         ["worker-one", "worker-two"],
@@ -3636,11 +3645,19 @@ def test_seat_config_doctor_reports_operator_checkout(tmp_path: Path) -> None:
 
     assert result["status"] == "succeeded"
     seats_by_name = {s["seat"]: s for s in result["result"]["seats"]}
-    worker_one_tree = next(c for c in seats_by_name["worker-one"]["checks"] if c["check"] == "working-tree")
+    worker_one_tree = next(
+        c
+        for c in seats_by_name["worker-one"]["checks"]
+        if c["check"] == "working-tree"
+    )
     assert worker_one_tree["status"] == "FAIL"
     assert "operator checkout is read-only for seats" in worker_one_tree["message"]
 
-    worker_two_tree = next(c for c in seats_by_name["worker-two"]["checks"] if c["check"] == "working-tree")
+    worker_two_tree = next(
+        c
+        for c in seats_by_name["worker-two"]["checks"]
+        if c["check"] == "working-tree"
+    )
     assert worker_two_tree["status"] == "PASS"
     assert "working tree routes to fleet-owned or seat-owned clone" in worker_two_tree["message"]
 
