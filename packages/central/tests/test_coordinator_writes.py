@@ -428,13 +428,6 @@ class CoordinatorWriteTests(unittest.IsolatedAsyncioTestCase):
                 },
             ),
             (
-                "ticket_claim",
-                {
-                    "agent_name": "coordinator-1",
-                    "ticket_id": ticket_id,
-                },
-            ),
-            (
                 "ticket_cancel",
                 {
                     "agent_name": "coordinator-1",
@@ -453,6 +446,17 @@ class CoordinatorWriteTests(unittest.IsolatedAsyncioTestCase):
         for name, arguments in forbidden_calls:
             with self.subTest(name=name), self.assertRaises(ToolError):
                 await self.call(name, **arguments)
+
+        claimed = await self.call(
+            "ticket_claim",
+            agent_name="coordinator-1",
+            ticket_id=ticket_id,
+        )
+        self.assertTrue(claimed.structured_content["ok"])
+        self.assertEqual(
+            claimed.structured_content["ticket"]["claimed_by"],
+            "coordinator-1",
+        )
 
         with self.assertRaisesRegex(ToolError, "only coordinator_findings"):
             await self.call(

@@ -25,6 +25,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   accept, decline, park, cancel, or dismiss the request with
   `ticket_human_resolve`. Pending questions appear in bounded briefings and
   remain excluded from claim and dispatch until reopened (TK-75275d51735f).
+- Central/client: coordinators and board admins can park open or submitted tickets;
+  parked tickets remain visible but are neither offered nor broadcast until unparked.
+- Central: claim-gate refusals and ticket park/unpark transitions are journaled with
+  seat attribution for operational attention views.
 - Dispatcher: unclaimed broadcast tickets are re-surfaced to idle identities on a
   cadence (`PURSERS_BACKLOG_RESURFACE_INTERVAL_S`, default 600 s) and re-offered after
   the board's `broadcast_reoffer_s`; coordinator identities are never offered work
@@ -37,6 +41,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   exact omissions, and treats a missing fleet clone as fleet-critical only
   when recent fleet work exists; advisory WARN/INFO checks no longer make the
   overall fleet result fail (TK-f814e9bf3dde).
+- Central: offer-based boards now enforce worker and reviewer offer ownership at
+  claim time; eligible broadcast claims and admin/coordinator recovery bypasses remain.
+- Client/seat-kit: claim-gate tool errors preserve Central's exact message so seats
+  return to waiting without retrying an unoffered or parked ticket.
 - Wait bridge: background lease keepalive renews only while the stdio session shows
   model liveness (`PURSERS_KEEPALIVE_IDLE_LIMIT_S`, default three claim TTLs); idle
   keepalive pauses with a `lease_keepalive_paused` cue and keepalive-only claims are

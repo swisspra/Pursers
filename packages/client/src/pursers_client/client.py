@@ -17,8 +17,10 @@ from mcp.client.streamable_http import streamable_http_client
 from mcp.client.subscriptions import SubscriptionLost
 
 from .events import (
+    CLAIM_GATE_EVENT_KINDS,
     DISPATCH_KINDS,
     KNOWN_EVENT_KINDS,
+    PARK_EVENT_KINDS,
     REVIEW_LEASE_KINDS,
 )
 
@@ -40,7 +42,7 @@ DEFAULT_EVENT_KINDS = frozenset(
         "ticket_status_changed",
         "ticket_assigned",
     }
-) | REVIEW_LEASE_KINDS | DISPATCH_KINDS
+) | REVIEW_LEASE_KINDS | DISPATCH_KINDS | CLAIM_GATE_EVENT_KINDS | PARK_EVENT_KINDS
 GENERATION_META_KEY = "io.onboard/expected-generation"
 # Cleanup is best-effort after this bound so a broken transport cannot wedge a
 # host shutdown or mask the original __aenter__ failure indefinitely.
@@ -207,7 +209,19 @@ class BoardClient:
     @staticmethod
     def _decode(result) -> dict[str, Any]:
         if result.is_error:
-            raise BoardClientError(str(result.content))
+            message = next(
+                (
+                    item.text
+                    for item in result.content
+                    if isinstance(getattr(item, "text", None), str)
+                ),
+                None,
+            )
+            if message and message.startswith("Error executing tool "):
+                _, separator, detail = message.partition(": ")
+                if separator:
+                    message = detail
+            raise BoardClientError(message or str(result.content))
         if result.structured_content:
             value = result.structured_content.get("result", result.structured_content)
         else:
@@ -505,6 +519,7 @@ class BoardClient:
         skills_required: list[str] | None = None,
         exclude_agents: list[str] | None = None,
         prefer_agents: list[str] | None = None,
+        parked: bool | None = None,
     ) -> dict[str, Any]:
         arguments: dict[str, Any] = {
             "agent_name": self.agent_name,
@@ -515,6 +530,7 @@ class BoardClient:
             "skills_required": skills_required,
             "exclude_agents": exclude_agents,
             "prefer_agents": prefer_agents,
+            "parked": parked,
         }
         arguments.update({key: value for key, value in optional.items() if value is not None})
         result = await self._call("ticket_update", arguments)
