@@ -52,6 +52,8 @@ MAX_TOOL_OUTPUT = 20_000
 MAX_FILE_READ = 100_000
 MAX_REVIEW_DESCRIPTION = 12_000
 MAX_REVIEW_FIELD = 5_000
+MAX_REVIEW_ANNOTATIONS = 50
+MAX_REVIEW_ANNOTATION_TEXT = 4_000
 MAX_SEEN_SUBMISSIONS = 2_048
 REVIEW_STATE_SUFFIX = ".review-state.json"
 LEASE_INTERVAL_S = 20.0
@@ -1241,6 +1243,34 @@ def review_context(ticket: dict[str, Any]) -> dict[str, Any]:
     latest = _latest_submission(ticket)
     required = ticket.get("required_fields")
     files = latest.get("files_changed")
+    raw_annotations = ticket.get("annotations")
+    annotations = []
+    if isinstance(raw_annotations, list):
+        for item in raw_annotations[-MAX_REVIEW_ANNOTATIONS:]:
+            if not isinstance(item, dict):
+                continue
+            attribution = item.get("by")
+            if not isinstance(attribution, dict):
+                attribution = {}
+            annotations.append(
+                {
+                    "annotation_id": _clip(item.get("annotation_id"), 200),
+                    "kind": _clip(item.get("kind"), 32),
+                    "text": _clip(
+                        item.get("text"), MAX_REVIEW_ANNOTATION_TEXT
+                    ),
+                    "by": {
+                        "principal_id": _clip(
+                            attribution.get("principal_id"), 200
+                        ),
+                        "agent_id": _clip(attribution.get("agent_id"), 200),
+                        "agent_name": _clip(
+                            attribution.get("agent_name"), 200
+                        ),
+                    },
+                    "at": _clip(item.get("at"), 100),
+                }
+            )
     return {
         "ticket_id": str(ticket.get("ticket_id", "")),
         "title": _clip(ticket.get("title"), MAX_REVIEW_FIELD),
@@ -1255,6 +1285,10 @@ def review_context(ticket: dict[str, Any]) -> dict[str, Any]:
                 ticket.get("tags") if isinstance(ticket.get("tags"), list) else []
             )[:100]
         ],
+        "annotations": annotations,
+        "annotations_omitted_count": max(
+            0, int(ticket.get("annotations_omitted_count", 0) or 0)
+        ),
         "latest_submission": {
             "summary": _clip(latest.get("summary"), MAX_REVIEW_FIELD),
             "notes": _clip(latest.get("notes"), MAX_REVIEW_FIELD),

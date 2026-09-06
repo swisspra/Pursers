@@ -733,6 +733,114 @@ class CoordinatorWriteTests(unittest.IsolatedAsyncioTestCase):
             "coordinator-intake",
         )
 
+    async def test_ticket_annotations_enforce_roles_and_preserve_workflow(self) -> None:
+        ticket_id = await self.create_ticket("annotated coordinator target")
+        self.principal = self.worker
+        for kind in ("note", "evidence", "authorization", "decision"):
+            with self.subTest(worker_kind=kind), self.assertRaisesRegex(
+                ToolError, "annotation requires"
+            ):
+                await self.call(
+                    "ticket_annotate", agent_name="worker-agent",
+                    ticket_id=ticket_id, text="worker text", kind=kind,
+                )
+
+        reviewer = central.Principal(
+            "PR-annotation-reviewer", "annotation-reviewer-canonical",
+            frozenset({"board:read", "board:review"}),
+        )
+        self.principal = self.admin
+        await self.call(
+            "board_member_add", agent_name="admin-agent",
+            principal_id=reviewer.principal_id, role="reviewer",
+        )
+        self.principal = reviewer
+        joined = await self.call("board_join", agent_name="annotation-reviewer")
+        reviewer_id = joined.structured_content["agent_id"]
+        note = await self.call(
+            "ticket_annotate", agent_name="annotation-reviewer",
+            ticket_id=ticket_id, text="reviewer note",
+        )
+        self.assertFalse(note.is_error)
+        for kind in ("evidence", "authorization", "decision"):
+            with self.subTest(reviewer_kind=kind), self.assertRaisesRegex(
+                ToolError, "only kind=note"
+            ):
+                await self.call(
+                    "ticket_annotate", agent_name="annotation-reviewer",
+                    ticket_id=ticket_id, text="reviewer escalation", kind=kind,
+                )
+
+        self.principal = self.worker
+        claimed = await self.call(
+            "ticket_claim", agent_name="worker-agent", ticket_id=ticket_id
+        )
+        self.assertFalse(claimed.is_error)
+        before = self.service.load("pursers")["tickets"][ticket_id]
+        workflow = {
+            key: before.get(key)
+            for key in ("status", "notes", "claim_lease", "review_lease", "submission_generation")
+        }
+        self.principal = self.admin
+        results = []
+        for kind in ("note", "evidence", "authorization", "decision"):
+            results.append(await self.call(
+                "ticket_annotate", agent_name="admin-agent",
+                ticket_id=ticket_id, text=f"admin {kind}", kind=kind,
+            ))
+        self.principal = self.intake_joiner
+        coordinated = await self.call(
+            "ticket_annotate", agent_name="intake-coordinator",
+            ticket_id=ticket_id, text="coordinator evidence", kind="evidence",
+        )
+        for result in [*results, coordinated]:
+            self.assertFalse(result.is_error)
+            self.assertEqual(result.structured_content["event"]["kind"], "ticket_annotated")
+            annotation = result.structured_content["annotation"]
+            self.assertRegex(annotation["annotation_id"], r"^AN-\d{12}$")
+            self.assertTrue(annotation["by"]["principal_id"])
+            self.assertTrue(annotation["by"]["agent_id"])
+            self.assertTrue(annotation["by"]["agent_name"])
+        recipients = results[-1].structured_content["event"]["recipient_identities"]
+        self.assertIn(self.worker_id, recipients)
+        self.assertIn(reviewer_id, recipients)
+        after = self.service.load("pursers")["tickets"][ticket_id]
+        self.assertEqual(workflow, {key: after.get(key) for key in workflow})
+
+    async def test_ticket_annotations_are_scrubbed_capped_and_projected(self) -> None:
+        ticket_id = await self.create_ticket("bounded annotations")
+        self.service.mutate(
+            "pursers", lambda document: document["config"].pop("scrub_profile", None)
+        )
+        self.principal = self.admin
+        with self.assertRaisesRegex(ToolError, "email"):
+            await self.call(
+                "ticket_annotate", agent_name="admin-agent", ticket_id=ticket_id,
+                text="operator@example.invalid", kind="evidence",
+            )
+        self.assertNotIn(
+            "annotations", self.service.load("pursers")["tickets"][ticket_id]
+        )
+        for index in range(51):
+            result = await self.call(
+                "ticket_annotate", agent_name="admin-agent", ticket_id=ticket_id,
+                text=f"bounded annotation {index}",
+            )
+            self.assertFalse(result.is_error)
+        fetched = await self.call("ticket_get", ticket_id=ticket_id)
+        ticket = fetched.structured_content["ticket"]
+        self.assertEqual(ticket["annotation_count"], 51)
+        self.assertEqual(ticket["annotations_omitted_count"], 1)
+        self.assertEqual(len(ticket["annotations"]), 50)
+        self.assertEqual(ticket["annotations"][0]["text"], "bounded annotation 1")
+        listed = await self.call("ticket_list")
+        summary = next(
+            item for item in listed.structured_content["tickets"]
+            if item["ticket_id"] == ticket_id
+        )
+        self.assertEqual(summary["annotation_count"], 51)
+        self.assertNotIn("annotations", summary)
+
 
 if __name__ == "__main__":
     unittest.main()

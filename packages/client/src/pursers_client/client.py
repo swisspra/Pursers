@@ -521,6 +521,25 @@ class BoardClient:
         self._remember_event(result)
         return result
 
+    async def ticket_annotate(
+        self,
+        ticket_id: str,
+        text: str,
+        *,
+        kind: str = "note",
+    ) -> dict[str, Any]:
+        result = await self._call(
+            "ticket_annotate",
+            {
+                "agent_name": self.agent_name,
+                "ticket_id": ticket_id,
+                "text": text,
+                "kind": kind,
+            },
+        )
+        self._remember_event(result)
+        return result
+
     async def ticket_submit(
         self,
         ticket_id: str,

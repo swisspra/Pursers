@@ -16,6 +16,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   origin preflight, reports it in Doctor, supplies a launchd-safe git
   environment, and surfaces scrubbed subcommand/stderr diagnostics instead of
   bare exception names (TK-4c676bdba0ea).
+- Central and client: attributed, bounded ticket annotations let administrators
+  and coordinators attach notes, decisions, authorizations, or operator-run
+  evidence without claiming or submitting; reviewer context, board digests, and
+  the fleet dashboard expose the annotations (TK-1afa7f1ae8bb).
 - Dispatcher: unclaimed broadcast tickets are re-surfaced to idle identities on a
   cadence (`PURSERS_BACKLOG_RESURFACE_INTERVAL_S`, default 600 s) and re-offered after
   the board's `broadcast_reoffer_s`; coordinator identities are never offered work

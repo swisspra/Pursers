@@ -32,6 +32,42 @@ sys.modules[SPEC.name] = worker_module
 SPEC.loader.exec_module(worker_module)
 
 
+def test_review_context_includes_bounded_attributed_annotations() -> None:
+    ticket = {
+        "ticket_id": "TK-annotation-review",
+        "title": "Review annotations",
+        "description": "Verify operator evidence.",
+        "required_fields": ["operator_evidence"],
+        "annotations_omitted_count": 2,
+        "annotations": [
+            {
+                "annotation_id": f"AN-{index:012d}",
+                "kind": "evidence",
+                "text": "x" * 5_000,
+                "by": {
+                    "principal_id": "PR-operator",
+                    "agent_id": "AI-coordinator",
+                    "agent_name": "coordinator",
+                },
+                "at": "2030-01-01T00:00:00+00:00",
+            }
+            for index in range(55)
+        ],
+    }
+
+    context = worker_module.review_context(ticket)
+
+    assert len(context["annotations"]) == 50
+    assert context["annotations"][0]["annotation_id"] == "AN-000000000005"
+    assert len(context["annotations"][0]["text"]) == 4_000
+    assert context["annotations"][0]["by"] == {
+        "principal_id": "PR-operator",
+        "agent_id": "AI-coordinator",
+        "agent_name": "coordinator",
+    }
+    assert context["annotations_omitted_count"] == 2
+
+
 class FakeBoard:
     def __init__(self) -> None:
         self.submissions: list[dict[str, Any]] = []

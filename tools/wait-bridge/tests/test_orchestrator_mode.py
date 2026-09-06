@@ -360,6 +360,80 @@ class OrchestratorModeTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 await engine.stop_subscriber()
 
+    async def test_digest_projects_new_annotations_without_status_transitions(
+        self,
+    ) -> None:
+        async with Client(self.mcp, mode="2026-07-28", cache=None) as raw_client:
+            client, engine = await self._setup_client_and_engine(raw_client)
+            operator = central.Principal(
+                "PR-operator-test",
+                "operator-canonical",
+                frozenset({"board:read", "board:write"}),
+            )
+            await client._call(
+                "board_member_add",
+                agent_name="orchestrator-agent",
+                principal_id=operator.principal_id,
+                role="admin",
+            )
+            central.current_principal = lambda: operator
+            await client.board_join(agent_name="operator-agent")
+            central.current_principal = lambda: self.principal
+            await engine.start_subscriber()
+            try:
+                await asyncio.wait_for(engine.ready.wait(), timeout=3.0)
+                created = await client.create_ticket("annotated digest ticket")
+                ticket_id = created["ticket"]["ticket_id"]
+                await client.claim_ticket(
+                    ticket_id, agent_name="orchestrator-agent"
+                )
+                central.current_principal = lambda: operator
+                try:
+                    annotated = await client._call(
+                        "ticket_annotate",
+                        agent_name="operator-agent",
+                        ticket_id=ticket_id,
+                        text="operator live check passed",
+                        kind="evidence",
+                    )
+                finally:
+                    central.current_principal = lambda: self.principal
+                annotation_id = annotated["annotation"]["annotation_id"]
+
+                deadline = time.monotonic() + 3.0
+                while time.monotonic() < deadline:
+                    digest = await engine.build_digest(since=0)
+                    if any(
+                        item.get("annotation_id") == annotation_id
+                        for item in digest["annotations"]
+                    ):
+                        break
+                    await asyncio.sleep(0.05)
+
+                digest = await engine.build_digest(since=0)
+                annotation = next(
+                    item
+                    for item in digest["annotations"]
+                    if item["annotation_id"] == annotation_id
+                )
+                ticket = next(
+                    item
+                    for item in digest["tickets"]
+                    if item["ticket_id"] == ticket_id
+                )
+                self.assertEqual(annotation["kind"], "evidence")
+                self.assertEqual(annotation["text"], "operator live check passed")
+                self.assertEqual(annotation["by"]["agent_name"], "operator-agent")
+                self.assertFalse(annotation["omitted"])
+                self.assertEqual(ticket["annotations"], [annotation])
+                self.assertEqual(
+                    [transition["to"] for transition in ticket["transitions"]],
+                    ["open"],
+                )
+                self.assertEqual(digest["counts"]["annotations"], 1)
+            finally:
+                await engine.stop_subscriber()
+
     async def test_ack_advances_and_subsequent_digest_shows_only_newer_changes(
         self,
     ) -> None:

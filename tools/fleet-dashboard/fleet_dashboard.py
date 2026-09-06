@@ -93,6 +93,8 @@ MAX_LABEL_CHARS = 96
 MAX_DESCRIPTION_CHARS = 800
 MAX_REQUIRED_FIELDS = 20
 MAX_SUBMISSION_CHARS = 500
+MAX_ANNOTATIONS_PER_TICKET = 50
+MAX_ANNOTATION_TEXT_CHARS = 4_000
 MAX_FINDINGS = 50
 MAX_FINDING_CHARS = 500
 MAX_OVERHEAD_FILE_BYTES = 2_000_000
@@ -2008,6 +2010,39 @@ def _detail_ticket(ticket: dict[str, Any]) -> dict[str, Any]:
     )
     if not isinstance(latest_submission, dict):
         latest_submission = {}
+    raw_annotations = ticket.get("annotations")
+    annotations = []
+    if isinstance(raw_annotations, list):
+        for item in raw_annotations[-MAX_ANNOTATIONS_PER_TICKET:]:
+            if not isinstance(item, dict):
+                continue
+            attribution = item.get("by")
+            if not isinstance(attribution, dict):
+                attribution = {}
+            annotations.append(
+                {
+                    "annotation_id": _clip(
+                        item.get("annotation_id"), MAX_LABEL_CHARS
+                    ),
+                    "kind": _clip(item.get("kind") or "note", 32),
+                    "text": _clip(item.get("text"), MAX_ANNOTATION_TEXT_CHARS),
+                    "by": {
+                        "agent_name": _clip(
+                            attribution.get("agent_name"), MAX_LABEL_CHARS
+                        ),
+                        "agent_id": _clip(
+                            attribution.get("agent_id"), MAX_LABEL_CHARS
+                        ),
+                        "principal_id": _clip(
+                            attribution.get("principal_id"), MAX_LABEL_CHARS
+                        ),
+                    },
+                    "at": _clip(item.get("at"), 40) or None,
+                }
+            )
+    annotations_omitted = max(
+        0, int(ticket.get("annotations_omitted_count", 0) or 0)
+    )
     return {
         "id": _clip(ticket.get("ticket_id"), MAX_LABEL_CHARS),
         "title": _clip(ticket.get("title") or "(untitled)", MAX_TITLE_CHARS),
@@ -2039,6 +2074,12 @@ def _detail_ticket(ticket: dict[str, Any]) -> dict[str, Any]:
         )
         or None,
         "review_label": _clip(ticket.get("review_label"), MAX_LABEL_CHARS) or None,
+        "annotations": annotations,
+        "annotation_count": max(
+            annotations_omitted + len(annotations),
+            int(ticket.get("annotation_count", 0) or 0),
+        ),
+        "annotations_omitted_count": annotations_omitted,
     }
 
 
@@ -5135,7 +5176,8 @@ function pressureBadge(s){const label=s.pressure==='compact'?'COMPACT':s.pressur
 function renderOverhead(d){const sessions=d.sessions||[],model=d.model_wait||[],cumulative=d.seats||[];document.querySelector('#detail-view').innerHTML=`<a class="back" href="#/">← All centrals</a><div class="top"><div><h2>Session context pressure · ${esc(d.central)}</h2><p class="muted">Model-visible wait cost is separated from bridge-to-Central diagnostics.</p></div></div><section class="card pool"><h3>Model-visible a2a_wait cost</h3>${model.length?`<div class="table-scroll"><table aria-label="Model-visible wait cost"><thead><tr><th>Seat</th><th>Returns this hour</th><th>Context this hour</th><th>24-hour outcomes</th></tr></thead><tbody>${model.map(s=>`<tr><td><b>${esc(s.agent_name)}</b><div class="meta">${esc(s.board_id)}</div></td><td>${esc(s.returns_per_hour)}</td><td>${esc(s.context_bytes_per_hour)} B<div class="meta">≈ ${esc(s.estimated_tokens_per_hour)} tokens</div></td><td>${esc(JSON.stringify(s.outcomes||{}))}<div class="meta">${esc(s.last_24h_returns)} returns · ${esc(s.last_24h_context_bytes)} B</div></td></tr>`).join('')}</tbody></table></div>`:`<p class="empty">No model-visible wait returns yet.</p>`}</section><section class="card pool">${sessions.length?`<div class="table-scroll"><table aria-label="Session context pressure"><thead><tr><th>Seat</th><th>Board</th><th>Est. tokens / poll</th><th>Trend vs median</th><th>Pressure</th></tr></thead><tbody>${sessions.map(s=>`<tr><td><b>${esc(s.agent_name)}</b><div class="meta">sampled ${esc(fmt(s.latest_at))}</div></td><td>${esc(s.board_id)}</td><td>${esc(s.latest_estimated_tokens)}</td><td>${esc(s.trend)} ${s.trend_ratio===null?'—':`${esc(s.trend_ratio)}×`}<div class="meta">24-sample median ≈ ${esc(s.median_estimated_tokens)} tokens · ${esc(s.sample_count)} samples</div></td><td>${pressureBadge(s)}<div class="meta">${esc(s.next_action)}</div></td></tr>`).join('')}</tbody></table></div>`:`<p class="empty">No session pressure samples yet — context pressure is calm (${esc(d.source_status)}).</p>`}</section><details class="card pool" data-state-key="overhead-details:${esc(d.central)}"><summary>Bridge-to-Central diagnostic details</summary>${cumulative.length?`<div class="table-scroll"><table><thead><tr><th>Seat</th><th>Today</th><th>7-day</th><th>Top tools by bytes</th></tr></thead><tbody>${cumulative.map(s=>`<tr><td><b>${esc(s.agent_name)}</b><div class="meta">${esc(s.board_id)}</div></td><td>${esc(s.today_bytes)} B<div class="meta">≈ ${esc(s.today_estimated_tokens)} tokens · ${esc(s.today_calls)} calls</div></td><td>${esc(s.seven_day_bytes)} B<div class="meta">≈ ${esc(s.seven_day_estimated_tokens)} tokens · ${esc(s.seven_day_calls)} calls</div></td><td class="overhead-tools">${s.top_tools.map(t=>`${esc(t.tool)}: ${esc(t.bytes)} B`).join(' · ')||'—'}</td></tr>`).join('')}</tbody></table></div>`:`<p class="empty">No cumulative debug stats.</p>`}</details>`;bindInteractive(document.querySelector('#detail-view'))}
 function sortedTickets(items){const rank=s=>['claimed','in_progress','creating_report'].includes(s)?0:['submitted','reviewing','in_review'].includes(s)?1:s==='open'?2:3;return [...items].sort((a,b)=>rank(a.status)-rank(b.status)||(detailSort==='oldest'?String(a.updated_at||'').localeCompare(String(b.updated_at||'')):String(b.updated_at||'').localeCompare(String(a.updated_at||''))))}
 function tabs(d,r){return `<nav class="tabs" aria-label="Board views">${[['tickets','Tickets'],['timeline','Timeline'],['changes','Changes'],['flow','Ticket Flow'],['routes','Routes']].map(([v,label])=>`<a class="tab${r.view===v?' active':''}" href="${boardHref(r.central,d.board.board_id,v)}">${esc(label)}</a>`).join('')}</nav>`}
-function ticketView(d,r){const rows=sortedTickets(d.tickets).filter(t=>matches([t.id,t.title,t.status,t.claimed_by,t.description],filterNeedle));const visible=!r.ticket||rows.some(t=>t.id===r.ticket);return `${visible?'':`<p class="warning">Requested ticket ${esc(r.ticket)} is outside this bounded response or filter.</p>`}<div class="toolbar"><span>${esc(rows.length)} of ${esc(d.ticket_returned)} returned tickets</span><label>Updated <select id="ticket-sort"><option value="newest"${detailSort==='newest'?' selected':''}>newest first</option><option value="oldest"${detailSort==='oldest'?' selected':''}>oldest first</option></select></label></div><section class="card"><div class="table-scroll"><table><thead><tr><th>Ticket</th><th>Title and details</th><th>Status</th><th class="hide-small">Updated</th></tr></thead><tbody>${rows.length?rows.map(t=>`<tr><td><span class="id">${esc(t.id)}</span></td><td><details class="ticket-detail" data-ticket="${esc(t.id)}" data-state-key="${esc(`ticket:${r.central}:${d.board.board_id}:${t.id}`)}"${r.ticket===t.id?' open':''}><summary>${esc(t.title)}</summary><p class="ticket-copy">${esc(t.description||'No description')}</p>${t.required_fields.length?`<div class="required">${t.required_fields.map(x=>`<span class="pill">${esc(x)}</span>`).join('')}</div>`:''}${t.latest_submission_summary?`<p class="meta ticket-copy">Latest submission: ${esc(t.latest_submission_summary)}</p>`:''}${t.review_label?`<p class="meta">Review: ${esc(t.review_label)}</p>`:''}</details></td><td><span class="status">${esc(t.status)}</span><div class="meta">${esc(t.claimed_by||'')}</div></td><td class="meta hide-small">${esc(fmt(t.updated_at))}</td></tr>`).join(''):'<tr><td colspan="4" class="empty">No tickets match the filter.</td></tr>'}</tbody></table></div></section>`}
+function annotationView(t){const rows=t.annotations||[],omitted=Number(t.annotations_omitted_count||0);if(!rows.length&&!omitted)return'';return`<section class="ticket-annotations"><h3>Annotations · ${esc(t.annotation_count||rows.length)}</h3>${omitted?`<p class="meta">${esc(omitted)} older annotation(s) omitted.</p>`:''}${rows.map(a=>{const by=a.by||{},author=by.agent_name||by.agent_id||by.principal_id||'unknown';return`<article class="finding annotation"><span class="pill annotation-kind">${esc(a.kind||'note')}</span> <span class="id">${esc(a.annotation_id)}</span><p class="ticket-copy">${esc(a.text)}</p><p class="meta">By ${esc(author)} · ${esc(fmt(a.at))}</p></article>`}).join('')}</section>`}
+function ticketView(d,r){const rows=sortedTickets(d.tickets).filter(t=>matches([t.id,t.title,t.status,t.claimed_by,t.description],filterNeedle));const visible=!r.ticket||rows.some(t=>t.id===r.ticket);return `${visible?'':`<p class="warning">Requested ticket ${esc(r.ticket)} is outside this bounded response or filter.</p>`}<div class="toolbar"><span>${esc(rows.length)} of ${esc(d.ticket_returned)} returned tickets</span><label>Updated <select id="ticket-sort"><option value="newest"${detailSort==='newest'?' selected':''}>newest first</option><option value="oldest"${detailSort==='oldest'?' selected':''}>oldest first</option></select></label></div><section class="card"><div class="table-scroll"><table><thead><tr><th>Ticket</th><th>Title and details</th><th>Status</th><th class="hide-small">Updated</th></tr></thead><tbody>${rows.length?rows.map(t=>`<tr><td><span class="id">${esc(t.id)}</span></td><td><details class="ticket-detail" data-ticket="${esc(t.id)}" data-state-key="${esc(`ticket:${r.central}:${d.board.board_id}:${t.id}`)}"${r.ticket===t.id?' open':''}><summary>${esc(t.title)}</summary><p class="ticket-copy">${esc(t.description||'No description')}</p>${t.required_fields.length?`<div class="required">${t.required_fields.map(x=>`<span class="pill">${esc(x)}</span>`).join('')}</div>`:''}${t.latest_submission_summary?`<p class="meta ticket-copy">Latest submission: ${esc(t.latest_submission_summary)}</p>`:''}${t.review_label?`<p class="meta">Review: ${esc(t.review_label)}</p>`:''}${annotationView(t)}</details></td><td><span class="status">${esc(t.status)}</span><div class="meta">${esc(t.claimed_by||'')}</div></td><td class="meta hide-small">${esc(fmt(t.updated_at))}</td></tr>`).join(''):'<tr><td colspan="4" class="empty">No tickets match the filter.</td></tr>'}</tbody></table></div></section>`}
 function timelineView(d,r){const bySeq=new Map(d.events.map(e=>[e.seq,e]));const groups=d.timeline.map(day=>({...day,tickets:day.tickets.map(t=>({...t,events:t.event_seqs.map(seq=>bySeq.get(seq)).filter(Boolean).filter(e=>eventMatches(e,t.ticket_id,filterNeedle))})).filter(t=>t.events.length)})).filter(day=>day.tickets.length);return `<p class="muted bounded-note">Showing last ${esc(d.event_returned)} events from a read-only bounded catchup (ack=false).</p><section class="timeline">${groups.length?groups.map(day=>`<details class="card" data-state-key="${esc(`timeline-day:${r.central}:${d.board.board_id}:${day.day}`)}" open><summary><b>${esc(day.day)}</b></summary>${day.tickets.map(t=>`<details class="timeline-ticket" data-state-key="${esc(`timeline-ticket:${r.central}:${d.board.board_id}:${t.ticket_id}`)}"><summary><a class="id" href="${ticketHref(r.central,d.board.board_id,t.ticket_id)}">${esc(t.ticket_id)}</a> · ${esc(t.events.length)} event(s)</summary><div class="table-scroll"><table><tbody>${t.events.map(e=>`<tr><td class="id">${esc(e.seq)}</td><td>${esc(e.kind)}</td><td>${esc(e.status_from||'—')} → ${esc(e.status_to||'—')}</td><td class="meta">${esc(fmt(e.occurred_at))}</td></tr>`).join('')}</tbody></table></div></details>`).join('')}</details>`).join(''):'<p class="empty">No timeline events match the filter.</p>'}</section>`}
 function changesFor(events,since,generatedAt){const cutoff=since===null?new Date(generatedAt).getTime()-86400000:null,chosen=events.filter(e=>since!==null?Number.isInteger(e.seq)&&e.seq>since:new Date(e.occurred_at).getTime()>=cutoff),counts={created:0,claimed:0,submitted:0,closed:0,rejected:0};for(const e of chosen){if(e.kind==='ticket_created')counts.created++;if(e.status_to==='claimed')counts.claimed++;if(e.status_to==='submitted')counts.submitted++;if(e.status_to==='closed')counts.closed++;if(e.review_verdict==='reject'||(e.status_from==='submitted'&&['open','claimed','rejected'].includes(e.status_to)&&Number(e.rejection_count)>0))counts.rejected++}return{counts,event_count:chosen.length}}
 function changesView(d,r){const valid=r.since!==null&&/^\d+$/.test(r.since),since=valid?Number(r.since):null,events=filterChangeEvents(d.events,filterNeedle),summary=changesFor(events,since,d.generated_at);return `<div class="toolbar"><div><b>${since===null?'Last 24 hours':`After seq ${esc(since)}`}</b><p class="muted">Calculated only from the ${esc(d.event_returned)} returned events.</p></div><form id="changes-form"><label>Starting seq <input id="since-seq" inputmode="numeric" pattern="[0-9]*" value="${since===null?'':esc(since)}" placeholder="blank = 24h"></label> <button type="submit">Apply</button></form></div><section class="strip change-grid">${Object.entries(summary.counts).map(([name,count])=>`<div class="metric"><span>${esc(name)}</span><b>${esc(count)}</b></div>`).join('')}</section><p class="muted">${esc(summary.event_count)} bounded event(s) matched.</p>`}
