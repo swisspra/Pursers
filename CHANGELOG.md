@@ -7,6 +7,43 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [5.0.0a22] - 2026-09-06
+
+This release includes `pursers-central==0.1.0a26`,
+`pursers-client==0.1.0a19`, `pursers-personal-import==5.0.0a3`,
+`pursers-personal==5.0.0a22`, `pursers==5.0.0a22`, and
+`pursers-wait-bridge==0.1.0a12`.
+
+### Package summary
+
+- **Central 0.1.0a26:** adds attributed ticket annotations, structured
+  `needs_human` requests and resolution, ticket park/unpark and claim gating,
+  fleet-safe Registry Doctor and clone preflight hardening, backlog
+  re-surfacing, and coordinator failure isolation.
+- **Client 0.1.0a19:** carries the annotation, human-request, park, claim-gate,
+  registry Doctor, and current event contracts while preserving exact Central
+  claim-refusal messages for worker seats.
+- **Wait Bridge 0.1.0a12:** delivers pending human requests through declared
+  MCP elicitation capabilities, gates lease keepalive on model liveness, and
+  preserves recoverable cursor clamping. Empty `elicitation: {}` remains
+  form-only.
+- **Personal and meta 5.0.0a22:** ship the human-request dashboard and guarded
+  resolver, exact elicitation capability handling, credential-field safety,
+  fleet-wide or dedicated seat semantics, and the regenerated component lock.
+  Personal Import remains at 5.0.0a3.
+- **Seat kit:** makes `--board` optional, adds `--registry-board`, persists the
+  fleet selector, preserves virtual-environment interpreters, and repairs
+  non-fast-forward upgrades without discarding seat work.
+- **Fleet Dashboard tooling:** adds actionable Registry Doctor and clone
+  preflight evidence, form-safe refresh and Resume controls, clone repair,
+  ticket annotations, and schema-generated "Waiting for you" forms.
+- **Coordinator:** isolates unreachable boards, retries with bounded backoff,
+  reports stale findings, surfaces broadcast backlog, and routes human-request
+  events without claiming work.
+- **Docs:** reconciles the English and Thai manuals, architecture briefings,
+  What's New timeline, release boundary, package versions, and operator
+  guidance to the 5.0.0a22 train.
+
 ### Added
 - Registry operations: `fleet: false` marks operator-only projects; Doctor
   reports per-check severity/scope and actionable duplicate-seat evidence, and

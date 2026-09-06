@@ -149,14 +149,14 @@
   <header class="page">
     <p class="eyebrow">Team briefing · Pursers v5</p>
     <h1>From &ldquo;shared memory&rdquo; to <br><span>auditable work coordination</span></h1>
-    <p class="lead">Pursers 5.0.0a21 architecture overview: subscription-first push-wait across all seats, host-aware re-arm, project registry, worker pool, and independent review</p>
+    <p class="lead">Pursers 5.0.0a22 architecture overview: subscription-first push-wait across all seats, host-aware re-arm, project registry, worker pool, independent review, and human-input routing</p>
     <div class="meta">
       <span class="pill">Central + SQLite</span>
       <span class="pill">MCP v2</span>
       <span class="pill">JWT-only · RS256/JWKS</span>
       <span class="pill">Subscription-first multi-board</span>
       <span class="pill">Fleet dashboard</span>
-      <span class="pill">a21 released</span>
+      <span class="pill">a22 released</span>
     </div>
   </header>
 
@@ -173,7 +173,7 @@
       <a href="#flow">Work flow</a>
       <a href="#seats">Seats &amp; routing</a>
       <a href="#compare">v4 &rarr; v5</a>
-      <a href="#unreleased">Unreleased</a>
+      <a href="#unreleased">a22 release</a>
       <a href="#release">Build &amp; release</a>
       <a href="#why">Design rationale</a>
       <a href="#caveats">Guardrails</a>
@@ -183,13 +183,13 @@
   <main class="page">
     <section id="start">
       <h2>Get started in 5 minutes: 6 commands for operators</h2>
-      <pre><code>python -m pip install "pursers==5.0.0a21"
+      <pre><code>python -m pip install "pursers==5.0.0a22"
 pursers-personal setup --project /PATH/TO/project --session primary
 pursers-personal doctor --project /PATH/TO/project
 python tools/wait-bridge/registry_admin.py show
 python tools/fleet-dashboard/fleet_dashboard.py --token-file /PATH/TO/admin.jwt
 shasum -a 256 -c SHA256SUMS.txt</code></pre>
-      <div class="callout"><strong>Expected outcome:</strong> Version 5.0.0a21 and pinned component set match exactly, profile and identities are validated, registry passes schema checks, and the fleet dashboard opens on loopback.</div>
+      <div class="callout"><strong>Expected outcome:</strong> Version 5.0.0a22 and pinned component set match exactly, profile and identities are validated, registry passes schema checks, and the fleet dashboard opens on loopback.</div>
     </section>
 
     <section id="mental-model">
@@ -371,7 +371,7 @@ shasum -a 256 -c SHA256SUMS.txt</code></pre>
     <section id="fleet">
       <h2>Cross-Project Fleet: Add a project once, the pool sees the entire system</h2>
       <p class="section-intro">The registry board hosts the centralized project registry, and <code>a2a_wait(boards="registry")</code> resolves this registry into active boards before listening. Since a16, all seats rely on subscription-first event feeds rather than polling timers.</p>
-      <div class="callout"><strong>Unreleased:</strong> A blank seat home board indicates a fleet-wide worker serving all active registry boards (<code>boards=registry</code>), with the bridge binding to the registry board (default <code>pursers</code>); a named home board indicates a dedicated seat (<code>boards=home</code>), with the prompt passing <code>boards=["&lt;board&gt;"]</code>. Managed host configs persist this selector via <code>PURSERS_BOARDS</code> / <code>PURSERS_HOME_BOARD</code>.</div>
+      <div class="callout"><strong>Added in a22:</strong> A blank seat home board indicates a fleet-wide worker serving all active registry boards (<code>boards=registry</code>), with the bridge binding to the registry board (default <code>pursers</code>); a named home board indicates a dedicated seat (<code>boards=home</code>), with the prompt passing <code>boards=["&lt;board&gt;"]</code>. Managed host configs persist this selector via <code>PURSERS_BOARDS</code> / <code>PURSERS_HOME_BOARD</code>.</div>
 
       <figure class="card diagram" aria-labelledby="pool-caption">
         <svg viewBox="0 0 1120 650" role="img" aria-labelledby="pool-title pool-desc">
@@ -570,7 +570,7 @@ shasum -a 256 -c SHA256SUMS.txt</code></pre>
           <p>The <code>ui://pursers/dashboard</code> resource provides an inline, pure-read view showing Today, Work, Agents, Fleet, and Activity. It is not an operator console replacement and never receives credentials inside its iframe sandbox.</p>
         </article>
       </div>
-      <p><strong>Unreleased:</strong> Panel timer auto-refresh automatically pauses whenever a form holds input focus or contains unsaved modifications, resuming via a fixed &ldquo;Resume&rdquo; pill or status bar click. The fleet clone endpoint populates working trees and repairs empty clone directories rather than rejecting them as dirty.</p>
+      <p><strong>Added in a22:</strong> Panel timer auto-refresh automatically pauses whenever a form holds input focus or contains unsaved modifications, resuming via a fixed &ldquo;Resume&rdquo; pill or status bar click. The fleet clone endpoint populates working trees and repairs empty clone directories rather than rejecting them as dirty.</p>
     </section>
 
     <section id="coordinator">
@@ -590,7 +590,7 @@ shasum -a 256 -c SHA256SUMS.txt</code></pre>
         </article>
         <article class="card">
           <h3>Dispatcher liveness</h3>
-          <p>Release a21 restricts work offers to verifiable live seats with fair round-robin rotation and persistent offer deadlines across restarts. Unreleased features periodically re-surface unclaimed broadcast tickets according to <code>PURSERS_BACKLOG_RESURFACE_INTERVAL_S</code> (default 600 s) and re-offer them after the board&rsquo;s <code>broadcast_reoffer_s</code>, ensuring coordinator identities are never offered work.</p>
+          <p>Release a21 restricts work offers to verifiable live seats with fair round-robin rotation and persistent offer deadlines across restarts. Release a22 periodically re-surfaces unclaimed broadcast tickets according to <code>PURSERS_BACKLOG_RESURFACE_INTERVAL_S</code> (default 600 s) and re-offers them after the board&rsquo;s <code>broadcast_reoffer_s</code>, ensuring coordinator identities are never offered work.</p>
         </article>
       </div>
       <div class="callout"><strong>Reduced attack surface:</strong> <code>agent_nudge</code> has been removed. Autonomous Dispatcher offers serve as the sole targeted waking mechanism.</div>
@@ -695,7 +695,7 @@ shasum -a 256 -c SHA256SUMS.txt</code></pre>
         <div class="step"><div class="num">6</div><h3>Review</h3><p>An independent reviewer under a separate principal inspects evidence; approve to close or reject with fix steps.</p></div>
       </div>
       <div class="callout"><strong>Team topology &amp; governance:</strong> One worker seat maps to one host session and one <code>agent_name</code> per call. Reviewer seats operate under their own distinct principal and must verify reproducible evidence before approving or rejecting. Operators oversee scope and boundaries. Browser verification uses lightweight dedicated headless/lite tools, never unconstrained personal browsers.</div>
-      <div class="callout"><strong>Unreleased &mdash; keepalive liveness:</strong> Background lease renewal occurs only while the stdio session demonstrates active model liveness within <code>PURSERS_KEEPALIVE_IDLE_LIMIT_S</code> (default three claim TTLs). When idle, renewal pauses with a <code>lease_keepalive_paused</code> notification cue, and the Needs Attention panel flags claims sustained solely by keepalive.</div>
+      <div class="callout"><strong>a22 &mdash; keepalive liveness:</strong> Background lease renewal occurs only while the stdio session demonstrates active model liveness within <code>PURSERS_KEEPALIVE_IDLE_LIMIT_S</code> (default three claim TTLs). When idle, renewal pauses with a <code>lease_keepalive_paused</code> notification cue, and the Needs Attention panel flags claims sustained solely by keepalive.</div>
     </section>
 
     <section id="seats">
@@ -708,7 +708,7 @@ shasum -a 256 -c SHA256SUMS.txt</code></pre>
         </article>
         <article class="card">
           <h3>CLI seat (Goose seat-kit)</h3>
-          <p>The <code>seat_new.py</code> generator creates role-safe <code>bin/board.sh</code> wrappers, token launch files, fleet clone workflows, and wait commands driven by registry cursor maps. Unreleased updates make <code>--board</code> optional, introduce <code>--registry-board</code>, preserve virtual environment interpreters under <code>--python</code>, and ensure upgrades do not abort on non-fast-forward seat clones.</p>
+          <p>The <code>seat_new.py</code> generator creates role-safe <code>bin/board.sh</code> wrappers, token launch files, fleet clone workflows, and wait commands driven by registry cursor maps. Release a22 makes <code>--board</code> optional, introduces <code>--registry-board</code>, preserves virtual environment interpreters under <code>--python</code>, and ensures upgrades do not abort on non-fast-forward seat clones.</p>
         </article>
         <article class="card">
           <h3>API seat (worker-runtime)</h3>
@@ -784,7 +784,7 @@ shasum -a 256 -c SHA256SUMS.txt</code></pre>
     </section>
 
     <section id="unreleased">
-      <h2>Architecture roadmap: a14 &rarr; a21 and Unreleased</h2>
+      <h2>Architecture roadmap: a14 &rarr; a22</h2>
       <table>
         <thead><tr><th>Release</th><th>Structural Architectural Changes</th></tr></thead>
         <tbody>
@@ -794,22 +794,22 @@ shasum -a 256 -c SHA256SUMS.txt</code></pre>
           <tr><td>a18</td><td>Explicit worker, reviewer, and orchestrator roles; capability offers; background lease keepalive; split-identity fail-closed verification; bounded digest and watch modes.</td></tr>
           <tr><td>a19&ndash;a20</td><td>Membership admission and connector identity hardening; shared event vocabulary allowing push listeners to fail open on unknown kinds with fallback visibility.</td></tr>
           <tr><td>a21</td><td>Live-seat fair dispatch, persistent offer deadlines and dispatch histories, agent retirement lifecycles, compacted catch-up pagination, fleet-owned clone management, seat import and Doctor tooling, Release &amp; Operations panel; removal of legacy tools (<code>agent_nudge</code>, <code>board_get_briefing</code>, <code>ticket_terminate</code>).</td></tr>
-          <tr><td>Unreleased, on main</td><td>Fleet-wide versus dedicated home-board semantics (<code>boards=registry</code> vs. <code>boards=home</code>), model-liveness-gated lease keepalive, automatic backlog ticket re-surfacing (<code>PURSERS_BACKLOG_RESURFACE_INTERVAL_S</code> default 600 s) and re-offers after <code>broadcast_reoffer_s</code>, form-safe dashboard auto-refresh with Resume controls, fleet clone working tree population and repair, and seat-kit virtual environment interpreter preservation and non-fast-forward upgrade safety.</td></tr>
+          <tr><td>a22</td><td>Fleet-wide versus dedicated home-board semantics (<code>boards=registry</code> vs. <code>boards=home</code>), model-liveness-gated lease keepalive, backlog re-surfacing and re-offers, form-safe dashboard refresh, clone and seat-kit hardening, attributed annotations, structured <code>needs_human</code> workflows, claim gating, and MCP elicitation delivery.</td></tr>
         </tbody>
       </table>
-      <p>Unreleased features are actively developed on main: do not label these features under release 5.0.0a21 until a formal version tag, manifest lock, and release artifact are approved.</p>
+      <p>These a22 capabilities belong to release 5.0.0a22. Verify the approved tag, manifest lock, component versions, and release artifacts before deployment.</p>
     </section>
 
     <section id="release">
       <h2>Build and release: From source to PyPI with a hash chain</h2>
-      <p class="section-intro">The pre-release package set described herein represents <code>v5.0.0a21</code>, incorporating subscription-first push-wait mechanics. Operators must verify checksums and manifests prior to production deployment.</p>
+      <p class="section-intro">The pre-release package set described herein represents <code>v5.0.0a22</code>, incorporating human-input routing, claim gating, annotations, fleet hardening, and subscription-first push-wait mechanics. Operators must verify checksums and manifests prior to production deployment.</p>
       <div class="version-grid" aria-label="Current distribution component versions">
-        <article class="card"><b>5.0.0a21</b><small>pursers · meta installer</small></article>
-        <article class="card"><b>5.0.0a21</b><small>pursers-personal</small></article>
-        <article class="card"><b>0.1.0a25</b><small>pursers-central</small></article>
-        <article class="card"><b>0.1.0a18</b><small>pursers-client</small></article>
+        <article class="card"><b>5.0.0a22</b><small>pursers · meta installer</small></article>
+        <article class="card"><b>5.0.0a22</b><small>pursers-personal</small></article>
+        <article class="card"><b>0.1.0a26</b><small>pursers-central</small></article>
+        <article class="card"><b>0.1.0a19</b><small>pursers-client</small></article>
         <article class="card"><b>5.0.0a3</b><small>pursers-personal-import</small></article>
-        <article class="card"><b>0.1.0a11</b><small>pursers-wait-bridge</small></article>
+        <article class="card"><b>0.1.0a12</b><small>pursers-wait-bridge</small></article>
       </div>
 
       <div class="detail-grid">
@@ -817,7 +817,7 @@ shasum -a 256 -c SHA256SUMS.txt</code></pre>
           <h3>Installation from PyPI</h3>
           <pre><code>pip install pursers
 uvx pursers-wait-bridge</code></pre>
-          <p>The released suite pins Central <code>0.1.0a25</code>, Client <code>0.1.0a18</code>, and Personal <code>5.0.0a21</code> as exact dependencies; verify package manifests before installing.</p>
+          <p>The released suite pins Central <code>0.1.0a26</code>, Client <code>0.1.0a19</code>, Wait Bridge <code>0.1.0a12</code>, and Personal <code>5.0.0a22</code> as exact dependencies; verify package manifests before installing.</p>
         </article>
         <article class="card">
           <h3>Trusted Publishing</h3>
@@ -924,7 +924,7 @@ uvx pursers-wait-bridge</code></pre>
   </main>
 
   <footer>
-    <div class="page">Pursers architecture briefing · v5.0.0a21 release · Standalone documentation with zero external assets, CDNs, or JavaScript · Placeholders used for credentials and private paths</div>
+    <div class="page">Pursers architecture briefing · v5.0.0a22 release · Standalone documentation with zero external assets, CDNs, or JavaScript · Placeholders used for credentials and private paths</div>
   </footer>
 </body>
 </html>
