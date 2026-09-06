@@ -78,6 +78,7 @@ from pursers_client import (
     REVIEW_LEASE_EXPIRED,
     REVIEW_LEASE_KINDS,
     REVIEW_LEASE_RELEASED,
+    TICKET_ANNOTATED,
     TICKET_OFFERED,
     GENERATION_META_KEY,
     BoardClient,
@@ -179,7 +180,11 @@ CLAIMABLE_RELEVANT_KINDS = frozenset(
         OFFER_REVOKED,
     }
 )
-RELEVANT_KINDS = CLAIMABLE_RELEVANT_KINDS | SUBMITTED_RELEVANT_KINDS
+RELEVANT_KINDS = (
+    CLAIMABLE_RELEVANT_KINDS
+    | SUBMITTED_RELEVANT_KINDS
+    | frozenset({TICKET_ANNOTATED})
+)
 KEEPALIVE_SIGNAL_KINDS = CLAIM_TTL_EVENT_KINDS
 RELEVANT_KINDS = RELEVANT_KINDS | KEEPALIVE_SIGNAL_KINDS
 SUBSCRIPTION_KINDS = RELEVANT_KINDS & CENTRAL_EVENT_KINDS
@@ -2361,6 +2366,7 @@ class OrchestratorEngine:
 
         tickets: list[dict[str, Any]] = []
         new_tickets: list[dict[str, Any]] = []
+        annotations: list[dict[str, Any]] = []
 
         for (bid, tid), evs in by_ticket.items():
             cache_key = f"{bid}:{tid}"
@@ -2368,6 +2374,8 @@ class OrchestratorEngine:
 
             transitions = []
             for ev in evs:
+                if ev.get("kind") == "ticket_annotated":
+                    continue
                 s_from = ev.get("status_from")
                 s_to = ev.get("status_to")
                 if ev.get("kind") == "ticket_created":
@@ -2416,6 +2424,41 @@ class OrchestratorEngine:
                 or any(t in self.watched_tags for t in ticket_data.get("tags", []))
             )
 
+            retained_annotations = {
+                item.get("annotation_id"): item
+                for item in ticket_data.get("annotations", [])
+                if isinstance(item, dict) and item.get("annotation_id")
+            }
+            ticket_annotations: list[dict[str, Any]] = []
+            for ev in evs:
+                if ev.get("kind") != "ticket_annotated":
+                    continue
+                annotation_id = ev.get("annotation_id")
+                retained = retained_annotations.get(annotation_id)
+                if isinstance(retained, dict):
+                    projected_annotation = copy.deepcopy(retained)
+                    projected_annotation["omitted"] = False
+                else:
+                    projected_annotation = {
+                        "annotation_id": annotation_id,
+                        "kind": ev.get("annotation_kind"),
+                        "text": None,
+                        "by": {
+                            "principal_id": ev.get(
+                                "annotation_by_principal_id"
+                            ),
+                            "agent_id": ev.get("annotation_by_agent_id"),
+                            "agent_name": ev.get("annotation_by_agent_name"),
+                        },
+                        "at": ev.get("occurred_at"),
+                        "omitted": True,
+                    }
+                projected_annotation.update(
+                    {"board_id": bid, "ticket_id": tid}
+                )
+                ticket_annotations.append(projected_annotation)
+                annotations.append(copy.deepcopy(projected_annotation))
+
             ticket_item = {
                 "ticket_id": tid,
                 "board_id": bid,
@@ -2429,6 +2472,10 @@ class OrchestratorEngine:
                 },
                 "claimed_by": claimed_by,
                 "notes_subset": notes_subset,
+                "annotations": ticket_annotations,
+                "annotation_count": int(
+                    ticket_data.get("annotation_count", 0) or 0
+                ),
                 "closed_at": closed_at,
                 "watched": is_watched,
                 "dispatch_state": copy.deepcopy(ticket_data.get("dispatch_state")),
@@ -2461,6 +2508,7 @@ class OrchestratorEngine:
             "rejected": sum(1 for t in tickets if (t.get("review") or {}).get("verdict") == "reject"),
             "closed": sum(1 for t in tickets if any(tr["to"] == "closed" for tr in t["transitions"])),
             "cancelled": sum(1 for t in tickets if any(tr["to"] == "cancelled" for tr in t["transitions"])),
+            "annotations": len(annotations),
         }
 
         current_cursor_map = {
@@ -2492,6 +2540,7 @@ class OrchestratorEngine:
             "cursor_map": current_cursor_map,
             "tickets": tickets,
             "new_tickets": new_tickets,
+            "annotations": annotations,
             "counts": counts,
             "unassignable_tickets": unassignable_tickets,
             "subscription": {

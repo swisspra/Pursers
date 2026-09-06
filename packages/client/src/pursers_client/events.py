@@ -4,6 +4,7 @@ from __future__ import annotations
 
 
 TICKET_REVIEW_CLAIMED = "ticket_review_claimed"
+TICKET_ANNOTATED = "ticket_annotated"
 REVIEW_LEASE_EXPIRED = "review_lease_expired"
 REVIEW_LEASE_RELEASED = "review_lease_released"
 TICKET_OFFERED = "ticket_offered"
@@ -29,6 +30,7 @@ CORE_EVENT_KINDS = frozenset(
     {
         "ticket_status_changed",
         "ticket_created",
+        TICKET_ANNOTATED,
         "memory_written",
         "coordinator_assignment",
         "coordinator_nudge",

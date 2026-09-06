@@ -136,6 +136,16 @@ also call `board_dispatch_policy_set`, but that operation remains limited to an
 `admin` board membership. Other admin-only configuration tools keep their
 existing `board:write` requirements.
 
+## Attach operator-run evidence
+
+When a required live or credentialed check can run only in an operator session,
+record its exact result on the ticket with `ticket_annotate(...,
+kind="evidence")`. Central scrubs and attributes the text to the authenticated
+principal without claiming, submitting, or changing workflow state. Put the
+returned `AN-...` identifier in the worker submission's corresponding required
+field so the reviewer can verify the evidence and its author. Keep credentials
+out of annotation text.
+
 ## Troubleshooting runbook
 
 | Symptom | Check | Recovery |

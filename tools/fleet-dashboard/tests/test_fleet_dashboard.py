@@ -823,6 +823,43 @@ def test_detail_projection_is_byte_bounded_and_drops_unbounded_history() -> None
     assert b'"notes"' not in body
 
 
+def test_detail_projection_and_html_show_bounded_attributed_annotations() -> None:
+    ticket = {
+        "ticket_id": "TK-annotations",
+        "title": "Annotated",
+        "description": "Ticket context",
+        "status": "open",
+        "annotations_omitted_count": 3,
+        "annotation_count": 55,
+        "annotations": [
+            {
+                "annotation_id": f"AN-{index:012d}",
+                "kind": "evidence",
+                "text": "operator result " + "x" * 5_000,
+                "by": {
+                    "principal_id": "PR-operator",
+                    "agent_id": "AI-coordinator",
+                    "agent_name": "coordinator-agent",
+                },
+                "at": "2030-01-01T00:00:00+00:00",
+            }
+            for index in range(52)
+        ],
+    }
+
+    projected = dashboard._detail_ticket(ticket)
+
+    assert projected["annotation_count"] == 55
+    assert projected["annotations_omitted_count"] == 3
+    assert len(projected["annotations"]) == dashboard.MAX_ANNOTATIONS_PER_TICKET
+    assert projected["annotations"][0]["annotation_id"] == "AN-000000000002"
+    assert len(projected["annotations"][0]["text"]) == 4_000
+    assert projected["annotations"][0]["by"]["agent_name"] == "coordinator-agent"
+    assert "function annotationView(t)" in dashboard.HTML
+    assert "annotation-kind" in dashboard.HTML
+    assert "By ${esc(author)}" in dashboard.HTML
+
+
 @pytest.mark.parametrize(
     ("path", "expected"),
     [

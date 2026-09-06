@@ -16,6 +16,11 @@ MIN_COMPACTION_RETAIN_LAST = 500
 SEMANTIC_FIELDS = frozenset(
     {
         "ticket_id",
+        "annotation_id",
+        "annotation_kind",
+        "annotation_by_agent_id",
+        "annotation_by_agent_name",
+        "annotation_by_principal_id",
         "assigned_to_agent_id",
         "previous_assigned_to_agent_id",
         "coordinator_op_key",

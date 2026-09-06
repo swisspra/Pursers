@@ -197,6 +197,40 @@ async def test_bounded_read_parameters_are_forwarded(monkeypatch) -> None:
 
 
 @pytest.mark.anyio
+async def test_ticket_annotate_forwards_identity_kind_and_remembers_event(
+    monkeypatch,
+) -> None:
+    board = client()
+    calls: list[tuple[str, dict[str, Any]]] = []
+    remembered: list[dict[str, Any]] = []
+
+    async def call(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        calls.append((name, arguments))
+        return {"ok": True, "event": {"seq": 17}}
+
+    monkeypatch.setattr(board, "_call", call)
+    monkeypatch.setattr(board, "_remember_event", remembered.append)
+
+    result = await board.ticket_annotate(
+        "TK-annotation", "operator result", kind="evidence"
+    )
+
+    assert result["ok"] is True
+    assert calls == [
+        (
+            "ticket_annotate",
+            {
+                "agent_name": "env-default",
+                "ticket_id": "TK-annotation",
+                "text": "operator result",
+                "kind": "evidence",
+            },
+        )
+    ]
+    assert remembered == [result]
+
+
+@pytest.mark.anyio
 async def test_ticket_submit_truncates_notes_at_line_boundary(monkeypatch) -> None:
     board = client()
     captured: dict[str, Any] = {}

@@ -100,6 +100,9 @@ ACTIVE_TICKET_STATES = frozenset(
 TERMINAL_TICKET_STATES = frozenset({"closed", "rejected", "canceled", "terminated"})
 TICKET_PRIORITIES = frozenset({"low", "medium", "high", "critical"})
 TICKET_SCOPES = frozenset({"READ-ONLY", "interactive-no-send", "interactive"})
+ANNOTATION_KINDS = frozenset({"note", "evidence", "authorization", "decision"})
+MAX_ANNOTATIONS_PER_TICKET = 50
+MAX_ANNOTATION_TEXT_CHARS = 4_000
 MEMORY_TYPES = frozenset(
     {
         "decision",
@@ -825,6 +828,7 @@ class CentralBoard:
             "next_admission_revision": 1,
             "tickets": {},
             "next_ticket_seq": 1,
+            "next_annotation_seq": 1,
             "memories": [],
             "next_memory_seq": 1,
             "state": {},
@@ -875,6 +879,13 @@ class CentralBoard:
         document.setdefault("invites", {})
         document.setdefault("principal_revocations", {})
         document.setdefault("next_admission_revision", 1)
+        next_annotation_seq = document.setdefault("next_annotation_seq", 1)
+        if (
+            isinstance(next_annotation_seq, bool)
+            or not isinstance(next_annotation_seq, int)
+            or next_annotation_seq < 1
+        ):
+            raise ValueError("board annotation sequence is invalid")
         config = document.setdefault("config", {})
         if not isinstance(config, dict):
             raise ValueError("board config is invalid")
@@ -2547,7 +2558,12 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         # read_after exposes the watermark even when cursor zero predates retention.
         return int(service.journal.read_after(board_id, 0, 1)["latest_cursor"])
 
-    def project_ticket(board_id: str, ticket: dict[str, Any]) -> dict[str, Any]:
+    def project_ticket(
+        board_id: str,
+        ticket: dict[str, Any],
+        *,
+        include_annotations: bool = True,
+    ) -> dict[str, Any]:
         projected = copy.deepcopy(ticket)
         projected.setdefault("description", "")
         projected.setdefault("scope", None)
@@ -2564,6 +2580,21 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         projected.setdefault("assigned_to", None)
         projected.setdefault("abandoned_count", 0)
         projected.setdefault("rejection_count", 0)
+        annotations = projected.get("annotations")
+        if not isinstance(annotations, list):
+            annotations = []
+        annotations = [
+            item for item in annotations if isinstance(item, dict)
+        ][-MAX_ANNOTATIONS_PER_TICKET:]
+        omitted = projected.get("annotations_omitted_count", 0)
+        if isinstance(omitted, bool) or not isinstance(omitted, int) or omitted < 0:
+            omitted = 0
+        projected["annotation_count"] = omitted + len(annotations)
+        projected["annotations_omitted_count"] = omitted
+        if include_annotations:
+            projected["annotations"] = annotations
+        else:
+            projected.pop("annotations", None)
         now = time.time()
 
         def elapsed_seconds(value: Any) -> int | None:
@@ -3094,6 +3125,11 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             if candidate not in document["tickets"]:
                 document["next_ticket_seq"] = seq
                 return candidate
+
+    def allocate_annotation_id(document: dict[str, Any]) -> str:
+        seq = int(document.setdefault("next_annotation_seq", 1))
+        document["next_annotation_seq"] = seq + 1
+        return f"AN-{seq:012d}"
 
     def allocate_admission_revision(document: dict[str, Any]) -> int:
         revision = int(document.setdefault("next_admission_revision", 1))
@@ -3676,7 +3712,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             reverse=True,
         )
         tickets = [
-            project_ticket(document["board_id"], item)
+            project_ticket(document["board_id"], item, include_annotations=False)
             for item in document["tickets"].values()
             if item.get("status") in ACTIVE_TICKET_STATES
         ]
@@ -5425,6 +5461,146 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         }
 
     @tool()
+    async def ticket_annotate(
+        board_id: str,
+        agent_name: str,
+        ticket_id: str,
+        text: str,
+        ctx: Context,
+        kind: str = "note",
+        expected_generation: str | None = None,
+    ) -> dict[str, Any]:
+        """Append attributed context without changing a ticket's workflow state."""
+        board_id = require_id("board_id", board_id)
+        agent_name = require_id("agent_name", agent_name)
+        ticket_id = require_id("ticket_id", ticket_id)
+        if kind not in ANNOTATION_KINDS:
+            raise ValueError(
+                "kind must be note, evidence, authorization, or decision"
+            )
+        principal = current_principal()
+        if not ({"board:write", "board:review", COORDINATOR_SCOPE} & principal.scopes):
+            raise PermissionError(
+                "ticket annotation requires board admin, board:coordinate, "
+                "or reviewer authorization"
+            )
+        now = time.time()
+
+        def annotate(document: dict[str, Any]) -> dict[str, Any]:
+            membership = service.resolve_board_context(
+                document, principal.principal_id
+            )
+            actor = service.member(document, principal, agent_name)
+            role = membership.get("role")
+            coordinate = COORDINATOR_SCOPE in principal.scopes
+            admin = role == "admin" and "board:write" in principal.scopes
+            reviewer_note = (
+                role == "reviewer"
+                and kind == "note"
+                and "board:review" in principal.scopes
+            )
+            if not (coordinate or admin or reviewer_note):
+                if role == "reviewer":
+                    raise PermissionError(
+                        "reviewer membership may annotate only kind=note"
+                    )
+                raise PermissionError(
+                    "ticket annotation requires board admin or "
+                    "board:coordinate authorization"
+                )
+            ticket = document["tickets"].get(ticket_id)
+            if ticket is None:
+                raise ValueError("ticket not found")
+            profile = board_scrub_profile(document)
+            allow_counts: dict[str, int] = {}
+            safe_text = clean_text(
+                "text",
+                text,
+                required=True,
+                max_length=MAX_ANNOTATION_TEXT_CHARS,
+                scrub_profile=profile,
+                allow_counts=allow_counts,
+            )
+            assert safe_text is not None
+            annotation = {
+                "annotation_id": allocate_annotation_id(document),
+                "kind": kind,
+                "text": safe_text,
+                "by": {
+                    "principal_id": principal.principal_id,
+                    "agent_id": actor["agent_id"],
+                    "agent_name": actor["agent_name"],
+                },
+                "at": iso_at(now),
+            }
+            annotations = ticket.setdefault("annotations", [])
+            if not isinstance(annotations, list):
+                raise ValueError("ticket annotations are invalid")
+            annotations.append(annotation)
+            overflow = max(0, len(annotations) - MAX_ANNOTATIONS_PER_TICKET)
+            if overflow:
+                del annotations[:overflow]
+                omitted = ticket.get("annotations_omitted_count", 0)
+                if (
+                    isinstance(omitted, bool)
+                    or not isinstance(omitted, int)
+                    or omitted < 0
+                ):
+                    omitted = 0
+                ticket["annotations_omitted_count"] = omitted + overflow
+            ticket["updated_at"] = iso_at(now)
+            reviewer_ids = [
+                member.get("agent_id")
+                for member in document.get("members", {}).values()
+                if document.get("principal_memberships", {})
+                .get(member.get("principal_id"), {})
+                .get("role")
+                == "reviewer"
+                and member.get("lifecycle_status", "active") == "active"
+            ]
+            review_lease = ticket.get("review_lease")
+            holder_ids = [ticket.get("claimed_by_agent_id")]
+            if isinstance(review_lease, Mapping):
+                holder_ids.append(review_lease.get("reviewer_agent_id"))
+            recipients = selected_ticket_recipients(
+                document, actor, [*holder_ids, *reviewer_ids]
+            )
+            return {
+                "actor": copy.deepcopy(actor),
+                "annotation": copy.deepcopy(annotation),
+                "ticket": copy.deepcopy(ticket),
+                "recipients": recipients,
+                "scrub_audit": record_scrub_allows(
+                    document, actor, now, allow_counts
+                ),
+            }
+
+        changed = service.mutate(board_id, annotate)
+        annotation = changed["annotation"]
+        uri = resource_uri(board_id, "ticket", ticket_id)
+        event = await append_and_publish(
+            board_id,
+            changed["actor"],
+            "ticket_annotated",
+            uri,
+            changed["recipients"],
+            ctx,
+            ticket_id=ticket_id,
+            annotation_id=annotation["annotation_id"],
+            annotation_kind=annotation["kind"],
+            annotation_by_agent_id=annotation["by"]["agent_id"],
+            annotation_by_agent_name=annotation["by"]["agent_name"],
+            annotation_by_principal_id=annotation["by"]["principal_id"],
+        )
+        return {
+            "ok": True,
+            "annotation": annotation,
+            "ticket": project_ticket(board_id, changed["ticket"]),
+            "event": event,
+            "scrub_audit": changed["scrub_audit"],
+        }
+
+    @tool()
     async def ticket_assign(
         board_id: str,
         agent_name: str,
@@ -6809,7 +6985,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         )
         projected = []
         for item in tickets[:limit]:
-            row = project_ticket(board_id, item)
+            row = project_ticket(board_id, item, include_annotations=False)
             lease = item.get("review_lease")
             if item.get("status") != "submitted":
                 projected.append(row)
