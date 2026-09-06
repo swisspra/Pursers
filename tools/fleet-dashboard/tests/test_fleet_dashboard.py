@@ -3418,7 +3418,9 @@ def test_timer_refresh_pauses_while_operator_edits() -> None:
         "current?.board!==r.board||refreshPaused())return;detailData=data",
         "route()?.central!==r.central||refreshPaused())return;renderOverhead(data)",
         "route()?.central===r.central&&!refreshPaused()){renderConfig(data)",
+        "if(navKind()==='seats'&&!refreshPaused())renderHub()",
     ):
+    assert "if(navKind()==='seats')renderHub()" not in html
         assert fn in html, fn
 
 
