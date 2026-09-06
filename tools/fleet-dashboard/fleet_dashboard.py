@@ -4245,12 +4245,21 @@ class SeatConfigManager:
             (path / item).exists() or (path / item).is_symlink()
             for item in tracked_paths
         )
+        git_index = self._git(path, "rev-parse", "--git-path", "index")
+        index_path = Path(git_index.stdout.strip()) if git_index.returncode == 0 else None
+        if index_path is not None and not index_path.is_absolute():
+            index_path = path / index_path
+        index_missing = index_path is not None and not index_path.exists()
         status_lines = porcelain.stdout.splitlines()
-        deletion_only = all(
-            len(line) >= 2 and "D" in line[:2] for line in status_lines
+        legacy_status_shape = not status_lines or (
+            len(status_lines) == len(tracked_paths)
+            and all(line.startswith("D  ") for line in status_lines)
         )
         empty_worktree = bool(
-            tracked_paths and not tracked_files_present and deletion_only
+            tracked_paths
+            and not tracked_files_present
+            and index_missing
+            and legacy_status_shape
         )
         dirty = bool(porcelain.stdout.strip()) and not empty_worktree
         symbolic = self._git(path, "symbolic-ref", "-q", "HEAD")

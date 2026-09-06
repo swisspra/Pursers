@@ -33,6 +33,9 @@ fetches and fast-forwards a clean clone; partial first-time clones are removed
 after a failure. Registry and Doctor report an empty working tree separately
 from local changes. A dirty clone is never overwritten, and the API error gives
 its exact path plus a `git status --short` inspection command.
+Automatic legacy recovery requires the missing Git index left by the former
+`--no-checkout` flow. Unstaged or staged deletions in an initialized clone stay
+classified as local changes and are never restored automatically.
 
 ## Release & Operations panel
 

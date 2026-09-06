@@ -205,10 +205,10 @@ def test_prepare_fleet_clone_tracks_origin_main_detached(tmp_path: Path) -> None
     ).stdout == ""
 
     (clone / "README.md").unlink()
-    empty = manager._clone_state(clone)
-    assert empty["status"] == "empty_worktree"
-    assert empty["empty_worktree"] is True
-    assert empty["dirty"] is False
+    deleted = manager._clone_state(clone)
+    assert deleted["status"] == "dirty"
+    assert deleted["empty_worktree"] is False
+    assert deleted["dirty"] is True
     registry_view = manager.registry(
         fleet={},
         registry_payload={
@@ -225,24 +225,110 @@ def test_prepare_fleet_clone_tracks_origin_main_detached(tmp_path: Path) -> None
             }
         },
     )
-    assert registry_view["projects"][0]["clone"]["status"] == "empty_worktree"
-    repaired = manager.prepare_fleet_clone(
-        {"registry": refreshed["registry"], "expected_sha256": "c" * 64},
-        "Alpha Project",
-    )
-    assert repaired["clone"]["status"] == "ready"
-    assert (clone / "README.md").read_text(encoding="utf-8") == "two\n"
-
-    (clone / "README.md").write_text("local edit\n", encoding="utf-8")
+    assert registry_view["projects"][0]["clone"]["status"] == "dirty"
     with pytest.raises(ValueError) as exc_info:
         manager.prepare_fleet_clone(
-            {"registry": repaired["registry"], "expected_sha256": "d" * 64},
+            {"registry": refreshed["registry"], "expected_sha256": "c" * 64},
             "Alpha Project",
         )
     message = str(exc_info.value)
     assert "fleet clone is dirty; refusing to overwrite local changes" in message
     assert str(clone) in message
-    assert "status --short" in message
+    assert f"inspect with: git -C {clone} status --short" in message
+    assert not (clone / "README.md").exists()
+
+    subprocess.run(
+        ["git", "-C", str(clone), "checkout", "--", "README.md"], check=True
+    )
+    subprocess.run(
+        ["git", "-C", str(clone), "rm", "README.md"], check=True, capture_output=True
+    )
+    staged = manager._clone_state(clone)
+    assert staged["status"] == "dirty"
+    assert staged["empty_worktree"] is False
+    with pytest.raises(ValueError, match="fleet clone is dirty"):
+        manager.prepare_fleet_clone(
+            {"registry": refreshed["registry"], "expected_sha256": "d" * 64},
+            "Alpha Project",
+        )
+    assert not (clone / "README.md").exists()
+    assert subprocess.run(
+        ["git", "-C", str(clone), "status", "--porcelain"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.startswith("D  README.md")
+
+
+def test_prepare_fleet_clone_repairs_proven_legacy_no_checkout(
+    tmp_path: Path,
+) -> None:
+    origin = tmp_path / "origin.git"
+    operator = tmp_path / "operator"
+    legacy = tmp_path / "legacy"
+    subprocess.run(["git", "init", "--bare", str(origin)], check=True, capture_output=True)
+    subprocess.run(["git", "clone", str(origin), str(operator)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(operator), "config", "user.name", "Test"], check=True)
+    subprocess.run(
+        ["git", "-C", str(operator), "config", "user.email", "test@example.invalid"],
+        check=True,
+    )
+    (operator / "README.md").write_text("legacy\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(operator), "add", "README.md"], check=True)
+    subprocess.run(
+        ["git", "-C", str(operator), "commit", "-m", "initial"],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(["git", "-C", str(operator), "branch", "-M", "main"], check=True)
+    subprocess.run(
+        ["git", "-C", str(operator), "push", "-u", "origin", "main"],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "--git-dir", str(origin), "symbolic-ref", "HEAD", "refs/heads/main"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "clone", "--no-checkout", "--origin", "origin", "--", str(origin), str(legacy)],
+        check=True,
+        capture_output=True,
+    )
+    manager = dashboard.SeatConfigManager(
+        state_dir=tmp_path / "fleet", latest_version=lambda: None
+    )
+    state = manager._clone_state(legacy)
+    assert not (legacy / ".git" / "index").exists()
+    assert state["status"] == "empty_worktree"
+    assert state["empty_worktree"] is True
+    assert state["dirty"] is False
+
+    prepared = manager.prepare_fleet_clone(
+        {
+            "registry": {
+                "schema_version": 1,
+                "projects": {
+                    "Alpha": {
+                        "board_id": "alpha",
+                        "work_dir": str(operator),
+                        "fleet_clone_dir": str(legacy),
+                        "status": "active",
+                    }
+                },
+            },
+            "expected_sha256": "a" * 64,
+        },
+        "Alpha",
+    )
+    assert prepared["clone"]["status"] == "ready"
+    assert (legacy / "README.md").read_text(encoding="utf-8") == "legacy\n"
+    assert subprocess.run(
+        ["git", "-C", str(legacy), "status", "--porcelain"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout == ""
 
 
 def test_prepare_fleet_clone_removes_partial_directory_on_clone_failure(
