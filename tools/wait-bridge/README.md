@@ -33,6 +33,7 @@ SHA-256 `1a0981ec6cc47aed8eeb5e8f488bef260ab6b5fd5c7c88e2cd99604654103e1a`.
 | `PURSERS_ROLE` | no | Explicit seat role: `worker`, `reviewer`, `orchestrator`, or `coordinator`. When omitted, Central maps reviewer membership to `reviewer`; admin/member membership maps to `worker`. |
 | `PURSERS_WAIT_MODE` | no | `push` (default) or explicit compatibility `poll`; a subscription error polls only that board for the current call and push is retried on re-arm. |
 | `PURSERS_KEEPALIVE_IDLE_LIMIT_S` | no | Maximum seconds since this stdio session's last model tool call before background lease renewal pauses. Defaults to three times each claim's live TTL. |
+| `PURSERS_BACKLOG_RESURFACE_INTERVAL_S` | no | Seconds before an unchanged open broadcast ticket may wake the same idle identity again; defaults to `600`. |
 | `PURSERS_HOST` | no | `codex` (default), `codex-cli`, `goose`, `claude-code`, `claude-desktop`, or `headless`; selects the safe call ceiling. |
 | `PURSERS_HOST_TIMEOUT_S` | no | Explicit host/runner deadline in seconds; overrides the named profile. |
 | `PURSERS_TIER_MAX` | no | Maximum dispatch tier (`1`-`3`) declared when the seat joins. |
@@ -157,6 +158,10 @@ activity. After the limit (default: three claim TTLs), renewal pauses, logs and
 returns a `lease_keepalive_paused` cue with `keepalive paused: model idle`, and
 lets the lease lapse. The next tool call resumes renewal only if the same
 authenticated identity still holds the lease.
+scan also snapshots leases held by the exact derived agent ID. During the live
+wait, Central discovery is limited to one bounded backlog scan per resurfacing
+cadence; only snapshotted ticket IDs receive `lease_renew`, at
+`min(300s, ttl/3)`.
 
 ## Project registry
 
@@ -402,8 +407,10 @@ the filter cannot stall replay. It also scans the currently open ticket
 projection, so work older than the cursor still wakes the worker. Backlog cues use
 `source="backlog_scan"`, carry no fabricated journal sequence, and leave
 `new_seq` governed only by the real journal. An unchanged backlog ticket is
-surfaced once per bridge process and then suppressed until a journal change;
-a bridge restart may surface it once again. `reason` reports `journal`,
+suppressed only until the per-identity cadence expires (10 minutes by default),
+then it may wake that idle seat again. Dedupe still applies within one wait
+call; another identity has an independent cadence. A bridge restart may surface
+the ticket immediately. `reason` reports `journal`,
 `backlog`, or `timeout`. A replay over 200 events is reduced to the latest
 event per ticket and capped at 200 returned events; `compacted`, `dropped`, and
 `event_counts` describe that summary. Omitting `since_seq` starts from and

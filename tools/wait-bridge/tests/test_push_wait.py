@@ -1316,6 +1316,61 @@ class PushWaitTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(push_listens, 1)
         self.assertEqual(poll_listens, 0)
 
+    def test_unchanged_backlog_resurfaces_after_cadence_per_identity(self) -> None:
+        event = {
+            "kind": "ticket_backlog",
+            "source": "backlog_scan",
+            "ticket_id": "TK-starved",
+            "status": "open",
+            "updated_at": "2026-09-05T00:00:00+00:00",
+        }
+        wait_server._BACKLOG_SEEN.clear()
+        with patch.object(wait_server, "BACKLOG_RESURFACE_INTERVAL_S", 600.0):
+            first = wait_server._fresh_backlog_events(
+                "pursers", "claimable", "AI-worker-a", [event], now=100.0
+            )
+            suppressed = wait_server._fresh_backlog_events(
+                "pursers", "claimable", "AI-worker-a", [event], now=699.9
+            )
+            other_identity = wait_server._fresh_backlog_events(
+                "pursers", "claimable", "AI-worker-b", [event], now=200.0
+            )
+            resurfaced = wait_server._fresh_backlog_events(
+                "pursers", "claimable", "AI-worker-a", [event, event], now=700.0
+            )
+
+        self.assertEqual(first, [event])
+        self.assertEqual(suppressed, [])
+        self.assertEqual(other_identity, [event])
+        self.assertEqual(resurfaced, [event])
+
+    async def test_idle_wait_rescans_backlog_when_cadence_becomes_due(self) -> None:
+        clock = ManualClock()
+        ticket = {
+            "ticket_id": "TK-starved",
+            "status": "open",
+            "updated_at": "2026-09-05T00:00:00+00:00",
+        }
+        client = ScriptedBoardClient([], tickets=[ticket])
+        with (
+            patch.object(wait_server, "WAIT_MODE", "poll"),
+            patch.object(wait_server, "BACKLOG_RESURFACE_INTERVAL_S", 0.5),
+            patch.object(wait_server.time, "monotonic", clock.monotonic),
+            patch.object(wait_server.asyncio, "sleep", clock.sleep),
+        ):
+            first = await wait_server._wait_for_work(
+                client, since_seq=0, timeout_s=2, only_mine=False
+            )
+            second = await wait_server._wait_for_work(
+                client, since_seq=0, timeout_s=2, only_mine=False
+            )
+
+        self.assertEqual(first["events"][0]["ticket_id"], "TK-starved")
+        self.assertEqual(second["events"][0]["ticket_id"], "TK-starved")
+        self.assertEqual(second["reason"], "backlog")
+        self.assertEqual(second["waited_s"], 0.5)
+        self.assertEqual(client.ticket_list_calls, 3)
+
 
 if __name__ == "__main__":
     unittest.main()

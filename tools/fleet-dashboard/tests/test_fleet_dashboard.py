@@ -4730,6 +4730,14 @@ def test_dispatch_fetcher_projects_policy_gaps_offers_and_timeline() -> None:
                 "unassignable_tickets": [
                     {"ticket_id": "TK-hard", "reason": "no_eligible_worker"}
                 ],
+                "unclaimed_tickets": [
+                    {
+                        "ticket_id": "TK-starved",
+                        "reason": "unclaimed_broadcast",
+                        "unclaimed_for_s": 700,
+                        "threshold_s": 600,
+                    }
+                ],
                 "agents": [
                     {
                         "agent_name": "worker-low",
@@ -4793,6 +4801,7 @@ def test_dispatch_fetcher_projects_policy_gaps_offers_and_timeline() -> None:
         "tier_max>=3",
         "skill:python",
     ]
+    assert result["unclaimed_tickets"][0]["ticket_id"] == "TK-starved"
     assert result["timeline"][0]["kind"] == "ticket_offered"
 
 
@@ -5019,6 +5028,7 @@ def test_dispatch_policy_save_validates_and_forwards_exact_contract() -> None:
     policy = {
         "claim_ttl_s": 300,
         "offer_ttl_s": 60,
+        "broadcast_reoffer_s": 600,
         "second_opinion": False,
         "fallback_broadcast": True,
     }
@@ -5027,6 +5037,7 @@ def test_dispatch_policy_save_validates_and_forwards_exact_contract() -> None:
 
     assert result["dispatch_policy"] == {
         "offer_ttl_s": 60,
+        "broadcast_reoffer_s": 600,
         "second_opinion": False,
         "fallback_broadcast": True,
     }
@@ -5036,6 +5047,7 @@ def test_dispatch_policy_save_validates_and_forwards_exact_contract() -> None:
             "dispatch",
             {
                 "offer_ttl_s": 60,
+                "broadcast_reoffer_s": 600,
                 "second_opinion": False,
                 "fallback_broadcast": True,
             },
@@ -5056,6 +5068,8 @@ def test_capability_and_dispatch_ui_contract_is_present() -> None:
     assert "Dispatch unavailable:" in dashboard.HTML
     assert "Current offer" in dashboard.HTML
     assert 'name="claim_ttl_s"' in dashboard.HTML
+    assert 'name="broadcast_reoffer_s"' in dashboard.HTML
+    assert "Needs attention · unclaimed broadcasts" in dashboard.HTML
     assert "Lease lapsed ${t.abandoned_count} times" in dashboard.HTML
     assert "Runtime consumption requires Dispatch Part 2" in dashboard.HTML
     assert ">coordinator</option>" in dashboard.HTML

@@ -951,7 +951,7 @@ def test_ten_minute_idle_window_has_no_central_calls_beyond_subscription(
 
 
 @pytest.mark.parametrize("role", ["worker", "reviewer"])
-def test_real_bridge_and_central_stay_cue_driven_for_ten_minutes(
+def test_real_bridge_scans_backlog_once_at_ten_minute_cadence(
     role: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     central_src = Path(__file__).parents[3] / "packages" / "central" / "src" / "pursers_central"
@@ -1143,7 +1143,7 @@ def test_real_bridge_and_central_stay_cue_driven_for_ten_minutes(
                             "ticket_create",
                             agent_name="admin-runtime",
                             title="held lease during push idle",
-                            description="prove lease-only Central traffic",
+                            description="prove bounded idle Central traffic",
                             target_url="pursers/tools/worker-runtime",
                             scope="interactive-no-send",
                             required_fields=["test_output"],
@@ -1229,16 +1229,16 @@ def test_real_bridge_and_central_stay_cue_driven_for_ten_minutes(
                     idle_names = [name for name, _arguments in idle_calls]
                     if role == "worker":
                         assert idle_names
-                        assert set(idle_names) == {"lease_renew"}
+                        assert set(idle_names) == {"lease_renew", "ticket_list"}
                         assert all(
                             arguments["ticket_id"] == ticket_id
-                            for _name, arguments in idle_calls
+                            for name, arguments in idle_calls
+                            if name == "lease_renew"
                         )
                     else:
-                        assert idle_calls == []
-                    assert not {
-                        "ticket_list", "ticket_get", "board_catchup"
-                    }.intersection(idle_names)
+                        assert idle_names == ["ticket_list"]
+                    assert idle_names.count("ticket_list") == 1
+                    assert not {"ticket_get", "board_catchup"}.intersection(idle_names)
 
                     if role == "worker":
                         transport.subscription_drained.clear()

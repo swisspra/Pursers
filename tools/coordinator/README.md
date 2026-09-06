@@ -62,6 +62,12 @@ last local cursor. Other healthy boards remain subscribed.
   per board per 10 minutes.
 - Three consecutive mutation failures open the circuit breaker and change the
   process's effective mode to shadow.
+- Central re-enters the offer cycle for an unclaimed broadcast ticket after
+  `dispatch_policy.broadcast_reoffer_s` (600 seconds by default). Each cycle
+  may retry live eligible workers, but never coordinator/orchestrator seats or
+  any seat with `can_work=false`.
+- Board status and the fleet dashboard flag broadcast tickets still unclaimed
+  beyond that threshold under **Needs attention**.
 
 ## Dual credentials for intake
 
