@@ -44,9 +44,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   `POST /api/human/resolve` behind the same-origin loopback guard
   (TK-c5b7fef1ee2d). Required fields, primitive enum/oneOf defaults and titles,
   and array `items.enum` defaults/minimum selections are enforced by the
-  renderer. A shared bridge/dashboard guard prevents credential, file,
-  password, token, secret, and API-key prompts from becoming form fields;
-  those requests require a trusted URL or described drop location.
+  renderer. The bridge treats empty `elicitation: {}` as form-only and returns
+  and logs the SDK-parsed raw declaration. Its shared bridge/dashboard guard
+  blocks only secret/credential fields (passwords, API keys, access tokens, and
+  payment credentials); names, email addresses, usernames, ordinary prose, and
+  file deliverables remain form-safe (TK-766ef9515d69).
 - Dispatcher: unclaimed broadcast tickets are re-surfaced to idle identities on a
   cadence (`PURSERS_BACKLOG_RESURFACE_INTERVAL_S`, default 600 s) and re-offered after
   the board's `broadcast_reoffer_s`; coordinator identities are never offered work

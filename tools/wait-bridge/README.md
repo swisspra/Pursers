@@ -517,11 +517,14 @@ question to the human through the host they already sit in:
   never an `InputRequiredResult`. Clients that declared no elicitation get the list plus instructions to
   answer via `board_human_requests(answer={"ticket_id": ..., "action": ...,
   "content": {...}, "disposition": ...})` or the fleet dashboard. The bridge
-  never sends a mode the client did not declare. A shared conservative guard
-  checks request messages plus schema property names, titles, and descriptions;
-  credential, file, password, token, secret, and API-key requests are never
-  emitted as form fields. They require url mode pointing at a trusted target or
-  a described drop location, otherwise the bridge returns a safe fallback.
+  never sends a mode the client did not declare. Every result exposes the
+  SDK-parsed declaration as `declared: {"form": bool, "url": bool, "raw":
+  object|null}` (inside `_meta` on `InputRequiredResult`), and the bridge writes
+  the same scrubbed value once to stderr for each call. A shared guard checks
+  schema property names and titles for secrets or credentials: passwords, API
+  keys, access tokens, and payment credentials require url mode. Names, email
+  addresses, usernames, ordinary request prose, and file deliverables remain
+  valid form fields.
 - Push: the `human_input_requested` / `human_input_resolved` journal kinds
   wake orchestrator seats; `board_digest` shows a `human_requests` section
   and `board_digest_ack` clears it.
@@ -535,11 +538,12 @@ question to the human through the host they already sit in:
 
 Elicitation host declarations (probed 2026-09-06):
 
-| Host | declares elicitation | measured result |
+| Host / transport | raw declaration | measured result |
 | --- | --- | --- |
-| Claude Desktop | no | Live MCPB probe against the sandbox dependency Central returned `elicitation_declared: false` after the empty-object compatibility and dual-era fixes plus a full Desktop restart. A fourth operator-authorized call for request `HR-667f8dd55d230060` again rendered no form. An earlier fallback `answer` call accepted `choice=green`, `disposition=reopen`, and Central recorded the matching resolution. |
+| Claude Desktop / stdio | not captured by the pre-raw-value probe build | Live MCPB calls returned `elicitation_declared: false`; no form was rendered. An earlier fallback `answer` call accepted `choice=green`, `disposition=reopen`, and Central recorded the matching resolution. The corrected bridge will distinguish raw `null` from `{}` on the next host call. |
+| Claude Desktop / HTTP custom connector | not measured | This is a separate per-request `_meta` path; no declaration is inferred from the stdio probe. |
 | Codex app | not measured | The sandbox probe connector was not available to this Codex task, so no declaration is inferred. |
-| Goose | no | Live stdio probe verified the fallback list + instructions path against Central. |
+| Goose / stdio | not captured by the pre-raw-value probe build | Live stdio probe verified the fallback list + instructions path; no raw declaration was retained by that build. |
 
 The fleet dashboard is the independent browser fallback, not an MCP App UI
 resource associated with `board_human_requests`. Keeping it open does not alter
@@ -567,5 +571,7 @@ the back-channel and returned a final tool result (not MRTR), resolving
 request `HR-48dc39e253b9604e` with `choice=blue` and `disposition=reopen`.
 An additional operator-authorized Claude Desktop call against pending request
 `HR-667f8dd55d230060` again returned `elicitation_declared: false` and rendered
-no form, confirming the host result after the rejection fixes without inferring
-support from connector presence.
+no form. Those calls predated the `declared.raw` result field, so this record
+does not infer whether the host sent nothing or the old bridge misread its
+declaration. The corrected bridge logs and returns the SDK-parsed raw value on
+the next call.

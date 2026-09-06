@@ -240,6 +240,22 @@ def test_aggregate_marks_sensitive_form_for_safe_fallback() -> None:
     assert "trusted URL" in row["safety_reason"]
 
 
+def test_aggregate_allows_file_deliverable_form() -> None:
+    now = datetime(2030, 1, 2, 12, tzinfo=timezone.utc)
+    deliverable = dict(
+        HUMAN_RECORD,
+        message="Export the dataset file",
+        requested_schema={
+            "type": "object",
+            "properties": {"file": {"type": "string", "title": "Dataset file"}},
+        },
+    )
+    result = dashboard.aggregate_fleet(
+        [_board_row([deliverable])], stale_seconds=300, now=now
+    )
+    assert result["boards"][0]["human_requests"][0]["form_safe"] is True
+
+
 def _run_human_renderer(program_tail: str) -> str:
     scripts = "\n".join(
         re.findall(r"<script>(.*?)</script>", dashboard.HTML, flags=re.DOTALL)
@@ -288,9 +304,9 @@ def test_renderer_executes_required_defaults_titles_and_array_enum() -> None:
 
 def test_renderer_executes_sensitive_fallback_without_form_fields() -> None:
     output = _run_human_renderer(
-        "console.log(humanRequestCard({central:'default',board:{board_id:'one',label:'One'},h:{ticket_id:'TK-1',request_id:'HR-1',message:'Paste credential',kind:'decision',form_safe:false,safety_reason:'A trusted URL or described drop location is required.',requested_schema:{properties:{credential:{type:'string'}}}}}));"
+        "console.log(humanRequestCard({central:'default',board:{board_id:'one',label:'One'},h:{ticket_id:'TK-1',request_id:'HR-1',message:'Paste credential',kind:'decision',form_safe:false,safety_reason:'A trusted URL is required.',requested_schema:{properties:{credential:{type:'string'}}}}}));"
     )
-    assert "trusted URL or described drop location" in output
+    assert "trusted URL is required" in output
     assert "human-form" not in output
     assert 'data-human-field="credential"' not in output
 

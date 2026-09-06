@@ -8,6 +8,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -19,7 +20,14 @@ sys.path.insert(0, str(CLIENT_SRC))
 sys.path.insert(0, str(ROOT))
 os.environ.setdefault("ONBOARD_CENTRAL_TOKEN", "TOKEN_PLACEHOLDER")
 
-from mcp.types import ClientCapabilities, ElicitResult, InputRequiredResult  # noqa: E402
+from mcp.server.connection import Connection  # noqa: E402
+from mcp.types import (  # noqa: E402
+    ClientCapabilities,
+    ElicitResult,
+    Implementation,
+    InitializeRequestParams,
+    InputRequiredResult,
+)
 import pursers_wait_server as wait_server  # noqa: E402
 
 
@@ -122,18 +130,35 @@ class FakeBoardClient:
         raise AssertionError(f"unexpected tool call {name}")
 
 
-def caps(form: bool = False, url: bool = False) -> SimpleNamespace | None:
+def caps(form: bool = False, url: bool = False) -> ClientCapabilities | None:
     if not form and not url:
         return None
-    elicitation = SimpleNamespace(
-        form=SimpleNamespace() if form else None,
-        url=SimpleNamespace() if url else None,
+    return ClientCapabilities.model_validate(
+        {
+            "elicitation": {
+                **({"form": {}} if form else {}),
+                **({"url": {}} if url else {}),
+            }
+        }
     )
-    return SimpleNamespace(elicitation=elicitation)
 
 
 def run(coro):
     return asyncio.run(coro)
+
+
+def sourced_caps(source: str, raw: dict[str, Any]) -> ClientCapabilities | None:
+    """Exercise the SDK paths used by stdio initialize and 2026 request metadata."""
+    if source == "stdio-session":
+        connection = Connection.for_loop(None, protocol_version_hint="2025-11-25")
+        connection.client_params = InitializeRequestParams(
+            protocolVersion="2025-11-25",
+            capabilities=ClientCapabilities.model_validate(raw),
+            clientInfo=Implementation(name="test-host", version="1"),
+        )
+    else:
+        connection = Connection.from_envelope("2026-07-28", None, raw)
+    return connection.client_capabilities
 
 
 class HumanRequestsCoreTests(unittest.TestCase):
@@ -169,6 +194,9 @@ class HumanRequestsCoreTests(unittest.TestCase):
         )
         self.assertIsInstance(result, dict)
         self.assertFalse(result["elicitation_declared"])
+        self.assertEqual(
+            result["declared"], {"form": False, "url": False, "raw": None}
+        )
         self.assertEqual(len(result["pending"]), 1)
         item = result["pending"][0]
         self.assertEqual(item["ticket_id"], "TK-1")
@@ -193,6 +221,10 @@ class HumanRequestsCoreTests(unittest.TestCase):
             )
         )
         self.assertIsInstance(result, InputRequiredResult)
+        self.assertEqual(
+            result.meta["declared"],
+            {"form": True, "url": False, "raw": {"form": {}}},
+        )
         requests = result.input_requests
         self.assertEqual(list(requests.keys()), ["r0"])
         params = requests["r0"].params
@@ -299,33 +331,59 @@ class HumanRequestsCoreTests(unittest.TestCase):
         self.assertIsInstance(url_result, InputRequiredResult)
         self.assertEqual(url_result.input_requests["r0"].params.mode, "url")
 
-    def test_sensitive_title_and_description_block_legacy_form(self) -> None:
-        for field, value in (
-            ("title", "API key"),
-            ("description", "Choose a secret token"),
-        ):
-            with self.subTest(field=field):
-                client = self._client_with_form_request(
-                    schema={
-                        "type": "object",
-                        "properties": {"value": {"type": "string", field: value}},
+    def test_sensitive_title_blocks_legacy_form(self) -> None:
+        client = self._client_with_form_request(
+            schema={
+                "type": "object",
+                "properties": {"value": {"type": "string", "title": "API key"}},
+            }
+        )
+
+        async def elicit_form(_message, _schema):
+            raise AssertionError("sensitive form must not be emitted")
+
+        result = run(
+            wait_server.board_human_requests_core(
+                client,
+                boards=["proj-a"],
+                capabilities=caps(form=True),
+                protocol_version="2025-11-25",
+                legacy_elicit_form=elicit_form,
+            )
+        )
+        self.assertEqual(len(result["unasked"]), 1)
+        self.assertIn("trusted URL", result["unasked"][0]["reason"])
+
+    def test_message_and_description_are_not_sensitive_field_identifiers(self) -> None:
+        client = self._client_with_form_request(
+            schema={
+                "type": "object",
+                "properties": {
+                    "file": {
+                        "type": "string",
+                        "title": "Dataset file",
+                        "description": "Never include a secret token",
                     }
-                )
+                },
+            }
+        )
 
-                async def elicit_form(_message, _schema):
-                    raise AssertionError("sensitive form must not be emitted")
+        async def elicit_form(_message, _schema):
+            return ElicitResult(
+                action="accept",
+                content={"file": "report.csv", "disposition": "reopen"},
+            )
 
-                result = run(
-                    wait_server.board_human_requests_core(
-                        client,
-                        boards=["proj-a"],
-                        capabilities=caps(form=True),
-                        protocol_version="2025-11-25",
-                        legacy_elicit_form=elicit_form,
-                    )
-                )
-                self.assertEqual(len(result["unasked"]), 1)
-                self.assertIn("trusted URL", result["unasked"][0]["reason"])
+        result = run(
+            wait_server.board_human_requests_core(
+                client,
+                boards=["proj-a"],
+                capabilities=caps(form=True),
+                protocol_version="2025-11-25",
+                legacy_elicit_form=elicit_form,
+            )
+        )
+        self.assertEqual(len(result["resolved"]), 1)
 
     def test_request_state_roundtrip_accept(self) -> None:
         client = self._client_with_form_request()
@@ -759,6 +817,58 @@ class SchemaHelperTests(unittest.TestCase):
         self.assertEqual(
             wait_server._elicitation_modes(SimpleNamespace(elicitation=None)),
             (False, False),
+        )
+
+    def test_three_capability_cases_from_stdio_and_request_meta(self) -> None:
+        cases = (
+            ({}, {"form": False, "url": False, "raw": None}),
+            (
+                {"elicitation": {}},
+                {"form": True, "url": False, "raw": {}},
+            ),
+            (
+                {"elicitation": {"form": {}, "url": {}}},
+                {"form": True, "url": True, "raw": {"form": {}, "url": {}}},
+            ),
+        )
+        for source in ("stdio-session", "request-meta"):
+            for raw, expected in cases:
+                with self.subTest(source=source, raw=raw):
+                    self.assertEqual(
+                        wait_server._elicitation_declaration(
+                            sourced_caps(source, raw)
+                        ),
+                        expected,
+                    )
+
+    def test_tool_logs_one_scrubbed_declaration_and_returns_raw(self) -> None:
+        context = SimpleNamespace(
+            client_capabilities=ClientCapabilities.model_validate(
+                {"elicitation": {}}
+            ),
+            input_responses=None,
+            request_state=None,
+            protocol_version="2026-07-28",
+        )
+
+        async def fake_client(_context):
+            return FakeBoardClient()
+
+        with (
+            mock.patch.object(wait_server, "_client_for_tool", fake_client),
+            mock.patch.object(wait_server, "_log") as log,
+        ):
+            result = run(
+                wait_server.board_human_requests(
+                    context, boards=["proj-a"]
+                )
+            )
+        self.assertEqual(
+            result["declared"], {"form": True, "url": False, "raw": {}}
+        )
+        log.assert_called_once_with(
+            'board_human_requests client elicitation declaration='
+            '{"form":true,"raw":{},"url":false}'
         )
 
 

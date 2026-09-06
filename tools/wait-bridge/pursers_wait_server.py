@@ -95,6 +95,7 @@ from pursers_client import (
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import (
+    ClientCapabilities,
     ElicitRequest,
     ElicitRequestFormParams,
     ElicitRequestURLParams,
@@ -2907,39 +2908,35 @@ def _pending_human_request_records(ticket: dict[str, Any]) -> list[dict[str, Any
     return pending
 
 
-def _elicitation_modes(capabilities: Any) -> tuple[bool, bool]:
-    """Return (form_ok, url_ok) from the client's declared elicitation capability.
-
-    Never sends an elicitation mode the client did not declare (spec MUST).
-    Accepts pydantic ClientCapabilities or plain dict fakes.
-    """
+def _elicitation_declaration(capabilities: Any) -> dict[str, Any]:
+    """Return the SDK-parsed elicitation declaration and supported modes."""
     if capabilities is None:
-        return (False, False)
-    elicitation = (
-        capabilities.get("elicitation")
-        if isinstance(capabilities, dict)
-        else getattr(capabilities, "elicitation", None)
-    )
+        return {"form": False, "url": False, "raw": None}
+    if isinstance(capabilities, dict):
+        try:
+            capabilities = ClientCapabilities.model_validate(capabilities)
+        except Exception:
+            return {"form": False, "url": False, "raw": None}
+    elicitation = getattr(capabilities, "elicitation", None)
     if elicitation is None:
-        return (False, False)
-    form = (
-        elicitation.get("form")
-        if isinstance(elicitation, dict)
-        else getattr(elicitation, "form", None)
-    )
-    url = (
-        elicitation.get("url")
-        if isinstance(elicitation, dict)
-        else getattr(elicitation, "url", None)
-    )
-    # Backward compatibility applies only to a bare `elicitation: {}`. Do not
-    # reinterpret an explicit null mode as support.
-    empty_declaration = (
-        not elicitation
-        if isinstance(elicitation, dict)
-        else not getattr(elicitation, "model_fields_set", {"unknown"})
-    )
-    return (form is not None or empty_declaration, url is not None)
+        return {"form": False, "url": False, "raw": None}
+    if not callable(getattr(elicitation, "model_dump", None)):
+        return {"form": False, "url": False, "raw": None}
+    raw = elicitation.model_dump(exclude_unset=True, mode="json")
+    fields_set = elicitation.model_fields_set
+    # The spec defines exactly three cases: absent, empty (form-only), or the
+    # explicitly listed form/url modes. Explicit null is not a declaration.
+    return {
+        "form": not fields_set or elicitation.form is not None,
+        "url": elicitation.url is not None,
+        "raw": raw,
+    }
+
+
+def _elicitation_modes(capabilities: Any) -> tuple[bool, bool]:
+    """Return only modes declared by the client (empty means form-only)."""
+    declared = _elicitation_declaration(capabilities)
+    return (bool(declared["form"]), bool(declared["url"]))
 
 
 def _human_schema_summary(schema: Any) -> str:
@@ -3237,6 +3234,7 @@ async def board_human_requests_core(
     legacy_elicit_url: Callable[[str, str, str], Awaitable[Any]] | None = None,
 ) -> dict[str, Any] | InputRequiredResult:
     """List or answer pending needs_human requests (a22 human-in-loop)."""
+    declared = _elicitation_declaration(capabilities)
     if isinstance(boards, str):
         if boards.strip().lower() == "registry":
             registry = await _read_project_registry(client)
@@ -3261,6 +3259,7 @@ async def board_human_requests_core(
         if action == "cancel":
             return {
                 "ok": True,
+                "declared": declared,
                 "resolved": [],
                 "deferred": [
                     {
@@ -3291,6 +3290,7 @@ async def board_human_requests_core(
         if match is None:
             return {
                 "ok": False,
+                "declared": declared,
                 "error": f"no pending human request found for ticket {ticket_id}",
             }
         try:
@@ -3304,9 +3304,14 @@ async def board_human_requests_core(
                 disposition=str(disposition),
             )
         except Exception as exc:
-            return {"ok": False, "error": f"ticket_human_resolve failed: {exc}"}
+            return {
+                "ok": False,
+                "declared": declared,
+                "error": f"ticket_human_resolve failed: {exc}",
+            }
         return {
             "ok": True,
+            "declared": declared,
             "resolved": [
                 {
                     "board_id": match["board_id"],
@@ -3388,10 +3393,12 @@ async def board_human_requests_core(
         if not targets:
             return {
                 "ok": False,
+                "declared": declared,
                 "error": "input_responses received but request_state targets are missing",
             }
         return {
             "ok": not errors,
+            "declared": declared,
             "resolved": resolved,
             "deferred": deferred,
             "unasked": prior_unasked,
@@ -3402,11 +3409,12 @@ async def board_human_requests_core(
     if not pending:
         return {
             "ok": True,
+            "declared": declared,
             "pending": [],
             "message": "no tickets are waiting for a human answer",
         }
 
-    form_ok, url_ok = _elicitation_modes(capabilities)
+    form_ok, url_ok = bool(declared["form"]), bool(declared["url"])
     summaries = [
         {
             "board_id": item["board_id"],
@@ -3438,6 +3446,7 @@ async def board_human_requests_core(
     if not form_ok and not url_ok:
         return {
             "ok": True,
+            "declared": declared,
             "elicitation_declared": False,
             "pending": summaries,
             "unasked": unsafe_without_url,
@@ -3445,7 +3454,7 @@ async def board_human_requests_core(
         }
 
     if not is_version_at_least(protocol_version, "2026-07-28"):
-        return await _legacy_human_requests(
+        legacy_result = await _legacy_human_requests(
             client,
             pending,
             form_ok=form_ok,
@@ -3453,6 +3462,8 @@ async def board_human_requests_core(
             elicit_form=legacy_elicit_form,
             elicit_url=legacy_elicit_url,
         )
+        legacy_result["declared"] = declared
+        return legacy_result
 
     input_requests: dict[str, ElicitRequest] = {}
     targets: dict[str, dict[str, str]] = {}
@@ -3522,6 +3533,7 @@ async def board_human_requests_core(
     if not input_requests:
         return {
             "ok": True,
+            "declared": declared,
             "elicitation_declared": True,
             "pending": summaries,
             "unasked": unasked,
@@ -3531,6 +3543,7 @@ async def board_human_requests_core(
         {"targets": targets, "unasked": unasked}, separators=(",", ":")
     )
     return InputRequiredResult(
+        meta={"declared": declared},
         input_requests=input_requests,
         request_state=state,
     )
@@ -3559,6 +3572,14 @@ async def board_human_requests(
         capabilities = ctx.client_capabilities
     except Exception:
         capabilities = None
+    _log(
+        "board_human_requests client elicitation declaration="
+        + json.dumps(
+            _elicitation_declaration(capabilities),
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    )
     try:
         responses = ctx.input_responses
         state = ctx.request_state

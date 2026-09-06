@@ -78,42 +78,36 @@ async def test_human_request_and_resolution_forward_exact_arguments(monkeypatch)
 
 
 @pytest.mark.parametrize(
-    ("message", "schema"),
+    ("property_name", "title"),
     [
-        ("Paste the credential and file path", {"type": "object"}),
-        ("Continue", {"properties": {"api_key": {"type": "string"}}}),
-        (
-            "Continue",
-            {"properties": {"value": {"title": "Access token", "type": "string"}}},
-        ),
-        (
-            "Continue",
-            {
-                "properties": {
-                    "value": {"description": "Upload the secret file", "type": "string"}
-                }
-            },
-        ),
+        ("password", "Password"),
+        ("api_key", "API key"),
+        ("token", "Access token"),
+        ("payment", "Payment credentials"),
     ],
 )
-def test_human_form_safety_rejects_sensitive_message_and_schema_metadata(
-    message: str, schema: dict[str, Any]
+def test_human_form_safety_rejects_secret_or_credential_fields(
+    property_name: str, title: str
 ) -> None:
-    safe, reason = human_form_safety(message, schema)
+    safe, reason = human_form_safety(
+        "Ordinary request text",
+        {"properties": {property_name: {"title": title, "type": "string"}}},
+    )
     assert safe is False
     assert "trusted URL" in str(reason)
 
 
-def test_human_form_safety_allows_non_sensitive_decision() -> None:
+@pytest.mark.parametrize("field", ["username", "email", "name", "file"])
+def test_human_form_safety_allows_profile_and_file_fields(field: str) -> None:
     safe, reason = human_form_safety(
-        "Choose a deployment region",
+        "Export the dataset file; do not paste an API key here",
         {
             "type": "object",
             "properties": {
-                "region": {
+                field: {
                     "type": "string",
-                    "title": "Region",
-                    "description": "Select one approved region",
+                    "title": field.title(),
+                    "description": "Ordinary profile or deliverable field",
                 }
             },
         },
