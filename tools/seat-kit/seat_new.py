@@ -1339,6 +1339,143 @@ def _write(path: Path, content: str, mode: int) -> None:
     path.chmod(mode)
 
 
+def _venv_interpreter(python: Path) -> bool:
+    """Return true without resolving a venv's interpreter symlink."""
+    return (python.parent.parent / "pyvenv.cfg").is_file()
+
+
+def _existing_interpreter(board_shell: Path) -> Path | None:
+    if not board_shell.is_file():
+        return None
+    for line in board_shell.read_text(encoding="utf-8").splitlines():
+        if not line.startswith("exec "):
+            continue
+        try:
+            command = shlex.split(line)
+        except ValueError:
+            continue
+        if (
+            len(command) == 4
+            and command[0] == "exec"
+            and command[2] == "$SCRIPT_DIR/board.py"
+            and command[3] == "$@"
+        ):
+            return Path(command[1])
+    return None
+
+
+def _validate_interpreter(python: Path) -> None:
+    if _venv_interpreter(python):
+        return
+    completed = subprocess.run(
+        [str(python), "-c", "import pursers_client, mcp, httpx"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        raise ValueError(
+            f"bare Python interpreter lacks required seat dependencies: {python}; "
+            "install pursers-client, mcp, and httpx there or pass a virtual-environment "
+            "interpreter"
+        )
+
+
+def _select_interpreter(args: argparse.Namespace, dest: Path) -> Path:
+    raw_python = args.python
+    if raw_python is None and args.upgrade:
+        raw_python = _existing_interpreter(dest / "bin" / "board.sh")
+    python = Path(raw_python or sys.executable).expanduser()
+    _validate_interpreter(python)
+    return python
+
+
+def _warn_clone(clone_dest: Path, reason: str) -> None:
+    print(
+        f"seat_new.py: warning: leaving repository clone unchanged at "
+        f"{clone_dest}: {reason}",
+        file=sys.stderr,
+    )
+
+
+def _git_probe(clone_dest: Path, command: list[str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        command,
+        cwd=clone_dest,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+
+def _upgrade_repo_clone(clone_dest: Path) -> None:
+    fetched = _git_probe(clone_dest, ["git", "fetch", "origin"])
+    if fetched.returncode != 0:
+        _warn_clone(clone_dest, "git fetch origin failed")
+        return
+
+    current = _git_probe(
+        clone_dest, ["git", "symbolic-ref", "--quiet", "--short", "HEAD"]
+    )
+    default = _git_probe(
+        clone_dest,
+        [
+            "git",
+            "symbolic-ref",
+            "--quiet",
+            "--short",
+            "refs/remotes/origin/HEAD",
+        ],
+    )
+    if current.returncode != 0 or default.returncode != 0:
+        _warn_clone(clone_dest, "could not determine current/default branch")
+        return
+    current_branch = current.stdout.strip()
+    default_ref = default.stdout.strip()
+    default_branch = default_ref.removeprefix("origin/")
+    if current_branch != default_branch:
+        _warn_clone(
+            clone_dest,
+            f"HEAD is on {current_branch}, not default branch {default_branch}",
+        )
+        return
+
+    status = _git_probe(clone_dest, ["git", "status", "--porcelain"])
+    if status.returncode != 0:
+        _warn_clone(clone_dest, "git status failed")
+        return
+    if status.stdout.strip():
+        _warn_clone(clone_dest, "working tree is dirty")
+        return
+
+    fast_forward = _git_probe(
+        clone_dest,
+        ["git", "merge-base", "--is-ancestor", "HEAD", default_ref],
+    )
+    if fast_forward.returncode != 0:
+        _warn_clone(clone_dest, f"HEAD is not fast-forwardable to {default_ref}")
+        return
+
+    merged = _git_probe(
+        clone_dest, ["git", "merge", "--ff-only", default_ref]
+    )
+    if merged.returncode != 0:
+        _warn_clone(clone_dest, f"git merge --ff-only {default_ref} failed")
+
+
+def _self_check(python: Path, board_script: Path) -> None:
+    completed = subprocess.run(
+        [str(python), str(board_script), "--help"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout).strip().splitlines()
+        suffix = f": {detail[-1]}" if detail else ""
+        raise ValueError(f"generated board.py self-check failed{suffix}")
+
+
 def generate(args: argparse.Namespace) -> Path:
     if not NAME_RE.fullmatch(args.name):
         raise ValueError("--name must be a safe 1-80 character agent name")
@@ -1349,7 +1486,7 @@ def generate(args: argparse.Namespace) -> Path:
     token_file = Path(args.token_file).expanduser().resolve()
     ca_file = Path(args.ca_file).expanduser().resolve()
     repo_leaf = _repo_leaf(args.repo) if args.repo else None
-    python = Path(args.python).expanduser().resolve()
+    python = _select_interpreter(args, dest)
     skills = ",".join(
         sorted({item.strip() for item in args.skills.split(",") if item.strip()})
     )
@@ -1375,19 +1512,7 @@ def generate(args: argparse.Namespace) -> Path:
                 check=True,
             )
         elif args.upgrade:
-            status = subprocess.run(
-                ["git", "status", "--porcelain"],
-                cwd=clone_dest,
-                check=False,
-                text=True,
-                capture_output=True,
-            )
-            if status.returncode == 0 and not status.stdout.strip():
-                subprocess.run(
-                    ["git", "pull", "--ff-only"],
-                    cwd=clone_dest,
-                    check=True,
-                )
+            _upgrade_repo_clone(clone_dest)
 
     bin_dir = dest / "bin"
     bin_dir.mkdir(mode=0o755, exist_ok=True)
@@ -1420,6 +1545,7 @@ def generate(args: argparse.Namespace) -> Path:
     instructions = _instructions(role=args.role, name=args.name, client=args.client)
     _write(dest / "AGENTS.md", instructions, 0o644)
     _write(dest / ".goosehints", instructions, 0o644)
+    _self_check(python, bin_dir / "board.py")
     return dest
 
 
@@ -1433,8 +1559,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ca-file", required=True)
     parser.add_argument(
         "--python",
-        default=sys.executable,
-        help="known interpreter used by generated board.sh",
+        help=(
+            "known interpreter used by generated board.sh; upgrade preserves the "
+            "existing interpreter when omitted"
+        ),
     )
     parser.add_argument(
         "--upgrade",

@@ -37,10 +37,16 @@ The destination must be new or empty. The generator creates:
 - the optional repository clone
 
 Use `--upgrade` to regenerate those four managed files in an existing seat.
-The repository clone and every other file are preserved. `--python` selects the
-absolute interpreter written to `bin/board.sh`; the fleet dashboard chooses the
-wait-bridge tool environment so `mcp`, `httpx`, and `pursers_client` come from a
-known runtime instead of whichever `python3` happens to be on `PATH`.
+Every other file is preserved. An upgrade fetches the repository clone and
+fast-forwards it only when it is clean, already on the remote default branch,
+and has no divergent commits; otherwise it leaves the clone untouched and
+prints a warning. `--python` selects the interpreter written to `bin/board.sh`
+without resolving its symlink, so a virtual environment keeps its installed
+packages. Omitting `--python` during an upgrade preserves the interpreter in the
+existing launcher. A bare interpreter must import `pursers_client`, `mcp`, and
+`httpx`; generation fails before reporting success when that dependency check
+or the generated `board.py --help` self-check fails. The fleet dashboard chooses
+the wait-bridge tool environment as the known runtime.
 
 The token contents are never read by the generator or copied into the seat.
 `bin/board.sh` reads the configured token file at runtime, sets
