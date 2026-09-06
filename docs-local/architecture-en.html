@@ -1,0 +1,921 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <link rel="icon" href="data:,">
+  <title>Pursers — Architecture &amp; Operational Flow</title>
+  <style>
+    :root {
+      --ink: #17243b;
+      --muted: #58657a;
+      --paper: #f5f1e8;
+      --card: #fffdf8;
+      --line: #d8d1c3;
+      --navy: #173b57;
+      --teal: #087e78;
+      --orange: #ee7b36;
+      --gold: #efb94c;
+      --blue: #4177c6;
+      --green: #478568;
+      --red: #c14f47;
+      --shadow: 0 16px 42px rgba(31, 45, 61, .09);
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 8% 2%, rgba(239,185,76,.19), transparent 25rem),
+        radial-gradient(circle at 100% 18%, rgba(8,126,120,.12), transparent 31rem),
+        var(--paper);
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+        "Segoe UI", sans-serif;
+      line-height: 1.72;
+    }
+    a { color: var(--teal); text-underline-offset: .16em; }
+    .page { width: min(1160px, calc(100% - 32px)); margin: 0 auto; }
+    header { padding: 64px 0 34px; }
+    .eyebrow {
+      display: inline-flex; align-items: center; gap: 9px;
+      margin: 0 0 14px; color: var(--teal); font-size: .82rem;
+      font-weight: 800; letter-spacing: .13em; text-transform: uppercase;
+    }
+    .eyebrow::before { content: ""; width: 28px; height: 3px; background: var(--orange); border-radius: 2px; }
+    h1, h2, h3 { line-height: 1.22; letter-spacing: -.025em; }
+    h1 { max-width: 1060px; margin: 0; font-size: clamp(2.55rem, 6.2vw, 5.1rem); color: var(--navy); }
+    h1 span { color: var(--orange); }
+    .lead { max-width: 810px; margin: 22px 0 0; color: var(--muted); font-size: clamp(1.05rem, 2vw, 1.32rem); }
+    .meta { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 24px; }
+    .pill { padding: 7px 12px; border: 1px solid var(--line); border-radius: 999px; background: rgba(255,253,248,.75); font-size: .86rem; }
+    nav {
+      position: sticky; top: 0; z-index: 10; border-block: 1px solid rgba(216,209,195,.8);
+      background: rgba(245,241,232,.92); backdrop-filter: blur(12px);
+    }
+    nav .page { display: flex; gap: 8px; overflow-x: auto; padding-block: 10px; scrollbar-width: thin; }
+    nav a { flex: 0 0 auto; padding: 7px 11px; color: var(--ink); border-radius: 9px; text-decoration: none; font-size: .88rem; font-weight: 700; }
+    nav a:hover { background: var(--card); color: var(--teal); }
+    main { padding: 30px 0 70px; }
+    section { scroll-margin-top: 76px; margin-top: 64px; }
+    section:first-child { margin-top: 16px; }
+    h2 { margin: 0 0 10px; color: var(--navy); font-size: clamp(1.85rem, 4vw, 3rem); }
+    h3 { margin: 0 0 9px; color: var(--navy); font-size: 1.13rem; }
+    .section-intro { max-width: 800px; margin: 0 0 24px; color: var(--muted); }
+    .card {
+      border: 1px solid var(--line); border-radius: 20px; background: var(--card);
+      box-shadow: var(--shadow); padding: clamp(20px, 3vw, 34px);
+    }
+    .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+    .mini { position: relative; overflow: hidden; }
+    .mini::after { content: ""; position: absolute; inset: auto -30px -45px auto; width: 105px; height: 105px; border-radius: 50%; background: color-mix(in srgb, var(--accent) 15%, transparent); }
+    .mini strong { display: block; margin-bottom: 5px; color: var(--accent); font-size: 1.62rem; line-height: 1; }
+    .mini p { margin: 0; color: var(--muted); }
+    .diagram { margin-top: 18px; padding: 14px; overflow-x: auto; }
+    svg { display: block; width: 100%; min-width: 760px; height: auto; }
+    svg text { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+    .legend { display: flex; flex-wrap: wrap; gap: 12px 20px; margin-top: 15px; color: var(--muted); font-size: .84rem; }
+    .dot { display: inline-block; width: 10px; height: 10px; margin-right: 6px; border-radius: 50%; }
+    .callout { margin-top: 18px; padding: 16px 18px; border-left: 5px solid var(--gold); border-radius: 10px; background: #fff6d9; }
+    .callout strong { color: #855712; }
+    .steps { display: grid; grid-template-columns: repeat(6, 1fr); gap: 10px; margin-top: 22px; }
+    .step { min-height: 155px; padding: 16px 14px; border: 1px solid var(--line); border-radius: 15px; background: var(--card); }
+    .step .num { display: grid; place-items: center; width: 32px; height: 32px; margin-bottom: 12px; border-radius: 50%; color: white; background: var(--teal); font-weight: 850; }
+    .step p { margin: 0; color: var(--muted); font-size: .9rem; }
+    .compare-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 18px; background: var(--card); box-shadow: var(--shadow); }
+    table { width: 100%; min-width: 820px; border-collapse: collapse; }
+    th, td { padding: 17px 18px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+    th { color: white; background: var(--navy); font-size: .88rem; letter-spacing: .02em; }
+    tr:last-child td { border-bottom: 0; }
+    td:first-child { width: 18%; font-weight: 800; color: var(--navy); }
+    td:nth-child(2) { width: 30%; color: var(--muted); }
+    td:nth-child(3) { width: 32%; }
+    td:last-child { width: 20%; color: var(--teal); font-size: .9rem; }
+    code { padding: .13em .38em; border-radius: 5px; background: #edf0ec; color: #233b4d; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .88em; overflow-wrap: anywhere; }
+    .why { display: grid; grid-template-columns: 1.1fr .9fr; gap: 18px; }
+    .why ul { margin: 12px 0 0; padding-left: 1.25rem; }
+    .why li + li { margin-top: 10px; }
+    .quote { display: grid; align-content: center; min-height: 100%; color: white; background: var(--navy); }
+    .quote p { margin: 0; font-size: clamp(1.25rem, 2.5vw, 1.85rem); line-height: 1.5; }
+    .quote small { display: block; margin-top: 18px; color: #b9d5df; }
+    .guardrails { display: grid; grid-template-columns: repeat(2, 1fr); gap: 15px; }
+    .guardrail { border-top: 4px solid var(--accent); }
+    .guardrail p { margin: 0; color: var(--muted); }
+    .takeaway { display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; }
+    .takeaway .card { box-shadow: none; }
+    .takeaway b { color: var(--orange); font-size: 1.35rem; }
+    .sources { color: var(--muted); font-size: .86rem; }
+    .sources ul { padding-left: 1.2rem; }
+    .detail-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; margin-top: 18px; }
+    .detail-grid .card { box-shadow: none; }
+    .detail-grid ul { margin: 10px 0 0; padding-left: 1.25rem; }
+    .detail-grid li + li { margin-top: 8px; }
+    pre {
+      margin: 14px 0 0; padding: 16px; overflow-x: auto; border: 1px solid var(--line);
+      border-radius: 12px; color: #d9f4f1; background: #102f43; font: .84rem/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      white-space: pre-wrap; overflow-wrap: anywhere;
+    }
+    pre code { padding: 0; color: inherit; background: transparent; font-size: inherit; }
+    .version-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-top: 18px; }
+    .detail-grid > *, .version-grid > * { min-width: 0; }
+    .version-grid .card { padding: 18px; box-shadow: none; }
+    .version-grid b { display: block; color: var(--teal); font-size: 1.12rem; }
+    .version-grid small { color: var(--muted); }
+    footer { padding: 25px 0 48px; border-top: 1px solid var(--line); color: var(--muted); font-size: .84rem; }
+    @media (max-width: 900px) {
+      .grid, .why, .guardrails, .takeaway, .detail-grid { grid-template-columns: 1fr; }
+      .version-grid { grid-template-columns: repeat(2, 1fr); }
+      .steps { grid-template-columns: repeat(2, 1fr); }
+    }
+    @media (max-width: 560px) {
+      .page { width: min(100% - 22px, 1160px); }
+      header { padding-top: 42px; }
+      .steps { grid-template-columns: 1fr; }
+      .version-grid { grid-template-columns: 1fr; }
+      .card { border-radius: 15px; }
+    }
+    @media print {
+      body { background: white; }
+      nav { display: none; }
+      header { padding-top: 24px; }
+      section { break-inside: avoid; margin-top: 34px; }
+      .card, .compare-wrap { box-shadow: none; }
+      a { color: inherit; text-decoration: none; }
+    }
+  </style>
+</head>
+<body>
+  <header class="page">
+    <p class="eyebrow">Team briefing · Pursers v5</p>
+    <h1>From &ldquo;shared memory&rdquo; to<br><span>auditable work coordination</span></h1>
+    <p class="lead">Pursers 5.0.0a21 architecture overview: subscription-first push-wait across all seats, host-aware re-arm, project registry, worker pool, and independent review</p>
+    <div class="meta">
+      <span class="pill">Central + SQLite</span>
+      <span class="pill">MCP v2</span>
+      <span class="pill">JWT-only · RS256/JWKS</span>
+      <span class="pill">Subscription-first multi-board</span>
+      <span class="pill">Fleet dashboard</span>
+      <span class="pill">a21 released</span>
+    </div>
+  </header>
+
+  <nav aria-label="Table of contents">
+    <div class="page">
+      <a href="#start">5-minute start</a>
+      <a href="#mental-model">Mental model</a>
+      <a href="#architecture">Architecture</a>
+      <a href="#personal">Personal tier</a>
+      <a href="#fleet">Fleet &amp; registry</a>
+      <a href="#bounded">Bounded APIs</a>
+      <a href="#dashboards">Dashboards</a>
+      <a href="#coordinator">Coordinator</a>
+      <a href="#flow">Work flow</a>
+      <a href="#seats">Seats &amp; routing</a>
+      <a href="#compare">v4 &rarr; v5</a>
+      <a href="#unreleased">Unreleased</a>
+      <a href="#release">Build &amp; release</a>
+      <a href="#why">Design rationale</a>
+      <a href="#caveats">Guardrails</a>
+    </div>
+  </nav>
+
+  <main class="page">
+    <section id="start">
+      <h2>Get started in 5 minutes: 6 commands for operators</h2>
+      <pre><code>python -m pip install "pursers==5.0.0a21"
+pursers-personal setup --project /PATH/TO/project --session primary
+pursers-personal doctor --project /PATH/TO/project
+python tools/wait-bridge/registry_admin.py show
+python tools/fleet-dashboard/fleet_dashboard.py --token-file /PATH/TO/admin.jwt
+shasum -a 256 -c SHA256SUMS.txt</code></pre>
+      <div class="callout"><strong>Expected outcome:</strong> Version 5.0.0a21 and pinned component set match exactly, profile and identities are validated, registry passes schema checks, and the fleet dashboard opens on loopback.</div>
+    </section>
+
+    <section id="mental-model">
+      <h2>Quick mental model first</h2>
+      <p class="section-intro">Pursers is neither a code repository nor a new AI model; it is an auditable coordination tower that ensures multiple agents share the same queue, contest tasks without collisions, and preserve forensic evidence of who worked, who reviewed, and when each task closed.</p>
+      <div class="grid">
+        <article class="card mini" style="--accent: var(--teal)">
+          <strong>N boards</strong>
+          <h3>One fleet, multiple projects</h3>
+          <p>Each project maintains its own board and cursor sequence, while the central registry allows the wait bridge to multiplex across all active boards over a single transport connection.</p>
+        </article>
+        <article class="card mini" style="--accent: var(--orange)">
+          <strong>N seats</strong>
+          <h3>One session per worker seat</h3>
+          <p>Codex, Claude Desktop, Goose, or other hosts submit a per-call <code>agent_name</code>; Central derives deterministic identities per board without cross-session interference.</p>
+        </article>
+        <article class="card mini" style="--accent: var(--blue)">
+          <strong>2 roles</strong>
+          <h3>Strict separation of work and review</h3>
+          <p>Workers claim and submit tickets; an independent reviewer on a distinct principal inspects evidence to approve or reject with actionable fix instructions.</p>
+        </article>
+      </div>
+    </section>
+
+    <section id="architecture">
+      <h2>Architecture: Central at the core, agents operate locally</h2>
+      <p class="section-intro">Communication is cleanly divided across three layers: a JWT-only Central service backed by SQLite handles state mutations and concurrency arbitrations; MCP connectors expose standardized tools to AI hosts; and the wait bridge multiplexes cross-board push cues without vendor lock-in.</p>
+
+      <figure class="card diagram" aria-labelledby="arch-caption">
+        <svg viewBox="0 0 1080 610" role="img" aria-labelledby="arch-title arch-desc">
+          <title id="arch-title">Pursers Architecture Diagram</title>
+          <desc id="arch-desc">Central service and SQLite database at center, connecting to diverse AI hosts via MCP connectors and wait bridge, accompanied by MCP App dashboard</desc>
+          <defs>
+            <marker id="arrA" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0 0 L10 5 L0 10 z" fill="#587083"/>
+            </marker>
+            <filter id="softA" x="-20%" y="-20%" width="140%" height="140%">
+              <feDropShadow dx="0" dy="8" stdDeviation="8" flood-color="#152b3a" flood-opacity=".12"/>
+            </filter>
+            <pattern id="dotsA" width="16" height="16" patternUnits="userSpaceOnUse">
+              <circle cx="2" cy="2" r="1.4" fill="#e0d9cc"/>
+            </pattern>
+          </defs>
+          <rect x="2" y="2" width="1076" height="606" rx="24" fill="url(#dotsA)"/>
+
+          <g filter="url(#softA)">
+            <rect x="379" y="94" width="322" height="324" rx="30" fill="#173b57"/>
+            <rect x="419" y="139" width="242" height="96" rx="18" fill="#fffdf8"/>
+            <ellipse cx="540" cy="167" rx="62" ry="17" fill="#efb94c"/>
+            <path d="M478 167v37c0 10 28 18 62 18s62-8 62-18v-37" fill="#f7cf76"/>
+            <path d="M478 185c0 10 28 18 62 18s62-8 62-18" fill="none" stroke="#9e6f18" stroke-width="2"/>
+            <text x="540" y="268" text-anchor="middle" fill="#fff" font-size="28" font-weight="800">Pursers Central</text>
+            <text x="540" y="298" text-anchor="middle" fill="#c9e1e9" font-size="16">SQLite · journal · ticket state</text>
+            <rect x="430" y="329" width="220" height="52" rx="13" fill="#087e78"/>
+            <text x="540" y="351" text-anchor="middle" fill="#fff" font-size="16" font-weight="750">MCP v2 + JWT-only</text>
+            <text x="540" y="371" text-anchor="middle" fill="#d8ffff" font-size="12">RS256/JWKS · loopback</text>
+          </g>
+
+          <g>
+            <path d="M379 190 C305 190 290 140 236 140" fill="none" stroke="#587083" stroke-width="3" marker-start="url(#arrA)" marker-end="url(#arrA)"/>
+            <path d="M379 280 C305 280 290 306 236 306" fill="none" stroke="#587083" stroke-width="3" marker-start="url(#arrA)" marker-end="url(#arrA)"/>
+            <path d="M379 362 C305 362 290 473 236 473" fill="none" stroke="#587083" stroke-width="3" marker-start="url(#arrA)" marker-end="url(#arrA)"/>
+            <path d="M701 192 C772 192 784 143 838 143" fill="none" stroke="#587083" stroke-width="3" marker-start="url(#arrA)" marker-end="url(#arrA)"/>
+            <path d="M701 315 C777 315 783 340 838 340" fill="none" stroke="#587083" stroke-width="3" marker-start="url(#arrA)" marker-end="url(#arrA)"/>
+          </g>
+
+          <g filter="url(#softA)">
+            <rect x="48" y="77" width="188" height="126" rx="20" fill="#fffdf8" stroke="#d8d1c3"/>
+            <circle cx="88" cy="116" r="20" fill="#4177c6"/>
+            <path d="M76 116h24M88 104v24" stroke="#fff" stroke-width="4"/>
+            <text x="119" y="115" fill="#173b57" font-size="20" font-weight="800">Host A</text>
+            <text x="72" y="153" fill="#58657a" font-size="15">Codex + connector</text>
+            <text x="72" y="178" fill="#087e78" font-size="13">agent_name: session-a</text>
+
+            <rect x="48" y="243" width="188" height="126" rx="20" fill="#fffdf8" stroke="#d8d1c3"/>
+            <circle cx="88" cy="282" r="20" fill="#ee7b36"/>
+            <path d="M77 288c10-22 18-22 25 0" fill="none" stroke="#fff" stroke-width="4"/>
+            <text x="119" y="281" fill="#173b57" font-size="20" font-weight="800">Host B</text>
+            <text x="72" y="319" fill="#58657a" font-size="15">Claude + connector</text>
+            <text x="72" y="344" fill="#087e78" font-size="13">agent_name: session-b</text>
+
+            <rect x="48" y="410" width="188" height="126" rx="20" fill="#fffdf8" stroke="#d8d1c3"/>
+            <circle cx="88" cy="449" r="20" fill="#478568"/>
+            <path d="M76 449h24M88 437v24" stroke="#fff" stroke-width="4"/>
+            <text x="119" y="448" fill="#173b57" font-size="20" font-weight="800">Host N</text>
+            <text x="72" y="486" fill="#58657a" font-size="15">Other MCP-ready hosts</text>
+            <text x="72" y="511" fill="#087e78" font-size="13">agent_name: session-n</text>
+
+            <rect x="838" y="78" width="194" height="130" rx="20" fill="#fffdf8" stroke="#d8d1c3"/>
+            <rect x="874" y="106" width="122" height="55" rx="8" fill="#e5f0f4" stroke="#4177c6"/>
+            <path d="M886 147l24-21 17 13 22-25 34 33" fill="none" stroke="#4177c6" stroke-width="4"/>
+            <text x="935" y="186" text-anchor="middle" fill="#173b57" font-size="17" font-weight="800">MCP App dashboard</text>
+
+            <rect x="838" y="274" width="194" height="132" rx="20" fill="#fffdf8" stroke="#d8d1c3"/>
+            <path d="M878 314c0-17 14-31 31-31s31 14 31 31v27h-62z" fill="#efb94c"/>
+            <path d="M870 341h78" stroke="#9e6f18" stroke-width="5" stroke-linecap="round"/>
+            <text x="935" y="374" text-anchor="middle" fill="#173b57" font-size="17" font-weight="800">wait-bridge</text>
+            <text x="935" y="394" text-anchor="middle" fill="#58657a" font-size="12">subscription-first · poll opt-in</text>
+          </g>
+
+          <text x="539" y="477" text-anchor="middle" fill="#173b57" font-size="17" font-weight="800">Actual project files do not reside on the board</text>
+          <text x="539" y="503" text-anchor="middle" fill="#58657a" font-size="14">Workers only access authorized working directories such as /PATH/TO/project</text>
+          <path d="M420 526 H660" stroke="#ee7b36" stroke-width="4" stroke-linecap="round" stroke-dasharray="10 9"/>
+          <text x="540" y="557" text-anchor="middle" fill="#ee7b36" font-size="13" font-weight="750">Coordination &ne; file permissions</text>
+        </svg>
+        <figcaption id="arch-caption" class="legend">
+          <span><i class="dot" style="background:var(--navy)"></i>Central arbitrates state and commits forensic evidence</span>
+          <span><i class="dot" style="background:var(--teal)"></i>MCP establishes a common cross-host contract</span>
+          <span><i class="dot" style="background:var(--gold)"></i>Journal cues wake workers; state must be refetched</span>
+        </figcaption>
+      </figure>
+
+      <div class="callout">
+        <strong>TLS deployment realities:</strong> Production fleets run <code>pursers</code>, <code>fullplatts</code>, <code>mi-mcp-prd</code>, and archive boards on a single Central instance behind loopback TLS. However, what the package itself strictly enforces is loopback binding + JWT authentication; other profiles or local setups may run plain HTTP over loopback. Do not claim the package mandates TLS across all installations.
+      </div>
+
+      <div class="detail-grid">
+        <article class="card">
+          <h3>Authentication and admission</h3>
+          <ul>
+            <li><code>CENTRAL_AUTH_MODE</code> must be set to <code>jwt</code>; development token transition fallbacks have been removed.</li>
+            <li>The JWT verifier accepts only RS256, loads public keys from <code>CENTRAL_JWKS_PATH</code>, and validates issuer, audience, resource, expiration, subject, and scopes fail-closed.</li>
+            <li>The principal identity is derived solely from cryptographic claims, never from client-declared agent names; board admission requires membership via <code>board_member_add</code> or an invite through <code>board_invite</code>.</li>
+          </ul>
+        </article>
+        <article class="card">
+          <h3>Per-board identity derivation</h3>
+          <p>Central deterministically derives each <code>agent_id</code> using this canonical tuple:</p>
+          <pre><code>agent_id = "AI-" + sha256(
+  JSON([board_id, principal_id, agent_name])
+)</code></pre>
+          <p>Consequently, workers using the same agent name under the same principal receive distinct <code>agent_id</code> values on different boards; the fleet dashboard aggregates seat presence by <code>(principal_id, agent_name)</code> rather than <code>agent_id</code>.</p>
+        </article>
+        <article class="card">
+          <h3>board_state applies per-board scrub profiles</h3>
+          <p>Central 0.1.0a25 applies board-specific scrub profiles to <code>board_state_update</code>. An <code>internal</code> board can persist registries containing absolute <code>work_dir</code> paths, while a <code>strict</code> board rejects paths that resemble home directories.</p>
+        </article>
+        <article class="card">
+          <h3>Board generation fencing</h3>
+          <p>Every mutation susceptible to stale writers requires the board&rsquo;s current generation token. Rejoining returns the latest generation; callers must provide this token with claims, submissions, reviews, and lease renewals rather than assuming prior authorizations remain valid.</p>
+        </article>
+        <article class="card">
+          <h3>Data visibility scope vs. filesystem sandbox</h3>
+          <p>JWT tokens and board memberships govern which boards a principal may observe. In contrast, <code>work_dir</code> entries in the registry serve solely as routing metadata; local filesystem read/write permissions remain governed by the worker host&rsquo;s OS-level sandbox or container layer.</p>
+        </article>
+      </div>
+    </section>
+
+    <section id="personal">
+      <h2>Personal tier: Same Central, packaged for a single user on a single machine</h2>
+      <div class="detail-grid">
+        <article class="card">
+          <h3>Profiles and capabilities</h3>
+          <p><code>pursers-personal setup</code> provisions isolated profiles for boards, Central configurations, credentials, and host configs; <code>doctor</code> validates paths, versions, token identities, CA bundles, and config drift without leaking raw tokens to browsers or stdout.</p>
+        </article>
+        <article class="card">
+          <h3>Full-lifecycle CLI</h3>
+          <p>Running <code>setup</code> without <code>--apply</code> acts as a pure plan-only inspection; failed apply transactions roll back cleanly without leaving orphan profiles, and <code>uninstall</code> strips host integrations while preserving user project data.</p>
+        </article>
+        <article class="card">
+          <h3>Transactional host integration</h3>
+          <p>The Config panel displays redacted diffs prior to application, generates timestamped backups, and signals required host restarts. Release a21 introduced seat imports and granular per-seat or fleet-wide Doctor diagnostics.</p>
+        </article>
+        <article class="card">
+          <h3>Pure-read MCP App facade</h3>
+          <p>The dashboard resource queries <code>board_status</code>, <code>board_snapshot</code>, <code>fleet_snapshot</code>, and the journal event feed using bounded limits without joining or mutating boards; Personal <code>memory_*</code> endpoints remain supported for existing UI consumers.</p>
+        </article>
+        <article class="card">
+          <h3>Security boundary</h3>
+          <p>The Personal tier is designed for a single-user local trust boundary using loopback bindings + JWTs, storing credentials in protected files or secret stores; it is not multi-tenant and does not turn the registry into a filesystem sandbox.</p>
+        </article>
+        <article class="card">
+          <h3>Migration from On Board v4</h3>
+          <p><code>pursers-personal-import 5.0.0a3</code> executes a one-way cutover while embedding audit provenance; legacy datastores are never written back to, nor is import intended for bi-directional synchronization.</p>
+        </article>
+      </div>
+    </section>
+
+    <section id="fleet">
+      <h2>Cross-Project Fleet: Add a project once, the pool sees the entire system</h2>
+      <p class="section-intro">The registry board hosts the centralized project registry, and <code>a2a_wait(boards="registry")</code> resolves this registry into active boards before listening. Since a16, all seats rely on subscription-first event feeds rather than polling timers.</p>
+      <div class="callout"><strong>Unreleased:</strong> A blank seat home board indicates a fleet-wide worker serving all active registry boards (<code>boards=registry</code>), with the bridge binding to the registry board (default <code>pursers</code>); a named home board indicates a dedicated seat (<code>boards=home</code>), with the prompt passing <code>boards=["&lt;board&gt;"]</code>. Managed host configs persist this selector via <code>PURSERS_BOARDS</code> / <code>PURSERS_HOME_BOARD</code>.</div>
+
+      <figure class="card diagram" aria-labelledby="pool-caption">
+        <svg viewBox="0 0 1120 650" role="img" aria-labelledby="pool-title pool-desc">
+          <title id="pool-title">Project Registry and Multi-Board Worker Pool Data Flow</title>
+          <desc id="pool-desc">Operator modifies project registry once on home board, wait bridge loads active boards, maintains per-board cursors and agent IDs, receives subscription cues, and wakes workers</desc>
+          <defs>
+            <marker id="arrP" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+              <path d="M0 0 L10 5 L0 10 z" fill="#173b57"/>
+            </marker>
+            <filter id="softP" x="-20%" y="-20%" width="140%" height="140%">
+              <feDropShadow dx="0" dy="7" stdDeviation="7" flood-color="#152b3a" flood-opacity=".12"/>
+            </filter>
+          </defs>
+          <rect width="1120" height="650" rx="24" fill="#fbf8f0"/>
+
+          <g filter="url(#softP)">
+            <rect x="45" y="76" width="214" height="132" rx="20" fill="#fffdf8" stroke="#d8d1c3"/>
+            <text x="152" y="112" text-anchor="middle" fill="#173b57" font-size="19" font-weight="850">Registry admin</text>
+            <text x="152" y="142" text-anchor="middle" fill="#58657a" font-size="14">show · add · pause</text>
+            <text x="152" y="165" text-anchor="middle" fill="#58657a" font-size="14">activate · remove</text>
+            <text x="152" y="191" text-anchor="middle" fill="#087e78" font-size="12">validate + write + read-back</text>
+
+            <rect x="342" y="60" width="300" height="168" rx="24" fill="#173b57"/>
+            <text x="492" y="100" text-anchor="middle" fill="#fff" font-size="21" font-weight="850">Home board · pursers</text>
+            <text x="492" y="130" text-anchor="middle" fill="#c9e1e9" font-size="14">board_state["project_registry"]</text>
+            <rect x="382" y="152" width="220" height="48" rx="12" fill="#087e78"/>
+            <text x="492" y="181" text-anchor="middle" fill="#fff" font-size="14">schema v1 · active / paused</text>
+
+            <rect x="735" y="57" width="330" height="178" rx="24" fill="#fffdf8" stroke="#087e78" stroke-width="2"/>
+            <text x="900" y="96" text-anchor="middle" fill="#087e78" font-size="21" font-weight="850">wait-bridge</text>
+            <text x="900" y="128" text-anchor="middle" fill="#173b57" font-size="15">a2a_wait(boards="registry")</text>
+            <text x="900" y="158" text-anchor="middle" fill="#58657a" font-size="13">resolve active boards once per call</text>
+            <text x="900" y="184" text-anchor="middle" fill="#58657a" font-size="13">one cursor + generation + agent_id per board</text>
+            <text x="900" y="211" text-anchor="middle" fill="#ee7b36" font-size="12">add registry entry without editing connectors</text>
+          </g>
+
+          <path d="M259 142H332" stroke="#173b57" stroke-width="3" fill="none" marker-end="url(#arrP)"/>
+          <path d="M642 142H725" stroke="#173b57" stroke-width="3" fill="none" marker-end="url(#arrP)"/>
+
+          <g filter="url(#softP)">
+            <rect x="74" y="330" width="246" height="142" rx="20" fill="#eaf6f3" stroke="#087e78"/>
+            <text x="197" y="368" text-anchor="middle" fill="#087e78" font-size="19" font-weight="850">pursers</text>
+            <text x="197" y="398" text-anchor="middle" fill="#58657a" font-size="13">cursor[pursers]</text>
+            <text x="197" y="423" text-anchor="middle" fill="#58657a" font-size="13">agent_id[pursers]</text>
+            <text x="197" y="450" text-anchor="middle" fill="#173b57" font-size="12">subscription cue · poll opt-in</text>
+
+            <rect x="437" y="330" width="246" height="142" rx="20" fill="#eef5f7" stroke="#4177c6"/>
+            <text x="560" y="368" text-anchor="middle" fill="#4177c6" font-size="19" font-weight="850">fullplatts</text>
+            <text x="560" y="398" text-anchor="middle" fill="#58657a" font-size="13">cursor[fullplatts]</text>
+            <text x="560" y="423" text-anchor="middle" fill="#58657a" font-size="13">agent_id[fullplatts]</text>
+            <text x="560" y="450" text-anchor="middle" fill="#173b57" font-size="12">subscription cue · poll opt-in</text>
+
+            <rect x="800" y="330" width="246" height="142" rx="20" fill="#fff2e8" stroke="#ee7b36"/>
+            <text x="923" y="368" text-anchor="middle" fill="#b64d19" font-size="19" font-weight="850">mi-mcp-prd</text>
+            <text x="923" y="398" text-anchor="middle" fill="#58657a" font-size="13">cursor[mi-mcp-prd]</text>
+            <text x="923" y="423" text-anchor="middle" fill="#58657a" font-size="13">agent_id[mi-mcp-prd]</text>
+            <text x="923" y="450" text-anchor="middle" fill="#173b57" font-size="12">+ archive board</text>
+          </g>
+
+          <path d="M835 235 C790 282 197 266 197 320" fill="none" stroke="#173b57" stroke-width="3" marker-end="url(#arrP)"/>
+          <path d="M900 235 C850 282 560 274 560 320" fill="none" stroke="#173b57" stroke-width="3" marker-end="url(#arrP)"/>
+          <path d="M965 235 C1010 282 923 273 923 320" fill="none" stroke="#173b57" stroke-width="3" marker-end="url(#arrP)"/>
+
+          <rect x="235" y="548" width="650" height="58" rx="18" fill="#173b57"/>
+          <text x="560" y="574" text-anchor="middle" fill="#fff" font-size="17" font-weight="800">Aggregated cue back to worker · every event tagged with board_id</text>
+          <text x="560" y="595" text-anchor="middle" fill="#c9e1e9" font-size="12">Boards without admission &rarr; skipped_boards; other boards keep waiting</text>
+          <path d="M197 472 C197 523 330 516 393 538" fill="none" stroke="#173b57" stroke-width="3" marker-end="url(#arrP)"/>
+          <path d="M560 472V538" fill="none" stroke="#173b57" stroke-width="3" marker-end="url(#arrP)"/>
+          <path d="M923 472 C923 523 790 516 727 538" fill="none" stroke="#173b57" stroke-width="3" marker-end="url(#arrP)"/>
+        </svg>
+        <figcaption id="pool-caption" class="legend">
+          <span><i class="dot" style="background:var(--teal)"></i>The registry is the single control point for project membership</span>
+          <span><i class="dot" style="background:var(--blue)"></i>Per-board state isolation prevents cursor and lease contamination</span>
+          <span><i class="dot" style="background:var(--orange)"></i>Admission errors on one board do not block the rest of the pool</span>
+        </figcaption>
+      </figure>
+
+      <div class="detail-grid">
+        <article class="card">
+          <h3>Project registry contract</h3>
+          <p>Persisted under key <code>project_registry</code> on the registry board as a JSON string matching schema version 1:</p>
+          <pre><code>{
+  "schema_version": 1,
+  "projects": {
+    "&lt;name&gt;": {
+      "board_id": "&lt;board_id&gt;",
+      "work_dir": "&lt;absolute_work_dir&gt;",
+      "status": "active | paused"
+    }
+  }
+}</code></pre>
+        </article>
+        <article class="card">
+          <h3>Registry admin CLI</h3>
+          <p><code>tools/wait-bridge/registry_admin.py</code> supports <code>show</code>, <code>add</code>, <code>pause</code>, <code>activate</code>, and <code>remove</code>. All mutations perform strict whole-document validation before writing and execute an immediate read-back verification. Mismatches exit non-zero with diffs; authentication uses <code>ONBOARD_CENTRAL_TOKEN</code> without printing secrets.</p>
+          <pre><code>python tools/wait-bridge/registry_admin.py add &lt;name&gt;   --board-id &lt;board_id&gt; --work-dir &lt;absolute_work_dir&gt;</code></pre>
+        </article>
+        <article class="card">
+          <h3>Subscription-first + explicit polling</h3>
+          <p>Each accessible board subscribes to both <code>board://&lt;board_id&gt;/journal</code> and seat-specific notification cues via <code>BoardClient.events()</code>. Waking cues trigger a refetch with <code>touch=false</code>. If push notifications fail, the bridge logs the event and degrades only the affected board or call, attempting push reconnection on the next re-arm.</p>
+          <p>Idle seats generate zero traffic to Central after draining; seats holding active tickets renew only their specific lease within TTL bounds. Long-running work must issue explicit renewals outside of <code>a2a_wait</code> calls.</p>
+        </article>
+        <article class="card">
+          <h3>Failure is actionable data</h3>
+          <p>Multi-board wait responses return a composite <code>new_seq</code> dictionary, every journal event specifies its <code>board_id</code>, and inaccessible boards are recorded under <code>skipped_boards</code>. If the registry is missing or malformed, the system falls back to the home board with a <code>registry_warning</code> rather than fabricating entries.</p>
+        </article>
+      </div>
+
+      <h3 style="margin-top:32px">From registry to Fleet dashboard</h3>
+      <p class="section-intro">The pure-read tool <code>fleet_snapshot</code> discovers active projects from the registry, issues concurrent calls to <code>board_status</code> and bounded <code>board_snapshot</code> across each board without joining or mutating, and aggregates an organization-wide operational view.</p>
+      <figure class="card diagram" aria-labelledby="fleet-caption">
+        <svg viewBox="0 0 1100 430" role="img" aria-labelledby="fleet-title fleet-desc">
+          <title id="fleet-title">Fleet Dashboard Aggregation Path</title>
+          <desc id="fleet-desc">fleet snapshot reads the registry, fetches status and bounded snapshots from each board, aggregates seats by principal and agent name, and returns totals, projects, and worker pools</desc>
+          <defs>
+            <marker id="arrD" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10 z" fill="#173b57"/></marker>
+          </defs>
+          <rect width="1100" height="430" rx="24" fill="#fbf8f0"/>
+          <rect x="40" y="117" width="190" height="118" rx="18" fill="#173b57"/>
+          <text x="135" y="153" text-anchor="middle" fill="#fff" font-size="18" font-weight="800">project_registry</text>
+          <text x="135" y="181" text-anchor="middle" fill="#c9e1e9" font-size="13">active projects</text>
+          <text x="135" y="207" text-anchor="middle" fill="#c9e1e9" font-size="13">bounded list</text>
+
+          <rect x="300" y="60" width="205" height="92" rx="17" fill="#eef5f7" stroke="#4177c6"/>
+          <text x="402" y="96" text-anchor="middle" fill="#173b57" font-size="17" font-weight="800">board_status</text>
+          <text x="402" y="124" text-anchor="middle" fill="#58657a" font-size="12">open · claimed · submitted</text>
+          <rect x="300" y="201" width="205" height="92" rx="17" fill="#eaf6f3" stroke="#087e78"/>
+          <text x="402" y="237" text-anchor="middle" fill="#173b57" font-size="17" font-weight="800">board_snapshot</text>
+          <text x="402" y="265" text-anchor="middle" fill="#58657a" font-size="12">agents · tickets · omitted counts</text>
+
+          <rect x="575" y="91" width="230" height="176" rx="22" fill="#fff2e8" stroke="#ee7b36" stroke-width="2"/>
+          <text x="690" y="128" text-anchor="middle" fill="#b64d19" font-size="19" font-weight="850">fleet_snapshot</text>
+          <text x="690" y="160" text-anchor="middle" fill="#173b57" font-size="13">group (principal_id, agent_name)</text>
+          <text x="690" y="186" text-anchor="middle" fill="#58657a" font-size="13">dedupe seats across boards</text>
+          <text x="690" y="212" text-anchor="middle" fill="#58657a" font-size="13">classify busy / available / stale</text>
+          <text x="690" y="238" text-anchor="middle" fill="#087e78" font-size="12">warning + truncation counts</text>
+
+          <rect x="875" y="65" width="185" height="226" rx="22" fill="#fffdf8" stroke="#087e78" stroke-width="2"/>
+          <text x="967" y="103" text-anchor="middle" fill="#087e78" font-size="20" font-weight="850">Fleet tab</text>
+          <text x="967" y="137" text-anchor="middle" fill="#173b57" font-size="13">Agents · Busy</text>
+          <text x="967" y="160" text-anchor="middle" fill="#173b57" font-size="13">Available · Stale</text>
+          <text x="967" y="192" text-anchor="middle" fill="#58657a" font-size="13">project ticket counts</text>
+          <text x="967" y="218" text-anchor="middle" fill="#58657a" font-size="13">pool rows</text>
+          <rect x="904" y="239" width="127" height="30" rx="15" fill="#eaf6f3"/>
+          <text x="967" y="259" text-anchor="middle" fill="#087e78" font-size="12">project:ticket</text>
+
+          <g fill="none" stroke="#173b57" stroke-width="3" marker-end="url(#arrD)">
+            <path d="M230 158 C260 145 264 106 290 106"/>
+            <path d="M230 194 C260 207 264 247 290 247"/>
+            <path d="M505 106 C540 106 540 149 565 149"/>
+            <path d="M505 247 C540 247 540 210 565 210"/>
+            <path d="M805 179H865"/>
+          </g>
+          <text x="550" y="365" text-anchor="middle" fill="#58657a" font-size="14">Roster adds project name · current ticket · duplicate-name warnings; Fleet tab remains strictly read-only</text>
+        </svg>
+        <figcaption id="fleet-caption" class="legend">
+          <span><i class="dot" style="background:var(--navy)"></i>Pure-read: neither joins nor mutates boards</span>
+          <span><i class="dot" style="background:var(--orange)"></i>Deduplicates individuals across boards via (principal, agent_name)</span>
+          <span><i class="dot" style="background:var(--teal)"></i>Unavailable fields cleanly display em-dashes and warnings</span>
+        </figcaption>
+      </figure>
+    </section>
+
+    <section id="bounded">
+      <h2>Bounded APIs: Bound structures and bytes before controlling prose</h2>
+      <div class="detail-grid">
+        <article class="card">
+          <h3>Snapshot</h3>
+          <p><code>board_snapshot</code> bounds projected collections and total UTF-8 JSON byte size, returning total, returned, omitted, and truncated counts alongside high-watermark sequence tokens.</p>
+        </article>
+        <article class="card">
+          <h3>Catchup</h3>
+          <p><code>board_catchup</code> enforces event count and byte limits, returning <code>has_more</code> flags and updated <code>new_seq</code> cursors; release a21 introduced batching, compaction, and cursor clamping while guaranteeing monotonic progress within deadlines.</p>
+        </article>
+        <article class="card">
+          <h3>Status</h3>
+          <p><code>board_status</code> delivers a lightweight summary of active and pending board states, replacing the legacy <code>board_get_briefing</code> tool removed in release a21.</p>
+        </article>
+        <article class="card">
+          <h3>Submit</h3>
+          <p>Pursers Client 0.1.0a18 enforces notes length constraints, truncating at line boundaries with explicit truncation metadata to ensure evidence is never silently clipped.</p>
+        </article>
+      </div>
+      <div class="callout"><strong>Core principle:</strong> Model token limits do not constrain structured transport envelopes. Tools must enforce item, event, and byte limits, requiring callers to paginate using server-provided cursors.</div>
+    </section>
+
+    <section id="dashboards">
+      <h2>Two dashboard flavors separated by context</h2>
+      <div class="detail-grid">
+        <article class="card">
+          <h3>Standalone Fleet Dashboard (primary)</h3>
+          <p>The primary operator console hosted on loopback incorporates Home, Work, Agents, Config, Needs Attention, and Release &amp; Operations panels. Release a21 introduced seat imports and seat-level Doctor diagnostics, fleet clone worktree ownership, immutable release planning, Central staging verification, tag publishing, kickstart flows, and restart checklists.</p>
+        </article>
+        <article class="card">
+          <h3>MCP App (inline per-project)</h3>
+          <p>The <code>ui://pursers/dashboard</code> resource provides an inline, pure-read view showing Today, Work, Agents, Fleet, and Activity. It is not an operator console replacement and never receives credentials inside its iframe sandbox.</p>
+        </article>
+      </div>
+      <p><strong>Unreleased:</strong> Panel timer auto-refresh automatically pauses whenever a form holds input focus or contains unsaved modifications, resuming via a fixed &ldquo;Resume&rdquo; pill or status bar click. The fleet clone endpoint populates working trees and repairs empty clone directories rather than rejecting them as dirty.</p>
+    </section>
+
+    <section id="coordinator">
+      <h2>Coordinator: Read, analyze, intake asks, observe dispatch without claiming work</h2>
+      <div class="detail-grid">
+        <article class="card">
+          <h3>Findings engine</h3>
+          <p>Surfaces deduplicated reports covering stale claims, unverifiable or closed-but-unmerged commits, oversized boards, and integration gaps; <code>board-degraded</code> alerts are reserved strictly for genuine network or call failures.</p>
+        </article>
+        <article class="card">
+          <h3>Structured intake</h3>
+          <p>Deterministic classifiers translate authorized incoming asks into formal tickets through an isolated principal intake, featuring consume-once idempotency tokens and an explicit approval matrix.</p>
+        </article>
+        <article class="card">
+          <h3>Orchestrator digest</h3>
+          <p><code>board_digest</code>, <code>board_digest_ack</code>, and board watchlists provide non-blocking event buffer reads; orchestrators never issue <code>a2a_wait</code> calls, claim tickets, review submissions, or merge code autonomously.</p>
+        </article>
+        <article class="card">
+          <h3>Dispatcher liveness</h3>
+          <p>Release a21 restricts work offers to verifiable live seats with fair round-robin rotation and persistent offer deadlines across restarts. Unreleased features periodically re-surface unclaimed broadcast tickets according to <code>PURSERS_BACKLOG_RESURFACE_INTERVAL_S</code> and ensure coordinators are never dispatched work.</p>
+        </article>
+      </div>
+      <div class="callout"><strong>Reduced attack surface:</strong> <code>agent_nudge</code> has been removed. Autonomous Dispatcher offers serve as the sole targeted waking mechanism.</div>
+    </section>
+
+    <section id="flow">
+      <h2>Core work flow: Wait &rarr; Race claim &rarr; Understand &rarr; Do &rarr; Submit &rarr; Review</h2>
+      <p class="section-intro">The foundation of safe autonomy is server-side atomic state transitions: exactly one worker wins a claim race. The event journal acts as a wake-up cue rather than a source of truth; workers must always refetch current ticket state before executing tasks.</p>
+
+      <figure class="card diagram" aria-labelledby="flow-caption">
+        <svg viewBox="0 0 1100 600" role="img" aria-labelledby="flow-title flow-desc">
+          <title id="flow-title">Pursers Operational Work Flow</title>
+          <desc id="flow-desc">Lifecycle sequence: worker arms wait, receives cue, races to claim, executes task, submits evidence, independent reviewer approves to close or rejects with fix instructions</desc>
+          <defs>
+            <marker id="arrF" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+              <path d="M0 0 L10 5 L0 10 z" fill="#173b57"/>
+            </marker>
+          </defs>
+          <rect width="1100" height="600" rx="24" fill="#fbf8f0"/>
+
+          <g>
+            <rect x="151" y="95" width="155" height="62" rx="16" fill="#173b57"/>
+            <text x="228" y="121" text-anchor="middle" fill="#fff" font-size="17" font-weight="800">1 · ARM</text>
+            <text x="228" y="143" text-anchor="middle" fill="#c9e1e9" font-size="12">a2a_wait(boards)</text>
+
+            <rect x="151" y="263" width="155" height="62" rx="16" fill="#4177c6"/>
+            <text x="228" y="289" text-anchor="middle" fill="#fff" font-size="17" font-weight="800">2 · WAKE</text>
+            <text x="228" y="311" text-anchor="middle" fill="#e8f2ff" font-size="12">subscription cue</text>
+
+            <rect x="386" y="263" width="155" height="62" rx="16" fill="#087e78"/>
+            <text x="463" y="289" text-anchor="middle" fill="#fff" font-size="17" font-weight="800">3 · CLAIM</text>
+            <text x="463" y="311" text-anchor="middle" fill="#d9fffb" font-size="12">atomic contest</text>
+
+            <rect x="386" y="95" width="155" height="62" rx="16" fill="#173b57"/>
+            <text x="463" y="121" text-anchor="middle" fill="#fff" font-size="17" font-weight="800">4 · UNDERSTAND</text>
+            <text x="463" y="143" text-anchor="middle" fill="#c9e1e9" font-size="12">refetch touch=false</text>
+
+            <rect x="621" y="95" width="155" height="62" rx="16" fill="#173b57"/>
+            <text x="698" y="121" text-anchor="middle" fill="#fff" font-size="17" font-weight="800">5 · WORK</text>
+            <text x="698" y="143" text-anchor="middle" fill="#c9e1e9" font-size="12">in fleet clone</text>
+
+            <rect x="856" y="95" width="155" height="62" rx="16" fill="#173b57"/>
+            <text x="933" y="121" text-anchor="middle" fill="#fff" font-size="17" font-weight="800">6 · RENEW</text>
+            <text x="933" y="143" text-anchor="middle" fill="#c9e1e9" font-size="12">periodic lease keepalive</text>
+
+            <rect x="856" y="263" width="155" height="62" rx="16" fill="#ee7b36"/>
+            <text x="933" y="289" text-anchor="middle" fill="#fff" font-size="17" font-weight="800">7 · SUBMITTED</text>
+            <text x="933" y="311" text-anchor="middle" fill="#fff0e7" font-size="12">await independent review</text>
+
+            <rect x="621" y="430" width="155" height="62" rx="16" fill="#478568"/>
+            <text x="698" y="456" text-anchor="middle" fill="#fff" font-size="17" font-weight="800">8 · REVIEW</text>
+            <text x="698" y="478" text-anchor="middle" fill="#eafff1" font-size="12">read diffs + run evidence</text>
+
+            <rect x="856" y="430" width="155" height="62" rx="16" fill="#087e78"/>
+            <text x="933" y="456" text-anchor="middle" fill="#fff" font-size="17" font-weight="800">9A · CLOSE</text>
+            <text x="933" y="478" text-anchor="middle" fill="#d9fffb" font-size="12">approved &amp; closed</text>
+
+            <rect x="386" y="430" width="155" height="62" rx="16" fill="#c14f47"/>
+            <text x="463" y="456" text-anchor="middle" fill="#fff" font-size="17" font-weight="800">9B · REJECT</text>
+            <text x="463" y="478" text-anchor="middle" fill="#ffe7e5" font-size="12">return fix instructions</text>
+          </g>
+
+          <g fill="none" stroke="#173b57" stroke-width="3" marker-end="url(#arrF)">
+            <path d="M228 157v103"/>
+            <path d="M306 294h70"/>
+            <path d="M463 263v-96"/>
+            <path d="M541 126h70"/>
+            <path d="M776 126h70"/>
+            <path d="M933 157v96"/>
+            <path d="M933 325v65c0 40-64 14-137 50"/>
+            <path d="M776 461h70"/>
+            <path d="M621 461h-70"/>
+            <path d="M463 430V195c0-42 100-69 148-69" stroke="#c14f47" stroke-dasharray="8 7"/>
+          </g>
+          <text x="518" y="385" fill="#c14f47" font-size="13" font-weight="750">Fix &rarr; validate &rarr; resubmit</text>
+          <path d="M933 492v54H228v-369" fill="none" stroke="#087e78" stroke-width="3" stroke-dasharray="9 7" marker-end="url(#arrF)"/>
+          <text x="661" y="569" text-anchor="middle" fill="#087e78" font-size="13" font-weight="750">Closed ticket releases slot; worker re-arms for next offer</text>
+        </svg>
+        <figcaption id="flow-caption" class="legend">
+          <span><i class="dot" style="background:var(--blue)"></i>Workers execute only claimed tickets</span>
+          <span><i class="dot" style="background:var(--orange)"></i>Central remains authoritative source of truth</span>
+          <span><i class="dot" style="background:var(--green)"></i>Reviewers evaluate work independently</span>
+          <span><i class="dot" style="background:var(--red)"></i>Rejection is not failure, but an auditable repair loop</span>
+        </figcaption>
+      </figure>
+
+      <div class="steps" aria-label="Summary of six steps">
+        <div class="step"><div class="num">1</div><h3>Arm</h3><p>Call <code>a2a_wait(boards="registry")</code> with latest cursors; on <code>timed_out=true</code>, immediately re-arm using returned <code>new_seq</code>.</p></div>
+        <div class="step"><div class="num">2</div><h3>Claim</h3><p>Contest offered ticket; losing agents immediately step back to wait rather than duplicate work.</p></div>
+        <div class="step"><div class="num">3</div><h3>Understand</h3><p>Inspect ticket description, required fields, relevant memories, and any rejection fix instructions.</p></div>
+        <div class="step"><div class="num">4</div><h3>Do</h3><p>Work strictly within the authorized fleet clone; issue periodic renewals for long tasks.</p></div>
+        <div class="step"><div class="num">5</div><h3>Submit</h3><p>Report changes, test results, constraints, and verified evidence truthfully without exaggeration.</p></div>
+        <div class="step"><div class="num">6</div><h3>Review</h3><p>An independent reviewer under a separate principal inspects evidence; approve to close or reject with fix steps.</p></div>
+      </div>
+      <div class="callout"><strong>Team topology &amp; governance:</strong> One worker seat maps to one host session and one <code>agent_name</code> per call. Reviewer seats operate under their own distinct principal and must verify reproducible evidence before approving or rejecting. Operators oversee scope and boundaries. Browser verification uses lightweight dedicated headless/lite tools, never unconstrained personal browsers.</div>
+      <div class="callout"><strong>Unreleased &mdash; keepalive liveness:</strong> Background lease renewal occurs only while the stdio session demonstrates active model liveness within <code>PURSERS_KEEPALIVE_IDLE_LIMIT_S</code> (default three claim TTLs). When idle, renewal pauses with a <code>lease_keepalive_paused</code> notification cue, and the Needs Attention panel flags claims sustained solely by keepalive.</div>
+    </section>
+
+    <section id="seats">
+      <h2>Three seat flavors and work routing</h2>
+      <p class="section-intro">Despite differences in transport mechanisms, all seats authenticate via JWTs, participate in board membership, observe generation tokens, and submit per-call identities. Roles have been declared by seats since a18, and reviewers must belong to a separate principal from submitters.</p>
+      <div class="detail-grid">
+        <article class="card">
+          <h3>MCP seat (Codex / Claude Desktop)</h3>
+          <p>Listens via the Wait Bridge using subscription-first multiplexing across boards, refetches ticket state upon cue, and aligns with host timeout profiles to re-arm cleanly prior to client deadlines.</p>
+        </article>
+        <article class="card">
+          <h3>CLI seat (Goose seat-kit)</h3>
+          <p>The <code>seat_new.py</code> generator creates role-safe <code>bin/board.sh</code> wrappers, token launch files, fleet clone workflows, and wait commands driven by registry cursor maps. Unreleased updates make <code>--board</code> optional, introduce <code>--registry-board</code>, preserve virtual environment interpreters under <code>--python</code>, and ensure upgrades do not abort on non-fast-forward seat clones.</p>
+        </article>
+        <article class="card">
+          <h3>API seat (worker-runtime)</h3>
+          <p>Headless runtime consuming identical capability, tier, and skill-targeted offers as interactive seats, equipped with bounded wait/submit loops, fleet-owned clone trees, and a strictly reduced tool surface.</p>
+        </article>
+      </div>
+      <div class="callout"><strong>Work routing:</strong> The Dispatcher issues offers only to active live seats meeting tier, skill, and role permissions. Atomic review leases prevent duplicate inspections, and continuations track prior claim holders and branches across handoffs.</div>
+    </section>
+
+    <section id="compare">
+      <h2>What changed: On Board v4 (legacy) &rarr; Pursers v5</h2>
+      <p class="section-intro">The core evolution is not simply a change in file formats, but a fundamental transition from an isolated per-project memory store to a shared multi-host work control plane.</p>
+      <div class="compare-wrap">
+        <table>
+          <thead>
+            <tr><th>Dimension</th><th>On Board v4</th><th>Pursers v5</th><th>Operational impact</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Storage</td><td>Scattered <code>.agent-mem</code> files across projects</td><td>Centralized SQLite backed by ACID transactions and WAL journals</td><td>Claim/submit states avoid write collisions and maintain full historical auditability.</td></tr>
+            <tr><td>Project scope</td><td>Single board tightly coupled to single project</td><td>Multi-board fleets coordinated via a central project registry defining <code>board_id</code>, <code>work_dir</code>, and status</td><td>Add new projects through a single registry entry without altering worker connector configs.</td></tr>
+            <tr><td>Identity</td><td>One process or application equaled one identity</td><td>Explicit per-call <code>agent_name</code>; <code>agent_id</code> derived deterministically from board + principal + name</td><td>Multiple sessions safely share transports while isolating cursors, leases, and logs.</td></tr>
+            <tr><td>Permissions &amp; Auth</td><td>Development tokens and local convention</td><td>JWT-only RS256/JWKS authentication, capability scopes, and per-board invite admission</td><td>Eliminates insecure token fallbacks; separates agent name from principal identity to enforce independent reviews.</td></tr>
+            <tr><td>Worker waking</td><td>Continuous timer polling</td><td><code>a2a_wait(boards="registry")</code> using MCP subscriptions/listen by default; polling retained as explicit fallback</td><td>Idle seats generate zero traffic to Central; timeouts simply cycle calls and re-arm with updated cursor maps.</td></tr>
+            <tr><td>Memory</td><td>Files risked corruption or overwrites during manual edits</td><td>Live memories, archives, and retraction pointers decoupled; compaction touches only reproducible telemetry</td><td>Original historical context is preserved; eliminates destructive truncations.</td></tr>
+            <tr><td>Builds</td><td>Environment variations produced differing wheels</td><td>Pinned toolchain, fixed build epoch, and cryptographic SHA-256 lockfile across components and views</td><td>Component wheels build byte-identically; packages reject mismatched dashboard bundles.</td></tr>
+            <tr><td>Publishing</td><td>Manual package deployments</td><td>All packages distributed via PyPI; GitHub Actions uses Trusted Publishing OIDC accompanied by <code>SHA256SUMS.txt</code></td><td>Removes long-lived PyPI API secrets; operators can verify artifact checksums prior to installation.</td></tr>
+            <tr><td>User Interface</td><td>Logs scattered in chat windows and local files</td><td>Pure-read MCP App featuring Roster and Fleet overview tabs driven by <code>fleet_snapshot</code></td><td>Consolidates project totals, ticket statuses, and worker chips without leaking tokens into browser iframes.</td></tr>
+            <tr><td>Governance</td><td>Unstructured context sharing</td><td>Worker submission &rarr; independent review on separate principal &rarr; approve/close or reject with instructions</td><td>Tasks cannot be marked closed solely by their author; enforces verifiable evidence gates.</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <figure class="card diagram" aria-labelledby="evo-caption">
+        <svg viewBox="0 0 1080 350" role="img" aria-labelledby="evo-title evo-desc">
+          <title id="evo-title">Evolution from On Board v4 to Pursers v5</title>
+          <desc id="evo-desc">Left side illustrates isolated project files and single identity per app, evolving via MCP standards and journals to Central SQLite, JWT-only auth, project registry, multi-board pools, and locked artifacts</desc>
+          <defs>
+            <linearGradient id="evoG" x1="0" x2="1">
+              <stop offset="0" stop-color="#ee7b36"/><stop offset="1" stop-color="#087e78"/>
+            </linearGradient>
+            <marker id="arrE" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+              <path d="M0 0 L10 5 L0 10 z" fill="#173b57"/>
+            </marker>
+          </defs>
+          <rect width="1080" height="350" rx="24" fill="#fbf8f0"/>
+          <rect x="54" y="55" width="316" height="238" rx="26" fill="#fff2e8" stroke="#ee7b36" stroke-width="2"/>
+          <text x="212" y="96" text-anchor="middle" fill="#b64d19" font-size="25" font-weight="850">On Board v4</text>
+          <g fill="#173b57" font-size="16">
+            <text x="92" y="140">&bull; .agent-mem per project</text>
+            <text x="92" y="176">&bull; One identity per app</text>
+            <text x="92" y="212">&bull; Polling-centric</text>
+            <text x="92" y="248">&bull; Environment-dependent builds</text>
+          </g>
+          <path d="M400 175H670" fill="none" stroke="url(#evoG)" stroke-width="15" stroke-linecap="round" marker-end="url(#arrE)"/>
+          <circle cx="475" cy="175" r="38" fill="#fffdf8" stroke="#d8d1c3"/>
+          <circle cx="583" cy="175" r="38" fill="#fffdf8" stroke="#d8d1c3"/>
+          <text x="475" y="170" text-anchor="middle" fill="#173b57" font-size="14" font-weight="800">MCP</text>
+          <text x="475" y="188" text-anchor="middle" fill="#58657a" font-size="11">Standard contract</text>
+          <text x="583" y="170" text-anchor="middle" fill="#173b57" font-size="14" font-weight="800">Journal</text>
+          <text x="583" y="188" text-anchor="middle" fill="#58657a" font-size="11">Event cues</text>
+          <rect x="710" y="55" width="316" height="238" rx="26" fill="#eaf6f3" stroke="#087e78" stroke-width="2"/>
+          <text x="868" y="96" text-anchor="middle" fill="#087e78" font-size="25" font-weight="850">Pursers v5</text>
+          <g fill="#173b57" font-size="16">
+            <text x="748" y="140">&bull; Central SQLite + JWT-only</text>
+            <text x="748" y="176">&bull; Registry + multi-board pool</text>
+            <text x="748" y="212">&bull; Fleet overview + reviewer seats</text>
+            <text x="748" y="248">&bull; Reproducible release chain</text>
+          </g>
+          <text x="540" y="322" text-anchor="middle" fill="#58657a" font-size="14">From shared memory &rarr; governed work coordination</text>
+        </svg>
+        <figcaption id="evo-caption" class="legend"><span>Core philosophies remain local-first with human-directed scopes; enhancements provide concurrency arbitration, verified identities, and auditable evidence trails.</span></figcaption>
+      </figure>
+    </section>
+
+    <section id="unreleased">
+      <h2>Architecture roadmap: a14 &rarr; a21 and Unreleased</h2>
+      <table>
+        <thead><tr><th>Release</th><th>Structural Architectural Changes</th></tr></thead>
+        <tbody>
+          <tr><td>a14&ndash;a15</td><td>Runtime health checks, tier-aware worker runtime, transactional Host setup, wait-bridge handshake, and coordinator findings hygiene.</td></tr>
+          <tr><td>a16</td><td>Subscription-first wait multiplexing, host execution ceilings, side-effect-free refetch, and explicit timer polling fallback.</td></tr>
+          <tr><td>a17</td><td>Atomic review leases, Config and Doctor diagnostic panels, generated HARD-verify seat scaffolding, and registry-wide CLI wait capabilities.</td></tr>
+          <tr><td>a18</td><td>Explicit worker, reviewer, and orchestrator roles; capability offers; background lease keepalive; split-identity fail-closed verification; bounded digest and watch modes.</td></tr>
+          <tr><td>a19&ndash;a20</td><td>Membership admission and connector identity hardening; shared event vocabulary allowing push listeners to fail open on unknown kinds with fallback visibility.</td></tr>
+          <tr><td>a21</td><td>Live-seat fair dispatch, persistent offer deadlines and dispatch histories, agent retirement lifecycles, compacted catch-up pagination, fleet-owned clone management, seat import and Doctor tooling, Release &amp; Operations panel; removal of legacy tools (<code>agent_nudge</code>, <code>board_get_briefing</code>, <code>ticket_terminate</code>).</td></tr>
+          <tr><td>Unreleased, on main</td><td>Fleet-wide versus dedicated home-board semantics (<code>boards=registry</code> vs. <code>boards=home</code>), model-liveness-gated lease keepalive, automatic backlog ticket re-surfacing and re-offers, form-safe dashboard auto-refresh with Resume controls, fleet clone working tree population and repair, and seat-kit virtual environment interpreter preservation and non-fast-forward upgrade safety.</td></tr>
+        </tbody>
+      </table>
+      <p>Unreleased features are actively developed on main: do not label these features under release 5.0.0a21 until a formal version tag, manifest lock, and release artifact are approved.</p>
+    </section>
+
+    <section id="release">
+      <h2>Build and release: From source to PyPI with a hash chain</h2>
+      <p class="section-intro">The pre-release package set described herein represents <code>v5.0.0a21</code>, incorporating subscription-first push-wait mechanics. Operators must verify checksums and manifests prior to production deployment.</p>
+      <div class="version-grid" aria-label="Current distribution component versions">
+        <article class="card"><b>5.0.0a21</b><small>pursers · meta installer</small></article>
+        <article class="card"><b>5.0.0a21</b><small>pursers-personal</small></article>
+        <article class="card"><b>0.1.0a25</b><small>pursers-central</small></article>
+        <article class="card"><b>0.1.0a18</b><small>pursers-client</small></article>
+        <article class="card"><b>5.0.0a3</b><small>pursers-personal-import</small></article>
+        <article class="card"><b>0.1.0a11</b><small>pursers-wait-bridge</small></article>
+      </div>
+
+      <div class="detail-grid">
+        <article class="card">
+          <h3>Installation from PyPI</h3>
+          <pre><code>pip install pursers
+uvx pursers-wait-bridge</code></pre>
+          <p>The released suite pins Central <code>0.1.0a25</code>, Client <code>0.1.0a18</code>, and Personal <code>5.0.0a21</code> as exact dependencies; verify package manifests before installing.</p>
+        </article>
+        <article class="card">
+          <h3>Trusted Publishing</h3>
+          <p><code>.github/workflows/publish-pypi.yml</code> builds distribution wheels and publishes via <code>pypa/gh-action-pypi-publish</code> using GitHub Actions OpenID Connect (<code>id-token: write</code>), isolating the <code>pypi</code> and <code>pypi-bridge</code> environments without long-lived API tokens.</p>
+        </article>
+        <article class="card">
+          <h3>Reproducible component lock</h3>
+          <p><code>tools/regenerate_component_lock.py</code> provisions clean virtual environments, checks pinned toolchains, and sets <code>PYTHONHASHSEED=0</code> and <code>SOURCE_DATE_EPOCH=315532800</code> to guarantee bit-for-bit reproducible wheel builds.</p>
+          <p><code>component-lock.json</code> records wheel SHA-256 hashes, internal member checksums, and dashboard asset fingerprints; Central and Client packages build byte-identically under designated toolchains.</p>
+        </article>
+        <article class="card">
+          <h3>Release verification</h3>
+          <p>Operator-approved releases bundle distribution wheels with <code>SHA256SUMS.txt</code>. Operators verify artifacts via:</p>
+          <pre><code>shasum -a 256 -c SHA256SUMS.txt</code></pre>
+          <p>This release chain enforces clear separation: source code dictates logic &rarr; lockfiles seal build components &rarr; release checksums verify distribution files &rarr; Trusted Publishing authenticates uploads to PyPI.</p>
+        </article>
+      </div>
+    </section>
+
+    <section id="why">
+      <h2>Design rationale</h2>
+      <p class="section-intro">The architectural goal is not creating a single omnipotent agent, but enabling diverse models across vendors to collaborate effectively while operators retain complete control over data, scopes, and accountability.</p>
+      <div class="why">
+        <article class="card">
+          <h3>1. Cross-vendor interoperability is a core feature</h3>
+          <ul>
+            <li><strong>MCP provides clean boundaries:</strong> Any host implementing the standard protocol interacts with identical ticket and memory models without Central needing model-specific logic.</li>
+            <li><strong>Identity bound to individual calls:</strong> Multiple concurrent sessions share connectors while Central independently validates their respective <code>agent_name</code> and principal credentials.</li>
+            <li><strong>Server-side atomic arbitration:</strong> Even when multiple workers wake concurrently, atomic claim operations ensure exactly one worker is awarded a ticket.</li>
+          </ul>
+        </article>
+        <aside class="card quote">
+          <p>&ldquo;Let models compete on work quality, not on who overwrites shared state first.&rdquo;</p>
+          <small>Core philosophy of Central + ticket leases + independent reviews</small>
+        </aside>
+        <article class="card">
+          <h3>2. Local-first architecture minimizes attack surface</h3>
+          <ul>
+            <li>Central binds exclusively to loopback interfaces in Personal deployments, storing data in user-controlled SQLite databases.</li>
+            <li>Secrets and tokens never appear in configuration diffs, dashboard HTML, iframe messages, tool outputs, or logs; documentation examples use placeholders such as <code>&lt;token&gt;</code>.</li>
+            <li>Dashboards operate in pure-read mode; file modification rights remain strictly governed by the OS-level file-editing layer within <code>/PATH/TO/project</code> rather than the board.</li>
+          </ul>
+        </article>
+        <article class="card">
+          <h3>3. Cloud-ready without redesign</h3>
+          <ul>
+            <li>JWTs partition issuers, audiences, scopes, and principals from day one, facilitating straightforward integration with enterprise identity providers.</li>
+            <li>Journal cursors, bounded snapshots, and idempotent event streams gracefully accommodate network interruptions and client reconnects.</li>
+            <li>Cryptographic artifact locks and pinned build environments ensure reproducible verification across external cloud runners.</li>
+          </ul>
+        </article>
+      </div>
+    </section>
+
+    <section id="caveats">
+      <h2>Operational realities and guardrails</h2>
+      <p class="section-intro">While this briefing articulates the v5 architecture, conceptual capabilities must not be mistaken for security assurances beyond what the codebase enforces.</p>
+      <div class="guardrails">
+        <article class="card guardrail" style="--accent: var(--red)">
+          <h3>The registry is routing metadata, not a filesystem sandbox</h3>
+          <p>The <code>project_registry</code> maps board identifiers to local <code>work_dir</code> paths; it does not grant or restrict filesystem read/write permissions. Filesystem safety must be enforced by container runtimes or host-level sandboxes, while board access is governed by membership.</p>
+        </article>
+        <article class="card guardrail" style="--accent: var(--gold)">
+          <h3>Push events are cues, not authoritative payloads</h3>
+          <p>When <code>subscriptions/listen</code> wakes a bridge, the client must refetch state using <code>touch=false</code> before taking action. If push notifications fail, the bridge gracefully falls back to polling for that board and retries push subscriptions on the next re-arm.</p>
+        </article>
+        <article class="card guardrail" style="--accent: var(--blue)">
+          <h3>Leases expire</h3>
+          <p>The wait bridge only renews leases for tickets actively held by the seat during an ongoing <code>a2a_wait</code> call; idle seats emit no keepalive signals. Long operations must call <code>lease_renew</code> directly to prevent background reapers from returning the ticket to the open backlog.</p>
+        </article>
+        <article class="card guardrail" style="--accent: var(--green)">
+          <h3>Review requires independent principals</h3>
+          <p>Differing agent names may belong to the same underlying principal. Strict review governance verifies that the submitter and reviewer principals differ, and reviewers must independently inspect test and execution evidence before approval.</p>
+        </article>
+      </div>
+    </section>
+
+    <section>
+      <h2>60-second executive summary</h2>
+      <div class="takeaway">
+        <article class="card"><b>01</b><h3>Central is the impartial umpire</h3><p>SQLite persists ticket state and journal logs; JWT-only auth and memberships control board access, while atomic claims eliminate collision races.</p></article>
+        <article class="card"><b>02</b><h3>The registry enables fleet coordination</h3><p>The wait bridge discovers active boards from the registry, maintaining isolated subscriptions and cursors; timer polling serves strictly as an intentional fallback.</p></article>
+        <article class="card"><b>03</b><h3>Work is complete only when verified</h3><p>Worker seats submit changes; independent reviewer seats on distinct principals approve or reject; fleet dashboards provide visibility, and workers re-arm upon closure.</p></article>
+      </div>
+    </section>
+
+    <section class="sources" aria-label="Codebase evidence">
+      <h2>Evidence verified from this checkout</h2>
+      <ul>
+        <li><code>packages/central/src/pursers_central/central.py</code> &mdash; Loopback binding, JWT verification, journal notifications, and ticket/review tooling.</li>
+        <li><code>packages/central/src/pursers_central/jwt_verifier.py</code> &mdash; RS256-only JWKS verification and fail-closed claim checks.</li>
+        <li><code>packages/central/tests/test_board_state_scrub_profile.py</code> &mdash; <code>board_state_update</code> scrub profiles in Central 0.1.0a25.</li>
+        <li><code>packages/central/src/pursers_central/transactional_sqlite.py</code> and <code>sqlite_store.py</code> &mdash; Transactional SQLite and WAL-backed persistence.</li>
+        <li><code>tools/wait-bridge/pursers_wait_server.py</code> and <code>README.md</code> &mdash; Subscription-first waits, host profiles, per-call identities, multi-board cursors, explicit poll fallback, and lease keepalive.</li>
+        <li><code>tools/wait-bridge/registry_admin.py</code> &mdash; Schema validation, safe mutations, and read-back verification for project registries.</li>
+        <li><code>packages/client/tests/test_per_call_identity.py</code> &mdash; Explicit identities isolated from shared client state.</li>
+        <li><code>packages/personal/src/pursers_personal/apps_server.py</code> &mdash; Pure-read <code>fleet_snapshot</code>, bounded board reads, and pool aggregation.</li>
+        <li><code>tools/dashboard-ui/src/dashboard.ts</code> &mdash; Fleet tab, totals, project and pool tables, seat chips, and Roster fields.</li>
+        <li><code>tools/regenerate_component_lock.py</code> and <code>component-lock.json</code> &mdash; Pinned toolchains, fixed epoch, and SHA-256 component/view locks.</li>
+        <li><code>.github/workflows/publish-pypi.yml</code> &mdash; Trusted Publishing via GitHub Actions OIDC across all six distributions.</li>
+        <li><code>packages/*/pyproject.toml</code> and <code>tools/wait-bridge/pyproject.toml</code> &mdash; Current released versions and exact dependency pins.</li>
+      </ul>
+    </section>
+  </main>
+
+  <footer>
+    <div class="page">Pursers architecture briefing · v5.0.0a21 release · Standalone documentation with zero external assets, CDNs, or JavaScript · Placeholders used for credentials and private paths</div>
+  </footer>
+</body>
+</html>
