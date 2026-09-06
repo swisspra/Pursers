@@ -148,7 +148,7 @@
 <body>
   <header class="page">
     <p class="eyebrow">Team briefing · Pursers v5</p>
-    <h1>From &ldquo;shared memory&rdquo; to<br><span>auditable work coordination</span></h1>
+    <h1>From &ldquo;shared memory&rdquo; to <br><span>auditable work coordination</span></h1>
     <p class="lead">Pursers 5.0.0a21 architecture overview: subscription-first push-wait across all seats, host-aware re-arm, project registry, worker pool, and independent review</p>
     <div class="meta">
       <span class="pill">Central + SQLite</span>
@@ -590,7 +590,7 @@ shasum -a 256 -c SHA256SUMS.txt</code></pre>
         </article>
         <article class="card">
           <h3>Dispatcher liveness</h3>
-          <p>Release a21 restricts work offers to verifiable live seats with fair round-robin rotation and persistent offer deadlines across restarts. Unreleased features periodically re-surface unclaimed broadcast tickets according to <code>PURSERS_BACKLOG_RESURFACE_INTERVAL_S</code> and ensure coordinators are never dispatched work.</p>
+          <p>Release a21 restricts work offers to verifiable live seats with fair round-robin rotation and persistent offer deadlines across restarts. Unreleased features periodically re-surface unclaimed broadcast tickets according to <code>PURSERS_BACKLOG_RESURFACE_INTERVAL_S</code> (default 600 s) and re-offer them after the board&rsquo;s <code>broadcast_reoffer_s</code>, ensuring coordinator identities are never offered work.</p>
         </article>
       </div>
       <div class="callout"><strong>Reduced attack surface:</strong> <code>agent_nudge</code> has been removed. Autonomous Dispatcher offers serve as the sole targeted waking mechanism.</div>
@@ -608,33 +608,42 @@ shasum -a 256 -c SHA256SUMS.txt</code></pre>
             <marker id="arrF" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
               <path d="M0 0 L10 5 L0 10 z" fill="#173b57"/>
             </marker>
+            <filter id="softF" x="-20%" y="-20%" width="140%" height="140%">
+              <feDropShadow dx="0" dy="6" stdDeviation="7" flood-color="#152b3a" flood-opacity=".12"/>
+            </filter>
           </defs>
-          <rect width="1100" height="600" rx="24" fill="#fbf8f0"/>
+          <rect x="0" y="0" width="1100" height="600" rx="24" fill="#fbf8f0"/>
+          <rect x="38" y="62" width="1024" height="122" rx="18" fill="#eef5f7"/>
+          <rect x="38" y="229" width="1024" height="122" rx="18" fill="#fff2e8"/>
+          <rect x="38" y="396" width="1024" height="122" rx="18" fill="#eef5ef"/>
+          <text x="66" y="93" fill="#4177c6" font-size="16" font-weight="800">WORKERS</text>
+          <text x="66" y="260" fill="#ee7b36" font-size="16" font-weight="800">CENTRAL</text>
+          <text x="66" y="427" fill="#478568" font-size="16" font-weight="800">REVIEWER (separate principal)</text>
 
-          <g>
-            <rect x="151" y="95" width="155" height="62" rx="16" fill="#173b57"/>
-            <text x="228" y="121" text-anchor="middle" fill="#fff" font-size="17" font-weight="800">1 · ARM</text>
-            <text x="228" y="143" text-anchor="middle" fill="#c9e1e9" font-size="12">a2a_wait(boards)</text>
+          <g filter="url(#softF)">
+            <rect x="151" y="95" width="155" height="62" rx="16" fill="#4177c6"/>
+            <text x="228" y="121" text-anchor="middle" fill="#fff" font-size="17" font-weight="800">1 · ARM / WAIT</text>
+            <text x="228" y="143" text-anchor="middle" fill="#e9f2ff" font-size="12">subscription cue</text>
 
-            <rect x="151" y="263" width="155" height="62" rx="16" fill="#4177c6"/>
-            <text x="228" y="289" text-anchor="middle" fill="#fff" font-size="17" font-weight="800">2 · WAKE</text>
-            <text x="228" y="311" text-anchor="middle" fill="#e8f2ff" font-size="12">subscription cue</text>
+            <rect x="386" y="95" width="155" height="62" rx="16" fill="#4177c6"/>
+            <text x="463" y="121" text-anchor="middle" fill="#fff" font-size="17" font-weight="800">3 · CLAIM</text>
+            <text x="463" y="143" text-anchor="middle" fill="#e9f2ff" font-size="12">multiple workers contest</text>
 
-            <rect x="386" y="263" width="155" height="62" rx="16" fill="#087e78"/>
-            <text x="463" y="289" text-anchor="middle" fill="#fff" font-size="17" font-weight="800">3 · CLAIM</text>
-            <text x="463" y="311" text-anchor="middle" fill="#d9fffb" font-size="12">atomic contest</text>
+            <rect x="621" y="95" width="155" height="62" rx="16" fill="#4177c6"/>
+            <text x="698" y="121" text-anchor="middle" fill="#fff" font-size="17" font-weight="800">5 · DO</text>
+            <text x="698" y="143" text-anchor="middle" fill="#e9f2ff" font-size="12">execute + renew lease</text>
 
-            <rect x="386" y="95" width="155" height="62" rx="16" fill="#173b57"/>
-            <text x="463" y="121" text-anchor="middle" fill="#fff" font-size="17" font-weight="800">4 · UNDERSTAND</text>
-            <text x="463" y="143" text-anchor="middle" fill="#c9e1e9" font-size="12">refetch touch=false</text>
+            <rect x="856" y="95" width="155" height="62" rx="16" fill="#4177c6"/>
+            <text x="933" y="121" text-anchor="middle" fill="#fff" font-size="17" font-weight="800">6 · SUBMIT</text>
+            <text x="933" y="143" text-anchor="middle" fill="#e9f2ff" font-size="12">attach requested evidence</text>
 
-            <rect x="621" y="95" width="155" height="62" rx="16" fill="#173b57"/>
-            <text x="698" y="121" text-anchor="middle" fill="#fff" font-size="17" font-weight="800">5 · WORK</text>
-            <text x="698" y="143" text-anchor="middle" fill="#c9e1e9" font-size="12">in fleet clone</text>
+            <rect x="151" y="263" width="155" height="62" rx="16" fill="#ee7b36"/>
+            <text x="228" y="289" text-anchor="middle" fill="#fff" font-size="17" font-weight="800">2 · TICKET</text>
+            <text x="228" y="311" text-anchor="middle" fill="#fff0e7" font-size="12">journal emits cue</text>
 
-            <rect x="856" y="95" width="155" height="62" rx="16" fill="#173b57"/>
-            <text x="933" y="121" text-anchor="middle" fill="#fff" font-size="17" font-weight="800">6 · RENEW</text>
-            <text x="933" y="143" text-anchor="middle" fill="#c9e1e9" font-size="12">periodic lease keepalive</text>
+            <rect x="386" y="263" width="155" height="62" rx="16" fill="#ee7b36"/>
+            <text x="463" y="289" text-anchor="middle" fill="#fff" font-size="17" font-weight="800">4 · ONE WINNER</text>
+            <text x="463" y="311" text-anchor="middle" fill="#fff0e7" font-size="12">open → claimed atomically</text>
 
             <rect x="856" y="263" width="155" height="62" rx="16" fill="#ee7b36"/>
             <text x="933" y="289" text-anchor="middle" fill="#fff" font-size="17" font-weight="800">7 · SUBMITTED</text>
@@ -665,7 +674,7 @@ shasum -a 256 -c SHA256SUMS.txt</code></pre>
             <path d="M621 461h-70"/>
             <path d="M463 430V195c0-42 100-69 148-69" stroke="#c14f47" stroke-dasharray="8 7"/>
           </g>
-          <text x="518" y="385" fill="#c14f47" font-size="13" font-weight="750">Fix &rarr; validate &rarr; resubmit</text>
+          <text x="518" y="385" fill="#c14f47" font-size="13" font-weight="750">Fix → validate → resubmit</text>
           <path d="M933 492v54H228v-369" fill="none" stroke="#087e78" stroke-width="3" stroke-dasharray="9 7" marker-end="url(#arrF)"/>
           <text x="661" y="569" text-anchor="middle" fill="#087e78" font-size="13" font-weight="750">Closed ticket releases slot; worker re-arms for next offer</text>
         </svg>
@@ -785,7 +794,7 @@ shasum -a 256 -c SHA256SUMS.txt</code></pre>
           <tr><td>a18</td><td>Explicit worker, reviewer, and orchestrator roles; capability offers; background lease keepalive; split-identity fail-closed verification; bounded digest and watch modes.</td></tr>
           <tr><td>a19&ndash;a20</td><td>Membership admission and connector identity hardening; shared event vocabulary allowing push listeners to fail open on unknown kinds with fallback visibility.</td></tr>
           <tr><td>a21</td><td>Live-seat fair dispatch, persistent offer deadlines and dispatch histories, agent retirement lifecycles, compacted catch-up pagination, fleet-owned clone management, seat import and Doctor tooling, Release &amp; Operations panel; removal of legacy tools (<code>agent_nudge</code>, <code>board_get_briefing</code>, <code>ticket_terminate</code>).</td></tr>
-          <tr><td>Unreleased, on main</td><td>Fleet-wide versus dedicated home-board semantics (<code>boards=registry</code> vs. <code>boards=home</code>), model-liveness-gated lease keepalive, automatic backlog ticket re-surfacing and re-offers, form-safe dashboard auto-refresh with Resume controls, fleet clone working tree population and repair, and seat-kit virtual environment interpreter preservation and non-fast-forward upgrade safety.</td></tr>
+          <tr><td>Unreleased, on main</td><td>Fleet-wide versus dedicated home-board semantics (<code>boards=registry</code> vs. <code>boards=home</code>), model-liveness-gated lease keepalive, automatic backlog ticket re-surfacing (<code>PURSERS_BACKLOG_RESURFACE_INTERVAL_S</code> default 600 s) and re-offers after <code>broadcast_reoffer_s</code>, form-safe dashboard auto-refresh with Resume controls, fleet clone working tree population and repair, and seat-kit virtual environment interpreter preservation and non-fast-forward upgrade safety.</td></tr>
         </tbody>
       </table>
       <p>Unreleased features are actively developed on main: do not label these features under release 5.0.0a21 until a formal version tag, manifest lock, and release artifact are approved.</p>
