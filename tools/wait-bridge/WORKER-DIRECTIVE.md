@@ -94,10 +94,13 @@ Run this loop continuously. Each pass is one unit of work:
 3. **UNDERSTAND** — read the ticket and any linked memories/briefing. If it was
    rejected before, read the fix instructions and address them.
 4. **DO** — perform the work in your project directory via the file-editing MCP.
-   The bridge keeps discovered work and review leases alive in the background,
-   renewing at about 40% of the board's current claim TTL even while you work
-   outside `a2a_wait`. A `lease_keepalive_failed` cue means the claim was lost;
-   stop editing and refetch the ticket. Manual `lease_renew` remains safe before
+   The bridge keeps discovered work and review leases alive in the background
+   only while this model session remains live. Any bridge tool call and an
+   in-progress `a2a_wait` count as liveness. After three claim TTLs without a
+   bridge interaction (or `PURSERS_KEEPALIVE_IDLE_LIMIT_S`), it emits
+   `lease_keepalive_paused` with `keepalive paused: model idle` and lets the
+   lease lapse. A `lease_keepalive_failed` cue means the claim was lost; stop
+   editing and refetch the ticket. Manual `lease_renew` remains safe before
    unusually long or disruptive operations.
 5. **SUBMIT** — `ticket_submit` with a clear, honest summary and the evidence
    the ticket's `required_fields` ask for. State what you did, what you

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -165,6 +167,64 @@ class ClaimTtlTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(hint["prior_holder"]["agent_name"], "worker-agent")
         self.assertEqual(
             hint["branch_and_commit"], "codex/TK-old @ " + "a" * 40
+        )
+
+    async def test_ticket_exposes_claim_age_and_renewal_source(self) -> None:
+        ticket_id = await self.create_ticket()
+        self.principal = self.worker
+        claimed = await self.call(
+            "ticket_claim", agent_name="worker-agent", ticket_id=ticket_id
+        )
+        claimed_at = datetime.fromisoformat(
+            claimed.structured_content["ticket"]["claimed_at"]
+        ).timestamp()
+        self.assertEqual(
+            claimed.structured_content["ticket"]["lease_renewal_source"],
+            "model",
+        )
+
+        with patch.object(central.time, "time", return_value=claimed_at + 120):
+            await self.call(
+                "lease_renew",
+                agent_name="worker-agent",
+                ticket_id=ticket_id,
+                renewal_source="keepalive",
+            )
+        with patch.object(central.time, "time", return_value=claimed_at + 300):
+            projected = await self.call("ticket_get", ticket_id=ticket_id)
+        ticket = projected.structured_content["ticket"]
+        self.assertEqual(ticket["claim_age_s"], 300)
+        self.assertEqual(ticket["lease_renewal_source"], "keepalive")
+        self.assertEqual(ticket["lease_keepalive_only_age_s"], 180)
+
+        with patch.object(central.time, "time", return_value=claimed_at + 301):
+            await self.call(
+                "lease_renew", agent_name="worker-agent", ticket_id=ticket_id
+            )
+            projected = await self.call("ticket_get", ticket_id=ticket_id)
+        ticket = projected.structured_content["ticket"]
+        self.assertEqual(ticket["lease_renewal_source"], "model")
+        self.assertNotIn("lease_keepalive_only_age_s", ticket)
+
+    async def test_idle_lease_lapses_without_renewal(self) -> None:
+        self.principal = self.admin
+        await self.call(
+            "board_claim_ttl_set", agent_name="admin-agent", claim_ttl_s=1
+        )
+        ticket_id = await self.create_ticket()
+        self.principal = self.worker
+        await self.call(
+            "ticket_claim", agent_name="worker-agent", ticket_id=ticket_id
+        )
+
+        await asyncio.sleep(1.05)
+        await self.call("board_reap")
+        ticket = await self.call("ticket_get", ticket_id=ticket_id)
+
+        self.assertEqual(ticket.structured_content["ticket"]["status"], "open")
+        self.assertEqual(
+            ticket.structured_content["ticket"]["last_release_reason"],
+            "lease expired",
         )
 
 

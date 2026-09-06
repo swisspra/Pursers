@@ -1972,6 +1972,16 @@ def _detail_ticket(ticket: dict[str, Any]) -> dict[str, Any]:
         "priority": _clip(ticket.get("priority") or "medium", 16),
         "abandoned_count": max(0, int(ticket.get("abandoned_count", 0) or 0)),
         "claimed_by": _clip(ticket.get("claimed_by"), MAX_LABEL_CHARS) or None,
+        "claim_age_s": _nonnegative_int(ticket.get("claim_age_s")),
+        "lease_renewal_source": (
+            ticket.get("lease_renewal_source")
+            if ticket.get("lease_renewal_source") in {"model", "keepalive"}
+            else None
+        ),
+        "lease_keepalive_only_age_s": _nonnegative_int(
+            ticket.get("lease_keepalive_only_age_s")
+        ),
+        "ttl_s": _nonnegative_int(ticket.get("ttl_s")),
         "closed_at": _clip(ticket.get("closed_at"), 40) or None,
         "updated_at": _clip(ticket.get("updated_at"), 40) or None,
         "description": _clip(ticket.get("description"), MAX_DESCRIPTION_CHARS),
@@ -2702,6 +2712,19 @@ def aggregate_fleet(
                         "status": _clip(status, 32),
                         "status_label": _clip(_ticket_status_label(ticket, now), 64),
                         "claimed_by": _clip(claimed_by, MAX_LABEL_CHARS) or None,
+                        "claim_age_s": _nonnegative_int(
+                            ticket.get("claim_age_s")
+                        ),
+                        "lease_renewal_source": (
+                            ticket.get("lease_renewal_source")
+                            if ticket.get("lease_renewal_source")
+                            in {"model", "keepalive"}
+                            else None
+                        ),
+                        "lease_keepalive_only_age_s": _nonnegative_int(
+                            ticket.get("lease_keepalive_only_age_s")
+                        ),
+                        "ttl_s": _nonnegative_int(ticket.get("ttl_s")),
                         "updated_at": _clip(ticket.get("updated_at"), 40) or None,
                         "abandoned_count": max(
                             0, int(ticket.get("abandoned_count", 0) or 0)
@@ -4946,6 +4969,25 @@ refreshAttentionState();
 ).replace(
     "</style>",
     ".attention-actions{display:flex;gap:6px;margin-top:6px}.attention-actions button{background:var(--panel2);border:1px solid var(--line);border-radius:7px;color:var(--text);padding:4px 7px}</style>",
+    1,
+)
+
+HTML = HTML.replace(
+    "if((t.abandoned_count||0)>0)",
+    "const keepaliveAge=numberCount(t.lease_keepalive_only_age_s),"
+    "keepaliveThreshold=(numberCount(t.ttl_s)||900)*3;"
+    "if(['claimed','in_progress','creating_report'].includes(t.status)"
+    "&&t.lease_renewal_source==='keepalive'"
+    "&&keepaliveAge>keepaliveThreshold){"
+    "const minutes=Math.floor(keepaliveAge/60),"
+    "thresholdMinutes=Math.floor(keepaliveThreshold/60);"
+    "rows.push({key:`keepalive-only|${central}|${b.board_id}|${t.id}`,"
+    "fingerprint:`keepalive-only-${t.id}-${keepaliveThreshold}`,"
+    "type:'keepalive-only',central,board:b,level:'critical',"
+    "title:`Claim renewed only by keepalive for > ${thresholdMinutes} minutes`,"
+    "text:`${t.claimed_by||'Unknown seat'} · ${minutes} minutes · ${t.title}`,"
+    "ticket_id:t.id,age:keepaliveAge*1000})}"
+    "if((t.abandoned_count||0)>0)",
     1,
 )
 

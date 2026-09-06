@@ -486,6 +486,41 @@ def test_ticket_table_filters_before_bounding_and_includes_submitted() -> None:
     assert rows[1]["status_label"] == "in review by reviewer-a"
 
 
+def test_keepalive_only_claim_is_projected_and_flagged_for_attention() -> None:
+    result = dashboard.aggregate_fleet(
+        [
+            {
+                "label": "Board",
+                "board_id": "board",
+                "snapshot": {
+                    "agents": [],
+                    "tickets": [
+                        {
+                            "ticket_id": "TK-zombie",
+                            "title": "Inactive model claim",
+                            "status": "claimed",
+                            "claimed_by": "idle-seat",
+                            "claim_age_s": 4_000,
+                            "lease_renewal_source": "keepalive",
+                            "lease_keepalive_only_age_s": 2_701,
+                            "ttl_s": 900,
+                        }
+                    ],
+                },
+                "events": [],
+            }
+        ],
+        stale_seconds=300,
+    )
+
+    row = result["boards"][0]["tickets"][0]
+    assert row["claim_age_s"] == 4_000
+    assert row["lease_renewal_source"] == "keepalive"
+    assert row["lease_keepalive_only_age_s"] == 2_701
+    assert "Claim renewed only by keepalive for >" in dashboard.HTML
+    assert "keepaliveAge>keepaliveThreshold" in dashboard.HTML
+
+
 def test_fetcher_requests_central_max_snapshot_bounds() -> None:
     requested: dict[str, int | None] = {}
 

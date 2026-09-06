@@ -1754,19 +1754,45 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         service.ensure_schema(document)
         return int(document["config"]["stale_after_days"])
 
-    def renew_claim(ticket: dict[str, Any], now: float, ttl_s: int) -> None:
+    def normalize_renewal_source(value: str | None) -> str:
+        selected = "model" if value is None else str(value).strip().casefold()
+        if selected not in {"model", "keepalive"}:
+            raise ValueError("renewal_source must be model or keepalive")
+        return selected
+
+    def mark_renewal_source(
+        lease: dict[str, Any], now: float, source: str, *, prefix: str = ""
+    ) -> None:
+        source_key = f"{prefix}renewal_source"
+        model_key = f"{prefix}last_model_renewed_at"
+        keepalive_key = f"{prefix}keepalive_only_since"
+        previous = lease.get(source_key)
+        lease[source_key] = source
+        if source == "model":
+            lease[model_key] = iso_at(now)
+            lease.pop(keepalive_key, None)
+        elif previous != "keepalive":
+            lease[keepalive_key] = iso_at(now)
+
+    def renew_claim(
+        ticket: dict[str, Any], now: float, ttl_s: int, *, source: str = "model"
+    ) -> None:
         expires = now + ttl_s
         ticket["ttl_s"] = ttl_s
         ticket["lease_expires_at_epoch"] = expires
         ticket["lease_expires_at"] = iso_at(expires)
         ticket["lease_renewed_at"] = iso_at(now)
+        mark_renewal_source(ticket, now, source, prefix="lease_")
 
-    def renew_review_lease(lease: dict[str, Any], now: float, ttl_s: int) -> None:
+    def renew_review_lease(
+        lease: dict[str, Any], now: float, ttl_s: int, *, source: str = "model"
+    ) -> None:
         expires = now + ttl_s
         lease["ttl_s"] = ttl_s
         lease["expires_at_epoch"] = expires
         lease["expires_at"] = iso_at(expires)
         lease["renewed_at"] = iso_at(now)
+        mark_renewal_source(lease, now, source)
 
     def review_lease_is_live(ticket: Mapping[str, Any], now: float) -> bool:
         lease = ticket.get("review_lease")
@@ -2213,6 +2239,9 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 "lease_expires_at_epoch",
                 "lease_expires_at",
                 "lease_renewed_at",
+                "lease_renewal_source",
+                "lease_last_model_renewed_at",
+                "lease_keepalive_only_since",
                 "ttl_s",
             ):
                 ticket.pop(key, None)
@@ -2447,6 +2476,38 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         projected.setdefault("assigned_to", None)
         projected.setdefault("abandoned_count", 0)
         projected.setdefault("rejection_count", 0)
+        now = time.time()
+
+        def elapsed_seconds(value: Any) -> int | None:
+            if not isinstance(value, str):
+                return None
+            try:
+                parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except ValueError:
+                return None
+            if parsed.tzinfo is None:
+                return None
+            return max(0, int(now - parsed.timestamp()))
+
+        if projected.get("status") in PRE_SUBMISSION_STATES:
+            claim_age = elapsed_seconds(projected.get("claimed_at"))
+            if claim_age is not None:
+                projected["claim_age_s"] = claim_age
+            keepalive_age = elapsed_seconds(
+                projected.get("lease_keepalive_only_since")
+            )
+            if keepalive_age is not None:
+                projected["lease_keepalive_only_age_s"] = keepalive_age
+        review_lease = projected.get("review_lease")
+        if isinstance(review_lease, dict):
+            review_age = elapsed_seconds(review_lease.get("claimed_at"))
+            if review_age is not None:
+                review_lease["claim_age_s"] = review_age
+            review_keepalive_age = elapsed_seconds(
+                review_lease.get("keepalive_only_since")
+            )
+            if review_keepalive_age is not None:
+                review_lease["keepalive_only_age_s"] = review_keepalive_age
         projected["payload_ref"] = resource_uri(board_id, "ticket", ticket["ticket_id"])
         return projected
 
@@ -3229,6 +3290,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         role: str,
         capabilities: Mapping[str, Any] | None = None,
         *, allow_workflow_side_effects: bool = True,
+        lease_renewal_source: str = "model",
     ) -> dict[str, Any]:
         membership = service.resolve_board_context(document, principal.principal_id)
         configured_ttl = claim_ttl(document)
@@ -3318,7 +3380,9 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 ticket.get("status") in PRE_SUBMISSION_STATES
                 and ticket.get("claimed_by_agent_id") == identity_id
             ):
-                renew_claim(ticket, now, configured_ttl)
+                renew_claim(
+                    ticket, now, configured_ttl, source=lease_renewal_source
+                )
                 renewed.append(ticket["ticket_id"])
                 renewed_leases.append(
                     {
@@ -3334,7 +3398,12 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 and isinstance(review_lease, dict)
                 and review_lease.get("reviewer_agent_id") == identity_id
             ):
-                renew_review_lease(review_lease, now, configured_ttl)
+                renew_review_lease(
+                    review_lease,
+                    now,
+                    configured_ttl,
+                    source=lease_renewal_source,
+                )
                 ticket["updated_at"] = iso_at(now)
                 renewed.append(ticket["ticket_id"])
                 renewed_leases.append(
@@ -3684,6 +3753,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         invite_token: str | None = None,
         role: str | None = None,
         capabilities: dict[str, Any] | None = None,
+        renewal_source: str | None = None,
     ) -> dict[str, Any]:
         """Join one explicit board under the verified bearer principal."""
         board_id = require_id("board_id", board_id)
@@ -3693,6 +3763,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 f"claim_ttl_s must be between {MIN_CLAIM_TTL_S} and {MAX_CLAIM_TTL_S}"
             )
         principal = current_principal()
+        selected_renewal_source = normalize_renewal_source(renewal_source)
         requested_role = (
             validate_seat_role(principal, role) if role is not None else None
         )
@@ -3749,6 +3820,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 document, principal, agent_name, now, claim_ttl_s,
                 safe_platform, safe_focus, effective_role, capabilities,
                 allow_workflow_side_effects=not coordinate_only,
+                lease_renewal_source=selected_renewal_source,
             )
             member = joined["actor"]
             return {
@@ -5590,6 +5662,9 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 "lease_expires_at_epoch",
                 "lease_expires_at",
                 "lease_renewed_at",
+                "lease_renewal_source",
+                "lease_last_model_renewed_at",
+                "lease_keepalive_only_since",
                 "ttl_s",
             ):
                 ticket.pop(key, None)
@@ -5649,11 +5724,13 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         ctx: Context,
         expected_generation: str | None = None,
         agent_name: str | None = None,
+        renewal_source: str | None = None,
     ) -> dict[str, Any]:
         """Renew the authenticated holder's work or review lease."""
         board_id = require_id("board_id", board_id)
         ticket_id = require_id("ticket_id", ticket_id)
         principal = current_principal()
+        selected_renewal_source = normalize_renewal_source(renewal_source)
         if not ({"board:write", "board:review"} & principal.scopes):
             raise PermissionError(
                 "authenticated principal lacks board:write or board:review authorization"
@@ -5678,7 +5755,12 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                         or review_lease.get("reviewer_agent_id") == member["agent_id"]
                     )
                 ):
-                    renew_review_lease(review_lease, now, claim_ttl(document))
+                    renew_review_lease(
+                        review_lease,
+                        now,
+                        claim_ttl(document),
+                        source=selected_renewal_source,
+                    )
                     ticket["updated_at"] = iso_at(now)
                     return {
                         "ticket": copy.deepcopy(ticket),
@@ -5695,7 +5777,12 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                     "error": f"lease is not held by this principal; lease was released{detail}",
                     "released": released,
                 }
-            renew_claim(ticket, now, claim_ttl(document))
+            renew_claim(
+                ticket,
+                now,
+                claim_ttl(document),
+                source=selected_renewal_source,
+            )
             return {
                 "ticket": copy.deepcopy(ticket),
                 "released": released,
@@ -5843,7 +5930,14 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             ticket["submitted_by_principal_id"] = principal.principal_id
             ticket["updated_at"] = iso_at(now)
             ticket["last_lease_expires_at"] = ticket.pop("lease_expires_at", None)
-            for key in ("lease_expires_at_epoch", "lease_renewed_at", "ttl_s"):
+            for key in (
+                "lease_expires_at_epoch",
+                "lease_renewed_at",
+                "lease_renewal_source",
+                "lease_last_model_renewed_at",
+                "lease_keepalive_only_since",
+                "ttl_s",
+            ):
                 ticket.pop(key, None)
             if not stay_active:
                 actor["lifecycle_status"] = "handed_off"
@@ -6498,7 +6592,9 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             released.extend(redispatch_queue(document, now))
             for key in (
                 "lease_expires_at_epoch", "lease_expires_at",
-                "lease_renewed_at", "ttl_s",
+                "lease_renewed_at", "lease_renewal_source",
+                "lease_last_model_renewed_at", "lease_keepalive_only_since",
+                "ttl_s",
             ):
                 ticket.pop(key, None)
             scrub_audit = record_scrub_allows(

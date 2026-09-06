@@ -129,3 +129,9 @@ For dispatch controls, a `board:coordinate` credential may call
 also call `board_dispatch_policy_set`, but that operation remains limited to an
 `admin` board membership. Other admin-only configuration tools keep their
 existing `board:write` requirements.
+
+## Troubleshooting runbook
+
+| Symptom | Check | Recovery |
+| --- | --- | --- |
+| A ticket stays claimed for hours while its branch is not moving | Inspect the ticket's `claim_age_s`, `lease_renewal_source`, and `lease_keepalive_only_age_s`. The fleet dashboard flags claims renewed only by keepalive for more than three live claim TTLs. | Confirm the model session is no longer working, then use admin `ticket_unclaim` to return the ticket to the queue. Do not delete or rewrite the worker branch; its continuation evidence remains available to the next claimant. |
