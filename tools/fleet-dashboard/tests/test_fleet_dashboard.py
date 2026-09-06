@@ -3404,6 +3404,15 @@ def test_timer_refresh_pauses_while_operator_edits() -> None:
         "(!force&&refreshPaused())",
         "!centralLabels.length||refreshPaused()",
         "async function refreshAttentionState(){if(refreshPaused())return;",
+        # in-flight requests that started before editing must not render on completion
+        "if(!route()&&!(typeof refreshPaused==='function'&&refreshPaused()))renderFleet()",
+        "if(hubKinds.has(route()?.kind)&&!refreshPaused())renderHub()",
+        "navKind()==='seats'&&centralLabels.length&&!refreshPaused())await refreshSeats()",
+        "includes(navKind())&&!refreshPaused())renderHub()",
+        "navKind()==='overview'&&!refreshPaused())renderHub()",
+        "current?.board!==r.board||refreshPaused())return;detailData=data",
+        "route()?.central!==r.central||refreshPaused())return;renderOverhead(data)",
+        "route()?.central===r.central&&!refreshPaused()){renderConfig(data)",
     ):
         assert fn in html, fn
 
