@@ -358,7 +358,7 @@ python tools/fleet-dashboard/fleet_dashboard.py \
         <article class="card">
           <h3>Profile และ capability</h3>
           <ul>
-            <li>profile อยู่ใต้ <code>~/Library/Application Support/On Board Personal</code> หนึ่ง profile ต่อโปรเจกต์ (<code>profile_path_for_project</code>) เลือกด้วย <code>ONBOARD_PERSONAL_PROFILE</code></li>
+            <li>profile อยู่ใต้ <code>/PATH/TO/local Support/On Board Personal</code> หนึ่ง profile ต่อโปรเจกต์ (<code>profile_path_for_project</code>) เลือกด้วย <code>ONBOARD_PERSONAL_PROFILE</code></li>
             <li><em>capability</em> = JWT ที่เซ็นด้วย key ในเครื่อง อายุเริ่มต้น 1 ปี (ขั้นต่ำ 1 ชม. สูงสุด 2 ปี) scope ต้องตรง “approved set” เท่านั้น ไม่งั้น fail-closed (<code>ProfileSecurityError</code>)</li>
             <li>อ่านไฟล์ profile ด้วย <code>O_NOFOLLOW</code>; review policy ของ Personal คือ <code>workflow</code></li>
             <li><code>rotate</code> หมุนทั้ง signing key และ capability ในคำสั่งเดียว</li>

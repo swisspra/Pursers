@@ -7,3 +7,11 @@ a8–a14 what's-new page). They carry sections that the a21 rewrite of
 They are reference input for the documentation reconciliation tickets, not the
 published set: the published set is `docs-local/*.html`. Machine-specific paths
 were replaced with `/PATH/TO/...` placeholders before import.
+
+## Scope guard for documentation work
+
+Pursers documentation covers the Pursers work track only. Anything from the
+operator's personal/hobby tracks (role-play tooling, personal assistants, local
+notes or wikis outside this repository) is out of scope: do not import, cite, or
+link it. Machine-specific and home-relative paths (`/Users/...`, `~/...`) are
+never allowed in this repository; use `/PATH/TO/...` placeholders.
