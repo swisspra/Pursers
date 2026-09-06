@@ -3478,6 +3478,141 @@ def test_dual_credential_approved_ask_fake_e2e(
     )
 
 
+def test_scope_preflight_enforces_main_and_intake_matrix() -> None:
+    main = _token_with_scopes("board:read", "board:write", "board:coordinate")
+    intake = _token_with_scopes(
+        "board:read", "board:intake", "board:coordinate"
+    )
+    assert coordinator.scope_preflight(main, intake) == ()
+
+    issues = coordinator.scope_preflight(
+        _token_with_scopes("board:read", "board:write"),
+        _token_with_scopes("board:read", "board:intake", "board:write"),
+    )
+    assert issues == (
+        "coordinator-main missing required scope board:coordinate",
+        "coordinator-intake carries forbidden scope board:write",
+    )
+
+
+def test_home_board_retry_uses_capped_exponential_backoff() -> None:
+    delays: list[float] = []
+    attempts = 0
+
+    async def operation() -> str:
+        nonlocal attempts
+        attempts += 1
+        if attempts <= 10:
+            raise coordinator.HomeBoardUnreachable("home", "TimeoutError")
+        return "recovered"
+
+    async def sleeper(delay: float) -> None:
+        delays.append(delay)
+
+    result = asyncio.run(
+        coordinator.retry_home_board(
+            operation,
+            home_board="home",
+            sleeper=sleeper,
+        )
+    )
+
+    assert result == "recovered"
+    assert delays == [1, 2, 4, 8, 16, 32, 64, 128, 256, 300]
+
+
+def test_board_failure_logger_logs_once_per_board_per_cooldown(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    now = [0.0]
+    logger = coordinator.BoardFailureLogger(300, lambda: now[0])
+    assert logger.report("board-a", "PermissionError") is True
+    now[0] = 299
+    assert logger.report("board-a", "PermissionError") is False
+    assert logger.report("board-b", "TimeoutError") is True
+    now[0] = 300
+    assert logger.report("board-a", "PermissionError") is True
+    assert capsys.readouterr().err.count("board='board-a'") == 2
+
+
+def test_write_reports_isolates_join_rejection_and_publishes_unreachable_home_finding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import pursers_client
+
+    entered: list[str] = []
+    published: dict[str, dict[str, Any]] = {}
+
+    class FakeBoardClient:
+        def __init__(
+            self,
+            _url: str,
+            _token: str,
+            board_id: str,
+            *,
+            agent_name: str,
+            role: str,
+        ) -> None:
+            assert role == "coordinator"
+            self.board_id = board_id
+
+        async def __aenter__(self) -> "FakeBoardClient":
+            entered.append(self.board_id)
+            if self.board_id == "unjoinable":
+                raise PermissionError(
+                    "authenticated principal lacks board:coordinate authorization"
+                )
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+        async def board_state_update(self, _key: str, value: str) -> None:
+            published[self.board_id] = json.loads(value)
+
+        async def memory_write(self, *_args: Any, **_kwargs: Any) -> None:
+            raise AssertionError("digest writes should be suppressed")
+
+    monkeypatch.setattr(pursers_client, "BoardClient", FakeBoardClient)
+    states = {
+        board_id: coordinator.bound_findings_state([], NOW)
+        for board_id in ("unjoinable", "healthy", "home")
+    }
+    markers = {
+        "last_daily_digest": NOW.date().isoformat(),
+        "last_weekly_digest": (
+            f"{NOW.isocalendar().year}-W{NOW.isocalendar().week:02d}"
+        ),
+    }
+    states["home"].update(markers)
+
+    asyncio.run(
+        coordinator.write_reports(
+            "https://board.invalid/mcp",
+            "not-a-real-token",
+            "home",
+            "coordinator-test",
+            states,
+            {"home": markers},
+            NOW,
+            failure_logger=coordinator.BoardFailureLogger(),
+        )
+    )
+
+    assert entered == ["unjoinable", "healthy", "home"]
+    assert set(published) == {"healthy", "home"}
+    finding = next(
+        item
+        for item in published["home"]["findings"]
+        if item["kind"] == "board_unreachable"
+    )
+    assert finding["board_id"] == "unjoinable"
+    assert finding["reason"] == (
+        "PermissionError: authenticated principal lacks "
+        "board:coordinate authorization"
+    )
+
+
 def test_intake_queue_is_drained_only_after_finding_publish(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

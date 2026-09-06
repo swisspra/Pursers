@@ -84,7 +84,7 @@ If intake is enabled without a usable intake token, the daemon prints one line
 and leaves asks queued as drafts. Findings distinguish asks that have explicit
 human approval from auto-category asks that do not. A write-scoped intake token
 is also refused locally with the same approval distinction; the main credential
-continues all non-intake work unchanged.
+continues read-only analysis, while coordinator mutations remain in shadow mode.
 
 ### Approve or decline an ask
 
@@ -115,10 +115,21 @@ and accepts only `null` or a safe absolute path.
 Provision both principals as board members. This example intentionally lists
 scopes only; token minting and key material remain operator-only:
 
-```text
-coordinator-main:   board:read board:write board:coordinate
-coordinator-intake: board:read board:intake
-```
+| Credential | Required scopes | Optional scopes | Forbidden scopes |
+| --- | --- | --- | --- |
+| `coordinator-main` | `board:read board:write board:coordinate` | — | — |
+| `coordinator-intake` | `board:read board:intake` | `board:coordinate` | `board:write` |
+
+At startup the daemon decodes the JWT scope claims locally without signature
+verification and never logs either token. A mismatch is named by credential and
+missing or forbidden scope, and forces shadow mode. Use `--strict-scopes` when a
+scope mismatch should stop a one-shot validation or supervised deployment.
+
+Board joins and writes are isolated per board. An inaccessible registry board
+produces a `board_unreachable` finding (including a scrubbed reason) on the home
+board while healthy boards continue. Repeated messages for the same board are
+logged at most once per five minutes. If the home board is inaccessible, the
+daemon stays alive and retries with exponential backoff capped at five minutes.
 
 Board membership is admission, while token scopes authorize coordinator
 actions. An admitted `admin`, `member`, or `reviewer` principal may therefore
@@ -140,4 +151,6 @@ existing `board:write` requirements.
 
 | Symptom | Check | Recovery |
 | --- | --- | --- |
+| Scope preflight names a missing `board:coordinate` scope, or a new registry board reports `board_unreachable` | Compare both credentials with the scope matrix above. | Have the token operator mint a replacement `coordinator-main` token with `board:read board:write board:coordinate`, install it at the configured token path, and restart the daemon. Never add `board:write` to the intake token. |
+| The home board is unavailable | Confirm Central reachability and the home-board membership; the daemon log should show capped in-process retries rather than repeated process starts. | Restore Central or membership. The running daemon retries automatically, with a maximum five-minute delay. |
 | A ticket stays claimed for hours while its branch is not moving | Inspect the ticket's `claim_age_s`, `lease_renewal_source`, and `lease_keepalive_only_age_s`. The fleet dashboard flags claims renewed only by keepalive for more than three live claim TTLs. | Confirm the model session is no longer working, then use admin `ticket_unclaim` to return the ticket to the queue. Do not delete or rewrite the worker branch; its continuation evidence remains available to the next claimant. |

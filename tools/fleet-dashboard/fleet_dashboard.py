@@ -101,6 +101,7 @@ MAX_OVERHEAD_TOOLS = 5
 OVERHEAD_DAYS = 7
 ATTENTION_RETENTION_DAYS = 7
 CONTEXT_ATTENTION_HOURS = 24
+COORDINATOR_FINDINGS_STALE_MINUTES = 15
 CONTEXT_STATS_ANOMALY_TOKENS = 1_000_000
 WORKER_API_MAX_BYTES = 20_000
 CONFIG_API_MAX_BYTES = 40_000
@@ -1649,7 +1650,12 @@ def project_coordinator_findings(
                         **finding,
                         "message": f"Origin does not contain the submitted branch and commit for {ticket_id}.",
                     }
-        text = finding.get("message") or finding.get("summary") or finding.get("detail")
+        text = (
+            finding.get("reason")
+            if normalized_kind == "board-unreachable"
+            and isinstance(finding.get("reason"), str)
+            else finding.get("message") or finding.get("summary") or finding.get("detail")
+        )
         if not isinstance(text, str):
             text = json.dumps(finding, ensure_ascii=False, sort_keys=True)
         ask_id = finding.get("ask_id")
@@ -1674,6 +1680,20 @@ def project_coordinator_findings(
         "items": items,
         "truncated_count": reported_truncated + max(0, len(findings) - MAX_FINDINGS),
     }
+
+
+def coordinator_findings_stale(
+    snapshot: dict[str, Any], *, now: datetime | None = None
+) -> bool:
+    state = snapshot.get("state")
+    entry = state.get("coordinator_findings") if isinstance(state, dict) else None
+    updated_at = _parse_time(entry.get("updated_at")) if isinstance(entry, dict) else None
+    if updated_at is None:
+        return False
+    current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    return updated_at < current - timedelta(
+        minutes=COORDINATOR_FINDINGS_STALE_MINUTES
+    )
 
 
 BRANCH_COMMIT_RE = re.compile(
@@ -2506,6 +2526,9 @@ def project_board_detail(
         "event_returned": len(events),
         "routes": routes,
         "coordinator_findings": project_coordinator_findings(snapshot),
+        "coordinator_findings_stale": coordinator_findings_stale(
+            snapshot, now=now
+        ),
         "snapshot_truncation": snapshot.get("_snapshot_truncation"),
         "ticket_total": max(snapshot_ticket_total, len(source_tickets)),
         "ticket_returned": min(len(tickets), MAX_DETAIL_TICKET_ROWS),
@@ -2806,6 +2829,9 @@ def aggregate_fleet(
                     coordinator_seen_at.isoformat() if coordinator_seen_at else None
                 ),
                 "coordinator_findings": project_coordinator_findings(snapshot),
+                "coordinator_findings_stale": coordinator_findings_stale(
+                    snapshot, now=now
+                ),
                 "stale_after_days": (
                     snapshot.get("board", {}).get("stale_after_days", 3)
                     if isinstance(snapshot.get("board"), dict) else 3
@@ -5269,6 +5295,16 @@ refreshAttentionState();
 ).replace(
     "</style>",
     ".attention-actions{display:flex;gap:6px;margin-top:6px}.attention-actions button{background:var(--panel2);border:1px solid var(--line);border-radius:7px;color:var(--text);padding:4px 7px}</style>",
+    1,
+)
+
+HTML = HTML.replace(
+    "function attentionCandidates(){const rows=[];for(const [central,d] of Object.entries(fleetData)){for(const b of d.boards||[]){for(const f of b.coordinator_findings?.items||[])",
+    "function attentionCandidates(){const rows=[];for(const [central,d] of Object.entries(fleetData)){for(const b of d.boards||[]){"
+    "if(b.coordinator_findings_stale)rows.push({key:`coordinator-findings-stale|${central}|${b.board_id}`,"
+    "fingerprint:'coordinator-findings-stale-15m',type:'coordinator-findings-stale',central,board:b,level:'critical',"
+    "title:'coordinator findings stale > 15 min',text:'The coordinator findings state has not refreshed for more than 15 minutes.'});"
+    "for(const f of b.coordinator_findings?.items||[])",
     1,
 )
 
