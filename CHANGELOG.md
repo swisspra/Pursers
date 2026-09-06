@@ -35,6 +35,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   of the string `"home"`, which the wait bridge rejects.
 
 ### Fixed
+- Coordinator: isolate registry-board join/read failures as `board_unreachable`
+  home findings, preflight main/intake scopes into shadow mode, and retry an
+  unreachable home board in-process with capped exponential backoff. The fleet
+  dashboard now surfaces findings stale for more than 15 minutes
+  (TK-758574bd4db1).
 - Fleet dashboard: timer-driven panel refreshes (fleet, detail, overhead, config, hub,
   attention, seats) no longer wipe form input; refresh pauses while a form has focus
   or unsaved input and resumes from a fixed "Resume" pill or the status line.

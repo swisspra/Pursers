@@ -12,6 +12,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from collections import Counter
 from contextlib import AsyncExitStack, aclosing
 from dataclasses import dataclass
@@ -46,6 +47,11 @@ INTAKE_RATE_LIMIT = 5
 INTAKE_RATE_WINDOW_SECONDS = 3_600
 INTAKE_BREAKER_FAILURES = 3
 INTAKE_SCOPE = "board:intake"
+MAIN_REQUIRED_SCOPES = frozenset({"board:read", "board:write", "board:coordinate"})
+INTAKE_REQUIRED_SCOPES = frozenset({"board:read", "board:intake"})
+INTAKE_FORBIDDEN_SCOPES = frozenset({"board:write"})
+BOARD_FAILURE_LOG_COOLDOWN_SECONDS = 300
+HOME_BACKOFF_MAX_SECONDS = 300
 INTAKE_DOCUMENT_SCHEMA_VERSION = 1
 MAX_INTAKE_TOMBSTONES = 20
 INTAKE_CATEGORIES = (
@@ -133,6 +139,43 @@ class RuntimeState:
             intake_failures={},
             intake_breakers=set(),
         )
+
+
+class HomeBoardUnreachable(RuntimeError):
+    """A recoverable home-board failure that must not terminate the daemon."""
+
+    def __init__(self, board_id: str, reason: str) -> None:
+        super().__init__(f"home board {board_id!r} is unreachable: {reason}")
+        self.board_id = board_id
+        self.reason = reason
+
+
+class BoardFailureLogger:
+    """Rate-limit repeated board failure logs while retaining per-board detail."""
+
+    def __init__(
+        self,
+        cooldown_s: float = BOARD_FAILURE_LOG_COOLDOWN_SECONDS,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self.cooldown_s = cooldown_s
+        self.clock = clock
+        self._last_logged: dict[str, float] = {}
+
+    def report(self, board_id: str, reason: str) -> bool:
+        now = self.clock()
+        previous = self._last_logged.get(board_id)
+        if previous is not None and now - previous < self.cooldown_s:
+            return False
+        self._last_logged[board_id] = now
+        print(
+            f"coordinator: board unreachable board={board_id!r} reason={reason}",
+            file=sys.stderr,
+        )
+        return True
+
+
+DEFAULT_BOARD_FAILURE_LOGGER = BoardFailureLogger()
 
 
 @dataclass(frozen=True)
@@ -930,6 +973,7 @@ def _finding_next_action(
         "privacy-scan-truncated": f"Run another bounded privacy scan cycle for {board_id} before declaring coverage complete.",
         "review-backlog": f"Review {ticket_id} on {board_id} with an available reviewer seat.",
         "board-degraded": f"Restore the journal subscription and reads for {board_id}, then confirm one healthy refresh.",
+        "board_unreachable": f"Restore coordinator access to {board_id}, then confirm one successful join and read.",
         "would_assign": f"Review the proposed assignment for {ticket_id} before enabling active mode.",
         "assign": f"Verify the assigned seat claims {ticket_id} on {board_id}.",
         "mutation_failed": f"Review the failed coordinator mutation for {ticket_id} before retrying.",
@@ -1889,6 +1933,8 @@ def _bounded_finding(item: Mapping[str, Any]) -> dict[str, Any]:
         protected.update(
             {"ask_id", "category", "matrix_rule", "ticket_id", "op_key"}
         )
+    if result["kind"] == "board_unreachable":
+        protected.add("reason")
     while len(json.dumps(result, sort_keys=True, separators=(",", ":"))) > finding_limit:
         removable = next(
             (key for key in reversed(result) if key not in protected), None
@@ -1952,7 +1998,7 @@ def dedupe_findings(
     result: list[Mapping[str, Any]] = []
     positions: dict[tuple[Any, ...], int] = {}
     for item in findings:
-        if item.get("kind") not in {"board-large", "board-degraded"}:
+        if item.get("kind") not in {"board-large", "board-degraded", "board_unreachable"}:
             result.append(item)
             continue
         identity = _finding_identity(item)
@@ -2035,14 +2081,14 @@ def bound_findings_state(
         item
         for item in normalized
         if item.get("level") != "critical"
-        and item.get("kind") in {"board-large", "board-degraded"}
+        and item.get("kind") in {"board-large", "board-degraded", "board_unreachable"}
     ]
     remaining = [
         item
         for item in normalized
         if item.get("level") != "critical"
         and not str(item.get("kind", "")).startswith("intake-")
-        and item.get("kind") not in {"board-large", "board-degraded"}
+        and item.get("kind") not in {"board-large", "board-degraded", "board_unreachable"}
     ]
 
     def add_findings(rows: Sequence[dict[str, Any]]) -> None:
@@ -2409,6 +2455,7 @@ async def read_board(
             "agents": [],
             "tickets": [],
             "snapshot_error_class": type(exc).__name__,
+            "snapshot_error_reason": safe_failure_reason(exc),
             "truncated": True,
             "omitted_counts": {"agents": 1, "tickets": 1},
         }
@@ -2447,6 +2494,9 @@ async def read_board(
             snapshot.setdefault("state_error_classes", {})[STATE_KEY] = type(
                 exc
             ).__name__
+            snapshot.setdefault("state_error_reasons", {})[STATE_KEY] = (
+                safe_failure_reason(exc)
+            )
     previous = _previous_payload(prior)
     try:
         intake = await reader.call(
@@ -2550,6 +2600,25 @@ def analyze_cycle(
         )
         findings_by_board[board_id].extend(drop_findings)
         degraded, reason, error_class = board_degradation(snapshot)
+        if degraded:
+            failure_reason = snapshot.get("snapshot_error_reason")
+            if not isinstance(failure_reason, str):
+                state_reasons = snapshot.get("state_error_reasons")
+                failure_reason = (
+                    next(iter(state_reasons.values()), error_class)
+                    if isinstance(state_reasons, Mapping)
+                    else error_class
+                )
+            findings_by_board[board_id].append(
+                _finding(
+                    "board_unreachable",
+                    "critical",
+                    board_id,
+                    f"Coordinator cannot read board {board_id}: {failure_reason}.",
+                    reason=failure_reason,
+                    error_class=error_class,
+                )
+            )
         prior_health = previous.get(board_id, {}).get("board_health", {})
         persisted_streak = 0
         if isinstance(prior_health, Mapping):
@@ -3193,6 +3262,7 @@ def home_audit_state(
     home_board: str,
     states: Mapping[str, Mapping[str, Any]],
     now: datetime,
+    extra_findings: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, Any] | None:
     """Mirror fleet-critical board health onto the reachable home state."""
     source = states.get(home_board)
@@ -3217,18 +3287,33 @@ def home_audit_state(
             continue
         board_findings = states[board_id].get("findings", [])
         for item in board_findings if isinstance(board_findings, list) else []:
-            if not isinstance(item, Mapping) or item.get("kind") != "board-degraded":
+            if not isinstance(item, Mapping) or item.get("kind") not in {
+                "board-degraded",
+                "board_unreachable",
+            }:
                 continue
             mirrored = dict(item)
             mirrored["board_id"] = str(item.get("board_id") or board_id)
             key = (
-                "board-degraded",
+                str(mirrored.get("kind", "")),
                 mirrored["board_id"],
                 str(mirrored.get("evidence", "")),
             )
             if key not in seen:
                 findings.append(mirrored)
                 seen.add(key)
+    for item in extra_findings:
+        if not isinstance(item, Mapping):
+            continue
+        mirrored = dict(item)
+        key = (
+            str(mirrored.get("kind", "")),
+            str(mirrored.get("board_id", "")),
+            str(mirrored.get("evidence", "")),
+        )
+        if key not in seen:
+            findings.append(mirrored)
+            seen.add(key)
 
     rebuilt = bound_findings_state(
         findings,
@@ -3279,10 +3364,13 @@ async def write_reports(
     now: datetime,
     intake_updates: Mapping[str, frozenset[str]] | None = None,
     publish_boards: set[str] | None = None,
+    failure_logger: BoardFailureLogger | None = None,
 ) -> None:
     from pursers_client import BoardClient
     intake_updates = intake_updates or {}
+    failure_logger = failure_logger or DEFAULT_BOARD_FAILURE_LOGGER
     targets = set(states) if publish_boards is None else publish_boards
+    unreachable_findings: list[dict[str, Any]] = []
 
     # Publish non-home findings first. A board that cannot accept its report
     # must not prevent healthy boards or the home audit surface from updating.
@@ -3303,9 +3391,20 @@ async def write_reports(
                 )
                 if board_id in intake_updates:
                     await drain_intake(client, board_id, intake_updates[board_id])
-        except Exception:
-            # The snapshot-side finding already carries a scrubbed error class.
-            # Never retain transport exception text in coordinator state.
+        except Exception as exc:
+            reason = safe_failure_reason(exc)
+            unreachable_findings.append(
+                _finding(
+                    "board_unreachable",
+                    "critical",
+                    board_id,
+                    f"Coordinator cannot join or write board {board_id}: {reason}.",
+                    reason=reason,
+                    error_class=type(exc).__name__,
+                )
+            )
+            if failure_logger is not None:
+                failure_logger.report(board_id, reason)
             continue
     previous_home = previous.get(home_board, {})
     today = now.date().isoformat()
@@ -3318,47 +3417,57 @@ async def write_reports(
         home_board in targets
         and previous_home.get("last_weekly_digest") != week
     )
-    if write_daily or write_weekly:
-        async with BoardClient(
-            url,
-            token,
-            home_board,
-            agent_name=agent_name,
-            role="coordinator",
-        ) as client:
-            if write_daily:
-                await client.memory_write(
-                    f"Coordinator daily digest {today}",
-                    format_digest("daily", now, states),
-                    "project",
-                    memory_type="checkpoint",
-                    tags=["coordinator", "digest", "daily"],
-                )
-            if write_weekly:
-                await client.memory_write(
-                    f"Coordinator weekly rollup {week}",
-                    format_digest("weekly", now, states),
-                    "project",
-                    memory_type="checkpoint",
-                    tags=["coordinator", "digest", "weekly"],
-                )
-    home_state = home_audit_state(home_board, states, now)
+    try:
+        if write_daily or write_weekly:
+            async with BoardClient(
+                url,
+                token,
+                home_board,
+                agent_name=agent_name,
+                role="coordinator",
+            ) as client:
+                if write_daily:
+                    await client.memory_write(
+                        f"Coordinator daily digest {today}",
+                        format_digest("daily", now, states),
+                        "project",
+                        memory_type="checkpoint",
+                        tags=["coordinator", "digest", "daily"],
+                    )
+                if write_weekly:
+                    await client.memory_write(
+                        f"Coordinator weekly rollup {week}",
+                        format_digest("weekly", now, states),
+                        "project",
+                        memory_type="checkpoint",
+                        tags=["coordinator", "digest", "weekly"],
+                    )
+    except Exception as exc:
+        raise HomeBoardUnreachable(home_board, safe_failure_reason(exc)) from exc
+    home_state = home_audit_state(
+        home_board, states, now, extra_findings=unreachable_findings
+    )
     if home_state is not None and targets:
-        async with BoardClient(
-            url,
-            token,
-            home_board,
-            agent_name=agent_name,
-            role="coordinator",
-        ) as client:
-            await client.board_state_update(
-                STATE_KEY,
-                json.dumps(home_state, sort_keys=True, separators=(",", ":")),
-            )
-            if home_board in intake_updates:
-                await drain_intake(
-                    client, home_board, intake_updates[home_board]
+        try:
+            async with BoardClient(
+                url,
+                token,
+                home_board,
+                agent_name=agent_name,
+                role="coordinator",
+            ) as client:
+                await client.board_state_update(
+                    STATE_KEY,
+                    json.dumps(home_state, sort_keys=True, separators=(",", ":")),
                 )
+                if home_board in intake_updates:
+                    await drain_intake(
+                        client, home_board, intake_updates[home_board]
+                    )
+        except Exception as exc:
+            raise HomeBoardUnreachable(
+                home_board, safe_failure_reason(exc)
+            ) from exc
 
 
 def _read_token(path_value: str) -> str:
@@ -3387,6 +3496,57 @@ def capability_scopes(token: str) -> frozenset[str]:
     return frozenset()
 
 
+def safe_failure_reason(exc: Exception) -> str:
+    """Return a bounded, credential-free failure reason suitable for findings."""
+    error_class = type(exc).__name__
+    message = " ".join(str(exc).split())
+    permission = re.search(
+        r"(?:authenticated principal )?lacks [a-z0-9:_-]+ authorization|"
+        r"permission denied|forbidden|unauthorized",
+        message,
+        flags=re.IGNORECASE,
+    )
+    return f"{error_class}: {permission.group(0)}"[:200] if permission else error_class
+
+
+def scope_preflight(
+    main_token: str, intake_token: str | None = None
+) -> tuple[str, ...]:
+    """Validate unverified local scope hints without exposing credential data."""
+    issues: list[str] = []
+    main_scopes = capability_scopes(main_token)
+    for scope in sorted(MAIN_REQUIRED_SCOPES - main_scopes):
+        issues.append(f"coordinator-main missing required scope {scope}")
+    if intake_token is not None:
+        intake_scopes = capability_scopes(intake_token)
+        for scope in sorted(INTAKE_REQUIRED_SCOPES - intake_scopes):
+            issues.append(f"coordinator-intake missing required scope {scope}")
+        for scope in sorted(INTAKE_FORBIDDEN_SCOPES & intake_scopes):
+            issues.append(f"coordinator-intake carries forbidden scope {scope}")
+    return tuple(issues)
+
+
+async def retry_home_board(
+    operation: Callable[[], Awaitable[Any]],
+    *,
+    home_board: str,
+    sleeper: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    failure_logger: BoardFailureLogger | None = None,
+    initial_delay_s: float = 1,
+    max_delay_s: float = HOME_BACKOFF_MAX_SECONDS,
+) -> Any:
+    """Retry home-board failures in-process with capped exponential backoff."""
+    delay = initial_delay_s
+    while True:
+        try:
+            return await operation()
+        except HomeBoardUnreachable as exc:
+            if failure_logger is not None:
+                failure_logger.report(home_board, exc.reason)
+            await sleeper(delay)
+            delay = min(delay * 2, max_delay_s)
+
+
 def load_intake_credential(path_value: str | None) -> tuple[str | None, str | None]:
     """Load the optional write-less intake credential and return a safe issue code."""
     if not path_value:
@@ -3398,7 +3558,7 @@ def load_intake_credential(path_value: str | None) -> tuple[str | None, str | No
     scopes = capability_scopes(token)
     if "board:write" in scopes:
         return None, "intake-token-has-board-write"
-    if INTAKE_SCOPE not in scopes:
+    if not INTAKE_REQUIRED_SCOPES.issubset(scopes):
         return None, "missing-board-intake-grant"
     return token, None
 
@@ -3458,6 +3618,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--strict-scopes",
+        action="store_true",
+        help="Exit on coordinator credential scope mismatch instead of using shadow mode",
+    )
     intake = parser.add_mutually_exclusive_group()
     intake.add_argument("--enable-intake", dest="intake_enabled", action="store_true")
     intake.add_argument("--disable-intake", dest="intake_enabled", action="store_false")
@@ -3540,6 +3705,25 @@ async def run(args: argparse.Namespace) -> None:
     token = _read_token(args.token_path)
     terms_path = os.environ.get("PURSERS_PRIVACY_TERMS")
     runtime = RuntimeState.for_mode("shadow" if args.dry_run else args.mode)
+    intake_preflight_token: str | None = None
+    intake_preflight_issue: str | None = None
+    if args.intake_token_path:
+        try:
+            intake_preflight_token = _read_token(args.intake_token_path)
+        except ValueError:
+            intake_preflight_issue = "coordinator-intake credential is unreadable"
+    scope_issues = [
+        *scope_preflight(token, intake_preflight_token),
+        *([intake_preflight_issue] if intake_preflight_issue else []),
+    ]
+    if scope_issues:
+        for issue in scope_issues:
+            print(f"coordinator: scope preflight failed: {issue}", file=sys.stderr)
+        if args.strict_scopes:
+            raise RuntimeError("scope preflight failed: " + "; ".join(scope_issues))
+        runtime.effective_mode = "shadow"
+        print("coordinator: continuing in shadow mode", file=sys.stderr)
+    failure_logger = DEFAULT_BOARD_FAILURE_LOGGER
     degraded_streaks: dict[str, int] = {}
     subscription_loss_streaks: dict[str, int] = {}
     reported_intake_issues: set[str] = set()
@@ -3570,6 +3754,18 @@ async def run(args: argparse.Namespace) -> None:
             subscription_loss_streaks.pop(stale, None)
         snapshots.update(fresh_snapshots)
         previous.update(fresh_previous)
+        for board_id, snapshot in fresh_snapshots.items():
+            degraded, _degradation_reason, error_class = board_degradation(snapshot)
+            if degraded:
+                reason = snapshot.get("snapshot_error_reason")
+                if not isinstance(reason, str):
+                    state_reasons = snapshot.get("state_error_reasons")
+                    reason = (
+                        next(iter(state_reasons.values()), error_class)
+                        if isinstance(state_reasons, Mapping)
+                        else error_class
+                    )
+                failure_logger.report(board_id, str(reason or "unavailable"))
         return set(fresh_snapshots)
 
     async def process(selected: set[str]) -> None:
@@ -3580,6 +3776,13 @@ async def run(args: argparse.Namespace) -> None:
         intake_token, intake_authorization_rule = load_intake_credential(
             live_config.intake_token_path
         )
+        if live_config.intake_enabled and intake_authorization_rule:
+            if args.strict_scopes:
+                raise RuntimeError(
+                    "scope preflight failed: coordinator-intake "
+                    f"{intake_authorization_rule}"
+                )
+            runtime.effective_mode = "shadow"
         if (
             live_config.intake_enabled
             and intake_authorization_rule
@@ -3695,8 +3898,21 @@ async def run(args: argparse.Namespace) -> None:
         if args.dry_run:
             state_cache.update(states)
 
-    initial = await refresh(None)
-    await process(initial)
+    async def initial_cycle() -> set[str]:
+        try:
+            selected = await refresh(None)
+        except Exception as exc:
+            raise HomeBoardUnreachable(
+                args.home_board, safe_failure_reason(exc)
+            ) from exc
+        await process(selected)
+        return selected
+
+    await retry_home_board(
+        initial_cycle,
+        home_board=args.home_board,
+        failure_logger=failure_logger,
+    )
     if args.once:
         return
 
@@ -3736,9 +3952,24 @@ async def run(args: argparse.Namespace) -> None:
                 for board_id in selected:
                     subscription_loss_streaks[board_id] = 0
 
-            refreshed = await refresh(selected)
-            if refreshed:
-                await process(refreshed)
+            async def selected_cycle() -> set[str]:
+                try:
+                    refreshed_boards = await refresh(selected)
+                except Exception as exc:
+                    if args.home_board not in selected:
+                        raise
+                    raise HomeBoardUnreachable(
+                        args.home_board, safe_failure_reason(exc)
+                    ) from exc
+                if refreshed_boards:
+                    await process(refreshed_boards)
+                return refreshed_boards
+
+            refreshed = await retry_home_board(
+                selected_cycle,
+                home_board=args.home_board,
+                failure_logger=failure_logger,
+            )
             active = {project.board_id for project in projects}
             next_cursors = {
                 board_id: subscriptions.cursors.get(

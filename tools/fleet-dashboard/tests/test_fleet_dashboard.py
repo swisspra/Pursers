@@ -5532,6 +5532,60 @@ def test_findings_clear_when_the_coordinator_source_is_stale() -> None:
     assert result is None
 
 
+def test_coordinator_findings_stale_after_fifteen_minutes() -> None:
+    snapshot = {
+        "state": {
+            "coordinator_findings": {
+                "updated_at": "2030-01-01T00:00:00+00:00",
+                "value": json.dumps({"findings": []}),
+            }
+        }
+    }
+
+    assert dashboard.coordinator_findings_stale(
+        snapshot, now=datetime(2030, 1, 1, 0, 14, tzinfo=timezone.utc)
+    ) is False
+    assert dashboard.coordinator_findings_stale(
+        snapshot, now=datetime(2030, 1, 1, 0, 16, tzinfo=timezone.utc)
+    ) is True
+    assert "coordinator findings stale > 15 min" in dashboard.HTML
+
+
+def test_board_unreachable_finding_shows_scrubbed_reason() -> None:
+    result = dashboard.project_coordinator_findings(
+        {
+            "state": {
+                "coordinator_findings": {
+                    "value": json.dumps(
+                        {
+                            "findings": [
+                                {
+                                    "kind": "board_unreachable",
+                                    "level": "critical",
+                                    "message": "generic message",
+                                    "reason": "PermissionError: lacks board:coordinate authorization",
+                                }
+                            ]
+                        }
+                    )
+                }
+            }
+        }
+    )
+
+    assert result is not None
+    assert result["items"] == [
+        {
+            "kind": "board_unreachable",
+            "level": "critical",
+            "text": "PermissionError: lacks board:coordinate authorization",
+            "ticket_id": None,
+            "ask_id": None,
+            "draft": None,
+        }
+    ]
+
+
 def test_truncated_snapshot_splices_active_ticket_list() -> None:
     calls: list[tuple[str, dict]] = []
 
