@@ -156,7 +156,7 @@
       <span class="pill">JWT-only · RS256/JWKS</span>
       <span class="pill">Subscription-first multi-board</span>
       <span class="pill">Fleet dashboard</span>
-      <span class="pill">a21 released</span>
+      <span class="pill">a22 released</span>
     </div>
   </header>
 
@@ -173,7 +173,7 @@
       <a href="#flow">Flow งาน</a>
       <a href="#seats">Seats &amp; routing</a>
       <a href="#compare">v4 → v5</a>
-      <a href="#unreleased">Unreleased</a>
+      <a href="#unreleased">a22 release</a>
       <a href="#release">Build &amp; release</a>
       <a href="#why">เหตุผลการออกแบบ</a>
       <a href="#caveats">ขอบเขตจริง</a>
@@ -353,7 +353,7 @@ shasum -a 256 -c SHA256SUMS.txt</code></pre>
     <section id="fleet">
       <h2>Cross-Project Fleet: เพิ่มโปรเจกต์หนึ่งครั้ง แล้ว pool เห็นทั้งระบบ</h2>
       <p class="section-intro">Registry board เก็บ project registry กลาง แล้ว <code>a2a_wait(boards="registry")</code> แปลง registry เป็นรายการ board ที่ active ก่อนเริ่มรอ ตั้งแต่ a16 ทุก seat ใช้ subscription เป็นเส้นทางหลักแทน timer poll</p>
-      <div class="callout"><strong>Unreleased:</strong> home board ว่างหมายถึง seat แบบ fleet-wide (<code>boards=registry</code>) และ bridge bind กับ registry board (<code>pursers</code> โดย default); home board ที่มีชื่อหมายถึง dedicated seat (<code>boards=home</code>) และ prompt ส่ง <code>boards=["&lt;board&gt;"]</code> Managed config เก็บ selector ใน <code>PURSERS_BOARDS</code>/<code>PURSERS_HOME_BOARD</code></div>
+      <div class="callout"><strong>เพิ่มใน a22:</strong> home board ว่างหมายถึง seat แบบ fleet-wide (<code>boards=registry</code>) และ bridge bind กับ registry board (<code>pursers</code> โดย default); home board ที่มีชื่อหมายถึง dedicated seat (<code>boards=home</code>) และ prompt ส่ง <code>boards=["&lt;board&gt;"]</code> Managed config เก็บ selector ใน <code>PURSERS_BOARDS</code>/<code>PURSERS_HOME_BOARD</code></div>
 
       <figure class="card diagram" aria-labelledby="pool-caption">
         <svg viewBox="0 0 1120 650" role="img" aria-labelledby="pool-title pool-desc">
@@ -535,7 +535,7 @@ shasum -a 256 -c SHA256SUMS.txt</code></pre>
         <article class="card"><h3>Standalone Fleet dashboard · primary</h3><p>loopback console รวม Home, Work, Agents, Config, Needs attention และ Release &amp; Operations a21 เพิ่ม seat import/Doctor, fleet-clone ownership, immutable release plan, Central staging, publish/kickstart และ restart checks</p></article>
         <article class="card"><h3>MCP App · inline per-project</h3><p><code>ui://pursers/dashboard</code> เป็น pure-read view ของ Today, Work, Agents, Fleet และ Activity; ไม่แทน operator console และไม่ส่ง credential เข้า iframe</p></article>
       </div>
-      <p><strong>Unreleased:</strong> timer refresh หยุดเมื่อ form มี focus หรือ unsaved input และ resume ผ่าน fixed pill/status line; clone endpoint เติม working tree และซ่อม empty clone แทนการปฏิเสธว่า dirty</p>
+      <p><strong>เพิ่มใน a22:</strong> timer refresh หยุดเมื่อ form มี focus หรือ unsaved input และ resume ผ่าน fixed pill/status line; clone endpoint เติม working tree และซ่อม empty clone แทนการปฏิเสธว่า dirty</p>
     </section>
 
     <section id="coordinator">
@@ -544,7 +544,7 @@ shasum -a 256 -c SHA256SUMS.txt</code></pre>
         <article class="card"><h3>Findings</h3><p>รายงาน stale claim, unverifiable/closed-but-unmerged commit, board-large และ integration gaps แบบ deduplicated; <code>board-degraded</code> ใช้เฉพาะ call failure จริง</p></article>
         <article class="card"><h3>Structured intake</h3><p>classifier แบบ deterministic แปลง ask ที่อนุญาตเป็น ticket ผ่าน principal-intake แยก พร้อม consume-once idempotency และ approval matrix</p></article>
         <article class="card"><h3>Orchestrator digest</h3><p><code>board_digest</code>/<code>board_digest_ack</code> และ watchlist อ่าน event buffer แบบ non-blocking; orchestrator ไม่ <code>a2a_wait</code>, claim, review หรือ merge แทนคน</p></article>
-        <article class="card"><h3>Dispatcher liveness</h3><p>a21 offer เฉพาะ live seat, fair rotation และเก็บ deadline/history ข้าม restart; unreleased re-surface unclaimed broadcast ตาม <code>PURSERS_BACKLOG_RESURFACE_INTERVAL_S</code> แล้ว re-offer หลัง <code>broadcast_reoffer_s</code> ของบอร์ด และไม่ offer ให้ coordinator</p></article>
+        <article class="card"><h3>Dispatcher liveness</h3><p>a21 offer เฉพาะ live seat, fair rotation และเก็บ deadline/history ข้าม restart; a22 re-surface unclaimed broadcast ตาม <code>PURSERS_BACKLOG_RESURFACE_INTERVAL_S</code> แล้ว re-offer หลัง <code>broadcast_reoffer_s</code> ของบอร์ด และไม่ offer ให้ coordinator</p></article>
       </div>
       <div class="callout"><strong>Reduced surface:</strong> ไม่มี <code>agent_nudge</code>; autonomous Dispatcher offers เป็น targeted wake path เดียว</div>
     </section>
@@ -648,7 +648,7 @@ shasum -a 256 -c SHA256SUMS.txt</code></pre>
         <div class="step"><div class="num">6</div><h3>Review</h3><p>reviewer seat คนละ principal ตรวจ; approve → close, reject → แก้และ submit ใหม่</p></div>
       </div>
       <div class="callout"><strong>รูปแบบการจัดทีม:</strong> worker seat หนึ่งที่นั่งคือหนึ่ง Codex session และหนึ่ง <code>agent_name</code> ต่อ call; reviewer seat แยกอยู่ภายใต้ principal ของตัวเองและต้องตรวจ evidence ก่อน approve/reject มนุษย์เป็นผู้กำกับ scope และผลลัพธ์ สำหรับงานตรวจผ่าน browser ใช้ ego lite เท่านั้น ไม่ใช้ Chrome</div>
-      <div class="callout"><strong>Unreleased — keepalive liveness:</strong> background lease renewal ทำงานเฉพาะเมื่อ stdio session ยังแสดง model liveness ภายใน <code>PURSERS_KEEPALIVE_IDLE_LIMIT_S</code> (default สาม claim TTLs) เมื่อ idle จะหยุดและส่ง <code>lease_keepalive_paused</code>; Needs-attention แยก claim ที่อยู่ได้ด้วย keepalive อย่างเดียว</div>
+      <div class="callout"><strong>a22 — keepalive liveness:</strong> background lease renewal ทำงานเฉพาะเมื่อ stdio session ยังแสดง model liveness ภายใน <code>PURSERS_KEEPALIVE_IDLE_LIMIT_S</code> (default สาม claim TTLs) เมื่อ idle จะหยุดและส่ง <code>lease_keepalive_paused</code>; Needs-attention แยก claim ที่อยู่ได้ด้วย keepalive อย่างเดียว</div>
     </section>
 
     <section id="seats">
@@ -656,7 +656,7 @@ shasum -a 256 -c SHA256SUMS.txt</code></pre>
       <p class="section-intro">transport ต่างกัน แต่ทุก seat ใช้ JWT, membership, generation และ per-call identity เดียวกัน Role เป็นคำประกาศของ seat ตั้งแต่ a18 และ reviewer ต้องแยก principal จากผู้ submit</p>
       <div class="detail-grid">
         <article class="card"><h3>MCP seat · Codex / Claude</h3><p>รอผ่าน Wait Bridge แบบ subscription-first หลาย board, refetch หลัง cue และใช้ Host timeout profile เพื่อ re-arm ก่อน tool deadline</p></article>
-        <article class="card"><h3>CLI seat · Goose (seat-kit)</h3><p><code>seat_new.py</code> สร้าง role-safe <code>bin/board.sh</code>, token-file launch, fleet-clone workflow และ wait แบบ registry cursor map; unreleased ทำ <code>--board</code> optional, เพิ่ม <code>--registry-board</code>, รักษา venv interpreter และไม่ abort upgrade เมื่อ clone non-fast-forward</p></article>
+        <article class="card"><h3>CLI seat · Goose (seat-kit)</h3><p><code>seat_new.py</code> สร้าง role-safe <code>bin/board.sh</code>, token-file launch, fleet-clone workflow และ wait แบบ registry cursor map; a22 ทำ <code>--board</code> optional, เพิ่ม <code>--registry-board</code>, รักษา venv interpreter และไม่ abort upgrade เมื่อ clone non-fast-forward</p></article>
         <article class="card"><h3>API seat · worker-runtime</h3><p>headless runtime ใช้ capability/tier/skills และ targeted offers ชุดเดียวกับ interactive seat พร้อม bounded wait/submit, fleet-owned clone และ reduced tool surface</p></article>
       </div>
       <div class="callout"><strong>Routing:</strong> Dispatcher offer เฉพาะ live seat ที่ผ่าน tier, skills และ work/review gates; review lease แบบ atomic กัน reviewer ตรวจซ้ำ และ continuation บอก prior holder/branch เมื่อ claim เปลี่ยนมือ</div>
@@ -728,7 +728,7 @@ shasum -a 256 -c SHA256SUMS.txt</code></pre>
     </section>
 
     <section id="unreleased">
-      <h2>เส้นทางสถาปัตยกรรม a14 → a21 และ Unreleased</h2>
+      <h2>เส้นทางสถาปัตยกรรม a14 → a22</h2>
       <table>
         <thead><tr><th>ช่วง</th><th>การเปลี่ยนโครงสร้าง</th></tr></thead>
         <tbody>
@@ -738,10 +738,10 @@ shasum -a 256 -c SHA256SUMS.txt</code></pre>
           <tr><td>a18</td><td>explicit worker/reviewer/orchestrator roles, capability offers, background keepalive, split-identity fail-closed และ bounded digest/watch mode</td></tr>
           <tr><td>a19–a20</td><td>membership admission/connector identity hardening และ shared event vocabulary ที่ทำให้ push fail open ต่อ unknown kinds พร้อม visibility ของ fallback</td></tr>
           <tr><td>a21</td><td>live-seat fair dispatch, durable offer deadlines/history, retirement lifecycle, compacted catch-up, fleet-owned clones, import/Doctor และ Release &amp; Operations panel; ถอด <code>agent_nudge</code>, <code>board_get_briefing</code>, <code>ticket_terminate</code></td></tr>
-          <tr><td>Unreleased, on main</td><td>fleet-wide vs dedicated home-board semantics, model-liveness-gated keepalive, backlog re-surface/re-offer, form-safe Resume, clone repair และ seat-kit upgrade/interpreter fixes</td></tr>
+          <tr><td>a22</td><td>fleet-wide vs dedicated home-board semantics, model-liveness-gated keepalive, backlog re-surface/re-offer, form-safe Resume, clone repair, seat-kit upgrade/interpreter fixes, annotations, <code>needs_human</code>, claim gating และ elicitation</td></tr>
         </tbody>
       </table>
-      <p>Unreleased ยังไม่ใช่ version ใหม่: ห้ามรวมรายการเหล่านี้ไว้ใต้ป้าย 5.0.0a22 จนกว่าจะมี tag, manifest และ artifact ที่อนุมัติ</p>
+      <p>รายการ a22 อยู่ใน release 5.0.0a22 แล้ว; ผู้ดูแลต้องตรวจ tag, manifest, component versions และ artifact ที่อนุมัติก่อน deploy</p>
     </section>
 
     <section id="release">

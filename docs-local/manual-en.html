@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <link rel="icon" href="data:,">
-  <title>Pursers 5.0.0a22 — Operator guide and unreleased notes</title>
+  <title>Pursers 5.0.0a22 — Operator guide and release notes</title>
   <style>
     :root {
       color-scheme: light;
@@ -149,9 +149,9 @@
 <body>
   <header class="hero">
     <div class="hero-inner">
-      <p class="eyebrow">Pursers 5.0.0a22 · Operator guide · unreleased notes</p>
+      <p class="eyebrow">Pursers 5.0.0a22 · Operator guide · release notes</p>
       <h1>Bring up the fleet, provision seats, and move work to done</h1>
-      <p class="lead">Start with the six commands operators use most, then add seats, projects, tickets, review, and guarded releases. Features newer than a21 are labelled unreleased, on main.</p>
+      <p class="lead">Start with the six commands operators use most, then add seats, projects, tickets, review, and guarded releases. The a22 release boundary and exact component versions are documented below.</p>
       <div class="hero-meta" aria-label="Main characteristics">
         <span class="pill">Local first</span>
         <span class="pill">JWT only</span>
@@ -180,8 +180,8 @@
         <li><a href="#release">Ship a release</a></li>
         <li><a href="#troubleshoot">Troubleshoot</a></li>
         <li><a href="#security">Handle JWTs and secrets</a></li>
-        <li><a href="#unreleased">Unreleased changes on main</a></li>
-        <li><a href="#operations-runbook">Resume fleet operations after the a21 pause</a></li>
+        <li><a href="#unreleased">5.0.0a22 release changes</a></li>
+        <li><a href="#operations-runbook">Resume fleet operations with a22</a></li>
       </ol>
     </nav>
 
@@ -747,9 +747,9 @@ memory_search(
     </section>
 
     <section id="unreleased">
-      <p class="eyebrow" style="color:#2f6f9f">Unreleased · on main</p>
-      <h2>Changes newer than 5.0.0a22</h2>
-      <div class="warning"><strong>Release boundary:</strong> every item in this section is unreleased, on main. Do not describe it as a numbered release or assume it exists in an installed a21 environment.</div>
+      <p class="eyebrow" style="color:#2f6f9f">Released · 5.0.0a22</p>
+      <h2>Fleet operations added in 5.0.0a22</h2>
+      <div class="success"><strong>Release boundary:</strong> every item in this section belongs to 5.0.0a22. Confirm the installed component versions and approved artifact manifest before relying on it.</div>
       <ul>
         <li><strong>Fleet-wide or dedicated seats.</strong> A blank home board serves every active registry board with <code>boards=registry</code>; the bridge binds to the registry board, <code>pursers</code> by default. A named home board is dedicated: use <code>boards=home</code>, and generated prompts pass <code>boards=["&lt;board&gt;"]</code>. Managed configs persist <code>PURSERS_BOARDS</code> and <code>PURSERS_HOME_BOARD</code>; seat-kit makes <code>--board</code> optional, adds <code>--registry-board</code>, and generated <code>bin/board.sh</code> exports <code>PURSERS_BOARDS</code>.</li>
         <li><strong>Protected dashboard input.</strong> Timer-driven Fleet Dashboard refresh pauses while a form has focus or unsaved input. A fixed <strong>Resume</strong> pill or the status line resumes it.</li>
@@ -757,12 +757,15 @@ memory_search(
         <li><strong>Backlog re-surface.</strong> The Dispatcher re-surfaces unclaimed broadcast tickets every <code>PURSERS_BACKLOG_RESURFACE_INTERVAL_S</code> (600 seconds by default) and re-offers after <code>broadcast_reoffer_s</code>. Coordinator identities are never offered work.</li>
         <li><strong>Fleet clone repair.</strong> The clone endpoint populates the working tree and repairs an empty clone instead of refusing it as dirty.</li>
         <li><strong>Seat-kit interpreter and upgrade repair.</strong> <code>--python</code> retains the virtual-environment interpreter; <code>--upgrade</code> no longer aborts solely on a non-fast-forward seat clone.</li>
+        <li><strong>Human-input routing.</strong> Structured <code>needs_human</code> requests appear in the dashboard and reach only MCP clients that declared the matching form or URL elicitation capability. Other clients receive dashboard and answer-command fallbacks.</li>
+        <li><strong>Annotations and claim gates.</strong> Attributed ticket annotations preserve decisions and operator evidence. Pending human requests and parked tickets remain visible but cannot be claimed or dispatched, while offer ownership is enforced at claim time.</li>
+        <li><strong>Registry and coordinator hardening.</strong> Doctor reports actionable duplicate-seat and clone-preflight evidence; unreachable boards are isolated, retried with bounded backoff, and surfaced through stale findings.</li>
       </ul>
     </section>
 
     <section id="operations-runbook">
       <p class="eyebrow" style="color:#2f6f9f">13 · Operations handoff</p>
-      <h2>Resume fleet operations after the a21 pause</h2>
+      <h2>Resume fleet operations with the a22 release</h2>
       <p>This is the single operational runbook for a returning operator or a new coordinator. Run it from the repository root at the operator-approved integration commit. Values in angle brackets are placeholders; never paste a real token, principal, operator identity, or home-directory path into this document, a command transcript, ticket notes, or Git.</p>
       <div class="warning"><strong>Release boundary:</strong> read <code>tools/release_versions.toml</code> at the exact candidate commit and use those values. Do not infer a version from this page, reuse wheels from another commit, rebuild an already-published version, or publish from a moving branch. PyPI versions are immutable.</div>
 
@@ -770,7 +773,7 @@ memory_search(
         <strong>สรุปภาษาไทย:</strong> ก่อนเปิด fleet อีกครั้ง ให้ยืนยัน commit/tag และ hash ของ wheel จาก release เดียวกัน อัปเดต Central, wait bridge และ Personal ตามลำดับ แล้ว restart ทุก seat จากนั้นรัน Doctor จน identity, role, token และ push subscription ตรงกัน Worker รับเฉพาะงานที่ offer ให้ตนเอง, reviewer ต้องใช้ principal/token คนละชุด, coordinator ห้าม claim งาน และทุก host ต้องใช้ token เดียวกันระหว่าง board connector กับ wait bridge ของ seat นั้น หากพบ <code>poll</code>, lease หลุด, identity ซ้ำ หรือ cursor ผิด ให้หยุดแจกงานใหม่และแก้ตามตาราง troubleshooting ด้านล่างก่อน
       </div>
 
-      <h3>1. Architecture and authority at a21</h3>
+      <h3>1. Architecture and authority at a22</h3>
       <table>
         <thead><tr><th>Component</th><th>Operational responsibility</th></tr></thead>
         <tbody>
@@ -1153,7 +1156,7 @@ python3 tools/worker-runtime/pursers_worker.py \
           <tr><td>Lease churn or lost claim</td><td>TTL is shorter than the renew schedule, the holder stopped renewing, Central restarted, or identity changed.</td><td>Stop edits, call <code>ticket_get</code>, verify holder/principal and <code>ttl_s</code>, reclaim only if current state permits, and renew about every five minutes during manual work. Check claim-TTL changes and the current Central service before resuming.</td></tr>
           <tr><td>Phantom or duplicate identities</td><td>A seat name/instance changed across restarts, or old config still launches another connector.</td><td>Restore one stable seat name, inspect inventory and Doctor, stop obsolete processes, then use <code>agent_retire</code> on the exact inert identity only after confirming it has no live work or review lease.</td></tr>
           <tr><td>Submission notes rejected or truncated</td><td>Notes exceeded the 5,000-character contract.</td><td>Keep the required fields and concise real test tails. The client truncates at a line boundary and returns metadata; move full logs to an approved artifact instead of claiming the omitted text was submitted.</td></tr>
-          <tr><td>Cursor ahead of journal</td><td>A cursor map came from another board, a restored state is newer than Central, or journal state was replaced.</td><td>Pursers Wait Bridge <code>0.1.0a12</code> in the a21 release clamps the affected entry and returns a recoverable <code>cursor_ahead_clamped</code> warning plus a usable cursor in <code>new_seq</code>. Preserve the other entries in the per-board cursor map, accept the returned entry for this board, refetch authoritative ticket state, and re-arm with the complete returned map.</td></tr>
+          <tr><td>Cursor ahead of journal</td><td>A cursor map came from another board, a restored state is newer than Central, or journal state was replaced.</td><td>Pursers Wait Bridge <code>0.1.0a12</code> in the a22 release clamps the affected entry and returns a recoverable <code>cursor_ahead_clamped</code> warning plus a usable cursor in <code>new_seq</code>. Preserve the other entries in the per-board cursor map, accept the returned entry for this board, refetch authoritative ticket state, and re-arm with the complete returned map.</td></tr>
           <tr><td>Codex bridge has no token</td><td>Codex did not forward a shell variable into its stdio subprocess.</td><td>Use the Config adapter so the private managed bridge env contains the token literal, keep the config mode 0600, verify literal/file principal equality with Doctor, and restart Codex.</td></tr>
         </tbody>
       </table>
