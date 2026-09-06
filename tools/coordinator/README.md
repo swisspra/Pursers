@@ -130,11 +130,19 @@ coordinate-only join never consumes an invite or changes board membership.
 `admin` board membership and `board:coordinate`; ordinary member/reviewer
 coordinator seats rely on Dispatcher offers instead.
 
-For dispatch controls, a `board:coordinate` credential may call
-`ticket_update` under the existing creator-or-admin membership check. It may
+For tier, skills, and preference controls, a `board:coordinate` credential may
+call `ticket_update` under the existing creator-or-admin membership check. It may
 also call `board_dispatch_policy_set`, but that operation remains limited to an
 `admin` board membership. Other admin-only configuration tools keep their
 existing `board:write` requirements.
+
+Offers are enforced server-side. Worker and reviewer principals cannot claim a
+ticket offered to another seat; broadcast fallback claims still require a live,
+capable, non-excluded seat. Board admins and `board:coordinate` principals keep
+their operator-recovery bypass. An admin or coordinator can call
+`ticket_update(..., parked=true)` to keep an open ticket visible while preventing
+offers, broadcasts, and ordinary seat claims; `parked=false` immediately
+re-dispatches it.
 
 ## Troubleshooting runbook
 

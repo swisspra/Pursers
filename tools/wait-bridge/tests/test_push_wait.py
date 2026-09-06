@@ -585,10 +585,13 @@ class PushWaitTests(unittest.IsolatedAsyncioTestCase):
                 )
             self.assertTrue(b_wait["timed_out"], b_wait)
             self.assertEqual(b_wait["events"], [])
-            denied = await b._call(
-                "ticket_claim", agent_name=b.agent_name, ticket_id=first_id
-            )
-            self.assertEqual(denied["error"]["code"], "claim_not_offered")
+            with self.assertRaisesRegex(
+                BoardClientError,
+                r"^ticket is not offered to this seat; wait for your offer$",
+            ):
+                await b._call(
+                    "ticket_claim", agent_name=b.agent_name, ticket_id=first_id
+                )
 
             self.principal = worker_a
             a_wait = await wait_server._wait_for_work(

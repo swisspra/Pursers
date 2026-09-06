@@ -84,6 +84,11 @@ Run this loop continuously. Each pass is one unit of work:
      you each time.
 2. **CLAIM** — `ticket_claim` the returned ticket. If the claim fails (another
    worker won the race), go back to WAIT — do not fight for it.
+   Central enforces offers server-side: outside an eligible broadcast fallback,
+   a worker or reviewer may claim only the ticket currently offered to its exact
+   `agent_id`. `ticket is not offered to this seat; wait for your offer` and
+   `ticket is parked by the board owner` are terminal results for that cue;
+   return directly to WAIT and do not retry the claim in a loop.
    - If the claim result or cue contains `continuation`, inspect its
      `prior_holder` and fetch the reported `branch_and_commit` before changing
      files. Continue verified prior work instead of restarting it.
@@ -157,13 +162,12 @@ Run this loop continuously. Each pass is one unit of work:
   safely reschedule keepalive at about 40% after a shorter TTL is published.
   The former startup-only environment guard prevented operational tuning and is
   no longer needed because lease arithmetic remains explicit per response.
-- **What the current central (a6) actually enforces — do not overclaim:**
+- **What the current central enforces — do not overclaim:**
   attribution is real and automatic (your name is on every journal event).
-  Mandatory review, reviewer-must-differ, and per-project permission are **not**
-  server-enforced on a6 — they hold only by convention: (a) a separate reviewer
-  principal/token, and (b) project-tag routing. Server-enforced governance
-  (subscription auth, review policy) is a later (a9/JWT) capability. Treat the
-  rules above as discipline you keep, not as a fence the server guarantees.
+  Offer ownership, parked-ticket refusal, subscription authorization, and review
+  policy are server-enforced. Per-project filesystem permission remains outside
+  Central and project-tag routing remains soft routing, so keep the separate
+  reviewer principal and work-directory discipline described above.
 - **Project filtering is soft routing, not security.** `a2a_wait(project=…)`
   and the `target_url` tag route the right work to the right worker; they do
   **not** stop a mis-tagged or filter-less caller from seeing another project's

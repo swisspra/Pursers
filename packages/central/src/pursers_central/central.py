@@ -45,10 +45,13 @@ from pursers_client import (
     ADMISSION_EVENT_KINDS,
     AGENT_LIFECYCLE_EVENT_KINDS,
     CLAIM_TTL_EVENT_KINDS,
+    CLAIM_GATE_EVENT_KINDS,
     DEPRECATION_EVENT_KINDS,
     DISPATCH_EVENT_KINDS,
     OFFER_EXPIRED,
     OFFER_REVOKED,
+    PARK_EVENT_KINDS,
+    REVIEW_CLAIM_REFUSED,
     REVIEW_OFFERED,
     REVIEW_LEASE_EXPIRED,
     REVIEW_LEASE_RELEASED,
@@ -56,6 +59,9 @@ from pursers_client import (
     SCRUB_EVENT_KINDS,
     TICKET_REVIEW_CLAIMED,
     TICKET_OFFERED,
+    TICKET_CLAIM_REFUSED,
+    TICKET_PARKED,
+    TICKET_UNPARKED,
 )
 
 from cursor import CursorStore
@@ -220,6 +226,27 @@ DISPATCH_EVENT_FIELDS = frozenset(
         "recipient_identities",
     }
 )
+CLAIM_GATE_EVENT_FIELDS = frozenset(
+    {
+        "ticket_id",
+        "claim_kind",
+        "refused_agent_id",
+        "refused_agent_name",
+        "refusal_reason",
+        "fixture_provenance",
+        "recipient_identities",
+    }
+)
+PARK_EVENT_FIELDS = frozenset(
+    {
+        "ticket_id",
+        "parked",
+        "parked_by_agent_id",
+        "parked_by_agent_name",
+        "fixture_provenance",
+        "recipient_identities",
+    }
+)
 DISPATCH_PROJECTION_FIELDS = frozenset(
     {
         "seq",
@@ -308,6 +335,14 @@ def require_scope(principal: Principal, scope: str) -> None:
 def require_board_write_or_coordinate(principal: Principal) -> bool:
     """Authorize a board writer, or return True for the narrow coordinator path."""
     if "board:write" in principal.scopes:
+        return False
+    require_scope(principal, COORDINATOR_SCOPE)
+    return True
+
+
+def require_board_review_or_coordinate(principal: Principal) -> bool:
+    """Authorize a reviewer, or return True for the narrow coordinator path."""
+    if "board:review" in principal.scopes:
         return False
     require_scope(principal, COORDINATOR_SCOPE)
     return True
@@ -426,6 +461,8 @@ class CentralJournal(Journal):
             | DISPATCH_EVENT_KINDS
             | DEPRECATION_EVENT_KINDS
             | AGENT_LIFECYCLE_EVENT_KINDS
+            | CLAIM_GATE_EVENT_KINDS
+            | PARK_EVENT_KINDS
         ):
             raise ValueError(f"unsupported event kind: {kind}")
         board_id = _require_text("board_id", board_id)
@@ -441,6 +478,8 @@ class CentralJournal(Journal):
             | DISPATCH_EVENT_FIELDS
             | DEPRECATION_EVENT_FIELDS
             | AGENT_LIFECYCLE_EVENT_FIELDS
+            | CLAIM_GATE_EVENT_FIELDS
+            | PARK_EVENT_FIELDS
         )
         semantic = {
             key: copy.deepcopy(event[key])
@@ -494,6 +533,8 @@ class CentralJournal(Journal):
             | DISPATCH_EVENT_KINDS
             | DEPRECATION_EVENT_KINDS
             | AGENT_LIFECYCLE_EVENT_KINDS
+            | CLAIM_GATE_EVENT_KINDS
+            | PARK_EVENT_KINDS
         ):
             raise ValueError(f"unsupported event kind: {kind}")
         if not unique_fields:
@@ -511,6 +552,8 @@ class CentralJournal(Journal):
             | DISPATCH_EVENT_FIELDS
             | DEPRECATION_EVENT_FIELDS
             | AGENT_LIFECYCLE_EVENT_FIELDS
+            | CLAIM_GATE_EVENT_FIELDS
+            | PARK_EVENT_FIELDS
         )
         semantic = {
             key: copy.deepcopy(event[key])
@@ -1962,11 +2005,89 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                     return True
         return False
 
+    def claim_gate_bypass(
+        document: Mapping[str, Any], principal: Principal,
+    ) -> bool:
+        membership = service.resolve_board_context(
+            document, principal.principal_id
+        )
+        return (
+            membership.get("role") == "admin"
+            or COORDINATOR_SCOPE in principal.scopes
+        )
+
+    def dispatch_candidate_is_eligible(
+        document: Mapping[str, Any],
+        ticket: Mapping[str, Any],
+        member: Mapping[str, Any],
+        now: float,
+        kind: str,
+    ) -> bool:
+        membership = document.get("principal_memberships", {}).get(
+            member.get("principal_id")
+        )
+        if membership is None or member.get("lifecycle_status", "active") != "active":
+            return False
+        assigned = ticket.get("assigned_to_agent_id") if kind == "work" else None
+        requested = ticket.get("assigned_to") if kind == "work" else None
+        if assigned is not None and member.get("agent_id") != assigned:
+            return False
+        if (
+            assigned is None
+            and requested
+            and not assignment_matches(member, str(requested))
+        ):
+            return False
+        if agent_matches(ticket.get("exclude_agents", []), member):
+            return False
+        if not member.get("capabilities_explicit"):
+            return False
+        if kind == "work" and member.get("role") in {"coordinator", "orchestrator"}:
+            return False
+        caps = member_capabilities(member)
+        required_tier = int(ticket.get("tier", 2))
+        required_skills = set(ticket.get("skills_required", []))
+        if (
+            int(caps["tier_max"]) < required_tier
+            or not required_skills.issubset(caps["skills"])
+        ):
+            return False
+        if kind == "work":
+            if not caps["can_work"]:
+                return False
+        else:
+            if not caps["can_review"] or membership.get("role") not in {"admin", "reviewer"}:
+                return False
+            if member.get("principal_id") == ticket.get("submitted_by_principal_id"):
+                return False
+            if (
+                board_review_policy(document) == "workflow"
+                and member.get("agent_id") == ticket.get("submitted_by_agent_id")
+            ):
+                return False
+        if agent_is_busy(
+            document,
+            str(member["agent_id"]),
+            now,
+            excluding_ticket_id=str(ticket["ticket_id"]),
+        ):
+            return False
+        policy = dispatch_policy(document)
+        return service.is_agent_live(
+            str(document["board_id"]),
+            str(member["agent_id"]),
+            member,
+            now,
+            int(policy.get("offer_ttl_s", DEFAULT_OFFER_TTL_S)),
+        )
+
     def dispatch_ticket(
         document: dict[str, Any], ticket: dict[str, Any], now: float, kind: str,
     ) -> dict[str, Any] | None:
         wanted_status = "open" if kind == "work" else "submitted"
         if ticket.get("status") != wanted_status:
+            return None
+        if ticket.get("parked") is True:
             return None
         if not dispatch_enabled(document):
             return None
@@ -2006,11 +2127,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             set_broadcast_state(ticket, now, kind, "offer_limit_reached")
             return None
         required_tier = int(ticket.get("tier", 2))
-        required_skills = set(ticket.get("skills_required", []))
-        excluded = list(ticket.get("exclude_agents", []))
         preferred = list(ticket.get("prefer_agents", []))
-        assigned = ticket.get("assigned_to_agent_id") if kind == "work" else None
-        requested_assignment = ticket.get("assigned_to") if kind == "work" else None
         expired_for_this_ticket = {
             entry["agent_id"]
             for entry in ticket.get("dispatch_history", [])
@@ -2023,52 +2140,13 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         }
         candidates: list[tuple[dict[str, Any], dict[str, Any]]] = []
         for member in document.get("members", {}).values():
-            membership = document.get("principal_memberships", {}).get(member.get("principal_id"))
-            if membership is None or member.get("lifecycle_status", "active") != "active":
-                continue
-            if assigned is not None and member.get("agent_id") != assigned:
-                continue
-            if assigned is None and requested_assignment and not assignment_matches(
-                member, str(requested_assignment)
-            ):
-                continue
-            if agent_matches(excluded, member):
-                continue
-            if not member.get("capabilities_explicit"):
-                continue
-            if (
-                kind == "work"
-                and member.get("role") in {"coordinator", "orchestrator"}
-            ):
-                continue
-            caps = member_capabilities(member)
-            if int(caps["tier_max"]) < required_tier or not required_skills.issubset(caps["skills"]):
-                continue
-            if kind == "work":
-                if not caps["can_work"]:
-                    continue
-            if kind == "review":
-                if not caps["can_review"] or membership.get("role") not in {"admin", "reviewer"}:
-                    continue
-                if member.get("principal_id") == ticket.get("submitted_by_principal_id"):
-                    continue
-                if (
-                    board_review_policy(document) == "workflow"
-                    and member.get("agent_id") == ticket.get("submitted_by_agent_id")
-                ):
-                    continue
-            if agent_is_busy(
-                document, str(member["agent_id"]), now,
-                excluding_ticket_id=str(ticket["ticket_id"]),
+            if not dispatch_candidate_is_eligible(
+                document, ticket, member, now, kind
             ):
                 continue
             if member.get("agent_id") in expired_for_this_ticket:
                 continue
-            if not service.is_agent_live(
-                document["board_id"], str(member["agent_id"]), member, now,
-                int(policy.get("offer_ttl_s", DEFAULT_OFFER_TTL_S)),
-            ):
-                continue
+            caps = member_capabilities(member)
             candidates.append((member, caps))
         avoid = (
             ticket.get("last_claimed_by_agent_id") or ticket.get("last_work_offered_agent_id")
@@ -2138,6 +2216,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
 
     def expire_dispatch_offers(
         document: dict[str, Any], ticket: dict[str, Any], now: float,
+        *, redispatch: bool = True,
     ) -> list[dict[str, Any]]:
         events: list[dict[str, Any]] = []
         for kind in ("work", "review"):
@@ -2168,9 +2247,10 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                     "recipients": [expired.get("agent_id")],
                 }
             )
-            next_event = dispatch_ticket(document, ticket, now, kind)
-            if next_event is not None:
-                events.append(next_event)
+            if redispatch:
+                next_event = dispatch_ticket(document, ticket, now, kind)
+                if next_event is not None:
+                    events.append(next_event)
         return events
 
     def redispatch_queue(
@@ -2247,7 +2327,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         }
 
     def auto_stale_members(
-        document: dict[str, Any], now: float
+        document: dict[str, Any], now: float, *, redispatch: bool = True,
     ) -> list[dict[str, Any]]:
         cutoff = now - board_stale_after_days(document) * 86_400
         events: list[dict[str, Any]] = []
@@ -2269,15 +2349,21 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             if transition is not None:
                 events.append(transition)
                 changed = True
-        if changed:
+        if changed and redispatch:
             events.extend(redispatch_queue(document, now))
         return events
 
-    def reap_expired(document: dict[str, Any], now: float) -> list[dict[str, Any]]:
-        released = auto_stale_members(document, now)
+    def reap_expired(
+        document: dict[str, Any], now: float, *, redispatch: bool = True,
+    ) -> list[dict[str, Any]]:
+        released = auto_stale_members(document, now, redispatch=redispatch)
         recipients = service.admitted_agent_ids(document)
         for ticket in document["tickets"].values():
-            released.extend(expire_dispatch_offers(document, ticket, now))
+            released.extend(
+                expire_dispatch_offers(
+                    document, ticket, now, redispatch=redispatch
+                )
+            )
             review_lease = ticket.get("review_lease")
             if isinstance(review_lease, dict):
                 review_expires = review_lease.get("expires_at_epoch")
@@ -2295,9 +2381,10 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                             "recipients": recipients,
                         }
                     )
-                    dispatch_event = dispatch_ticket(document, ticket, now, "review")
-                    if dispatch_event is not None:
-                        released.append(dispatch_event)
+                    if redispatch:
+                        dispatch_event = dispatch_ticket(document, ticket, now, "review")
+                        if dispatch_event is not None:
+                            released.append(dispatch_event)
             if ticket.get("status") not in PRE_SUBMISSION_STATES:
                 continue
             expires = ticket.get("lease_expires_at_epoch")
@@ -2344,21 +2431,27 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                     "recipients": recipients,
                 }
             )
-            dispatch_event = dispatch_ticket(document, ticket, now, "work")
-            if dispatch_event is not None:
-                released.append(dispatch_event)
-        released.extend(redispatch_queue(document, now))
+            if redispatch:
+                dispatch_event = dispatch_ticket(document, ticket, now, "work")
+                if dispatch_event is not None:
+                    released.append(dispatch_event)
+        if redispatch:
+            released.extend(redispatch_queue(document, now))
         return released
 
-    def prepare_board_call(
-        document: dict[str, Any], principal: Principal, agent_name: str, now: float
-    ) -> tuple[dict[str, Any], list[dict[str, Any]], list[str]]:
-        released = reap_expired(document, now)
+    def resolve_active_actor(
+        document: dict[str, Any], principal: Principal, agent_name: str,
+    ) -> dict[str, Any]:
         actor = service.member(document, principal, agent_name)
         if actor.get("lifecycle_status", "active") != "active":
             raise PermissionError(
                 "agent is not active; call board_onboard or board_join before more work"
             )
+        return actor
+
+    def touch_actor(
+        document: dict[str, Any], actor: dict[str, Any], now: float,
+    ) -> list[str]:
         actor["last_activity_at"] = iso_at(now)
         service.record_agent_activity(document["board_id"], actor["agent_id"], now)
         renewed: list[str] = []
@@ -2370,6 +2463,14 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             ):
                 renew_claim(ticket, now, ttl_s)
                 renewed.append(ticket["ticket_id"])
+        return renewed
+
+    def prepare_board_call(
+        document: dict[str, Any], principal: Principal, agent_name: str, now: float
+    ) -> tuple[dict[str, Any], list[dict[str, Any]], list[str]]:
+        released = reap_expired(document, now)
+        actor = resolve_active_actor(document, principal, agent_name)
+        renewed = touch_actor(document, actor, now)
         return actor, released, renewed
 
     async def publish_releases(
@@ -2558,6 +2659,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         projected.setdefault("skills_required", [])
         projected.setdefault("exclude_agents", [])
         projected.setdefault("prefer_agents", [])
+        projected.setdefault("parked", False)
         projected.setdefault("tags", [])
         projected.setdefault("related_files", [])
         projected.setdefault("target_url", "")
@@ -5339,6 +5441,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         skills_required: list[str] | None = None,
         exclude_agents: list[str] | None = None,
         prefer_agents: list[str] | None = None,
+        parked: bool | None = None,
         expected_generation: str | None = None,
     ) -> dict[str, Any]:
         """Update dispatch requirements on a live ticket."""
@@ -5349,7 +5452,10 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             isinstance(tier, bool) or not isinstance(tier, int) or tier not in {1, 2, 3}
         ):
             raise ValueError("tier must be 1, 2, or 3")
-        if all(value is None for value in (tier, skills_required, exclude_agents, prefer_agents)):
+        if parked is not None and not isinstance(parked, bool):
+            raise ValueError("parked must be boolean")
+        dispatch_values = (tier, skills_required, exclude_agents, prefer_agents)
+        if all(value is None for value in (*dispatch_values, parked)):
             raise ValueError("at least one dispatch field is required")
         principal = current_principal()
         coordinate_only = require_board_write_or_coordinate(principal)
@@ -5369,13 +5475,23 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             if ticket is None:
                 raise ValueError("ticket not found")
             membership = service.resolve_board_context(document, principal.principal_id)
-            if (
+            if any(value is not None for value in dispatch_values) and (
                 ticket.get("created_by_principal_id") != principal.principal_id
                 and membership.get("role") != "admin"
             ):
                 raise PermissionError("ticket update requires creator or board admin")
+            if (
+                parked is not None
+                and membership.get("role") != "admin"
+                and COORDINATOR_SCOPE not in principal.scopes
+            ):
+                raise PermissionError(
+                    "parking a ticket requires board admin membership or board:coordinate authorization"
+                )
             if ticket.get("status") not in ACTIVE_TICKET_STATES:
                 raise ValueError(f"ticket is {ticket.get('status')}")
+            if parked is not None and ticket.get("status") not in {"open", "submitted"}:
+                raise ValueError("only open or submitted tickets can be parked")
             if tier is not None:
                 ticket["tier"] = tier
             for field, value in (
@@ -5391,7 +5507,35 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             kind = "work" if ticket.get("status") == "open" else (
                 "review" if ticket.get("status") == "submitted" else None
             )
-            if kind is not None:
+            park_event = None
+            park_changed = parked is not None and ticket.get("parked", False) != parked
+            if park_changed:
+                ticket["parked"] = parked
+                state_name = "parked" if parked else "unparked"
+                ticket.setdefault("dispatch_history", []).append(
+                    {
+                        "state": state_name,
+                        "kind": kind,
+                        "agent_id": actor["agent_id"],
+                        "agent_name": actor["agent_name"],
+                        "at": iso_at(now),
+                    }
+                )
+                park_event = {
+                    "kind": TICKET_PARKED if parked else TICKET_UNPARKED,
+                    "parked": parked,
+                }
+                if parked:
+                    ticket["dispatch_state"] = {
+                        "state": "parked", "kind": kind, "at": iso_at(now)
+                    }
+                else:
+                    ticket.pop("dispatch_state", None)
+                    if kind is not None:
+                        ticket[f"{kind}_offer_expirations"] = 0
+            if kind is not None and (
+                park_changed or any(value is not None for value in dispatch_values)
+            ):
                 offer = ticket.pop(f"{kind}_offer", None)
                 if isinstance(offer, Mapping):
                     released.append(
@@ -5401,25 +5545,46 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                             "offered_agent_id": offer.get("agent_id"),
                             "offered_agent_name": offer.get("agent_name"),
                             "offer_expires_at": offer.get("expires_at"),
-                            "dispatch_reason": "ticket_updated",
+                            "dispatch_reason": (
+                                "ticket_parked" if parked is True else "ticket_updated"
+                            ),
                             "recipients": [offer.get("agent_id")],
                         }
                     )
-                dispatched = dispatch_ticket(document, ticket, now, kind)
-                if dispatched is not None:
-                    released.append(dispatched)
+                if ticket.get("parked") is not True:
+                    dispatched = dispatch_ticket(document, ticket, now, kind)
+                    if dispatched is not None:
+                        released.append(dispatched)
             ticket["updated_at"] = iso_at(now)
             return {
                 "ticket": copy.deepcopy(ticket), "released": released,
                 "renewed": renewed,
+                "actor": copy.deepcopy(actor),
+                "park_event": park_event,
+                "recipients": ticket_recipients(document, actor),
                 "scrub_audit": record_scrub_allows(document, actor, now, allow_counts),
             }
 
         result = service.mutate(board_id, update)
         events = await publish_releases(board_id, result["released"], principal, ctx)
+        park_event = None
+        if result["park_event"] is not None:
+            park_event = await append_and_publish(
+                board_id,
+                result["actor"],
+                result["park_event"]["kind"],
+                resource_uri(board_id, "ticket", ticket_id),
+                result["recipients"],
+                ctx,
+                ticket_id=ticket_id,
+                parked=result["park_event"]["parked"],
+                parked_by_agent_id=result["actor"]["agent_id"],
+                parked_by_agent_name=result["actor"]["agent_name"],
+            )
         return {
             "ok": True, "ticket": project_ticket(board_id, result["ticket"]),
             "dispatch_events": events,
+            "park_event": park_event,
             "implicitly_renewed": result["renewed"],
             "scrub_audit": result["scrub_audit"],
         }
@@ -5572,21 +5737,41 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         board_id = require_id("board_id", board_id)
         ticket_id = require_id("ticket_id", ticket_id)
         principal = current_principal()
-        require_scope(principal, "board:write")
+        coordinate_only = require_board_write_or_coordinate(principal)
         now = time.time()
 
         def claim(document: dict[str, Any]) -> dict[str, Any]:
-            actor, released, renewed = prepare_board_call(document, principal, agent_name, now)
+            released = reap_expired(document, now, redispatch=False)
+            if coordinate_only:
+                actor = coordinator_actor(document, principal, agent_name)
+                renewed = []
+            else:
+                actor = resolve_active_actor(document, principal, agent_name)
+                renewed = []
             ticket = document["tickets"].get(ticket_id)
             if ticket is None:
                 raise ValueError("ticket not found")
             continuation = continuation_hint(ticket)
+            operator_override = claim_gate_bypass(document, principal)
+
+            def refuse(message: str, claim_kind: str = "work") -> dict[str, Any]:
+                return {
+                    "error": message,
+                    "claim_kind": claim_kind,
+                    "actor": copy.deepcopy(actor),
+                    "recipients": ticket_recipients(document, actor),
+                    "released": released,
+                    "renewed": renewed,
+                }
+
             if ticket.get("status") == "claimed":
                 if (
                     ticket.get("claimed_by_agent_id") != actor["agent_id"]
                     or ticket.get("claimed_by_principal_id") != principal.principal_id
                 ):
                     raise ValueError("ticket is claimed by another identity")
+                if not coordinate_only:
+                    renewed = touch_actor(document, actor, now)
                 ticket["status"] = "in_progress"
                 ticket["updated_at"] = iso_at(now)
                 renew_claim(ticket, now, claim_ttl(document))
@@ -5603,10 +5788,9 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             assigned_identity = ticket.get("assigned_to_agent_id")
             requested = ticket.get("assigned_to")
             assignment_kind = ticket.get("assigned_to_kind")
-            coordinator_override = board_role_allows_review(document, principal)
-            if assigned_identity not in {None, actor["agent_id"]} and not coordinator_override:
+            if assigned_identity not in {None, actor["agent_id"]} and not operator_override:
                 raise PermissionError("ticket assigned to another authenticated identity")
-            if assigned_identity is None and requested and not coordinator_override:
+            if assigned_identity is None and requested and not operator_override:
                 requested_key = str(requested).casefold()
                 name_matches = [
                     item for item in document["members"].values()
@@ -5628,37 +5812,42 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                     raise PermissionError("ticket assigned to another agent or platform")
             if ticket["status"] != "open":
                 raise ValueError(f"ticket is {ticket['status']}")
+            if ticket.get("parked") is True and not operator_override:
+                return refuse("ticket is parked by the board owner")
             if dispatch_enabled(document):
                 offer = ticket.get("work_offer")
-                if not isinstance(offer, Mapping) and ticket.get("dispatch_state", {}).get("state") != "broadcast":
-                    offered = dispatch_ticket(document, ticket, now, "work")
-                    if offered is not None:
-                        released.append(offered)
-                    offer = ticket.get("work_offer")
                 state = ticket.get("dispatch_state")
                 broadcast = isinstance(state, Mapping) and state.get("state") == "broadcast"
-                if not isinstance(offer, Mapping) and not broadcast:
-                    return {
-                        "error": {
-                            "code": "claim_not_offered",
-                            "reason": state.get("reason", "no_live_offer") if isinstance(state, Mapping) else "no_live_offer",
-                            "dispatch_state": copy.deepcopy(state),
-                        },
-                        "released": released,
-                        "renewed": renewed,
-                    }
-                if isinstance(offer, Mapping) and offer.get("agent_id") != actor["agent_id"]:
-                    return {
-                        "error": {
-                            "code": "claim_not_offered",
-                            "reason": "offered_to_another_agent",
-                            "offered_agent_id": offer.get("agent_id"),
-                            "expires_at": offer.get("expires_at"),
-                        },
-                        "released": released,
-                        "renewed": renewed,
-                    }
+                if not operator_override and (
+                    not dispatch_candidate_is_eligible(
+                        document, ticket, actor, now, "work"
+                    )
+                    or (
+                        isinstance(offer, Mapping)
+                        and offer.get("agent_id") != actor["agent_id"]
+                    )
+                    or (
+                        not isinstance(offer, Mapping)
+                        and not broadcast
+                    )
+                ):
+                    return refuse(
+                        "ticket is not offered to this seat; wait for your offer"
+                    )
                 if isinstance(offer, Mapping):
+                    if offer.get("agent_id") != actor["agent_id"]:
+                        released.append(
+                            {
+                                "kind": OFFER_REVOKED,
+                                "ticket_id": ticket_id,
+                                "offer_kind": "work",
+                                "offered_agent_id": offer.get("agent_id"),
+                                "offered_agent_name": offer.get("agent_name"),
+                                "offer_expires_at": offer.get("expires_at"),
+                                "dispatch_reason": "operator_claim",
+                                "recipients": [offer.get("agent_id")],
+                            }
+                        )
                     ticket.pop("work_offer", None)
                     ticket.setdefault("dispatch_history", []).append(
                         {"state": "accepted", "kind": "work", "agent_id": actor["agent_id"], "at": iso_at(now)}
@@ -5667,6 +5856,8 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                     "state": "claimed", "kind": "work",
                     "agent_id": actor["agent_id"], "at": iso_at(now),
                 }
+            if not coordinate_only:
+                renewed = touch_actor(document, actor, now)
             ticket["status"] = "claimed"
             ticket["claimed_by_agent_id"] = actor["agent_id"]
             ticket["claimed_by_principal_id"] = principal.principal_id
@@ -5690,7 +5881,20 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         changed = service.mutate(board_id, claim)
         release_events = await publish_releases(board_id, changed["released"], principal, ctx)
         if "error" in changed:
-            return {"ok": False, "error": changed["error"], "release_events": release_events}
+            await append_and_publish(
+                board_id,
+                changed["actor"],
+                TICKET_CLAIM_REFUSED,
+                resource_uri(board_id, "ticket", ticket_id),
+                changed["recipients"],
+                ctx,
+                ticket_id=ticket_id,
+                claim_kind=changed["claim_kind"],
+                refused_agent_id=changed["actor"]["agent_id"],
+                refused_agent_name=changed["actor"]["agent_name"],
+                refusal_reason=changed["error"],
+            )
+            raise ValueError(changed["error"])
         uri = resource_uri(board_id, "ticket", ticket_id)
         event = await append_and_publish(
             board_id, changed["actor"], "ticket_status_changed", uri, changed["recipients"], ctx,
@@ -6104,19 +6308,35 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         board_id = require_id("board_id", board_id)
         ticket_id = require_id("ticket_id", ticket_id)
         principal = current_principal()
-        require_scope(principal, "board:review")
+        coordinate_only = require_board_review_or_coordinate(principal)
         now = time.time()
 
         def claim(document: dict[str, Any]) -> dict[str, Any]:
-            actor, released, renewed = prepare_board_call(
-                document, principal, agent_name, now
-            )
+            released = reap_expired(document, now, redispatch=False)
+            if coordinate_only:
+                actor = coordinator_actor(document, principal, agent_name)
+                renewed = []
+            else:
+                actor = resolve_active_actor(document, principal, agent_name)
+                renewed = []
             ticket = document["tickets"].get(ticket_id)
             if ticket is None:
                 raise ValueError("ticket not found")
             if ticket.get("status") != "submitted":
                 raise ValueError(f"ticket is {ticket.get('status')}")
-            if not board_role_allows_review(document, principal):
+            operator_override = claim_gate_bypass(document, principal)
+
+            def refuse(message: str) -> dict[str, Any]:
+                return {
+                    "error": message,
+                    "claim_kind": "review",
+                    "actor": copy.deepcopy(actor),
+                    "recipients": ticket_recipients(document, actor),
+                    "released": released,
+                    "renewed": renewed,
+                }
+
+            if not operator_override and not board_role_allows_review(document, principal):
                 raise PermissionError(
                     "reviewing agent lacks reviewer board role and board:review authorization"
                 )
@@ -6132,39 +6352,44 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 raise PermissionError(
                     "workflow review denied: submitting and reviewing agent must differ"
                 )
+            if ticket.get("parked") is True and not operator_override:
+                return refuse("ticket is parked by the board owner")
             existing = ticket.get("review_lease")
             live_review = review_lease_is_live(ticket, now)
             if dispatch_enabled(document) and not live_review:
                 offer = ticket.get("review_offer")
-                if not isinstance(offer, Mapping) and ticket.get("dispatch_state", {}).get("state") != "broadcast":
-                    offered = dispatch_ticket(document, ticket, now, "review")
-                    if offered is not None:
-                        released.append(offered)
-                    offer = ticket.get("review_offer")
                 state = ticket.get("dispatch_state")
                 broadcast = isinstance(state, Mapping) and state.get("state") == "broadcast"
-                if not isinstance(offer, Mapping) and not broadcast:
-                    return {
-                        "error": {
-                            "code": "review_not_offered",
-                            "reason": state.get("reason", "no_live_offer") if isinstance(state, Mapping) else "no_live_offer",
-                            "dispatch_state": copy.deepcopy(state),
-                        },
-                        "released": released,
-                        "renewed": renewed,
-                    }
-                if isinstance(offer, Mapping) and offer.get("agent_id") != actor["agent_id"]:
-                    return {
-                        "error": {
-                            "code": "review_not_offered",
-                            "reason": "offered_to_another_agent",
-                            "offered_agent_id": offer.get("agent_id"),
-                            "expires_at": offer.get("expires_at"),
-                        },
-                        "released": released,
-                        "renewed": renewed,
-                    }
+                if not operator_override and (
+                    not dispatch_candidate_is_eligible(
+                        document, ticket, actor, now, "review"
+                    )
+                    or (
+                        isinstance(offer, Mapping)
+                        and offer.get("agent_id") != actor["agent_id"]
+                    )
+                    or (
+                        not isinstance(offer, Mapping)
+                        and not broadcast
+                    )
+                ):
+                    return refuse(
+                        "ticket is not offered to this seat; wait for your offer"
+                    )
                 if isinstance(offer, Mapping):
+                    if offer.get("agent_id") != actor["agent_id"]:
+                        released.append(
+                            {
+                                "kind": OFFER_REVOKED,
+                                "ticket_id": ticket_id,
+                                "offer_kind": "review",
+                                "offered_agent_id": offer.get("agent_id"),
+                                "offered_agent_name": offer.get("agent_name"),
+                                "offer_expires_at": offer.get("expires_at"),
+                                "dispatch_reason": "operator_claim",
+                                "recipients": [offer.get("agent_id")],
+                            }
+                        )
                     ticket.pop("review_offer", None)
                     ticket.setdefault("dispatch_history", []).append(
                         {"state": "accepted", "kind": "review", "agent_id": actor["agent_id"], "at": iso_at(now)}
@@ -6178,6 +6403,8 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                     existing.get("reviewer_agent_id") == actor["agent_id"]
                     and existing.get("reviewer_principal_id") == principal.principal_id
                 ):
+                    if not coordinate_only:
+                        renewed = touch_actor(document, actor, now)
                     renew_review_lease(existing, now, claim_ttl(document))
                     ticket["updated_at"] = iso_at(now)
                     return {
@@ -6196,6 +6423,8 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                     },
                     "released": released,
                 }
+            if not coordinate_only:
+                renewed = touch_actor(document, actor, now)
             lease = claim_review_lease(
                 ticket, actor, principal, now, claim_ttl(document)
             )
@@ -6215,7 +6444,26 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             board_id, changed["released"], principal, ctx
         )
         if "error" in changed:
-            return {"ok": False, "error": changed["error"], "release_events": release_events}
+            if not isinstance(changed["error"], str):
+                return {
+                    "ok": False,
+                    "error": changed["error"],
+                    "release_events": release_events,
+                }
+            await append_and_publish(
+                board_id,
+                changed["actor"],
+                REVIEW_CLAIM_REFUSED,
+                resource_uri(board_id, "ticket", ticket_id),
+                changed["recipients"],
+                ctx,
+                ticket_id=ticket_id,
+                claim_kind=changed["claim_kind"],
+                refused_agent_id=changed["actor"]["agent_id"],
+                refused_agent_name=changed["actor"]["agent_name"],
+                refusal_reason=changed["error"],
+            )
+            raise ValueError(changed["error"])
         event = None
         if changed["created"]:
             event = await append_and_publish(

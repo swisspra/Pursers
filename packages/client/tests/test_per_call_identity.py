@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 
-from pursers_client import BoardClient, JoinedIdentity
+from pursers_client import BoardClient, BoardClientError, JoinedIdentity
 
 
 def joined(name: str) -> dict[str, Any]:
@@ -194,6 +194,39 @@ async def test_bounded_read_parameters_are_forwarded(monkeypatch) -> None:
             },
         ),
     ]
+
+
+@pytest.mark.anyio
+async def test_ticket_update_forwards_parked(monkeypatch) -> None:
+    board = client()
+    captured: dict[str, Any] = {}
+
+    async def call(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        captured.update({"tool": name, "arguments": arguments})
+        return {"ok": True}
+
+    monkeypatch.setattr(board, "_call", call)
+    await board.ticket_update("TK-parked", parked=True)
+
+    assert captured == {
+        "tool": "ticket_update",
+        "arguments": {
+            "agent_name": "env-default",
+            "ticket_id": "TK-parked",
+            "parked": True,
+        },
+    }
+
+
+def test_tool_error_text_is_preserved_verbatim() -> None:
+    message = "ticket is not offered to this seat; wait for your offer"
+    result = SimpleNamespace(
+        is_error=True,
+        content=[SimpleNamespace(text=f"Error executing tool ticket_claim: {message}")],
+    )
+
+    with pytest.raises(BoardClientError, match=message):
+        BoardClient._decode(result)
 
 
 @pytest.mark.anyio

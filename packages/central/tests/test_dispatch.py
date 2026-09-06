@@ -24,7 +24,11 @@ from pursers_client import (  # noqa: E402
     OFFER_EXPIRED,
     OFFER_REVOKED,
     REVIEW_OFFERED,
+    REVIEW_CLAIM_REFUSED,
+    TICKET_CLAIM_REFUSED,
     TICKET_OFFERED,
+    TICKET_PARKED,
+    TICKET_UNPARKED,
 )
 
 
@@ -306,20 +310,47 @@ class DispatchTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn(first, {worker_a, worker_b})
 
-    async def test_preference_wins_and_non_offered_claim_is_structured(self) -> None:
+    async def test_preference_wins_and_non_offered_claim_is_rejected(self) -> None:
         worker_a = await self.add_seat(self.worker_a, "worker-a", {"tier_max": 2})
         worker_b = await self.add_seat(self.worker_b, "worker-b", {"tier_max": 2})
         created = await self.create(prefer_agents=[worker_b])
         ticket_id = created.structured_content["ticket"]["ticket_id"]
         self.assertEqual(created.structured_content["ticket"]["work_offer"]["agent_id"], worker_b)
         self.principal = self.worker_a
-        denied = await self.call(
-            "ticket_claim", agent_name="worker-a", ticket_id=ticket_id
-        )
+        with self.assertRaisesRegex(
+            ToolError, "ticket is not offered to this seat; wait for your offer"
+        ):
+            await self.call(
+                "ticket_claim", agent_name="worker-a", ticket_id=ticket_id
+            )
+        refusal = self.service.journal.read_after("pursers", 0, 1000)["events"][-1]
+        self.assertEqual(refusal["kind"], TICKET_CLAIM_REFUSED)
+        self.assertEqual(refusal["ticket_id"], ticket_id)
+        self.assertEqual(refusal["refused_agent_id"], worker_a)
+        self.assertEqual(refusal["refused_agent_name"], "worker-a")
         self.assertEqual(
-            denied.structured_content["error"]["code"], "claim_not_offered"
+            refusal["refusal_reason"],
+            "ticket is not offered to this seat; wait for your offer",
+        )
+
+        def set_can_work(document: dict[str, Any], value: bool) -> None:
+            document["members"][worker_b]["capabilities"]["can_work"] = value
+
+        self.service.mutate(
+            "pursers", lambda document: set_can_work(document, False),
+            require_generation=False,
         )
         self.principal = self.worker_b
+        with self.assertRaisesRegex(
+            ToolError, "ticket is not offered to this seat; wait for your offer"
+        ):
+            await self.call(
+                "ticket_claim", agent_name="worker-b", ticket_id=ticket_id
+            )
+        self.service.mutate(
+            "pursers", lambda document: set_can_work(document, True),
+            require_generation=False,
+        )
         claimed = await self.call(
             "ticket_claim", agent_name="worker-b", ticket_id=ticket_id
         )
@@ -330,6 +361,236 @@ class DispatchTests(unittest.IsolatedAsyncioTestCase):
             "claimed",
         )
         self.assertNotEqual(worker_a, worker_b)
+
+    async def test_admin_and_coordinator_bypass_work_offer_gate(self) -> None:
+        worker = await self.add_seat(
+            self.worker_a, "worker-a", {"tier_max": 2}
+        )
+        created = await self.create(prefer_agents=[worker])
+        ticket_id = created.structured_content["ticket"]["ticket_id"]
+
+        self.principal = self.admin
+        admin_claim = await self.call(
+            "ticket_claim", agent_name="admin-agent", ticket_id=ticket_id
+        )
+        self.assertTrue(admin_claim.structured_content["ok"])
+        self.assertEqual(
+            admin_claim.structured_content["ticket"]["claimed_by"],
+            "admin-agent",
+        )
+        self.assertEqual(
+            admin_claim.structured_content["release_events"][0]["kind"],
+            OFFER_REVOKED,
+        )
+        await self.call(
+            "ticket_unclaim", agent_name="admin-agent", ticket_id=ticket_id
+        )
+
+        coordinator = central.Principal(
+            "PR-coordinate-claim",
+            "coordinate-claim",
+            frozenset({"board:read", "board:coordinate"}),
+        )
+        await self.call(
+            "board_member_add",
+            agent_name="admin-agent",
+            principal_id=coordinator.principal_id,
+            role="member",
+        )
+        self.principal = coordinator
+        await self.call(
+            "board_join", agent_name="coordinator-seat", role="coordinator"
+        )
+        coordinator_claim = await self.call(
+            "ticket_claim", agent_name="coordinator-seat", ticket_id=ticket_id
+        )
+        self.assertTrue(coordinator_claim.structured_content["ok"])
+        self.assertEqual(
+            coordinator_claim.structured_content["ticket"]["claimed_by"],
+            "coordinator-seat",
+        )
+
+    async def test_broadcast_claim_requires_live_capable_candidate(self) -> None:
+        eligible = await self.add_seat(
+            self.worker_a, "worker-eligible", {"tier_max": 2, "skills": ["python"]}
+        )
+        self.principal = self.admin
+        await self.call(
+            "board_dispatch_policy_set", agent_name="admin-agent", offer_ttl_s=1
+        )
+        base_time = central.time.time()
+        with patch.object(central.time, "time", return_value=base_time):
+            created = await self.create(tier=2, skills_required=["python"])
+        ticket_id = created.structured_content["ticket"]["ticket_id"]
+        with patch.object(central.time, "time", return_value=base_time + 2):
+            await self.call("board_reap")
+            self.service.record_agent_activity("pursers", eligible, base_time + 2)
+            await self.add_seat(
+                self.worker_b, "worker-low", {"tier_max": 1, "skills": ["python"]}
+            )
+        self.principal = self.worker_b
+        with patch.object(central.time, "time", return_value=base_time + 3):
+            with self.assertRaisesRegex(
+                ToolError,
+                "ticket is not offered to this seat; wait for your offer",
+            ):
+                await self.call(
+                    "ticket_claim", agent_name="worker-low", ticket_id=ticket_id
+                )
+        self.principal = self.worker_a
+        with patch.object(central.time, "time", return_value=base_time + 3):
+            claimed = await self.call(
+                "ticket_claim", agent_name="worker-eligible", ticket_id=ticket_id
+            )
+        self.assertTrue(claimed.structured_content["ok"])
+        self.assertEqual(
+            claimed.structured_content["ticket"]["claimed_by_agent_id"], eligible
+        )
+
+    async def test_park_refuses_claim_and_unpark_redispatches(self) -> None:
+        worker = await self.add_seat(
+            self.worker_a, "worker-a", {"tier_max": 2}
+        )
+        created = await self.create(prefer_agents=[worker])
+        ticket_id = created.structured_content["ticket"]["ticket_id"]
+
+        self.principal = self.worker_a
+        with self.assertRaisesRegex(
+            ToolError,
+            "parking a ticket requires board admin membership or board:coordinate authorization",
+        ):
+            await self.call(
+                "ticket_update",
+                agent_name="worker-a",
+                ticket_id=ticket_id,
+                parked=True,
+            )
+
+        self.principal = self.admin
+        parked = await self.call(
+            "ticket_update",
+            agent_name="admin-agent",
+            ticket_id=ticket_id,
+            parked=True,
+        )
+        parked_ticket = parked.structured_content["ticket"]
+        self.assertTrue(parked_ticket["parked"])
+        self.assertEqual(parked_ticket["dispatch_state"]["state"], "parked")
+        self.assertNotIn("work_offer", parked_ticket)
+        self.assertEqual(
+            parked.structured_content["dispatch_events"][0]["kind"], OFFER_REVOKED
+        )
+        self.assertEqual(
+            parked.structured_content["park_event"]["kind"], TICKET_PARKED
+        )
+
+        self.principal = self.worker_a
+        with self.assertRaisesRegex(
+            ToolError, "ticket is parked by the board owner"
+        ):
+            await self.call(
+                "ticket_claim", agent_name="worker-a", ticket_id=ticket_id
+            )
+        events = self.service.journal.read_after("pursers", 0, 1000)["events"]
+        self.assertEqual(events[-1]["kind"], TICKET_CLAIM_REFUSED)
+        self.assertEqual(events[-1]["refused_agent_id"], worker)
+
+        coordinator = central.Principal(
+            "PR-coordinate-park",
+            "coordinate-park",
+            frozenset({"board:read", "board:coordinate"}),
+        )
+        self.principal = self.admin
+        await self.call(
+            "board_member_add",
+            agent_name="admin-agent",
+            principal_id=coordinator.principal_id,
+            role="member",
+        )
+        self.principal = coordinator
+        await self.call(
+            "board_join", agent_name="coordinator-seat", role="coordinator"
+        )
+        unparked = await self.call(
+            "ticket_update",
+            agent_name="coordinator-seat",
+            ticket_id=ticket_id,
+            parked=False,
+        )
+        unparked_ticket = unparked.structured_content["ticket"]
+        self.assertFalse(unparked_ticket["parked"])
+        self.assertEqual(
+            unparked.structured_content["park_event"]["kind"], TICKET_UNPARKED
+        )
+        self.assertEqual(unparked_ticket["work_offer"]["agent_id"], worker)
+        self.principal = self.worker_a
+        claimed = await self.call(
+            "ticket_claim", agent_name="worker-a", ticket_id=ticket_id
+        )
+        self.assertTrue(claimed.structured_content["ok"])
+
+    async def test_dispatch_disabled_keeps_legacy_free_claims(self) -> None:
+        worker = await self.add_seat(
+            self.worker_a, "legacy-worker", {"tier_max": 2}
+        )
+        created = await self.create()
+        ticket_id = created.structured_content["ticket"]["ticket_id"]
+
+        def disable_dispatch(document: dict[str, Any]) -> None:
+            for member in document["members"].values():
+                member["capabilities_explicit"] = False
+            ticket = document["tickets"][ticket_id]
+            ticket.pop("work_offer", None)
+            ticket.pop("dispatch_state", None)
+
+        self.service.mutate(
+            "pursers", disable_dispatch, require_generation=False
+        )
+        self.principal = self.worker_a
+        claimed = await self.call(
+            "ticket_claim", agent_name="legacy-worker", ticket_id=ticket_id
+        )
+        self.assertTrue(claimed.structured_content["ok"])
+        self.assertEqual(
+            claimed.structured_content["ticket"]["claimed_by_agent_id"], worker
+        )
+
+    async def test_repeated_unoffered_claim_does_not_create_its_own_offer(self) -> None:
+        offered = await self.add_seat(
+            self.worker_a, "worker-offered", {"tier_max": 2}
+        )
+        claimant = await self.add_seat(
+            self.worker_b, "worker-claimant", {"tier_max": 2}
+        )
+        self.principal = self.admin
+        await self.call(
+            "board_dispatch_policy_set", agent_name="admin-agent", offer_ttl_s=1
+        )
+        now = central.time.time()
+        with patch.object(central.time, "time", return_value=now):
+            created = await self.create(prefer_agents=[offered])
+        ticket_id = created.structured_content["ticket"]["ticket_id"]
+        self.assertEqual(
+            created.structured_content["ticket"]["work_offer"]["agent_id"], offered
+        )
+
+        self.principal = self.worker_b
+        for _ in range(2):
+            with patch.object(central.time, "time", return_value=now + 2):
+                with self.assertRaisesRegex(
+                    ToolError,
+                    "ticket is not offered to this seat; wait for your offer",
+                ):
+                    await self.call(
+                        "ticket_claim",
+                        agent_name="worker-claimant",
+                        ticket_id=ticket_id,
+                    )
+
+        persisted = self.service.load("pursers")["tickets"][ticket_id]
+        self.assertEqual(persisted["status"], "open")
+        self.assertNotIn("work_offer", persisted)
+        self.assertNotEqual(persisted["dispatch_state"].get("agent_id"), claimant)
 
     async def test_max_parallel_one_distributes_two_offers(self) -> None:
         worker_a = await self.add_seat(self.worker_a, "worker-a", {"tier_max": 2})
@@ -569,12 +830,12 @@ class DispatchTests(unittest.IsolatedAsyncioTestCase):
         )
         for principal, name, _ in attempts:
             self.principal = principal
-            denied = await self.call(
-                "ticket_claim", agent_name=name, ticket_id=ticket_id
-            )
-            self.assertFalse(denied.structured_content["ok"])
-            self.assertEqual(denied.structured_content["error"]["code"], "claim_not_offered")
-            self.assertEqual(denied.structured_content["error"]["reason"], "no_eligible_worker")
+            with self.assertRaisesRegex(
+                ToolError, "ticket is not offered to this seat; wait for your offer"
+            ):
+                await self.call(
+                    "ticket_claim", agent_name=name, ticket_id=ticket_id
+                )
         self.principal = self.admin
         fetched = await self.call("ticket_get", ticket_id=ticket_id)
         self.assertEqual(fetched.structured_content["ticket"]["status"], "open")
@@ -675,16 +936,40 @@ class DispatchTests(unittest.IsolatedAsyncioTestCase):
             else (self.reviewer_a, "reviewer-a")
         )
         self.principal = other_principal
-        denied = await self.call(
-            "ticket_review_claim", agent_name=other_name, ticket_id=ticket_id
-        )
-        self.assertEqual(denied.structured_content["error"]["code"], "review_not_offered")
+        with self.assertRaisesRegex(
+            ToolError, "ticket is not offered to this seat; wait for your offer"
+        ):
+            await self.call(
+                "ticket_review_claim", agent_name=other_name, ticket_id=ticket_id
+            )
+        refusal = self.service.journal.read_after("pursers", 0, 1000)["events"][-1]
+        self.assertEqual(refusal["kind"], REVIEW_CLAIM_REFUSED)
+        self.assertEqual(refusal["claim_kind"], "review")
+        self.assertEqual(refusal["refused_agent_name"], other_name)
         self.assertIn(first, {reviewer_a, reviewer_b})
         first_principal, first_name = (
             (self.reviewer_a, "reviewer-a") if first == reviewer_a
             else (self.reviewer_b, "reviewer-b")
         )
+
+        def set_can_review(document: dict[str, Any], value: bool) -> None:
+            document["members"][first]["capabilities"]["can_review"] = value
+
         self.principal = first_principal
+        self.service.mutate(
+            "pursers", lambda document: set_can_review(document, False),
+            require_generation=False,
+        )
+        with self.assertRaisesRegex(
+            ToolError, "ticket is not offered to this seat; wait for your offer"
+        ):
+            await self.call(
+                "ticket_review_claim", agent_name=first_name, ticket_id=ticket_id
+            )
+        self.service.mutate(
+            "pursers", lambda document: set_can_review(document, True),
+            require_generation=False,
+        )
         review_claimed = await self.call(
             "ticket_review_claim", agent_name=first_name, ticket_id=ticket_id
         )
@@ -706,6 +991,75 @@ class DispatchTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotEqual(
             resubmitted.structured_content["ticket"]["review_offer"]["agent_id"], first
+        )
+
+    async def test_admin_bypasses_review_offer_gate(self) -> None:
+        worker = await self.add_seat(
+            self.worker_a, "worker-a", {"tier_max": 2}
+        )
+        await self.add_seat(
+            self.reviewer_a,
+            "reviewer-a",
+            {"tier_max": 2, "can_review": True, "can_work": False},
+            role="reviewer",
+        )
+        created = await self.create(prefer_agents=[worker])
+        ticket_id = created.structured_content["ticket"]["ticket_id"]
+        self.principal = self.worker_a
+        await self.call(
+            "ticket_claim", agent_name="worker-a", ticket_id=ticket_id
+        )
+        submitted = await self.call(
+            "ticket_submit", agent_name="worker-a", ticket_id=ticket_id,
+            summary="ready",
+        )
+        self.assertNotEqual(
+            submitted.structured_content["ticket"]["review_offer"]["agent_id"],
+            central.agent_id("pursers", self.admin.principal_id, "admin-agent"),
+        )
+        self.principal = self.admin
+        claimed = await self.call(
+            "ticket_review_claim", agent_name="admin-agent", ticket_id=ticket_id
+        )
+        self.assertTrue(claimed.structured_content["ok"])
+        self.assertEqual(
+            claimed.structured_content["review_lease"]["reviewer_agent_name"],
+            "admin-agent",
+        )
+        self.assertEqual(
+            claimed.structured_content["release_events"][0]["kind"],
+            OFFER_REVOKED,
+        )
+        await self.call(
+            "ticket_review_release", agent_name="admin-agent", ticket_id=ticket_id
+        )
+
+        coordinator = central.Principal(
+            "PR-coordinate-review",
+            "coordinate-review",
+            frozenset({"board:read", "board:coordinate"}),
+        )
+        await self.call(
+            "board_member_add",
+            agent_name="admin-agent",
+            principal_id=coordinator.principal_id,
+            role="member",
+        )
+        self.principal = coordinator
+        await self.call(
+            "board_join", agent_name="coordinator-review", role="coordinator"
+        )
+        coordinator_claim = await self.call(
+            "ticket_review_claim",
+            agent_name="coordinator-review",
+            ticket_id=ticket_id,
+        )
+        self.assertTrue(coordinator_claim.structured_content["ok"])
+        self.assertEqual(
+            coordinator_claim.structured_content["review_lease"][
+                "reviewer_agent_name"
+            ],
+            "coordinator-review",
         )
 
     async def test_unassignable_review_denies_claim_and_direct_verdict(self) -> None:
@@ -765,17 +1119,14 @@ class DispatchTests(unittest.IsolatedAsyncioTestCase):
             (disabled_principal, "reviewer-disabled"),
             (excluded_principal, "reviewer-excluded"),
         )
-        denied_claim = None
         for review_principal, review_name in review_attempts:
             self.principal = review_principal
-            denied_claim = await self.call(
-                "ticket_review_claim", agent_name=review_name, ticket_id=ticket_id
-            )
-            self.assertEqual(
-                denied_claim.structured_content["error"]["code"],
-                "review_not_offered",
-            )
-        assert denied_claim is not None
+            with self.assertRaisesRegex(
+                ToolError, "ticket is not offered to this seat; wait for your offer"
+            ):
+                await self.call(
+                    "ticket_review_claim", agent_name=review_name, ticket_id=ticket_id
+                )
         self.principal = self.reviewer_b
         denied_direct = await self.call(
             "ticket_review", agent_name="reviewer-low", ticket_id=ticket_id,
@@ -794,10 +1145,6 @@ class DispatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ticket["status"], "submitted")
         self.assertNotIn("review_lease", ticket)
         self.assertNotIn("review_verdict", ticket)
-        self.assertEqual(
-            denied_claim.structured_content["error"]["reason"],
-            "no_eligible_reviewer",
-        )
 
     async def test_dispatch_projection_is_cross_seat_but_catchup_stays_scoped(
         self,
