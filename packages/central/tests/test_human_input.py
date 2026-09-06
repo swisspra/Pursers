@@ -255,6 +255,174 @@ class HumanInputTests(unittest.IsolatedAsyncioTestCase):
                 request_id=requested["request_id"], action="accept",
             )
 
+    async def test_malformed_form_schema_keywords_are_rejected(self) -> None:
+        await self.claimed_ticket()
+        invalid_schemas = (
+            {
+                "type": "object",
+                "properties": {
+                    "choice": {
+                        "type": "string",
+                        "oneOf": [{"const": "a", "title": ""}],
+                    }
+                },
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "minLength": "not-an-integer"}
+                },
+            },
+            {
+                "type": "object",
+                "title": {"nested": "not-a-string"},
+                "properties": {},
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "choices": {
+                        "type": "array",
+                        "items": {"type": "string", "enum": ["a"]},
+                        "minItems": "bad",
+                        "uniqueItems": "bad",
+                    }
+                },
+            },
+        )
+        for requested_schema in invalid_schemas:
+            with self.subTest(requested_schema=requested_schema):
+                with self.assertRaises(ToolError):
+                    await self.request(requested_schema=requested_schema)
+
+    async def test_schema_constraints_and_defaults_are_typed_and_enforced(self) -> None:
+        await self.claimed_ticket()
+        invalid_properties = (
+            {"name": {"type": "string", "title": {"bad": "title"}}},
+            {"name": {"type": "string", "description": ["bad"]}},
+            {"name": {"type": "string", "maxLength": True}},
+            {"name": {"type": "string", "minLength": 3, "maxLength": 2}},
+            {"count": {"type": "number", "minimum": "zero"}},
+            {"count": {"type": "number", "maximum": False}},
+            {"count": {"type": "number", "minimum": 2, "maximum": 1}},
+            {"count": {"type": "integer", "default": 1.5}},
+            {"enabled": {"type": "boolean", "default": "false"}},
+            {"name": {"type": "string", "minLength": 2, "default": "x"}},
+            {
+                "choices": {
+                    "type": "array",
+                    "items": {"type": "string", "enum": ["a", "b"]},
+                    "minItems": "bad",
+                }
+            },
+            {
+                "choices": {
+                    "type": "array",
+                    "items": {"type": "string", "enum": ["a", "b"]},
+                    "maxItems": True,
+                }
+            },
+            {
+                "choices": {
+                    "type": "array",
+                    "items": {"type": "string", "enum": ["a", "b"]},
+                    "uniqueItems": True,
+                }
+            },
+            {
+                "choices": {
+                    "type": "array",
+                    "items": {"type": "string", "enum": ["a", "b"]},
+                    "default": ["other"],
+                }
+            },
+            {"choice": {"type": "string", "enum": ["a"], "minimum": 0}},
+            {"choice": {"type": "number", "enum": [1, 2]}},
+            {"choice": {"enum": ["a", "b"]}},
+            {
+                "choices": {
+                    "type": "array",
+                    "items": {"type": "integer", "enum": [1, 2]},
+                }
+            },
+            {
+                "choice": {
+                    "type": "string",
+                    "enum": ["a"],
+                    "oneOf": [{"const": "a", "title": "A"}],
+                }
+            },
+        )
+        for properties in invalid_properties:
+            with self.subTest(properties=properties):
+                with self.assertRaises(ToolError):
+                    await self.request(
+                        requested_schema={"type": "object", "properties": properties}
+                    )
+        with self.assertRaises(ToolError):
+            await self.request(
+                requested_schema={
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": 0,
+                }
+            )
+
+        requested = (
+            await self.request(
+                requested_schema={
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "minLength": 2,
+                            "maxLength": 4,
+                            "default": "ok",
+                        },
+                        "count": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 3,
+                            "default": 2,
+                        },
+                        "choices": {
+                            "type": "array",
+                            "items": {"type": "string", "enum": ["a", "b"]},
+                            "minItems": 1,
+                            "maxItems": 1,
+                            "default": ["a"],
+                        },
+                    },
+                    "required": ["name", "count", "choices"],
+                }
+            )
+        ).structured_content
+        self.principal = self.admin
+        for content in (
+            {"name": "x", "count": 2, "choices": ["a"]},
+            {"name": "okay", "count": 4, "choices": ["a"]},
+            {"name": "okay", "count": 2, "choices": []},
+            {"name": "okay", "count": 2, "choices": ["a", "b"]},
+        ):
+            with self.subTest(content=content), self.assertRaises(ToolError):
+                await self.call(
+                    "ticket_human_resolve",
+                    ticket_id="TK-human",
+                    agent_name="admin-agent",
+                    request_id=requested["request_id"],
+                    action="accept",
+                    content=content,
+                )
+        resolved = await self.call(
+            "ticket_human_resolve",
+            ticket_id="TK-human",
+            agent_name="admin-agent",
+            request_id=requested["request_id"],
+            action="accept",
+            content={"name": "okay", "count": 2, "choices": ["a"]},
+        )
+        self.assertEqual(resolved.structured_content["ticket"]["status"], "open")
+
     async def test_list_snapshot_briefing_and_event_vocabulary(self) -> None:
         await self.claimed_ticket()
         requested = (

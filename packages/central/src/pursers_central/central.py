@@ -11,6 +11,7 @@ import hashlib
 import hmac
 import ipaddress
 import json
+import math
 import os
 import re
 import secrets
@@ -2761,6 +2762,16 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 cleaned.append(text)
         return cleaned
 
+    def json_schema_value_equal(left: Any, right: Any) -> bool:
+        if isinstance(left, bool) or isinstance(right, bool):
+            return isinstance(left, bool) and isinstance(right, bool) and left == right
+        if (
+            isinstance(left, (int, float))
+            and isinstance(right, (int, float))
+        ):
+            return left == right
+        return type(left) is type(right) and left == right
+
     def validate_human_request_schema(
         value: dict[str, Any] | None, *, scrub_profile: str,
         allow_counts: dict[str, int],
@@ -2775,7 +2786,10 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         }
         if set(value) - allowed_root:
             raise ValueError("requested_schema contains unsupported root keywords")
-        properties = value.get("properties", {})
+        for keyword in ("title", "description"):
+            if keyword in value and not isinstance(value[keyword], str):
+                raise ValueError(f"requested_schema {keyword} must be a string")
+        properties = value.get("properties")
         if not isinstance(properties, dict) or len(properties) > HUMAN_REQUEST_MAX_PROPERTIES:
             raise ValueError(
                 f"requested_schema properties must be an object with at most {HUMAN_REQUEST_MAX_PROPERTIES} fields"
@@ -2788,25 +2802,115 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             or not set(required).issubset(properties)
         ):
             raise ValueError("requested_schema required must contain unique property names")
-        if value.get("additionalProperties", False) not in {False, None}:
+        if "additionalProperties" in value and value["additionalProperties"] is not False:
             raise ValueError("requested_schema additionalProperties must be false")
 
         secret_names = {"password", "token", "secret", "api_key"}
         primitive_types = {"string", "number", "integer", "boolean"}
-        def schema_value_matches(item: Any, field_type: str | None) -> bool:
-            if field_type is None:
-                return isinstance(item, (str, int, float, bool))
+
+        def schema_value_matches(item: Any, field_type: str) -> bool:
             expected: dict[str, Any] = {
                 "string": str, "number": (int, float),
                 "integer": int, "boolean": bool,
             }
             return isinstance(item, expected[field_type]) and not (
                 field_type in {"number", "integer"} and isinstance(item, bool)
+            ) and not (
+                field_type in {"number", "integer"}
+                and isinstance(item, float)
+                and not math.isfinite(item)
             )
-        scalar_keywords = {
-            "type", "title", "description", "default", "enum", "oneOf",
-            "minimum", "maximum", "minLength", "maxLength",
-        }
+
+        def ensure_optional_text(schema: Mapping[str, Any]) -> None:
+            for keyword in ("title", "description"):
+                if keyword in schema and not isinstance(schema[keyword], str):
+                    raise ValueError(
+                        f"requested_schema property {keyword} must be a string"
+                    )
+
+        def ensure_nonnegative_integer(
+            schema: Mapping[str, Any], keyword: str,
+        ) -> None:
+            if keyword not in schema:
+                return
+            item = schema[keyword]
+            if isinstance(item, bool) or not isinstance(item, int) or item < 0:
+                raise ValueError(
+                    f"requested_schema {keyword} must be a non-negative integer"
+                )
+
+        def ensure_number(schema: Mapping[str, Any], keyword: str) -> None:
+            if keyword not in schema:
+                return
+            item = schema[keyword]
+            if (
+                isinstance(item, bool)
+                or not isinstance(item, (int, float))
+                or (isinstance(item, float) and not math.isfinite(item))
+            ):
+                raise ValueError(f"requested_schema {keyword} must be a number")
+
+        def ensure_ordered_bounds(
+            schema: Mapping[str, Any], minimum: str, maximum: str,
+        ) -> None:
+            if (
+                minimum in schema
+                and maximum in schema
+                and schema[minimum] > schema[maximum]
+            ):
+                raise ValueError(
+                    f"requested_schema {minimum} must not exceed {maximum}"
+                )
+
+        def ensure_unique(values: list[Any], keyword: str) -> None:
+            for index, item in enumerate(values):
+                if any(
+                    json_schema_value_equal(item, prior)
+                    for prior in values[:index]
+                ):
+                    raise ValueError(
+                        f"requested_schema {keyword} values must be unique"
+                    )
+
+        def validate_choices(
+            schema: Mapping[str, Any], field_type: str,
+        ) -> list[Any] | None:
+            if "enum" in schema and "oneOf" in schema:
+                raise ValueError("requested_schema enum and oneOf are mutually exclusive")
+            if "enum" in schema:
+                choices = schema["enum"]
+                if (
+                    not isinstance(choices, list)
+                    or not choices
+                    or any(
+                        not schema_value_matches(item, field_type) for item in choices
+                    )
+                ):
+                    raise ValueError("requested_schema enum must be a non-empty array")
+                ensure_unique(choices, "enum")
+                return choices
+            if "oneOf" in schema:
+                definitions = schema["oneOf"]
+                if (
+                    not isinstance(definitions, list)
+                    or not definitions
+                    or any(
+                        not isinstance(choice, dict)
+                        or set(choice) != {"const", "title"}
+                        or not isinstance(choice.get("title"), str)
+                        or not choice["title"].strip()
+                        or not schema_value_matches(choice.get("const"), field_type)
+                        for choice in definitions
+                    )
+                ):
+                    raise ValueError(
+                        "requested_schema oneOf choices require const and non-empty title"
+                    )
+                choices = [choice["const"] for choice in definitions]
+                ensure_unique(choices, "oneOf const")
+                return choices
+            return None
+
         for name, schema in properties.items():
             if not isinstance(name, str) or not name or len(name) > 80:
                 raise ValueError("requested_schema property names must be 1-80 characters")
@@ -2819,16 +2923,20 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 raise ValueError("use url mode for sensitive input")
             if not isinstance(schema, dict):
                 raise ValueError("requested_schema property definitions must be objects")
+            ensure_optional_text(schema)
             field_type = schema.get("type")
             if field_type == "array":
-                allowed = {"type", "title", "description", "items", "minItems", "maxItems", "uniqueItems"}
+                allowed = {
+                    "type", "title", "description", "items", "minItems",
+                    "maxItems", "default",
+                }
                 if set(schema) - allowed:
                     raise ValueError("array properties support only array-of-enum schemas")
                 items = schema.get("items")
                 if (
                     not isinstance(items, dict)
                     or set(items) - {"type", "enum"}
-                    or items.get("type") not in primitive_types
+                    or items.get("type") != "string"
                     or not isinstance(items.get("enum"), list)
                     or not items["enum"]
                     or any(
@@ -2836,58 +2944,88 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                         for item in items["enum"]
                     )
                 ):
-                    raise ValueError("array properties must use primitive enum items")
+                    raise ValueError("array properties must use string enum items")
+                ensure_unique(items["enum"], "array enum")
+                ensure_nonnegative_integer(schema, "minItems")
+                ensure_nonnegative_integer(schema, "maxItems")
+                ensure_ordered_bounds(schema, "minItems", "maxItems")
+                if "default" in schema:
+                    default = schema["default"]
+                    if (
+                        not isinstance(default, list)
+                        or any(
+                            not any(
+                                json_schema_value_equal(item, choice)
+                                for choice in items["enum"]
+                            )
+                            for item in default
+                        )
+                        or len(default) < int(schema.get("minItems", 0))
+                        or (
+                            "maxItems" in schema
+                            and len(default) > schema["maxItems"]
+                        )
+                    ):
+                        raise ValueError(
+                            "requested_schema default does not match array constraints"
+                        )
             elif field_type in primitive_types:
-                if set(schema) - scalar_keywords:
+                choices_present = "enum" in schema or "oneOf" in schema
+                allowed = {"type", "title", "description", "default"}
+                if choices_present and field_type == "string":
+                    allowed |= {"enum", "oneOf"}
+                elif field_type == "string":
+                    allowed |= {"minLength", "maxLength"}
+                elif field_type in {"number", "integer"}:
+                    allowed |= {"minimum", "maximum"}
+                if set(schema) - allowed:
                     raise ValueError("requested_schema contains unsupported property keywords")
-                if "enum" in schema and (
-                    not isinstance(schema["enum"], list) or not schema["enum"]
-                    or any(
-                        not schema_value_matches(item, field_type)
-                        for item in schema["enum"]
-                    )
-                ):
-                    raise ValueError("requested_schema enum must be a non-empty array")
-                if "oneOf" in schema:
-                    choices = schema["oneOf"]
-                    if (
-                        not isinstance(choices, list)
-                        or not choices
-                        or any(
-                            not isinstance(choice, dict)
-                            or set(choice) != {"const", "title"}
-                            or not isinstance(choice.get("title"), str)
-                            or not schema_value_matches(choice.get("const"), field_type)
+                choices = (
+                    validate_choices(schema, field_type)
+                    if choices_present and field_type == "string"
+                    else None
+                )
+                if field_type == "string" and not choices_present:
+                    ensure_nonnegative_integer(schema, "minLength")
+                    ensure_nonnegative_integer(schema, "maxLength")
+                    ensure_ordered_bounds(schema, "minLength", "maxLength")
+                if field_type in {"number", "integer"} and not choices_present:
+                    ensure_number(schema, "minimum")
+                    ensure_number(schema, "maximum")
+                    ensure_ordered_bounds(schema, "minimum", "maximum")
+                if "default" in schema:
+                    default = schema["default"]
+                    valid = schema_value_matches(default, field_type)
+                    if choices is not None:
+                        valid = valid and any(
+                            json_schema_value_equal(default, choice)
                             for choice in choices
                         )
-                    ):
-                        raise ValueError("requested_schema oneOf choices require const and title")
-            elif field_type is None and set(schema) <= {"title", "description", "enum", "oneOf"}:
-                if "enum" in schema and (
-                    not isinstance(schema["enum"], list) or not schema["enum"]
-                    or any(
-                        not schema_value_matches(item, None)
-                        for item in schema["enum"]
-                    )
-                ):
-                    raise ValueError("requested_schema enum must be a non-empty array")
-                if "oneOf" in schema:
-                    choices = schema["oneOf"]
-                    if (
-                        not isinstance(choices, list)
-                        or not choices
-                        or any(
-                            not isinstance(choice, dict)
-                            or set(choice) != {"const", "title"}
-                            or not isinstance(choice.get("title"), str)
-                            or not choice["title"].strip()
-                            or not schema_value_matches(choice.get("const"), None)
-                            for choice in choices
+                    if field_type == "string" and not choices_present:
+                        valid = (
+                            valid
+                            and len(default) >= int(schema.get("minLength", 0))
+                            and (
+                                "maxLength" not in schema
+                                or len(default) <= schema["maxLength"]
+                            )
                         )
-                    ):
-                        raise ValueError("requested_schema oneOf choices require const and title")
-                if "enum" not in schema and "oneOf" not in schema:
-                    raise ValueError("requested_schema properties must declare a primitive type, enum, or oneOf")
+                    if field_type in {"number", "integer"} and not choices_present:
+                        valid = (
+                            valid
+                            and (
+                                "minimum" not in schema
+                                or default >= schema["minimum"]
+                            )
+                            and (
+                                "maximum" not in schema
+                                or default <= schema["maximum"]
+                            )
+                        )
+                    if not valid:
+                        raise ValueError(
+                            "requested_schema default does not match property constraints"
+                        )
             else:
                 raise ValueError("requested_schema properties must be primitive or array-of-enum")
         encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
@@ -2947,7 +3085,19 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             field_type = definition.get("type")
             if field_type == "array":
                 if not isinstance(item, list) or any(
-                    value not in definition["items"]["enum"] for value in item
+                    not any(
+                        json_schema_value_equal(value, choice)
+                        for choice in definition["items"]["enum"]
+                    )
+                    for value in item
+                ):
+                    raise ValueError(f"human answer field {name} does not match requested_schema")
+                if (
+                    len(item) < int(definition.get("minItems", 0))
+                    or (
+                        "maxItems" in definition
+                        and len(item) > definition["maxItems"]
+                    )
                 ):
                     raise ValueError(f"human answer field {name} does not match requested_schema")
                 continue
@@ -2955,13 +3105,40 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 expected = primitive_types[field_type]
                 if not isinstance(item, expected) or (
                     field_type in {"number", "integer"} and isinstance(item, bool)
+                ) or (
+                    field_type in {"number", "integer"}
+                    and isinstance(item, float)
+                    and not math.isfinite(item)
                 ):
                     raise ValueError(f"human answer field {name} does not match requested_schema")
-            if "enum" in definition and item not in definition["enum"]:
+            if "enum" in definition and not any(
+                json_schema_value_equal(item, choice)
+                for choice in definition["enum"]
+            ):
                 raise ValueError(f"human answer field {name} does not match requested_schema")
-            if "oneOf" in definition and item not in {
-                choice["const"] for choice in definition["oneOf"]
-            }:
+            if "oneOf" in definition and not any(
+                json_schema_value_equal(item, choice["const"])
+                for choice in definition["oneOf"]
+            ):
+                raise ValueError(f"human answer field {name} does not match requested_schema")
+            if field_type == "string" and (
+                len(item) < int(definition.get("minLength", 0))
+                or (
+                    "maxLength" in definition
+                    and len(item) > definition["maxLength"]
+                )
+            ):
+                raise ValueError(f"human answer field {name} does not match requested_schema")
+            if field_type in {"number", "integer"} and (
+                (
+                    "minimum" in definition
+                    and item < definition["minimum"]
+                )
+                or (
+                    "maximum" in definition
+                    and item > definition["maximum"]
+                )
+            ):
                 raise ValueError(f"human answer field {name} does not match requested_schema")
 
     def human_request_recipients(document: dict[str, Any]) -> list[str]:
