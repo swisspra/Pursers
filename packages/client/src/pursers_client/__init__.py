@@ -34,6 +34,7 @@ from .events import (
     TICKET_REVIEW_CLAIMED,
     TICKET_OFFERED,
 )
+from .human_input import SENSITIVE_FORM_FALLBACK, human_form_safety
 from .personal_profile import (
     PERSONAL_REVIEW_POLICY,
     PROFILE_ENV,
@@ -97,6 +98,7 @@ __all__ = [
     "OFFER_EXPIRED",
     "OFFER_REVOKED",
     "ScrubRejectedError",
+    "SENSITIVE_FORM_FALLBACK",
     "SCRUB_EVENT_KINDS",
     "SUBMISSION_KINDS",
     "SUBMITTED_RELEVANT_KINDS",
@@ -108,6 +110,7 @@ __all__ = [
     "default_profiles_root",
     "doctor_identity_summary",
     "ensure_personal_profile",
+    "human_form_safety",
     "load_personal_profile",
     "parse_project_registry",
     "registry_project_work_dirs",

@@ -486,9 +486,11 @@ question to the human through the host they already sit in:
   never an `InputRequiredResult`. Clients that declared no elicitation get the list plus instructions to
   answer via `board_human_requests(answer={"ticket_id": ..., "action": ...,
   "content": {...}, "disposition": ...})` or the fleet dashboard. The bridge
-  never sends a mode the client did not declare. Form mode never asks for
-  secrets; credentials and files go through url mode pointing at the
-  dashboard page or a described drop location.
+  never sends a mode the client did not declare. A shared conservative guard
+  checks request messages plus schema property names, titles, and descriptions;
+  credential, file, password, token, secret, and API-key requests are never
+  emitted as form fields. They require url mode pointing at a trusted target or
+  a described drop location, otherwise the bridge returns a safe fallback.
 - Push: the `human_input_requested` / `human_input_resolved` journal kinds
   wake orchestrator seats; `board_digest` shows a `human_requests` section
   and `board_digest_ack` clears it.
@@ -504,7 +506,7 @@ Elicitation host declarations (probed 2026-09-06):
 
 | Host | declares elicitation | measured result |
 | --- | --- | --- |
-| Claude Desktop | no | Live MCPB probe against the sandbox dependency Central returned `elicitation_declared: false` after the empty-object compatibility and dual-era fixes plus a full Desktop restart. No form rendered. The fallback `answer` call accepted `choice=green`, `disposition=reopen`, and Central recorded the matching resolution. |
+| Claude Desktop | no | Live MCPB probe against the sandbox dependency Central returned `elicitation_declared: false` after the empty-object compatibility and dual-era fixes plus a full Desktop restart. A fourth operator-authorized call for request `HR-667f8dd55d230060` again rendered no form. An earlier fallback `answer` call accepted `choice=green`, `disposition=reopen`, and Central recorded the matching resolution. |
 | Codex app | not measured | The sandbox probe connector was not available to this Codex task, so no declaration is inferred. |
 | Goose | no | Live stdio probe verified the fallback list + instructions path against Central. |
 
@@ -532,3 +534,7 @@ capability and MRTR path independently of Claude Desktop's host support. A
 second SDK probe in `2025-11-25` legacy mode invoked the form callback over
 the back-channel and returned a final tool result (not MRTR), resolving
 request `HR-48dc39e253b9604e` with `choice=blue` and `disposition=reopen`.
+An additional operator-authorized Claude Desktop call against pending request
+`HR-667f8dd55d230060` again returned `elicitation_declared: false` and rendered
+no form, confirming the host result after the rejection fixes without inferring
+support from connector presence.

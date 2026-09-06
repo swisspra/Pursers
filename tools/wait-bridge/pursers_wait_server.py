@@ -85,7 +85,9 @@ from pursers_client import (
     BoardClient,
     BoardClientError,
     JoinedIdentity,
+    SENSITIVE_FORM_FALLBACK,
     SUBMITTED_RELEVANT_KINDS,
+    human_form_safety,
     parse_project_registry,
     registry_work_dirs,
 )
@@ -3108,6 +3110,17 @@ async def _legacy_human_requests(
                 )
                 disposition_field = "disposition"
             else:
+                form_safe, safety_reason = human_form_safety(
+                    item.get("message"), item.get("requested_schema")
+                )
+                if not form_safe:
+                    unasked.append(
+                        {
+                            **target,
+                            "reason": safety_reason or SENSITIVE_FORM_FALLBACK,
+                        }
+                    )
+                    continue
                 if not form_ok or elicit_form is None:
                     unasked.append(
                         {
@@ -3359,11 +3372,26 @@ async def board_human_requests_core(
         }
         for item in pending
     ]
+    unsafe_without_url = []
+    for item in pending:
+        form_safe, safety_reason = human_form_safety(
+            item.get("message"), item.get("requested_schema")
+        )
+        if not item.get("url") and not form_safe:
+            unsafe_without_url.append(
+                {
+                    "board": item["board_id"],
+                    "ticket_id": item["ticket_id"],
+                    "request_id": item["request_id"],
+                    "reason": safety_reason or SENSITIVE_FORM_FALLBACK,
+                }
+            )
     if not form_ok and not url_ok:
         return {
             "ok": True,
             "elicitation_declared": False,
             "pending": summaries,
+            "unasked": unsafe_without_url,
             "instructions": _human_fallback_instructions(),
         }
 
@@ -3401,6 +3429,18 @@ async def board_human_requests_core(
                 )
             )
         else:
+            form_safe, safety_reason = human_form_safety(
+                item.get("message"), item.get("requested_schema")
+            )
+            if not form_safe:
+                unasked.append(
+                    {
+                        "ticket_id": item["ticket_id"],
+                        "request_id": item["request_id"],
+                        "reason": safety_reason or SENSITIVE_FORM_FALLBACK,
+                    }
+                )
+                continue
             if not form_ok:
                 unasked.append(
                     {
