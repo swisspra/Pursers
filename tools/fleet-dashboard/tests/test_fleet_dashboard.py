@@ -3600,7 +3600,7 @@ def test_seat_config_manager_reviews_imports_and_doctors_discovered_seats(
     assert review["conflicts"] == []
     assert len(review["candidates"]) == 3
     assert all(row["zero_diff"] for row in review["candidates"])
-    assert all(row["boards"] == "registry" for row in review["candidates"])
+    assert all(row["boards"] == "home" for row in review["candidates"])  # named home board = dedicated
     assert all(row["tier_max"] == 2 for row in review["candidates"])
     assert all(row["can_work"] is True for row in review["candidates"])
     assert all(row["bridge_connector_name"] for row in review["candidates"])

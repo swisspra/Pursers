@@ -662,7 +662,9 @@ def test_prompt_renderer_has_exact_registry_rearm_and_role_rules(tmp_path: Path)
     reviewer = renderer.render(desired(tmp_path, "claude-desktop", role="reviewer"))
     orchestrator = renderer.render(desired(tmp_path, "claude-desktop", role="orchestrator"))
 
-    assert 'boards="registry"' in worker
+    # the fixture names a home board, so the seat is dedicated to it
+    assert 'boards=["pursers"]' in worker
+    assert 'boards="registry"' not in worker
     assert "timeout_s=560" in worker
     assert "whole new_seq map" in worker
     assert "bound to this Codex window" in worker
@@ -757,10 +759,65 @@ def test_discover_managed_seats_imports_codex_goose_and_claude_desktop(
         assert seat.role == target.role
         assert seat.connector_name == target.connector_name
         assert seat.home_board == target.home_board
-        assert seat.boards == "registry"
+        assert seat.boards == "home"  # named home board = dedicated seat
         assert seat.token_file == target.token_file
         assert seat.token_env_var == target.token_env_var
         assert seat_config.adapter_for(seat).plan(seat) == []
+
+
+def test_blank_home_board_serves_every_registry_board(tmp_path: Path) -> None:
+    fleet = desired(tmp_path, "codex", home_board="")
+    assert fleet.home_board == ""
+    assert fleet.boards == "registry"
+    assert fleet.anchor_board == "pursers"
+    dedicated = desired(tmp_path, "codex", name="codex-dedicated", home_board=" fullplatts ")
+    assert dedicated.home_board == "fullplatts"
+    assert dedicated.boards == "home"
+    assert dedicated.anchor_board == "fullplatts"
+    with pytest.raises(ValueError):
+        desired(tmp_path, "codex", name="codex-bad", home_board="", boards="home")
+
+    renderer = seat_config.PromptRenderer()
+    assert 'boards="registry"' in renderer.render(fleet)
+    assert 'boards=["fullplatts"]' in renderer.render(dedicated)
+
+    env = seat_config.capability_env(fleet)
+    assert env["PURSERS_BOARDS"] == "registry"
+    assert env["PURSERS_HOME_BOARD"] == ""
+
+    adapter = seat_config.adapter_for(fleet)
+    adapter.apply(adapter.plan(fleet))
+    block = tomllib.loads(Path(fleet.config_path).read_text())["mcp_servers"][fleet.connector_name]["env"]
+    assert block["ONBOARD_BOARD_ID"] == "pursers"  # bridge binds to the registry board
+    assert block["PURSERS_HOME_BOARD"] == ""
+    assert block["PURSERS_BOARDS"] == "registry"
+
+    seats, conflicts = seat_config.discover_managed_seats([("codex", Path(fleet.config_path))])
+    assert conflicts == []
+    assert seats[0].home_board == ""
+    assert seats[0].boards == "registry"
+    assert seats[0].anchor_board == "pursers"
+    assert seat_config.adapter_for(seats[0]).plan(seats[0]) == []
+
+
+def test_legacy_managed_block_without_home_marker_keeps_fleet_wide_scope() -> None:
+    env = {
+        "ONBOARD_AGENT_NAME": "legacy-seat",
+        "PURSERS_ROLE": "worker",
+        "ONBOARD_CENTRAL_URL": "https://central.example/mcp",
+        "ONBOARD_BOARD_ID": "pursers",
+        "PURSERS_BRIDGE_COMMAND": "/opt/bin/pursers-wait-bridge",
+        "ONBOARD_CENTRAL_TOKEN_FILE": "/tmp/seat.jwt",
+    }
+    seat = seat_config._managed_seat_from_env(
+        host="codex",
+        config_path=Path("/tmp/config.toml"),
+        env=env,
+        command="/opt/bin/pursers-wait-bridge",
+        connector_name="pursers-wait-bridge",
+    )
+    assert seat.home_board == "pursers"
+    assert seat.boards == "registry"  # legacy blocks predate the selector; they were fleet-wide
 
 
 def test_discover_managed_seats_reports_duplicate_name_conflicts(tmp_path: Path) -> None:

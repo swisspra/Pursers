@@ -41,6 +41,7 @@ DEFAULT_INVENTORY = DEFAULT_STATE_DIR / "seats.json"
 SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
 ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 MANAGED_COMMENT = "# pursers-managed; edit through the fleet dashboard"
+DEFAULT_REGISTRY_BOARD = "pursers"
 CAPABILITY_ENV = {
     "tier_max": "PURSERS_TIER_MAX",
     "skills": "PURSERS_SKILLS",
@@ -48,6 +49,8 @@ CAPABILITY_ENV = {
     "can_work": "PURSERS_CAN_WORK",
     "model": "PURSERS_MODEL",
     "provider": "PURSERS_PROVIDER",
+    "boards": "PURSERS_BOARDS",
+    "home_board": "PURSERS_HOME_BOARD",
 }
 CONNECTOR_SKILLS = {
     "github": "git",
@@ -619,7 +622,8 @@ class DesiredSeat:
     can_work: bool | None = None
     model: str | None = None
     provider: str | None = None
-    boards: str = "registry"
+    boards: str | None = None
+    registry_board: str = DEFAULT_REGISTRY_BOARD
 
     def __post_init__(self) -> None:
         if self.host not in HOST_PROFILES:
@@ -630,12 +634,24 @@ class DesiredSeat:
             )
         if not SAFE_NAME.fullmatch(self.name):
             raise ValueError("seat name must be a safe 1-80 character identifier")
-        if not SAFE_NAME.fullmatch(self.home_board):
-            raise ValueError("home board must be a safe 1-80 character identifier")
+        # Blank home board = the seat serves every active registry board.
+        # A named home board = the seat is dedicated to that board only.
+        home_board = (self.home_board or "").strip() if isinstance(self.home_board, str) else self.home_board
+        if not isinstance(home_board, str):
+            raise ValueError("home board must be a string (blank = any registry board)")
+        if home_board and not SAFE_NAME.fullmatch(home_board):
+            raise ValueError("home board must be blank or a safe 1-80 character identifier")
+        object.__setattr__(self, "home_board", home_board)
+        if not isinstance(self.registry_board, str) or not SAFE_NAME.fullmatch(self.registry_board):
+            raise ValueError("registry board must be a safe 1-80 character identifier")
         if not ENV_NAME.fullmatch(self.token_env_var):
             raise ValueError("token env var must be a safe identifier")
+        if self.boards is None:
+            object.__setattr__(self, "boards", "home" if home_board else "registry")
         if not isinstance(self.boards, str):
             raise ValueError("boards must be a string")
+        if self.boards == "home" and not home_board:
+            raise ValueError("boards=home requires a home board; leave boards blank for any registry board")
         explicit_boards = self.boards.split(",")
         if self.boards not in {"registry", "home"} and (
             not explicit_boards
@@ -702,6 +718,11 @@ class DesiredSeat:
         return cls(**selected)
 
     @property
+    def anchor_board(self) -> str:
+        """Board the bridge binds to: the home board, or the registry board when blank."""
+        return self.home_board or self.registry_board
+
+    @property
     def capabilities(self) -> dict[str, Any]:
         return {
             "tier_max": self.tier_max,
@@ -722,6 +743,8 @@ def capability_env(desired: DesiredSeat) -> dict[str, str]:
         "can_work": str(desired.can_work).lower(),
         "model": desired.model or "",
         "provider": desired.provider or "",
+        "boards": desired.boards or "",
+        "home_board": desired.home_board,
     }
     return {CAPABILITY_ENV[key]: value for key, value in values.items()}
 
@@ -754,7 +777,7 @@ def _managed_seat_from_env(
         "name": env.get("ONBOARD_AGENT_NAME"),
         "role": env.get("PURSERS_ROLE"),
         "central_url": env.get("ONBOARD_CENTRAL_URL"),
-        "home_board": env.get("ONBOARD_BOARD_ID"),
+        "anchor_board": env.get("ONBOARD_BOARD_ID"),
     }
     missing = [
         key
@@ -783,12 +806,21 @@ def _managed_seat_from_env(
         if item.strip()
     )
     boards = str(env.get("PURSERS_BOARDS") or env.get("ONBOARD_BOARDS") or "registry")
+    anchor_board = str(required["anchor_board"])
+    # PURSERS_HOME_BOARD (possibly blank) is authoritative when present; legacy blocks
+    # only carry ONBOARD_BOARD_ID, which doubles as the home board.
+    home_board = env.get("PURSERS_HOME_BOARD")
+    if not isinstance(home_board, str):
+        home_board = anchor_board
+    if not home_board and boards == "home":
+        boards = "registry"
     return DesiredSeat(
         host=host,
         role=role,
         name=str(required["name"]),
         central_url=str(required["central_url"]),
-        home_board=str(required["home_board"]),
+        home_board=home_board,
+        registry_board=anchor_board,
         token_file=token_file,
         ca_file=str(env.get("SSL_CERT_FILE") or ""),
         bridge_command=bridge_command,
@@ -1223,7 +1255,7 @@ tool_timeout_sec = {desired.profile.host_timeout_s}
 PURSERS_BRIDGE_COMMAND = {_toml_string(desired.bridge_command)}
 ONBOARD_CENTRAL_TOKEN_FILE = {_toml_string(desired.token_file)}
 ONBOARD_CENTRAL_URL = {_toml_string(desired.central_url)}
-ONBOARD_BOARD_ID = {_toml_string(desired.home_board)}
+ONBOARD_BOARD_ID = {_toml_string(desired.anchor_board)}
 ONBOARD_AGENT_NAME = {_toml_string(desired.name)}
 PURSERS_HOST = {_toml_string(desired.host)}
 PURSERS_ROLE = {_toml_string(desired.role)}
@@ -1233,6 +1265,8 @@ PURSERS_CAN_REVIEW = {_toml_string(str(desired.can_review).lower())}
 PURSERS_CAN_WORK = {_toml_string(str(desired.can_work).lower())}
 PURSERS_MODEL = {_toml_string(desired.model or '')}
 PURSERS_PROVIDER = {_toml_string(desired.provider or '')}
+PURSERS_BOARDS = {_toml_string(desired.boards or '')}
+PURSERS_HOME_BOARD = {_toml_string(desired.home_board)}
 PURSERS_REQUIRE_TOKEN_MATCH = "1"
 {desired.token_env_var} = {_toml_string(connector_token)}
 SSL_CERT_FILE = {_toml_string(desired.ca_file)}
@@ -1242,7 +1276,7 @@ url = {_toml_string(desired.central_url)}
 bearer_token_env_var = {_toml_string(desired.token_env_var)}
 
 [mcp_servers.{board_name}.env_http_headers]
-ONBOARD_BOARD_ID = {_toml_string(desired.home_board)}
+ONBOARD_BOARD_ID = {_toml_string(desired.anchor_board)}
 """
         result = prefix.rstrip() + "\n\n" + MANAGED_COMMENT + block
         tomllib.loads(result)
@@ -1292,7 +1326,7 @@ def _goose_block(desired: DesiredSeat) -> list[str]:
         f"      PURSERS_BRIDGE_COMMAND: {_yaml_quote(desired.bridge_command)}\n",
         f"      ONBOARD_CENTRAL_TOKEN_FILE: {_yaml_quote(desired.token_file)}\n",
         f"      ONBOARD_CENTRAL_URL: {_yaml_quote(desired.central_url)}\n",
-        f"      ONBOARD_BOARD_ID: {_yaml_quote(desired.home_board)}\n",
+        f"      ONBOARD_BOARD_ID: {_yaml_quote(desired.anchor_board)}\n",
         f"      ONBOARD_AGENT_NAME: {_yaml_quote(desired.name)}\n",
         "      PURSERS_HOST: goose\n",
         f"      PURSERS_ROLE: {_yaml_quote(desired.role)}\n",
@@ -1375,7 +1409,8 @@ class GooseAdapter(FileAdapter):
                 root / "bin/board.sh": (
                     seat_new._board_shell(
                         name=desired.name,
-                        board=desired.home_board,
+                        board=desired.anchor_board,
+                        boards=desired.boards or "registry",
                         central_url=desired.central_url,
                         token_file=Path(desired.token_file).expanduser(),
                         ca_file=Path(desired.ca_file).expanduser(),
@@ -1477,7 +1512,7 @@ def _bridge_json(desired: DesiredSeat) -> dict[str, Any]:
         "PURSERS_BRIDGE_COMMAND": desired.bridge_command,
         "ONBOARD_CENTRAL_TOKEN_FILE": desired.token_file,
         "ONBOARD_CENTRAL_URL": desired.central_url,
-        "ONBOARD_BOARD_ID": desired.home_board,
+        "ONBOARD_BOARD_ID": desired.anchor_board,
         "ONBOARD_AGENT_NAME": desired.name,
         "PURSERS_HOST": desired.host,
         "PURSERS_ROLE": desired.role,
@@ -1808,8 +1843,10 @@ class PromptRenderer:
             encoding="utf-8"
         )
         board_selector = (
-            json.dumps(desired.boards)
-            if desired.boards in {"registry", "home"}
+            json.dumps("registry")
+            if desired.boards == "registry"
+            else json.dumps([desired.anchor_board])
+            if desired.boards == "home"
             else json.dumps(desired.boards.split(","))
         )
         return template.format(
@@ -2065,7 +2102,7 @@ def _default_identity_probe(
             transport = streamable_http_client(desired.central_url, http_client=http)
             async with Client(transport, mode="2026-07-28", cache=None) as client:
                 result = await client.call_tool(
-                    "board_status", {"board_id": desired.home_board}
+                    "board_status", {"board_id": desired.anchor_board}
                 )
                 if result.is_error:
                     raise RuntimeError("Central rejected identity probe")
@@ -2098,7 +2135,7 @@ def _default_live_probe(desired: DesiredSeat, timeout_s: float) -> dict[str, Any
             client_cm = BoardClient(
                 desired.central_url,
                 token,
-                desired.home_board,
+                desired.anchor_board,
                 agent_name=desired.name,
                 role=desired.role,
                 capabilities={"can_work": False, "can_review": False},
@@ -2107,14 +2144,14 @@ def _default_live_probe(desired: DesiredSeat, timeout_s: float) -> dict[str, Any
             client_cm = BoardClient(
                 desired.central_url,
                 token,
-                desired.home_board,
+                desired.anchor_board,
                 agent_name=desired.name,
                 role=desired.role,
             )
         async with client_cm as client:
             status = await client.board_status()
             state = await client.board_state_get("project_registry")
-            registry_boards = [desired.home_board]
+            registry_boards = [desired.anchor_board]
             raw = state.get("state", {}).get("value") if isinstance(state, dict) else None
             if isinstance(raw, str):
                 try:
@@ -2138,8 +2175,8 @@ def _default_live_probe(desired: DesiredSeat, timeout_s: float) -> dict[str, Any
                 None,
             )
             resources = (
-                f"board://{desired.home_board}/journal",
-                f"board://{desired.home_board}/agent/{identity.agent_id}",
+                f"board://{desired.anchor_board}/journal",
+                f"board://{desired.anchor_board}/agent/{identity.agent_id}",
             )
 
             async def listen() -> None:
@@ -2162,7 +2199,7 @@ def _default_live_probe(desired: DesiredSeat, timeout_s: float) -> dict[str, Any
                     await task
                 except asyncio.CancelledError:
                     pass
-            available = [desired.home_board]
+            available = [desired.anchor_board]
             skipped: dict[str, str] = {}
             for board in registry_boards[1:]:
                 try:

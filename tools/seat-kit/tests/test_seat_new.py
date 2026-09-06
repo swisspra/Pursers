@@ -771,6 +771,28 @@ def test_board_sh_missing_token_fails_cleanly_without_network(tmp_path: Path) ->
     assert "Traceback" not in result.stderr
 
 
+def test_blank_board_serves_registry_and_named_board_is_dedicated(tmp_path: Path) -> None:
+    fleet = seat_new.generate(args(tmp_path))
+    shell = (fleet / "bin" / "board.sh").read_text()
+    # blank --board: bind to the registry board, wait on every active project
+    assert "export ONBOARD_BOARD_ID=${PURSERS_BOARD:-pursers}" in shell
+    assert "export PURSERS_BOARDS=${PURSERS_BOARDS:-registry}" in shell
+    assert 'os.environ.get("PURSERS_BOARDS")' in (fleet / "bin" / "board.py").read_text()
+
+    parsed = args(tmp_path, role="reviewer")
+    parsed.board = "fullplatts"
+    dedicated = seat_new.generate(parsed)
+    shell = (dedicated / "bin" / "board.sh").read_text()
+    assert "export ONBOARD_BOARD_ID=${PURSERS_BOARD:-fullplatts}" in shell
+    assert "export PURSERS_BOARDS=${PURSERS_BOARDS:-home}" in shell
+
+    bad = args(tmp_path)
+    bad.dest = str(tmp_path / "bad")
+    bad.board = "not a board id"
+    with pytest.raises(ValueError, match="--board"):
+        seat_new.generate(bad)
+
+
 def test_nonempty_destination_is_refused(tmp_path: Path) -> None:
     dest = tmp_path / "worker"
     dest.mkdir()

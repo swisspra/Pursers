@@ -502,8 +502,9 @@ def _wait_args(wait: argparse.ArgumentParser) -> None:
                       help="integer cursor or JSON board-to-cursor map")
     wait.add_argument("--timeout", type=int, default=DEFAULT_WAIT_S,
                       help="max wait seconds")
-    wait.add_argument("--boards", default="registry",
-                      help="registry (default), home, or comma-separated board IDs")
+    wait.add_argument("--boards", default=os.environ.get("PURSERS_BOARDS") or "registry",
+                      help="registry, home, or comma-separated board IDs "
+                           "(default: $PURSERS_BOARDS, else registry)")
     wait.add_argument("--poll", action="store_true", default=False,
                       help="enable poll fallback (explicit opt-in, not default)")
 
@@ -1178,10 +1179,12 @@ def _board_shell(
     host: str,
     model: str | None = None,
     provider: str | None = None,
+    boards: str = "registry",
 ) -> str:
     values = {
         "agent": shlex.quote(name),
         "board": shlex.quote(board),
+        "boards": shlex.quote(boards),
         "url": shlex.quote(central_url),
         "token": shlex.quote(str(token_file)),
         "ca": shlex.quote(str(ca_file)),
@@ -1216,6 +1219,7 @@ fi
 export ONBOARD_CENTRAL_TOKEN
 export ONBOARD_CENTRAL_URL=${{PURSERS_CENTRAL_URL:-{values["url"]}}}
 export ONBOARD_BOARD_ID=${{PURSERS_BOARD:-{values["board"]}}}
+export PURSERS_BOARDS=${{PURSERS_BOARDS:-{values["boards"]}}}
 export ONBOARD_AGENT_NAME={values["agent"]}
 export PURSERS_TIER_MAX={tier_max}
 export PURSERS_SKILLS={values["skills"]}
@@ -1312,7 +1316,7 @@ Client: `{client}`
 {commands}
 ```
 
-`PURSERS_BOARD` selects the home board. Registry wait is the default; use each event's `board_id` with `--board` for subsequent commands.
+`PURSERS_BOARD` overrides the board the CLI binds to; `PURSERS_BOARDS` selects the wait scope (`registry` = every active project, `home` = this seat's dedicated board only). A seat created without `--board` serves every registry board; use each event's `board_id` with `--board` for subsequent commands.
 
 Wait profile: {profile}
 
@@ -1342,8 +1346,10 @@ def _write(path: Path, content: str, mode: int) -> None:
 def generate(args: argparse.Namespace) -> Path:
     if not NAME_RE.fullmatch(args.name):
         raise ValueError("--name must be a safe 1-80 character agent name")
-    if not BOARD_RE.fullmatch(args.board):
-        raise ValueError("--board must be a safe 1-80 character board ID")
+    if args.board and not BOARD_RE.fullmatch(args.board):
+        raise ValueError("--board must be blank or a safe 1-80 character board ID")
+    if not BOARD_RE.fullmatch(args.registry_board):
+        raise ValueError("--registry-board must be a safe 1-80 character board ID")
 
     dest = Path(args.dest).expanduser().resolve()
     token_file = Path(args.token_file).expanduser().resolve()
@@ -1396,7 +1402,8 @@ def generate(args: argparse.Namespace) -> Path:
         bin_dir / "board.sh",
         _board_shell(
             name=args.name,
-            board=args.board,
+            board=args.board or args.registry_board,
+            boards="home" if args.board else "registry",
             central_url=args.central_url,
             token_file=token_file,
             ca_file=ca_file,
@@ -1442,7 +1449,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="regenerate managed seat files in place and preserve all other files",
     )
     parser.add_argument("--repo")
-    parser.add_argument("--board", default="pursers")
+    parser.add_argument(
+        "--board",
+        default="",
+        help="dedicated home board; blank (default) = serve every active registry board",
+    )
+    parser.add_argument(
+        "--registry-board",
+        default="pursers",
+        help="board that stores project_registry; the bridge binds here when --board is blank",
+    )
     parser.add_argument("--tier-max", type=int, choices=(1, 2, 3), default=2)
     parser.add_argument("--skills", default="", help="comma-separated dispatch skills")
     parser.add_argument(

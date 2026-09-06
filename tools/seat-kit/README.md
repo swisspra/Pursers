@@ -13,12 +13,16 @@ python tools/seat-kit/seat_new.py \
   --token-file /path/to/worker-a.jwt \
   --ca-file /path/to/central-ca.pem \
   --repo https://github.com/example/Pursers.git \
-  --board pursers \
+  --board fullplatts \
   --client codex \
   --tier-max 2 \
   --skills python,docs \
   --no-can-review
 ```
+
+`--board` is optional: omit it and the seat serves every active registry board
+(the CLI binds to the registry board, `--registry-board`, default `pursers`);
+name a board to dedicate the seat to that board only.
 
 `--repo` is optional. When supplied, the repository is cloned beneath the seat
 using its repository basename. Without it, install `pursers-client` in the

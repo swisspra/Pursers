@@ -7,6 +7,23 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Changed
+- Fleet dashboard / seat-kit: a seat's home board may now be blank, meaning the seat
+  serves every active registry board (`boards=registry`); a named home board now
+  means the seat is dedicated to that board only (`boards=home`). The bridge binds to
+  the registry board (`pursers` by default, `--registry-board` in seat-kit) when the
+  home board is blank. Managed host configs persist the selector as
+  `PURSERS_BOARDS` / `PURSERS_HOME_BOARD` so discovery round-trips; legacy blocks
+  without the marker keep their fleet-wide scope. Generated `bin/board.sh` exports
+  `PURSERS_BOARDS`, and `board.py wait --boards` defaults to it.
+- Fleet dashboard: dedicated seats' prompts now pass `boards=["<home board>"]` instead
+  of the string `"home"`, which the wait bridge rejects.
+
+### Fixed
+- Fleet dashboard: timer-driven panel refreshes (fleet, detail, overhead, config, hub,
+  attention, seats) no longer wipe form input; refresh pauses while a form has focus
+  or unsaved input and resumes from a fixed "Resume" pill or the status line.
+
 ## [5.0.0a21] - 2026-09-06
 
 This release includes `pursers-central==0.1.0a25`,
