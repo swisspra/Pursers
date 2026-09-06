@@ -281,7 +281,7 @@ class HumanRequestsCoreTests(unittest.TestCase):
     def test_sensitive_form_is_never_emitted_for_any_capability_mix(self) -> None:
         schema = {
             "type": "object",
-            "properties": {"credential": {"type": "string"}},
+            "properties": {"accessToken": {"type": "string"}},
         }
         for capabilities in (
             None,

@@ -229,7 +229,7 @@ def test_aggregate_marks_sensitive_form_for_safe_fallback() -> None:
         message="Paste the credential file",
         requested_schema={
             "type": "object",
-            "properties": {"credential": {"type": "string"}},
+            "properties": {"accessToken": {"type": "string"}},
         },
     )
     result = dashboard.aggregate_fleet(
@@ -304,11 +304,11 @@ def test_renderer_executes_required_defaults_titles_and_array_enum() -> None:
 
 def test_renderer_executes_sensitive_fallback_without_form_fields() -> None:
     output = _run_human_renderer(
-        "console.log(humanRequestCard({central:'default',board:{board_id:'one',label:'One'},h:{ticket_id:'TK-1',request_id:'HR-1',message:'Paste credential',kind:'decision',form_safe:false,safety_reason:'A trusted URL is required.',requested_schema:{properties:{credential:{type:'string'}}}}}));"
+        "console.log(humanRequestCard({central:'default',board:{board_id:'one',label:'One'},h:{ticket_id:'TK-1',request_id:'HR-1',message:'Paste credential',kind:'decision',form_safe:false,safety_reason:'A trusted URL is required.',requested_schema:{properties:{accessToken:{type:'string'}}}}}));"
     )
     assert "trusted URL is required" in output
     assert "human-form" not in output
-    assert 'data-human-field="credential"' not in output
+    assert 'data-human-field="accessToken"' not in output
 
 
 def test_renderer_executes_required_and_min_items_validation() -> None:

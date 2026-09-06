@@ -82,6 +82,11 @@ async def test_human_request_and_resolution_forward_exact_arguments(monkeypatch)
     [
         ("password", "Password"),
         ("api_key", "API key"),
+        ("apiKey", "API key"),
+        ("APIKey", "API key"),
+        ("accessToken", "Access token"),
+        ("clientSecret", "Client secret"),
+        ("paymentCredentials", "Payment credentials"),
         ("token", "Access token"),
         ("payment", "Payment credentials"),
     ],

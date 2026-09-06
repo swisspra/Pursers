@@ -149,8 +149,9 @@ Run this loop continuously. Each pass is one unit of work:
   and it is re-dispatched. `kind` is one of `decision`, `deliverable`,
   `approval`, `information`; keep `requested_schema` a flat JSON-Schema
   object (string/number/integer/boolean properties, enum, or array-of-enum).
-  Form-mode questions must never ask for secrets — point `url` mode at the
-  dashboard or an agreed drop location for credentials and files instead.
+  Form-mode questions must never ask for actual secrets or credentials — use
+  trusted `url` mode for those. Ordinary file names, paths, and deliverable
+  requests are form-safe and do not require URL mode.
 
 ## 6. Notes for whoever configures the seat
 

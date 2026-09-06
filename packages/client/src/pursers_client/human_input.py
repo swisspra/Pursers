@@ -20,7 +20,12 @@ SENSITIVE_FORM_FALLBACK = (
 def _normalized_text(value: Any) -> str:
     if not isinstance(value, str):
         return ""
-    return re.sub(r"[_\-/]+", " ", value)
+    text = re.sub(r"[_\-/]+", " ", value)
+    # Schema property names commonly use camelCase/PascalCase. Split both
+    # lower-to-upper and acronym-to-word boundaries before matching so names
+    # such as accessToken, apiKey, and APIKey cannot bypass the guard.
+    text = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", text)
+    return re.sub(r"(?<=[A-Z])(?=[A-Z][a-z])", " ", text)
 
 
 def _schema_form_text(schema: Any) -> list[str]:
