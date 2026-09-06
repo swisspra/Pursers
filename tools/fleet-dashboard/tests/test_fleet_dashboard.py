@@ -332,7 +332,7 @@ def test_prepare_fleet_clone_repairs_proven_legacy_no_checkout(
 
 
 def test_prepare_fleet_clone_removes_partial_directory_on_clone_failure(
-    tmp_path: Path,
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     origin = tmp_path / "origin.git"
     operator = tmp_path / "operator"
@@ -346,9 +346,20 @@ def test_prepare_fleet_clone_removes_partial_directory_on_clone_failure(
     )
 
     def fail_clone(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if command[1] == "ls-remote":
+            return subprocess.CompletedProcess(
+                command, 0, "a" * 40 + "\trefs/heads/main\n", ""
+            )
         if command[:2] == ["git", "clone"]:
             Path(command[-1]).mkdir(parents=True)
-            raise subprocess.CalledProcessError(1, command)
+            raise subprocess.CalledProcessError(
+                1,
+                command,
+                stderr=(
+                    "fatal: token=raw-clone-credential at /"
+                    + "Users/operator/private-repo"
+                ),
+            )
         return subprocess.run(command, **kwargs)  # noqa: PLW1510 - forwards check.
 
     manager = dashboard.SeatConfigManager(
@@ -371,9 +382,240 @@ def test_prepare_fleet_clone_removes_partial_directory_on_clone_failure(
     }
     target = manager._fleet_clone_default("Alpha")
 
-    with pytest.raises(ValueError, match="failed to prepare fleet clone"):
+    with pytest.raises(dashboard.FleetCloneGitError, match="git clone failed") as caught:
         manager.prepare_fleet_clone(payload, "Alpha")
     assert not target.exists()
+    message = str(caught.value)
+    assert "raw-clone-credential" not in message
+    assert "operator/private-repo" not in message
+    assert "[REDACTED]" in message
+    log = capsys.readouterr().err
+    assert '"project": "Alpha"' in log
+    assert '"subcommand": "clone"' in log
+    assert "raw-clone-credential" not in log
+    journal = (tmp_path / "fleet/config-actions.jsonl").read_text()
+    assert '"subcommand": "clone"' in journal
+    assert "raw-clone-credential" not in journal
+
+
+def test_prepare_fleet_clone_preflight_is_noninteractive_and_actionable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    calls: list[tuple[list[str], dict[str, object]]] = []
+
+    def fail_preflight(
+        command: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append((command, kwargs))
+        if command[1:4] == ["remote", "get-url", "origin"]:
+            return subprocess.CompletedProcess(command, 0, "https://example.invalid/repo\n", "")
+        if command[1] == "ls-remote":
+            return subprocess.CompletedProcess(
+                command,
+                128,
+                "",
+                "fatal: Authorization: "
+                + "Bearer "
+                + "private-launchd-credential at /"
+                + "Users/operator/repo",
+            )
+        raise AssertionError(command)
+
+    monkeypatch.setenv("PATH", "/usr/bin")
+    original_is_dir = Path.is_dir
+    monkeypatch.setattr(
+        Path,
+        "is_dir",
+        lambda path: str(path) == "/opt/homebrew/bin" or original_is_dir(path),
+    )
+    manager = dashboard.SeatConfigManager(
+        state_dir=tmp_path / "fleet", latest_version=lambda: None,
+        git_runner=fail_preflight,
+    )
+    payload = {
+        "registry": {
+            "schema_version": 1,
+            "projects": {
+                "Alpha": {
+                    "board_id": "alpha",
+                    "work_dir": str(tmp_path / "operator"),
+                    "status": "active",
+                }
+            },
+        },
+        "expected_sha256": "a" * 64,
+    }
+
+    with pytest.raises(dashboard.FleetCloneGitError) as caught:
+        manager.prepare_fleet_clone(payload, "Alpha")
+
+    message = str(caught.value)
+    assert "cannot reach origin from the dashboard service" in message
+    assert "clone from a shell then re-run to adopt" in message
+    assert "git ls-remote failed" in message
+    assert "private-launchd-credential" not in message
+    assert "operator/repo" not in message
+    assert [call[0][1] for call in calls] == ["remote", "ls-remote"]
+    for _command, kwargs in calls:
+        env = kwargs["env"]
+        assert isinstance(env, dict)
+        assert env["GIT_TERMINAL_PROMPT"] == "0"
+        assert env["HOME"]
+        assert env["PATH"].split(os.pathsep)[0] == "/opt/homebrew/bin"
+        assert kwargs["timeout"] == 120
+    log = capsys.readouterr().err
+    assert '"subcommand": "ls-remote"' in log
+    assert "private-launchd-credential" not in log
+
+
+def test_registry_clone_api_returns_scrubbed_git_failure(
+    tmp_path: Path,
+) -> None:
+    def fail_clone(
+        command: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        if command[1:4] == ["remote", "get-url", "origin"]:
+            return subprocess.CompletedProcess(command, 0, "https://example.invalid/repo\n", "")
+        if command[1] == "ls-remote":
+            return subprocess.CompletedProcess(
+                command, 128, "", "fatal: password=private-api-credential"
+            )
+        raise AssertionError(command)
+
+    class Cache:
+        def get_project_registry(self) -> dict[str, object]:
+            return {
+                "registry": {
+                    "schema_version": 1,
+                    "projects": {
+                        "Alpha": {
+                            "board_id": "alpha",
+                            "work_dir": str(tmp_path / "operator"),
+                            "status": "active",
+                        }
+                    },
+                },
+                "expected_sha256": "a" * 64,
+            }
+
+    manager = dashboard.SeatConfigManager(
+        state_dir=tmp_path / "fleet",
+        latest_version=lambda: None,
+        git_runner=fail_clone,
+    )
+    server = dashboard.ThreadingHTTPServer(
+        ("127.0.0.1", 0), dashboard.make_handler(Cache(), seat_manager=manager)
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    request = urllib.request.Request(
+        base + "/api/config/registry/clone",
+        data=json.dumps({"project": "Alpha"}).encode(),
+        headers={"Content-Type": "application/json", "Origin": base},
+        method="POST",
+    )
+    try:
+        with pytest.raises(urllib.error.HTTPError) as caught:
+            urllib.request.urlopen(request)
+        assert caught.value.code == 400
+        body = json.loads(caught.value.read())
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+    assert "git ls-remote failed" in body["error"]
+    assert "[REDACTED]" in body["error"]
+    assert "private-api-credential" not in body["error"]
+
+
+def test_registry_clone_uses_board_scrub_for_every_error_surface(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    credential = "AK" + "IA" + "ABCDEFGHIJKLMNOP"
+
+    def fail_preflight(
+        command: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        if command[1:4] == ["remote", "get-url", "origin"]:
+            return subprocess.CompletedProcess(
+                command, 0, "https://example.invalid/repo\n", ""
+            )
+        if command[1] == "ls-remote":
+            return subprocess.CompletedProcess(
+                command, 128, "", f"fatal: credential {credential} rejected"
+            )
+        raise AssertionError(command)
+
+    registry_payload = {
+        "registry": {
+            "schema_version": 1,
+            "projects": {
+                "Alpha": {
+                    "board_id": "alpha",
+                    "work_dir": str(tmp_path / "operator"),
+                    "status": "active",
+                }
+            },
+        },
+        "expected_sha256": "a" * 64,
+    }
+    manager = dashboard.SeatConfigManager(
+        state_dir=tmp_path / "fleet",
+        latest_version=lambda: None,
+        git_runner=fail_preflight,
+    )
+
+    with pytest.raises(dashboard.FleetCloneGitError) as caught:
+        manager.prepare_fleet_clone(registry_payload, "Alpha")
+    exception_text = str(caught.value)
+    direct_log = capsys.readouterr().err
+    journal_path = tmp_path / "fleet/config-actions.jsonl"
+    direct_journal = journal_path.read_text(encoding="utf-8")
+
+    class Cache:
+        def get_project_registry(self) -> dict[str, object]:
+            return registry_payload
+
+    server = dashboard.ThreadingHTTPServer(
+        ("127.0.0.1", 0), dashboard.make_handler(Cache(), seat_manager=manager)
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    request = urllib.request.Request(
+        base + "/api/config/registry/clone",
+        data=json.dumps({"project": "Alpha"}).encode(),
+        headers={"Content-Type": "application/json", "Origin": base},
+        method="POST",
+    )
+    try:
+        with pytest.raises(urllib.error.HTTPError) as api_error:
+            urllib.request.urlopen(request)
+        assert api_error.value.code == 400
+        body = json.loads(api_error.value.read())
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+    api_log = capsys.readouterr().err
+    final_journal = journal_path.read_text(encoding="utf-8")
+    surfaces = (
+        exception_text,
+        body["error"],
+        direct_log,
+        api_log,
+        direct_journal,
+        final_journal,
+    )
+    for surface in surfaces:
+        assert credential not in surface
+        assert "[REDACTED:AWS_ACCESS_KEY_ID]" in surface
 
 
 def test_agents_group_by_principal_and_name_across_board_specific_ids() -> None:
@@ -4132,6 +4374,60 @@ def test_seat_config_doctor_reports_operator_checkout(
     assert clone_health["status"] == "FAIL"
     assert f"empty worktree: Beta ({empty_clone})" in clone_health["message"]
     assert f"local changes: Gamma ({dirty_clone})" in clone_health["message"]
+
+
+def test_seat_config_doctor_reports_clone_preflight_per_project(
+    tmp_path: Path,
+) -> None:
+    def git_runner(
+        command: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        if command[1:4] == ["remote", "get-url", "origin"]:
+            origin = f"https://example.invalid/{Path(_kwargs['cwd']).name}.git"
+            return subprocess.CompletedProcess(command, 0, origin + "\n", "")
+        if command[1] == "ls-remote":
+            if any("offline.git" in item for item in command):
+                return subprocess.CompletedProcess(command, 128, "", "network unavailable")
+            return subprocess.CompletedProcess(command, 0, "a" * 40 + "\trefs/heads/main\n", "")
+        raise AssertionError(command)
+
+    manager = dashboard.SeatConfigManager(
+        state_dir=tmp_path / "state",
+        latest_version=lambda: None,
+        git_runner=git_runner,
+    )
+    registry_payload = {
+        "registry": {
+            "schema_version": 1,
+            "projects": {
+                "Online": {
+                    "board_id": "online",
+                    "work_dir": str(tmp_path / "online"),
+                    "status": "active",
+                },
+                "Offline": {
+                    "board_id": "offline",
+                    "work_dir": str(tmp_path / "offline"),
+                    "status": "active",
+                },
+            },
+        }
+    }
+
+    job = manager.doctor(registry_payload=registry_payload)
+    deadline = time.monotonic() + 2
+    while (result := manager.job(job["job_id"]))["status"] not in {
+        "succeeded",
+        "failed",
+    } and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    assert result["status"] == "succeeded"
+    reports = {row["project"]: row for row in result["result"]["projects"]}
+    assert reports["Online"]["status"] == "PASS"
+    assert reports["Online"]["message"] == "origin exposes main"
+    assert reports["Offline"]["status"] == "FAIL"
+    assert "cannot reach origin from the dashboard service" in reports["Offline"]["message"]
 
 
 def test_config_api_and_ui_contract_are_separate_from_coordinator_config() -> None:

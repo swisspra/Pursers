@@ -41,11 +41,16 @@ import tomllib
 _CLIENT_SRC = Path(__file__).resolve().parents[2] / "packages" / "client" / "src"
 if (_CLIENT_SRC / "pursers_client").is_dir():
     sys.path.insert(0, str(_CLIENT_SRC))
+_CENTRAL_SRC = Path(__file__).resolve().parents[2] / "packages" / "central" / "src"
+if (_CENTRAL_SRC / "pursers_central").is_dir():
+    sys.path.insert(0, str(_CENTRAL_SRC))
 from pursers_client import (
     BoardClient,
     BoardClientError,
     parse_project_registry as parse_client_project_registry,
 )
+from pursers_central.scrub import Policy as BoardScrubPolicy
+from pursers_central.scrub import scrub as board_scrub
 
 _DASHBOARD_DIR = Path(__file__).resolve().parent
 if str(_DASHBOARD_DIR) not in sys.path:
@@ -102,6 +107,8 @@ CONFIG_API_MAX_BYTES = 40_000
 CONFIG_JOB_LIMIT = 100
 CONFIG_OPS_PLAN_TTL_SECONDS = 120
 CONFIG_PLAN_LIMIT = 50
+GIT_TIMEOUT_SECONDS = 120
+GIT_ERROR_TAIL_CHARS = 2_000
 CONFIG_STATE_DIR = Path("~/.pursers/fleet-dashboard")
 MAX_REVIEW_STATE_BYTES = 4_096
 REVIEW_STATE_SUFFIX = ".review-state.json"
@@ -178,6 +185,12 @@ DEFAULT_CONTEXT_PRESSURE = {
     "context_trend_compact_ratio": 1.5,
 }
 
+_BOARD_REDACTION_POLICY = BoardScrubPolicy(mode="redact")
+
+
+def _board_redact(value: str) -> str:
+    return board_scrub(value, _BOARD_REDACTION_POLICY)[0]
+
 
 class ConfigConflictError(RuntimeError):
     """The dashboard form was based on missing or superseded state."""
@@ -185,6 +198,14 @@ class ConfigConflictError(RuntimeError):
 
 class IntakeRateLimitError(RuntimeError):
     """The dashboard intake write rate exceeded its bounded hourly window."""
+
+
+class FleetCloneGitError(ValueError):
+    """A scrubbed git failure safe to return through the local dashboard API."""
+
+    def __init__(self, subcommand: str, message: str) -> None:
+        self.subcommand = subcommand
+        super().__init__(_board_redact(message))
 
 
 class FleetClient(Protocol):
@@ -3915,8 +3936,33 @@ class SeatConfigManager:
     @staticmethod
     def _clean_text(value: str) -> str:
         value = re.sub(
+            r"\b([a-z][a-z0-9+.-]*://[^:\s/@]+):[^@\s/]+@",
+            r"\1:[REDACTED:URL_PASSWORD]@",
+            value,
+            flags=re.IGNORECASE,
+        )
+        value = re.sub(
             r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b",
             "[REDACTED JWT]",
+            value,
+        )
+        value = re.sub(
+            r"\bBearer[ \t]+[A-Za-z0-9._~+/=-]{8,}",
+            "Bearer [REDACTED]",
+            value,
+            flags=re.IGNORECASE,
+        )
+        value = re.sub(
+            r"(?i)\b(token|authorization|secret|password|api[_-]?key)"
+            r"(\s*[:=]\s*)[^\s,;]+",
+            r"\1\2[REDACTED]",
+            value,
+        )
+        value = re.sub(r"/Users/[^/\s]+", "/Users/[REDACTED:POSIX_HOME]", value)
+        value = re.sub(r"/home/[^/\s]+", "/home/[REDACTED:LINUX_HOME]", value)
+        value = re.sub(
+            r"[A-Za-z]:\\Users\\[^\\\s]+",
+            r"C:\\Users\\[REDACTED:WINDOWS_HOME]",
             value,
         )
         sensitive = re.compile(
@@ -4237,18 +4283,124 @@ class SeatConfigManager:
         return self.state_dir.expanduser().resolve() / "clones" / f"{slug}-{suffix}"
 
     def _git(
-        self, cwd: Path, *arguments: str, check: bool = False
+        self,
+        cwd: Path,
+        *arguments: str,
+        check: bool = False,
+        timeout: int = GIT_TIMEOUT_SECONDS,
     ) -> subprocess.CompletedProcess[str]:
-        return self.git_runner(
-            ["git", *arguments],
-            cwd=cwd,
-            check=check,
-            text=True,
-            capture_output=True,
-            timeout=60,
+        try:
+            return self.git_runner(
+                ["git", *arguments],
+                cwd=cwd,
+                check=check,
+                text=True,
+                capture_output=True,
+                timeout=timeout,
+                env=self._git_environment(),
+            )
+        except subprocess.CalledProcessError as exc:
+            subcommand = arguments[0] if arguments else "command"
+            detail = self._git_error_tail(exc.stderr or exc.stdout)
+            raise FleetCloneGitError(
+                subcommand, f"git {subcommand} failed: {detail}"
+            ) from exc
+        except subprocess.TimeoutExpired as exc:
+            subcommand = arguments[0] if arguments else "command"
+            detail = self._git_error_tail(exc.stderr or exc.stdout)
+            raise FleetCloneGitError(
+                subcommand,
+                f"git {subcommand} timed out after {timeout}s: {detail}",
+            ) from exc
+        except OSError as exc:
+            subcommand = arguments[0] if arguments else "command"
+            detail = self._git_error_tail(str(exc))
+            raise FleetCloneGitError(
+                subcommand, f"git {subcommand} could not start: {detail}"
+            ) from exc
+
+    @staticmethod
+    def _git_environment() -> dict[str, str]:
+        env = os.environ.copy()
+        paths = [item for item in env.get("PATH", "").split(os.pathsep) if item]
+        for candidate in reversed(("/opt/homebrew/bin", "/usr/local/bin")):
+            if Path(candidate).is_dir() and candidate not in paths:
+                paths.insert(0, candidate)
+        env["PATH"] = os.pathsep.join(paths)
+        env["HOME"] = env.get("HOME") or str(Path.home())
+        env["GIT_TERMINAL_PROMPT"] = "0"
+        return env
+
+    @classmethod
+    def _git_error_tail(cls, value: Any) -> str:
+        if isinstance(value, bytes):
+            value = value.decode("utf-8", errors="replace")
+        text = value if isinstance(value, str) else "git returned no error output"
+        text = _board_redact(text)
+        text = cls._clean_text(text[-GIT_ERROR_TAIL_CHARS:])
+        return " ".join(text.split()) or "git returned no error output"
+
+    def _clone_origin_preflight(self, source: Path, integration_ref: str) -> str:
+        try:
+            remote = self._git(source, "remote", "get-url", "origin")
+        except OSError as exc:
+            raise FleetCloneGitError(
+                "remote", "git remote failed: operator checkout is unavailable"
+            ) from exc
+        if remote.returncode or not remote.stdout.strip():
+            detail = self._git_error_tail(remote.stderr)
+            raise FleetCloneGitError(
+                "remote", f"git remote failed: operator checkout has no origin remote; {detail}"
+            )
+        origin = remote.stdout.strip()
+        try:
+            preflight = self._git(
+                source, "ls-remote", "--heads", origin, integration_ref
+            )
+        except FleetCloneGitError as exc:
+            raise FleetCloneGitError(
+                "ls-remote",
+                "cannot reach origin from the dashboard service; clone from a shell "
+                f"then re-run to adopt; {exc}",
+            ) from exc
+        except OSError as exc:
+            raise FleetCloneGitError(
+                "ls-remote",
+                "cannot reach origin from the dashboard service; clone from a shell "
+                "then re-run to adopt; git executable is unavailable",
+            ) from exc
+        if preflight.returncode or not preflight.stdout.strip():
+            detail = self._git_error_tail(preflight.stderr or preflight.stdout)
+            raise FleetCloneGitError(
+                "ls-remote",
+                "cannot reach origin from the dashboard service; clone from a shell "
+                f"then re-run to adopt; git ls-remote failed: {detail}",
+            )
+        return origin
+
+    def _log_clone_failure(
+        self, project_name: str, error: FleetCloneGitError
+    ) -> None:
+        project = self._clean_text(project_name)
+        message = self._clean_text(_board_redact(str(error)))
+        record = {
+            "event": "registry_clone_failed",
+            "project": project,
+            "subcommand": error.subcommand,
+            "error": message,
+        }
+        print(json.dumps(record, sort_keys=True), file=sys.stderr, flush=True)
+        self._journal(
+            "registry-clone",
+            project=project,
+            status="failed",
+            subcommand=error.subcommand,
+            error=message,
         )
 
-    def _clone_state(self, path: Path) -> dict[str, Any]:
+    def _clone_state(
+        self, path: Path, integration_ref: str = "main"
+    ) -> dict[str, Any]:
         if not path.exists():
             return {
                 "path": str(path),
@@ -4297,7 +4449,11 @@ class SeatConfigManager:
         dirty = bool(porcelain.stdout.strip()) and not empty_worktree
         symbolic = self._git(path, "symbolic-ref", "-q", "HEAD")
         counts = self._git(
-            path, "rev-list", "--left-right", "--count", "HEAD...origin/main"
+            path,
+            "rev-list",
+            "--left-right",
+            "--count",
+            f"HEAD...origin/{integration_ref}",
         )
         ahead = behind = None
         if counts.returncode == 0:
@@ -4346,34 +4502,26 @@ class SeatConfigManager:
                 and Path(other_target).expanduser().resolve() == target
             ):
                 raise ValueError("fleet_clone_dir is already assigned to another project")
-        remote = self._git(source, "remote", "get-url", "origin")
-        if remote.returncode or not remote.stdout.strip():
-            raise ValueError("operator checkout has no origin remote")
-        origin = remote.stdout.strip()
-        target.parent.mkdir(parents=True, exist_ok=True)
+        integration_ref = str(entry.get("integration_ref", "main"))
         creating = not (target.exists() or target.is_symlink())
         try:
+            origin = self._clone_origin_preflight(source, integration_ref)
+            target.parent.mkdir(parents=True, exist_ok=True)
             if creating:
-                self.git_runner(
-                    [
-                        "git",
-                        "clone",
-                        "--branch",
-                        "main",
-                        "--single-branch",
-                        "--origin",
-                        "origin",
-                        "--",
-                        origin,
-                        str(target),
-                    ],
-                    cwd=target.parent,
+                self._git(
+                    target.parent,
+                    "clone",
+                    "--branch",
+                    integration_ref,
+                    "--single-branch",
+                    "--origin",
+                    "origin",
+                    "--",
+                    origin,
+                    str(target),
                     check=True,
-                    text=True,
-                    capture_output=True,
-                    timeout=120,
                 )
-            state = self._clone_state(target)
+            state = self._clone_state(target, integration_ref)
             if state["status"] == "invalid":
                 raise ValueError("fleet_clone_dir exists but is not a git repository")
             if state.get("dirty"):
@@ -4385,24 +4533,37 @@ class SeatConfigManager:
             clone_origin = self._git(target, "remote", "get-url", "origin")
             if clone_origin.returncode or clone_origin.stdout.strip() != origin:
                 raise ValueError("fleet clone origin differs from the operator checkout")
-            self._git(target, "fetch", "--prune", "origin", "main", check=True)
+            self._git(
+                target, "fetch", "--prune", "origin", integration_ref, check=True
+            )
             if state.get("empty_worktree"):
                 self._git(
                     target,
                     "checkout",
                     "--detach",
                     "--force",
-                    "origin/main",
+                    f"origin/{integration_ref}",
                     check=True,
                 )
             else:
-                self._git(target, "merge", "--ff-only", "origin/main", check=True)
+                self._git(
+                    target,
+                    "merge",
+                    "--ff-only",
+                    f"origin/{integration_ref}",
+                    check=True,
+                )
                 self._git(target, "checkout", "--detach", "HEAD", check=True)
-            final_state = self._clone_state(target)
+            final_state = self._clone_state(target, integration_ref)
             if final_state["status"] != "ready" or (
                 final_state.get("ahead"), final_state.get("behind")
             ) != (0, 0):
                 raise ValueError("fleet clone checkout verification failed")
+        except FleetCloneGitError as exc:
+            if creating and (target.exists() or target.is_symlink()):
+                shutil.rmtree(target)
+            self._log_clone_failure(project_name, exc)
+            raise
         except Exception as exc:  # noqa: BLE001 - clean partial first-time clones.
             if creating and (target.exists() or target.is_symlink()):
                 shutil.rmtree(target)
@@ -4598,6 +4759,30 @@ class SeatConfigManager:
                 )
                 if isinstance(entry, dict) and entry.get("status") == "active"
             }
+            project_reports = []
+            for project_name, entry in sorted(active_projects.items()):
+                try:
+                    source = Path(str(entry["work_dir"])).expanduser().resolve()
+                    integration_ref = str(entry.get("integration_ref", "main"))
+                    self._clone_origin_preflight(source, integration_ref)
+                except (FleetCloneGitError, KeyError, TypeError, ValueError) as exc:
+                    project_reports.append(
+                        {
+                            "project": project_name,
+                            "check": "clone-preflight",
+                            "status": "FAIL",
+                            "message": self._clean_text(str(exc)),
+                        }
+                    )
+                else:
+                    project_reports.append(
+                        {
+                            "project": project_name,
+                            "check": "clone-preflight",
+                            "status": "PASS",
+                            "message": f"origin exposes {integration_ref}",
+                        }
+                    )
             for record in records:
                 desired = self._desired(record)
                 checks = self.doctor_factory().run(desired)
@@ -4659,7 +4844,7 @@ class SeatConfigManager:
                     desired, bridge_version=self.bridge_installer.version, doctor=report
                 )
                 reports.append({"seat": desired.name, **report})
-            return {"seats": reports}
+            return {"seats": reports, "projects": project_reports}
 
         return self._start_job("doctor", run)
 

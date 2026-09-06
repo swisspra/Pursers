@@ -33,6 +33,13 @@ fetches and fast-forwards a clean clone; partial first-time clones are removed
 after a failure. Registry and Doctor report an empty working tree separately
 from local changes. A dirty clone is never overwritten, and the API error gives
 its exact path plus a `git status --short` inspection command.
+Before cloning, the dashboard runs a non-interactive `git ls-remote` preflight
+for the project's integration ref; Doctor reports that preflight per active
+registry project. Git receives `GIT_TERMINAL_PROMPT=0`, a defined `HOME`, and a
+PATH augmented with available Homebrew/local binary directories. Credential
+helpers must therefore work non-interactively under the launchd service account.
+Failures return and log the failing git subcommand with a bounded, scrubbed
+stderr tail; credentials and operator home names are redacted.
 Automatic legacy recovery requires the missing Git index left by the former
 `--no-checkout` flow. Unstaged or staged deletions in an initialized clone stay
 classified as local changes and are never restored automatically.
