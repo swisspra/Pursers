@@ -247,6 +247,10 @@ python tools/wait-bridge/seat_admin.py check --name worker-a
 python tools/wait-bridge/seat_admin.py new-board --board board-new
 python tools/wait-bridge/seat_admin.py retire \
   --name worker-a --boards registry
+python tools/wait-bridge/seat_admin.py dedupe \
+  --name worker-a --keep-principal PR-KEEP
+python tools/wait-bridge/seat_admin.py dedupe \
+  --name worker-a --keep-principal PR-KEEP --commit
 python tools/wait-bridge/seat_admin.py prune-stale \
   --older-than-days 30 --dry-run --protect worker-a
 python tools/wait-bridge/seat_admin.py prune-stale \
@@ -265,6 +269,11 @@ the principal holds an active claim. A seat seen within the stale threshold
 principals require `--principal`; registry-mode seat definitions must be
 retired with `--boards registry`. Each removed membership is read back from
 both membership and agents projections before success is printed.
+
+`dedupe` resolves one seat name used by multiple principals across every active
+fleet board. It keeps the named principal and plans retirement of all others.
+Dry-run is the default; `--commit` refuses admin principals, active claims, or
+incomplete snapshots, then removes and verifies each membership.
 
 `prune-stale` aggregates each principal's latest seat activity across every
 active registry board. It excludes reviewer/admin roles, names supplied by
@@ -294,6 +303,21 @@ review backlog, coordinator freshness, and the bridge stats file. The default
 human table and `--json` report contain only bounded details; exit codes are
 `0` for PASS, `1` for WARN, and `2` for FAIL.
 
+Each check reports both a runtime `status` and its declared `severity` and
+`scope`. Overall health is computed only from FAIL-class checks, so advisory
+WARN/INFO checks remain visible without declaring a fleet outage.
+
+| Severity | Affects OVERALL | Intended use |
+| --- | --- | --- |
+| `FAIL` | Yes | Fleet-critical reachability, registry, board, project, snapshot, and complete ticket-scan checks |
+| `WARN` | No | Actionable hygiene such as duplicate/stale seats, claim age, review backlog, and missing clone with no recent fleet work |
+| `INFO` | No | Operator-owned state intentionally outside the fleet |
+
+Ticket checks query each active status separately at Central's maximum bounded
+limit and report exact omitted counts by board and status. Snapshot reads also
+use the maximum byte bound. Duplicate-seat rows include principal, last-seen,
+retire-candidate evidence, and the exact `seat_admin.py retire` command.
+
 Pass a token file path rather than a token value. `PURSERS_DOCTOR_TOKEN_PATH`
 or `ONBOARD_TOKEN_FILE` can supply the path, and `PURSERS_BRIDGE_STATS` can
 override the default adjacent `bridge-stats.json` path.
@@ -306,6 +330,11 @@ python tools/wait-bridge/registry_doctor.py --token-path /PATH/TO/TOKEN --json
 Registry entries default to integration ref `main`. A future-compatible
 `integration_ref` string can override it; `git_repo: false` explicitly marks a
 project work directory as intentionally non-git.
+
+Set `fleet: false` on an active registry entry for an operator-only project.
+The doctor reports it as INFO, excludes its board and work directory from fleet
+health/routing, and never fails because its `fleet_clone_dir` is absent. The
+admin CLI can create this shape with `registry_admin.py add ... --operator-only`.
 
 After Central is deployed with board-state support for the board's scrub
 profile, seed and verify the initial registry with the bridge environment:

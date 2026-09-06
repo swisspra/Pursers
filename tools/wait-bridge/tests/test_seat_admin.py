@@ -734,6 +734,50 @@ class SeatAdminTests(unittest.TestCase):
         self.assertNotIn("PR-worker", backend.roles["board-one"])
         self.assertIn("PR-other", backend.roles["board-two"])
 
+    def test_dedupe_dry_run_then_commit_retires_other_principal_everywhere(self) -> None:
+        backend = StrictFakeBackend()
+        for board_id in ("home", "board-one", "board-two"):
+            backend.roles[board_id]["PR-other"] = "member"
+            backend.agents[board_id].append(("PR-other", "worker-a", "stale"))
+            backend.last_activity[(board_id, "PR-other", "worker-a")] = (
+                "2020-01-01T00:00:00+00:00"
+            )
+        backend.seats["seats"]["worker-a"] = {
+            "principal_id": "PR-worker",
+            "role": "worker",
+            "board_mode": "registry",
+        }
+
+        dry_run = json.loads(
+            invoke(
+                backend, "dedupe", "--name", "worker-a",
+                "--keep-principal", "PR-worker",
+            )
+        )
+        self.assertEqual(dry_run["mode"], "dry-run")
+        self.assertEqual(dry_run["writes"], 0)
+        self.assertEqual(dry_run["retire"][0]["principal_id"], "PR-other")
+        self.assertEqual(backend.calls, [])
+
+        committed = json.loads(
+            invoke(
+                backend, "dedupe", "--name", "worker-a",
+                "--keep-principal", "PR-worker", "--commit",
+            )
+        )
+        self.assertEqual(committed["mode"], "commit")
+        self.assertEqual(
+            committed["writes"], 3
+        )
+        self.assertEqual(
+            [item["board_id"] for item in committed["verified_read_back"]],
+            ["home", "board-one", "board-two"],
+        )
+        for board_id in ("home", "board-one", "board-two"):
+            self.assertNotIn("PR-other", backend.roles[board_id])
+        self.assertIn("PR-worker", backend.roles["home"])
+        self.assertIn("PR-worker", backend.roles["board-one"])
+
     def test_prune_stale_defaults_to_dry_run_with_zero_writes(self) -> None:
         backend = StrictFakeBackend()
         result = json.loads(

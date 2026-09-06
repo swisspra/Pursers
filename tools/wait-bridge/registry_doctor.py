@@ -27,11 +27,17 @@ DEFAULT_REVIEW_BACKLOG_SECONDS = 1_800
 DEFAULT_STALE_SEAT_SECONDS = 300
 DEFAULT_COORDINATOR_STALE_SECONDS = 300
 SNAPSHOT_LIMIT = 1_000
-SNAPSHOT_MAX_BYTES = 300_000
+SNAPSHOT_MAX_BYTES = 750_000
+TICKET_SCAN_LIMIT = 500
+FLEET_ACTIVITY_WINDOW_SECONDS = 7 * 86_400
+TICKET_SCAN_STATUSES = (
+    "open", "claimed", "in_progress", "creating_report", "submitted",
+    "reviewing", "in_review", "needs_human",
+)
 MAX_STATS_BYTES = 1_000_000
-MAX_DETAIL_CHARS = 300
+MAX_DETAIL_CHARS = 1_000
 MAX_LIST_ITEMS = 20
-LEVELS = {"PASS": 0, "WARN": 1, "FAIL": 2}
+LEVELS = {"PASS": 0, "INFO": 0, "WARN": 1, "FAIL": 2}
 ACTIVE_CLAIM_STATES = frozenset({"claimed", "in_progress", "creating_report"})
 
 
@@ -48,15 +54,25 @@ class DoctorBackend(Protocol):
         self, board_id: str, key: str
     ) -> dict[str, Any]: ...
 
+    async def board_tickets(self, board_id: str) -> dict[str, Any]: ...
+
 
 @dataclass(frozen=True)
 class Check:
     status: str
     name: str
     detail: str
+    severity: str
+    scope: str
 
     def as_dict(self) -> dict[str, str]:
-        return {"status": self.status, "check": self.name, "detail": self.detail}
+        return {
+            "status": self.status,
+            "severity": self.severity,
+            "scope": self.scope,
+            "check": self.name,
+            "detail": self.detail,
+        }
 
 
 class LiveBackend:
@@ -97,6 +113,31 @@ class LiveBackend:
         async with self._client(board_id) as client:
             return await client.board_state_get(key)
 
+    async def board_tickets(self, board_id: str) -> dict[str, Any]:
+        tickets: list[dict[str, Any]] = []
+        omitted_by_status: dict[str, int] = {}
+        async with self._client(board_id) as client:
+            for status in TICKET_SCAN_STATUSES:
+                result = await client.ticket_list(
+                    status=status, include_closed=False, limit=TICKET_SCAN_LIMIT
+                )
+                rows = result.get("tickets", [])
+                if not isinstance(rows, list):
+                    raise DoctorError("ticket_list returned malformed tickets")
+                tickets.extend(item for item in rows if isinstance(item, dict))
+                total = result.get("total_matching", len(rows))
+                if type(total) is not int or total < len(rows):
+                    raise DoctorError("ticket_list returned malformed counts")
+                omitted = total - len(rows)
+                if omitted:
+                    omitted_by_status[status] = omitted
+        return {
+            "tickets": tickets,
+            "omitted_by_status": omitted_by_status,
+            "segments": len(TICKET_SCAN_STATUSES),
+            "limit_per_status": TICKET_SCAN_LIMIT,
+        }
+
 
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
@@ -134,11 +175,29 @@ def _safe_detail(value: Any, token: str) -> str:
 
 
 def _add(
-    checks: list[Check], status: str, name: str, detail: Any, token: str
+    checks: list[Check], status: str, name: str, detail: Any, token: str,
+    *, severity: str | None = None, scope: str | None = None,
 ) -> None:
     if status not in LEVELS:
         raise ValueError(f"unknown doctor status {status!r}")
-    checks.append(Check(status, name, _safe_detail(detail, token)))
+    if severity is None:
+        severity = (
+            "FAIL"
+            if name in {"central", "registry"}
+            or name.startswith(("board:", "snapshot:", "project:"))
+            else "WARN"
+        )
+    if severity not in {"FAIL", "WARN", "INFO"}:
+        raise ValueError(f"unknown doctor severity {severity!r}")
+    if scope is None:
+        if ":" in name and name.split(":", 1)[0] in {
+            "board", "snapshot", "project", "seat-workdir"
+        }:
+            prefix, target = name.split(":", 1)
+            scope = f"board:{target}" if prefix in {"board", "snapshot"} else f"project:{target}"
+        else:
+            scope = "fleet"
+    checks.append(Check(status, name, _safe_detail(detail, token), severity, scope))
 
 
 def _state_value(result: Any, label: str) -> Any:
@@ -173,6 +232,7 @@ def parse_registry(result: Any) -> dict[str, Any]:
         "public",
         "work_dir_owner",
         "fleet_clone_dir",
+        "fleet",
     }
     for name, raw in projects.items():
         if not isinstance(name, str) or not name.strip() or name != name.strip():
@@ -211,6 +271,8 @@ def parse_registry(result: Any) -> dict[str, Any]:
             )
         if "git_repo" in raw and type(raw["git_repo"]) is not bool:
             raise DoctorError(f"project {name!r} git_repo must be boolean")
+        if "fleet" in raw and type(raw["fleet"]) is not bool:
+            raise DoctorError(f"project {name!r} fleet must be boolean")
         normalized["projects"][name] = dict(raw)
         normalized["projects"][name]["integration_ref"] = integration_ref
     return normalized
@@ -235,17 +297,40 @@ def check_project(
     checks: list[Check],
     token: str,
     git_runner: GitRunner,
+    recent_fleet_tickets: int | None = None,
 ) -> None:
+    if entry.get("fleet", True) is False:
+        _add(
+            checks, "INFO", f"seat-workdir:{name}",
+            "operator-only project (fleet=false); fleet routing checks skipped",
+            token, severity="INFO", scope=f"project:{name}",
+        )
+        _add(
+            checks, "INFO", f"project:{name}",
+            "operator-only project is outside fleet health",
+            token, severity="INFO", scope=f"project:{name}",
+        )
+        return
     operator_owned = entry.get("work_dir_owner", "operator") == "operator"
     fleet_clone_dir = entry.get("fleet_clone_dir")
     path = Path(str(fleet_clone_dir or entry["work_dir"]))
     if operator_owned and not fleet_clone_dir:
+        has_recent_work = recent_fleet_tickets is None or recent_fleet_tickets > 0
         _add(
             checks,
-            "FAIL",
+            "FAIL" if has_recent_work else "WARN",
             f"seat-workdir:{name}",
-            "operator checkout is read-only for seats; fleet_clone_dir is missing",
+            (
+                "operator checkout is read-only for seats; fleet_clone_dir is missing; "
+                + (
+                    "recent fleet ticket count is unknown"
+                    if recent_fleet_tickets is None
+                    else f"recent fleet tickets={recent_fleet_tickets}"
+                )
+            ),
             token,
+            severity="FAIL" if has_recent_work else "WARN",
+            scope=f"project:{name}",
         )
     else:
         _add(
@@ -336,7 +421,7 @@ def _seat_check(
     checks: list[Check],
     token: str,
 ) -> None:
-    principals_by_name: dict[str, set[str]] = defaultdict(set)
+    identities_by_name: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
     stale: list[str] = []
     count = 0
     for board_id, snapshot in snapshots.items():
@@ -350,14 +435,28 @@ def _seat_check(
                 continue
             count += 1
             if isinstance(principal, str) and principal:
-                principals_by_name[name].add(principal)
+                last_seen = agent.get("last_activity_at") or agent.get("last_seen")
+                age = _age(last_seen, now)
+                existing = identities_by_name[name].get(principal)
+                existing_age = (
+                    _age(existing.get("last_seen"), now) if existing else None
+                )
+                if existing is None or (
+                    age is not None
+                    and (existing_age is None or age < existing_age)
+                ):
+                    identities_by_name[name][principal] = {
+                        "last_seen": last_seen,
+                        "age": age,
+                    }
             age = _age(agent.get("last_activity_at") or agent.get("last_seen"), now)
             if agent.get("status") == "stale" or (
                 age is not None and age > stale_seconds
             ):
                 stale.append(f"{board_id}/{name}")
     duplicates = [
-        name for name, principals in principals_by_name.items() if len(principals) > 1
+        name for name, identities in identities_by_name.items()
+        if len(identities) > 1
     ]
     issues: list[str] = []
     incomplete = [
@@ -369,6 +468,21 @@ def _seat_check(
         issues.append(f"agent scan incomplete: {_bounded_items(incomplete)}")
     if duplicates:
         issues.append(f"duplicate names across principals: {_bounded_items(duplicates)}")
+        for name in sorted(duplicates):
+            identity_details: list[str] = []
+            for principal, identity in sorted(identities_by_name[name].items()):
+                age = identity.get("age")
+                candidate = age is not None and age > stale_seconds
+                command = f"seat_admin.py retire --name {name} --principal {principal}"
+                identity_details.append(
+                    f"principal={principal} last_seen={identity.get('last_seen') or 'unknown'} "
+                    f"retire_candidate={str(candidate).lower()} command={command}"
+                )
+            _add(
+                checks, "WARN", f"seat-duplicate:{name}",
+                " | ".join(identity_details), token,
+                severity="WARN", scope="fleet",
+            )
     if stale:
         issues.append(f"stale seats: {_bounded_items(stale)}")
     if issues:
@@ -378,7 +492,7 @@ def _seat_check(
 
 
 def _ticket_checks(
-    snapshots: Mapping[str, Mapping[str, Any]],
+    scans: Mapping[str, Mapping[str, Any]],
     now: datetime,
     review_backlog_seconds: int,
     checks: list[Check],
@@ -386,13 +500,17 @@ def _ticket_checks(
 ) -> None:
     expired: list[str] = []
     backlog: list[str] = []
-    incomplete = [
-        board_id
-        for board_id, snapshot in snapshots.items()
-        if _snapshot_omissions(snapshot).get("tickets", 0)
-    ]
-    for board_id, snapshot in snapshots.items():
-        tickets = snapshot.get("tickets", [])
+    incomplete: list[str] = []
+    for board_id, scan in scans.items():
+        omitted = scan.get("omitted_by_status", {})
+        if isinstance(omitted, Mapping) and omitted:
+            counts = ",".join(
+                f"{status}={count}" for status, count in sorted(omitted.items())
+            )
+            incomplete.append(
+                f"{board_id} ({counts}; limit/status={TICKET_SCAN_LIMIT})"
+            )
+        tickets = scan.get("tickets", [])
         for ticket in tickets if isinstance(tickets, list) else []:
             if not isinstance(ticket, Mapping):
                 continue
@@ -540,7 +658,11 @@ def _bridge_stats_check(
 
 
 def worst_status(checks: Sequence[Check]) -> str:
-    return max(checks, key=lambda item: LEVELS[item.status]).status if checks else "FAIL"
+    fail_class = [item for item in checks if item.severity == "FAIL"]
+    return (
+        max(fail_class, key=lambda item: LEVELS[item.status]).status
+        if fail_class else "PASS"
+    )
 
 
 def report_document(checks: Sequence[Check], now: datetime) -> dict[str, Any]:
@@ -608,16 +730,17 @@ async def evaluate(
         )
 
     snapshots: dict[str, Mapping[str, Any]] = {}
+    ticket_scans: dict[str, Mapping[str, Any]] = {}
     if registry is not None:
         active = {
             name: entry
             for name, entry in registry["projects"].items()
             if entry.get("status") == "active"
         }
-        for name, entry in sorted(active.items()):
-            check_project(name, entry, checks, token, git_runner)
         boards = [home_board]
         for entry in active.values():
+            if entry.get("fleet", True) is False:
+                continue
             board_id = str(entry["board_id"])
             if board_id not in boards:
                 boards.append(board_id)
@@ -667,9 +790,72 @@ async def evaluate(
                     f"bounded read failed ({type(exc).__name__})",
                     token,
                 )
+            try:
+                scan = await backend.board_tickets(board_id)
+                if not isinstance(scan, Mapping):
+                    raise DoctorError("ticket scan returned a non-object response")
+                omitted = scan.get("omitted_by_status", {})
+                if not isinstance(omitted, Mapping):
+                    raise DoctorError("ticket scan omission counts are malformed")
+                ticket_scans[board_id] = scan
+                if omitted:
+                    detail = ", ".join(
+                        f"{status}={count}"
+                        for status, count in sorted(omitted.items())
+                    )
+                    _add(
+                        checks, "WARN", f"ticket-scan:{board_id}",
+                        f"incomplete after limit/status={TICKET_SCAN_LIMIT}: {detail}",
+                        token, severity="FAIL", scope=f"board:{board_id}",
+                    )
+                else:
+                    _add(
+                        checks, "PASS", f"ticket-scan:{board_id}",
+                        f"complete across {len(TICKET_SCAN_STATUSES)} status segments",
+                        token, severity="FAIL", scope=f"board:{board_id}",
+                    )
+            except Exception as exc:
+                _add(
+                    checks, "FAIL", f"ticket-scan:{board_id}",
+                    f"bounded ticket_list scan failed ({type(exc).__name__})",
+                    token, severity="FAIL", scope=f"board:{board_id}",
+                )
+        board_project_counts: dict[str, int] = defaultdict(int)
+        for entry in active.values():
+            if entry.get("fleet", True):
+                board_project_counts[str(entry["board_id"])] += 1
+        for name, entry in sorted(active.items()):
+            board_id = str(entry["board_id"])
+            scan = ticket_scans.get(board_id)
+            recent_count: int | None = None
+            if scan is not None and not scan.get("omitted_by_status"):
+                recent_count = 0
+                route_keys = {
+                    name.casefold(), Path(str(entry["work_dir"])).name.casefold()
+                }
+                for ticket in scan.get("tickets", []):
+                    if not isinstance(ticket, Mapping):
+                        continue
+                    age = _age(
+                        ticket.get("updated_at") or ticket.get("created_at"), now
+                    )
+                    if age is not None and age > FLEET_ACTIVITY_WINDOW_SECONDS:
+                        continue
+                    target = str(ticket.get("target_url") or "").casefold()
+                    if (
+                        board_project_counts[board_id] > 1
+                        and target
+                        and not any(key in target for key in route_keys)
+                    ):
+                        continue
+                    recent_count += 1
+            check_project(
+                name, entry, checks, token, git_runner,
+                recent_fleet_tickets=recent_count,
+            )
         _seat_check(snapshots, now, stale_seat_seconds, checks, token)
         _ticket_checks(
-            snapshots,
+            ticket_scans,
             now,
             review_backlog_seconds,
             checks,
@@ -695,10 +881,16 @@ async def evaluate(
 def render_human(report: Mapping[str, Any]) -> str:
     rows = report.get("checks", [])
     width = max([len("CHECK"), *(len(str(row.get("check", ""))) for row in rows)])
-    lines = [f"{'STATUS':<6}  {'CHECK':<{width}}  DETAIL"]
+    scope_width = max([len("SCOPE"), *(len(str(row.get("scope", ""))) for row in rows)])
+    lines = [
+        f"{'STATUS':<6}  {'SEVERITY':<8}  {'SCOPE':<{scope_width}}  "
+        f"{'CHECK':<{width}}  DETAIL"
+    ]
     for row in rows:
         lines.append(
             f"{str(row.get('status', '')):<6}  "
+            f"{str(row.get('severity', '')):<8}  "
+            f"{str(row.get('scope', '')):<{scope_width}}  "
             f"{str(row.get('check', '')):<{width}}  "
             f"{row.get('detail', '')}"
         )

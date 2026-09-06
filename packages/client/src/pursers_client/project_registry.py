@@ -56,7 +56,7 @@ def parse_project_registry(result: dict[str, Any]) -> dict[str, Any]:
     projects = registry.get("projects")
     if not isinstance(projects, dict):
         raise ValueError("project_registry projects must be an object")
-    normalized: dict[str, dict[str, str]] = {}
+    normalized: dict[str, dict[str, Any]] = {}
     for name, project in projects.items():
         if not isinstance(name, str) or not name or name != name.strip():
             raise ValueError("project_registry project names must be non-empty strings")
@@ -89,6 +89,10 @@ def parse_project_registry(result: dict[str, Any]) -> dict[str, Any]:
             raise ValueError(
                 f"project_registry project {name!r} fleet_clone_dir must be absolute"
             )
+        if "fleet" in project and type(project["fleet"]) is not bool:
+            raise ValueError(
+                f"project_registry project {name!r} fleet must be boolean"
+            )
         normalized[name] = {
             "board_id": board_id,
             "work_dir": work_dir,
@@ -98,6 +102,8 @@ def parse_project_registry(result: dict[str, Any]) -> dict[str, Any]:
             normalized[name]["work_dir_owner"] = owner
         if fleet_clone_dir is not None:
             normalized[name]["fleet_clone_dir"] = fleet_clone_dir
+        if "fleet" in project:
+            normalized[name]["fleet"] = project["fleet"]
     return {"schema_version": PROJECT_REGISTRY_SCHEMA_VERSION, "projects": normalized}
 
 
@@ -106,7 +112,7 @@ def active_registry_boards(registry: dict[str, Any], home_board: str) -> list[st
     selected.update(
         project["board_id"]
         for project in registry["projects"].values()
-        if project["status"] == "active"
+        if project["status"] == "active" and project.get("fleet", True)
     )
     return sorted(selected)
 
@@ -114,7 +120,7 @@ def active_registry_boards(registry: dict[str, Any], home_board: str) -> list[st
 def registry_work_dirs(registry: dict[str, Any]) -> dict[str, str]:
     candidates: dict[str, set[str]] = {}
     for project in registry["projects"].values():
-        if project["status"] == "active":
+        if project["status"] == "active" and project.get("fleet", True):
             candidates.setdefault(project["board_id"], set()).add(
                 project.get("fleet_clone_dir") or project["work_dir"]
             )
@@ -128,7 +134,7 @@ def registry_work_dirs(registry: dict[str, Any]) -> dict[str, str]:
 def registry_project_work_dirs(registry: dict[str, Any]) -> dict[str, str]:
     selected: dict[str, str] = {}
     for name, project in registry["projects"].items():
-        if project["status"] != "active":
+        if project["status"] != "active" or not project.get("fleet", True):
             continue
         work_dir = project.get("fleet_clone_dir") or project["work_dir"]
         selected[name.casefold()] = work_dir
@@ -142,6 +148,7 @@ def registry_operator_work_dirs(registry: dict[str, Any]) -> dict[str, str]:
     for project in registry["projects"].values():
         if (
             project["status"] == "active"
+            and project.get("fleet", True)
             and project.get("work_dir_owner", "operator") == "operator"
         ):
             candidates.setdefault(project["board_id"], set()).add(project["work_dir"])
@@ -160,6 +167,7 @@ def registry_project_operator_work_dirs(
     for name, project in registry["projects"].items():
         if (
             project["status"] != "active"
+            or not project.get("fleet", True)
             or project.get("work_dir_owner", "operator") != "operator"
         ):
             continue

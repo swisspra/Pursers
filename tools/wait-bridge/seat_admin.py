@@ -236,7 +236,11 @@ def _active_boards(registry: dict[str, Any], home_board: str) -> list[str]:
     boards = [_identifier(home_board, "home board id")]
     for project in registry["projects"].values():
         board_id = _identifier(project["board_id"], "registry board id")
-        if project["status"] == "active" and board_id not in boards:
+        if (
+            project["status"] == "active"
+            and project.get("fleet", True)
+            and board_id not in boards
+        ):
             boards.append(board_id)
     return boards
 
@@ -756,6 +760,103 @@ async def _retire(
     )
 
 
+async def _dedupe(
+    args: argparse.Namespace,
+    backend: SeatBackend,
+    registry: dict[str, Any],
+    seat_registry: dict[str, Any],
+) -> None:
+    name = _identifier(args.name, "agent name")
+    keep = _identifier(args.keep_principal, "principal id")
+    boards = _active_boards(registry, backend.home_board)
+    rows, memberships, snapshots = await _inventory(backend, boards)
+    candidates = {
+        str(row["principal_id"])
+        for row in rows
+        if row["name"] == name
+    }
+    definition = seat_registry["seats"].get(name)
+    if definition is not None:
+        candidates.add(str(definition["principal_id"]))
+    if keep not in candidates:
+        raise RegistryError(
+            f"agent name {name!r} is not associated with keep principal {keep!r}"
+        )
+    targets = sorted(candidates - {keep})
+    if not targets:
+        raise RegistryError(f"agent name {name!r} has no duplicate principals")
+
+    operations: list[tuple[str, str]] = []
+    plan: list[dict[str, Any]] = []
+    for principal in targets:
+        target_boards = [
+            board_id for board_id in boards
+            if _member_role(memberships, board_id, principal) is not None
+        ]
+        admin_boards = [
+            board_id for board_id in target_boards
+            if _member_role(memberships, board_id, principal) == "admin"
+        ]
+        if admin_boards:
+            raise RegistryError(
+                "refusing to dedupe an admin principal from "
+                + ", ".join(admin_boards)
+            )
+        operations.extend((board_id, principal) for board_id in target_boards)
+        identity_rows = [
+            row for row in rows
+            if row["name"] == name and row["principal_id"] == principal
+        ]
+        plan.append(
+            {
+                "principal_id": principal,
+                "boards": target_boards,
+                "last_seen": sorted(
+                    {str(row.get("last_seen") or "unknown") for row in identity_rows}
+                ),
+            }
+        )
+
+    claims = _active_claims(snapshots, set(targets))
+    if claims:
+        listed = ", ".join(
+            f"{item['board_id']}/{item['ticket_id']}" for item in claims
+        )
+        raise RegistryError(f"active claims prevent dedupe: {listed}")
+    result: dict[str, Any] = {
+        "action": "dedupe",
+        "mode": "commit" if args.commit else "dry-run",
+        "name": name,
+        "keep_principal": keep,
+        "retire": plan,
+        "writes": len(operations) if args.commit else 0,
+    }
+    if not args.commit:
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return
+
+    verified = await _remove_many_and_verify(
+        backend, operations, action="dedupe"
+    )
+    updated_registry = json.loads(json.dumps(seat_registry))
+    removed_definitions = [
+        stored_name
+        for stored_name, stored in updated_registry["seats"].items()
+        if stored["principal_id"] in targets
+    ]
+    for stored_name in removed_definitions:
+        del updated_registry["seats"][stored_name]
+    if updated_registry != seat_registry:
+        await backend.write_seat_registry(updated_registry)
+    result.update(
+        {
+            "verified_read_back": verified,
+            "seat_registry_definitions_removed": sorted(removed_definitions),
+        }
+    )
+    print(json.dumps(result, indent=2, sort_keys=True))
+
+
 async def _prune_stale(
     args: argparse.Namespace,
     backend: SeatBackend,
@@ -1002,10 +1103,12 @@ async def execute(args: argparse.Namespace, backend: SeatBackend) -> None:
         if args.boards != "registry":
             for item in args.boards.split(","):
                 _identifier(item, "board id")
-    elif args.command in {"check", "retire"}:
+    elif args.command in {"check", "retire", "dedupe"}:
         _identifier(args.name, "agent name")
         if args.command == "retire" and args.principal is not None:
             _identifier(args.principal, "principal id")
+        if args.command == "dedupe":
+            _identifier(args.keep_principal, "principal id")
     elif args.command == "prune-stale":
         _protected_names(args.protected)
     else:  # new-board
@@ -1015,6 +1118,9 @@ async def execute(args: argparse.Namespace, backend: SeatBackend) -> None:
     seat_registry = _validate_seat_registry(await backend.seat_registry())
     if args.command == "retire":
         await _retire(args, backend, registry, seat_registry)
+        return
+    if args.command == "dedupe":
+        await _dedupe(args, backend, registry, seat_registry)
         return
     if args.command == "prune-stale":
         await _prune_stale(args, backend, registry, seat_registry)
@@ -1192,6 +1298,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=int(os.environ.get("PURSERS_STALE_SECONDS", DEFAULT_STALE_SECONDS)),
     )
     retire.add_argument("--force", action="store_true")
+
+    dedupe = subparsers.add_parser("dedupe")
+    dedupe.add_argument("--name", required=True)
+    dedupe.add_argument("--keep-principal", required=True)
+    dedupe.add_argument("--commit", action="store_true")
 
     prune = subparsers.add_parser("prune-stale")
     prune.add_argument("--older-than-days", type=int, required=True)

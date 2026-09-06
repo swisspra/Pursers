@@ -137,6 +137,19 @@ class RegistryAdminTests(unittest.TestCase):
             },
         )
 
+    def test_operator_only_flag_persists_fleet_false(self) -> None:
+        client = FakeClient()
+
+        invoke(
+            client,
+            "add", "operator-app", "--board-id", "operator-board",
+            "--work-dir", "/operator/app", "--operator-only",
+        )
+
+        self.assertIs(
+            client.document()["projects"]["operator-app"]["fleet"], False
+        )
+
     def test_duplicate_add_requires_force_and_force_replaces(self) -> None:
         client = FakeClient()
         arguments = (
@@ -246,6 +259,16 @@ class RegistryAdminTests(unittest.TestCase):
         client = FakeClient(malformed)
 
         with self.assertRaisesRegex(registry_admin.RegistryError, "exactly"):
+            invoke(client, "show")
+
+        self.assertEqual(client.writes, [])
+
+    def test_validation_rejects_non_boolean_fleet_flag(self) -> None:
+        malformed = json.loads(json.dumps(INITIAL))
+        malformed["projects"]["alpha"]["fleet"] = "false"
+        client = FakeClient(malformed)
+
+        with self.assertRaisesRegex(registry_admin.RegistryError, "fleet must be boolean"):
             invoke(client, "show")
 
         self.assertEqual(client.writes, [])
