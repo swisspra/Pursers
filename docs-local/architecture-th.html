@@ -353,7 +353,7 @@ shasum -a 256 -c SHA256SUMS.txt</code></pre>
     <section id="fleet">
       <h2>Cross-Project Fleet: เพิ่มโปรเจกต์หนึ่งครั้ง แล้ว pool เห็นทั้งระบบ</h2>
       <p class="section-intro">Registry board เก็บ project registry กลาง แล้ว <code>a2a_wait(boards="registry")</code> แปลง registry เป็นรายการ board ที่ active ก่อนเริ่มรอ ตั้งแต่ a16 ทุก seat ใช้ subscription เป็นเส้นทางหลักแทน timer poll</p>
-      <div class="callout"><strong>Unreleased:</strong> home board ว่างหมายถึง seat แบบ fleet-wide และ bridge bind กับ registry board (<code>pursers</code> โดย default); home board ที่มีชื่อหมายถึง dedicated seat และ prompt ส่ง <code>boards=["&lt;board&gt;"]</code> Managed config เก็บ selector ใน <code>PURSERS_BOARDS</code>/<code>PURSERS_HOME_BOARD</code></div>
+      <div class="callout"><strong>Unreleased:</strong> home board ว่างหมายถึง seat แบบ fleet-wide (<code>boards=registry</code>) และ bridge bind กับ registry board (<code>pursers</code> โดย default); home board ที่มีชื่อหมายถึง dedicated seat (<code>boards=home</code>) และ prompt ส่ง <code>boards=["&lt;board&gt;"]</code> Managed config เก็บ selector ใน <code>PURSERS_BOARDS</code>/<code>PURSERS_HOME_BOARD</code></div>
 
       <figure class="card diagram" aria-labelledby="pool-caption">
         <svg viewBox="0 0 1120 650" role="img" aria-labelledby="pool-title pool-desc">
@@ -544,7 +544,7 @@ shasum -a 256 -c SHA256SUMS.txt</code></pre>
         <article class="card"><h3>Findings</h3><p>รายงาน stale claim, unverifiable/closed-but-unmerged commit, board-large และ integration gaps แบบ deduplicated; <code>board-degraded</code> ใช้เฉพาะ call failure จริง</p></article>
         <article class="card"><h3>Structured intake</h3><p>classifier แบบ deterministic แปลง ask ที่อนุญาตเป็น ticket ผ่าน principal-intake แยก พร้อม consume-once idempotency และ approval matrix</p></article>
         <article class="card"><h3>Orchestrator digest</h3><p><code>board_digest</code>/<code>board_digest_ack</code> และ watchlist อ่าน event buffer แบบ non-blocking; orchestrator ไม่ <code>a2a_wait</code>, claim, review หรือ merge แทนคน</p></article>
-        <article class="card"><h3>Dispatcher liveness</h3><p>a21 offer เฉพาะ live seat, fair rotation และเก็บ deadline/history ข้าม restart; unreleased re-surface unclaimed broadcast ตาม <code>PURSERS_BACKLOG_RESURFACE_INTERVAL_S</code> และไม่ offer ให้ coordinator</p></article>
+        <article class="card"><h3>Dispatcher liveness</h3><p>a21 offer เฉพาะ live seat, fair rotation และเก็บ deadline/history ข้าม restart; unreleased re-surface unclaimed broadcast ตาม <code>PURSERS_BACKLOG_RESURFACE_INTERVAL_S</code> แล้ว re-offer หลัง <code>broadcast_reoffer_s</code> ของบอร์ด และไม่ offer ให้ coordinator</p></article>
       </div>
       <div class="callout"><strong>Reduced surface:</strong> ไม่มี <code>agent_nudge</code>; autonomous Dispatcher offers เป็น targeted wake path เดียว</div>
     </section>

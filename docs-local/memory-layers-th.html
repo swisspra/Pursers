@@ -1,5 +1,11 @@
-<title>หน่วยความจำร่วมของ Pursers</title>
-<style>
+<!doctype html>
+<html lang="th">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" href="data:,">
+  <title>หน่วยความจำร่วมของ Pursers</title>
+  <style>
   :root{
     color-scheme:light;
     --ground:#FFFFFF;--surface:#F7F9FC;--surface-sunk:#EDF1F7;
@@ -57,7 +63,9 @@
   @media(max-width:640px){.page{padding:40px 18px 72px}.row{grid-template-columns:1fr;gap:5px}}
   @media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
   a{color:var(--accent)}:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
-</style>
+  </style>
+</head>
+<body>
 
 <div class="page">
 <header class="masthead">
@@ -142,7 +150,7 @@
 
 <section id="catchup">
   <h2>a21 catch-up: bounded, compacted, clamped</h2>
-  <p class="sectionlede">Wait Bridge a21 เดิน journal เป็นหน้าและรับประกัน monotonic progress: cursor เคลื่อนไปข้างหน้าโดยไม่คืน event ก้อนใหญ่เกินขอบเขต</p>
+  <p class="sectionlede">Wait Bridge a21 เดิน journal ผ่าน <code>board_catchup</code> เป็นหน้าและรับประกัน monotonic progress: cursor เคลื่อนไปข้างหน้าโดยไม่คืน event ก้อนใหญ่เกินขอบเขต</p>
   <ul>
     <li>history มากกว่า replay bound ถูกย่อเป็นรายการล่าสุดที่เกี่ยวข้อง และคืน <code>compacted</code>, <code>dropped</code> และ <code>event_counts</code></li>
     <li>cursor ที่อยู่หลังช่วง retention จะขยับผ่านส่วนที่ถูก compact พร้อมคำเตือน; cursor ที่อยู่หน้าหัว journal จะถูก clamp พร้อมคำเตือน</li>
@@ -176,3 +184,5 @@
 
 <footer><span>Pursers board memory</span><span>5.0.0a21</span><span>ภาษาไทย</span><span>scope: work track only</span></footer>
 </div>
+</body>
+</html>
