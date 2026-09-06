@@ -13,6 +13,8 @@ import ipaddress
 import json
 import os
 import re
+import shlex
+import shutil
 import signal
 import stat
 import statistics
@@ -4252,14 +4254,47 @@ class SeatConfigManager:
                 "path": str(path),
                 "status": "missing",
                 "dirty": False,
+                "empty_worktree": False,
                 "detached": None,
                 "ahead": None,
                 "behind": None,
             }
         inside = self._git(path, "rev-parse", "--is-inside-work-tree")
         if inside.returncode or inside.stdout.strip() != "true":
-            return {"path": str(path), "status": "invalid", "dirty": None}
-        dirty = bool(self._git(path, "status", "--porcelain").stdout.strip())
+            return {
+                "path": str(path),
+                "status": "invalid",
+                "dirty": None,
+                "empty_worktree": None,
+            }
+        porcelain = self._git(path, "status", "--porcelain")
+        tracked = self._git(path, "ls-tree", "-r", "--name-only", "-z", "HEAD")
+        tracked_paths = (
+            [item for item in tracked.stdout.split("\0") if item]
+            if tracked.returncode == 0
+            else []
+        )
+        tracked_files_present = any(
+            (path / item).exists() or (path / item).is_symlink()
+            for item in tracked_paths
+        )
+        git_index = self._git(path, "rev-parse", "--git-path", "index")
+        index_path = Path(git_index.stdout.strip()) if git_index.returncode == 0 else None
+        if index_path is not None and not index_path.is_absolute():
+            index_path = path / index_path
+        index_missing = index_path is not None and not index_path.exists()
+        status_lines = porcelain.stdout.splitlines()
+        legacy_status_shape = not status_lines or (
+            len(status_lines) == len(tracked_paths)
+            and all(line.startswith("D  ") for line in status_lines)
+        )
+        empty_worktree = bool(
+            tracked_paths
+            and not tracked_files_present
+            and index_missing
+            and legacy_status_shape
+        )
+        dirty = bool(porcelain.stdout.strip()) and not empty_worktree
         symbolic = self._git(path, "symbolic-ref", "-q", "HEAD")
         counts = self._git(
             path, "rev-list", "--left-right", "--count", "HEAD...origin/main"
@@ -4271,8 +4306,13 @@ class SeatConfigManager:
                 ahead, behind = (int(parts[0]), int(parts[1]))
         return {
             "path": str(path),
-            "status": "dirty" if dirty else "ready",
+            "status": (
+                "empty_worktree"
+                if empty_worktree
+                else "dirty" if dirty else "ready"
+            ),
             "dirty": dirty,
+            "empty_worktree": empty_worktree,
             "detached": symbolic.returncode != 0,
             "ahead": ahead,
             "behind": behind,
@@ -4311,41 +4351,71 @@ class SeatConfigManager:
             raise ValueError("operator checkout has no origin remote")
         origin = remote.stdout.strip()
         target.parent.mkdir(parents=True, exist_ok=True)
-        if not target.exists():
-            self.git_runner(
-                [
-                    "git",
-                    "clone",
-                    "--no-checkout",
-                    "--origin",
-                    "origin",
-                    "--",
-                    origin,
-                    str(target),
-                ],
-                cwd=target.parent,
-                check=True,
-                text=True,
-                capture_output=True,
-                timeout=120,
-            )
-        state = self._clone_state(target)
-        if state["status"] == "invalid":
-            raise ValueError("fleet_clone_dir exists but is not a git repository")
-        if state.get("dirty"):
-            raise ValueError("fleet clone is dirty; refusing to overwrite local changes")
-        clone_origin = self._git(target, "remote", "get-url", "origin")
-        if clone_origin.returncode or clone_origin.stdout.strip() != origin:
-            raise ValueError("fleet clone origin differs from the operator checkout")
-        self._git(target, "fetch", "--prune", "origin", "main", check=True)
-        self._git(target, "checkout", "--detach", "origin/main", check=True)
+        creating = not (target.exists() or target.is_symlink())
+        try:
+            if creating:
+                self.git_runner(
+                    [
+                        "git",
+                        "clone",
+                        "--branch",
+                        "main",
+                        "--single-branch",
+                        "--origin",
+                        "origin",
+                        "--",
+                        origin,
+                        str(target),
+                    ],
+                    cwd=target.parent,
+                    check=True,
+                    text=True,
+                    capture_output=True,
+                    timeout=120,
+                )
+            state = self._clone_state(target)
+            if state["status"] == "invalid":
+                raise ValueError("fleet_clone_dir exists but is not a git repository")
+            if state.get("dirty"):
+                inspect = f"git -C {shlex.quote(str(target))} status --short"
+                raise ValueError(
+                    "fleet clone is dirty; refusing to overwrite local changes at "
+                    f"{target}; inspect with: {inspect}"
+                )
+            clone_origin = self._git(target, "remote", "get-url", "origin")
+            if clone_origin.returncode or clone_origin.stdout.strip() != origin:
+                raise ValueError("fleet clone origin differs from the operator checkout")
+            self._git(target, "fetch", "--prune", "origin", "main", check=True)
+            if state.get("empty_worktree"):
+                self._git(
+                    target,
+                    "checkout",
+                    "--detach",
+                    "--force",
+                    "origin/main",
+                    check=True,
+                )
+            else:
+                self._git(target, "merge", "--ff-only", "origin/main", check=True)
+                self._git(target, "checkout", "--detach", "HEAD", check=True)
+            final_state = self._clone_state(target)
+            if final_state["status"] != "ready" or (
+                final_state.get("ahead"), final_state.get("behind")
+            ) != (0, 0):
+                raise ValueError("fleet clone checkout verification failed")
+        except Exception as exc:  # noqa: BLE001 - clean partial first-time clones.
+            if creating and (target.exists() or target.is_symlink()):
+                shutil.rmtree(target)
+            if isinstance(exc, ValueError):
+                raise
+            raise ValueError(f"failed to prepare fleet clone at {target}") from exc
         entry["work_dir_owner"] = "operator"
         entry["fleet_clone_dir"] = str(target)
         return {
             "registry": registry,
             "expected_sha256": expected,
             "project": project_name,
-            "clone": self._clone_state(target),
+            "clone": final_state,
         }
 
     def _seat_effective_work_dir(
@@ -4549,6 +4619,41 @@ class SeatConfigManager:
                         ),
                     )
                 )
+                clone_issues: dict[str, list[str]] = {
+                    "empty worktree": [],
+                    "local changes": [],
+                    "unavailable": [],
+                }
+                checked_clones = 0
+                for project_name, entry in active_projects.items():
+                    clone_dir = entry.get("fleet_clone_dir")
+                    if not isinstance(clone_dir, str) or not clone_dir.strip():
+                        continue
+                    checked_clones += 1
+                    clone_path = Path(clone_dir).expanduser().resolve()
+                    clone_state = self._clone_state(clone_path)
+                    status = clone_state.get("status")
+                    label = f"{project_name} ({clone_path})"
+                    if status == "empty_worktree":
+                        clone_issues["empty worktree"].append(label)
+                    elif status == "dirty":
+                        clone_issues["local changes"].append(label)
+                    elif status != "ready":
+                        clone_issues["unavailable"].append(label)
+                if checked_clones:
+                    messages = [
+                        f"{kind}: {', '.join(values)}"
+                        for kind, values in clone_issues.items()
+                        if values
+                    ]
+                    checks.append(
+                        DoctorCheck(
+                            desired.name,
+                            "fleet-clones",
+                            "FAIL" if messages else "PASS",
+                            "; ".join(messages) if messages else "fleet clones are clean",
+                        )
+                    )
                 report = self._report(checks)
                 self.inventory.upsert(
                     desired, bridge_version=self.bridge_installer.version, doctor=report
@@ -5145,7 +5250,7 @@ seatRows=function(){return (seatData.seats||[]).map(s=>{const live=seatRegistry.
 function seatImportReview(){const review=seatData.import_review||{},candidates=review.candidates||[],conflicts=review.conflicts||[],done=review.already_imported||[],mapping=s=>`${esc(s.role)} · ${esc(s.boards)}<div class="meta">tier ${esc(s.tier_max)} · review ${s.can_review?'yes':'no'} · work ${s.can_work?'yes':'no'} · ${esc((s.skills||[]).join(', ')||'no skills')}</div><div class="meta">wait ${esc(s.bridge_connector_name)} · board ${esc(s.board_connector_name)} · token ${esc(s.token_source)}</div>`,rows=[...candidates.map(s=>`<tr><td>${esc(s.host)}</td><td><span class="id">${esc(s.name)}</span><div class="meta">${esc(s.config_path)}</div></td><td>${mapping(s)}</td><td><span class="status">Will import</span><div class="meta">${s.zero_diff?'config matches · zero diff':'config drift detected'}</div></td></tr>`),...conflicts.map(s=>`<tr><td>${esc(s.host)}</td><td><span class="id">${esc(s.connector_name||'—')}</span><div class="meta">${esc(s.config_path)}</div></td><td>—</td><td><span class="error">Conflict</span><div class="meta">${esc(s.reason)}</div></td></tr>`),...done.map(s=>`<tr><td>${esc(s.host)}</td><td><span class="id">${esc(s.name)}</span><div class="meta">${esc(s.config_path)}</div></td><td>${mapping(s)}</td><td><span class="status">Already imported</span></td></tr>`)].join('');return `<section class="card pool"><div class="section-title"><div><h3>Import discovered seats</h3><p class="muted">Review managed Pursers mappings. Import updates inventory only; host configs are not rewritten.</p></div>${candidates.length?'<button class="primary-action" data-seat-action="import">Import and run Doctor</button>':''}</div><div class="table-scroll"><table><thead><tr><th>Host</th><th>Seat / config</th><th>Role / boards + capabilities</th><th>Review</th></tr></thead><tbody>${rows||'<tr><td colspan="4" class="empty">No managed Pursers seats discovered.</td></tr>'}</tbody></table></div></section>`}
 function dispatchPanels(){return (seatRegistry.boards||[]).map(board=>{const data=dispatchData[board.board_id];if(!data)return `<article class="card"><h3>${esc(board.label||board.board_id)}</h3><p class="muted">Dispatch data loading…</p></article>`;if(data.error)return `<article class="card"><h3>${esc(board.label||board.board_id)} dispatch</h3><p class="error">Dispatch unavailable: ${esc(data.error)}</p></article>`;const p=data.dispatch_policy||{};return `<article class="card"><h3>${esc(board.label||board.board_id)} dispatch</h3><form class="dispatch-form" data-board="${esc(board.board_id)}"><label>Claim TTL seconds<input name="claim_ttl_s" type="number" min="1" max="86400" value="${esc(data.claim_ttl_s||900)}"></label><label>Offer TTL seconds<input name="offer_ttl_s" type="number" min="1" max="86400" value="${esc(p.offer_ttl_s||120)}"></label><label>Broadcast re-offer seconds<input name="broadcast_reoffer_s" type="number" min="60" max="86400" value="${esc(p.broadcast_reoffer_s||600)}"></label><label><input name="second_opinion" type="checkbox" ${p.second_opinion?'checked':''}> Second opinion</label><label><input name="fallback_broadcast" type="checkbox" ${p.fallback_broadcast?'checked':''}> Fallback broadcast</label><button type="submit">Save policy</button></form><p class="meta dispatch-status"></p><h4>Needs attention · unclaimed broadcasts</h4>${(data.unclaimed_tickets||[]).map(x=>`<p><span class="id">${esc(x.ticket_id)}</span> unclaimed for ${esc(Math.floor((x.unclaimed_for_s||0)/60))} minutes</p>`).join('')||'<p class="empty">None</p>'}<h4>Unassignable</h4>${(data.unassignable_tickets||[]).map(x=>`<p><span class="id">${esc(x.ticket_id)}</span> ${esc(x.reason)}<span class="meta"> · missing ${(x.missing||[]).map(esc).join(', ')||'unknown'}</span></p>`).join('')||'<p class="empty">None</p>'}<h4>Current offers</h4>${(data.offers||[]).map(x=>`<p><span class="id">${esc(x.ticket_id)}</span> → ${esc(x.agent_name)}<span class="meta"> · expires ${esc(fmt(x.expires_at))}</span></p>`).join('')||'<p class="empty">None</p>'}<h4>Open ticket dispatch history</h4>${(data.open_tickets||[]).map(t=>`<div><b><span class="id">${esc(t.ticket_id)}</span> ${esc(t.title)}</b><div class="meta">state: ${esc(t.dispatch_state?.state||'none')}${t.dispatch_state?.reason?` · ${esc(t.dispatch_state.reason)}`:''}</div>${(t.dispatch_history||[]).map(h=>`<div class="meta">• ${esc(fmt(h.at))} · ${esc(h.state)} · ${esc(h.agent_name||h.agent_id||'—')}${h.reason?` · ${esc(h.reason)}`:''}</div>`).join('')||'<p class="empty">No dispatch history</p>'}</div>`).join('')||'<p class="empty">None</p>'}<details><summary>Recent offer timeline</summary>${(data.timeline||[]).map(x=>`<p>${esc(fmt(x.occurred_at))} · ${esc(x.kind)} · <span class="id">${esc(x.ticket_id||'—')}</span></p>`).join('')||'<p class="empty">No recent offer events.</p>'}</details></article>`}).join('')}
 renderSeats=function(){const installed=seatBridge.installed_version||'not installed',latest=seatBridge.latest_pypi_version||'unavailable',source=seatBridge.resolution_source||'unresolved',bridgeStatus=seatBridge.status||'unknown',bridgeMessage=seatBridge.message||'';return `${pageHead('Config','Seats and dispatch','Declare seat capabilities, verify drift, and inspect per-board offers.','<div class="seat-toolbar"><button data-seat-global="doctor">Doctor all</button><button data-seat-global="install">Install / upgrade bridge</button><button data-seat-global="upgrade-all">Upgrade all seats</button></div>')}${seatActionMessage?`<p class="status">${esc(seatActionMessage)} ${seatSessionPrompt?'<button id="copy-session-prompt">Copy session prompt</button>':''}</p>`:''}${renderReleaseOps()}${seatImportReview()}<section class="card pool"><div class="section-title"><h3>Seat inventory</h3><span class="status">${(seatData.seats||[]).length} configured</span></div><div class="table-scroll"><table><thead><tr><th>Host / role</th><th>Name</th><th>Capabilities</th><th>State / Doctor</th><th>Current offer</th><th>Bridge</th><th>Actions</th></tr></thead><tbody>${seatRows()||'<tr><td colspan="7" class="empty">No configured seats. Use the wizard.</td></tr>'}</tbody></table></div></section><div class="seat-layout"><div class="seat-stack"><section class="card pool"><h3>Add or update seat</h3>${seatForm()}</section><section id="seat-plan" class="card pool" ${seatPlan?'':'hidden'}><h3>Confirm changes</h3><p class="muted">Review the diff before applying. Existing files are backed up first.</p><pre class="seat-diff">${esc((seatPlan?.changes||[]).map(c=>`${c.description}\n${c.diff||c.action}`).join('\n')||'No changes required.')}</pre><button id="seat-apply" class="primary-action" ${seatPlan?'':'disabled'}>Confirm and apply</button></section></div><aside class="seat-stack"><section class="card pool"><h3>Wait bridge</h3><p><span class="status">${esc(bridgeStatus)}</span>${bridgeMessage?` ${esc(bridgeMessage)}`:''}</p><p>Installed <b>${esc(installed)}</b></p><p class="meta">Pinned ${esc(seatBridge.pinned_version||'unknown')} · PyPI latest ${esc(latest)} · ${esc(source)}</p></section><section class="card pool"><h3>Doctor</h3><div id="seat-doctor">${seatDoctorResult?doctorResult(seatDoctorResult):'<p class="muted">Doctor compares declared capabilities with Central.</p>'}</div></section></aside></div><section class="pool"><div class="section-title"><h3>Dispatch by board</h3><span class="status">policy · gaps · offers</span></div><div class="grid">${dispatchPanels()}</div></section>`}
-function registryClonePanel(){const rows=(seatRegistry.projects||[]).map(p=>{const c=p.clone||{},unsafe=(p.operator_checkout_seats||[]).length>0;return `<div class="card"><h4>${esc(p.name)} <span class="status">${esc(p.board_id||'')}</span></h4><p class="meta">Operator checkout · ${esc(p.work_dir||'missing')}</p><p class="meta">Fleet clone · ${esc(p.fleet_clone_dir||p.default_fleet_clone_dir||'missing')}</p><p><span class="status">${esc(c.status||'unknown')}</span> · dirty ${c.dirty===null?'—':c.dirty?'yes':'no'} · detached ${c.detached===null?'—':c.detached?'yes':'no'} · ahead ${esc(c.ahead??'—')} / behind ${esc(c.behind??'—')}</p>${unsafe?`<p class="error">${esc(p.operator_checkout_seats.join(', '))}: operator checkout is read-only for seats</p>`:''}<button data-registry-clone="${esc(p.name)}">${p.fleet_clone_dir?'Fetch and detach origin/main':'Create fleet clone'}</button></div>`}).join('');return `<section class="pool"><div class="section-title"><h3>Registry work trees</h3><span class="status">fleet-owned clones</span></div><div class="grid">${rows||'<p class="empty">No registry projects.</p>'}</div></section>`}
+function registryClonePanel(){const rows=(seatRegistry.projects||[]).map(p=>{const c=p.clone||{},unsafe=(p.operator_checkout_seats||[]).length>0,cloneStatus=String(c.status||'unknown').replace(/_/g,' ');return `<div class="card"><h4>${esc(p.name)} <span class="status">${esc(p.board_id||'')}</span></h4><p class="meta">Operator checkout · ${esc(p.work_dir||'missing')}</p><p class="meta">Fleet clone · ${esc(p.fleet_clone_dir||p.default_fleet_clone_dir||'missing')}</p><p><span class="status">${esc(cloneStatus)}</span> · dirty ${c.dirty===null?'—':c.dirty?'yes':'no'} · detached ${c.detached===null?'—':c.detached?'yes':'no'} · ahead ${esc(c.ahead??'—')} / behind ${esc(c.behind??'—')}</p>${unsafe?`<p class="error">${esc(p.operator_checkout_seats.join(', '))}: operator checkout is read-only for seats</p>`:''}<button data-registry-clone="${esc(p.name)}">${p.fleet_clone_dir?'Fetch and detach origin/main':'Create fleet clone'}</button></div>`}).join('');return `<section class="pool"><div class="section-title"><h3>Registry work trees</h3><span class="status">fleet-owned clones</span></div><div class="grid">${rows||'<p class="empty">No registry projects.</p>'}</div></section>`}
 const renderSeatsBeforeRegistry=renderSeats;
 renderSeats=function(){return renderSeatsBeforeRegistry()+registryClonePanel()}
 const seatClickBeforeRegistry=seatClick;

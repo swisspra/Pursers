@@ -157,10 +157,18 @@ def test_prepare_fleet_clone_tracks_origin_main_detached(tmp_path: Path) -> None
         "path": str(clone),
         "status": "ready",
         "dirty": False,
+        "empty_worktree": False,
         "detached": True,
         "ahead": 0,
         "behind": 0,
     }
+    assert (clone / "README.md").read_text(encoding="utf-8") == "one\n"
+    assert subprocess.run(
+        ["git", "-C", str(clone), "status", "--porcelain"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout == ""
     assert subprocess.run(
         ["git", "-C", str(clone), "remote", "get-url", "origin"],
         check=True,
@@ -188,6 +196,184 @@ def test_prepare_fleet_clone_tracks_origin_main_detached(tmp_path: Path) -> None
         capture_output=True,
         text=True,
     ).stdout
+    assert (clone / "README.md").read_text(encoding="utf-8") == "two\n"
+    assert subprocess.run(
+        ["git", "-C", str(clone), "status", "--porcelain"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout == ""
+
+    (clone / "README.md").unlink()
+    deleted = manager._clone_state(clone)
+    assert deleted["status"] == "dirty"
+    assert deleted["empty_worktree"] is False
+    assert deleted["dirty"] is True
+    registry_view = manager.registry(
+        fleet={},
+        registry_payload={
+            "registry": {
+                "schema_version": 1,
+                "projects": {
+                    "Alpha Project": {
+                        "board_id": "alpha",
+                        "work_dir": str(operator),
+                        "fleet_clone_dir": str(clone),
+                        "status": "active",
+                    }
+                },
+            }
+        },
+    )
+    assert registry_view["projects"][0]["clone"]["status"] == "dirty"
+    with pytest.raises(ValueError) as exc_info:
+        manager.prepare_fleet_clone(
+            {"registry": refreshed["registry"], "expected_sha256": "c" * 64},
+            "Alpha Project",
+        )
+    message = str(exc_info.value)
+    assert "fleet clone is dirty; refusing to overwrite local changes" in message
+    assert str(clone) in message
+    assert f"inspect with: git -C {clone} status --short" in message
+    assert not (clone / "README.md").exists()
+
+    subprocess.run(
+        ["git", "-C", str(clone), "checkout", "--", "README.md"], check=True
+    )
+    subprocess.run(
+        ["git", "-C", str(clone), "rm", "README.md"], check=True, capture_output=True
+    )
+    staged = manager._clone_state(clone)
+    assert staged["status"] == "dirty"
+    assert staged["empty_worktree"] is False
+    with pytest.raises(ValueError, match="fleet clone is dirty"):
+        manager.prepare_fleet_clone(
+            {"registry": refreshed["registry"], "expected_sha256": "d" * 64},
+            "Alpha Project",
+        )
+    assert not (clone / "README.md").exists()
+    assert subprocess.run(
+        ["git", "-C", str(clone), "status", "--porcelain"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.startswith("D  README.md")
+
+
+def test_prepare_fleet_clone_repairs_proven_legacy_no_checkout(
+    tmp_path: Path,
+) -> None:
+    origin = tmp_path / "origin.git"
+    operator = tmp_path / "operator"
+    legacy = tmp_path / "legacy"
+    subprocess.run(["git", "init", "--bare", str(origin)], check=True, capture_output=True)
+    subprocess.run(["git", "clone", str(origin), str(operator)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(operator), "config", "user.name", "Test"], check=True)
+    subprocess.run(
+        ["git", "-C", str(operator), "config", "user.email", "test@example.invalid"],
+        check=True,
+    )
+    (operator / "README.md").write_text("legacy\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(operator), "add", "README.md"], check=True)
+    subprocess.run(
+        ["git", "-C", str(operator), "commit", "-m", "initial"],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(["git", "-C", str(operator), "branch", "-M", "main"], check=True)
+    subprocess.run(
+        ["git", "-C", str(operator), "push", "-u", "origin", "main"],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "--git-dir", str(origin), "symbolic-ref", "HEAD", "refs/heads/main"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "clone", "--no-checkout", "--origin", "origin", "--", str(origin), str(legacy)],
+        check=True,
+        capture_output=True,
+    )
+    manager = dashboard.SeatConfigManager(
+        state_dir=tmp_path / "fleet", latest_version=lambda: None
+    )
+    state = manager._clone_state(legacy)
+    assert not (legacy / ".git" / "index").exists()
+    assert state["status"] == "empty_worktree"
+    assert state["empty_worktree"] is True
+    assert state["dirty"] is False
+
+    prepared = manager.prepare_fleet_clone(
+        {
+            "registry": {
+                "schema_version": 1,
+                "projects": {
+                    "Alpha": {
+                        "board_id": "alpha",
+                        "work_dir": str(operator),
+                        "fleet_clone_dir": str(legacy),
+                        "status": "active",
+                    }
+                },
+            },
+            "expected_sha256": "a" * 64,
+        },
+        "Alpha",
+    )
+    assert prepared["clone"]["status"] == "ready"
+    assert (legacy / "README.md").read_text(encoding="utf-8") == "legacy\n"
+    assert subprocess.run(
+        ["git", "-C", str(legacy), "status", "--porcelain"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout == ""
+
+
+def test_prepare_fleet_clone_removes_partial_directory_on_clone_failure(
+    tmp_path: Path,
+) -> None:
+    origin = tmp_path / "origin.git"
+    operator = tmp_path / "operator"
+    subprocess.run(["git", "init", "--bare", str(origin)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "clone", str(origin), str(operator)], check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "-C", str(operator), "remote", "set-url", "origin", str(origin)],
+        check=True,
+    )
+
+    def fail_clone(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if command[:2] == ["git", "clone"]:
+            Path(command[-1]).mkdir(parents=True)
+            raise subprocess.CalledProcessError(1, command)
+        return subprocess.run(command, **kwargs)  # noqa: PLW1510 - forwards check.
+
+    manager = dashboard.SeatConfigManager(
+        state_dir=tmp_path / "fleet",
+        latest_version=lambda: None,
+        git_runner=fail_clone,
+    )
+    payload = {
+        "registry": {
+            "schema_version": 1,
+            "projects": {
+                "Alpha": {
+                    "board_id": "alpha",
+                    "work_dir": str(operator),
+                    "status": "active",
+                }
+            },
+        },
+        "expected_sha256": "a" * 64,
+    }
+    target = manager._fleet_clone_default("Alpha")
+
+    with pytest.raises(ValueError, match="failed to prepare fleet clone"):
+        manager.prepare_fleet_clone(payload, "Alpha")
+    assert not target.exists()
 
 
 def test_agents_group_by_principal_and_name_across_board_specific_ids() -> None:
@@ -3815,7 +4001,9 @@ def test_seat_config_registry_coverage_uses_live_fleet_seats(tmp_path: Path) -> 
     }
 
 
-def test_seat_config_doctor_reports_operator_checkout(tmp_path: Path) -> None:
+def test_seat_config_doctor_reports_operator_checkout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     class Bridge:
         version = "0.1.0a11"
 
@@ -3863,6 +4051,18 @@ def test_seat_config_doctor_reports_operator_checkout(tmp_path: Path) -> None:
     )
     manager.inventory.upsert(desired_two, bridge_version=Bridge.version)
 
+    empty_clone = (tmp_path / "empty-clone").resolve()
+    dirty_clone = (tmp_path / "dirty-clone").resolve()
+
+    def clone_state(path: Path) -> dict:
+        if path == empty_clone:
+            return {"status": "empty_worktree"}
+        if path == dirty_clone:
+            return {"status": "dirty"}
+        return {"status": "missing"}
+
+    monkeypatch.setattr(manager, "_clone_state", clone_state)
+
     registry_payload = {
         "registry": {
             "schema_version": 1,
@@ -3875,7 +4075,13 @@ def test_seat_config_doctor_reports_operator_checkout(tmp_path: Path) -> None:
                 "Beta": {
                     "board_id": "beta",
                     "work_dir": "/operator/beta",
-                    "fleet_clone_dir": "/fleet/beta",
+                    "fleet_clone_dir": str(empty_clone),
+                    "status": "active",
+                },
+                "Gamma": {
+                    "board_id": "gamma",
+                    "work_dir": "/operator/gamma",
+                    "fleet_clone_dir": str(dirty_clone),
                     "status": "active",
                 },
             },
@@ -3886,6 +4092,9 @@ def test_seat_config_doctor_reports_operator_checkout(tmp_path: Path) -> None:
     assert alpha_proj["operator_checkout_seats"] == ["worker-one"]
     beta_proj = next(p for p in reg["projects"] if p["name"] == "Beta")
     assert beta_proj["operator_checkout_seats"] == []
+    assert beta_proj["clone"]["status"] == "empty_worktree"
+    gamma_proj = next(p for p in reg["projects"] if p["name"] == "Gamma")
+    assert gamma_proj["clone"]["status"] == "dirty"
 
     job = manager.doctor(
         ["worker-one", "worker-two"],
@@ -3915,6 +4124,14 @@ def test_seat_config_doctor_reports_operator_checkout(tmp_path: Path) -> None:
     )
     assert worker_two_tree["status"] == "PASS"
     assert "working tree routes to fleet-owned or seat-owned clone" in worker_two_tree["message"]
+    clone_health = next(
+        c
+        for c in seats_by_name["worker-two"]["checks"]
+        if c["check"] == "fleet-clones"
+    )
+    assert clone_health["status"] == "FAIL"
+    assert f"empty worktree: Beta ({empty_clone})" in clone_health["message"]
+    assert f"local changes: Gamma ({dirty_clone})" in clone_health["message"]
 
 
 def test_config_api_and_ui_contract_are_separate_from_coordinator_config() -> None:
