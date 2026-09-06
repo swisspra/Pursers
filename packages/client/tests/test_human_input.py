@@ -9,6 +9,7 @@ from pursers_client import (
     HUMAN_INPUT_REQUESTED,
     HUMAN_INPUT_RESOLVED,
     KNOWN_EVENT_KINDS,
+    human_form_safety,
 )
 
 
@@ -74,3 +75,48 @@ async def test_human_request_and_resolution_forward_exact_arguments(monkeypatch)
     assert "board://board-a/ticket/TK-1" in board._watched_uris
     assert len(board._local_events) == 2
     assert {HUMAN_INPUT_REQUESTED, HUMAN_INPUT_RESOLVED} <= KNOWN_EVENT_KINDS
+
+
+@pytest.mark.parametrize(
+    ("message", "schema"),
+    [
+        ("Paste the credential and file path", {"type": "object"}),
+        ("Continue", {"properties": {"api_key": {"type": "string"}}}),
+        (
+            "Continue",
+            {"properties": {"value": {"title": "Access token", "type": "string"}}},
+        ),
+        (
+            "Continue",
+            {
+                "properties": {
+                    "value": {"description": "Upload the secret file", "type": "string"}
+                }
+            },
+        ),
+    ],
+)
+def test_human_form_safety_rejects_sensitive_message_and_schema_metadata(
+    message: str, schema: dict[str, Any]
+) -> None:
+    safe, reason = human_form_safety(message, schema)
+    assert safe is False
+    assert "trusted URL" in str(reason)
+
+
+def test_human_form_safety_allows_non_sensitive_decision() -> None:
+    safe, reason = human_form_safety(
+        "Choose a deployment region",
+        {
+            "type": "object",
+            "properties": {
+                "region": {
+                    "type": "string",
+                    "title": "Region",
+                    "description": "Select one approved region",
+                }
+            },
+        },
+    )
+    assert safe is True
+    assert reason is None

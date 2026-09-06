@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
+import subprocess
 import sys
 import threading
 import urllib.error
@@ -65,6 +67,8 @@ def test_aggregate_fleet_projects_human_requests_bounded() -> None:
     assert row["request_id"] == "REQ-human"
     assert row["kind"] == "approval"
     assert row["requested_schema"]["properties"]["answer"] == {"type": "string"}
+    assert row["form_safe"] is True
+    assert row["safety_reason"] is None
 
 
 def test_aggregate_fleet_board_without_human_requests_is_empty() -> None:
@@ -216,6 +220,91 @@ def test_html_contains_waiting_for_you_surface() -> None:
     assert "/api/human/resolve" in dashboard.HTML
     assert "data-human-disposition" in dashboard.HTML
     assert 'target="_blank"' in dashboard.HTML
+
+
+def test_aggregate_marks_sensitive_form_for_safe_fallback() -> None:
+    now = datetime(2030, 1, 2, 12, tzinfo=timezone.utc)
+    sensitive = dict(
+        HUMAN_RECORD,
+        message="Paste the credential file",
+        requested_schema={
+            "type": "object",
+            "properties": {"credential": {"type": "string"}},
+        },
+    )
+    result = dashboard.aggregate_fleet(
+        [_board_row([sensitive])], stale_seconds=300, now=now
+    )
+    row = result["boards"][0]["human_requests"][0]
+    assert row["form_safe"] is False
+    assert "trusted URL" in row["safety_reason"]
+
+
+def _run_human_renderer(program_tail: str) -> str:
+    scripts = "\n".join(
+        re.findall(r"<script>(.*?)</script>", dashboard.HTML, flags=re.DOTALL)
+    )
+    lines = scripts.splitlines()
+
+    def last_source(prefix: str) -> str:
+        return [line for line in lines if line.startswith(prefix)][-1]
+
+    program = "\n".join(
+        [
+            "const esc=value=>String(value).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('\\\"','&quot;');",
+            "const fmt=value=>String(value);",
+            "const ticketHref=()=>'/ticket';",
+            last_source("function humanUrlHost("),
+            last_source("function humanEnumOptions("),
+            last_source("function humanFormField("),
+            last_source("function humanFormContent("),
+            last_source("function humanRequestCard("),
+            program_tail,
+        ]
+    )
+    completed = subprocess.run(
+        ["node", "-e", program], capture_output=True, text=True, check=False
+    )
+    assert completed.returncode == 0, completed.stderr
+    return completed.stdout
+
+
+def test_renderer_executes_required_defaults_titles_and_array_enum() -> None:
+    output = _run_human_renderer(
+        "console.log(JSON.stringify({"
+        "primitive:humanFormField('priority',{type:'string',oneOf:[{const:'low',title:'Low title'},{const:'high',title:'High title'}],default:'high'},true),"
+        "multi:humanFormField('regions',{type:'array',items:{enum:['eu','us']},default:['eu'],minItems:2},true)"
+        "}));"
+    )
+    rendered = json.loads(output)
+    assert "priority *" in rendered["primitive"]
+    assert "required" in rendered["primitive"]
+    assert 'value="high" selected' in rendered["primitive"]
+    assert "High title" in rendered["primitive"]
+    assert 'data-human-min-items="2"' in rendered["multi"]
+    assert 'value="eu" checked' in rendered["multi"]
+    assert 'value="us"' in rendered["multi"]
+
+
+def test_renderer_executes_sensitive_fallback_without_form_fields() -> None:
+    output = _run_human_renderer(
+        "console.log(humanRequestCard({central:'default',board:{board_id:'one',label:'One'},h:{ticket_id:'TK-1',request_id:'HR-1',message:'Paste credential',kind:'decision',form_safe:false,safety_reason:'A trusted URL or described drop location is required.',requested_schema:{properties:{credential:{type:'string'}}}}}));"
+    )
+    assert "trusted URL or described drop location" in output
+    assert "human-form" not in output
+    assert 'data-human-field="credential"' not in output
+
+
+def test_renderer_executes_required_and_min_items_validation() -> None:
+    output = _run_human_renderer(
+        "const multi={dataset:{humanField:'regions',humanType:'multi-enum'},value:'eu'};"
+        "const multiForm={querySelectorAll:s=>s==='[data-human-field]'?[multi]:[multi],querySelector:s=>({dataset:{humanMinItems:'2'}})};"
+        "const required={dataset:{humanField:'region',humanType:'string'},value:'',required:true};"
+        "const requiredForm={querySelectorAll:()=>[required],querySelector:()=>null};"
+        "for(const [name,form] of [['minItems',multiForm],['required',requiredForm]]){try{humanFormContent(form);console.log(name+':missing-error')}catch(error){console.log(name+':'+error.message)}}"
+    )
+    assert "minItems:regions requires at least 2 selections" in output
+    assert "required:region is required" in output
 
 
 class Cache:

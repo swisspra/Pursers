@@ -246,6 +246,87 @@ class HumanRequestsCoreTests(unittest.TestCase):
         self.assertEqual(params.mode, "url")
         self.assertEqual(params.url, "https://vault.example/handoff")
 
+    def test_sensitive_form_is_never_emitted_for_any_capability_mix(self) -> None:
+        schema = {
+            "type": "object",
+            "properties": {"credential": {"type": "string"}},
+        }
+        for capabilities in (
+            None,
+            caps(form=True),
+            caps(url=True),
+            caps(form=True, url=True),
+        ):
+            with self.subTest(capabilities=capabilities):
+                client = self._client_with_form_request(schema=schema)
+                result = run(
+                    wait_server.board_human_requests_core(
+                        client, boards=["proj-a"], capabilities=capabilities
+                    )
+                )
+                self.assertIsInstance(result, dict)
+                self.assertEqual(len(result["unasked"]), 1)
+                self.assertIn("trusted URL", result["unasked"][0]["reason"])
+
+    def test_sensitive_message_uses_url_only_when_declared(self) -> None:
+        client = FakeBoardClient(
+            tickets_by_board={
+                "proj-a": [
+                    {
+                        "ticket_id": "TK-1",
+                        "human_request": _human_record(
+                            message="Upload the credential file",
+                            url="https://vault.example/handoff",
+                        ),
+                    }
+                ]
+            }
+        )
+        form_only = run(
+            wait_server.board_human_requests_core(
+                client, boards=["proj-a"], capabilities=caps(form=True)
+            )
+        )
+        self.assertIsInstance(form_only, dict)
+        self.assertIn("url mode", form_only["unasked"][0]["reason"])
+
+        url_client = FakeBoardClient(tickets_by_board=client.tickets_by_board)
+        url_result = run(
+            wait_server.board_human_requests_core(
+                url_client, boards=["proj-a"], capabilities=caps(url=True)
+            )
+        )
+        self.assertIsInstance(url_result, InputRequiredResult)
+        self.assertEqual(url_result.input_requests["r0"].params.mode, "url")
+
+    def test_sensitive_title_and_description_block_legacy_form(self) -> None:
+        for field, value in (
+            ("title", "API key"),
+            ("description", "Choose a secret token"),
+        ):
+            with self.subTest(field=field):
+                client = self._client_with_form_request(
+                    schema={
+                        "type": "object",
+                        "properties": {"value": {"type": "string", field: value}},
+                    }
+                )
+
+                async def elicit_form(_message, _schema):
+                    raise AssertionError("sensitive form must not be emitted")
+
+                result = run(
+                    wait_server.board_human_requests_core(
+                        client,
+                        boards=["proj-a"],
+                        capabilities=caps(form=True),
+                        protocol_version="2025-11-25",
+                        legacy_elicit_form=elicit_form,
+                    )
+                )
+                self.assertEqual(len(result["unasked"]), 1)
+                self.assertIn("trusted URL", result["unasked"][0]["reason"])
+
     def test_request_state_roundtrip_accept(self) -> None:
         client = self._client_with_form_request()
         first = run(
