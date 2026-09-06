@@ -5785,36 +5785,54 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                     "renewed": renewed,
                     "continuation": continuation,
                 }
-            assigned_identity = ticket.get("assigned_to_agent_id")
-            requested = ticket.get("assigned_to")
-            assignment_kind = ticket.get("assigned_to_kind")
-            if assigned_identity not in {None, actor["agent_id"]} and not operator_override:
-                raise PermissionError("ticket assigned to another authenticated identity")
-            if assigned_identity is None and requested and not operator_override:
-                requested_key = str(requested).casefold()
-                name_matches = [
-                    item for item in document["members"].values()
-                    if str(item.get("agent_name", "")).casefold() == requested_key
-                ]
-                if assignment_kind != "agent_platform" and len(name_matches) > 1:
-                    raise PermissionError("ticket assignee is ambiguous; creator must use an exact agent_id")
-                if assignment_kind == "agent_platform":
-                    matches_actor = (
-                        str(actor.get("agent_platform", "")).casefold() == requested_key
-                    )
-                elif name_matches:
-                    matches_actor = actor["agent_id"] == name_matches[0]["agent_id"]
-                else:
-                    # Legacy/unresolved assignments may become claimable after
-                    # a matching agent or platform joins the board.
-                    matches_actor = assignment_matches(actor, requested)
-                if not matches_actor:
-                    raise PermissionError("ticket assigned to another agent or platform")
             if ticket["status"] != "open":
                 raise ValueError(f"ticket is {ticket['status']}")
             if ticket.get("parked") is True and not operator_override:
                 return refuse("ticket is parked by the board owner")
-            if dispatch_enabled(document):
+            offer_based = dispatch_enabled(document)
+            if not offer_based:
+                assigned_identity = ticket.get("assigned_to_agent_id")
+                requested = ticket.get("assigned_to")
+                assignment_kind = ticket.get("assigned_to_kind")
+                if (
+                    assigned_identity not in {None, actor["agent_id"]}
+                    and not operator_override
+                ):
+                    raise PermissionError(
+                        "ticket assigned to another authenticated identity"
+                    )
+                if assigned_identity is None and requested and not operator_override:
+                    requested_key = str(requested).casefold()
+                    name_matches = [
+                        item for item in document["members"].values()
+                        if str(item.get("agent_name", "")).casefold()
+                        == requested_key
+                    ]
+                    if (
+                        assignment_kind != "agent_platform"
+                        and len(name_matches) > 1
+                    ):
+                        raise PermissionError(
+                            "ticket assignee is ambiguous; creator must use an exact agent_id"
+                        )
+                    if assignment_kind == "agent_platform":
+                        matches_actor = (
+                            str(actor.get("agent_platform", "")).casefold()
+                            == requested_key
+                        )
+                    elif name_matches:
+                        matches_actor = (
+                            actor["agent_id"] == name_matches[0]["agent_id"]
+                        )
+                    else:
+                        # Legacy/unresolved assignments may become claimable after
+                        # a matching agent or platform joins the board.
+                        matches_actor = assignment_matches(actor, requested)
+                    if not matches_actor:
+                        raise PermissionError(
+                            "ticket assigned to another agent or platform"
+                        )
+            if offer_based:
                 offer = ticket.get("work_offer")
                 state = ticket.get("dispatch_state")
                 broadcast = isinstance(state, Mapping) and state.get("state") == "broadcast"

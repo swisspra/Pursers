@@ -529,6 +529,86 @@ class DispatchTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(claimed.structured_content["ok"])
 
+    async def test_assigned_offer_and_park_refusals_are_attributed(self) -> None:
+        assigned = await self.add_seat(
+            self.worker_a, "assigned-worker", {"tier_max": 2}
+        )
+        refused = await self.add_seat(
+            self.worker_b, "refused-worker", {"tier_max": 2}
+        )
+        created = await self.create(assigned_to=assigned)
+        ticket_id = created.structured_content["ticket"]["ticket_id"]
+        self.assertEqual(
+            created.structured_content["ticket"]["work_offer"]["agent_id"],
+            assigned,
+        )
+
+        async def assert_refusal(message: str) -> None:
+            self.principal = self.worker_b
+            with self.assertRaises(ToolError) as raised:
+                await self.call(
+                    "ticket_claim",
+                    agent_name="refused-worker",
+                    ticket_id=ticket_id,
+                )
+            self.assertEqual(
+                str(raised.exception),
+                f"Error executing tool ticket_claim: {message}",
+            )
+            event = self.service.journal.read_after("pursers", 0, 1000)[
+                "events"
+            ][-1]
+            self.assertEqual(event["kind"], TICKET_CLAIM_REFUSED)
+            self.assertEqual(event["refused_agent_id"], refused)
+            self.assertEqual(event["refused_agent_name"], "refused-worker")
+            self.assertEqual(event["refusal_reason"], message)
+
+        await assert_refusal(
+            "ticket is not offered to this seat; wait for your offer"
+        )
+
+        self.principal = self.admin
+        await self.call(
+            "ticket_update",
+            agent_name="admin-agent",
+            ticket_id=ticket_id,
+            parked=True,
+        )
+        await assert_refusal("ticket is parked by the board owner")
+
+    async def test_dispatch_disabled_preserves_assigned_claim_error(self) -> None:
+        assigned = await self.add_seat(
+            self.worker_a, "legacy-assigned", {"tier_max": 2}
+        )
+        await self.add_seat(
+            self.worker_b, "legacy-refused", {"tier_max": 2}
+        )
+        created = await self.create(assigned_to=assigned)
+        ticket_id = created.structured_content["ticket"]["ticket_id"]
+
+        def disable_dispatch(document: dict[str, Any]) -> None:
+            for member in document["members"].values():
+                member["capabilities_explicit"] = False
+            ticket = document["tickets"][ticket_id]
+            ticket.pop("work_offer", None)
+            ticket.pop("dispatch_state", None)
+
+        self.service.mutate(
+            "pursers", disable_dispatch, require_generation=False
+        )
+        self.principal = self.worker_b
+        with self.assertRaises(ToolError) as raised:
+            await self.call(
+                "ticket_claim",
+                agent_name="legacy-refused",
+                ticket_id=ticket_id,
+            )
+        self.assertEqual(
+            str(raised.exception),
+            "Error executing tool ticket_claim: "
+            "ticket assigned to another authenticated identity",
+        )
+
     async def test_dispatch_disabled_keeps_legacy_free_claims(self) -> None:
         worker = await self.add_seat(
             self.worker_a, "legacy-worker", {"tier_max": 2}
