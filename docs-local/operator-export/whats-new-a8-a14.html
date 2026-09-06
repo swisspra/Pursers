@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pursers — คู่มือฟีเจอร์ใหม่ (a8 → a14)</title>
+<style>
+:root{--bg:#fafaf8;--panel:#fff;--line:#e4e2dc;--text:#1f2328;--muted:#6b7280;--accent:#0b6e4f;--warn:#b45309;--code:#f3f4f0}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:16px/1.7 ui-sans-serif,system-ui,-apple-system,"Sukhumvit Set","Noto Sans Thai",sans-serif}
+main{max-width:880px;margin:auto;padding:32px 20px 80px}
+h1{font-size:28px;margin:.2em 0}
+h2{font-size:21px;margin:2em 0 .5em;padding-top:1em;border-top:1px solid var(--line);color:var(--accent)}
+h3{font-size:17px;margin:1.4em 0 .3em}
+p{margin:.5em 0}
+.meta{color:var(--muted);font-size:14px}
+code,pre{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13.5px}
+code{background:var(--code);padding:1px 5px;border-radius:4px}
+pre{background:var(--code);border:1px solid var(--line);border-radius:8px;padding:12px 14px;overflow-x:auto;line-height:1.5}
+table{border-collapse:collapse;width:100%;font-size:14.5px;margin:.6em 0}
+th,td{border:1px solid var(--line);padding:7px 10px;text-align:left;vertical-align:top}
+th{background:var(--code)}
+.note{background:#fff8e6;border:1px solid #f0d9a0;border-radius:8px;padding:10px 14px;margin:.8em 0;font-size:14.5px}
+.ok{color:var(--accent);font-weight:600}
+ul{margin:.4em 0;padding-left:1.4em}
+li{margin:.25em 0}
+.toc{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 18px;font-size:14.5px}
+.toc a{color:var(--accent);text-decoration:none}
+</style>
+</head>
+<body>
+<main>
+<h1>คู่มือฟีเจอร์ใหม่ Pursers</h1>
+<p class="meta">ครอบคลุมรอบ a8 → a14 (31 ส.ค. – 1 ก.ย. 2026) · เวอร์ชันปัจจุบัน: pursers/personal <b>5.0.0a14</b> · central <b>0.1.0a19</b> · client <b>0.1.0a13</b> · wait-bridge <b>0.1.0a4</b> · mcp SDK <b>2.1.1</b> · เอกสารภายใน — ไม่เผยแพร่</p>
+
+
+<div class="note"><b>เพิ่มใน a14 (ปิดรอบ):</b> Workers tab (เพิ่ม API worker จากหน้าเว็บ, key เข้า macOS Keychain, start/stop/Test), context-pressure panel (est tokens ต่อ poll ต่อ seat + badge COMPACT), Routes view (provenance ใคร่สร้าง/ทำ/ตรวจ), intake form (สั่งงาน coordinator จากหน้าเว็บ), tier filtering (worker เบาห้ามคว้างานหนัก — บทเรียนจาก llama 7B คว้าใบ investigation 555), ADO connector core (พร้อมเสียบเมื่อได้ PAT), runtime_health hardening หลัง incident healthz-500 (root cause: sqlite fd pressure), multi-central dashboard, seat retire/prune, central scaffold + Work Central staged ที่ ~/central-work</div>
+<div class="toc">
+<b>สารบัญ</b><br>
+1. <a href="#coordinator">Coordinator (ตัวคุมวงกลาง — ACTIVE แล้ว)</a> ·
+2. <a href="#dashboard">Fleet Dashboard (ตัวหลัก)</a> ·
+3. <a href="#seatadmin">seat_admin — เพิ่ม seat คำสั่งเดียว</a> ·
+4. <a href="#doctor">registry_doctor — เช็คสุขภาพระบบ</a> ·
+5. <a href="#worker">pursers-worker — worker จาก API/LiteLLM</a> ·
+6. <a href="#domainsplit">ชุดแยก Work/Personal (scaffold + board_move)</a> ·
+7. <a href="#release">Release อัตโนมัติ + Reproducible builds</a> ·
+8. <a href="#ci">CI</a> ·
+9. <a href="#overhead">Token overhead metering</a> ·
+10. <a href="#linkexplorer">MCP App Link Explorer</a> ·
+11. <a href="#cache">Cache-friendly responses</a> ·
+12. <a href="#docs">เอกสารประกอบ</a>
+</div>
+
+<h2 id="coordinator">1. Coordinator — ตัวคุมวงกลาง (ACTIVE)</h2>
+<p>ชิ้นสุดท้ายจาก north-star: daemon ที่เฝ้าทุกบอร์ดใน registry แล้วทำงานแทนคุณ 3 ชั้น</p>
+<table>
+<tr><th>Phase</th><th>ทำอะไร</th><th>สถานะ</th></tr>
+<tr><td><b>1 — Findings</b></td><td>ตรวจ: งานจอด (starved), claim ค้าง/หมดอายุ, review backlog, งานปิดแล้วไม่ merge (closed-but-unmerged), บอร์ดเสื่อม (degraded), privacy leak (จากไฟล์คำต้องห้าม private) — <b>ทุก finding มี evidence + next_action</b> บอกว่าต้องทำอะไรต่อ</td><td class="ok">รันอยู่</td></tr>
+<tr><td><b>2 — Dispatch</b></td><td>งานจอดครบ 30 นาที → <b>nudge</b> seat ที่ว่าง · ครบ 60 นาที → <b>force-assign</b> ให้ seat ที่ภาระน้อยสุด (ไม่รอคน ตามที่เคาะ) · atomic ผ่าน <code>ticket_assign</code> ใหม่ใน central · มี rate limit + circuit breaker ถอยกลับ shadow เอง</td><td class="ok">ACTIVE</td></tr>
+<tr><td><b>3 — Intake</b></td><td>รับ "คำสั่งหนึ่งบรรทัด" จาก board_state key <code>coordinator_intake</code> → แปลงเป็น ticket เต็มรูป · <b>auto-create</b> เฉพาะ docs/tests/read-only/bug-มี-repro บน domain personal · ที่เหลือ + ทุกอย่างฝั่ง work = <b>draft รอคุณ approve</b> · ปิดเป็น default (<code>--enable-intake</code>)</td><td class="ok">โค้ดครบ (ปิด default — เปิดเมื่อ grant board:intake)</td></tr>
+</table>
+<h3>คำสั่งรัน (ปัจจุบัน daemon รันอยู่แล้วบนเครื่องนี้)</h3>
+<pre>CUT=/PATH/TO/local$CUT/pursers-personal-app/.venv/bin/python \
+  "MCP Server/Pursers-local/tools/coordinator/coordinator.py" \
+  --url https://127.0.0.1:8766/mcp \
+  --token-path $CUT/.private-arm/jwt/tokens/principal-a.jwt \
+  --home-board pursers --agent-name coordinator-1 --poll-seconds 60 \
+  --integration-watch-since 2026-08-27T00:00:00Z \
+  --mode active        # kill switch: เปลี่ยนเป็น --mode shadow แล้ว restart</pre>
+<div class="note">Watermark <code>2026-08-27</code> ตัด false positive จากการ rewrite git history — ticket ที่ปิดก่อนวันนั้นถูก suppress แบบมีตัวเลขให้เห็น (ไม่หายเงียบ)</div>
+<h3>ผลงานจริงวันแรก</h3>
+<ul>
+<li>จับ closed-but-unmerged จริงบนบอร์ด work <b>5 ใบ</b> (TK-4abd76e3…, 4d23793c…, 66705b78…, 880b0bbb…, e98944be…) — <b>รอคุณ merge ตาม flow ฝั่งงาน</b></li>
+<li>จับ ticket rename เก่าของ pursers ที่ปิดแล้วลืม merge (จัดการแล้ว)</li>
+</ul>
+
+
+<h3>เปิดใช้ intake เมื่อพร้อม (2 ขั้น)</h3>
+<pre># 1) grant capability แคบให้ principal ของ coordinator (คุณรันเอง — เป็น membership write)
+#    scope ใหม่: board:intake  (สร้าง ticket + เขียนเฉพาะ intake keys เท่านั้น — ทุกอย่างอื่นถูกปฏิเสธ)
+# 2) restart coordinator เพิ่ม --enable-intake  (และ/หรือเปิดสวิตช์ในหน้า /config)</pre>
+<h2 id="dashboard">2. Fleet Dashboard — dashboard หลัก (webapp)</h2>
+<p>ทิศทางที่เคาะ: <b>webapp เป็นตัวหลัก / MCP App เป็น inline per-project</b> — เปิดที่ <code>http://127.0.0.1:8899</code></p>
+<pre>ONBOARD_CENTRAL_TOKEN=$(cat $CUT/.private-arm/jwt/tokens/principal-a.jwt) \
+  $CUT/pursers-personal-app/.venv/bin/python \
+  "MCP Server/Pursers-local/tools/fleet-dashboard/fleet_dashboard.py" --port 8899</pre>
+<ul>
+<li><b>หน้าแรก</b>: pool summary (online/busy/available/stale — busy มาจาก agents projection ของ central ไม่ใช่เดาจาก ticket), การ์ดต่อบอร์ด, ticket counts (ขึ้น ≥ เมื่อโดน truncate — ไม่โกหกว่าเป๊ะ)</li>
+<li><b>Board drill-down</b>: ตาราง ticket ทุกสถานะ กดขยายดู description/submission/review + activity feed</li>
+<li><b>Agent drill-down</b>: seat อยู่บอร์ดไหน role อะไร ถืองานใบไหน</li>
+<li><b>Timeline / Changes / Flow</b> (port จาก v4): activity รายวันต่อ ticket · "มีอะไรเปลี่ยนใน 24 ชม." · pipeline คอลัมน์ open→claimed→submitted→closed · กด <code>/</code> เพื่อ filter</li>
+<li><b>Coordinator findings panel</b>: แสดง evidence + next_action สีตาม level บนหน้า board detail</li>
+<li><b>/api/overhead</b>: token overhead ต่อ seat (ดูข้อ 9)</li>
+<li><b>หน้า /config</b>: policy ทุกตัวของ coordinator ในหน้าเดียว — thresholds, always-ask/auto matrix, watermark, intake toggle — เขียนผ่าน CAS (กันทับกัน) ลง board_state; coordinator อ่านสดทุก poll; mode แสดง read-only (เปลี่ยนต้อง restart)</li>
+</ul>
+<p>วินัยเดิมครบ: loopback-only · read-only (ยกเว้น config key เดียวที่กำลังเพิ่ม) · ทุก call bounded · ไม่ hardcode ชื่อโปรเจกต์</p>
+
+<h2 id="seatadmin">3. seat_admin — เพิ่ม worker/reviewer คำสั่งเดียว</h2>
+<pre># เพิ่ม worker ใหม่ (กันชื่อซ้ำจาก pool จริงก่อนเสมอ)
+python tools/wait-bridge/seat_admin.py add --name qwen-1 --role worker --boards registry
+# เพิ่ม reviewer (member_add ก่อน แล้ว set_role reviewer ทุกบอร์ด — runbook ฝังในเครื่องมือแล้ว)
+python tools/wait-bridge/seat_admin.py add --name reviewer-2 --role reviewer
+# เพิ่มบอร์ดใหม่ให้ seat เดิมทั้งหมดทีเดียว
+python tools/wait-bridge/seat_admin.py new-board --board <id>
+# ตรวจว่า seat หนึ่งอยู่ที่ไหน role อะไร
+python tools/wait-bridge/seat_admin.py check --name qwen-1</pre>
+<p>จบด้วย config block พร้อม paste ให้ IDE/agent ใหม่ — <b>ไม่มีวันพิมพ์ JWT</b> (ชี้ path ไฟล์ token อย่างเดียว) การ mint token ยังเป็นของคุณตามเดิม</p>
+
+<h2 id="doctor">4. registry_doctor — เช็คสุขภาพทั้งระบบคำสั่งเดียว</h2>
+<pre>python tools/wait-bridge/registry_doctor.py \
+  --central-url https://127.0.0.1:8766/mcp --home-board pursers \
+  --token-path $CUT/.private-arm/jwt/tokens/principal-a.jwt   # เพิ่ม --json ได้</pre>
+<p>เช็ค 8 อย่าง read-only: central/auth · registry + work_dir + integration_ref · snapshot bounds · seats (ชื่อซ้ำ/stale) · claims หมดอายุ · review backlog · <b>coordinator ยังมีชีพจรไหม</b> · bridge stats — exit code ตาม severity เอาไปใส่ cron ได้</p>
+
+<h2 id="worker">5. pursers-worker — worker จาก API (LiteLLM/OpenAI-compatible)</h2>
+<p>Runtime สำเร็จรูปสำหรับ worker ที่ไม่ใช่ CLI agent: อ่าน config ไฟล์เดียว (endpoint, model, key จาก env/ไฟล์ 0600, seat) แล้ววน wait→claim→ทำงาน→submit เองครบ</p>
+<ul>
+<li>เครื่องมือถูกขังใน work_dir (path escape ถูกปฏิเสธ), timebox ต่อคำสั่ง, max 40 iterations</li>
+<li>Governance เท่า worker อื่นทุกประการ — ผ่าน reviewer เสมอ, ไม่มีสิทธิ์ merge</li>
+<li>system prompt เรียงแบบ cache-friendly (directive นิ่งอยู่หน้า)</li>
+</ul>
+<div class="note">เหตุที่ต้องมี: config ของ codex CLI เป็น global ตัวเดียว — ชี้ endpoint อื่นจะพัง reviewer ที่แชร์อยู่ · ตัวนี้คือ shape เดียวกับ "agent pool containers" ในภาพ enterprise ที่จะเสนอทีมงานด้วย · <b>รอจากคุณ: endpoint + key ของ LiteLLM แล้วผมทำ config + seat ให้</b> (README: <code>tools/worker-runtime/README.md</code>)</div>
+
+<h2 id="domainsplit">6. ชุดแยก Work/Personal Central</h2>
+<p>ตามที่เคาะ: central ปัจจุบัน = Personal, ตั้ง Work Central ใหม่แล้วย้าย fullplatts ไป — เครื่องมือครบแล้ว เหลือนัด session สั้นๆ กับคุณ (ต้อง gen keys + stop server ช่วงย้าย):</p>
+<pre># 1) เตรียมโครง instance ใหม่ (ไม่แตะ key ใดๆ — จบด้วย runbook สิ่งที่คุณต้องทำเอง)
+python tools/central_scaffold.py init --root ~/central-work --name work --port 8767
+python tools/central_scaffold.py check --root ~/central-work
+# 2) ย้ายบอร์ด (offline ทั้งคู่ · dry-run เป็น default · กันซ้ำ/กัน merge เงียบ)
+python tools/board_move/board_move.py export --data-dir <src> --board fullplatts --out fp.archive
+python tools/board_move/board_move.py import --data-dir <dst> --archive fp.archive \
+  --principal-map PR-old=PR-new --require-full-map --commit</pre>
+
+<h2 id="release">7. Release อัตโนมัติ + Reproducible builds</h2>
+<ul>
+<li><b>Push tag <code>v*</code> ครั้งเดียว</b> → GitHub Release สร้างเอง (wheels 6 ตัว + SHA256SUMS + notes จาก CHANGELOG, mark Latest) — ใช้จริงแล้วตั้งแต่ a8 คุณไม่ต้องกดเองอีก</li>
+<li>PyPI publish: <code>gh api …/publish-pypi.yml/dispatches -f ref=main</code> — ตอนนี้ build ด้วย toolchain pinned + <b>sha gate</b> เทียบ component-lock ก่อน upload (บั๊กที่เจอ: CI เคย build ด้วย setuptools ไม่ pin ทำให้ wheel บน PyPI ไม่ตรง lock ตั้งแต่ a4 — แก้แล้ว + พิสูจน์ byte-identical)</li>
+<li><b><code>pip install pursers</code> จาก PyPI ล้วนๆ ผ่าน verify_component_artifacts แล้ว</b> — ครั้งแรกของโปรเจกต์</li>
+<li>ระวัง: component ที่ publish ไปแล้วก่อน fix (เช่น client a12) ไฟล์ immutable — ถ้า lock ต้อง match ให้ bump version publish ใหม่ (เหตุที่มี client a13 ทั้งที่ source เท่าเดิม)</li>
+</ul>
+
+<h2 id="ci">8. CI (ใหม่ทั้งชุด)</h2>
+<p><code>.github/workflows/ci.yml</code> — ทุก push/PR รันเทส <b>ทุก suite ~440 ตัว</b> + typecheck dashboard-ui · มี <b>manifest</b> (<code>tools/ci_manifest.py</code>): suite ไหน collect ได้ 0 ตัวหรือหายไป = fail พร้อมชื่อ · guard test จับ test dir ใหม่ที่ลืมลง manifest · เขียวแล้วทั้ง main/nightly (บทเรียนรอบแรก: path macOS-only, feature Darwin-only ต้อง skipif, runner ต้องมี uv)</p>
+
+<h2 id="overhead">9. Token overhead metering</h2>
+<p>wait-bridge นับ bytes ต่อ (บอร์ด, seat, วัน) + call ต่อ tool → dashboard แสดงที่ <code>/api/overhead</code> เป็น <b>ค่าประมาณ token (bytes/4)</b> ติดป้ายชัดว่า "protocol overhead ไม่ใช่บิลจริงของ provider" — เริ่มเก็บอัตโนมัติเมื่อ bridge ของแต่ละ session respawn (restart codex app / Claude Desktop ครั้งถัดไป)</p>
+
+<h2 id="linkexplorer">10. MCP App — Link Explorer</h2>
+<p>ใน per-project App (Claude Desktop): แท็บ Links โยง <b>ticket ↔ memory ↔ file ↔ tag</b> จาก <code>memory_links</code> (บอร์ดจริง: 43 nodes / 217 edges) กด copy ID/path ได้ · read-only ผ่าน projection แบบ bounded ตัวใหม่</p>
+
+<h2 id="cache">11. Cache-friendly responses</h2>
+<p>ทุก response ที่ worker อ่านซ้ำ (briefing, catchup, journal envelope) serialize แบบ <b>stable-first + field order คงที่</b> → prompt cache ของทุก provider เห็น prefix นิ่ง (คุณวัดเองแล้ว: 181.8M cache read ต่อ 10.5k input) · คู่มือ + ตาราง adapter ต่อ provider: <code>docs/cache-friendly-prose.md</code></p>
+
+<h2 id="docs">12. เอกสารประกอบที่พร้อมใช้</h2>
+<table>
+<tr><th>ไฟล์</th><th>คืออะไร</th></tr>
+<tr><td><code>~/Desktop/Claude/Temp/wiki/pursers-journey.html</code></td><td>เรื่องเต็ม Pursers 7 บท 8 ภาพ (เล่า ~20 นาที) สำหรับ sharing</td></tr>
+<tr><td><code>~/Desktop/Claude/Temp/wiki/platts-mcp-journey.html</code></td><td>Journey ของ Platts MCP ยกเครื่องแล้ว 11 ภาพ (~15 นาที)</td></tr>
+<tr><td><code>~/Desktop/Pursers-Docs/sonar-ado-design.html</code></td><td>Design explainer สำหรับทีม dev (SonarQube/ADO connector) — เน้น "dev คุมทุกอย่าง"</td></tr>
+<tr><td><code>~/Desktop/Pursers-Docs/manual-th.html / manual-en.html / architecture-th.html</code></td><td>คู่มือหลัก + architecture — อัปเดตเป็นยุค a9+ แล้ว (มี 5-minute start)</td></tr>
+<tr><td><code>docs/coordinator-design.md · docs/v4-port-audit.md · docs/cache-friendly-prose.md</code></td><td>design coordinator (10 คำถาม-คำตอบ) · ขุมทรัพย์ v4 จัด rank · กติกา cache</td></tr>
+<tr><td><code>tools/coordinator/reports/TK-5ac771dfa715.md</code></td><td>Simulation report ที่ใช้ตัดสิน phase 2</td></tr>
+</table>
+
+<h2>สิ่งที่รอคุณ (สรุปท้ายเล่ม)</h2>
+<ul>
+<li>merge งาน work 5 ใบที่ coordinator จับได้ (ดูบน dashboard → fullplatts → Findings)</li>
+<li>นัด session แยก Work Central (~30 นาที: gen keys ตาม runbook + ย้ายบอร์ด)</li>
+<li>endpoint + key LiteLLM สำหรับ worker API ตัวแรก</li>
+<li>เอา <code>sonar-ado-design.html</code> ไปคุยทีม dev + เอกสาร journey ไป sharing</li>
+</ul>
+<p class="meta">เขียนโดย fable5-main · 31 ส.ค. 2026 กลางคืน · ไฟล์นี้อยู่ local เท่านั้น</p>
+</main>
+</body>
+</html>
