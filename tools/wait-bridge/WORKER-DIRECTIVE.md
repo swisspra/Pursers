@@ -129,6 +129,9 @@ Run this loop continuously. Each pass is one unit of work:
   see something worth doing, file a ticket for it — don't just do it.
 - **Ask only when truly blocked** on something a human must decide (a
   destructive action, a genuine ambiguity, access you cannot grant yourself).
+  Use `ticket_request_human` with a bounded message and, when useful, its flat
+  `requested_schema`; this releases the work lease and parks the ticket in
+  `needs_human`. Never keep renewing a lease while waiting for a person.
   Otherwise proceed; you are a worker, not a committee.
 
 ## 6. Notes for whoever configures the seat

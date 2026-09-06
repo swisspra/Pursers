@@ -47,6 +47,8 @@ from pursers_client import (
     CLAIM_TTL_EVENT_KINDS,
     DEPRECATION_EVENT_KINDS,
     DISPATCH_EVENT_KINDS,
+    HUMAN_INPUT_REQUESTED,
+    HUMAN_INPUT_RESOLVED,
     OFFER_EXPIRED,
     OFFER_REVOKED,
     REVIEW_OFFERED,
@@ -95,7 +97,7 @@ BRANCH_AND_COMMIT_RE = re.compile(
 )
 PRE_SUBMISSION_STATES = frozenset({"claimed", "in_progress", "creating_report"})
 ACTIVE_TICKET_STATES = frozenset(
-    {"open", "claimed", "in_progress", "creating_report", "submitted", "reviewing", "in_review"}
+    {"open", "claimed", "in_progress", "creating_report", "submitted", "reviewing", "in_review", "needs_human"}
 )
 TERMINAL_TICKET_STATES = frozenset({"closed", "rejected", "canceled", "terminated"})
 TICKET_PRIORITIES = frozenset({"low", "medium", "high", "critical"})
@@ -281,6 +283,12 @@ BRIEFING_PINNED_DIGEST_LIMIT = 8
 BRIEFING_MEMORY_CONTENT_MAX_CHARS = 2_000
 BRIEFING_MEMORY_LIST_LIMIT = 20
 BRIEFING_HANDOFF_NEXT_STEPS_LIMIT = 8
+BRIEFING_HUMAN_REQUEST_LIMIT = 20
+HUMAN_REQUEST_MESSAGE_MAX_CHARS = 2_000
+HUMAN_REQUEST_SCHEMA_MAX_CHARS = 20_000
+HUMAN_REQUEST_MAX_PROPERTIES = 50
+HUMAN_REQUEST_SNAPSHOT_MESSAGE_CHARS = 500
+HUMAN_REQUEST_KINDS = frozenset({"decision", "deliverable", "approval", "information"})
 
 
 @dataclass(frozen=True)
@@ -2599,6 +2607,20 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         projected["payload_ref"] = resource_uri(board_id, "ticket", ticket["ticket_id"])
         return projected
 
+    def snapshot_ticket_payload(board_id: str, ticket: dict[str, Any]) -> dict[str, Any]:
+        projected = project_ticket(board_id, ticket)
+        request = projected.get("human_request")
+        if not isinstance(request, dict):
+            return projected
+        message = str(request.get("message", ""))
+        omitted = max(0, len(message) - HUMAN_REQUEST_SNAPSHOT_MESSAGE_CHARS)
+        if omitted:
+            request["message"] = (
+                message[: HUMAN_REQUEST_SNAPSHOT_MESSAGE_CHARS - 1].rstrip() + "…"
+            )
+        request["omitted_counts"] = {"message_chars": omitted}
+        return projected
+
     def continuation_hint(ticket: Mapping[str, Any]) -> dict[str, Any] | None:
         prior_name = ticket.get("last_claimed_by")
         prior_agent_id = ticket.get("last_claimed_by_agent_id")
@@ -2738,6 +2760,239 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             if text not in cleaned:
                 cleaned.append(text)
         return cleaned
+
+    def validate_human_request_schema(
+        value: dict[str, Any] | None, *, scrub_profile: str,
+        allow_counts: dict[str, int],
+    ) -> dict[str, Any] | None:
+        if value is None:
+            return None
+        if not isinstance(value, dict) or value.get("type") != "object":
+            raise ValueError("requested_schema must be a JSON Schema root object")
+        allowed_root = {
+            "type", "title", "description", "properties", "required",
+            "additionalProperties",
+        }
+        if set(value) - allowed_root:
+            raise ValueError("requested_schema contains unsupported root keywords")
+        properties = value.get("properties", {})
+        if not isinstance(properties, dict) or len(properties) > HUMAN_REQUEST_MAX_PROPERTIES:
+            raise ValueError(
+                f"requested_schema properties must be an object with at most {HUMAN_REQUEST_MAX_PROPERTIES} fields"
+            )
+        required = value.get("required", [])
+        if (
+            not isinstance(required, list)
+            or any(not isinstance(item, str) for item in required)
+            or len(required) != len(set(required))
+            or not set(required).issubset(properties)
+        ):
+            raise ValueError("requested_schema required must contain unique property names")
+        if value.get("additionalProperties", False) not in {False, None}:
+            raise ValueError("requested_schema additionalProperties must be false")
+
+        secret_names = {"password", "token", "secret", "api_key"}
+        primitive_types = {"string", "number", "integer", "boolean"}
+        def schema_value_matches(item: Any, field_type: str | None) -> bool:
+            if field_type is None:
+                return isinstance(item, (str, int, float, bool))
+            expected: dict[str, Any] = {
+                "string": str, "number": (int, float),
+                "integer": int, "boolean": bool,
+            }
+            return isinstance(item, expected[field_type]) and not (
+                field_type in {"number", "integer"} and isinstance(item, bool)
+            )
+        scalar_keywords = {
+            "type", "title", "description", "default", "enum", "oneOf",
+            "minimum", "maximum", "minLength", "maxLength",
+        }
+        for name, schema in properties.items():
+            if not isinstance(name, str) or not name or len(name) > 80:
+                raise ValueError("requested_schema property names must be 1-80 characters")
+            normalized = re.sub(r"[^a-z0-9]+", "_", name.casefold()).strip("_")
+            compact_name = normalized.replace("_", "")
+            if (
+                any(part in secret_names for part in normalized.split("_"))
+                or any(secret.replace("_", "") in compact_name for secret in secret_names)
+            ):
+                raise ValueError("use url mode for sensitive input")
+            if not isinstance(schema, dict):
+                raise ValueError("requested_schema property definitions must be objects")
+            field_type = schema.get("type")
+            if field_type == "array":
+                allowed = {"type", "title", "description", "items", "minItems", "maxItems", "uniqueItems"}
+                if set(schema) - allowed:
+                    raise ValueError("array properties support only array-of-enum schemas")
+                items = schema.get("items")
+                if (
+                    not isinstance(items, dict)
+                    or set(items) - {"type", "enum"}
+                    or items.get("type") not in primitive_types
+                    or not isinstance(items.get("enum"), list)
+                    or not items["enum"]
+                    or any(
+                        not schema_value_matches(item, items.get("type"))
+                        for item in items["enum"]
+                    )
+                ):
+                    raise ValueError("array properties must use primitive enum items")
+            elif field_type in primitive_types:
+                if set(schema) - scalar_keywords:
+                    raise ValueError("requested_schema contains unsupported property keywords")
+                if "enum" in schema and (
+                    not isinstance(schema["enum"], list) or not schema["enum"]
+                    or any(
+                        not schema_value_matches(item, field_type)
+                        for item in schema["enum"]
+                    )
+                ):
+                    raise ValueError("requested_schema enum must be a non-empty array")
+                if "oneOf" in schema:
+                    choices = schema["oneOf"]
+                    if (
+                        not isinstance(choices, list)
+                        or not choices
+                        or any(
+                            not isinstance(choice, dict)
+                            or set(choice) != {"const", "title"}
+                            or not isinstance(choice.get("title"), str)
+                            or not schema_value_matches(choice.get("const"), field_type)
+                            for choice in choices
+                        )
+                    ):
+                        raise ValueError("requested_schema oneOf choices require const and title")
+            elif field_type is None and set(schema) <= {"title", "description", "enum", "oneOf"}:
+                if "enum" in schema and (
+                    not isinstance(schema["enum"], list) or not schema["enum"]
+                    or any(
+                        not schema_value_matches(item, None)
+                        for item in schema["enum"]
+                    )
+                ):
+                    raise ValueError("requested_schema enum must be a non-empty array")
+                if "oneOf" in schema:
+                    choices = schema["oneOf"]
+                    if (
+                        not isinstance(choices, list)
+                        or not choices
+                        or any(
+                            not isinstance(choice, dict)
+                            or set(choice) != {"const", "title"}
+                            or not isinstance(choice.get("title"), str)
+                            or not choice["title"].strip()
+                            or not schema_value_matches(choice.get("const"), None)
+                            for choice in choices
+                        )
+                    ):
+                        raise ValueError("requested_schema oneOf choices require const and title")
+                if "enum" not in schema and "oneOf" not in schema:
+                    raise ValueError("requested_schema properties must declare a primitive type, enum, or oneOf")
+            else:
+                raise ValueError("requested_schema properties must be primitive or array-of-enum")
+        encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        clean_text(
+            "requested_schema", encoded, required=True,
+            max_length=HUMAN_REQUEST_SCHEMA_MAX_CHARS,
+            scrub_profile=scrub_profile, allow_counts=allow_counts,
+        )
+        return copy.deepcopy(value)
+
+    def validate_human_request_url(
+        value: str | None, *, scrub_profile: str, allow_counts: dict[str, int]
+    ) -> str | None:
+        cleaned = clean_text(
+            "url", value, max_length=2_000, scrub_profile=scrub_profile,
+            allow_counts=allow_counts,
+        )
+        if cleaned is None:
+            return None
+        parsed = urlparse(cleaned)
+        if parsed.username or parsed.password or parsed.fragment or not parsed.hostname:
+            raise ValueError("url must be https or loopback http")
+        if parsed.scheme == "https":
+            return cleaned
+        if parsed.scheme != "http":
+            raise ValueError("url must be https or loopback http")
+        hostname = parsed.hostname.casefold()
+        loopback = hostname == "localhost"
+        if not loopback:
+            try:
+                loopback = ipaddress.ip_address(hostname).is_loopback
+            except ValueError:
+                loopback = False
+        if not loopback:
+            raise ValueError("url must be https or loopback http")
+        return cleaned
+
+    def validate_human_answer(content: Any, schema: Mapping[str, Any] | None) -> None:
+        if schema is None:
+            return
+        if not isinstance(content, dict):
+            raise ValueError("human answer must be an object matching requested_schema")
+        properties = schema.get("properties", {})
+        required = set(schema.get("required", []))
+        missing = required - set(content)
+        unknown = set(content) - set(properties)
+        if missing or unknown:
+            raise ValueError("human answer does not match requested_schema fields")
+        primitive_types = {
+            "string": str,
+            "number": (int, float),
+            "integer": int,
+            "boolean": bool,
+        }
+        for name, item in content.items():
+            definition = properties[name]
+            field_type = definition.get("type")
+            if field_type == "array":
+                if not isinstance(item, list) or any(
+                    value not in definition["items"]["enum"] for value in item
+                ):
+                    raise ValueError(f"human answer field {name} does not match requested_schema")
+                continue
+            if field_type is not None:
+                expected = primitive_types[field_type]
+                if not isinstance(item, expected) or (
+                    field_type in {"number", "integer"} and isinstance(item, bool)
+                ):
+                    raise ValueError(f"human answer field {name} does not match requested_schema")
+            if "enum" in definition and item not in definition["enum"]:
+                raise ValueError(f"human answer field {name} does not match requested_schema")
+            if "oneOf" in definition and item not in {
+                choice["const"] for choice in definition["oneOf"]
+            }:
+                raise ValueError(f"human answer field {name} does not match requested_schema")
+
+    def human_request_recipients(document: dict[str, Any]) -> list[str]:
+        recipients: list[str] = []
+        for member in document.get("members", {}).values():
+            membership = document.get("principal_memberships", {}).get(
+                member.get("principal_id"), {}
+            )
+            if (
+                membership.get("role") == "admin"
+                or COORDINATOR_SCOPE in set(member.get("scopes", []))
+                or member.get("role") in {"coordinator", "orchestrator"}
+            ):
+                recipients.append(member["agent_id"])
+        return sorted(set(recipients))
+
+    def clear_work_lease(ticket: dict[str, Any], now: float, actor: dict[str, Any]) -> None:
+        ticket["last_claimed_by_agent_id"] = ticket.get("claimed_by_agent_id")
+        ticket["last_claimed_by_principal_id"] = ticket.get("claimed_by_principal_id")
+        ticket["last_claimed_by"] = ticket.get("claimed_by")
+        ticket["last_claimed_at"] = ticket.get("claimed_at")
+        ticket["last_release_reason"] = "human input requested"
+        ticket["last_unclaimed_by_agent_id"] = actor["agent_id"]
+        ticket["last_unclaimed_at"] = iso_at(now)
+        for key in (
+            "claimed_by_agent_id", "claimed_by_principal_id", "claimed_by",
+            "claimed_at", "lease_expires_at_epoch", "lease_expires_at",
+            "lease_renewed_at", "lease_renewal_source",
+            "lease_last_model_renewed_at", "lease_keepalive_only_since", "ttl_s",
+        ):
+            ticket.pop(key, None)
 
     def board_scrub_profile(document: dict[str, Any]) -> str:
         service.ensure_schema(document)
@@ -2935,6 +3190,25 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             "claimed_by": ticket.get("claimed_by"),
             "priority": ticket.get("priority", "medium"),
             "updated_at": ticket.get("updated_at"),
+        }
+
+    def briefing_human_request_payload(ticket: dict[str, Any]) -> dict[str, Any]:
+        request = ticket.get("human_request")
+        if not isinstance(request, dict):
+            return {"ticket_id": ticket["ticket_id"]}
+        message = str(request.get("message", ""))
+        omitted = max(0, len(message) - HUMAN_REQUEST_SNAPSHOT_MESSAGE_CHARS)
+        if omitted:
+            message = message[: HUMAN_REQUEST_SNAPSHOT_MESSAGE_CHARS - 1].rstrip() + "…"
+        return {
+            "ticket_id": ticket["ticket_id"],
+            "request_id": request.get("request_id"),
+            "kind": request.get("kind"),
+            "message": message,
+            "requested_schema": copy.deepcopy(request.get("requested_schema")),
+            "url": request.get("url"),
+            "asked_at": request.get("asked_at"),
+            "omitted_counts": {"message_chars": omitted},
         }
 
     def briefing_memory_payload(entry: dict[str, Any]) -> dict[str, Any]:
@@ -3516,7 +3790,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         document: dict[str, Any], *, include_retired: bool = False
     ) -> dict[str, Any]:
         tickets = [
-            project_ticket(document["board_id"], ticket)
+            snapshot_ticket_payload(document["board_id"], ticket)
             for ticket in sorted(
                 document["tickets"].values(), key=lambda item: item["ticket_id"]
             )
@@ -3680,6 +3954,13 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             for item in document["tickets"].values()
             if item.get("status") in ACTIVE_TICKET_STATES
         ]
+        pending_human = [
+            briefing_human_request_payload(item)
+            for item in tickets
+            if item.get("status") == "needs_human"
+            and isinstance(item.get("human_request"), dict)
+            and item["human_request"].get("resolution") is None
+        ]
         tickets.sort(
             key=lambda item: (
                 {"critical": 0, "high": 1, "medium": 2, "low": 3}.get(item["priority"], 9),
@@ -3739,6 +4020,23 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 )
             if len(pinned) > 8:
                 lines.append(f"- … {len(pinned) - 8} more pinned memories")
+        if pending_human:
+            lines.append("\n## Pending human requests")
+            for request in pending_human[:BRIEFING_HUMAN_REQUEST_LIMIT]:
+                lines.append(
+                    f"- `{request['ticket_id']}` [{request.get('kind')}] {request.get('message', '')}"
+                )
+                if request.get("requested_schema") is not None:
+                    lines.append(
+                        "  schema: " + json.dumps(
+                            request["requested_schema"], sort_keys=True,
+                            separators=(",", ":"), ensure_ascii=False,
+                        )
+                    )
+            if len(pending_human) > BRIEFING_HUMAN_REQUEST_LIMIT:
+                lines.append(
+                    f"- … {len(pending_human) - BRIEFING_HUMAN_REQUEST_LIMIT} more pending human requests"
+                )
         if tickets:
             lines.append("\n## Open tickets")
             for ticket in tickets[:20]:
@@ -3786,6 +4084,8 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         omitted_open_tickets = max(
             0, len(tickets) - len(compact_open_tickets)
         )
+        compact_pending_human = pending_human[:BRIEFING_HUMAN_REQUEST_LIMIT]
+        omitted_pending_human = max(0, len(pending_human) - len(compact_pending_human))
         omitted_pinned_digest = max(0, len(pinned) - len(compact_pinned))
         memory_payload_truncated = any(
             item["truncated"] for item in compact_pinned
@@ -3798,6 +4098,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 "memory_content_chars": BRIEFING_MEMORY_CONTENT_MAX_CHARS,
                 "memory_list_items": BRIEFING_MEMORY_LIST_LIMIT,
                 "handoff_next_steps": BRIEFING_HANDOFF_NEXT_STEPS_LIMIT,
+                "pending_human_requests": BRIEFING_HUMAN_REQUEST_LIMIT,
             },
             "review_policy": current_review_policy,
             "rendered": rendered,
@@ -3806,26 +4107,31 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             "latest_handoff": compact_handoff,
             "pinned_digest": compact_pinned,
             "open_tickets": compact_open_tickets,
+            "pending_human_requests": compact_pending_human,
             "omitted_open_tickets": omitted_open_tickets,
             "payload_total_counts": {
                 "open_tickets": len(tickets),
                 "pinned_digest": len(pinned),
                 "latest_handoff": int(bool(project_handoffs)),
+                "pending_human_requests": len(pending_human),
             },
             "payload_returned_counts": {
                 "open_tickets": len(compact_open_tickets),
                 "pinned_digest": len(compact_pinned),
                 "latest_handoff": int(compact_handoff is not None),
+                "pending_human_requests": len(compact_pending_human),
             },
             "payload_omitted_counts": {
                 "open_tickets": omitted_open_tickets,
                 "pinned_digest": omitted_pinned_digest,
                 "latest_handoff": 0,
+                "pending_human_requests": omitted_pending_human,
             },
             "payload_truncated": bool(
                 omitted_open_tickets
                 or omitted_pinned_digest
                 or memory_payload_truncated
+                or omitted_pending_human
             ),
             "review_label_counts": dict(sorted(review_label_counts.items())),
         }
@@ -5580,6 +5886,8 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             ticket = document["tickets"].get(ticket_id)
             if ticket is None:
                 raise ValueError("ticket not found")
+            if ticket.get("status") == "needs_human":
+                raise ValueError("ticket is waiting for a human answer")
             continuation = continuation_hint(ticket)
             if ticket.get("status") == "claimed":
                 if (
@@ -5816,6 +6124,288 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             "dispatch_event": dispatch_events[0] if dispatch_events else None,
             "release_events": release_events,
             "implicitly_renewed": changed["renewed"],
+        }
+
+    @tool()
+    async def ticket_request_human(
+        board_id: str,
+        agent_name: str,
+        ticket_id: str,
+        message: str,
+        kind: str,
+        ctx: Context,
+        requested_schema: dict[str, Any] | None = None,
+        url: str | None = None,
+        expected_generation: str | None = None,
+    ) -> dict[str, Any]:
+        """Pause work, release its lease, and request structured human input."""
+        board_id = require_id("board_id", board_id)
+        ticket_id = require_id("ticket_id", ticket_id)
+        principal = current_principal()
+        require_board_write_or_coordinate(principal)
+        coordinate_authorized = COORDINATOR_SCOPE in principal.scopes
+        if kind not in HUMAN_REQUEST_KINDS:
+            raise ValueError("kind must be decision, deliverable, approval, or information")
+        now = time.time()
+
+        def request(document: dict[str, Any]) -> dict[str, Any]:
+            profile = board_scrub_profile(document)
+            allow_counts: dict[str, int] = {}
+            safe_message = clean_text(
+                "message", message, required=True,
+                max_length=HUMAN_REQUEST_MESSAGE_MAX_CHARS,
+                scrub_profile=profile, allow_counts=allow_counts,
+            )
+            safe_schema = validate_human_request_schema(
+                requested_schema, scrub_profile=profile, allow_counts=allow_counts
+            )
+            safe_url = validate_human_request_url(
+                url, scrub_profile=profile, allow_counts=allow_counts
+            )
+            actor, released, renewed = prepare_board_call(
+                document, principal, agent_name, now
+            )
+            ticket = document["tickets"].get(ticket_id)
+            if ticket is None:
+                raise ValueError("ticket not found")
+            membership = service.resolve_board_context(
+                document, principal.principal_id
+            )
+            is_holder = (
+                ticket.get("status") in PRE_SUBMISSION_STATES
+                and ticket.get("claimed_by_agent_id") == actor["agent_id"]
+                and ticket.get("claimed_by_principal_id") == principal.principal_id
+            )
+            is_admin = membership.get("role") == "admin"
+            if not (is_holder or is_admin or coordinate_authorized):
+                raise PermissionError(
+                    "human request requires the work lease, board admin, or board:coordinate"
+                )
+            if ticket.get("status") in TERMINAL_TICKET_STATES:
+                raise ValueError(f"ticket is already {ticket['status']}")
+            previous_request = ticket.get("human_request")
+            if (
+                ticket.get("status") == "needs_human"
+                and isinstance(previous_request, Mapping)
+                and previous_request.get("resolution") is None
+            ):
+                raise ValueError("ticket already has a pending human request")
+            old_status = str(ticket["status"])
+            if ticket.get("status") in PRE_SUBMISSION_STATES:
+                clear_work_lease(ticket, now, actor)
+            offer = ticket.pop("work_offer", None)
+            if isinstance(offer, Mapping):
+                released.append(
+                    {
+                        "kind": OFFER_REVOKED, "ticket_id": ticket_id,
+                        "offer_kind": "work",
+                        "offered_agent_id": offer.get("agent_id"),
+                        "offered_agent_name": offer.get("agent_name"),
+                        "offer_expires_at": offer.get("expires_at"),
+                        "dispatch_reason": "human_input_requested",
+                        "recipients": [offer.get("agent_id")],
+                    }
+                )
+            request_id = "HR-" + secrets.token_hex(8)
+            ticket["status"] = "needs_human"
+            ticket["updated_at"] = iso_at(now)
+            ticket["dispatch_state"] = {
+                "state": "needs_human", "at": iso_at(now),
+                "request_id": request_id,
+            }
+            ticket["human_request"] = {
+                "request_id": request_id,
+                "message": safe_message,
+                "kind": kind,
+                "requested_schema": safe_schema,
+                "url": safe_url,
+                "asked_by": {
+                    "agent_id": actor["agent_id"],
+                    "agent_name": actor["agent_name"],
+                    "principal_id": principal.principal_id,
+                },
+                "asked_at": iso_at(now),
+                "expires_at": None,
+                "resolution": None,
+            }
+            scrub_audit = record_scrub_allows(document, actor, now, allow_counts)
+            released.extend(redispatch_queue(document, now))
+            return {
+                "actor": actor, "ticket": copy.deepcopy(ticket),
+                "old_status": old_status, "request_id": request_id,
+                "recipients": human_request_recipients(document),
+                "released": released,
+                "renewed": [item for item in renewed if item != ticket_id],
+                "scrub_audit": scrub_audit,
+            }
+
+        changed = service.mutate(board_id, request)
+        release_events = await publish_releases(
+            board_id, changed["released"], principal, ctx
+        )
+        uri = resource_uri(board_id, "ticket", ticket_id)
+        event = await append_and_publish(
+            board_id, changed["actor"], HUMAN_INPUT_REQUESTED, uri,
+            changed["recipients"], ctx, ticket_id=ticket_id,
+            request_id=changed["request_id"],
+            status_from=changed["old_status"], status_to="needs_human",
+        )
+        return {
+            "ok": True, "request_id": changed["request_id"],
+            "ticket": changed["ticket"], "event": event,
+            "release_events": release_events,
+            "implicitly_renewed": changed["renewed"],
+            "scrub_audit": changed["scrub_audit"],
+        }
+
+    @tool()
+    async def ticket_human_resolve(
+        board_id: str,
+        agent_name: str,
+        ticket_id: str,
+        request_id: str,
+        action: str,
+        ctx: Context,
+        content: Any | None = None,
+        note: str | None = None,
+        disposition: str = "reopen",
+        expected_generation: str | None = None,
+    ) -> dict[str, Any]:
+        """Resolve a pending human request as a board admin or coordinator."""
+        board_id = require_id("board_id", board_id)
+        ticket_id = require_id("ticket_id", ticket_id)
+        request_id = require_id("request_id", request_id)
+        if action not in {"accept", "decline", "cancel"}:
+            raise ValueError("action must be accept, decline, or cancel")
+        if disposition not in {"reopen", "park", "cancel"}:
+            raise ValueError("disposition must be reopen, park, or cancel")
+        principal = current_principal()
+        if not ({"board:write", COORDINATOR_SCOPE} & principal.scopes):
+            raise PermissionError(
+                "human resolution requires board admin or board:coordinate"
+            )
+        now = time.time()
+
+        def resolve(document: dict[str, Any]) -> dict[str, Any]:
+            actor, released, renewed = prepare_board_call(
+                document, principal, agent_name, now
+            )
+            membership = service.resolve_board_context(
+                document, principal.principal_id
+            )
+            if membership.get("role") != "admin" and COORDINATOR_SCOPE not in principal.scopes:
+                raise PermissionError(
+                    "human resolution requires board admin or board:coordinate"
+                )
+            ticket = document["tickets"].get(ticket_id)
+            if ticket is None:
+                raise ValueError("ticket not found")
+            request_record = ticket.get("human_request")
+            if (
+                ticket.get("status") != "needs_human"
+                or not isinstance(request_record, dict)
+                or request_record.get("request_id") != request_id
+                or request_record.get("resolution") is not None
+            ):
+                raise ValueError("human request is not pending")
+            profile = board_scrub_profile(document)
+            allow_counts: dict[str, int] = {}
+            safe_note = clean_text(
+                "note", note, max_length=2_000, scrub_profile=profile,
+                allow_counts=allow_counts,
+            )
+            safe_content = copy.deepcopy(content)
+            if content is not None:
+                validate_human_answer(content, request_record.get("requested_schema"))
+                encoded = json.dumps(
+                    content, sort_keys=True, separators=(",", ":"),
+                    ensure_ascii=False,
+                )
+                clean_text(
+                    "content", encoded, max_length=5_000, scrub_profile=profile,
+                    allow_counts=allow_counts,
+                )
+            resolution = {
+                "action": action,
+                "content": safe_content,
+                "resolved_by_principal_id": principal.principal_id,
+                "resolved_at": iso_at(now),
+                "note": safe_note,
+            }
+            request_record["resolution"] = resolution
+            old_status = "needs_human"
+            new_status = "needs_human"
+            dispatch_event = None
+            if action == "accept" or (action == "decline" and disposition == "reopen"):
+                new_status = "open"
+                answer = json.dumps(
+                    content, sort_keys=True, separators=(",", ":"),
+                    ensure_ascii=False,
+                ) if content is not None else (safe_note or action)
+                prior_notes = str(ticket.get("notes") or "").rstrip()
+                ticket["notes"] = (
+                    f"{prior_notes}\nHUMAN ANSWER: {answer}".lstrip()
+                )
+                asked_id = request_record.get("asked_by", {}).get("agent_id")
+                if ticket.get("assigned_to_agent_id") == asked_id:
+                    for key in ("assigned_to", "assigned_to_agent_id", "assigned_to_kind"):
+                        ticket.pop(key, None)
+                ticket["prefer_agents"] = [
+                    item for item in ticket.get("prefer_agents", [])
+                    if str(item).casefold() != str(asked_id).casefold()
+                ]
+                ticket["status"] = "open"
+                ticket["dispatch_state"] = {
+                    "state": "reopened", "at": iso_at(now),
+                    "reason": "human_input_resolved",
+                }
+                dispatch_event = dispatch_ticket(document, ticket, now, "work")
+            elif action == "decline" and disposition == "cancel":
+                new_status = "canceled"
+                ticket["status"] = "canceled"
+                ticket["canceled_by_agent_id"] = actor["agent_id"]
+                ticket["canceled_by_principal_id"] = principal.principal_id
+                ticket["cancel_permission"] = "human resolution"
+                ticket["canceled_at"] = iso_at(now)
+                ticket["cancel_reason"] = safe_note or "human request declined"
+                ticket["dispatch_state"] = {"state": "canceled", "at": iso_at(now)}
+            ticket["updated_at"] = iso_at(now)
+            released.extend(redispatch_queue(document, now))
+            recipients = set(human_request_recipients(document))
+            asked_id = request_record.get("asked_by", {}).get("agent_id")
+            if isinstance(asked_id, str):
+                recipients.add(asked_id)
+            scrub_audit = record_scrub_allows(document, actor, now, allow_counts)
+            return {
+                "actor": actor, "ticket": copy.deepcopy(ticket),
+                "recipients": sorted(recipients), "new_status": new_status,
+                "dispatch_event": dispatch_event, "released": released,
+                "renewed": renewed, "scrub_audit": scrub_audit,
+            }
+
+        changed = service.mutate(board_id, resolve)
+        release_events = await publish_releases(
+            board_id, changed["released"], principal, ctx
+        )
+        uri = resource_uri(board_id, "ticket", ticket_id)
+        event = await append_and_publish(
+            board_id, changed["actor"], HUMAN_INPUT_RESOLVED, uri,
+            changed["recipients"], ctx, ticket_id=ticket_id,
+            request_id=request_id, human_action=action,
+            human_disposition=disposition,
+            status_from="needs_human", status_to=changed["new_status"],
+        )
+        dispatch_events = await publish_releases(
+            board_id,
+            [changed["dispatch_event"]] if changed["dispatch_event"] else [],
+            principal, ctx,
+        )
+        return {
+            "ok": True, "ticket": changed["ticket"], "event": event,
+            "dispatch_event": dispatch_events[0] if dispatch_events else None,
+            "release_events": release_events,
+            "implicitly_renewed": changed["renewed"],
+            "scrub_audit": changed["scrub_audit"],
         }
 
     @tool()

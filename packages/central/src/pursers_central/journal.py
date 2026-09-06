@@ -36,6 +36,9 @@ SEMANTIC_FIELDS = frozenset(
         "abandoned_count",
         "fixture_provenance",
         "recipient_identities",
+        "request_id",
+        "human_action",
+        "human_disposition",
     }
 )
 

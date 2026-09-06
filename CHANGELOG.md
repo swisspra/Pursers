@@ -8,6 +8,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 ## [Unreleased]
 
 ### Added
+- Central and Client: workers can release a lease into the structured
+  `needs_human` state with `ticket_request_human`; admins and coordinators can
+  accept, decline, park, cancel, or dismiss the request with
+  `ticket_human_resolve`. Pending questions appear in bounded briefings and
+  remain excluded from claim and dispatch until reopened (TK-75275d51735f).
 - Dispatcher: unclaimed broadcast tickets are re-surfaced to idle identities on a
   cadence (`PURSERS_BACKLOG_RESURFACE_INTERVAL_S`, default 600 s) and re-offered after
   the board's `broadcast_reoffer_s`; coordinator identities are never offered work
