@@ -380,7 +380,7 @@ SSL_CERT_FILE = "&lt;ca_bundle_path&gt;"</code></pre>
 
       <h3>Claude Desktop as orchestrator</h3>
       <p>For Claude Desktop or other hosts acting as a fleet leader or coordinator, the wait bridge provides an <strong>orchestrator mode</strong> (<code>PURSERS_ROLE="orchestrator"</code>). Claude Desktop cancels tool calls after ~240s and cannot hold long blocking waits. Leaders never claim tickets—they need instant visibility into submitted, approved, rejected, and closed work, including <code>branch_and_commit</code> to merge approved code.</p>
-      <p>In orchestrator mode, the wait bridge runs a continuous background subscription across all active registry boards, buffering events into a persistent ring buffer (capped at 5,000 events) and refetching changed tickets using pure <code>touch=false</code> catchup (zero board writes or lease renewals while idle). A state file (<code>~/.pursers/wait-bridge/orchestrator_state_&lt;board&gt;.json</code> with mode 0600) persists cursors and buffered events across bridge restarts.</p>
+      <p>In orchestrator mode, the wait bridge runs a continuous background subscription across all active registry boards, buffering events into a persistent ring buffer (capped at 5,000 events) and refetching changed tickets using pure <code>touch=false</code> catchup (zero board writes or lease renewals while idle). A state file (<code>/PATH/TO/.pursers/wait-bridge/orchestrator_state_&lt;board&gt;.json</code> with mode 0600) persists cursors and buffered events across bridge restarts.</p>
       <p>Orchestrator tools return immediately without blocking:</p>
       <ul>
         <li><code>board_digest(since=None|cursor_map, boards="registry", group_by="ticket", include_notes_keys=["branch_and_commit"])</code>: Returns grouped ticket transitions, current status, reviewer details, closing notes, new tickets, and subscription health.</li>
@@ -485,13 +485,13 @@ Before approval:
 7. Confirm every required_field is present and truthful.
 8. Put the SHA, re-run tails, leak-scan result, and model in review_notes.
 
-Operator-specific leak regexes come from `~/.pursers/leak-markers.txt`, one per line; `PURSERS_LEAK_MARKERS_FILE` overrides that path. Record an empty marker file as a WARN in review_notes, not a blocker. Never print marker values.
+Operator-specific leak regexes come from `/PATH/TO/.pursers/leak-markers.txt`, one per line; `PURSERS_LEAK_MARKERS_FILE` overrides that path. Record an empty marker file as a WARN in review_notes, not a blocker. Never print marker values.
 
 Approval notes must contain a full 40-hex SHA, an unambiguously successful pytest `N passed` tail or paired unittest `Ran N tests` plus `OK` tail, `leak-scan: clean|N matches`, and `model: NAME`. The emergency flag works only when the operator explicitly sets `PURSERS_ALLOW_FORCE_APPROVE_WITHOUT_EVIDENCE=1`, and its use is appended to review_notes.
 
 Rejecting is normal and cheap; a wrong approval is expensive.</code></pre>
       <p>Run <code>board.sh verify &lt;TK&gt; [--run-suites] --board &lt;id&gt;</code> first. Approve only with the accepted evidence fields; reject with concrete, non-empty fix instructions when a check fails.</p>
-      <p>Generic leak rules cover JWTs, bearer tokens, private-key headers, API-key shapes, and macOS/Linux/Windows home-directory paths. Operator-specific regexes are loaded one per line from <code>~/.pursers/leak-markers.txt</code>, or from <code>PURSERS_LEAK_MARKERS_FILE</code>. Verify and approve print only the loaded count. Record an empty file as a WARN in <code>review_notes</code>, not a blocker. Documented placeholder paths, <code>example.com</code>, and <code>127.0.0.1</code> remain suitable fixtures.</p>
+      <p>Generic leak rules cover JWTs, bearer tokens, private-key headers, API-key shapes, and macOS/Linux/Windows home-directory paths. Operator-specific regexes are loaded one per line from <code>/PATH/TO/.pursers/leak-markers.txt</code>, or from <code>PURSERS_LEAK_MARKERS_FILE</code>. Verify and approve print only the loaded count. Record an empty file as a WARN in <code>review_notes</code>, not a blocker. Documented placeholder paths, <code>example.com</code>, and <code>127.0.0.1</code> remain suitable fixtures.</p>
       <p><code>ONBOARD_AGENT_NAME</code> supplies the process default. When one host carries multiple sessions, pass <code>agent_name</code> on each call so the journal records the correct seat. Use an independent reviewer principal, not merely another agent name under the worker's JWT.</p>
     </section>
 

@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="icon" href="data:,">
-<title>Pursers 5.0.0a21 — Four-Layer Memory Store</title>
+<title>Pursers 5.0.0a21 — Board Memory</title>
 <style>
   :root{
     --ground:#F7F8FA; --surface:#FFFFFF; --surface-sunk:#EFF2F6;
@@ -166,236 +166,117 @@
 </style>
 </head>
 <body>
-
 <div class="page">
-
   <header class="masthead">
-    <p class="eyebrow">Pursers 5.0.0a21 &middot; memory reference</p>
-    <h1>Four-Layer Memory Store</h1>
-    <p class="standfirst">How persistent memory is arranged for a coding agent on a single workstation &mdash; what auto-loads, what waits to be read, and what never leaves the machine.</p>
+    <p class="eyebrow">Pursers 5.0.0a21 &middot; board-memory reference</p>
+    <h1>Pursers Board Memory</h1>
+    <p class="standfirst">The governed memory surface for board workers and operators: durable writes, explicit scope, journal cues, and bounded recovery.</p>
   </header>
   <p class="meta">
-    <span>4 layers</span><span>2 isolated domains</span><span>git-versioned subset</span><span>local-first</span><span>a21 tool decision</span>
+    <span>board governed</span><span>journaled</span><span>cursor based</span><span>reduced tool surface</span><span>a21</span>
   </p>
 
   <div class="thesis">
-    <p><strong>The whole design turns on one balance.</strong> Every session auto-loads a small block of text. Put too little in it and the deeper tiers are never reached &mdash; the agent doesn't know they exist, so they die unread. Put too much in it and every session starts bloated, and the store dies of context cost instead.</p>
-    <p>So the auto-loaded file carries <em>only</em> guardrails, working style, and a pointer. Bulk facts live one level down and are read when a task makes them relevant.</p>
+    <p><strong>Board memory is shared operational state, not a workstation knowledge system.</strong> It belongs to an authorized Pursers board, is written through the board API, and follows that board's scrub, membership, journal, and provenance rules.</p>
+    <p>This page intentionally excludes personal assistants, local note stores, local wikis, prompt injectors, tier stores, and workstation sync designs.</p>
   </div>
 
   <section>
-    <h2>The four layers</h2>
-    <p class="sectionlede">Each layer answers a different question: what loads always, what the agent can reach for, what belongs to one project, and what survives a rebuild.</p>
-    <div class="rows">
-      <div class="row">
-        <div class="tier">Layer 1</div>
-        <div class="row-body"><b>Injector</b><span>A lean file that auto-loads into every session. Policy only.</span></div>
-      </div>
-      <div class="row">
-        <div class="tier">Layer 2</div>
-        <div class="row-body"><b>Tier store</b><span>Durable facts sorted into four tiers, read on relevance.</span></div>
-      </div>
-      <div class="row">
-        <div class="tier">Layer 3</div>
-        <div class="row-body"><b>Per-project memory</b><span>One fact per file, indexed, scoped to a single working directory.</span></div>
-      </div>
-      <div class="row">
-        <div class="tier">Layer 4</div>
-        <div class="row-body"><b>Sync</b><span>A git allowlist that versions the portable subset and nothing else.</span></div>
-      </div>
-    </div>
-  </section>
-
-  <section>
-    <h2>Pursers memory status at a21</h2>
-    <p class="sectionlede">The workstation layers below remain a useful local design. Pursers board memory has a separate, governed API and journal lifecycle.</p>
+    <h2>The a21 memory contract</h2>
+    <p class="sectionlede">The reduced seat surface keeps the common write path visible without loading every specialized memory tool into every model session.</p>
     <div class="guard">
-      <p class="guard-label">a21 decision</p>
-      <p><code>memory_write</code> remains a core seat tool. The specialized Central memory tools are not part of the ordinary reduced model-seat surface, but the Personal <code>memory_*</code> family remains supported because the shipped Personal UI is an active caller. Do not describe the whole memory family as removed, and do not enable legacy tools fleet-wide merely to expose unused model tools.</p>
+      <p class="guard-label">Tool-surface decision</p>
+      <p><code>memory_write</code> remains a visible core tool. Specialized Central memory tools are outside the ordinary reduced model-seat surface and are available only through capability negotiation where supported. The Personal <code>memory_*</code> API remains active for its shipped UI caller; that product surface is not part of this board-memory guide.</p>
+    </div>
+    <div class="rows">
+      <div class="row"><div class="tier">Write</div><div class="row-body"><b>memory_write</b><span>Create one governed private or project memory on the selected board.</span></div></div>
+      <div class="row"><div class="tier">Scope</div><div class="row-body"><b>private | project</b><span>The caller must declare the scope; the server enforces membership and authorization.</span></div></div>
+      <div class="row"><div class="tier">Audit</div><div class="row-body"><b>Author and provenance</b><span>Board state records the author identity, related files or tickets, archive provenance, and retraction links when supplied.</span></div></div>
+      <div class="row"><div class="tier">Safety</div><div class="row-body"><b>Scrub before persistence</b><span>Titles, content, tags, references, and summaries pass bounded text and leak-policy checks.</span></div></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Write only durable board context</h2>
+    <p class="sectionlede">A memory should help a later authorized worker act correctly without reconstructing the decision from chat history.</p>
+    <div class="layer">
+      <div class="layer-tag">One<br>record</div>
+      <div>
+        <h3>Required identity and scope</h3>
+        <p><code>memory_write</code> identifies the board, seat name, title, content, and scope. Optional fields classify the record, set priority, relate it to files or tickets, retract an older memory, or preserve archive provenance.</p>
+        <p>Use project scope for facts intended for authorized board participants. Use private scope only when the board contract calls for agent-private recall. A coordinator credential is narrower: it may write only the defined project-scoped coordinator digest shape.</p>
+      </div>
     </div>
     <div class="layer">
-      <div class="layer-tag">Board<br>memory</div>
+      <div class="layer-tag">Size<br>bounds</div>
       <div>
-        <h3>Journaled writes, bounded recovery</h3>
-        <p>A board memory write is durable board state and emits a journal cue. The cue is not the full source of truth: a waiting seat advances the returned per-board cursor, then refetches authoritative state. The a21 wait bridge reads large catch-up windows in bounded pages, compacts relevant results, guarantees monotonic cursor progress, clamps an out-of-range cursor, and may return deadline-bounded partial progress with a usable next cursor.</p>
-        <p>Orchestrator mode keeps at most 5,000 journal events in its persistent ring buffer and uses side-effect-free <code>board_catchup(touch=false)</code>, so reading the journal while idle does not create board writes or renew leases. Acknowledge processed digests with their complete cursor map.</p>
-        <p>Ticket submission notes are capped at 5,000 characters. Keep the required evidence and real test tails in that bounded note; when the client reports truncation, store the full log in an approved artifact rather than claiming the omitted text was submitted. This cap applies to submission notes, not as a license to store secrets in any memory layer.</p>
+        <h3>Keep records and submissions bounded</h3>
+        <p>Normal board-memory content is bounded at 10,000 characters; archived content may preserve a larger source under the archive contract. Titles, pinned summaries, tags, and relations have their own tighter limits.</p>
+        <p>Ticket-submission notes have a separate 5,000-character cap. Preserve the required evidence and real test tails inside that limit. If the client reports truncation, store the full output in an approved artifact and say that the submitted note was truncated.</p>
       </div>
     </div>
   </section>
 
   <section>
-    <h2>Layer 1 &mdash; The injector</h2>
-    <p class="sectionlede">The only file guaranteed to be in context. Everything else has to earn its way in.</p>
+    <h2>Journal, catch-up, and cursors</h2>
+    <p class="sectionlede">The journal wakes consumers; authoritative board state remains the source to refetch after a cue.</p>
+    <div class="flow">
+      <span class="node src">memory_write</span><span class="arr">&rarr;</span>
+      <span class="node">journal cue</span><span class="arr">&rarr;</span>
+      <span class="node">catch-up</span><span class="arr">&rarr;</span>
+      <span class="node src">refetch state</span><span class="arr">&rarr;</span>
+      <span class="node">advance cursor</span>
+    </div>
     <div class="layer">
-      <div class="layer-tag">Always<br>loaded</div>
+      <div class="layer-tag">Monotonic<br>progress</div>
       <div>
-        <h3>Lean by construction</h3>
-        <p class="path">~/.claude/CLAUDE.md</p>
-        <p>This file is treated as a system-prompt layer, not a knowledge base. It holds four things and refuses the rest:</p>
+        <h3>Resume from the returned cursor</h3>
+        <p>The a21 wait bridge drains large catch-up windows in bounded pages, compacts relevant results, clamps an out-of-range cursor, and guarantees monotonic progress. A deadline-bounded partial return still carries a usable next cursor, so the consumer continues without replaying the full journal.</p>
+        <p>For a registry-wide consumer, preserve the complete per-board cursor map. Each event names its board; refetch and act only against that board.</p>
+      </div>
+    </div>
+    <div class="layer">
+      <div class="layer-tag">Read-only<br>idle</div>
+      <div>
+        <h3>Catch-up does not become activity</h3>
+        <p>Orchestrator mode keeps a bounded ring buffer of 5,000 journal events and uses side-effect-free <code>board_catchup(touch=false)</code>. Reading while idle therefore does not write to the board or renew work leases. Processed digests are acknowledged with the cursor represented by the response.</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Retention and correction</h2>
+    <p class="sectionlede">Durable does not mean immutable or unbounded.</p>
+    <div class="rows">
+      <div class="row"><div class="tier">Retract</div><div class="row-body"><b>Link the replacement</b><span>A new write can identify the memory it retracts, preserving an auditable correction chain.</span></div></div>
+      <div class="row"><div class="tier">Archive</div><div class="row-body"><b>Preserve provenance</b><span>Archived records carry source and time metadata and retain approved oversize source content.</span></div></div>
+      <div class="row"><div class="tier">Compact</div><div class="row-body"><b>Remove derivable telemetry only</b><span>Journal compaction retains durable tickets, memories, agents, and consumer cursors.</span></div></div>
+      <div class="row"><div class="tier">Scrub</div><div class="row-body"><b>Never store secrets</b><span>Memory is subject to the same leak controls as other board writes; archive mode does not bypass them.</span></div></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Operator checklist</h2>
+    <p class="sectionlede">Use these checks when a memory-related release changes the API, tool surface, or wait bridge.</p>
+    <div class="layer">
+      <div class="layer-tag">Release<br>gate</div>
+      <div>
         <ul>
-          <li><b>Pinned guardrails</b> &mdash; the rules that must never be crossed</li>
-          <li><b>Working style</b> &mdash; concision, verification habits, when to ask instead of guess</li>
-          <li><b>Account context</b> &mdash; which identity belongs to which kind of task</li>
-          <li><b>A pointer</b> &mdash; where the real facts live, so the agent knows to look</li>
+          <li>Confirm <code>memory_write</code> is present on the intended seat surface.</li>
+          <li>Confirm specialized tools appear only for negotiated capabilities.</li>
+          <li>Verify private/project scope and principal authorization failures.</li>
+          <li>Verify the 5,000-character ticket-note boundary and truncation metadata.</li>
+          <li>Verify journal pages advance monotonically and return the next cursor on partial results.</li>
+          <li>Verify <code>touch=false</code> catch-up creates no idle board writes or lease renewals.</li>
+          <li>Run the repository leak scan before publishing generated documentation.</li>
         </ul>
-        <p class="note">The rule of thumb: if a fact is only needed for some tasks, it belongs in the tier store, not here.</p>
       </div>
     </div>
   </section>
-
-  <section>
-    <h2>Layer 2 &mdash; The tier store</h2>
-    <p class="sectionlede">Durable memory, sorted by how permanent it is and which domain it belongs to.</p>
-
-    <div class="layer">
-      <div class="layer-tag">Read on<br>relevance</div>
-      <div>
-        <h3>Four tiers, one source of truth</h3>
-        <p class="path">~/.claude/memory/</p>
-<pre><span class="k">0-core/</span>       <span class="c">L0   principles, guardrails, policy, durable facts</span>
-             <span class="c">     source of truth; facts can be retired or refreshed</span>
-<span class="k">1-main/</span>       <span class="c">L1   per-session working memory; consolidation lands here</span>
-<span class="k">2-work/</span>       <span class="c">L2.1 professional domain</span>
-<span class="k">2-personal/</span>   <span class="c">L2.2 everything outside it</span></pre>
-        <p>An index file inside <code>0-core/</code> is the way in: a grouped, one-line-per-fact table of contents pointing at every file in the store. It is what the agent scans when the pointer in Layer&nbsp;1 sends it here.</p>
-
-        <p style="margin-top:20px"><b style="font-family:var(--mono);font-size:13px;font-weight:500">Injection flow</b></p>
-        <div class="flow">
-          <span class="node src">L0 core</span>
-          <span class="arr">&rarr;&nbsp;<b>always</b>&rarr;</span>
-          <span class="node">L1 working</span>
-          <span class="arr">+</span>
-          <span class="node">L2 domains</span>
-          <span class="arr">&nbsp;&nbsp;&middot;&nbsp;&nbsp;L1</span>
-          <span class="arr">&rarr;&nbsp;<b>rarely</b>&rarr;</span>
-          <span class="node">L2</span>
-        </div>
-        <p class="note">Core reaches everything. Session memory rarely needs to reach the domains &mdash; and when it does, it is a deliberate promotion, not a default.</p>
-
-        <div class="guard">
-          <p class="guard-label">Hard separation &mdash; never crossed</p>
-          <p>The two domain tiers do not mix: not data, not memory, not context, not deliverables. A tool or account authorised for one domain is never used for the other. This is the one rule the injector spends its scarce space restating in full, because a violation here is not recoverable by cleanup.</p>
-        </div>
-
-        <p>Promotions run upward with review: something learned in a session sits in <code>1-main/</code> until it proves durable, then moves into <code>0-core/</code> as a fact.</p>
-      </div>
-    </div>
-  </section>
-
-  <section>
-    <h2>Layer 3 &mdash; Per-project memory</h2>
-    <p class="sectionlede">Facts that only make sense inside one working directory, kept beside that project's session history.</p>
-
-    <div class="layer">
-      <div class="layer-tag">Scoped to<br>one project</div>
-      <div>
-        <h3>One file, one fact, one index</h3>
-        <p class="path">~/.claude/projects/&lt;project-key&gt;/memory/</p>
-        <p>The project key is the working directory path with every non-alphanumeric character replaced by a dash &mdash; so the same folder always resolves to the same memory, and a renamed or moved folder resolves to a new one.</p>
-        <p>Each memory is a single markdown file carrying a small front matter block:</p>
-<pre>---
-name: <span class="c">short slug</span>
-description: <span class="c">one line — used to judge relevance during recall</span>
-type: <span class="k">user</span> | <span class="k">feedback</span> | <span class="k">project</span> | <span class="k">reference</span>
----
-
-<span class="c">The fact. For feedback and project types, followed by:</span>
-**Why:**            <span class="c">the reasoning that makes it stick</span>
-**How to apply:**   <span class="c">what to actually do differently</span></pre>
-        <p>The four types divide the space cleanly: <code>user</code> is who the person is, <code>feedback</code> is guidance they have given, <code>project</code> is ongoing work not derivable from the code, and <code>reference</code> is a pointer to something external.</p>
-        <p>Files cross-link with double-bracket wiki links. A link to a memory that doesn't exist yet is fine &mdash; it marks something worth writing later rather than a broken reference.</p>
-        <p>Alongside them sits <code>MEMORY.md</code>, the index actually loaded each session &mdash; one line per memory, title plus a hook, and never any content of its own:</p>
-<pre>- [deploy commands](reference_deploy_commands.md) <span class="c">— all run from repo root; three named scripts</span>
-- [naming convention](feedback_agent_naming.md) <span class="c">— role plus model goes in the name, not the platform field</span></pre>
-        <p class="note">What deliberately does <em>not</em> go here: anything the repository already records &mdash; code structure, past fixes, commit history, or the project's own instructions file.</p>
-      </div>
-    </div>
-  </section>
-
-  <section>
-    <h2>Layer 4 &mdash; Sync</h2>
-    <p class="sectionlede">A small script versions the portable subset. The interesting part is everything it refuses to touch.</p>
-
-    <div class="layer">
-      <div class="layer-tag">Versioned<br>subset</div>
-      <div>
-        <h3>Allowlist, not blocklist</h3>
-        <p class="path">~/.claude/memory-sync.sh &nbsp;&middot;&nbsp; status | push [msg] | pull</p>
-        <p>The ignore file starts by excluding the entire directory, then re-includes only what is safe and mergeable. Inverting the default this way means a new file added by a future release is ignored until someone deliberately allows it &mdash; the failure mode is a missing file, never a leaked one.</p>
-<pre><span class="c"># 1) ignore everything at the root</span>
-/*
-
-<span class="c"># 2) re-include the safe subset</span>
-<span class="k">!</span>/CLAUDE.md          <span class="c">the injector</span>
-<span class="k">!</span>/settings.json      <span class="c">preferences and permissions</span>
-<span class="k">!</span>/memory/            <span class="c">the tier store</span>
-<span class="k">!</span>/agents/            <span class="c">agent definitions</span>
-
-<span class="c"># 3) per-project: keep each memory folder, drop everything else</span>
-<span class="k">!</span>/projects/*/memory/
-
-<span class="c"># 4) defense in depth — never tracked even if re-included above</span>
-**/*.jsonl           <span class="c">session transcripts</span>
-.credentials.json    <span class="c">tokens</span>
-*.local.json         <span class="c">machine-specific overrides</span></pre>
-        <p>Session transcripts, authentication state, caches and runtime bundles stay on the machine. What travels is the part a second machine could actually use: policy, preferences, facts, and project memory.</p>
-      </div>
-    </div>
-  </section>
-
-  <section>
-    <h2>Why the order matters</h2>
-    <p class="sectionlede">The layering is not housekeeping. Reading order decides which instruction wins; load order decides what every session costs.</p>
-
-    <div class="layer">
-      <div class="layer-tag">Reading<br>order</div>
-      <div>
-        <h3>Precedence resolves without guessing</h3>
-        <p>Each layer answers a narrower question than the one above it, and they are read in that order. Two pieces of guidance that disagree therefore have a settled winner &mdash; the agent never picks arbitrarily.</p>
-        <div class="rows">
-          <div class="row"><div class="tier">1st</div><div class="row-body"><b>Guardrails</b><span>Absolute. Nothing further down may relax them.</span></div></div>
-          <div class="row"><div class="tier">2nd</div><div class="row-body"><b>Working style</b><span>How to proceed wherever the guardrails leave room.</span></div></div>
-          <div class="row"><div class="tier">3rd</div><div class="row-body"><b>Project memory</b><span>Beats general facts inside its own directory.</span></div></div>
-          <div class="row"><div class="tier">4th</div><div class="row-body"><b>Domain facts</b><span>Applied when nothing more specific has spoken.</span></div></div>
-        </div>
-        <p>The prose is written to match the rank. The injector is imperative &mdash; rules, in the second person. Tier files are declarative &mdash; facts, dated, retractable. Project memory is corrective &mdash; what to do <em>differently</em> here, and why. A file&rsquo;s voice tells you its authority before you have read a word of the content.</p>
-        <p class="note">This is also why the store holds one fact per file. A file that argues two things cannot be cleanly outranked, retired, or refreshed &mdash; and it forces a reader to load both to use either.</p>
-      </div>
-    </div>
-
-    <div class="layer">
-      <div class="layer-tag">Load<br>order</div>
-      <div>
-        <h3>A stable prefix is a cheap session</h3>
-        <p>Prompt caching matches on an <em>exact prefix</em>, evaluated in a fixed order: tool definitions, then system text, then the conversation. A hit requires every byte ahead of the breakpoint to be identical to last time &mdash; so the first thing that changes invalidates everything after it.</p>
-        <div class="flow">
-          <span class="node src">tools</span><span class="arr">&rarr;</span>
-          <span class="node src">injector</span><span class="arr">&rarr;</span>
-          <span class="node src">index</span>
-          <span class="arr">&nbsp;&#9474;&nbsp;</span>
-          <span class="node">facts, on demand</span><span class="arr">&rarr;</span>
-          <span class="node">this turn</span>
-        </div>
-        <p class="note">Left of the divider is written once and edited rarely &mdash; that is the cached prefix. Everything volatile is deliberately kept to the right of it.</p>
-        <p>Three properties of the layout fall out of that constraint:</p>
-        <ul>
-          <li><b>The injector is small and near-frozen.</b> Guardrails and working style change on the order of months, so the prefix stays byte-identical and sessions open on a cache hit rather than a full write.</li>
-          <li><b>Facts arrive late, as results.</b> Reading a tier file mid-session appends to the conversation instead of rewriting the front of it &mdash; so recall <em>extends</em> the cache rather than busting it.</li>
-          <li><b>Growth is append-shaped.</b> A new memory is a new file plus one index line. Nothing that already sits in the prefix gets rewritten, so yesterday&rsquo;s cache still matches today.</li>
-        </ul>
-        <p>The anti-pattern is the obvious one: inline every fact into the auto-loaded file. It looks simpler and costs twice. Each memory edit rewrites the prefix, so the next session pays a cache write instead of a read &mdash; and the accumulated bulk is then re-sent on every turn of every session, forever.</p>
-        <p class="note">The asymmetry is what makes it worth designing around: a cache read bills at roughly a tenth of the base input rate, while a write bills at a premium above it. Invalidation is not a wash &mdash; it is paying full freight for text you had already bought.</p>
-        <p>Both payoffs come from the same property. Separating durable policy from volatile facts is what gives precedence a fixed order, and it is what keeps the front of the request still enough to cache.</p>
-      </div>
-    </div>
-  </section>
-
 
   <footer>
-    <span>Local-first</span><span>No session data synced</span><span>Two domains, never crossed</span><span>Cache-stable prefix</span>
+    <span>Pursers work track</span><span>Governed board state</span><span>Journaled writes</span><span>Bounded recovery</span>
   </footer>
-
 </div>
 </body>
 </html>
