@@ -7,7 +7,22 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added
+- Dispatcher: unclaimed broadcast tickets are re-surfaced to idle identities on a
+  cadence (`PURSERS_BACKLOG_RESURFACE_INTERVAL_S`, default 600 s) and re-offered after
+  the board's `broadcast_reoffer_s`; coordinator identities are never offered work
+  (TK-968b2d34c06c).
+- Fleet dashboard: the fleet clone endpoint populates the working tree and repairs an
+  empty clone instead of refusing it as dirty (TK-416e256f9c72).
+
 ### Changed
+- Wait bridge: background lease keepalive renews only while the stdio session shows
+  model liveness (`PURSERS_KEEPALIVE_IDLE_LIMIT_S`, default three claim TTLs); idle
+  keepalive pauses with a `lease_keepalive_paused` cue and keepalive-only claims are
+  flagged in Needs-attention (TK-b51fd3674ab7).
+- seat-kit: `--python` keeps the virtual-environment interpreter instead of resolving
+  the symlink to the bare CPython; `--upgrade` no longer aborts on a non-fast-forward
+  seat clone (TK-35b6f1c9f373).
 - Fleet dashboard / seat-kit: a seat's home board may now be blank, meaning the seat
   serves every active registry board (`boards=registry`); a named home board now
   means the seat is dedicated to that board only (`boards=home`). The bridge binds to
