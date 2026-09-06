@@ -1,526 +1,178 @@
-<title>หน่วยความจำเอเจนต์ 4 ชั้น</title>
+<title>หน่วยความจำร่วมของ Pursers</title>
 <style>
-    :root{
+  :root{
     color-scheme:light;
-    --ground:#FFFFFF; --surface:#F7F9FC; --surface-sunk:#EDF1F7;
-    --ink:#12161C; --ink-muted:#48515D; --ink-faint:#6B7580;
-    --rule:#DCE2EA; --rule-strong:#B6C0CC;
-    --accent:#1F4E9C; --accent-soft:#E9F0FB;
-    --flag:#A8351F; --flag-soft:#FCEDE9;
-    --ok:#1F6B4C; --ok-soft:#E4F1EA;
+    --ground:#FFFFFF;--surface:#F7F9FC;--surface-sunk:#EDF1F7;
+    --ink:#12161C;--ink-muted:#48515D;--ink-faint:#6B7580;
+    --rule:#DCE2EA;--rule-strong:#B6C0CC;
+    --accent:#1F4E9C;--accent-soft:#E9F0FB;
+    --flag:#A8351F;--flag-soft:#FCEDE9;
+    --ok:#1F6B4C;--ok-soft:#E4F1EA;
     --thai:"IBM Plex Sans Thai",-apple-system,"Helvetica Neue",sans-serif;
-    --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+    --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace
   }
-
-*{box-sizing:border-box}
+  *{box-sizing:border-box}
   body{background:var(--ground);color:var(--ink);font-family:var(--thai);
        font-size:17.5px;line-height:1.9;-webkit-font-smoothing:antialiased}
   .page{max-width:880px;margin:0 auto;padding:56px 30px 96px}
-
   .masthead{border-bottom:2px solid var(--ink);padding-bottom:22px;margin-bottom:14px}
   .eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:.14em;text-transform:uppercase;
            color:var(--ink-faint);margin:0 0 14px}
-  h1{font-weight:600;font-size:clamp(29px,5vw,40px);line-height:1.35;letter-spacing:-.01em;
-     text-wrap:balance;margin:0 0 12px}
-  .standfirst{font-size:17.5px;color:var(--ink-muted);max-width:56ch;margin:0}
+  h1{font-weight:600;font-size:clamp(29px,5vw,40px);line-height:1.35;
+     letter-spacing:-.01em;text-wrap:balance;margin:0 0 12px}
+  .standfirst{font-size:17.5px;color:var(--ink-muted);max-width:60ch;margin:0}
   .meta{display:flex;flex-wrap:wrap;gap:6px 20px;font-family:var(--mono);font-size:11.5px;
         color:var(--ink-faint);margin:0 0 48px;padding-top:12px}
-
   .thesis{border-left:3px solid var(--accent);background:var(--accent-soft);
           padding:20px 24px;margin:0 0 52px;border-radius:0 3px 3px 0}
-  .thesis p{margin:0;max-width:58ch}
-  .thesis p + p{margin-top:10px}
-
+  .thesis p{margin:0;max-width:62ch}.thesis p+p{margin-top:10px}
   h2{font-weight:600;font-size:25px;margin:0 0 8px;line-height:1.5;text-wrap:balance}
-  .sectionlede{color:var(--ink-muted);max-width:56ch;margin:0 0 30px;font-size:17px}
-  section{margin-bottom:72px}
-
-  figure{margin:0 0 32px;padding:24px 20px 16px;background:var(--surface);
-         border:1px solid var(--rule);border-radius:5px;overflow-x:auto}
-  figure svg{display:block;max-width:100%;height:auto;margin:0 auto;color:var(--ink)}
-  figcaption{font-size:15px;color:var(--ink-muted);margin-top:14px;padding-top:12px;
-             border-top:1px solid var(--rule);max-width:64ch}
-  figcaption b{color:var(--ink);font-weight:600}
-  .fignum{font-family:var(--mono);font-size:11px;letter-spacing:.1em;text-transform:uppercase;
-          color:var(--accent);margin-right:8px}
-
+  h3{font-weight:600;font-size:20px;margin:22px 0 5px;line-height:1.5}
+  .sectionlede{color:var(--ink-muted);max-width:60ch;margin:0 0 30px;font-size:17px}
+  section{margin-bottom:64px}
   .rows{display:flex;flex-direction:column;border-top:1px solid var(--rule);margin-bottom:20px}
-  .row{display:grid;grid-template-columns:82px 1fr;gap:0 18px;align-items:baseline;
+  .row{display:grid;grid-template-columns:150px 1fr;gap:0 18px;align-items:baseline;
        padding:12px 0;border-bottom:1px solid var(--rule)}
-  .tier{font-family:var(--mono);font-size:12px;font-weight:500;color:var(--accent);letter-spacing:.04em}
-  .row-body b{font-weight:600;font-size:15.5px;color:var(--ink)}
-  .row-body span{display:block;color:var(--ink-muted);font-size:15.5px;margin-top:1px;line-height:1.7}
-
-  .layer{display:grid;grid-template-columns:88px 1fr;gap:0 18px;padding-top:24px;
-         border-top:1px solid var(--rule-strong);margin-bottom:36px}
-  .layer-tag{font-family:var(--mono);font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;
-             color:var(--ink-faint);line-height:1.7}
-  .layer h3{font-weight:600;font-size:20px;margin:0 0 4px;line-height:1.5}
-  .path{font-family:var(--mono);font-size:12.5px;color:var(--accent);margin:0 0 14px;word-break:break-all}
-  .layer p{margin:0 0 12px;max-width:58ch}
-  .layer p:last-child{margin-bottom:0}
-  ul{margin:0 0 14px;padding-left:20px;max-width:58ch}
-  li{margin-bottom:7px}
+  .tier{font-family:var(--mono);font-size:12px;font-weight:500;color:var(--accent)}
+  .row-body b{font-weight:600;font-size:15.5px}
+  .row-body span{display:block;color:var(--ink-muted);font-size:15.5px;
+                 margin-top:1px;line-height:1.7}
+  ul,ol{margin:0 0 16px;padding-left:22px;max-width:62ch}li{margin-bottom:7px}
   li::marker{color:var(--ink-faint)}
   code{font-family:var(--mono);font-size:.83em;background:var(--surface-sunk);
        padding:1px 5px;border-radius:3px;border:1px solid var(--rule)}
   pre{font-family:var(--mono);font-size:13px;line-height:1.85;background:var(--surface);
-      border:1px solid var(--rule);border-radius:4px;padding:16px 18px;overflow-x:auto;
-      margin:0 0 16px;color:var(--ink)}
-  pre .c{color:var(--ink-faint)}
-  pre .k{color:var(--accent)}
-
+      border:1px solid var(--rule);border-radius:4px;padding:16px 18px;
+      overflow-x:auto;margin:0 0 16px;color:var(--ink)}
   .guard{border:1px solid var(--flag);background:var(--flag-soft);border-radius:4px;
          padding:18px 20px;margin:0 0 16px}
-  .guard-label{font-family:var(--mono);font-size:11px;letter-spacing:.12em;text-transform:uppercase;
-               color:var(--flag);margin:0 0 8px;font-weight:500}
-  .guard p{margin:0;max-width:58ch}
+  .guard-label{font-family:var(--mono);font-size:11px;letter-spacing:.12em;
+               text-transform:uppercase;color:var(--flag);margin:0 0 8px;font-weight:500}
+  .guard p{margin:0;max-width:62ch}
   .note{font-size:15.5px;color:var(--ink-muted);border-left:2px solid var(--rule-strong);
-        padding-left:14px;margin:0 0 14px;max-width:58ch;line-height:1.75}
-
+        padding-left:14px;margin:0 0 14px;max-width:62ch;line-height:1.75}
   footer{border-top:1px solid var(--rule);padding-top:20px;margin-top:12px;
          font-family:var(--mono);font-size:11.5px;color:var(--ink-faint);
          display:flex;flex-wrap:wrap;gap:6px 24px}
-
-  @media (max-width:640px){
-    .page{padding:40px 18px 72px}
-    .row,.layer{grid-template-columns:1fr;gap:5px}
-  }
-  @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
-  a{color:var(--accent)} :focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+  @media(max-width:640px){.page{padding:40px 18px 72px}.row{grid-template-columns:1fr;gap:5px}}
+  @media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+  a{color:var(--accent)}:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 </style>
 
 <div class="page">
-
 <header class="masthead">
-  <p class="eyebrow">Agent configuration &middot; reference &middot; TH</p>
-  <h1>หน่วยความจำเอเจนต์ 4 ชั้น</h1>
-  <p class="standfirst">วิธีจัดหน่วยความจำถาวรให้เอเจนต์เขียนโค้ดบนเครื่องเดียว — อะไรโหลดอัตโนมัติ อะไรรอให้เรียกอ่าน และอะไรที่ไม่ออกจากเครื่องเลย</p>
+  <p class="eyebrow">Pursers board memory &middot; reference &middot; TH</p>
+  <h1>หน่วยความจำร่วมของ Pursers</h1>
+  <p class="standfirst">วิธีเก็บ อ่าน ค้นหา เชื่อมโยง แก้ไข และส่งต่อบริบทที่ใช้ซ้ำบนบอร์ด Pursers โดยรักษาขอบเขต สิทธิ์ แหล่งที่มา และหลักฐานที่ตรวจสอบได้</p>
 </header>
-<p class="meta"><span>4 ชั้น</span><span>2 โดเมนแยกขาด</span><span>Pursers 5.0.0a21</span><span>ซิงก์เฉพาะส่วนที่ปลอดภัย</span><span>local-first</span></p>
+<p class="meta"><span>Pursers 5.0.0a21</span><span>board-scoped</span><span>bounded</span><span>authoritative refetch</span></p>
 
 <div class="thesis">
-  <p><b>ทั้งระบบหมุนรอบสมดุลเดียว</b> ทุก session จะมีข้อความก้อนหนึ่งถูกโหลดเข้ามาอัตโนมัติ — ใส่น้อยไป ชั้นลึกก็ไม่มีใครไปถึง เอเจนต์ไม่รู้ว่ามีอยู่ คลังก็ตายทั้งที่ยังไม่ถูกอ่าน ใส่มากไป ทุก session ก็เริ่มต้นด้วยความอ้วน แล้วตายด้วยค่า context แทน</p>
-  <p>ไฟล์ที่โหลดอัตโนมัติจึงถือ<b>เฉพาะ</b>กฎเหล็ก แนวทางการทำงาน และป้ายบอกทาง ส่วนข้อเท็จจริงก้อนใหญ่อยู่ชั้นถัดลงไป และถูกอ่านตอนที่งานทำให้มันเกี่ยวข้องเท่านั้น</p>
+  <p><b>Memory ในหน้านี้หมายถึงข้อมูลร่วมที่ Central จัดเก็บให้บอร์ดเท่านั้น</b> ไม่ใช่ระบบจัดเก็บภายนอก Pursers และไม่ใช่ระบบฉีดข้อความเข้า context ของ host</p>
+  <p>ใช้ memory เพื่อเก็บการตัดสินใจ ตัวบล็อก วิธีตรวจสอบ handoff หรือบริบทของ ticket ที่ agent คนถัดไปต้องนำกลับมาใช้ ส่วน source code และเอกสารโครงการยังเป็นแหล่งความจริงของตัวงาน</p>
 </div>
 
-<section>
-  <h2>ภาพรวมทั้งสี่ชั้น</h2>
-  <p class="sectionlede">แต่ละชั้นตอบคำถามคนละข้อ และมีต้นทุน context ไม่เท่ากัน</p>
-
-  <figure>
-    <svg viewBox="0 0 780 366" role="img" aria-label="แผนภาพสี่ชั้น: ชั้นตัวฉีดอยู่ใน context ทุก session ชั้นคลัง tier และ memory ต่อโปรเจกต์อ่านเมื่อเกี่ยวข้อง ชั้นซิงก์ไม่เข้า context เลย">
-      <defs>
-        <marker id="a1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
-          <polygon points="0,0 10,5 0,10" fill="currentColor"/>
-        </marker>
-      </defs>
-
-      <text x="20" y="20" font-family="monospace" font-size="12" fill="currentColor" opacity=".68">ชั้นบนมีอำนาจเหนือชั้นล่าง</text>
-
-      <!-- layer 1 -->
-      <rect x="118" y="34" width="500" height="58" rx="4" fill="none" stroke="#1F4E9C" stroke-width="2"/>
-      <text x="104" y="60" font-family="monospace" font-size="12" fill="#1F4E9C" text-anchor="end">ชั้น 1</text>
-      <text x="138" y="60" font-size="14" font-weight="600" fill="currentColor">ตัวฉีด — ไฟล์ที่โหลดอัตโนมัติ</text>
-      <text x="138" y="79" font-size="12" fill="currentColor" opacity=".72">กฎเหล็ก · แนวทางทำงาน · ป้ายบอกทาง</text>
-      <text x="634" y="60" font-size="12.5" fill="#1F4E9C">อยู่ใน context</text>
-      <text x="634" y="76" font-size="12.5" fill="#1F4E9C">ทุก session</text>
-
-      <line x1="20" y1="106" x2="760" y2="106" stroke="currentColor" stroke-width="1" stroke-dasharray="4 4" opacity=".62"/>
-      <text x="20" y="100" font-size="12" fill="currentColor" opacity=".68">— เส้นแบ่ง: เหนือเส้นเสียค่าทุกครั้ง ใต้เส้นเสียเมื่อใช้ —</text>
-
-      <!-- layer 2 -->
-      <rect x="118" y="120" width="500" height="58" rx="4" fill="none" stroke="currentColor" stroke-width="1.4" opacity=".82"/>
-      <text x="104" y="146" font-family="monospace" font-size="12" fill="currentColor" text-anchor="end" opacity=".8">ชั้น 2</text>
-      <text x="138" y="146" font-size="14" font-weight="600" fill="currentColor">คลังแบ่งชั้น (tier store)</text>
-      <text x="138" y="165" font-size="12" fill="currentColor" opacity=".72">0-core · 1-main · 2-work · 2-personal</text>
-      <text x="634" y="152" font-size="12.5" fill="currentColor" opacity=".8">อ่านเมื่อเกี่ยวข้อง</text>
-
-      <!-- layer 3 -->
-      <rect x="118" y="206" width="500" height="58" rx="4" fill="none" stroke="currentColor" stroke-width="1.4" opacity=".82"/>
-      <text x="104" y="232" font-family="monospace" font-size="12" fill="currentColor" text-anchor="end" opacity=".8">ชั้น 3</text>
-      <text x="138" y="232" font-size="14" font-weight="600" fill="currentColor">memory ต่อโปรเจกต์</text>
-      <text x="138" y="251" font-size="12" fill="currentColor" opacity=".72">ดัชนี 1 บรรทัด/ความจำ + ไฟล์ความจำแยก</text>
-      <text x="634" y="238" font-size="12.5" fill="currentColor" opacity=".8">เฉพาะโฟลเดอร์นั้น</text>
-
-      <!-- layer 4 -->
-      <rect x="118" y="292" width="500" height="58" rx="4" fill="none" stroke="currentColor" stroke-width="1.2" stroke-dasharray="5 4" opacity=".62"/>
-      <text x="104" y="318" font-family="monospace" font-size="12" fill="currentColor" text-anchor="end" opacity=".62">ชั้น 4</text>
-      <text x="138" y="318" font-size="14" font-weight="600" fill="currentColor" opacity=".72">ซิงก์ด้วย git</text>
-      <text x="138" y="337" font-size="12" fill="currentColor" opacity=".62">เวอร์ชันเฉพาะส่วนที่พกพาได้</text>
-      <text x="634" y="324" font-size="12.5" fill="currentColor" opacity=".66">ไม่เข้า context เลย</text>
-
-      <line x1="60" y1="40" x2="60" y2="340" stroke="currentColor" stroke-width="1.2" opacity=".4" marker-end="url(#a1)"/>
-      <text x="52" y="196" font-size="12" fill="currentColor" text-anchor="end" opacity=".68">อ่าน</text>
-      <text x="52" y="212" font-size="12" fill="currentColor" text-anchor="end" opacity=".68">ตามลำดับ</text>
-    </svg>
-    <figcaption><span class="fignum">รูปที่ 1</span><b>เส้นประคือเส้นต้นทุน</b> — สิ่งที่อยู่เหนือเส้นถูกส่งไปกับทุกคำขอ ไม่ว่างานนั้นจะใช้หรือไม่ ทุกอย่างใต้เส้นจ่ายเมื่อถูกเรียกใช้จริงเท่านั้น การตัดสินใจว่าอะไรอยู่เหนือเส้นจึงเป็นการตัดสินใจที่แพงที่สุดในทั้งระบบ</figcaption>
-  </figure>
-
+<section id="overview">
+  <h2>ภาพรวม: เขียนหนึ่งครั้ง อ่านตามขอบเขต</h2>
+  <p class="sectionlede">Central เป็นเจ้าของ durable state; agent ระบุบอร์ด ชื่อ seat และ scope ทุกครั้งที่เขียน</p>
   <div class="rows">
-    <div class="row"><div class="tier">ชั้น 1</div><div class="row-body"><b>ตัวฉีด</b><span>ไฟล์เล็ก ๆ ที่โหลดเข้าทุก session — มีแต่นโยบาย</span></div></div>
-    <div class="row"><div class="tier">ชั้น 2</div><div class="row-body"><b>คลังแบ่งชั้น</b><span>ข้อเท็จจริงถาวร แยกเป็นสี่ tier อ่านเมื่อเกี่ยวข้อง</span></div></div>
-    <div class="row"><div class="tier">ชั้น 3</div><div class="row-body"><b>memory ต่อโปรเจกต์</b><span>หนึ่งไฟล์ต่อหนึ่งข้อเท็จจริง มีดัชนี ผูกกับโฟลเดอร์เดียว</span></div></div>
-    <div class="row"><div class="tier">ชั้น 4</div><div class="row-body"><b>ซิงก์</b><span>git allowlist ที่เก็บเฉพาะส่วนที่พกพาได้ และไม่แตะอย่างอื่นเลย</span></div></div>
+    <div class="row"><div class="tier">WRITE</div><div class="row-body"><b>ตรวจสิทธิ์และ scrub ก่อนบันทึก</b><span><code>memory_write</code> ส่งข้อมูลไปยัง Central ซึ่งผูกผู้เขียนกับ principal และ agent identity ที่ตรวจสอบแล้ว</span></div></div>
+    <div class="row"><div class="tier">CUE</div><div class="row-body"><b>Journal แจ้งว่ามี state เปลี่ยน</b><span><code>memory_written</code> เป็นสัญญาณให้ผู้อ่าน refetch ไม่ใช่สำเนา authoritative state</span></div></div>
+    <div class="row"><div class="tier">REFETCH</div><div class="row-body"><b>อ่าน state ปัจจุบันจาก Central</b><span>ใช้ <code>memory_read</code>, <code>memory_search</code> หรือ <code>memory_links</code> ตามข้อมูลที่ต้องการ</span></div></div>
   </div>
 </section>
 
-<section>
-  <h2>ชั้น 1 — ตัวฉีด</h2>
-  <p class="sectionlede">ไฟล์เดียวที่การันตีว่าอยู่ใน context เสมอ ที่เหลือต้องพิสูจน์ตัวเองก่อนถึงจะได้เข้า</p>
-  <div class="layer">
-    <div class="layer-tag">โหลด<br>ทุกครั้ง</div>
-    <div>
-      <h3>เล็กโดยเจตนา ไม่ใช่เพราะยังเขียนไม่เสร็จ</h3>
-      <p class="path">~/.claude/CLAUDE.md</p>
-      <p>ไฟล์นี้ถูกมองเป็นชั้นของ system prompt ไม่ใช่ฐานความรู้ มันถือแค่สี่อย่าง และปฏิเสธที่เหลือทั้งหมด:</p>
-      <ul>
-        <li><b>กฎเหล็กที่ปักหมุดไว้</b> — เส้นที่ห้ามข้ามไม่ว่ากรณีใด</li>
-        <li><b>แนวทางการทำงาน</b> — ความกระชับ นิสัยการตรวจสอบ เมื่อไหร่ควรถามแทนเดา</li>
-        <li><b>บริบทของบัญชี</b> — ตัวตนไหนใช้กับงานประเภทไหน</li>
-        <li><b>ป้ายบอกทาง</b> — ข้อเท็จจริงจริง ๆ อยู่ที่ไหน เพื่อให้เอเจนต์รู้ว่าต้องไปดู</li>
-      </ul>
-      <p class="note">กฎง่าย ๆ: ถ้าข้อเท็จจริงนั้นจำเป็นแค่กับงานบางประเภท มันอยู่ในคลังชั้น 2 ไม่ใช่ที่นี่</p>
-    </div>
-  </div>
-</section>
-
-<section>
-  <h2>ชั้น 2 — คลังแบ่งชั้น</h2>
-  <p class="sectionlede">ความจำถาวร เรียงตามความคงทน และตามโดเมนที่มันสังกัด</p>
-
-  <div class="layer">
-    <div class="layer-tag">อ่านเมื่อ<br>เกี่ยวข้อง</div>
-    <div>
-      <h3>สี่ tier แหล่งความจริงเดียว</h3>
-      <p class="path">~/.claude/memory/</p>
-<pre><span class="k">0-core/</span>       <span class="c">L0   หลักการ กฎเหล็ก นโยบาย ข้อเท็จจริงถาวร</span>
-             <span class="c">     แหล่งความจริง — ปลดระวาง/รีเฟรชข้อเท็จจริงได้</span>
-<span class="k">1-main/</span>       <span class="c">L1   ความจำใช้งานราย session — ที่ที่การกลั่นกรองลงมาพัก</span>
-<span class="k">2-work/</span>       <span class="c">L2.1 โดเมนงานอาชีพ</span>
-<span class="k">2-personal/</span>   <span class="c">L2.2 ทุกอย่างนอกเหนือจากนั้น</span></pre>
-      <p>ไฟล์ดัชนีใน <code>0-core/</code> คือประตูทางเข้า — สารบัญบรรทัดเดียวต่อข้อเท็จจริง จัดกลุ่มไว้ ชี้ไปทุกไฟล์ในคลัง มันคือสิ่งที่เอเจนต์กวาดตาดูเมื่อป้ายบอกทางในชั้น 1 ส่งมันมาที่นี่</p>
-    </div>
-  </div>
-
-  <figure>
-    <svg viewBox="0 0 760 300" role="img" aria-label="แผนภาพการฉีด: 0-core ส่งเข้า 1-main และทั้งสองโดเมนทุกครั้ง 1-main ส่งไปโดเมนนานๆ ครั้ง และมีกำแพงกั้นระหว่างโดเมนงานกับโดเมนส่วนตัว">
-      <defs>
-        <marker id="a2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto">
-          <polygon points="0,0 10,5 0,10" fill="#1F4E9C"/>
-        </marker>
-        <marker id="a2d" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto">
-          <polygon points="0,0 10,5 0,10" fill="currentColor"/>
-        </marker>
-      </defs>
-
-      <rect x="26" y="112" width="140" height="70" rx="4" fill="#E9F0FB" stroke="#1F4E9C" stroke-width="2"/>
-      <text x="96" y="142" font-size="14" font-weight="600" fill="#1F4E9C" text-anchor="middle">0-core</text>
-      <text x="96" y="162" font-family="monospace" font-size="12" fill="#1F4E9C" text-anchor="middle">L0</text>
-
-      <rect x="256" y="18" width="150" height="56" rx="4" fill="none" stroke="currentColor" stroke-width="1.5"/>
-      <text x="331" y="42" font-size="13.5" font-weight="600" fill="currentColor" text-anchor="middle">1-main</text>
-      <text x="331" y="60" font-family="monospace" font-size="12.5" fill="currentColor" text-anchor="middle" opacity=".72">L1</text>
-
-      <rect x="500" y="18" width="200" height="56" rx="4" fill="none" stroke="currentColor" stroke-width="1.5"/>
-      <text x="600" y="42" font-size="13.5" font-weight="600" fill="currentColor" text-anchor="middle">2-work</text>
-      <text x="600" y="60" font-family="monospace" font-size="12.5" fill="currentColor" text-anchor="middle" opacity=".72">L2.1</text>
-
-      <rect x="500" y="214" width="200" height="56" rx="4" fill="none" stroke="currentColor" stroke-width="1.5"/>
-      <text x="600" y="238" font-size="13.5" font-weight="600" fill="currentColor" text-anchor="middle">2-personal</text>
-      <text x="600" y="256" font-family="monospace" font-size="12.5" fill="currentColor" text-anchor="middle" opacity=".72">L2.2</text>
-
-      <!-- barrier -->
-      <line x1="478" y1="146" x2="726" y2="146" stroke="#A8351F" stroke-width="2" stroke-dasharray="7 5"/>
-      <text x="602" y="138" font-size="12" font-weight="600" fill="#A8351F" text-anchor="middle">กำแพง — ห้ามข้ามถึงกัน</text>
-      <text x="602" y="166" font-size="12" fill="#A8351F" text-anchor="middle" opacity=".85">ข้อมูล · ความจำ · บริบท · ผลงาน</text>
-
-      <!-- arrows from L0 -->
-      <line x1="166" y1="130" x2="250" y2="60" stroke="#1F4E9C" stroke-width="1.8" marker-end="url(#a2)"/>
-      <line x1="166" y1="142" x2="494" y2="56" stroke="#1F4E9C" stroke-width="1.8" marker-end="url(#a2)"/>
-      <line x1="166" y1="164" x2="494" y2="240" stroke="#1F4E9C" stroke-width="1.8" marker-end="url(#a2)"/>
-      <text x="212" y="88" font-size="12.5" fill="#1F4E9C">ทุกครั้ง</text>
-
-      <!-- L1 -> L2 rare -->
-      <line x1="406" y1="46" x2="494" y2="46" stroke="currentColor" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#a2d)" opacity=".8"/>
-      <text x="450" y="34" font-size="12" fill="currentColor" text-anchor="middle" opacity=".8">นานๆ ครั้ง</text>
-    </svg>
-    <figcaption><span class="fignum">รูปที่ 2</span><b>แกนกลางไปถึงทุกที่ แต่สองโดเมนไปหากันไม่ได้</b> — เส้นทึบคือฉีดทุกครั้ง เส้นประคือเกิดนาน ๆ ครั้งและเป็นการเลื่อนขั้นโดยตั้งใจ ไม่ใช่ค่าเริ่มต้น ส่วนเส้นสีแดงไม่ใช่ลูกศร มันคือสิ่งที่ตรงข้าม — ไม่มีเส้นทางใดพาดผ่านมันได้เลย</figcaption>
-  </figure>
-
-  <div class="guard">
-    <p class="guard-label">การแยกขาด — ห้ามข้ามเด็ดขาด</p>
-    <p>สอง tier โดเมนไม่ปะปนกัน: ไม่ใช่ข้อมูล ไม่ใช่ความจำ ไม่ใช่บริบท ไม่ใช่ผลงาน เครื่องมือหรือบัญชีที่อนุญาตให้ใช้กับโดเมนหนึ่ง จะไม่ถูกใช้กับอีกโดเมนหนึ่ง นี่คือกฎข้อเดียวที่ตัวฉีดยอมเสียพื้นที่อันจำกัดของมันเพื่อเขียนซ้ำแบบเต็ม ๆ เพราะการละเมิดตรงนี้แก้ด้วยการตามเก็บกวาดทีหลังไม่ได้</p>
-  </div>
-
-  <p>การเลื่อนขั้นวิ่งขึ้นข้างบนพร้อมการทบทวน: สิ่งที่เรียนรู้ระหว่าง session จะพักอยู่ใน <code>1-main/</code> จนกว่าจะพิสูจน์ว่าคงทน แล้วจึงย้ายเข้า <code>0-core/</code> ในฐานะข้อเท็จจริง</p>
-</section>
-
-<section>
-  <h2>ชั้น 3 — memory ต่อโปรเจกต์</h2>
-  <p class="sectionlede">ข้อเท็จจริงที่มีความหมายเฉพาะในโฟลเดอร์เดียว เก็บไว้ข้าง ๆ ประวัติ session ของโปรเจกต์นั้น</p>
-
-  <figure>
-    <svg viewBox="0 0 740 260" role="img" aria-label="แผนภาพ: ไฟล์ดัชนี MEMORY.md โหลดทุก session และแต่ละบรรทัดชี้ไปยังไฟล์ความจำที่โหลดเฉพาะเมื่อต้องใช้">
-      <defs>
-        <marker id="a3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
-          <polygon points="0,0 10,5 0,10" fill="currentColor"/>
-        </marker>
-      </defs>
-
-      <rect x="24" y="46" width="250" height="150" rx="4" fill="#E9F0FB" stroke="#1F4E9C" stroke-width="2"/>
-      <text x="40" y="72" font-family="monospace" font-size="12.5" font-weight="500" fill="#1F4E9C">MEMORY.md</text>
-      <line x1="40" y1="88" x2="258" y2="88" stroke="#1F4E9C" stroke-width="1" opacity=".35"/>
-      <text x="40" y="112" font-size="12.5" fill="#1F4E9C" opacity=".95">— คำสั่ง deploy — รันจาก root</text>
-      <text x="40" y="141" font-size="12.5" fill="#1F4E9C" opacity=".95">— กติกาตั้งชื่อ — role+model</text>
-      <text x="40" y="170" font-size="12.5" fill="#1F4E9C" opacity=".95">— ข้อมูลพัง — อย่า hard error</text>
-      <text x="149" y="222" font-size="12" font-weight="600" fill="#1F4E9C" text-anchor="middle">โหลดทุก session</text>
-      <text x="149" y="240" font-size="12" fill="#1F4E9C" text-anchor="middle" opacity=".8">1 บรรทัด/ความจำ · ไม่มีเนื้อหา</text>
-
-      <line x1="274" y1="108" x2="452" y2="60" stroke="currentColor" stroke-width="1.4" marker-end="url(#a3)" opacity=".82"/>
-      <line x1="274" y1="137" x2="452" y2="132" stroke="currentColor" stroke-width="1.4" marker-end="url(#a3)" opacity=".82"/>
-      <line x1="274" y1="166" x2="452" y2="204" stroke="currentColor" stroke-width="1.4" marker-end="url(#a3)" opacity=".82"/>
-      <text x="363" y="98" font-size="12" fill="currentColor" text-anchor="middle" opacity=".82">อ่านเมื่อเกี่ยว</text>
-
-      <rect x="458" y="34" width="256" height="52" rx="4" fill="none" stroke="currentColor" stroke-width="1.3" opacity=".8"/>
-      <text x="474" y="56" font-family="monospace" font-size="12.5" fill="currentColor">reference_deploy.md</text>
-      <text x="474" y="74" font-size="12" fill="currentColor" opacity=".72">เนื้อหาเต็ม + Why + How to apply</text>
-
-      <rect x="458" y="106" width="256" height="52" rx="4" fill="none" stroke="currentColor" stroke-width="1.3" opacity=".8"/>
-      <text x="474" y="128" font-family="monospace" font-size="12.5" fill="currentColor">feedback_naming.md</text>
-      <text x="474" y="146" font-size="12" fill="currentColor" opacity=".72">เนื้อหาเต็ม + Why + How to apply</text>
-
-      <rect x="458" y="178" width="256" height="52" rx="4" fill="none" stroke="currentColor" stroke-width="1.3" opacity=".8"/>
-      <text x="474" y="200" font-family="monospace" font-size="12.5" fill="currentColor">feedback_data.md</text>
-      <text x="474" y="218" font-size="12" fill="currentColor" opacity=".72">เนื้อหาเต็ม + Why + How to apply</text>
-    </svg>
-    <figcaption><span class="fignum">รูปที่ 3</span><b>ดัชนีอยู่ใน context เนื้อหาไม่อยู่</b> — ดัชนีเล็กพอจะแบกไว้ตลอด และมันมีหน้าที่เดียวคือทำให้เอเจนต์รู้ว่ามีอะไรให้อ่านบ้าง เนื้อหาเต็มของแต่ละความจำจะเข้ามาก็ต่อเมื่อบรรทัดในดัชนีทำให้มันดูเกี่ยวกับงานตรงหน้า</figcaption>
-  </figure>
-
-  <div class="layer">
-    <div class="layer-tag">ผูกกับ<br>โฟลเดอร์</div>
-    <div>
-      <h3>หนึ่งไฟล์ หนึ่งข้อเท็จจริง หนึ่งดัชนี</h3>
-      <p class="path">~/.claude/projects/&lt;project-key&gt;/memory/</p>
-      <p>project key คือ path ของโฟลเดอร์ที่ทำงานอยู่ โดยแทนอักขระที่ไม่ใช่ตัวเลขหรือตัวอักษรทั้งหมดด้วยขีด — โฟลเดอร์เดิมจึงชี้ไปที่ความจำเดิมเสมอ และโฟลเดอร์ที่ถูกย้ายหรือเปลี่ยนชื่อจะได้ความจำชุดใหม่</p>
-      <p>แต่ละความจำเป็นไฟล์ markdown ไฟล์เดียว มี frontmatter สั้น ๆ กำกับ:</p>
-<pre>---
-name: <span class="c">สลักสั้น ๆ</span>
-description: <span class="c">หนึ่งบรรทัด — ใช้ตัดสินความเกี่ยวข้องตอนเรียกคืน</span>
-type: <span class="k">user</span> | <span class="k">feedback</span> | <span class="k">project</span> | <span class="k">reference</span>
----
-
-<span class="c">ตัวข้อเท็จจริง สำหรับ feedback และ project ตามด้วย:</span>
-**Why:**            <span class="c">เหตุผลที่ทำให้มันติดหัว</span>
-**How to apply:**   <span class="c">แล้วต้องทำอะไรต่างไปจากเดิม</span></pre>
-      <p>สี่ type แบ่งพื้นที่ได้ครบโดยไม่ทับกัน: <code>user</code> คือผู้ใช้เป็นใคร <code>feedback</code> คือคำแนะนำที่เขาเคยให้ <code>project</code> คืองานที่กำลังทำซึ่งอ่านจากโค้ดไม่ได้ และ <code>reference</code> คือป้ายชี้ไปยังแหล่งภายนอก</p>
-      <p>ไฟล์เชื่อมถึงกันด้วยลิงก์วงเล็บเหลี่ยมคู่ ลิงก์ไปยังความจำที่ยังไม่มีอยู่ถือว่าปกติ — มันคือหมุดว่ามีเรื่องควรเขียนเพิ่ม ไม่ใช่ลิงก์เสีย</p>
-      <p class="note">สิ่งที่ตั้งใจ <b>ไม่</b> เก็บที่นี่: อะไรก็ตามที่ repo บันทึกไว้อยู่แล้ว — โครงสร้างโค้ด การแก้บั๊กที่ผ่านมา ประวัติ commit หรือไฟล์คำสั่งของโปรเจกต์เอง</p>
-    </div>
-  </div>
-</section>
-
-<section>
-  <h2>ชั้น 4 — ซิงก์</h2>
-  <p class="sectionlede">สคริปต์เล็ก ๆ ทำเวอร์ชันให้ส่วนที่พกพาได้ ส่วนที่น่าสนใจกว่าคือสิ่งที่มันปฏิเสธจะแตะ</p>
-
-  <figure>
-    <svg viewBox="0 0 760 300" role="img" aria-label="แผนภาพประตูกรอง: ทุกอย่างใต้โฟลเดอร์ตั้งค่าถูกปฏิเสธเป็นค่าเริ่มต้น มีเพียงห้ารายการที่ถูกอนุญาตให้ขึ้น git ที่เหลือไม่ออกจากเครื่อง">
-      <defs>
-        <marker id="a4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
-          <polygon points="0,0 10,5 0,10" fill="#1F6B4C"/>
-        </marker>
-      </defs>
-
-      <text x="20" y="20" font-size="12" font-weight="600" fill="currentColor" opacity=".82">ทุกอย่างใต้ ~/.claude</text>
-
-      <text x="26" y="52" font-family="monospace" font-size="12.5" fill="currentColor">CLAUDE.md</text>
-      <text x="26" y="76" font-family="monospace" font-size="12.5" fill="currentColor">settings.json</text>
-      <text x="26" y="100" font-family="monospace" font-size="12.5" fill="currentColor">memory/</text>
-      <text x="26" y="124" font-family="monospace" font-size="12.5" fill="currentColor">agents/</text>
-      <text x="26" y="148" font-family="monospace" font-size="12.5" fill="currentColor">projects/*/memory/</text>
-      <text x="26" y="180" font-family="monospace" font-size="12.5" fill="currentColor" opacity=".68">*.jsonl (บทสนทนา)</text>
-      <text x="26" y="204" font-family="monospace" font-size="12.5" fill="currentColor" opacity=".68">.credentials.json</text>
-      <text x="26" y="228" font-family="monospace" font-size="12.5" fill="currentColor" opacity=".68">*.local.json</text>
-      <text x="26" y="252" font-family="monospace" font-size="12.5" fill="currentColor" opacity=".68">sessions / caches / oauth</text>
-
-      <!-- gate -->
-      <rect x="290" y="26" width="76" height="244" rx="4" fill="none" stroke="currentColor" stroke-width="1.6"/>
-      <text x="328" y="130" font-size="12" font-weight="600" fill="currentColor" text-anchor="middle">ประตู</text>
-      <text x="328" y="150" font-size="12" fill="currentColor" text-anchor="middle" opacity=".82">ปฏิเสธ</text>
-      <text x="328" y="166" font-size="12" fill="currentColor" text-anchor="middle" opacity=".82">ก่อน</text>
-      <text x="328" y="292" font-family="monospace" font-size="12.5" fill="currentColor" text-anchor="middle" opacity=".72">/*  แล้วค่อย !re-include</text>
-
-      <!-- pass -->
-      <line x1="192" y1="48" x2="286" y2="60" stroke="#1F6B4C" stroke-width="1.5" marker-end="url(#a4)"/>
-      <line x1="192" y1="72" x2="286" y2="76" stroke="#1F6B4C" stroke-width="1.5" marker-end="url(#a4)"/>
-      <line x1="192" y1="96" x2="286" y2="94" stroke="#1F6B4C" stroke-width="1.5" marker-end="url(#a4)"/>
-      <line x1="192" y1="120" x2="286" y2="110" stroke="#1F6B4C" stroke-width="1.5" marker-end="url(#a4)"/>
-      <line x1="192" y1="144" x2="286" y2="126" stroke="#1F6B4C" stroke-width="1.5" marker-end="url(#a4)"/>
-
-      <!-- blocked -->
-      <line x1="192" y1="176" x2="270" y2="192" stroke="#A8351F" stroke-width="1.4" opacity=".8"/>
-      <line x1="192" y1="200" x2="270" y2="206" stroke="#A8351F" stroke-width="1.4" opacity=".8"/>
-      <line x1="192" y1="224" x2="270" y2="220" stroke="#A8351F" stroke-width="1.4" opacity=".8"/>
-      <line x1="192" y1="248" x2="270" y2="234" stroke="#A8351F" stroke-width="1.4" opacity=".8"/>
-      <g stroke="#A8351F" stroke-width="2">
-        <line x1="272" y1="185" x2="284" y2="197"/><line x1="284" y1="185" x2="272" y2="197"/>
-        <line x1="272" y1="199" x2="284" y2="211"/><line x1="284" y1="199" x2="272" y2="211"/>
-        <line x1="272" y1="213" x2="284" y2="225"/><line x1="284" y1="213" x2="272" y2="225"/>
-        <line x1="272" y1="227" x2="284" y2="239"/><line x1="284" y1="227" x2="272" y2="239"/>
-      </g>
-
-      <line x1="366" y1="92" x2="470" y2="92" stroke="#1F6B4C" stroke-width="1.8" marker-end="url(#a4)"/>
-      <rect x="478" y="52" width="252" height="80" rx="4" fill="#E4F1EA" stroke="#1F6B4C" stroke-width="1.8"/>
-      <text x="604" y="82" font-size="13.5" font-weight="600" fill="#1F6B4C" text-anchor="middle">ขึ้น git — 5 รายการ</text>
-      <text x="604" y="104" font-size="12.5" fill="#1F6B4C" text-anchor="middle">นโยบาย · ค่าตั้ง · ข้อเท็จจริง · memory</text>
-
-      <rect x="478" y="176" width="252" height="80" rx="4" fill="#FCEDE9" stroke="#A8351F" stroke-width="1.8" stroke-dasharray="6 4"/>
-      <text x="604" y="206" font-size="13.5" font-weight="600" fill="#A8351F" text-anchor="middle">ไม่ออกจากเครื่อง</text>
-      <text x="604" y="228" font-size="12.5" fill="#A8351F" text-anchor="middle">บทสนทนา · โทเคน · แคช · สถานะรันไทม์</text>
-    </svg>
-    <figcaption><span class="fignum">รูปที่ 4</span><b>ค่าเริ่มต้นคือปฏิเสธ</b> — ไฟล์ ignore เริ่มด้วยการตัดทั้งโฟลเดอร์ทิ้ง แล้วค่อยดึงกลับมาเฉพาะห้ารายการ การกลับด้านแบบนี้ทำให้ไฟล์ใหม่ที่มาพร้อมเวอร์ชันอนาคตถูกกันไว้โดยอัตโนมัติ จนกว่าจะมีคนตั้งใจอนุญาต — โหมดพังของมันคือ &ldquo;ไฟล์หาย&rdquo; ไม่ใช่ &ldquo;ข้อมูลหลุด&rdquo;</figcaption>
-  </figure>
-
-  <div class="layer">
-    <div class="layer-tag">ส่วนที่<br>ทำเวอร์ชัน</div>
-    <div>
-      <h3>allowlist ไม่ใช่ blocklist</h3>
-      <p class="path">~/.claude/memory-sync.sh &nbsp;&middot;&nbsp; status | push [msg] | pull</p>
-<pre><span class="c"># 1) ตัดทุกอย่างที่ root ทิ้งก่อน</span>
-/*
-
-<span class="c"># 2) ดึงกลับเฉพาะส่วนที่ปลอดภัย</span>
-<span class="k">!</span>/CLAUDE.md          <span class="c">ตัวฉีด</span>
-<span class="k">!</span>/settings.json      <span class="c">ค่าตั้งและสิทธิ์</span>
-<span class="k">!</span>/memory/            <span class="c">คลังแบ่งชั้น</span>
-<span class="k">!</span>/agents/            <span class="c">นิยามเอเจนต์</span>
-<span class="k">!</span>/projects/*/memory/ <span class="c">memory ต่อโปรเจกต์</span>
-
-<span class="c"># 3) ป้องกันซ้อนชั้น — ไม่ติดตามแม้จะถูกดึงกลับข้างบน</span>
-**/*.jsonl           <span class="c">บทสนทนา session</span>
-.credentials.json    <span class="c">โทเคน</span>
-*.local.json         <span class="c">ค่าเฉพาะเครื่อง</span></pre>
-      <p>บทสนทนา สถานะการยืนยันตัวตน แคช และไฟล์รันไทม์ อยู่กับเครื่อง สิ่งที่เดินทางคือส่วนที่เครื่องที่สองเอาไปใช้ได้จริง — นโยบาย ค่าตั้ง ข้อเท็จจริง และ memory ของโปรเจกต์</p>
-    </div>
-  </div>
-</section>
-
-<section>
-  <h2>Pursers a21 วางตัวตรงไหนในสี่ชั้น</h2>
-  <p class="sectionlede">Pursers เป็น shared coordination memory ที่มี provenance และขอบเขตบอร์ด ไม่ใช่ตัวแทนของไฟล์คำสั่งหรือ memory ต่อโปรเจกต์ และใน a21 การเคลื่อนย้ายความจริงทั้งหมดถูกผูกกับสัญญาแบบมีขอบเขต</p>
+<section id="surface">
+  <h2>ชุดเครื่องมือ memory ที่รองรับ</h2>
+  <p class="sectionlede"><code>memory_write</code> ยังเป็น core tool ใน a21; เครื่องมืออ่านและจัดการเฉพาะทางอาจซ่อนหลัง capability negotiation เพื่อลดขนาด tool list แต่ contract ยังรองรับ</p>
   <div class="rows">
-    <div class="row"><div class="tier">คำสั่ง</div><div class="row-body"><b>ยังอยู่ชั้น 1</b><span>กฎของ Host, AGENTS.md และ seat prompt โหลดก่อน และมีอำนาจเหนือข้อเท็จจริงที่เรียกคืนภายหลัง</span></div></div>
-    <div class="row"><div class="tier">ความรู้ร่วม</div><div class="row-body"><b>อยู่ชั้น 2/3 ตามขอบเขต</b><span>Central เป็น store ของความจำร่วมแบบกำหนดขอบเขตด้วยสิทธิ์ ผ่านตระกูล <code>memory_write</code> / <code>memory_read</code> / <code>memory_search</code> / <code>memory_unpin</code> / <code>memory_links</code> ซึ่งเป็นเส้นทางที่รองรับใน a21 ส่วนตระกูล <code>memory_*</code> บน Personal ถูกคงไว้เพราะ dashboard ของ Personal เป็น shipped caller ที่เรียกใช้อยู่จริง</span></div></div>
-    <div class="row"><div class="tier">งาน</div><div class="row-body"><b>ticket ไม่ใช่ memory</b><span>ticket, notes, review history, branch/commit และ journal เป็นหลักฐานการประสานงานใน Central; ไม่ควรคัดลอกทั้งก้อนเข้าไฟล์ฉีด</span></div></div>
-    <div class="row"><div class="tier">legacy</div><div class="row-body"><b><code>.agent-mem</code> เป็น v4 store ที่ปลดระวางแล้ว</b><span>การย้ายทางเดียวทำด้วย <code>pursers-personal-import 5.0.0a3</code> โดยคง provenance ไว้ และต้องไม่มีเขียนกลับหรือซิงก์สองทาง</span></div></div>
-    <div class="row"><div class="tier">cue ≠ ข้อมูล</div><div class="row-body"><b>journal เป็นสัญญาณ ไม่ใช่เนื้อหา</b><span><code>memory_write</code> บันทึกข้อเท็จจริงแบบทนทานใน Central แต่เหตุการณ์ที่วิ่งใน journal เป็นเพียง cue บอกว่าเกิดอะไรขึ้น การอ่านความจริงต้องทำผ่าน authoritative refetch อย่าง <code>memory_read</code> หรือ <code>board_catchup</code> แทนการเชื่อเนื้อหาใน cue; <code>board_catchup</code> ด้วย <code>touch=false</code> คือการอ่านแบบไร้ผลข้างเคียงที่ไม่แตะ activity, lease หรือ durable cursor และ <code>a2a_wait</code> ตั้งใจเมินเหตุการณ์ <code>memory_written</code> เพราะมันเป็นสัญญาณงานเข้า ไม่ใช่นาฬิกาจับความจำ</span></div></div>
-    <div class="row"><div class="tier">catchup</div><div class="row-body"><b>bounded และมีหลักประกันความก้าวหน้า</b><span>a21 drain หน้าเหตุการณ์แบบมีขอบเขตด้วย <code>board_catchup</code> ที่แบ่งหน้าและ ack เมื่อรับครบแต่ละหน้า; replay ที่เกิน 200 เหตุการณ์ถูกย่อเหลือเหตุการณ์ล่าสุดต่อตั๋วและจำกัดที่ 200 รายการพร้อมฟิลด์ <code>compacted</code> / <code>dropped</code> / <code>event_counts</code>; cursor เดินหน้าทางเดียว (ไม่ย้อน) และหากเลยหัว journal จะถูก clamp แล้วรายงานใน <code>warnings</code> แทนที่จะล้มทั้งเรียก; และเมื่อ catch-up กิน deadline ของการเรียก จะคืนผลบางส่วนพร้อม <code>partial=true</code> โดยไม่ทำ cursor ถัดไปหาย</span></div></div>
-    <div class="row"><div class="tier">วงแหวน 5,000</div><div class="row-body"><b>state ของ orchestrator จำเหตุการณ์ล่าสุด 5,000 รายการ</b><span>wait-bridge เก็บ ring buffer 5,000 เหตุการณ์พร้อม <code>cursor_map</code> ใน orchestrator state เพื่อบันทึกและตั้งหลักใหม่หลังรีสตาร์ทโดยไม่ replay ประวัติเดิม และการอ่านจาก Central ใช้ <code>touch=false</code> เพื่อไม่ไปกวน activity, lease หรือ cursor ทนทานของ seat อื่น</span></div></div>
-    <div class="row"><div class="tier">ขีดจำกัด 5,000</div><div class="row-body"><b>notes ของ <code>ticket_submit</code> จำกัดที่ 5,000 ตัวอักษร</b><span>ข้อความเกินจะถูกตัดพร้อมข้อมูลการตัดแบบชัดแจ้ง (<code>input_truncation.notes</code> และจำนวนอักขระที่ถูกตัด) พร้อมคำเตือน แทนที่จะถูกปฏิเสธเงียบหรือตัดอย่างไร้ร่องรอย ผู้ส่งจึงรู้ว่าหลักฐานส่วนไหนหายไป</span></div></div>
+    <div class="row"><div class="tier">memory_write</div><div class="row-body"><b>เขียนหรือเก็บ archive</b><span>บันทึก title, content, scope, type, tags, priority และลิงก์ไปยัง ticket หรือไฟล์</span></div></div>
+    <div class="row"><div class="tier">memory_read</div><div class="row-body"><b>อ่านแบบมีตัวกรอง</b><span>กรองตาม scope, type, tag, author, เวลา และ pinned state; archive ไม่ถูกรวมโดยปริยาย</span></div></div>
+    <div class="row"><div class="tier">memory_search</div><div class="row-body"><b>ค้นบริบทที่เกี่ยวข้อง</b><span>ค้นจาก title, content, tag และความสัมพันธ์ โดยกำหนดขอบเขตผลลัพธ์</span></div></div>
+    <div class="row"><div class="tier">memory_links</div><div class="row-body"><b>ดูกราฟความสัมพันธ์</b><span>ฉายลิงก์ระหว่าง memory, ticket, file และ tag แบบ read-only และมี limit</span></div></div>
+    <div class="row"><div class="tier">memory_unpin</div><div class="row-body"><b>ลดความสำคัญพร้อมเหตุผล</b><span>เอา memory ออกจากชุด pinned โดยคงร่องรอยการเปลี่ยนแปลง</span></div></div>
   </div>
-  <div class="guard"><p class="guard-label">a21 tool surface</p><p>a21 ถอด <code>agent_nudge</code>, <code>board_get_briefing</code> และ <code>ticket_terminate</code>; งานที่ถูกยกเลิกใช้ <code>ticket_cancel</code>, การปลุกเป้าหมายมาจาก Dispatcher offers เท่านั้น และมุมมองบอร์ดแบบมีขอบเขตใช้ <code>board_status</code> / <code>board_snapshot</code> ตระกูล <code>memory_*</code> ของ Central ยังเป็นเส้นทางรองรับสำหรับความจำร่วม และของ Personal คงไว้เพราะ UI ที่ส่งมอบแล้วเป็น caller โดยตรง อย่าอ้างของบน main ที่ยังไม่ release ว่าเป็น version ใหม่</p></div>
+  <pre><code>memory_write(
+  board_id="pursers",
+  agent_name="team-worker",
+  title="Decision: retry policy",
+  content="เหตุผล ผลกระทบ และวิธีตรวจสอบ",
+  scope="project",
+  memory_type="decision",
+  tags=["retry"],
+  related_tickets=["TK-EXAMPLE"],
+  related_files=["/PATH/TO/project/retry.py"]
+)</code></pre>
 </section>
 
-<section>
-  <h2>ทำไมลำดับถึงสำคัญ</h2>
-  <p class="sectionlede">การแบ่งชั้นไม่ใช่แค่ความเป็นระเบียบ ลำดับการอ่านตัดสินว่าคำสั่งไหนชนะ ส่วนลำดับการโหลดตัดสินว่าแต่ละ session ราคาเท่าไหร่</p>
-
-  <div class="layer">
-    <div class="layer-tag">ลำดับ<br>การอ่าน</div>
-    <div>
-      <h3>ลำดับอำนาจที่ไม่ต้องเดา</h3>
-      <p>แต่ละชั้นตอบคำถามที่แคบกว่าชั้นเหนือมัน และถูกอ่านตามลำดับนั้น คำแนะนำสองอันที่ขัดกันจึงมีผู้ชนะที่ตายตัวเสมอ เอเจนต์ไม่ต้องเลือกเอาเอง</p>
-      <div class="rows">
-        <div class="row"><div class="tier">ที่ 1</div><div class="row-body"><b>กฎเหล็ก</b><span>เด็ดขาด ไม่มีชั้นล่างใดผ่อนปรนได้</span></div></div>
-        <div class="row"><div class="tier">ที่ 2</div><div class="row-body"><b>แนวทางการทำงาน</b><span>จะเดินยังไงในพื้นที่ที่กฎเหล็กเปิดช่องไว้</span></div></div>
-        <div class="row"><div class="tier">ที่ 3</div><div class="row-body"><b>memory ของโปรเจกต์</b><span>ชนะข้อเท็จจริงทั่วไป เมื่ออยู่ในโฟลเดอร์ของตัวเอง</span></div></div>
-        <div class="row"><div class="tier">ที่ 4</div><div class="row-body"><b>ข้อเท็จจริงของโดเมน</b><span>ใช้เมื่อไม่มีอะไรที่เจาะจงกว่าพูดถึงเรื่องนั้น</span></div></div>
-      </div>
-      <p>ตัวหนังสือถูกเขียนให้ตรงกับลำดับชั้นด้วย ตัวฉีดใช้ประโยคสั่ง — เป็นกฎ ไฟล์ใน tier ใช้ประโยคบอกเล่า — เป็นข้อเท็จจริงที่ลงวันที่และถอนได้ ส่วน memory ของโปรเจกต์ใช้ประโยคแก้ — ที่นี่ต้องทำ<em>ต่างไป</em>ยังไง และเพราะอะไร น้ำเสียงของไฟล์บอกอำนาจของมันตั้งแต่ก่อนอ่านเนื้อหา</p>
-      <p class="note">นี่คือเหตุผลที่คลังยึดกติกาหนึ่งไฟล์ต่อหนึ่งข้อเท็จจริงด้วย ไฟล์ที่เถียงสองเรื่องพร้อมกันจะถูกจัดอันดับ ปลดระวาง หรือรีเฟรชอย่างสะอาดไม่ได้ แถมยังบังคับให้คนอ่านต้องโหลดทั้งสองเรื่องเพื่อใช้เรื่องเดียว</p>
-    </div>
-  </div>
-
-  <figure>
-    <svg viewBox="0 0 780 380" role="img" aria-label="เปรียบเทียบสองแบบ: แบบที่ใช้อยู่ prefix สั้นและนิ่ง แก้ความจำแล้วยังแคชโดน กับแบบยัดทุกอย่างในไฟล์อัตโนมัติ แก้บรรทัดเดียวแล้วทุกอย่างหลังจุดนั้นใช้ไม่ได้">
-      <defs>
-        <pattern id="hx" width="8" height="8" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
-          <line x1="0" y1="0" x2="0" y2="8" stroke="#A8351F" stroke-width="3" opacity=".28"/>
-        </pattern>
-        <marker id="a5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
-          <polygon points="0,0 10,5 0,10" fill="#A8351F"/>
-        </marker>
-      </defs>
-
-      <!-- A -->
-      <text x="20" y="24" font-size="13" font-weight="600" fill="#1F6B4C">แบบที่ใช้อยู่ — ตัวฉีดเล็ก ข้อเท็จจริงมาทีหลัง</text>
-      <rect x="20" y="42" width="96" height="46" rx="3" fill="#E9F0FB" stroke="#1F4E9C" stroke-width="1.6"/>
-      <text x="68" y="70" font-size="12.5" fill="#1F4E9C" text-anchor="middle">tools</text>
-      <rect x="118" y="42" width="118" height="46" rx="3" fill="#E9F0FB" stroke="#1F4E9C" stroke-width="1.6"/>
-      <text x="177" y="70" font-size="12.5" fill="#1F4E9C" text-anchor="middle">ตัวฉีด (เล็ก)</text>
-      <rect x="238" y="42" width="86" height="46" rx="3" fill="#E9F0FB" stroke="#1F4E9C" stroke-width="1.6"/>
-      <text x="281" y="70" font-size="12.5" fill="#1F4E9C" text-anchor="middle">ดัชนี</text>
-      <text x="172" y="106" font-size="12.5" font-weight="600" fill="#1F4E9C" text-anchor="middle">prefix ที่แคชไว้ — นิ่ง</text>
-
-      <line x1="336" y1="34" x2="336" y2="112" stroke="currentColor" stroke-width="1.3" stroke-dasharray="4 4" opacity=".66"/>
-
-      <rect x="350" y="42" width="150" height="46" rx="3" fill="none" stroke="currentColor" stroke-width="1.3" opacity=".8"/>
-      <text x="425" y="70" font-size="12.5" fill="currentColor" text-anchor="middle" opacity=".8">ข้อเท็จจริง เมื่อใช้</text>
-      <rect x="504" y="42" width="104" height="46" rx="3" fill="none" stroke="currentColor" stroke-width="1.3" opacity=".8"/>
-      <text x="556" y="70" font-size="12.5" fill="currentColor" text-anchor="middle" opacity=".8">เทิร์นนี้</text>
-
-      <rect x="628" y="42" width="132" height="46" rx="3" fill="#E4F1EA" stroke="#1F6B4C" stroke-width="1.8"/>
-      <text x="694" y="63" font-size="13" font-weight="600" fill="#1F6B4C" text-anchor="middle">แคชโดน</text>
-      <text x="694" y="80" font-size="12.5" fill="#1F6B4C" text-anchor="middle">จ่าย ~1/10</text>
-
-      <text x="425" y="106" font-size="12.5" fill="#1F6B4C" text-anchor="middle">เพิ่มความจำ = ไฟล์ใหม่ ไม่แตะ prefix</text>
-
-      <line x1="20" y1="140" x2="760" y2="140" stroke="currentColor" stroke-width="1" opacity=".25"/>
-
-      <!-- B -->
-      <text x="20" y="180" font-size="13" font-weight="600" fill="#A8351F">แบบยัดทุกอย่างไว้ในไฟล์ที่โหลดอัตโนมัติ</text>
-
-      <text x="184" y="214" font-size="12.5" font-weight="600" fill="#A8351F" text-anchor="middle">แก้ความจำ 1 บรรทัด</text>
-      <line x1="184" y1="220" x2="184" y2="244" stroke="#A8351F" stroke-width="1.6" marker-end="url(#a5)"/>
-
-      <rect x="20" y="250" width="96" height="46" rx="3" fill="#E9F0FB" stroke="#1F4E9C" stroke-width="1.6"/>
-      <text x="68" y="278" font-size="12.5" fill="#1F4E9C" text-anchor="middle">tools</text>
-
-      <rect x="118" y="250" width="290" height="46" rx="3" fill="#FCEDE9" stroke="#A8351F" stroke-width="1.8"/>
-      <text x="263" y="278" font-size="12.5" fill="#A8351F" text-anchor="middle">ตัวฉีด + ข้อเท็จจริงทั้งหมด (บวม)</text>
-      <rect x="412" y="250" width="104" height="46" rx="3" fill="none" stroke="#A8351F" stroke-width="1.4"/>
-      <text x="464" y="278" font-size="12.5" fill="#A8351F" text-anchor="middle">เทิร์นนี้</text>
-
-      <rect x="118" y="250" width="398" height="46" rx="3" fill="url(#hx)" stroke="none"/>
-      <text x="317" y="318" font-size="12.5" font-weight="600" fill="#A8351F" text-anchor="middle">ทุกอย่างตั้งแต่จุดที่แก้เป็นต้นไป ใช้ของเดิมไม่ได้</text>
-      <text x="317" y="336" font-size="12" fill="#A8351F" text-anchor="middle" opacity=".85">แถมก้อนบวมนี้ถูกส่งซ้ำทุกเทิร์น ของทุก session ตลอดไป</text>
-
-      <rect x="628" y="250" width="132" height="46" rx="3" fill="#FCEDE9" stroke="#A8351F" stroke-width="1.8"/>
-      <text x="694" y="271" font-size="13" font-weight="600" fill="#A8351F" text-anchor="middle">แคชพลาด</text>
-      <text x="694" y="288" font-size="12.5" fill="#A8351F" text-anchor="middle">จ่าย write เต็ม</text>
-    </svg>
-    <figcaption><span class="fignum">รูปที่ 5</span><b>จุดที่คุณแก้ ตัดสินว่าที่เหลือรอดหรือไม่</b> — แคชจับคู่แบบ prefix ตรงเป๊ะ เรียงตามลำดับ tools แล้ว system แล้วบทสนทนา สิ่งแรกที่เปลี่ยนจะทำให้ทุกอย่างหลังจากนั้นใช้ของเดิมไม่ได้ทันที การผลักความผันผวนไปไว้ท้ายสุดจึงไม่ใช่ความสวยงาม แต่คือการเลือกว่าจะจ่ายเท่าไหร่</figcaption>
-  </figure>
-
-  <div class="layer">
-    <div class="layer-tag">ลำดับ<br>การโหลด</div>
-    <div>
-      <h3>prefix ที่นิ่ง คือ session ที่ถูก</h3>
-      <p>คุณสมบัติสามข้อของโครงสร้างนี้ ตกผลึกมาจากข้อจำกัดเรื่อง prefix โดยตรง:</p>
-      <ul>
-        <li><b>ตัวฉีดเล็กและแทบไม่ขยับ</b> — กฎเหล็กกับแนวทางการทำงานเปลี่ยนกันเป็นเดือน prefix จึงเหมือนเดิมทุกไบต์ และ session เปิดมาด้วยการอ่านแคช ไม่ใช่เขียนใหม่</li>
-        <li><b>ข้อเท็จจริงมาทีหลัง ในฐานะผลลัพธ์</b> — การอ่านไฟล์ tier กลาง session คือการต่อท้ายบทสนทนา ไม่ใช่การเขียนหัวคำขอใหม่ การเรียกความจำจึง <em>ต่อ</em> แคช ไม่ใช่ทุบมัน</li>
-        <li><b>โตแบบต่อท้าย</b> — ความจำใหม่คือไฟล์ใหม่บวกดัชนีอีกหนึ่งบรรทัด ไม่มีอะไรที่นั่งอยู่ใน prefix แล้วถูกเขียนทับ แคชของเมื่อวานจึงยังตรงกับวันนี้</li>
-      </ul>
-      <p class="note">ความไม่สมมาตรของราคาคือเหตุผลที่คุ้มจะออกแบบรับ: การอ่านแคชคิดราวหนึ่งในสิบของอัตรา input ปกติ ขณะที่การเขียนแคชคิดแพงกว่าอัตราปกติ การทำแคชเสียจึงไม่ใช่เสมอตัว แต่คือการจ่ายเต็มราคาซ้ำ สำหรับข้อความที่ซื้อไปแล้ว</p>
-      <p>ผลตอบแทนทั้งสองอย่างมาจากคุณสมบัติเดียวกัน การแยกนโยบายที่คงทน ออกจากข้อเท็จจริงที่ผันผวน คือสิ่งที่ทำให้ลำดับอำนาจตายตัว และเป็นสิ่งเดียวกันที่ทำให้หัวของคำขอนิ่งพอจะแคชได้</p>
-    </div>
-  </div>
+<section id="authorization">
+  <h2>สิทธิ์ ขอบเขต แหล่งที่มา และการ scrub</h2>
+  <p class="sectionlede">Memory ไม่ข้าม authorization boundary ของบอร์ด และไม่ทำให้ข้อมูลลับกลายเป็นข้อมูลที่ควรเก็บ</p>
+  <ul>
+    <li><b>Authorization:</b> Central ตรวจ principal, membership, <code>agent_name</code> และ generation fencing ก่อนยอมรับการเขียน</li>
+    <li><b>Scope:</b> <code>project</code> ใช้ร่วมกันภายในบอร์ดตามสิทธิ์; <code>private</code> จำกัดการมองเห็นตาม principal เจ้าของ</li>
+    <li><b>Provenance:</b> รายการเก็บผู้เขียน เวลา tags และลิงก์ไปยัง ticket/ไฟล์; archive รับ <code>archive_source_id</code> และ <code>archived_at</code></li>
+    <li><b>Scrubbing:</b> profile ของบอร์ดตรวจ scalar และ list fields ก่อนเขียน ถ้าพบรูปแบบต้องห้าม Central คืน <code>scrub_rejected</code> พร้อมชื่อ field/rule โดยไม่สร้าง memory</li>
+  </ul>
+  <div class="guard"><p class="guard-label">Security boundary</p><p>ห้ามเก็บ token, private key, password, ข้อมูลส่วนบุคคล หรือ credential ใน memory แม้ตั้ง <code>scope="private"</code> การจำกัด scope และ scrub ลดความเสี่ยง แต่ไม่ใช่ที่เก็บ secret</p></div>
 </section>
 
-<footer>
-  <span>Pursers 5.0.0a21</span><span>Local-first</span><span>ไม่ซิงก์ข้อมูล session</span><span>สองโดเมน ไม่ข้ามกัน</span><span>prefix นิ่งเพื่อแคช</span>
-</footer>
+<section id="bounds">
+  <h2>ขอบเขตข้อมูล: 10,000 อักขระและ archive</h2>
+  <p class="sectionlede">Memory ปกติต้องสั้นพอให้ค้นและส่งต่อได้โดยไม่ทำให้ bounded API บวม</p>
+  <ul>
+    <li><code>content</code> ปกติยาวได้ไม่เกิน <b>10,000 อักขระ</b>; ให้สรุปสาระที่นำกลับมาใช้และเชื่อมกับ source ผ่าน ticket หรือ file</li>
+    <li>ถ้าต้องเก็บ source ที่ยาวกว่า 10,000 อักขระ ให้ใช้ <code>archived=true</code> และระบุ provenance เช่น <code>archive_source_id</code></li>
+    <li><code>memory_read</code> และ <code>memory_search</code> ไม่รวม archive ตามค่าเริ่มต้น; ใช้ <code>include_archived=true</code> เฉพาะเมื่อต้องการค้น archive โดยเจตนา</li>
+    <li>ผลอ่าน ค้นหา และลิงก์มี <code>limit</code>; ผู้อ่านต้องเคารพ metadata ของการตัดทอน ไม่ตีความหน้าหนึ่งว่าเป็นข้อมูลทั้งหมด</li>
+  </ul>
+</section>
 
+<section id="cue-refetch">
+  <h2>Journal เป็น cue; การ refetch คือหลักฐาน</h2>
+  <p class="sectionlede">Event มีไว้ปลุกผู้อ่าน ไม่ใช่สำเนา authoritative state</p>
+  <ol>
+    <li><code>memory_write</code> สร้าง durable state แล้ว journal จึงบันทึก <code>memory_written</code></li>
+    <li>เมื่อได้รับ cue ให้เรียก <code>memory_read</code>, <code>memory_search</code> หรือ <code>memory_links</code> ตามชนิดข้อมูลที่ต้องใช้</li>
+    <li><code>a2a_wait</code> ของ worker/reviewer เน้น ticket lifecycle และไม่ถือ <code>memory_written</code> เป็น claimable work</li>
+    <li>การ catch-up เพื่ออ่านสถานะใช้ <code>touch=false</code> เพื่อไม่ renew lease หรือเขียน state ขณะ idle</li>
+  </ol>
+  <p class="note">ถ้า cue เก่า ถูก compact หรือมาถึงซ้ำ ให้เชื่อ state ปัจจุบันจาก Central และใช้ cursor ล่าสุดที่ตอบกลับ ไม่ replay การตัดสินใจจาก payload เก่า</p>
+</section>
+
+<section id="catchup">
+  <h2>a21 catch-up: bounded, compacted, clamped</h2>
+  <p class="sectionlede">Wait Bridge a21 เดิน journal เป็นหน้าและรับประกัน monotonic progress: cursor เคลื่อนไปข้างหน้าโดยไม่คืน event ก้อนใหญ่เกินขอบเขต</p>
+  <ul>
+    <li>history มากกว่า replay bound ถูกย่อเป็นรายการล่าสุดที่เกี่ยวข้อง และคืน <code>compacted</code>, <code>dropped</code> และ <code>event_counts</code></li>
+    <li>cursor ที่อยู่หลังช่วง retention จะขยับผ่านส่วนที่ถูก compact พร้อมคำเตือน; cursor ที่อยู่หน้าหัว journal จะถูก clamp พร้อมคำเตือน</li>
+    <li>เมื่อ deadline หมดก่อนอ่านครบ ผลลัพธ์คืน <code>partial=true</code> พร้อม next cursor ที่ใช้ต่อได้แทนการย้อนกลับ</li>
+    <li>ในโหมดหลายบอร์ด <code>new_seq</code> เป็น cursor map; ต้องส่ง map ทั้งก้อนกลับเมื่อ re-arm และใช้ <code>board_id</code> ของ event เพื่อ refetch ถูกบอร์ด</li>
+  </ul>
+  <div class="guard"><p class="guard-label">Recovery rule</p><p>เมื่อผลลัพธ์ระบุ compaction, clamping หรือ partial ให้ refetch state ที่เกี่ยวข้องก่อนทำ mutation แล้ว re-arm จาก cursor ที่ server คืนมา ห้ามเดา event ที่หายไป</p></div>
+</section>
+
+<section id="orchestrator">
+  <h2>Orchestrator buffer และ submission notes</h2>
+  <p class="sectionlede">สองขอบเขตนี้ป้องกันงานสรุปและหลักฐานไม่ให้โตแบบไร้เพดาน</p>
+  <ul>
+    <li>โหมด orchestrator เก็บ journal ใน ring buffer สูงสุด <b>5,000 events</b> และใช้ cursor map แยกต่อบอร์ด</li>
+    <li>การ refetch ในโหมดนี้ใช้ <code>touch=false</code>; การอ่านเฉย ๆ จึงไม่ renew work lease และไม่สร้าง board write ตอน idle</li>
+    <li><code>ticket_submit</code> จำกัด notes ที่ <b>5,000 อักขระ</b> ฝั่ง client/seat helper ตัดที่ขอบบรรทัด ใส่ marker และคืน <code>input_truncation.notes</code> พร้อม <code>truncated_chars</code></li>
+    <li>ผู้ส่งต้องเก็บหลักฐานสำคัญ เช่น SHA, test tail และ blocker ไว้ก่อน prose เพื่อให้การตัดทอนไม่ทำลาย attribution</li>
+  </ul>
+</section>
+
+<section id="retention-correction">
+  <h2>Retention และการแก้ข้อมูลเดิม</h2>
+  <p class="sectionlede">Memory ที่ตรวจสอบได้ต้องรักษาประวัติ ไม่เขียนทับเหตุผลจนผู้รับช่วงหา provenance ไม่เจอ</p>
+  <div class="rows">
+    <div class="row"><div class="tier">แก้ข้อเท็จจริง</div><div class="row-body"><b>เขียนรายการใหม่พร้อม <code>retracts</code></b><span>Central ทำเครื่องหมายรายการเดิมว่า retracted, unpin รายการเดิม และเชื่อมรายการใหม่กลับไปยังต้นทาง</span></div></div>
+    <div class="row"><div class="tier">ลดความสำคัญ</div><div class="row-body"><b>ใช้ <code>memory_unpin</code> พร้อม reason</b><span>เอาออกจาก pinned working set โดยไม่ลบ audit trail</span></div></div>
+    <div class="row"><div class="tier">เก็บต้นฉบับยาว</div><div class="row-body"><b>ใช้ archive พร้อม provenance</b><span>archive ไม่ปะปนในผลอ่านปกติ แต่ยังค้นได้เมื่อเปิด <code>include_archived</code></span></div></div>
+  </div>
+  <p class="note">Memory ช่วยให้ agent รับช่วงเหตุผลและหลักฐานได้เร็วขึ้น แต่เมื่อ memory ขัดกับ code, ticket หรือเอกสารปัจจุบัน ให้ตรวจ source ที่ authoritative แล้วบันทึก correction แทนการเก็บข้อเท็จจริงเก่าไว้แบบไม่ระบุสถานะ</p>
+</section>
+
+<footer><span>Pursers board memory</span><span>5.0.0a21</span><span>ภาษาไทย</span><span>scope: work track only</span></footer>
 </div>

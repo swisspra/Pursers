@@ -354,7 +354,7 @@ PURSERS_HOST = "codex"</code></pre>
 
       <h3>Claude Desktop as orchestrator</h3>
       <p>สำหรับ Claude Desktop หรือ Host อื่นที่ทำหน้าที่เป็น leader หรือ coordinator ของ fleet Wait Bridge มีโหมด <strong>orchestrator</strong> (<code>PURSERS_ROLE="orchestrator"</code>) เพื่อแก้ปัญหาที่ Claude Desktop ตัด tool call หลังผ่านไปประมาณ 240 วินาที โดย leader ไม่จำเป็นต้อง claim ticket แต่ต้องการทราบการเปลี่ยนแปลงทันที เช่น ticket ที่ถูก submit, approve, reject หรือ close พร้อมข้อมูล <code>branch_and_commit</code> เพื่อ merge งานที่ผ่านการตรวจ</p>
-      <p>ในโหมด orchestrator ตัว bridge จะถือ subscription ใน background อย่างต่อเนื่องครอบคลุมทุก active registry board โดยเก็บประวัติใน ring buffer (จำกัดที่ 5,000 events) และ refetch ticket ด้วย <code>touch=false</code> (ไม่เกิดการเขียน SQLite หรือ renew lease ขณะ idle) พร้อมบันทึก state ลงไฟล์ (<code>~/.pursers/wait-bridge/orchestrator_state_&lt;board&gt;.json</code> ค่าเริ่มต้น permission 0600) เพื่อให้ restart แล้วรับงานต่อได้ทันทีโดยไม่สูญเสีย event</p>
+      <p>ในโหมด orchestrator ตัว bridge จะถือ subscription ใน background อย่างต่อเนื่องครอบคลุมทุก active registry board โดยเก็บประวัติใน ring buffer (จำกัดที่ 5,000 events) และ refetch ticket ด้วย <code>touch=false</code> (ไม่เกิดการเขียน SQLite หรือ renew lease ขณะ idle) พร้อมบันทึก state ลงไฟล์ (<code>/PATH/TO/.pursers/wait-bridge/orchestrator_state_&lt;board&gt;.json</code> ค่าเริ่มต้น permission 0600) เพื่อให้ restart แล้วรับงานต่อได้ทันทีโดยไม่สูญเสีย event</p>
       <p>ชุดเครื่องมือสำหรับ Orchestrator (ตอบกลับทันที ไม่ block):</p>
       <ul>
         <li><code>board_digest(since=None|cursor_map, boards="registry", group_by="ticket", include_notes_keys=["branch_and_commit"])</code>: สรุปการเปลี่ยนสถานะของ ticket, สถานะปัจจุบัน, ผู้ตรวจ, notes และ subscription health</li>
@@ -537,13 +537,13 @@ Before approval:
 7. Confirm every required_field is present and truthful.
 8. Put the SHA, re-run tails, leak-scan result, and model in review_notes.
 
-Operator-specific leak regexes come from `~/.pursers/leak-markers.txt`, one per line; `PURSERS_LEAK_MARKERS_FILE` overrides that path. Record an empty marker file as a WARN in review_notes, not a blocker. Never print marker values.
+Operator-specific leak regexes come from `/PATH/TO/.pursers/leak-markers.txt`, one per line; `PURSERS_LEAK_MARKERS_FILE` overrides that path. Record an empty marker file as a WARN in review_notes, not a blocker. Never print marker values.
 
 Approval notes must contain a full 40-hex SHA, an unambiguously successful pytest `N passed` tail or paired unittest `Ran N tests` plus `OK` tail, `leak-scan: clean|N matches`, and `model: NAME`. The emergency flag works only when the operator explicitly sets `PURSERS_ALLOW_FORCE_APPROVE_WITHOUT_EVIDENCE=1`, and its use is appended to review_notes.
 
 Rejecting is normal and cheap; a wrong approval is expensive.</code></pre>
       <p>ให้ reviewer รัน <code>board.sh verify &lt;TK&gt; [--run-suites] --board &lt;id&gt;</code> ก่อน approve ทุกครั้ง ถ้าหลักฐานไม่ครบให้ reject พร้อม fix instructions ที่ชัดเจนและไม่เป็นค่าว่าง</p>
-      <p>Generic leak rules ครอบคลุม JWT, bearer token, private-key header, API-key shape และ home-directory path ของ macOS/Linux/Windows ส่วน regex เฉพาะ operator โหลดจาก <code>~/.pursers/leak-markers.txt</code> ทีละบรรทัด หรือจาก <code>PURSERS_LEAK_MARKERS_FILE</code> โดย verify/approve พิมพ์เฉพาะจำนวนที่โหลด ถ้าไฟล์ว่างให้บันทึก WARN ใน <code>review_notes</code> แต่ไม่บล็อก approval โดยยกเว้น fixture ที่ระบุไว้คือ <code>/PATH/TO/synthetic-user</code>, <code>example.com</code> และ <code>127.0.0.1</code></p>
+      <p>Generic leak rules ครอบคลุม JWT, bearer token, private-key header, API-key shape และ home-directory path ของ macOS/Linux/Windows ส่วน regex เฉพาะ operator โหลดจาก <code>/PATH/TO/.pursers/leak-markers.txt</code> ทีละบรรทัด หรือจาก <code>PURSERS_LEAK_MARKERS_FILE</code> โดย verify/approve พิมพ์เฉพาะจำนวนที่โหลด ถ้าไฟล์ว่างให้บันทึก WARN ใน <code>review_notes</code> แต่ไม่บล็อก approval โดยยกเว้น fixture ที่ระบุไว้คือ <code>/PATH/TO/synthetic-user</code>, <code>example.com</code> และ <code>127.0.0.1</code></p>
       <p>ชื่อ process-level จาก <code>ONBOARD_AGENT_NAME</code> ยังใช้เป็นค่า default ได้ แต่สำหรับหลาย session ใน Host เดียวกัน ให้ส่ง <code>agent_name</code> ในแต่ละ call เพื่อความชัดเจน หนึ่งชื่อภายใต้ principal เดียวกันอาจมีหลาย <strong>worker seats</strong> บนหลายบอร์ด; fleet รวม seats เหล่านี้ด้วยคู่ <code>principal_id + agent_name</code> แต่ authorization และ lease ยังตรวจแยกต่อบอร์ด</p>
     </section>
 
