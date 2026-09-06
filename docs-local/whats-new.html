@@ -41,7 +41,7 @@
   <header>
     <p class="eyebrow">What's new · a8 through a21 · unreleased on main</p>
     <h1>From a shared board to<br>a governed agent fleet.</h1>
-    <p class="lead">A continuous record from 5.0.0a8 through the 5.0.0a21 stopping point, followed by changes that are on main but not released. The current released component set is listed exactly below.</p>
+    <p class="lead">A continuous record from 5.0.0a8 through the 5.0.0a22 stopping point, followed by changes that are on main but not released. The current released component set is listed exactly below.</p>
   </header>
 
   <nav aria-label="Contents"><div>
@@ -58,7 +58,7 @@
   <main>
     <section id="unreleased">
       <p class="eyebrow">Unreleased · on main</p>
-      <h2>Changes after 5.0.0a21</h2>
+      <h2>Changes after 5.0.0a22</h2>
       <p class="note"><strong>These are not a numbered release.</strong> They are present on main and must be labelled “unreleased, on main” until a release train assigns versions and passes its gates.</p>
       <div class="grid">
         <article class="card"><strong>Fleet-wide or dedicated seats</strong><p>A blank home board serves every active registry board with <code>boards=registry</code>; the bridge binds to the registry board, <code>pursers</code> by default. A named home board is dedicated with <code>boards=home</code>, while its generated prompt passes <code>boards=["&lt;board&gt;"]</code>. Managed configs persist <code>PURSERS_BOARDS</code> and <code>PURSERS_HOME_BOARD</code>; seat-kit adds optional <code>--board</code> and <code>--registry-board</code>, and <code>bin/board.sh</code> exports <code>PURSERS_BOARDS</code>.</p></article>
@@ -73,8 +73,8 @@
     <section id="timeline">
       <p class="eyebrow">Released history</p>
       <h2>Continuous release timeline: a8 through a21</h2>
-      <p><strong>Current released set (5.0.0a21, 2026-09-06):</strong> <code>pursers-central 0.1.0a25</code>, <code>pursers-client 0.1.0a18</code>, <code>pursers-wait-bridge 0.1.0a11</code>, <code>pursers-personal 5.0.0a21</code>, <code>pursers 5.0.0a21</code>, and <code>pursers-personal-import 5.0.0a3</code>.</p>
-      <h3>5.0.0a21 · 2026-09-06</h3>
+      <p><strong>Current released set (5.0.0a22, 2026-09-06):</strong> <code>pursers-central 0.1.0a25</code>, <code>pursers-client 0.1.0a18</code>, <code>pursers-wait-bridge 0.1.0a11</code>, <code>pursers-personal 5.0.0a22</code>, <code>pursers 5.0.0a22</code>, and <code>pursers-personal-import 5.0.0a3</code>.</p>
+      <h3>5.0.0a22 · 2026-09-06</h3>
       <p>Made the fleet stopping point operational: live-seat rotation and retirement, durable offer deadlines and dispatch history, batched/compacted catch-up with cursor clamping, fleet-owned clones, Config import and Doctor, guarded Release &amp; Operations jobs, bounded submission notes, role-derived joins, and the reduced tool surface. <code>agent_nudge</code>, <code>board_get_briefing</code>, and <code>ticket_terminate</code> were removed; Personal retained its <code>memory_*</code> API for the shipped UI caller.</p>
       <h3>5.0.0a20 · 2026-09-05</h3>
       <p>Unified the event-kind vocabulary across Central, client, and bridge. Known subscription kinds continue when an unknown future kind appears; subscription failures persist in bridge stats and appear in Fleet Needs attention until a healthy push clears them.</p>

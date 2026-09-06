@@ -7,6 +7,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [5.0.0a22] - 2026-09-06
+
+This release includes `pursers-central==0.1.0a26`,
+`pursers-client==0.1.0a19`, `pursers-personal-import==5.0.0a3`,
+`pursers-personal==5.0.0a22`, `pursers==5.0.0a22`, and
+`pursers-wait-bridge==0.1.0a12`.
+
 ### Added
 - Registry operations: `fleet: false` marks operator-only projects; Doctor
   reports per-check severity/scope and actionable duplicate-seat evidence, and
