@@ -734,9 +734,11 @@ def test_seat_kit_repo_text_obeys_operator_marker_file(
 def test_repo_clone_uses_repo_basename(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[list[str]] = []
 
-    def fake_run(command: list[str], *, check: bool) -> None:
-        calls.append(command)
-        Path(command[-1]).mkdir()
+    def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        if command[:2] == ["git", "clone"]:
+            calls.append(command)
+            Path(command[-1]).mkdir()
+        return subprocess.CompletedProcess(command, 0, "", "")
 
     monkeypatch.setattr(seat_new.subprocess, "run", fake_run)
     dest = seat_new.generate(args(tmp_path, repo="https://example.test/acme/Pursers.git"))
@@ -808,6 +810,7 @@ def test_upgrade_regenerates_managed_files_and_preserves_existing_content(
     tmp_path: Path,
 ) -> None:
     parsed = args(tmp_path)
+    parsed.python = sys.executable
     dest = seat_new.generate(parsed)
     (dest / "keep.txt").write_text("operator-owned", encoding="utf-8")
     (dest / "bin/board.sh").write_text("stale", encoding="utf-8")
@@ -817,7 +820,64 @@ def test_upgrade_regenerates_managed_files_and_preserves_existing_content(
 
     assert (dest / "keep.txt").read_text() == "operator-owned"
     assert "ONBOARD_AGENT_NAME" in (dest / "bin/board.sh").read_text()
-    assert str(Path(sys.executable).resolve()) in (dest / "bin/board.sh").read_text()
+    assert str(Path(sys.executable).expanduser()) in (dest / "bin/board.sh").read_text()
+
+
+def test_venv_interpreter_symlink_is_preserved(tmp_path: Path) -> None:
+    runtime = tmp_path / "runtime with spaces"
+    subprocess.run(
+        [sys.executable, "-m", "venv", "--without-pip", str(runtime)],
+        check=True,
+    )
+    interpreter = runtime / "bin" / "python"
+    assert interpreter.is_symlink()
+    parsed = args(tmp_path / "seat")
+    parsed.python = str(interpreter)
+
+    dest = seat_new.generate(parsed)
+
+    shell = (dest / "bin" / "board.sh").read_text(encoding="utf-8")
+    assert f"exec {seat_new.shlex.quote(str(interpreter))} " in shell
+    assert f"exec {seat_new.shlex.quote(str(interpreter.resolve()))} " not in shell
+
+
+def test_bare_interpreter_without_dependencies_is_rejected(tmp_path: Path) -> None:
+    interpreter = tmp_path / "bare-python"
+    interpreter.write_text(
+        "#!/bin/sh\n"
+        "if [ \"$1\" = \"-c\" ]; then exit 7; fi\n"
+        f"exec {sys.executable} \"$@\"\n",
+        encoding="utf-8",
+    )
+    interpreter.chmod(0o755)
+    parsed = args(tmp_path / "seat")
+    parsed.python = str(interpreter)
+
+    with pytest.raises(ValueError, match="bare Python interpreter lacks required"):
+        seat_new.generate(parsed)
+
+
+def test_upgrade_preserves_existing_interpreter_when_python_omitted(
+    tmp_path: Path,
+) -> None:
+    runtime = tmp_path / "runtime with spaces"
+    subprocess.run(
+        [sys.executable, "-m", "venv", "--without-pip", str(runtime)],
+        check=True,
+    )
+    interpreter = runtime / "bin" / "python"
+    initial = args(tmp_path / "seat")
+    initial.python = str(interpreter)
+    dest = seat_new.generate(initial)
+
+    upgrade = args(tmp_path / "seat")
+    upgrade.upgrade = True
+    assert upgrade.python is None
+    seat_new.generate(upgrade)
+
+    assert f"exec {seat_new.shlex.quote(str(interpreter))} " in (
+        dest / "bin" / "board.sh"
+    ).read_text()
 
 
 def test_upgrade_fast_forwards_existing_clean_clone(
@@ -830,14 +890,70 @@ def test_upgrade_fast_forwards_existing_clean_clone(
     calls = []
 
     def run(command, **kwargs):
+        if command[0] != "git":
+            return subprocess.CompletedProcess(command, 0, "", "")
         calls.append((command, kwargs.get("cwd")))
-        return subprocess.CompletedProcess(command, 0, "", "")
+        stdout = ""
+        if command[:5] == ["git", "symbolic-ref", "--quiet", "--short", "HEAD"]:
+            stdout = "main\n"
+        elif command[:5] == [
+            "git",
+            "symbolic-ref",
+            "--quiet",
+            "--short",
+            "refs/remotes/origin/HEAD",
+        ]:
+            stdout = "origin/main\n"
+        return subprocess.CompletedProcess(command, 0, stdout, "")
 
     monkeypatch.setattr(seat_new.subprocess, "run", run)
     seat_new.generate(parsed)
 
+    assert (["git", "fetch", "origin"], clone) in calls
     assert (["git", "status", "--porcelain"], clone) in calls
-    assert (["git", "pull", "--ff-only"], clone) in calls
+    assert (["git", "merge", "--ff-only", "origin/main"], clone) in calls
+
+
+@pytest.mark.parametrize(
+    ("current_branch", "ancestor_returncode", "warning"),
+    [
+        ("ticket-work", 0, "not default branch main"),
+        ("main", 1, "not fast-forwardable to origin/main"),
+    ],
+)
+def test_upgrade_warns_and_leaves_non_default_or_non_ff_clone_unchanged(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    current_branch: str,
+    ancestor_returncode: int,
+    warning: str,
+) -> None:
+    parsed = args(tmp_path, repo="https://example.test/Pursers.git")
+    parsed.upgrade = True
+    clone = Path(parsed.dest) / "Pursers"
+    clone.mkdir(parents=True)
+    calls: list[list[str]] = []
+
+    def run(command, **_kwargs):
+        if command[0] != "git":
+            return subprocess.CompletedProcess(command, 0, "", "")
+        calls.append(command)
+        if command[-1] == "refs/remotes/origin/HEAD":
+            return subprocess.CompletedProcess(command, 0, "origin/main\n", "")
+        if command[-1] == "HEAD" and command[1] == "symbolic-ref":
+            return subprocess.CompletedProcess(command, 0, f"{current_branch}\n", "")
+        if command[1] == "merge-base":
+            return subprocess.CompletedProcess(command, ancestor_returncode, "", "")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(seat_new.subprocess, "run", run)
+    dest = seat_new.generate(parsed)
+
+    assert (dest / "bin" / "board.sh").is_file()
+    assert ["git", "fetch", "origin"] in calls
+    assert not any(command[1:3] == ["merge", "--ff-only"] for command in calls)
+    assert warning in capsys.readouterr().err
 
 
 @pytest.mark.parametrize(
