@@ -3387,6 +3387,27 @@ def test_workers_tab_renders_presets_actions_and_keychain_copy() -> None:
     assert "board_state_update" not in dashboard.HTML
 
 
+def test_timer_refresh_pauses_while_operator_edits() -> None:
+    html = dashboard.HTML
+    assert "function refreshPaused()" in html
+    assert "Refresh paused while editing" in html
+    # real input events mark the form dirty; programmatic value changes never lock refresh
+    assert "t.form.dataset.dirty='1'" in html
+    assert "delete e.target.dataset.dirty" in html
+    # the search box never pauses refresh
+    assert "a.id!=='filter'" in html
+    for fn in (
+        "async function refreshFleet(timeoutMs=CENTRAL_REQUEST_TIMEOUT_MS){if(typeof refreshPaused==='function'&&refreshPaused())return;",
+        "r.kind!=='board'||refreshPaused()",
+        "r.kind!=='overhead'||refreshPaused()",
+        "r.kind!=='config'||refreshPaused()",
+        "(!force&&refreshPaused())",
+        "!centralLabels.length||refreshPaused()",
+        "async function refreshAttentionState(){if(refreshPaused())return;",
+    ):
+        assert fn in html, fn
+
+
 def test_dashboard_v2_ia_agents_and_responsive_contract() -> None:
     html = dashboard.HTML
 
