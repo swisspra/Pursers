@@ -41,11 +41,16 @@ import tomllib
 _CLIENT_SRC = Path(__file__).resolve().parents[2] / "packages" / "client" / "src"
 if (_CLIENT_SRC / "pursers_client").is_dir():
     sys.path.insert(0, str(_CLIENT_SRC))
+_CENTRAL_SRC = Path(__file__).resolve().parents[2] / "packages" / "central" / "src"
+if (_CENTRAL_SRC / "pursers_central").is_dir():
+    sys.path.insert(0, str(_CENTRAL_SRC))
 from pursers_client import (
     BoardClient,
     BoardClientError,
     parse_project_registry as parse_client_project_registry,
 )
+from pursers_central.scrub import Policy as BoardScrubPolicy
+from pursers_central.scrub import scrub as board_scrub
 
 _DASHBOARD_DIR = Path(__file__).resolve().parent
 if str(_DASHBOARD_DIR) not in sys.path:
@@ -180,6 +185,12 @@ DEFAULT_CONTEXT_PRESSURE = {
     "context_trend_compact_ratio": 1.5,
 }
 
+_BOARD_REDACTION_POLICY = BoardScrubPolicy(mode="redact")
+
+
+def _board_redact(value: str) -> str:
+    return board_scrub(value, _BOARD_REDACTION_POLICY)[0]
+
 
 class ConfigConflictError(RuntimeError):
     """The dashboard form was based on missing or superseded state."""
@@ -194,7 +205,7 @@ class FleetCloneGitError(ValueError):
 
     def __init__(self, subcommand: str, message: str) -> None:
         self.subcommand = subcommand
-        super().__init__(message)
+        super().__init__(_board_redact(message))
 
 
 class FleetClient(Protocol):
@@ -4325,14 +4336,8 @@ class SeatConfigManager:
         if isinstance(value, bytes):
             value = value.decode("utf-8", errors="replace")
         text = value if isinstance(value, str) else "git returned no error output"
+        text = _board_redact(text)
         text = cls._clean_text(text[-GIT_ERROR_TAIL_CHARS:])
-        text = re.sub(r"/Users/[^/\s]+", "/Users/[REDACTED:POSIX_HOME]", text)
-        text = re.sub(r"/home/[^/\s]+", "/home/[REDACTED:LINUX_HOME]", text)
-        text = re.sub(
-            r"[A-Za-z]:\\Users\\[^\\\s]+",
-            r"C:\\Users\\[REDACTED:WINDOWS_HOME]",
-            text,
-        )
         return " ".join(text.split()) or "git returned no error output"
 
     def _clone_origin_preflight(self, source: Path, integration_ref: str) -> str:
@@ -4377,7 +4382,7 @@ class SeatConfigManager:
         self, project_name: str, error: FleetCloneGitError
     ) -> None:
         project = self._clean_text(project_name)
-        message = self._clean_text(str(error))
+        message = self._clean_text(_board_redact(str(error)))
         record = {
             "event": "registry_clone_failed",
             "project": project,

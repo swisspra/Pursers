@@ -532,6 +532,92 @@ def test_registry_clone_api_returns_scrubbed_git_failure(
     assert "private-api-credential" not in body["error"]
 
 
+def test_registry_clone_uses_board_scrub_for_every_error_surface(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    credential = "AK" + "IA" + "ABCDEFGHIJKLMNOP"
+
+    def fail_preflight(
+        command: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        if command[1:4] == ["remote", "get-url", "origin"]:
+            return subprocess.CompletedProcess(
+                command, 0, "https://example.invalid/repo\n", ""
+            )
+        if command[1] == "ls-remote":
+            return subprocess.CompletedProcess(
+                command, 128, "", f"fatal: credential {credential} rejected"
+            )
+        raise AssertionError(command)
+
+    registry_payload = {
+        "registry": {
+            "schema_version": 1,
+            "projects": {
+                "Alpha": {
+                    "board_id": "alpha",
+                    "work_dir": str(tmp_path / "operator"),
+                    "status": "active",
+                }
+            },
+        },
+        "expected_sha256": "a" * 64,
+    }
+    manager = dashboard.SeatConfigManager(
+        state_dir=tmp_path / "fleet",
+        latest_version=lambda: None,
+        git_runner=fail_preflight,
+    )
+
+    with pytest.raises(dashboard.FleetCloneGitError) as caught:
+        manager.prepare_fleet_clone(registry_payload, "Alpha")
+    exception_text = str(caught.value)
+    direct_log = capsys.readouterr().err
+    journal_path = tmp_path / "fleet/config-actions.jsonl"
+    direct_journal = journal_path.read_text(encoding="utf-8")
+
+    class Cache:
+        def get_project_registry(self) -> dict[str, object]:
+            return registry_payload
+
+    server = dashboard.ThreadingHTTPServer(
+        ("127.0.0.1", 0), dashboard.make_handler(Cache(), seat_manager=manager)
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    request = urllib.request.Request(
+        base + "/api/config/registry/clone",
+        data=json.dumps({"project": "Alpha"}).encode(),
+        headers={"Content-Type": "application/json", "Origin": base},
+        method="POST",
+    )
+    try:
+        with pytest.raises(urllib.error.HTTPError) as api_error:
+            urllib.request.urlopen(request)
+        assert api_error.value.code == 400
+        body = json.loads(api_error.value.read())
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+    api_log = capsys.readouterr().err
+    final_journal = journal_path.read_text(encoding="utf-8")
+    surfaces = (
+        exception_text,
+        body["error"],
+        direct_log,
+        api_log,
+        direct_journal,
+        final_journal,
+    )
+    for surface in surfaces:
+        assert credential not in surface
+        assert "[REDACTED:AWS_ACCESS_KEY_ID]" in surface
+
+
 def test_agents_group_by_principal_and_name_across_board_specific_ids() -> None:
     now = datetime(2030, 1, 2, 12, tzinfo=timezone.utc)
     recent = (now - timedelta(seconds=20)).isoformat()
