@@ -156,17 +156,24 @@
       <span class="pill">JWT-only · RS256/JWKS</span>
       <span class="pill">Subscription-first multi-board</span>
       <span class="pill">Fleet dashboard</span>
-      <span class="pill">a16 released</span>
+      <span class="pill">a21 released</span>
     </div>
   </header>
 
   <nav aria-label="สารบัญ">
     <div class="page">
+      <a href="#start">เริ่มใน 5 นาที</a>
       <a href="#mental-model">ภาพจำสั้น ๆ</a>
       <a href="#architecture">สถาปัตยกรรม</a>
+      <a href="#personal">Personal tier</a>
       <a href="#fleet">Fleet &amp; registry</a>
+      <a href="#bounded">Bounded APIs</a>
+      <a href="#dashboards">Dashboard</a>
+      <a href="#coordinator">Coordinator</a>
       <a href="#flow">Flow งาน</a>
+      <a href="#seats">Seats &amp; routing</a>
       <a href="#compare">v4 → v5</a>
+      <a href="#unreleased">Unreleased</a>
       <a href="#release">Build &amp; release</a>
       <a href="#why">เหตุผลการออกแบบ</a>
       <a href="#caveats">ขอบเขตจริง</a>
@@ -174,6 +181,17 @@
   </nav>
 
   <main class="page">
+    <section id="start">
+      <h2>เริ่มใน 5 นาที: 6 คำสั่งสำหรับ operator</h2>
+      <pre><code>python -m pip install "pursers==5.0.0a21"
+pursers-personal setup --project /PATH/TO/project --session primary
+pursers-personal doctor --project /PATH/TO/project
+python tools/wait-bridge/registry_admin.py show
+python tools/fleet-dashboard/fleet_dashboard.py --token-file /PATH/TO/admin.jwt
+shasum -a 256 -c SHA256SUMS.txt</code></pre>
+      <div class="callout"><strong>ผลที่ควรเห็น:</strong> version 5.0.0a21 และ component set ที่ pin ตรงกัน, profile/identity ชัด, registry ผ่าน validation และ dashboard เปิดบน loopback</div>
+    </section>
+
     <section id="mental-model">
       <h2>ภาพจำสั้น ๆ ก่อน</h2>
       <p class="section-intro">Pursers ไม่ใช่ที่เก็บไฟล์โปรเจกต์ และไม่ใช่ AI ตัวใหม่ แต่เป็น “หอบังคับการงาน” ที่ทำให้หลาย agent เห็นคิวเดียวกัน แย่งงานโดยไม่ทำซ้ำ และมีหลักฐานว่าใครทำ ใครตรวจ และจบเมื่อไร</p>
@@ -310,15 +328,32 @@
           <p>Central 0.1.0a25 ใช้ scrub profile ของบอร์ดกับ <code>board_state_update</code> บอร์ด <code>internal</code> จึงเก็บ registry ที่มี absolute <code>work_dir</code> ได้ ขณะที่บอร์ด <code>strict</code> ยังปฏิเสธ path ลักษณะ home directory</p>
         </article>
         <article class="card">
+          <h3>Board generation fencing</h3>
+          <p>ทุก mutation ที่ต้องกัน stale writer ใช้ generation token ของ board การ rejoin คืน generation ปัจจุบัน; caller ต้องส่ง token นี้กับ claim, submit, review และ lease renewal แทนการเดาว่า session เดิมยังมีอำนาจ</p>
+        </article>
+        <article class="card">
           <h3>ขอบเขตข้อมูลกับขอบเขตไฟล์</h3>
           <p>JWT และ membership ตัดสินว่า principal เห็น board ใด ส่วน <code>work_dir</code> ใน registry เป็นข้อมูล routing เท่านั้น สิทธิ์อ่าน/เขียนไฟล์ยังต้องถูกบังคับโดย sandbox หรือ file-editing layer ของ worker แยกต่างหาก</p>
         </article>
       </div>
     </section>
 
+    <section id="personal">
+      <h2>Personal tier: Central เดียวกัน แต่ห่อสำหรับผู้ใช้คนเดียวบนเครื่องเดียว</h2>
+      <div class="detail-grid">
+        <article class="card"><h3>Profile และ capability</h3><p><code>pursers-personal setup</code> สร้าง private profile สำหรับ board, Central, credential และ Host; <code>doctor</code> ตรวจ path, version, token identity, CA และ config drift โดยไม่คืน token ให้ browser</p></article>
+        <article class="card"><h3>CLI ครบวงจรชีวิต</h3><p><code>setup</code> ที่ไม่มี <code>--apply</code> เป็น plan-only จริง, apply ที่ล้มไม่ทิ้ง orphan profile และ rollback คืน Host config จาก backup ส่วน uninstall ถอด integration แต่รักษาข้อมูลที่ผู้ใช้ยังต้องการ</p></article>
+        <article class="card"><h3>Host integration แบบ transaction</h3><p>Config page แสดง redacted diff ก่อน apply, สร้าง timestamped backup และบอก restart ที่ต้องทำ a21 เพิ่ม seat import กับ Doctor ราย seat หรือทั้ง fleet</p></article>
+        <article class="card"><h3>MCP App facade แบบ pure-read</h3><p>dashboard resource อ่าน <code>board_status</code>, <code>board_snapshot</code>, <code>fleet_snapshot</code> และ event feed แบบ bounded โดยไม่ join หรือ mutate board; Personal <code>memory_*</code> ยังอยู่เพราะมี shipped UI caller</p></article>
+        <article class="card"><h3>ขอบเขตความปลอดภัย</h3><p>Personal เหมาะกับ single-user local trust boundary ใช้ loopback + JWT และเก็บ credential ใน private file/secret storage ไม่ใช่รูปแบบ multi-tenant และไม่ทำให้ registry กลายเป็น filesystem sandbox</p></article>
+        <article class="card"><h3>Import จาก On Board v4</h3><p><code>pursers-personal-import 5.0.0a3</code> ทำ one-way cutover พร้อม provenance; อย่าเขียนกลับ retired store หรือใช้ import เป็น sync สองทาง</p></article>
+      </div>
+    </section>
+
     <section id="fleet">
       <h2>Cross-Project Fleet: เพิ่มโปรเจกต์หนึ่งครั้ง แล้ว pool เห็นทั้งระบบ</h2>
-      <p class="section-intro">Home board เก็บ project registry กลาง แล้ว <code>a2a_wait(boards="registry")</code> แปลง registry เป็นรายการ board ที่ active ก่อนเริ่มรอ ใน a16 ทุก seat ใช้ subscription เป็นเส้นทางหลักแทน timer poll</p>
+      <p class="section-intro">Registry board เก็บ project registry กลาง แล้ว <code>a2a_wait(boards="registry")</code> แปลง registry เป็นรายการ board ที่ active ก่อนเริ่มรอ ตั้งแต่ a16 ทุก seat ใช้ subscription เป็นเส้นทางหลักแทน timer poll</p>
+      <div class="callout"><strong>Unreleased:</strong> home board ว่างหมายถึง seat แบบ fleet-wide และ bridge bind กับ registry board (<code>pursers</code> โดย default); home board ที่มีชื่อหมายถึง dedicated seat และ prompt ส่ง <code>boards=["&lt;board&gt;"]</code> Managed config เก็บ selector ใน <code>PURSERS_BOARDS</code>/<code>PURSERS_HOME_BOARD</code></div>
 
       <figure class="card diagram" aria-labelledby="pool-caption">
         <svg viewBox="0 0 1120 650" role="img" aria-labelledby="pool-title pool-desc">
@@ -483,6 +518,37 @@
       </figure>
     </section>
 
+    <section id="bounded">
+      <h2>Bounded APIs: จำกัดโครงสร้างและ bytes ก่อนคุม prose</h2>
+      <div class="detail-grid">
+        <article class="card"><h3>Snapshot</h3><p><code>board_snapshot</code> จำกัด projected collections และ JSON UTF-8 รวม พร้อม total/returned/omitted/truncated และ watermark</p></article>
+        <article class="card"><h3>Catchup</h3><p><code>board_catchup</code> จำกัด events/bytes และคืน <code>has_more</code>/<code>new_seq</code>; a21 batch, compact และ clamp cursor โดยยังรับประกัน monotonic progress ภายใน deadline</p></article>
+        <article class="card"><h3>Status</h3><p><code>board_status</code> เป็นมุมมองสั้นสำหรับสถานะปัจจุบัน แทน <code>board_get_briefing</code> ที่ถูกถอดใน a21</p></article>
+        <article class="card"><h3>Submit</h3><p>Client 0.1.0a18 จำกัด notes ที่ใหญ่เกินพร้อม truncation metadata เพื่อไม่ให้หลักฐานถูกตัดแบบเงียบ</p></article>
+      </div>
+      <div class="callout"><strong>หลัก:</strong> token budget ไม่ได้จำกัด structured envelope ต้องคุม item/event/byte limits และ paginate ตาม cursor ที่ server คืน</div>
+    </section>
+
+    <section id="dashboards">
+      <h2>Dashboard สองรูปแบบ แยกตามบริบท</h2>
+      <div class="detail-grid">
+        <article class="card"><h3>Standalone Fleet dashboard · primary</h3><p>loopback console รวม Home, Work, Agents, Config, Needs attention และ Release &amp; Operations a21 เพิ่ม seat import/Doctor, fleet-clone ownership, immutable release plan, Central staging, publish/kickstart และ restart checks</p></article>
+        <article class="card"><h3>MCP App · inline per-project</h3><p><code>ui://pursers/dashboard</code> เป็น pure-read view ของ Today, Work, Agents, Fleet และ Activity; ไม่แทน operator console และไม่ส่ง credential เข้า iframe</p></article>
+      </div>
+      <p><strong>Unreleased:</strong> timer refresh หยุดเมื่อ form มี focus หรือ unsaved input และ resume ผ่าน fixed pill/status line; clone endpoint เติม working tree และซ่อม empty clone แทนการปฏิเสธว่า dirty</p>
+    </section>
+
+    <section id="coordinator">
+      <h2>Coordinator: อ่าน วิเคราะห์ รับ ask และมอง dispatch โดยไม่ claim งาน</h2>
+      <div class="detail-grid">
+        <article class="card"><h3>Findings</h3><p>รายงาน stale claim, unverifiable/closed-but-unmerged commit, board-large และ integration gaps แบบ deduplicated; <code>board-degraded</code> ใช้เฉพาะ call failure จริง</p></article>
+        <article class="card"><h3>Structured intake</h3><p>classifier แบบ deterministic แปลง ask ที่อนุญาตเป็น ticket ผ่าน principal-intake แยก พร้อม consume-once idempotency และ approval matrix</p></article>
+        <article class="card"><h3>Orchestrator digest</h3><p><code>board_digest</code>/<code>board_digest_ack</code> และ watchlist อ่าน event buffer แบบ non-blocking; orchestrator ไม่ <code>a2a_wait</code>, claim, review หรือ merge แทนคน</p></article>
+        <article class="card"><h3>Dispatcher liveness</h3><p>a21 offer เฉพาะ live seat, fair rotation และเก็บ deadline/history ข้าม restart; unreleased re-surface unclaimed broadcast ตาม <code>PURSERS_BACKLOG_RESURFACE_INTERVAL_S</code> และไม่ offer ให้ coordinator</p></article>
+      </div>
+      <div class="callout"><strong>Reduced surface:</strong> ไม่มี <code>agent_nudge</code>; autonomous Dispatcher offers เป็น targeted wake path เดียว</div>
+    </section>
+
     <section id="flow">
       <h2>Flow หลัก: รอ → แย่ง claim → ทำ → ส่ง → ตรวจ</h2>
       <p class="section-intro">หัวใจคือ server เป็นผู้เปลี่ยนสถานะ ticket แบบ atomic จึงมีผู้ชนะ claim เพียงคนเดียว ส่วน journal เป็น cue ให้ตื่น ไม่ใช่สำเนาความจริง Worker ต้องอ่าน ticket ล่าสุดก่อนลงมือเสมอ</p>
@@ -582,6 +648,18 @@
         <div class="step"><div class="num">6</div><h3>Review</h3><p>reviewer seat คนละ principal ตรวจ; approve → close, reject → แก้และ submit ใหม่</p></div>
       </div>
       <div class="callout"><strong>รูปแบบการจัดทีม:</strong> worker seat หนึ่งที่นั่งคือหนึ่ง Codex session และหนึ่ง <code>agent_name</code> ต่อ call; reviewer seat แยกอยู่ภายใต้ principal ของตัวเองและต้องตรวจ evidence ก่อน approve/reject มนุษย์เป็นผู้กำกับ scope และผลลัพธ์ สำหรับงานตรวจผ่าน browser ใช้ ego lite เท่านั้น ไม่ใช้ Chrome</div>
+      <div class="callout"><strong>Unreleased — keepalive liveness:</strong> background lease renewal ทำงานเฉพาะเมื่อ stdio session ยังแสดง model liveness ภายใน <code>PURSERS_KEEPALIVE_IDLE_LIMIT_S</code> (default สาม claim TTLs) เมื่อ idle จะหยุดและส่ง <code>lease_keepalive_paused</code>; Needs-attention แยก claim ที่อยู่ได้ด้วย keepalive อย่างเดียว</div>
+    </section>
+
+    <section id="seats">
+      <h2>Seat สามชนิด และ routing งาน</h2>
+      <p class="section-intro">transport ต่างกัน แต่ทุก seat ใช้ JWT, membership, generation และ per-call identity เดียวกัน Role เป็นคำประกาศของ seat ตั้งแต่ a18 และ reviewer ต้องแยก principal จากผู้ submit</p>
+      <div class="detail-grid">
+        <article class="card"><h3>MCP seat · Codex / Claude</h3><p>รอผ่าน Wait Bridge แบบ subscription-first หลาย board, refetch หลัง cue และใช้ Host timeout profile เพื่อ re-arm ก่อน tool deadline</p></article>
+        <article class="card"><h3>CLI seat · Goose (seat-kit)</h3><p><code>seat_new.py</code> สร้าง role-safe <code>bin/board.sh</code>, token-file launch, fleet-clone workflow และ wait แบบ registry cursor map; unreleased ทำ <code>--board</code> optional, เพิ่ม <code>--registry-board</code>, รักษา venv interpreter และไม่ abort upgrade เมื่อ clone non-fast-forward</p></article>
+        <article class="card"><h3>API seat · worker-runtime</h3><p>headless runtime ใช้ capability/tier/skills และ targeted offers ชุดเดียวกับ interactive seat พร้อม bounded wait/submit, fleet-owned clone และ reduced tool surface</p></article>
+      </div>
+      <div class="callout"><strong>Routing:</strong> Dispatcher offer เฉพาะ live seat ที่ผ่าน tier, skills และ work/review gates; review lease แบบ atomic กัน reviewer ตรวจซ้ำ และ continuation บอก prior holder/branch เมื่อ claim เปลี่ยนมือ</div>
     </section>
 
     <section id="compare">
@@ -647,6 +725,23 @@
         </svg>
         <figcaption id="evo-caption" class="legend"><span>สิ่งที่ยังเหมือนเดิมคือ local-first และมนุษย์เป็นเจ้าของขอบเขต; สิ่งที่เพิ่มคือ concurrency, identity และ evidence ที่ตรวจสอบได้</span></figcaption>
       </figure>
+    </section>
+
+    <section id="unreleased">
+      <h2>เส้นทางสถาปัตยกรรม a14 → a21 และ Unreleased</h2>
+      <table>
+        <thead><tr><th>ช่วง</th><th>การเปลี่ยนโครงสร้าง</th></tr></thead>
+        <tbody>
+          <tr><td>a14–a15</td><td>runtime health, tier-aware worker runtime, transactional Host setup, wait-bridge handshake และ coordinator finding hygiene</td></tr>
+          <tr><td>a16</td><td>subscription-first waits, host ceilings, side-effect-free refetch และ explicit poll fallback</td></tr>
+          <tr><td>a17</td><td>atomic review lease, Config/Doctor, generated HARD-verify seats และ registry-wide CLI waits</td></tr>
+          <tr><td>a18</td><td>explicit worker/reviewer/orchestrator roles, capability offers, background keepalive, split-identity fail-closed และ bounded digest/watch mode</td></tr>
+          <tr><td>a19–a20</td><td>membership admission/connector identity hardening และ shared event vocabulary ที่ทำให้ push fail open ต่อ unknown kinds พร้อม visibility ของ fallback</td></tr>
+          <tr><td>a21</td><td>live-seat fair dispatch, durable offer deadlines/history, retirement lifecycle, compacted catch-up, fleet-owned clones, import/Doctor และ Release &amp; Operations panel; ถอด <code>agent_nudge</code>, <code>board_get_briefing</code>, <code>ticket_terminate</code></td></tr>
+          <tr><td>Unreleased, on main</td><td>fleet-wide vs dedicated home-board semantics, model-liveness-gated keepalive, backlog re-surface/re-offer, form-safe Resume, clone repair และ seat-kit upgrade/interpreter fixes</td></tr>
+        </tbody>
+      </table>
+      <p>Unreleased ยังไม่ใช่ version ใหม่: ห้ามรวมรายการเหล่านี้ไว้ใต้ป้าย 5.0.0a21 จนกว่าจะมี tag, manifest และ artifact ที่อนุมัติ</p>
     </section>
 
     <section id="release">
