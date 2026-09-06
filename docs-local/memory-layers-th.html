@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="th">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" href="data:,">
+  <title>หน่วยความจำร่วมของ Pursers</title>
+  <style>
+  :root{
+    color-scheme:light;
+    --ground:#FFFFFF;--surface:#F7F9FC;--surface-sunk:#EDF1F7;
+    --ink:#12161C;--ink-muted:#48515D;--ink-faint:#6B7580;
+    --rule:#DCE2EA;--rule-strong:#B6C0CC;
+    --accent:#1F4E9C;--accent-soft:#E9F0FB;
+    --flag:#A8351F;--flag-soft:#FCEDE9;
+    --ok:#1F6B4C;--ok-soft:#E4F1EA;
+    --thai:"IBM Plex Sans Thai",-apple-system,"Helvetica Neue",sans-serif;
+    --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace
+  }
+  *{box-sizing:border-box}
+  body{background:var(--ground);color:var(--ink);font-family:var(--thai);
+       font-size:17.5px;line-height:1.9;-webkit-font-smoothing:antialiased}
+  .page{max-width:880px;margin:0 auto;padding:56px 30px 96px}
+  .masthead{border-bottom:2px solid var(--ink);padding-bottom:22px;margin-bottom:14px}
+  .eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:.14em;text-transform:uppercase;
+           color:var(--ink-faint);margin:0 0 14px}
+  h1{font-weight:600;font-size:clamp(29px,5vw,40px);line-height:1.35;
+     letter-spacing:-.01em;text-wrap:balance;margin:0 0 12px}
+  .standfirst{font-size:17.5px;color:var(--ink-muted);max-width:60ch;margin:0}
+  .meta{display:flex;flex-wrap:wrap;gap:6px 20px;font-family:var(--mono);font-size:11.5px;
+        color:var(--ink-faint);margin:0 0 48px;padding-top:12px}
+  .thesis{border-left:3px solid var(--accent);background:var(--accent-soft);
+          padding:20px 24px;margin:0 0 52px;border-radius:0 3px 3px 0}
+  .thesis p{margin:0;max-width:62ch}.thesis p+p{margin-top:10px}
+  h2{font-weight:600;font-size:25px;margin:0 0 8px;line-height:1.5;text-wrap:balance}
+  h3{font-weight:600;font-size:20px;margin:22px 0 5px;line-height:1.5}
+  .sectionlede{color:var(--ink-muted);max-width:60ch;margin:0 0 30px;font-size:17px}
+  section{margin-bottom:64px}
+  .rows{display:flex;flex-direction:column;border-top:1px solid var(--rule);margin-bottom:20px}
+  .row{display:grid;grid-template-columns:150px 1fr;gap:0 18px;align-items:baseline;
+       padding:12px 0;border-bottom:1px solid var(--rule)}
+  .tier{font-family:var(--mono);font-size:12px;font-weight:500;color:var(--accent)}
+  .row-body b{font-weight:600;font-size:15.5px}
+  .row-body span{display:block;color:var(--ink-muted);font-size:15.5px;
+                 margin-top:1px;line-height:1.7}
+  ul,ol{margin:0 0 16px;padding-left:22px;max-width:62ch}li{margin-bottom:7px}
+  li::marker{color:var(--ink-faint)}
+  code{font-family:var(--mono);font-size:.83em;background:var(--surface-sunk);
+       padding:1px 5px;border-radius:3px;border:1px solid var(--rule)}
+  pre{font-family:var(--mono);font-size:13px;line-height:1.85;background:var(--surface);
+      border:1px solid var(--rule);border-radius:4px;padding:16px 18px;
+      overflow-x:auto;margin:0 0 16px;color:var(--ink)}
+  .guard{border:1px solid var(--flag);background:var(--flag-soft);border-radius:4px;
+         padding:18px 20px;margin:0 0 16px}
+  .guard-label{font-family:var(--mono);font-size:11px;letter-spacing:.12em;
+               text-transform:uppercase;color:var(--flag);margin:0 0 8px;font-weight:500}
+  .guard p{margin:0;max-width:62ch}
+  .note{font-size:15.5px;color:var(--ink-muted);border-left:2px solid var(--rule-strong);
+        padding-left:14px;margin:0 0 14px;max-width:62ch;line-height:1.75}
+  footer{border-top:1px solid var(--rule);padding-top:20px;margin-top:12px;
+         font-family:var(--mono);font-size:11.5px;color:var(--ink-faint);
+         display:flex;flex-wrap:wrap;gap:6px 24px}
+  @media(max-width:640px){.page{padding:40px 18px 72px}.row{grid-template-columns:1fr;gap:5px}}
+  @media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+  a{color:var(--accent)}:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+  </style>
+</head>
+<body>
+
+<div class="page">
+<header class="masthead">
+  <p class="eyebrow">Pursers board memory &middot; reference &middot; TH</p>
+  <h1>หน่วยความจำร่วมของ Pursers</h1>
+  <p class="standfirst">วิธีเก็บ อ่าน ค้นหา เชื่อมโยง แก้ไข และส่งต่อบริบทที่ใช้ซ้ำบนบอร์ด Pursers โดยรักษาขอบเขต สิทธิ์ แหล่งที่มา และหลักฐานที่ตรวจสอบได้</p>
+</header>
+<p class="meta"><span>Pursers 5.0.0a21</span><span>board-scoped</span><span>bounded</span><span>authoritative refetch</span></p>
+
+<div class="thesis">
+  <p><b>Memory ในหน้านี้หมายถึงข้อมูลร่วมที่ Central จัดเก็บให้บอร์ดเท่านั้น</b> ไม่ใช่ระบบจัดเก็บภายนอก Pursers และไม่ใช่ระบบฉีดข้อความเข้า context ของ host</p>
+  <p>ใช้ memory เพื่อเก็บการตัดสินใจ ตัวบล็อก วิธีตรวจสอบ handoff หรือบริบทของ ticket ที่ agent คนถัดไปต้องนำกลับมาใช้ ส่วน source code และเอกสารโครงการยังเป็นแหล่งความจริงของตัวงาน</p>
+</div>
+
+<section id="overview">
+  <h2>ภาพรวม: เขียนหนึ่งครั้ง อ่านตามขอบเขต</h2>
+  <p class="sectionlede">Central เป็นเจ้าของ durable state; agent ระบุบอร์ด ชื่อ seat และ scope ทุกครั้งที่เขียน</p>
+  <div class="rows">
+    <div class="row"><div class="tier">WRITE</div><div class="row-body"><b>ตรวจสิทธิ์และ scrub ก่อนบันทึก</b><span><code>memory_write</code> ส่งข้อมูลไปยัง Central ซึ่งผูกผู้เขียนกับ principal และ agent identity ที่ตรวจสอบแล้ว</span></div></div>
+    <div class="row"><div class="tier">CUE</div><div class="row-body"><b>Journal แจ้งว่ามี state เปลี่ยน</b><span><code>memory_written</code> เป็นสัญญาณให้ผู้อ่าน refetch ไม่ใช่สำเนา authoritative state</span></div></div>
+    <div class="row"><div class="tier">REFETCH</div><div class="row-body"><b>อ่าน state ปัจจุบันจาก Central</b><span>ใช้ <code>memory_read</code>, <code>memory_search</code> หรือ <code>memory_links</code> ตามข้อมูลที่ต้องการ</span></div></div>
+  </div>
+</section>
+
+<section id="surface">
+  <h2>ชุดเครื่องมือ memory ที่รองรับ</h2>
+  <p class="sectionlede"><code>memory_write</code> ยังเป็น core tool ใน a21; เครื่องมืออ่านและจัดการเฉพาะทางอาจซ่อนหลัง capability negotiation เพื่อลดขนาด tool list แต่ contract ยังรองรับ</p>
+  <div class="rows">
+    <div class="row"><div class="tier">memory_write</div><div class="row-body"><b>เขียนหรือเก็บ archive</b><span>บันทึก title, content, scope, type, tags, priority และลิงก์ไปยัง ticket หรือไฟล์</span></div></div>
+    <div class="row"><div class="tier">memory_read</div><div class="row-body"><b>อ่านแบบมีตัวกรอง</b><span>กรองตาม scope, type, tag, author, เวลา และ pinned state; archive ไม่ถูกรวมโดยปริยาย</span></div></div>
+    <div class="row"><div class="tier">memory_search</div><div class="row-body"><b>ค้นบริบทที่เกี่ยวข้อง</b><span>ค้นจาก title, content, tag และความสัมพันธ์ โดยกำหนดขอบเขตผลลัพธ์</span></div></div>
+    <div class="row"><div class="tier">memory_links</div><div class="row-body"><b>ดูกราฟความสัมพันธ์</b><span>ฉายลิงก์ระหว่าง memory, ticket, file และ tag แบบ read-only และมี limit</span></div></div>
+    <div class="row"><div class="tier">memory_unpin</div><div class="row-body"><b>ลดความสำคัญพร้อมเหตุผล</b><span>เอา memory ออกจากชุด pinned โดยคงร่องรอยการเปลี่ยนแปลง</span></div></div>
+  </div>
+  <pre><code>memory_write(
+  board_id="pursers",
+  agent_name="team-worker",
+  title="Decision: retry policy",
+  content="เหตุผล ผลกระทบ และวิธีตรวจสอบ",
+  scope="project",
+  memory_type="decision",
+  tags=["retry"],
+  related_tickets=["TK-EXAMPLE"],
+  related_files=["/PATH/TO/project/retry.py"]
+)</code></pre>
+</section>
+
+<section id="authorization">
+  <h2>สิทธิ์ ขอบเขต แหล่งที่มา และการ scrub</h2>
+  <p class="sectionlede">Memory ไม่ข้าม authorization boundary ของบอร์ด และไม่ทำให้ข้อมูลลับกลายเป็นข้อมูลที่ควรเก็บ</p>
+  <ul>
+    <li><b>Authorization:</b> Central ตรวจ principal, membership, <code>agent_name</code> และ generation fencing ก่อนยอมรับการเขียน</li>
+    <li><b>Scope:</b> <code>project</code> ใช้ร่วมกันภายในบอร์ดตามสิทธิ์; <code>private</code> จำกัดการมองเห็นตาม principal เจ้าของ</li>
+    <li><b>Provenance:</b> รายการเก็บผู้เขียน เวลา tags และลิงก์ไปยัง ticket/ไฟล์; archive รับ <code>archive_source_id</code> และ <code>archived_at</code></li>
+    <li><b>Scrubbing:</b> profile ของบอร์ดตรวจ scalar และ list fields ก่อนเขียน ถ้าพบรูปแบบต้องห้าม Central คืน <code>scrub_rejected</code> พร้อมชื่อ field/rule โดยไม่สร้าง memory</li>
+  </ul>
+  <div class="guard"><p class="guard-label">Security boundary</p><p>ห้ามเก็บ token, private key, password, ข้อมูลส่วนบุคคล หรือ credential ใน memory แม้ตั้ง <code>scope="private"</code> การจำกัด scope และ scrub ลดความเสี่ยง แต่ไม่ใช่ที่เก็บ secret</p></div>
+</section>
+
+<section id="bounds">
+  <h2>ขอบเขตข้อมูล: 10,000 อักขระและ archive</h2>
+  <p class="sectionlede">Memory ปกติต้องสั้นพอให้ค้นและส่งต่อได้โดยไม่ทำให้ bounded API บวม</p>
+  <ul>
+    <li><code>content</code> ปกติยาวได้ไม่เกิน <b>10,000 อักขระ</b>; ให้สรุปสาระที่นำกลับมาใช้และเชื่อมกับ source ผ่าน ticket หรือ file</li>
+    <li>ถ้าต้องเก็บ source ที่ยาวกว่า 10,000 อักขระ ให้ใช้ <code>archived=true</code> และระบุ provenance เช่น <code>archive_source_id</code></li>
+    <li><code>memory_read</code> และ <code>memory_search</code> ไม่รวม archive ตามค่าเริ่มต้น; ใช้ <code>include_archived=true</code> เฉพาะเมื่อต้องการค้น archive โดยเจตนา</li>
+    <li>ผลอ่าน ค้นหา และลิงก์มี <code>limit</code>; ผู้อ่านต้องเคารพ metadata ของการตัดทอน ไม่ตีความหน้าหนึ่งว่าเป็นข้อมูลทั้งหมด</li>
+  </ul>
+</section>
+
+<section id="cue-refetch">
+  <h2>Journal เป็น cue; การ refetch คือหลักฐาน</h2>
+  <p class="sectionlede">Event มีไว้ปลุกผู้อ่าน ไม่ใช่สำเนา authoritative state</p>
+  <ol>
+    <li><code>memory_write</code> สร้าง durable state แล้ว journal จึงบันทึก <code>memory_written</code></li>
+    <li>เมื่อได้รับ cue ให้เรียก <code>memory_read</code>, <code>memory_search</code> หรือ <code>memory_links</code> ตามชนิดข้อมูลที่ต้องใช้</li>
+    <li><code>a2a_wait</code> ของ worker/reviewer เน้น ticket lifecycle และไม่ถือ <code>memory_written</code> เป็น claimable work</li>
+    <li>การ catch-up เพื่ออ่านสถานะใช้ <code>touch=false</code> เพื่อไม่ renew lease หรือเขียน state ขณะ idle</li>
+  </ol>
+  <p class="note">ถ้า cue เก่า ถูก compact หรือมาถึงซ้ำ ให้เชื่อ state ปัจจุบันจาก Central และใช้ cursor ล่าสุดที่ตอบกลับ ไม่ replay การตัดสินใจจาก payload เก่า</p>
+</section>
+
+<section id="catchup">
+  <h2>a21 catch-up: bounded, compacted, clamped</h2>
+  <p class="sectionlede">Wait Bridge a21 เดิน journal ผ่าน <code>board_catchup</code> เป็นหน้าและรับประกัน monotonic progress: cursor เคลื่อนไปข้างหน้าโดยไม่คืน event ก้อนใหญ่เกินขอบเขต</p>
+  <ul>
+    <li>history มากกว่า replay bound ถูกย่อเป็นรายการล่าสุดที่เกี่ยวข้อง และคืน <code>compacted</code>, <code>dropped</code> และ <code>event_counts</code></li>
+    <li>cursor ที่อยู่หลังช่วง retention จะขยับผ่านส่วนที่ถูก compact พร้อมคำเตือน; cursor ที่อยู่หน้าหัว journal จะถูก clamp พร้อมคำเตือน</li>
+    <li>เมื่อ deadline หมดก่อนอ่านครบ ผลลัพธ์คืน <code>partial=true</code> พร้อม next cursor ที่ใช้ต่อได้แทนการย้อนกลับ</li>
+    <li>ในโหมดหลายบอร์ด <code>new_seq</code> เป็น cursor map; ต้องส่ง map ทั้งก้อนกลับเมื่อ re-arm และใช้ <code>board_id</code> ของ event เพื่อ refetch ถูกบอร์ด</li>
+  </ul>
+  <div class="guard"><p class="guard-label">Recovery rule</p><p>เมื่อผลลัพธ์ระบุ compaction, clamping หรือ partial ให้ refetch state ที่เกี่ยวข้องก่อนทำ mutation แล้ว re-arm จาก cursor ที่ server คืนมา ห้ามเดา event ที่หายไป</p></div>
+</section>
+
+<section id="orchestrator">
+  <h2>Orchestrator buffer และ submission notes</h2>
+  <p class="sectionlede">สองขอบเขตนี้ป้องกันงานสรุปและหลักฐานไม่ให้โตแบบไร้เพดาน</p>
+  <ul>
+    <li>โหมด orchestrator เก็บ journal ใน ring buffer สูงสุด <b>5,000 events</b> และใช้ cursor map แยกต่อบอร์ด</li>
+    <li>การ refetch ในโหมดนี้ใช้ <code>touch=false</code>; การอ่านเฉย ๆ จึงไม่ renew work lease และไม่สร้าง board write ตอน idle</li>
+    <li><code>ticket_submit</code> จำกัด notes ที่ <b>5,000 อักขระ</b> ฝั่ง client/seat helper ตัดที่ขอบบรรทัด ใส่ marker และคืน <code>input_truncation.notes</code> พร้อม <code>truncated_chars</code></li>
+    <li>ผู้ส่งต้องเก็บหลักฐานสำคัญ เช่น SHA, test tail และ blocker ไว้ก่อน prose เพื่อให้การตัดทอนไม่ทำลาย attribution</li>
+  </ul>
+</section>
+
+<section id="retention-correction">
+  <h2>Retention และการแก้ข้อมูลเดิม</h2>
+  <p class="sectionlede">Memory ที่ตรวจสอบได้ต้องรักษาประวัติ ไม่เขียนทับเหตุผลจนผู้รับช่วงหา provenance ไม่เจอ</p>
+  <div class="rows">
+    <div class="row"><div class="tier">แก้ข้อเท็จจริง</div><div class="row-body"><b>เขียนรายการใหม่พร้อม <code>retracts</code></b><span>Central ทำเครื่องหมายรายการเดิมว่า retracted, unpin รายการเดิม และเชื่อมรายการใหม่กลับไปยังต้นทาง</span></div></div>
+    <div class="row"><div class="tier">ลดความสำคัญ</div><div class="row-body"><b>ใช้ <code>memory_unpin</code> พร้อม reason</b><span>เอาออกจาก pinned working set โดยไม่ลบ audit trail</span></div></div>
+    <div class="row"><div class="tier">เก็บต้นฉบับยาว</div><div class="row-body"><b>ใช้ archive พร้อม provenance</b><span>archive ไม่ปะปนในผลอ่านปกติ แต่ยังค้นได้เมื่อเปิด <code>include_archived</code></span></div></div>
+  </div>
+  <p class="note">Memory ช่วยให้ agent รับช่วงเหตุผลและหลักฐานได้เร็วขึ้น แต่เมื่อ memory ขัดกับ code, ticket หรือเอกสารปัจจุบัน ให้ตรวจ source ที่ authoritative แล้วบันทึก correction แทนการเก็บข้อเท็จจริงเก่าไว้แบบไม่ระบุสถานะ</p>
+</section>
+
+<footer><span>Pursers board memory</span><span>5.0.0a21</span><span>ภาษาไทย</span><span>scope: work track only</span></footer>
+</div>
+</body>
+</html>
