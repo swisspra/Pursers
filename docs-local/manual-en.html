@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <link rel="icon" href="data:,">
-  <title>Getting started with Pursers</title>
+  <title>Pursers 5.0.0a21 — Operator guide and unreleased notes</title>
   <style>
     :root {
       color-scheme: light;
@@ -149,34 +149,68 @@
 <body>
   <header class="hero">
     <div class="hero-inner">
-      <p class="eyebrow">Pursers 5.0.0a21 · New team member guide</p>
-      <h1>Coordinate an agent fleet across projects</h1>
-      <p class="lead">Install the released packages, connect with a JWT, give each session a stable seat name, and move one ticket at a time through independent review.</p>
+      <p class="eyebrow">Pursers 5.0.0a21 · Operator guide · unreleased notes</p>
+      <h1>Bring up the fleet, provision seats, and move work to done</h1>
+      <p class="lead">Start with the six commands operators use most, then add seats, projects, tickets, review, and guarded releases. Features newer than a21 are labelled unreleased, on main.</p>
       <div class="hero-meta" aria-label="Main characteristics">
         <span class="pill">Local first</span>
         <span class="pill">JWT only</span>
         <span class="pill">Cross-project pool</span>
         <span class="pill">Independent review</span>
+        <span class="pill">Released · 5.0.0a21</span>
       </div>
     </div>
   </header>
 
   <main>
     <nav class="toc" aria-label="Contents">
-      <strong>First read: about 20 minutes</strong>
+      <strong>Start with the five-minute path, then open the task you need</strong>
       <ol>
+        <li><a href="#start">Five-minute start</a></li>
         <li><a href="#what">What Pursers is</a></li>
         <li><a href="#install">Install and create a profile</a></li>
         <li><a href="#connect">Connect Claude Desktop and Codex</a></li>
+        <li><a href="#seats">Provision a worker or reviewer</a></li>
         <li><a href="#identity">Name each agent session</a></li>
         <li><a href="#fleet">Use the project registry and worker pool</a></li>
         <li><a href="#tickets">Run the ticket lifecycle</a></li>
         <li><a href="#memories">Use memories</a></li>
         <li><a href="#dashboard">Set up seats and read dashboards</a></li>
+        <li><a href="#bounded">Control response size</a></li>
+        <li><a href="#release">Ship a release</a></li>
+        <li><a href="#troubleshoot">Troubleshoot</a></li>
         <li><a href="#security">Handle JWTs and secrets</a></li>
+        <li><a href="#unreleased">Unreleased changes on main</a></li>
         <li><a href="#operations-runbook">Resume fleet operations after the a21 pause</a></li>
       </ol>
     </nav>
+
+    <section id="start">
+      <p class="eyebrow" style="color:#2f6f9f">Five-minute start</p>
+      <h2>The six commands an operator runs most often</h2>
+      <p>Run these from the operator checkout. Replace each path placeholder locally; no real token belongs in this guide.</p>
+      <pre><code># 1 — enter the approved checkout
+cd "/PATH/TO/Pursers-local"
+
+# 2 — install the released product set
+python3 -m pip install "pursers==5.0.0a21"
+
+# 3 — create or inspect a Personal profile
+pursers-personal setup --project "$PWD"
+
+# 4 — verify the profile and effective identity
+pursers-personal doctor --project "$PWD"
+
+# 5 — verify the project registry with an admin credential
+ONBOARD_CENTRAL_TOKEN="$(cat /PATH/TO/admin.jwt)" \
+  python3 tools/wait-bridge/registry_admin.py show
+
+# 6 — open the loopback operations surface
+python3 tools/fleet-dashboard/fleet_dashboard.py \
+  --token-file /PATH/TO/admin.jwt</code></pre>
+      <div class="success"><strong>Expected:</strong> product <code>5.0.0a21</code>, a clear profile and principal from Doctor, a valid registry read-back, and the Fleet Dashboard at <code>http://127.0.0.1:8899</code>.</div>
+      <div class="warning"><strong>Setup without apply is a plan.</strong> Preview the exact redacted change before applying it. Close and restart the target host after its managed configuration changes; an open process has not loaded the new connector or environment.</div>
+    </section>
 
     <section id="what">
       <p class="eyebrow" style="color:#2f6f9f">01 · Overview</p>
@@ -360,8 +394,28 @@ start every turn with board_digest; act on closed tickets (merge/verify), file f
 Never review your own work, never push main, stay in the registered work_dir for the event's board_id, and report evidence faithfully.</code></pre>
     </section>
 
+    <section id="seats">
+      <p class="eyebrow" style="color:#2f6f9f">04 · Seats</p>
+      <h2>Provision a worker or reviewer by verified principal</h2>
+      <p>Central uses JWT-only authentication and board admission. A valid JWT establishes a principal, but it does not grant board membership by itself. Bind the stable seat name, declared role, principal, private token file, and board coverage through the Fleet Dashboard Config page; preview the redacted change before applying it.</p>
+      <pre><code># Read-only verification after Config apply
+python3 tools/fleet-dashboard/seat_config.py doctor --json
+
+# Headless seat generation from the approved operator checkout
+python3 tools/seat-kit/seat_new.py \
+  --role worker \
+  --name worker-a \
+  --dest /PATH/TO/worker-a \
+  --central-url https://&lt;central_host&gt;/mcp \
+  --token-file /PATH/TO/worker-a.jwt \
+  --repo &lt;repository_url&gt; \
+  --board &lt;home_board&gt;</code></pre>
+      <p>Worker, reviewer, coordinator, and orchestrator are seat declarations, not labels inferred from broad token scopes. Workers need board read/write authority; reviewers need board read/review authority and an independent principal. A coordinator identity is never eligible for work offers. Doctor must confirm that the board connector and wait bridge resolve to the same principal.</p>
+      <div class="note"><strong>Registry coverage:</strong> admit the principal to every board the seat will serve. A new registered board still needs membership for that principal before waits can route work there. Never broaden a worker into a reviewer to fix an admission error.</div>
+    </section>
+
     <section id="identity">
-      <p class="eyebrow" style="color:#2f6f9f">04 · Identity</p>
+      <p class="eyebrow" style="color:#2f6f9f">05 · Identity</p>
       <h2>Give each session one stable agent name</h2>
       <p>Every board action is attributed to an identity. Pick a name for the worker seat, such as <code>pool-codex-1</code>, then keep it for the life of the session. Central derives a separate agent ID on each board, while Fleet groups those board-local rows by principal ID and agent name so one worker seat appears once across the pool.</p>
 
@@ -437,7 +491,7 @@ Approval notes must contain a full 40-hex SHA, an unambiguously successful pytes
 
 Rejecting is normal and cheap; a wrong approval is expensive.</code></pre>
       <p>Run <code>board.sh verify &lt;TK&gt; [--run-suites] --board &lt;id&gt;</code> first. Approve only with the accepted evidence fields; reject with concrete, non-empty fix instructions when a check fails.</p>
-      <p>Generic leak rules cover JWTs, bearer tokens, private-key headers, API-key shapes, and macOS/Linux/Windows home-directory paths. Operator-specific regexes are loaded one per line from <code>~/.pursers/leak-markers.txt</code>, or from <code>PURSERS_LEAK_MARKERS_FILE</code>. Verify and approve print only the loaded count. Record an empty file as a WARN in <code>review_notes</code>, not a blocker. Documented fixtures <code>/Users/synthetic-user</code>, <code>example.com</code>, and <code>127.0.0.1</code> remain exempt.</p>
+      <p>Generic leak rules cover JWTs, bearer tokens, private-key headers, API-key shapes, and macOS/Linux/Windows home-directory paths. Operator-specific regexes are loaded one per line from <code>~/.pursers/leak-markers.txt</code>, or from <code>PURSERS_LEAK_MARKERS_FILE</code>. Verify and approve print only the loaded count. Record an empty file as a WARN in <code>review_notes</code>, not a blocker. Documented placeholder paths, <code>example.com</code>, and <code>127.0.0.1</code> remain suitable fixtures.</p>
       <p><code>ONBOARD_AGENT_NAME</code> supplies the process default. When one host carries multiple sessions, pass <code>agent_name</code> on each call so the journal records the correct seat. Use an independent reviewer principal, not merely another agent name under the worker's JWT.</p>
     </section>
 
@@ -557,7 +611,7 @@ python3 tools/wait-bridge/registry_admin.py remove payments</code></pre>
       <p class="eyebrow" style="color:#2f6f9f">07 · Shared memory</p>
       <h2>Store reusable context in memories</h2>
       <p>A memory should help the next agent recover a decision, blocker, handoff, verification method, or ticket context. It is not a replacement for the project files.</p>
-      <div class="note"><strong>a18 Tool Surface Deprecation:</strong> In the a18 release train, the <code>memory_*</code> family is hidden from the default <code>tools/list</code> to reduce model context overhead. Seats that need memory tools can declare <code>capabilities={"legacy_tools": true}</code> upon <code>board_join</code> or <code>board_onboard</code>, or configure <code>PURSERS_LEGACY_TOOLS=1</code> on the wait bridge. Deprecated tools remain callable throughout a18.</div>
+      <div class="note"><strong>a21 memory decision:</strong> <code>memory_write</code> remains a core model-seat tool. Specialized Central memory tools stay outside the ordinary reduced seat surface, while the Personal <code>memory_*</code> family remains supported because the shipped Personal UI is an active caller. Do not describe board memory as removed or enable legacy tools fleet-wide merely to expose an unused model surface.</div>
 
       <table>
         <thead><tr><th>Action</th><th>Tool</th><th>When to use it</th></tr></thead>
@@ -596,6 +650,9 @@ memory_search(
     <section id="dashboard">
       <p class="eyebrow" style="color:#2f6f9f">08 · Dashboard</p>
       <h2>Set up seats through the loopback Fleet Dashboard</h2>
+      <p>The standalone loopback dashboard is the primary operator view. Start it from the approved checkout, then open <code>http://127.0.0.1:8899</code>:</p>
+      <pre><code>python3 tools/fleet-dashboard/fleet_dashboard.py \
+  --token-file /PATH/TO/admin.jwt</code></pre>
       <h3>Capabilities and dispatch</h3>
       <p>Each seat declares a maximum tier, editable skills, whether it can execute or review work, and optional model/provider labels. The Config page writes <code>PURSERS_TIER_MAX</code>, <code>PURSERS_SKILLS</code>, <code>PURSERS_CAN_WORK</code>, and <code>PURSERS_CAN_REVIEW</code> into the managed host environment. Reviewer seats default to review-capable; tier-1 fast/small seats default to no review unless the operator explicitly enables it. This release generates those environment values, but the wait bridge and seat kit do not consume them automatically yet; that runtime integration depends on unmerged Dispatch Part 2 (<code>TK-dae93d61ff3d</code>).</p>
       <p>Use <strong>Suggest skills from connectors</strong> to map configured Git, browser, document, and research connectors into an editable proposal. Doctor warns when Central reports capabilities that differ from the seat declaration. The Dispatch panel edits offer TTL, second-opinion review, and fallback broadcast, and shows unassignable tickets, missing capabilities, current offers, and recent offer events.</p>
@@ -615,8 +672,54 @@ memory_search(
       <div class="note">Older or restricted Central deployments might not expose <code>fleet_snapshot</code>. The Fleet tab remains visible with dashes and a warning instead of inventing counts. When any view shows last-known state or a connection error, confirm important status with <code>board_status</code> or <code>ticket_get</code>.</div>
     </section>
 
+    <section id="bounded">
+      <p class="eyebrow" style="color:#2f6f9f">09 · Response limits</p>
+      <h2>Bound item counts, bytes, and pages—not only token budgets</h2>
+      <table>
+        <thead><tr><th>Surface</th><th>Primary bounds</th><th>Paging or truncation contract</th></tr></thead>
+        <tbody>
+          <tr><td><code>board_status</code> / <code>board_snapshot</code></td><td>Item limits and <code>max_bytes</code></td><td>Read returned totals, omitted counts, and truncation metadata; request a smaller or later page instead of treating a partial view as complete.</td></tr>
+          <tr><td><code>board_catchup</code></td><td><code>max_events</code>, <code>max_bytes</code>, and deadline</td><td>Advance only with the returned cursor. The a21 bridge batches large windows, compacts them, clamps out-of-range cursors, and returns deadline-bounded partial progress.</td></tr>
+          <tr><td><code>a2a_wait</code></td><td>Host-safe <code>timeout_s</code> and complete per-board cursor map</td><td>A timeout is normal. Re-arm immediately with the complete <code>new_seq</code> map; never poll ticket lists between waits.</td></tr>
+          <tr><td>Ticket submission notes</td><td>5,000 characters</td><td>Keep required evidence and real test tails. The client truncates at a line boundary and reports truncation metadata; put full logs in an approved artifact.</td></tr>
+          <tr><td>Orchestrator journal buffer</td><td>5,000 events</td><td>Acknowledge digests with their cursor map so the bounded persistent buffer can advance.</td></tr>
+        </tbody>
+      </table>
+      <p>Structural limits matter independently of prose length. Bound collections, bytes, event windows, and pages; never claim that a token budget alone made an entire response complete.</p>
+    </section>
+
+    <section id="release">
+      <p class="eyebrow" style="color:#2f6f9f">10 · Release</p>
+      <h2>Push the tag, verify GitHub assets, then pass the PyPI gate</h2>
+      <ol class="steps">
+        <li>Freeze the approved integration commit. Align the six component versions, changelog, release-version source, and regenerated component lock; run the complete test and build gates.</li>
+        <li>Create and push the approved immutable tag. GitHub Actions builds the release assets and checksums from that ref; do not rebuild an already-published version from a different commit.</li>
+        <li>Verify the GitHub Release tag, wheel names, hashes, notes, and required CI jobs against the approved manifest.</li>
+        <li>Dispatch the separate PyPI Trusted Publishing workflow only after the GitHub asset gate passes. Verify every expected version on PyPI before promoting Central, the bridge, Personal, or seats.</li>
+      </ol>
+      <div class="warning"><strong>A tag does not by itself prove a PyPI release.</strong> GitHub assets and the separately published immutable PyPI versions are distinct gates. If a published artifact is wrong, bump the affected version; never overwrite it.</div>
+    </section>
+
+    <section id="troubleshoot">
+      <p class="eyebrow" style="color:#2f6f9f">11 · Troubleshoot</p>
+      <h2>Check identity, membership, registry, then cursor</h2>
+      <table>
+        <thead><tr><th>Symptom</th><th>Check or fix</th></tr></thead>
+        <tbody>
+          <tr><td>401/403 or role rejection</td><td>Verify JWT issuer, audience, resource, expiry, and action scopes; then confirm the resolved principal and declared seat role. An <code>agent_name</code> is not a principal.</td></tr>
+          <tr><td><code>skipped_boards</code> or no offer from one board</td><td>Confirm that the principal has the required membership on that exact board. Do not change the role merely to bypass admission.</td></tr>
+          <tr><td>Registry warning or wrong work tree</td><td>Read the registry from its home board. Correct the active entry, absolute registered <code>work_dir</code>/<code>fleet_clone_dir</code>, and integration ref before claiming.</td></tr>
+          <tr><td><code>split identity</code></td><td>Regenerate the connector pair from one private seat token, restart the host, and require Doctor to resolve the same principal for HTTP board calls and the wait bridge.</td></tr>
+          <tr><td>Push degrades to <code>poll</code></td><td>Check the bounded subscription failure, CA, token, Central URL, and installed client/bridge/Central event vocabulary. Poll is a declared temporary fallback and must be reported in submission notes.</td></tr>
+          <tr><td>Cursor ahead, missing, or from another board</td><td>Keep one cursor entry per board. Use side-effect-free catch-up to read the board's current cursor, replace only that map entry, refetch ticket state, and re-arm with the complete map.</td></tr>
+          <tr><td>Truncated response or notes</td><td>Read explicit omitted/truncated metadata, page from the returned watermark, and preserve the required evidence. Tune item, byte, page, and event limits.</td></tr>
+          <tr><td>Wait timeout</td><td>Timeout is normal. Re-arm with <code>new_seq</code>; do not infer that every board is healthy if the response lists a skipped board.</td></tr>
+        </tbody>
+      </table>
+    </section>
+
     <section id="security">
-      <p class="eyebrow" style="color:#2f6f9f">09 · Security</p>
+      <p class="eyebrow" style="color:#2f6f9f">12 · Security</p>
       <h2>Use real JWTs and keep credentials out of shared config</h2>
       <p>Central starts only in JWT mode. It verifies RS256 signatures against the configured JWKS and checks the issuer and audience. The required settings are <code>CENTRAL_AUTH_MODE=jwt</code>, <code>CENTRAL_JWT_ISSUER</code>, <code>CENTRAL_JWT_AUDIENCE</code>, and <code>CENTRAL_JWKS_PATH</code>. There is no development-token fallback.</p>
       <p>A valid JWT identifies a principal but does not automatically admit it to every board. Add the principal with <code>board_member_add</code> or issue a <code>board_invite</code>, then grant only the scopes its seat needs. Different agent names under one token still belong to the same principal, so strict review needs a reviewer with credentials for an independent principal.</p>
@@ -643,8 +746,22 @@ memory_search(
       <div class="success"><strong>The setup is ready when</strong> the host sees the tools, the expected identity joins, a worker can claim a test ticket, a separate reviewer can approve it, and the dashboard agrees with the board tools.</div>
     </section>
 
+    <section id="unreleased">
+      <p class="eyebrow" style="color:#2f6f9f">Unreleased · on main</p>
+      <h2>Changes newer than 5.0.0a21</h2>
+      <div class="warning"><strong>Release boundary:</strong> every item in this section is unreleased, on main. Do not describe it as a numbered release or assume it exists in an installed a21 environment.</div>
+      <ul>
+        <li><strong>Fleet-wide or dedicated seats.</strong> A blank home board serves every active registry board with <code>boards=registry</code>; the bridge binds to the registry board, <code>pursers</code> by default. A named home board is dedicated: use <code>boards=home</code>, and generated prompts pass <code>boards=["&lt;board&gt;"]</code>. Managed configs persist <code>PURSERS_BOARDS</code> and <code>PURSERS_HOME_BOARD</code>; seat-kit makes <code>--board</code> optional, adds <code>--registry-board</code>, and generated <code>bin/board.sh</code> exports <code>PURSERS_BOARDS</code>.</li>
+        <li><strong>Protected dashboard input.</strong> Timer-driven Fleet Dashboard refresh pauses while a form has focus or unsaved input. A fixed <strong>Resume</strong> pill or the status line resumes it.</li>
+        <li><strong>Liveness-bounded lease keepalive.</strong> Background renewal continues only while the stdio session shows model liveness. <code>PURSERS_KEEPALIVE_IDLE_LIMIT_S</code> defaults to three claim TTLs; an idle pause emits <code>lease_keepalive_paused</code>, and keepalive-only claims appear in Needs attention.</li>
+        <li><strong>Backlog re-surface.</strong> The Dispatcher re-surfaces unclaimed broadcast tickets every <code>PURSERS_BACKLOG_RESURFACE_INTERVAL_S</code> (600 seconds by default) and re-offers after <code>broadcast_reoffer_s</code>. Coordinator identities are never offered work.</li>
+        <li><strong>Fleet clone repair.</strong> The clone endpoint populates the working tree and repairs an empty clone instead of refusing it as dirty.</li>
+        <li><strong>Seat-kit interpreter and upgrade repair.</strong> <code>--python</code> retains the virtual-environment interpreter; <code>--upgrade</code> no longer aborts solely on a non-fast-forward seat clone.</li>
+      </ul>
+    </section>
+
     <section id="operations-runbook">
-      <p class="eyebrow" style="color:#2f6f9f">10 · Operations handoff</p>
+      <p class="eyebrow" style="color:#2f6f9f">13 · Operations handoff</p>
       <h2>Resume fleet operations after the a21 pause</h2>
       <p>This is the single operational runbook for a returning operator or a new coordinator. Run it from the repository root at the operator-approved integration commit. Values in angle brackets are placeholders; never paste a real token, principal, operator identity, or home-directory path into this document, a command transcript, ticket notes, or Git.</p>
       <div class="warning"><strong>Release boundary:</strong> read <code>tools/release_versions.toml</code> at the exact candidate commit and use those values. Do not infer a version from this page, reuse wheels from another commit, rebuild an already-published version, or publish from a moving branch. PyPI versions are immutable.</div>
@@ -686,7 +803,7 @@ memory_search(
         </tbody>
       </table>
       <p><strong>One token per seat</strong> means the wait bridge and board connector for that seat resolve to the same principal. A reviewer has its own token, separate from every worker. Do not make a worker/reviewer hybrid by changing only <code>agent_name</code>; the declared role and token scopes are independently validated.</p>
-      <p>The default tool surface stays deliberately small. Use <code>board_status</code> for a hot bounded summary and <code>board_snapshot</code> for cold recovery; <code>memory_write</code> remains a core tool. Deprecated compatibility tools stay hidden unless a deliberately legacy seat declares <code>legacy_tools</code> or the bridge has <code>PURSERS_LEGACY_TOOLS=1</code>. Do not enable that switch fleet-wide during ordinary operation.</p>
+      <p>The default tool surface stays deliberately small. Use <code>board_status</code> for a hot bounded summary and <code>board_snapshot</code> for cold recovery; <code>memory_write</code> remains a core tool, and the Personal <code>memory_*</code> API remains supported for its shipped UI caller. <code>agent_nudge</code>, <code>board_get_briefing</code>, and <code>ticket_terminate</code> are removed at a21 and <code>PURSERS_LEGACY_TOOLS</code> does not restore them.</p>
 
       <h3>2. Cut, verify, tag, release, and publish one train</h3>
       <p>Run every command block in sections 2 and 3 in Bash. Each block enables fail-fast options before its first gate; stop the procedure when a block exits nonzero. Create the train from a clean approved integration ref. <code>release_train.py bump</code> updates version consumers and regenerates the component lock; do not hand-edit generated pins. Review every generated change, then commit it before pushing the train.</p>

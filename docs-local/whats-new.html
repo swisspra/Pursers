@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <link rel="icon" href="data:,">
-  <title>Pursers 5.0.0a21 — What's new</title>
+  <title>Pursers a8–a21 and unreleased — What's new</title>
   <style>
     :root { --ink:#17365d; --muted:#596579; --line:#d9d6cc; --paper:#fbf8f0; --card:#fff; --blue:#2f6f9f; --green:#28745a; --orange:#b75b24; }
     * { box-sizing:border-box; }
@@ -39,12 +39,15 @@
 </head>
 <body>
   <header>
-    <p class="eyebrow">What's new · a21 release</p>
-    <h1>Fleet operations now have<br>one guarded control surface.</h1>
-    <p class="lead">The 5.0.0a21 stopping-point release combines live-seat dispatch, bounded catch-up, fleet-owned clones, a reduced tool surface, and immutable Release &amp; Operations plans.</p>
+    <p class="eyebrow">What's new · a8 through a21 · unreleased on main</p>
+    <h1>From a shared board to<br>a governed agent fleet.</h1>
+    <p class="lead">A continuous record from 5.0.0a8 through the 5.0.0a21 stopping point, followed by changes that are on main but not released. The current released component set is listed exactly below.</p>
   </header>
 
   <nav aria-label="Contents"><div>
+    <a href="#unreleased">Unreleased</a>
+    <a href="#timeline">a8–a21 timeline</a>
+    <a href="#operator-map">Operator feature map</a>
     <a href="#behavior">Behavior</a>
     <a href="#hosts">Host profiles</a>
     <a href="#seats">Seat commands</a>
@@ -53,6 +56,76 @@
   </div></nav>
 
   <main>
+    <section id="unreleased">
+      <p class="eyebrow">Unreleased · on main</p>
+      <h2>Changes after 5.0.0a21</h2>
+      <p class="note"><strong>These are not a numbered release.</strong> They are present on main and must be labelled “unreleased, on main” until a release train assigns versions and passes its gates.</p>
+      <div class="grid">
+        <article class="card"><strong>Fleet-wide or dedicated seats</strong><p>A blank home board serves every active registry board with <code>boards=registry</code>; the bridge binds to the registry board, <code>pursers</code> by default. A named home board is dedicated with <code>boards=home</code>, while its generated prompt passes <code>boards=["&lt;board&gt;"]</code>. Managed configs persist <code>PURSERS_BOARDS</code> and <code>PURSERS_HOME_BOARD</code>; seat-kit adds optional <code>--board</code> and <code>--registry-board</code>, and <code>bin/board.sh</code> exports <code>PURSERS_BOARDS</code>.</p></article>
+        <article class="card"><strong>Input-safe dashboard refresh</strong><p>Timer-driven panel refresh pauses while a form has focus or unsaved input. A fixed <strong>Resume</strong> pill or the status line resumes updates.</p></article>
+        <article class="card"><strong>Liveness-bounded keepalive</strong><p>The wait bridge renews leases only while its stdio session shows model liveness. <code>PURSERS_KEEPALIVE_IDLE_LIMIT_S</code> defaults to three claim TTLs; an idle pause emits <code>lease_keepalive_paused</code>, and keepalive-only claims are flagged in Needs attention.</p></article>
+        <article class="card"><strong>Broadcast backlog recovery</strong><p>Unclaimed broadcast tickets re-surface every <code>PURSERS_BACKLOG_RESURFACE_INTERVAL_S</code> (600 seconds by default) and are re-offered after <code>broadcast_reoffer_s</code>. Coordinator identities are never offered work.</p></article>
+        <article class="card"><strong>Fleet clone repair</strong><p>The clone endpoint populates a working tree and repairs an empty clone instead of refusing it as dirty.</p></article>
+        <article class="card"><strong>Seat-kit repair</strong><p><code>--python</code> preserves the virtual-environment interpreter, and <code>--upgrade</code> no longer aborts solely on a non-fast-forward seat clone.</p></article>
+      </div>
+    </section>
+
+    <section id="timeline">
+      <p class="eyebrow">Released history</p>
+      <h2>Continuous release timeline: a8 through a21</h2>
+      <p><strong>Current released set (5.0.0a21, 2026-09-06):</strong> <code>pursers-central 0.1.0a25</code>, <code>pursers-client 0.1.0a18</code>, <code>pursers-wait-bridge 0.1.0a11</code>, <code>pursers-personal 5.0.0a21</code>, <code>pursers 5.0.0a21</code>, and <code>pursers-personal-import 5.0.0a3</code>.</p>
+      <h3>5.0.0a21 · 2026-09-06</h3>
+      <p>Made the fleet stopping point operational: live-seat rotation and retirement, durable offer deadlines and dispatch history, batched/compacted catch-up with cursor clamping, fleet-owned clones, Config import and Doctor, guarded Release &amp; Operations jobs, bounded submission notes, role-derived joins, and the reduced tool surface. <code>agent_nudge</code>, <code>board_get_briefing</code>, and <code>ticket_terminate</code> were removed; Personal retained its <code>memory_*</code> API for the shipped UI caller.</p>
+      <h3>5.0.0a20 · 2026-09-05</h3>
+      <p>Unified the event-kind vocabulary across Central, client, and bridge. Known subscription kinds continue when an unknown future kind appears; subscription failures persist in bridge stats and appear in Fleet Needs attention until a healthy push clears them.</p>
+      <h3>5.0.0a19 · 2026-09-05</h3>
+      <p>Aligned coordinator/orchestrator admission with existing board membership and fixed managed Codex/Goose bridge environments so the board connector and bridge can prove the same principal without exposing token contents.</p>
+      <h3>5.0.0a18 · 2026-09-05</h3>
+      <p>Added capability-aware targeted offers, explicit worker/reviewer/orchestrator roles, review and work lease keepalive, orchestrator digests and watches, dispatch panels, and split-identity diagnostics. The ordinary model-seat surface hid specialized legacy tools behind capability negotiation while keeping <code>memory_write</code> visible.</p>
+      <h3>5.0.0a17 · 2026-09-04</h3>
+      <p>Added atomic review leases, reviewer claim/renew/release workflows, the Config page with redacted plan/apply and Doctor, registry-wide generated seat waits, exact seat restart checks, and role-derived claimable/submitted waits.</p>
+      <h3>5.0.0a16 · 2026-09-04</h3>
+      <p>Moved idle workers to subscription-first push waits with host-aware deadlines: 620/560 seconds for Codex, 300/270 for Goose, 240/200 for validated Claude Desktop builds, and 21,600/21,540 for Claude Code/headless rotations. Polling became an explicit per-call compatibility fallback.</p>
+      <h3>5.0.0a15 · 2026-09-01</h3>
+      <p>Hardened profile setup, cleanup, version reporting, validation-message forwarding, bridge initialization, and coordinator health classification so planning writes nothing and per-call auth/TLS faults surface explicitly.</p>
+      <h3>5.0.0a14 · 2026-09-01</h3>
+      <p>Added Central runtime-health hardening, the dashboard Workers tab for OpenAI-compatible API workers, Keychain-backed API keys, worker tier filtering, graceful runtime shutdown, and per-seat context-pressure estimates.</p>
+      <h3>5.0.0a13 · 2026-09-01</h3>
+      <p>Added deterministic coordinator intake with an approval matrix and the narrow <code>board:intake</code> capability. Safe auto-create categories remained limited; all other asks became reviewable drafts.</p>
+      <h3>5.0.0a12 · 2026-08-31</h3>
+      <p>Added the bounded read-only MCP App Link Explorer and Fleet Dashboard Timeline, Changes, and Ticket Flow views.</p>
+      <h3>5.0.0a11 · 2026-08-31</h3>
+      <p>Activated coordinator dispatch writes with audited targeted nudges and atomic assignment, escalation thresholds, idempotency, rate limits, a circuit breaker back to shadow, and an integration-watch watermark.</p>
+      <h3>5.0.0a10 · 2026-08-31</h3>
+      <p>Introduced the coordinator findings engine and simulation harness, offline board export/import for trust-domain splits, the jailed OpenAI-compatible worker runtime, per-seat wait overhead metering, and the first coordinator findings panel.</p>
+      <h3>5.0.0a9 · 2026-08-31</h3>
+      <p>Added one-command worker/reviewer provisioning across registry boards, Fleet board/agent drill-down, coordinator design and v4 port inventory, and stable-first response serialization for provider prompt caches.</p>
+      <h3>5.0.0a8 · 2026-08-31</h3>
+      <p>Upgraded Central, client, and Personal to MCP SDK 2.1.1 and preserved safe validation detail through the SDK's stricter exception boundary.</p>
+    </section>
+
+    <section id="operator-map">
+      <p class="eyebrow">a8–a14 operator export</p>
+      <h2>Operator feature map carried forward</h2>
+      <table>
+        <thead><tr><th>Earlier operator topic</th><th>Current disposition</th></tr></thead>
+        <tbody>
+          <tr><td>Coordinator</td><td>Carried through a10–a13, then superseded by capability-aware live-seat dispatch, explicit roles, retirement, and a21 offer history.</td></tr>
+          <tr><td>Fleet Dashboard</td><td>Kept and expanded with Config, seat import/Doctor, Needs attention, registry-owned clones, and guarded Release &amp; Operations.</td></tr>
+          <tr><td><code>seat_admin</code></td><td>Provisioning intent kept; the primary path is now Fleet Config/seat-kit with verified principal, role, token-pair, and registry coverage checks.</td></tr>
+          <tr><td><code>registry_doctor</code></td><td>Health-check intent merged into per-seat and all-seat Doctor plus read-only registry coverage.</td></tr>
+          <tr><td>API worker runtime</td><td>Kept as the headless OpenAI-compatible worker/reviewer runtime with work-directory jail, leases, registry routing, and governed review.</td></tr>
+          <tr><td>Work/Personal Central split</td><td>Kept as offline board export/import and separate trust-domain operations; registry routing now carries each board's owned work tree.</td></tr>
+          <tr><td>Automated release and reproducible builds</td><td>Kept and strengthened with component locks, immutable plans, GitHub asset verification, and a separate PyPI Trusted Publishing gate.</td></tr>
+          <tr><td>CI</td><td>Kept as the release prerequisite; the a21 operations panel reports required CI and prevents overlapping guarded jobs.</td></tr>
+          <tr><td>Token overhead metering</td><td>Kept as bounded per-seat protocol-overhead telemetry and context-pressure reporting, not a provider bill.</td></tr>
+          <tr><td>MCP App Link Explorer</td><td>Kept in the shipped Personal UI; that active caller is why the Personal <code>memory_*</code> API remains supported at a21.</td></tr>
+          <tr><td>Cache-friendly responses</td><td>Kept and extended into batched catch-up, deterministic envelopes, bounded partial returns, and explicit cursor progress.</td></tr>
+          <tr><td>Documentation set</td><td>Reconciled into the published <code>docs-local</code> English manual, Thai manual/architecture, this continuous page, and the four-layer memory reference.</td></tr>
+        </tbody>
+      </table>
+    </section>
+
     <section id="behavior">
       <h2>a21 fleet operations</h2>
       <div class="grid">
