@@ -290,6 +290,45 @@ class RegistryDoctorTests(unittest.TestCase):
         self.assertEqual(safe["seat-workdir:alpha"]["status"], "PASS")
         self.assertEqual(set(seen), {clone})
 
+    def test_recent_ticket_routing_uses_exact_first_target_segment(self) -> None:
+        backend = self.backend()
+        app_dir = self.root / "app"
+        happy_dir = self.root / "happy"
+        app_dir.mkdir()
+        happy_dir.mkdir()
+        backend.registry["projects"] = {
+            "app": {
+                "board_id": "alpha-board",
+                "work_dir": str(app_dir),
+                "work_dir_owner": "operator",
+                "status": "active",
+            },
+            "happy": {
+                "board_id": "alpha-board",
+                "work_dir": str(happy_dir),
+                "work_dir_owner": "operator",
+                "status": "active",
+            },
+        }
+        backend.snapshots["alpha-board"]["tickets"] = [
+            {
+                "ticket_id": "TK-happy",
+                "status": "open",
+                "target_url": "happy/task",
+                "updated_at": stamp(60),
+            }
+        ]
+
+        report = self.report(backend)
+        checks = rows(report)
+
+        self.assertEqual(checks["seat-workdir:app"]["status"], "WARN")
+        self.assertIn("recent fleet tickets=0", checks["seat-workdir:app"]["detail"])
+        self.assertEqual(checks["seat-workdir:happy"]["status"], "FAIL")
+        self.assertIn(
+            "recent fleet tickets=1", checks["seat-workdir:happy"]["detail"]
+        )
+
     def test_operator_only_project_is_info_and_outside_fleet_health(self) -> None:
         backend = self.backend()
         entry = backend.registry["projects"]["alpha"]

@@ -842,10 +842,11 @@ async def evaluate(
                     if age is not None and age > FLEET_ACTIVITY_WINDOW_SECONDS:
                         continue
                     target = str(ticket.get("target_url") or "").casefold()
+                    target_project = target.split("/", 1)[0]
                     if (
                         board_project_counts[board_id] > 1
                         and target
-                        and not any(key in target for key in route_keys)
+                        and target_project not in route_keys
                     ):
                         continue
                     recent_count += 1
