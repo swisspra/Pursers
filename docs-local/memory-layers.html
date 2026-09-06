@@ -1,0 +1,282 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:,">
+<title>Pursers 5.0.0a21 — Board Memory</title>
+<style>
+  :root{
+    --ground:#F7F8FA; --surface:#FFFFFF; --surface-sunk:#EFF2F6;
+    --ink:#171A21; --ink-muted:#5C6470; --ink-faint:#858D99;
+    --rule:#DDE1E8; --rule-strong:#C4CBD5;
+    --accent:#2D5BA9; --accent-soft:#E8EEF9;
+    --flag:#B3402A; --flag-soft:#FAECE8;
+    --serif:Georgia,"Times New Roman",serif;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+    --mono:ui-monospace,SFMono-Regular,Menlo,monospace;
+  }
+  @media (prefers-color-scheme:dark){
+    :root:not([data-theme="light"]){
+      --ground:#0E1116; --surface:#161A21; --surface-sunk:#11151B;
+      --ink:#E4E7EC; --ink-muted:#9099A6; --ink-faint:#6E7684;
+      --rule:#262C36; --rule-strong:#39414E;
+      --accent:#7BA3E8; --accent-soft:#18202E;
+      --flag:#E0785F; --flag-soft:#2A1B17;
+    }
+  }
+  :root[data-theme="dark"]{
+    --ground:#0E1116; --surface:#161A21; --surface-sunk:#11151B;
+    --ink:#E4E7EC; --ink-muted:#9099A6; --ink-faint:#6E7684;
+    --rule:#262C36; --rule-strong:#39414E;
+    --accent:#7BA3E8; --accent-soft:#18202E;
+    --flag:#E0785F; --flag-soft:#2A1B17;
+  }
+
+  *{box-sizing:border-box}
+  body{
+    background:var(--ground); color:var(--ink);
+    font-family:var(--sans); font-size:16px; line-height:1.65;
+    -webkit-font-smoothing:antialiased;
+  }
+  .page{max-width:820px;margin:0 auto;padding:56px 28px 96px}
+
+  /* ---- masthead ---- */
+  .masthead{border-bottom:2px solid var(--ink);padding-bottom:22px;margin-bottom:14px}
+  .eyebrow{
+    font-family:var(--mono);font-size:11px;letter-spacing:.14em;text-transform:uppercase;
+    color:var(--ink-faint);margin:0 0 14px
+  }
+  h1{
+    font-family:var(--serif);font-weight:600;font-size:clamp(30px,5vw,42px);
+    line-height:1.12;letter-spacing:-.015em;text-wrap:balance;margin:0 0 12px
+  }
+  .standfirst{font-size:17.5px;color:var(--ink-muted);max-width:60ch;margin:0}
+  .meta{
+    display:flex;flex-wrap:wrap;gap:6px 20px;font-family:var(--mono);font-size:11.5px;
+    color:var(--ink-faint);margin:0 0 52px;padding-top:12px
+  }
+
+  /* ---- thesis ---- */
+  .thesis{
+    border-left:3px solid var(--accent);background:var(--accent-soft);
+    padding:20px 24px;margin:0 0 56px;border-radius:0 3px 3px 0
+  }
+  .thesis p{margin:0;max-width:62ch}
+  .thesis p + p{margin-top:10px}
+  .thesis strong{font-weight:600}
+
+  /* ---- overview rows ---- */
+  h2{
+    font-family:var(--serif);font-weight:600;font-size:24px;letter-spacing:-.01em;
+    margin:0 0 8px;text-wrap:balance
+  }
+  .sectionlede{color:var(--ink-muted);max-width:64ch;margin:0 0 26px}
+  section{margin-bottom:64px}
+
+  .rows{display:flex;flex-direction:column;border-top:1px solid var(--rule)}
+  .row{
+    display:grid;grid-template-columns:74px 1fr;gap:0 18px;align-items:baseline;
+    padding:13px 0;border-bottom:1px solid var(--rule)
+  }
+  .tier{
+    font-family:var(--mono);font-size:12px;font-weight:500;color:var(--accent);
+    letter-spacing:.04em;padding-top:2px
+  }
+  .row-body b{font-family:var(--mono);font-weight:500;font-size:13.5px;color:var(--ink)}
+  .row-body span{display:block;color:var(--ink-muted);font-size:14.5px;margin-top:2px}
+
+  /* ---- layer blocks ---- */
+  .layer{
+    display:grid;grid-template-columns:74px 1fr;gap:0 18px;
+    padding-top:26px;border-top:1px solid var(--rule-strong);margin-bottom:38px
+  }
+  .layer-tag{
+    font-family:var(--mono);font-size:11px;letter-spacing:.12em;text-transform:uppercase;
+    color:var(--ink-faint);line-height:1.5
+  }
+  .layer h3{
+    font-family:var(--serif);font-weight:600;font-size:19.5px;margin:0 0 4px;letter-spacing:-.005em
+  }
+  .path{
+    font-family:var(--mono);font-size:12.5px;color:var(--accent);margin:0 0 14px;word-break:break-all
+  }
+  .layer p{margin:0 0 12px;max-width:62ch}
+  .layer p:last-child{margin-bottom:0}
+  ul{margin:0 0 14px;padding-left:18px;max-width:62ch}
+  li{margin-bottom:6px}
+  li::marker{color:var(--ink-faint)}
+  code{
+    font-family:var(--mono);font-size:.875em;background:var(--surface-sunk);
+    padding:1px 5px;border-radius:3px;border:1px solid var(--rule)
+  }
+
+  pre{
+    font-family:var(--mono);font-size:12.5px;line-height:1.7;
+    background:var(--surface);border:1px solid var(--rule);border-radius:4px;
+    padding:16px 18px;overflow-x:auto;margin:0 0 16px;color:var(--ink)
+  }
+  pre .c{color:var(--ink-faint)}
+  pre .k{color:var(--accent)}
+
+  /* ---- inject flow ---- */
+  .flow{
+    display:flex;flex-wrap:wrap;align-items:center;gap:10px;
+    background:var(--surface);border:1px solid var(--rule);border-radius:4px;
+    padding:18px;margin:0 0 14px;font-family:var(--mono);font-size:12.5px;overflow-x:auto
+  }
+  .node{
+    border:1px solid var(--rule-strong);border-radius:3px;padding:5px 11px;
+    color:var(--ink);white-space:nowrap;background:var(--surface-sunk)
+  }
+  .node.src{border-color:var(--accent);color:var(--accent)}
+  .arr{color:var(--ink-faint);white-space:nowrap}
+  .arr b{color:var(--ink-muted);font-weight:400;font-size:11px}
+
+  /* ---- guardrail ---- */
+  .guard{
+    border:1px solid var(--flag);background:var(--flag-soft);
+    border-radius:4px;padding:18px 20px;margin:0 0 16px
+  }
+  .guard-label{
+    font-family:var(--mono);font-size:11px;letter-spacing:.12em;text-transform:uppercase;
+    color:var(--flag);margin:0 0 8px;font-weight:500
+  }
+  .guard p{margin:0;max-width:62ch}
+
+  .note{
+    font-size:14.5px;color:var(--ink-muted);border-left:2px solid var(--rule-strong);
+    padding-left:14px;margin:0 0 14px;max-width:60ch
+  }
+
+  footer{
+    border-top:1px solid var(--rule);padding-top:20px;margin-top:12px;
+    font-family:var(--mono);font-size:11.5px;color:var(--ink-faint);
+    display:flex;flex-wrap:wrap;gap:6px 24px
+  }
+
+  @media (max-width:600px){
+    .page{padding:40px 20px 72px}
+    .row,.layer{grid-template-columns:1fr;gap:6px}
+    .tier,.layer-tag{padding-top:0}
+  }
+  @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+  a{color:var(--accent)}
+  a:focus-visible,:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+</style>
+</head>
+<body>
+<div class="page">
+  <header class="masthead">
+    <p class="eyebrow">Pursers 5.0.0a21 &middot; board-memory reference</p>
+    <h1>Pursers Board Memory</h1>
+    <p class="standfirst">The governed memory surface for board workers and operators: durable writes, explicit scope, journal cues, and bounded recovery.</p>
+  </header>
+  <p class="meta">
+    <span>board governed</span><span>journaled</span><span>cursor based</span><span>reduced tool surface</span><span>a21</span>
+  </p>
+
+  <div class="thesis">
+    <p><strong>Board memory is shared operational state, not a workstation knowledge system.</strong> It belongs to an authorized Pursers board, is written through the board API, and follows that board's scrub, membership, journal, and provenance rules.</p>
+    <p>This page intentionally excludes personal assistants, local note stores, local wikis, prompt injectors, tier stores, and workstation sync designs.</p>
+  </div>
+
+  <section>
+    <h2>The a21 memory contract</h2>
+    <p class="sectionlede">The reduced seat surface keeps the common write path visible without loading every specialized memory tool into every model session.</p>
+    <div class="guard">
+      <p class="guard-label">Tool-surface decision</p>
+      <p><code>memory_write</code> remains a visible core tool. Specialized Central memory tools are outside the ordinary reduced model-seat surface and are available only through capability negotiation where supported. The Personal <code>memory_*</code> API remains active for its shipped UI caller; that product surface is not part of this board-memory guide.</p>
+    </div>
+    <div class="rows">
+      <div class="row"><div class="tier">Write</div><div class="row-body"><b>memory_write</b><span>Create one governed private or project memory on the selected board.</span></div></div>
+      <div class="row"><div class="tier">Scope</div><div class="row-body"><b>private | project</b><span>The caller must declare the scope; the server enforces membership and authorization.</span></div></div>
+      <div class="row"><div class="tier">Audit</div><div class="row-body"><b>Author and provenance</b><span>Board state records the author identity, related files or tickets, archive provenance, and retraction links when supplied.</span></div></div>
+      <div class="row"><div class="tier">Safety</div><div class="row-body"><b>Scrub before persistence</b><span>Titles, content, tags, references, and summaries pass bounded text and leak-policy checks.</span></div></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Write only durable board context</h2>
+    <p class="sectionlede">A memory should help a later authorized worker act correctly without reconstructing the decision from chat history.</p>
+    <div class="layer">
+      <div class="layer-tag">One<br>record</div>
+      <div>
+        <h3>Required identity and scope</h3>
+        <p><code>memory_write</code> identifies the board, seat name, title, content, and scope. Optional fields classify the record, set priority, relate it to files or tickets, retract an older memory, or preserve archive provenance.</p>
+        <p>Use project scope for facts intended for authorized board participants. Use private scope only when the board contract calls for agent-private recall. A coordinator credential is narrower: it may write only the defined project-scoped coordinator digest shape.</p>
+      </div>
+    </div>
+    <div class="layer">
+      <div class="layer-tag">Size<br>bounds</div>
+      <div>
+        <h3>Keep records and submissions bounded</h3>
+        <p>Normal board-memory content is bounded at 10,000 characters; archived content may preserve a larger source under the archive contract. Titles, pinned summaries, tags, and relations have their own tighter limits.</p>
+        <p>Ticket-submission notes have a separate 5,000-character cap. Preserve the required evidence and real test tails inside that limit. If the client reports truncation, store the full output in an approved artifact and say that the submitted note was truncated.</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Journal, catch-up, and cursors</h2>
+    <p class="sectionlede">The journal wakes consumers; authoritative board state remains the source to refetch after a cue.</p>
+    <div class="flow">
+      <span class="node src">memory_write</span><span class="arr">&rarr;</span>
+      <span class="node">journal cue</span><span class="arr">&rarr;</span>
+      <span class="node">catch-up</span><span class="arr">&rarr;</span>
+      <span class="node src">refetch state</span><span class="arr">&rarr;</span>
+      <span class="node">advance cursor</span>
+    </div>
+    <div class="layer">
+      <div class="layer-tag">Monotonic<br>progress</div>
+      <div>
+        <h3>Resume from the returned cursor</h3>
+        <p>The a21 wait bridge drains large catch-up windows in bounded pages, compacts relevant results, clamps an out-of-range cursor, and guarantees monotonic progress. A deadline-bounded partial return still carries a usable next cursor, so the consumer continues without replaying the full journal.</p>
+        <p>For a registry-wide consumer, preserve the complete per-board cursor map. Each event names its board; refetch and act only against that board.</p>
+      </div>
+    </div>
+    <div class="layer">
+      <div class="layer-tag">Read-only<br>idle</div>
+      <div>
+        <h3>Catch-up does not become activity</h3>
+        <p>Orchestrator mode keeps a bounded ring buffer of 5,000 journal events and uses side-effect-free <code>board_catchup(touch=false)</code>. Reading while idle therefore does not write to the board or renew work leases. Processed digests are acknowledged with the cursor represented by the response.</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Retention and correction</h2>
+    <p class="sectionlede">Durable does not mean immutable or unbounded.</p>
+    <div class="rows">
+      <div class="row"><div class="tier">Retract</div><div class="row-body"><b>Link the replacement</b><span>A new write can identify the memory it retracts, preserving an auditable correction chain.</span></div></div>
+      <div class="row"><div class="tier">Archive</div><div class="row-body"><b>Preserve provenance</b><span>Archived records carry source and time metadata and retain approved oversize source content.</span></div></div>
+      <div class="row"><div class="tier">Compact</div><div class="row-body"><b>Remove derivable telemetry only</b><span>Journal compaction retains durable tickets, memories, agents, and consumer cursors.</span></div></div>
+      <div class="row"><div class="tier">Scrub</div><div class="row-body"><b>Never store secrets</b><span>Memory is subject to the same leak controls as other board writes; archive mode does not bypass them.</span></div></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Operator checklist</h2>
+    <p class="sectionlede">Use these checks when a memory-related release changes the API, tool surface, or wait bridge.</p>
+    <div class="layer">
+      <div class="layer-tag">Release<br>gate</div>
+      <div>
+        <ul>
+          <li>Confirm <code>memory_write</code> is present on the intended seat surface.</li>
+          <li>Confirm specialized tools appear only for negotiated capabilities.</li>
+          <li>Verify private/project scope and principal authorization failures.</li>
+          <li>Verify the 5,000-character ticket-note boundary and truncation metadata.</li>
+          <li>Verify journal pages advance monotonically and return the next cursor on partial results.</li>
+          <li>Verify <code>touch=false</code> catch-up creates no idle board writes or lease renewals.</li>
+          <li>Run the repository leak scan before publishing generated documentation.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <span>Pursers work track</span><span>Governed board state</span><span>Journaled writes</span><span>Bounded recovery</span>
+  </footer>
+</div>
+</body>
+</html>
