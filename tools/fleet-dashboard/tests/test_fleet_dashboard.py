@@ -3391,6 +3391,11 @@ def test_timer_refresh_pauses_while_operator_edits() -> None:
     html = dashboard.HTML
     assert "function refreshPaused()" in html
     assert "Refresh paused while editing" in html
+    # fixed-position pill with a Resume button, visible wherever the operator is scrolled
+    assert "pill.id='refresh-paused'" in html
+    assert 'id=\"refresh-resume\">Resume</button>' in html
+    assert "e.target.closest?.('#state,#refresh-resume')" in html
+    assert "#refresh-paused{position:fixed;" in html
     # real input events mark the form dirty; programmatic value changes never lock refresh
     assert "t.form.dataset.dirty='1'" in html
     assert "delete e.target.dataset.dirty" in html
