@@ -13,6 +13,20 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   accept, decline, park, cancel, or dismiss the request with
   `ticket_human_resolve`. Pending questions appear in bounded briefings and
   remain excluded from claim and dispatch until reopened (TK-75275d51735f).
+- Wait bridge + fleet dashboard: `needs_human` human requests are delivered to the
+  host the human already sits in. New bridge tool `board_human_requests` lists pending
+  requests and, when the MCP client declared elicitation (spec 2026-07-28), returns an
+  `InputRequiredResult` with one `elicitation/create` per request — form mode carries
+  the ticket's `requested_schema` verbatim plus a mandatory `disposition` enum
+  (`reopen|park|cancel`), url mode is used when the request carries a URL, and a mode
+  the client did not declare is never sent. Clients without elicitation receive the
+  list plus `answer=`/dashboard fallback instructions. `human_input_requested` /
+  `human_input_resolved` wake orchestrator seats, `board_digest` shows a
+  `human_requests` section that `board_digest_ack` clears, and the dashboard hub gains
+  a "Waiting for you" panel with schema-generated inline forms (string/number/boolean/
+  enum/multi-enum, defaults, required), a disposition selector, and
+  `POST /api/human/resolve` behind the same-origin loopback guard
+  (TK-c5b7fef1ee2d).
 - Dispatcher: unclaimed broadcast tickets are re-surfaced to idle identities on a
   cadence (`PURSERS_BACKLOG_RESURFACE_INTERVAL_S`, default 600 s) and re-offered after
   the board's `broadcast_reoffer_s`; coordinator identities are never offered work
