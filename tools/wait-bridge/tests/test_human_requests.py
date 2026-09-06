@@ -19,7 +19,7 @@ sys.path.insert(0, str(CLIENT_SRC))
 sys.path.insert(0, str(ROOT))
 os.environ.setdefault("ONBOARD_CENTRAL_TOKEN", "TOKEN_PLACEHOLDER")
 
-from mcp.types import ElicitResult, InputRequiredResult  # noqa: E402
+from mcp.types import ClientCapabilities, ElicitResult, InputRequiredResult  # noqa: E402
 import pursers_wait_server as wait_server  # noqa: E402
 
 
@@ -212,8 +212,14 @@ class HumanRequestsCoreTests(unittest.TestCase):
         state = json.loads(result.request_state)
         self.assertEqual(
             state["targets"]["r0"],
-            {"board": "proj-a", "ticket_id": "TK-1", "request_id": "REQ-1"},
+            {
+                "board": "proj-a",
+                "ticket_id": "TK-1",
+                "request_id": "REQ-1",
+                "disposition_field": "disposition",
+            },
         )
+        self.assertEqual(state["unasked"], [])
         self.assertEqual(client.resolved, [])
 
     def test_never_sends_url_mode_to_form_only_client(self) -> None:
@@ -274,6 +280,132 @@ class HumanRequestsCoreTests(unittest.TestCase):
         self.assertEqual(resolve_call["ticket_id"], "TK-1")
         self.assertEqual(resolve_call["request_id"], "REQ-1")
         self.assertEqual(resolve_call["board_id"], "proj-a")
+
+    def test_disposition_field_collision_preserves_ticket_answer(self) -> None:
+        schema = {
+            "type": "object",
+            "properties": {
+                "disposition": {"type": "string", "title": "Business disposition"}
+            },
+            "required": ["disposition"],
+        }
+        client = self._client_with_form_request(schema=schema)
+        first = run(
+            wait_server.board_human_requests_core(
+                client, boards=["proj-a"], capabilities=caps(form=True)
+            )
+        )
+        self.assertIsInstance(first, InputRequiredResult)
+        rendered = first.input_requests["r0"].params.requested_schema
+        self.assertEqual(
+            rendered["properties"]["disposition"],
+            schema["properties"]["disposition"],
+        )
+        state = json.loads(first.request_state)
+        synthetic = state["targets"]["r0"]["disposition_field"]
+        self.assertNotEqual(synthetic, "disposition")
+        self.assertIn(synthetic, rendered["properties"])
+        result = run(
+            wait_server.board_human_requests_core(
+                client,
+                boards=["proj-a"],
+                capabilities=caps(form=True),
+                input_responses={
+                    "r0": ElicitResult(
+                        action="accept",
+                        content={"disposition": "retain", synthetic: "park"},
+                    )
+                },
+                request_state=first.request_state,
+            )
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual(client.resolved[0]["content"], {"disposition": "retain"})
+        self.assertEqual(client.resolved[0]["disposition"], "park")
+
+    def test_mixed_mode_unasked_survives_mrtr_roundtrip(self) -> None:
+        client = FakeBoardClient(
+            tickets_by_board={
+                "proj-a": [
+                    {"ticket_id": "TK-form", "human_request": _human_record("REQ-form")},
+                    {
+                        "ticket_id": "TK-url",
+                        "human_request": _human_record(
+                            "REQ-url", url="https://vault.example/handoff"
+                        ),
+                    },
+                ]
+            }
+        )
+        first = run(
+            wait_server.board_human_requests_core(
+                client, boards=["proj-a"], capabilities=caps(form=True)
+            )
+        )
+        self.assertIsInstance(first, InputRequiredResult)
+        state = json.loads(first.request_state)
+        self.assertEqual(state["unasked"][0]["ticket_id"], "TK-url")
+        result = run(
+            wait_server.board_human_requests_core(
+                client,
+                boards=["proj-a"],
+                capabilities=caps(form=True),
+                input_responses={
+                    "r0": ElicitResult(
+                        action="accept",
+                        content={"answer": "yes", "disposition": "reopen"},
+                    )
+                },
+                request_state=first.request_state,
+            )
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["unasked"][0]["ticket_id"], "TK-url")
+
+    def test_legacy_uses_backchannel_for_form_and_url(self) -> None:
+        client = FakeBoardClient(
+            tickets_by_board={
+                "proj-a": [
+                    {"ticket_id": "TK-form", "human_request": _human_record("REQ-form")},
+                    {
+                        "ticket_id": "TK-url",
+                        "human_request": _human_record(
+                            "REQ-url", url="https://vault.example/handoff"
+                        ),
+                    },
+                ]
+            }
+        )
+        form_calls: list[tuple[str, dict[str, Any]]] = []
+        url_calls: list[tuple[str, str, str]] = []
+
+        async def elicit_form(message: str, schema: dict[str, Any]) -> ElicitResult:
+            form_calls.append((message, schema))
+            return ElicitResult(
+                action="accept",
+                content={"answer": "yes", "disposition": "reopen"},
+            )
+
+        async def elicit_url(message: str, url: str, request_id: str) -> ElicitResult:
+            url_calls.append((message, url, request_id))
+            return ElicitResult(action="accept")
+
+        result = run(
+            wait_server.board_human_requests_core(
+                client,
+                boards=["proj-a"],
+                capabilities=caps(form=True, url=True),
+                protocol_version="2025-11-25",
+                legacy_elicit_form=elicit_form,
+                legacy_elicit_url=elicit_url,
+            )
+        )
+        self.assertIsInstance(result, dict)
+        self.assertEqual(result["mode"], "legacy")
+        self.assertEqual(len(result["resolved"]), 2)
+        self.assertEqual(len(form_calls), 1)
+        self.assertEqual(url_calls[0][2], "REQ-url")
+        self.assertEqual(len(client.resolved), 2)
 
     def test_decline_defaults_disposition_to_park(self) -> None:
         client = self._client_with_form_request()
@@ -518,7 +650,25 @@ class SchemaHelperTests(unittest.TestCase):
     def test_elicitation_modes_dict_and_object(self) -> None:
         self.assertEqual(wait_server._elicitation_modes(None), (False, False))
         self.assertEqual(
+            wait_server._elicitation_modes({"elicitation": {}}),
+            (True, False),
+        )
+        self.assertEqual(
             wait_server._elicitation_modes({"elicitation": {"form": {}}}),
+            (True, False),
+        )
+        self.assertEqual(
+            wait_server._elicitation_modes({"elicitation": {"url": {}}}),
+            (False, True),
+        )
+        self.assertEqual(
+            wait_server._elicitation_modes({"elicitation": {"form": None}}),
+            (False, False),
+        )
+        self.assertEqual(
+            wait_server._elicitation_modes(
+                ClientCapabilities.model_validate({"elicitation": {}})
+            ),
             (True, False),
         )
         self.assertEqual(

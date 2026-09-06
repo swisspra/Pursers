@@ -466,17 +466,24 @@ question to the human through the host they already sit in:
 
 - `board_human_requests(boards="registry" | list, answer=None)` — without
   `answer` it lists pending requests (`ticket_id`, board, `message`, `kind`,
-  `asked_by`, schema summary). When the MCP client declared elicitation
-  (spec 2026-07-28, client/elicitation) in its capabilities, the tool returns
-  an `InputRequiredResult` whose `inputRequests` carry one
+  `asked_by`, schema summary). Under the 2026-07-28 protocol, the client must
+  declare elicitation on each request in
+  `_meta.io.modelcontextprotocol/clientCapabilities`; a bare
+  `elicitation: {}` is form-only support for backwards compatibility. When
+  declared, the tool
+  returns an `InputRequiredResult` whose `inputRequests` carry one
   `elicitation/create` per pending request: `mode: "form"` with the ticket's
   `requested_schema` verbatim plus a mandatory `disposition` enum field
   (`reopen | park | cancel` with titles), or `mode: "url"` when the request
-  carries a URL. `{board, ticket_id, request_id}` ride `requestState`; on the
+  carries a URL. If the ticket schema already owns `disposition`, the bridge
+  chooses a collision-free internal field name. `{board, ticket_id,
+  request_id}` ride `requestState`; on the
   retried call `accept` maps to `ticket_human_resolve(action="accept",
   content, disposition)`, `decline` to `resolve(decline, disposition from
   content or park)`, and `cancel` leaves the request pending ("asked later").
-  Clients that declared no elicitation get the list plus instructions to
+  On pre-2026 connections the same capability guard drives the legacy
+  `elicitation/create` back-channel and the tool returns only its final result,
+  never an `InputRequiredResult`. Clients that declared no elicitation get the list plus instructions to
   answer via `board_human_requests(answer={"ticket_id": ..., "action": ...,
   "content": {...}, "disposition": ...})` or the fleet dashboard. The bridge
   never sends a mode the client did not declare. Form mode never asks for
@@ -495,17 +502,33 @@ question to the human through the host they already sit in:
 
 Elicitation host declarations (probed 2026-09-06):
 
-| Host | declares elicitation | probe status |
+| Host | declares elicitation | measured result |
 | --- | --- | --- |
-| Claude Desktop | pending | form path implemented + unit-tested; end-to-end probe blocked until Central deploys `needs_human` (TK-75275d51735f) |
-| Codex app | pending | same blocker as Claude Desktop |
-| Goose | no | stdio probe verified the fallback list + instructions path live against Central |
+| Claude Desktop | no | Live MCPB probe against the sandbox dependency Central returned `elicitation_declared: false` after the empty-object compatibility and dual-era fixes plus a full Desktop restart. No form rendered. The fallback `answer` call accepted `choice=green`, `disposition=reopen`, and Central recorded the matching resolution. |
+| Codex app | not measured | The sandbox probe connector was not available to this Codex task, so no declaration is inferred. |
+| Goose | no | Live stdio probe verified the fallback list + instructions path against Central. |
 
-Live probe record (2026-09-06, bridge stdio vs the running Central): the tool
-registered and returned the bounded fallback payload for a client without
-elicitation and for one that declared it (no pending requests exist yet;
-Central answered `ticket_list(status="needs_human")` with "unsupported ticket
-status", which the bridge logs and survives). The Claude Desktop form round
-trip requires a sandbox `needs_human` ticket, so it is recorded as blocked on
-the Central `needs_human` ticket's merge + deployment.
+The fleet dashboard is the independent browser fallback, not an MCP App UI
+resource associated with `board_human_requests`. Keeping it open does not alter
+the MCP host's per-request capability declaration.
 
+Live Claude Desktop probe record (2026-09-06): dependency commit `78cad2e` ran
+in a loopback sandbox Central. Ticket `TK-claude-elicitation-probe` entered
+`needs_human` with request `HR-b576ee9577c14ccd`. After correcting bare
+`elicitation: {}` to mean form-only and selecting legacy back-channel versus
+2026 MRTR by protocol version, Claude Desktop was fully restarted. Its MCPB
+call still returned `elicitation_declared: false`, so no form was rendered and
+no unsupported mode was sent. The measured fallback then submitted `action=accept`,
+`content={"choice":"green"}`, and `disposition=reopen`; Central advanced the
+journal, recorded that exact resolution, and reopened the ticket. This proves
+the capability guard and fallback round trip on the measured host, but it does
+not claim form-MRTR support that the host did not declare. A separate live
+Python SDK 2.1.1 probe using protocol `2026-07-28` and an elicitation callback
+did declare form mode on the request: the bridge returned the expected schema,
+the SDK invoked the callback, retried the tool, and Central recorded
+`action=accept`, `content={"choice":"green"}`, and `disposition=reopen` for
+request `HR-4adce4d2f75071bc`. This verifies the bridge's 2026 per-request
+capability and MRTR path independently of Claude Desktop's host support. A
+second SDK probe in `2025-11-25` legacy mode invoked the form callback over
+the back-channel and returned a final tool result (not MRTR), resolving
+request `HR-48dc39e253b9604e` with `choice=blue` and `disposition=reopen`.

@@ -97,6 +97,7 @@ from mcp.types import (
     ElicitRequestURLParams,
     InputRequiredResult,
 )
+from mcp.types.version import is_version_at_least
 from mcp.server.subscriptions import ResourceUpdated
 from agent_naming import resolve_agent_name
 from backlog import (
@@ -2880,7 +2881,14 @@ def _elicitation_modes(capabilities: Any) -> tuple[bool, bool]:
         if isinstance(elicitation, dict)
         else getattr(elicitation, "url", None)
     )
-    return (form is not None, url is not None)
+    # Backward compatibility applies only to a bare `elicitation: {}`. Do not
+    # reinterpret an explicit null mode as support.
+    empty_declaration = (
+        not elicitation
+        if isinstance(elicitation, dict)
+        else not getattr(elicitation, "model_fields_set", {"unknown"})
+    )
+    return (form is not None or empty_declaration, url is not None)
 
 
 def _human_schema_summary(schema: Any) -> str:
@@ -2909,6 +2917,18 @@ def _human_schema_summary(schema: Any) -> str:
     return summary
 
 
+def _disposition_field_name(schema: Any) -> str:
+    """Choose a synthetic disposition field without shadowing ticket input."""
+    properties = schema.get("properties") if isinstance(schema, dict) else None
+    names = set(properties) if isinstance(properties, dict) else set()
+    candidate = "disposition"
+    suffix = 1
+    while candidate in names:
+        suffix += 1
+        candidate = f"_pursers_disposition_{suffix}"
+    return candidate
+
+
 def _form_schema_with_disposition(schema: Any) -> dict[str, Any]:
     """Requested schema verbatim plus the mandatory disposition enum field."""
     base = (
@@ -2920,7 +2940,8 @@ def _form_schema_with_disposition(schema: Any) -> dict[str, Any]:
         base = {"type": "object", "properties": {}}
     properties = base.get("properties")
     properties = dict(properties) if isinstance(properties, dict) else {}
-    properties["disposition"] = {
+    disposition_field = _disposition_field_name(base)
+    properties[disposition_field] = {
         "type": "string",
         "enum": list(HUMAN_DISPOSITIONS),
         "title": "Disposition",
@@ -2932,8 +2953,8 @@ def _form_schema_with_disposition(schema: Any) -> dict[str, Any]:
     }
     required = base.get("required")
     required_list = [str(item) for item in required] if isinstance(required, list) else []
-    if "disposition" not in required_list:
-        required_list.append("disposition")
+    if disposition_field not in required_list:
+        required_list.append(disposition_field)
     base["properties"] = properties
     base["required"] = required_list
     return base
@@ -3049,6 +3070,98 @@ def _human_fallback_instructions() -> str:
     )
 
 
+async def _legacy_human_requests(
+    client: BoardClient,
+    pending: list[dict[str, Any]],
+    *,
+    form_ok: bool,
+    url_ok: bool,
+    elicit_form: Callable[[str, dict[str, Any]], Awaitable[Any]] | None,
+    elicit_url: Callable[[str, str, str], Awaitable[Any]] | None,
+) -> dict[str, Any]:
+    """Run legacy server-initiated elicitation without emitting MRTR."""
+    resolved: list[dict[str, Any]] = []
+    deferred: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+    unasked: list[dict[str, Any]] = []
+    for item in pending:
+        target = {
+            "board": item["board_id"],
+            "ticket_id": item["ticket_id"],
+            "request_id": item["request_id"],
+        }
+        message = f"[{item['board_id']}/{item['ticket_id']}] {item['message']}"[
+            :HUMAN_MESSAGE_CHARS
+        ]
+        try:
+            if item.get("url"):
+                if not url_ok or elicit_url is None:
+                    unasked.append(
+                        {
+                            **target,
+                            "reason": "requires url mode, which this client did not declare",
+                        }
+                    )
+                    continue
+                response_value = await elicit_url(
+                    message, str(item["url"]), str(item["request_id"])
+                )
+                disposition_field = "disposition"
+            else:
+                if not form_ok or elicit_form is None:
+                    unasked.append(
+                        {
+                            **target,
+                            "reason": "requires form mode, which this client did not declare",
+                        }
+                    )
+                    continue
+                disposition_field = _disposition_field_name(
+                    item.get("requested_schema")
+                )
+                response_value = await elicit_form(
+                    message,
+                    _form_schema_with_disposition(item.get("requested_schema")),
+                )
+        except Exception as exc:
+            errors.append({**target, "error": str(exc)})
+            continue
+        response = _elicit_response_parts(response_value)
+        if response is None:
+            deferred.append({**target, "reason": "asked later"})
+            continue
+        action, content = response
+        if action == "cancel":
+            deferred.append({**target, "reason": "asked later"})
+            continue
+        payload = dict(content)
+        disposition = payload.pop(disposition_field, None)
+        if disposition not in HUMAN_DISPOSITIONS:
+            disposition = "reopen" if action == "accept" else "park"
+        try:
+            await _resolve_human_request(
+                client,
+                board_id=target["board"],
+                ticket_id=target["ticket_id"],
+                request_id=target["request_id"],
+                action=action,
+                content=payload or None,
+                disposition=str(disposition),
+            )
+            resolved.append({**target, "action": action, "disposition": disposition})
+        except Exception as exc:
+            errors.append({**target, "error": str(exc)})
+    return {
+        "ok": not errors,
+        "mode": "legacy",
+        "elicitation_declared": form_ok or url_ok,
+        "resolved": resolved,
+        "deferred": deferred,
+        "unasked": unasked,
+        "errors": errors,
+    }
+
+
 async def board_human_requests_core(
     client: BoardClient,
     *,
@@ -3057,6 +3170,9 @@ async def board_human_requests_core(
     capabilities: Any = None,
     input_responses: Any = None,
     request_state: str | None = None,
+    protocol_version: str = "2026-07-28",
+    legacy_elicit_form: Callable[[str, dict[str, Any]], Awaitable[Any]] | None = None,
+    legacy_elicit_url: Callable[[str, str, str], Awaitable[Any]] | None = None,
 ) -> dict[str, Any] | InputRequiredResult:
     """List or answer pending needs_human requests (a22 human-in-loop)."""
     if isinstance(boards, str):
@@ -3143,6 +3259,7 @@ async def board_human_requests_core(
 
     if input_responses:
         targets: dict[str, dict[str, str]] = {}
+        prior_unasked: list[dict[str, Any]] = []
         if isinstance(request_state, str) and request_state:
             try:
                 decoded = json.loads(request_state)
@@ -3155,7 +3272,17 @@ async def board_human_requests_core(
                             "board": str(value.get("board") or BOARD_ID),
                             "ticket_id": str(value["ticket_id"]),
                             "request_id": str(value["request_id"]),
+                            "disposition_field": str(
+                                value.get("disposition_field") or "disposition"
+                            ),
                         }
+                raw_unasked = decoded.get("unasked")
+                if isinstance(raw_unasked, list):
+                    prior_unasked = [
+                        copy.deepcopy(item)
+                        for item in raw_unasked
+                        if isinstance(item, dict)
+                    ]
         resolved: list[dict[str, Any]] = []
         deferred: list[dict[str, Any]] = []
         errors: list[dict[str, Any]] = []
@@ -3165,16 +3292,20 @@ async def board_human_requests_core(
             else getattr(input_responses, "root", {}) or {}
         )
         for key, target in targets.items():
+            public_target = {
+                name: target[name]
+                for name in ("board", "ticket_id", "request_id")
+            }
             response = _elicit_response_parts(responses.get(key))
             if response is None:
-                deferred.append({**target, "reason": "asked later"})
+                deferred.append({**public_target, "reason": "asked later"})
                 continue
             action, content = response
             if action == "cancel":
-                deferred.append({**target, "reason": "asked later"})
+                deferred.append({**public_target, "reason": "asked later"})
                 continue
             payload = dict(content)
-            disposition = payload.pop("disposition", None)
+            disposition = payload.pop(target["disposition_field"], None)
             if disposition not in HUMAN_DISPOSITIONS:
                 disposition = "reopen" if action == "accept" else "park"
             try:
@@ -3187,15 +3318,23 @@ async def board_human_requests_core(
                     content=payload or None,
                     disposition=str(disposition),
                 )
-                resolved.append({**target, "action": action, "disposition": disposition})
+                resolved.append(
+                    {**public_target, "action": action, "disposition": disposition}
+                )
             except Exception as exc:
-                errors.append({**target, "error": str(exc)})
+                errors.append({**public_target, "error": str(exc)})
         if not targets:
             return {
                 "ok": False,
                 "error": "input_responses received but request_state targets are missing",
             }
-        return {"ok": not errors, "resolved": resolved, "deferred": deferred, "errors": errors}
+        return {
+            "ok": not errors,
+            "resolved": resolved,
+            "deferred": deferred,
+            "unasked": prior_unasked,
+            "errors": errors,
+        }
 
     pending = await _collect_pending_human_requests(client, target_boards)
     if not pending:
@@ -3227,6 +3366,16 @@ async def board_human_requests_core(
             "pending": summaries,
             "instructions": _human_fallback_instructions(),
         }
+
+    if not is_version_at_least(protocol_version, "2026-07-28"):
+        return await _legacy_human_requests(
+            client,
+            pending,
+            form_ok=form_ok,
+            url_ok=url_ok,
+            elicit_form=legacy_elicit_form,
+            elicit_url=legacy_elicit_url,
+        )
 
     input_requests: dict[str, ElicitRequest] = {}
     targets: dict[str, dict[str, str]] = {}
@@ -3261,6 +3410,9 @@ async def board_human_requests_core(
                     }
                 )
                 continue
+            disposition_field = _disposition_field_name(
+                item.get("requested_schema")
+            )
             input_requests[key] = ElicitRequest(
                 params=ElicitRequestFormParams(
                     mode="form",
@@ -3274,6 +3426,9 @@ async def board_human_requests_core(
             "board": item["board_id"],
             "ticket_id": item["ticket_id"],
             "request_id": item["request_id"],
+            "disposition_field": disposition_field
+            if not item.get("url")
+            else "disposition",
         }
     if not input_requests:
         return {
@@ -3283,7 +3438,9 @@ async def board_human_requests_core(
             "unasked": unasked,
             "instructions": _human_fallback_instructions(),
         }
-    state = json.dumps({"targets": targets}, separators=(",", ":"))
+    state = json.dumps(
+        {"targets": targets, "unasked": unasked}, separators=(",", ":")
+    )
     return InputRequiredResult(
         input_requests=input_requests,
         request_state=state,
@@ -3308,6 +3465,7 @@ async def board_human_requests(
     capabilities: Any = None
     responses: Any = None
     state: str | None = None
+    protocol_version = "2026-07-28"
     try:
         capabilities = ctx.client_capabilities
     except Exception:
@@ -3318,6 +3476,30 @@ async def board_human_requests(
     except Exception:
         responses = None
         state = None
+    try:
+        protocol_version = ctx.protocol_version
+    except Exception:
+        pass
+
+    async def legacy_elicit_form(
+        message: str, requested_schema: dict[str, Any]
+    ) -> Any:
+        return await ctx.session.elicit_form(
+            message,
+            requested_schema,
+            related_request_id=ctx.request_id,
+        )
+
+    async def legacy_elicit_url(
+        message: str, url: str, elicitation_id: str
+    ) -> Any:
+        return await ctx.session.elicit_url(
+            message,
+            url,
+            elicitation_id,
+            related_request_id=ctx.request_id,
+        )
+
     return await board_human_requests_core(
         client,
         boards=boards,
@@ -3325,6 +3507,9 @@ async def board_human_requests(
         capabilities=capabilities,
         input_responses=responses,
         request_state=state,
+        protocol_version=protocol_version,
+        legacy_elicit_form=legacy_elicit_form,
+        legacy_elicit_url=legacy_elicit_url,
     )
 
 
