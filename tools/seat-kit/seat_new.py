@@ -1378,8 +1378,10 @@ def _validate_interpreter(python: Path) -> None:
         text=True,
     )
     if completed.returncode != 0:
+        detail = (completed.stderr or "").strip().splitlines()
+        reason = f" ({detail[-1].strip()})" if detail else ""
         raise ValueError(
-            f"bare Python interpreter lacks required seat dependencies: {python}; "
+            f"bare Python interpreter lacks required seat dependencies: {python}{reason}; "
             "install pursers-client, mcp, and httpx there or pass a virtual-environment "
             "interpreter"
         )

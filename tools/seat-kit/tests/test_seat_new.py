@@ -72,6 +72,22 @@ def load_generated(path: Path, name: str) -> Any:
 
 
 @pytest.fixture(autouse=True)
+def hermetic_interpreter_check(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Keep seat generation independent of the host interpreter's site-packages.
+
+    generate() probes the selected interpreter for pursers_client/mcp/httpx. CI
+    runners (and developer shells) may run pytest from an interpreter that only
+    sees those modules via sys.path, so the probe is stubbed unless a test opts
+    into the real check with @pytest.mark.real_interpreter_check.
+    """
+    if request.node.get_closest_marker("real_interpreter_check"):
+        return
+    monkeypatch.setattr(seat_new, "_validate_interpreter", lambda python: None)
+
+
+@pytest.fixture(autouse=True)
 def isolated_operator_markers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> Path:
@@ -841,6 +857,7 @@ def test_venv_interpreter_symlink_is_preserved(tmp_path: Path) -> None:
     assert f"exec {seat_new.shlex.quote(str(interpreter.resolve()))} " not in shell
 
 
+@pytest.mark.real_interpreter_check
 def test_bare_interpreter_without_dependencies_is_rejected(tmp_path: Path) -> None:
     interpreter = tmp_path / "bare-python"
     interpreter.write_text(
