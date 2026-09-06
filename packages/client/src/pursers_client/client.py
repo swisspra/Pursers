@@ -540,6 +540,56 @@ class BoardClient:
         self._remember_event(result)
         return result
 
+    async def ticket_request_human(
+        self,
+        ticket_id: str,
+        message: str,
+        kind: str,
+        *,
+        requested_schema: dict[str, Any] | None = None,
+        url: str | None = None,
+    ) -> dict[str, Any]:
+        arguments: dict[str, Any] = {
+            "agent_name": self.agent_name,
+            "ticket_id": ticket_id,
+            "message": message,
+            "kind": kind,
+        }
+        if requested_schema is not None:
+            arguments["requested_schema"] = requested_schema
+        if url is not None:
+            arguments["url"] = url
+        self._watched_uris.add(f"board://{self.board_id}/ticket/{ticket_id}")
+        result = await self._call("ticket_request_human", arguments)
+        self._remember_event(result)
+        return result
+
+    async def ticket_human_resolve(
+        self,
+        ticket_id: str,
+        request_id: str,
+        action: str,
+        *,
+        content: Any | None = None,
+        note: str | None = None,
+        disposition: str = "reopen",
+    ) -> dict[str, Any]:
+        arguments: dict[str, Any] = {
+            "agent_name": self.agent_name,
+            "ticket_id": ticket_id,
+            "request_id": request_id,
+            "action": action,
+            "disposition": disposition,
+        }
+        if content is not None:
+            arguments["content"] = content
+        if note is not None:
+            arguments["note"] = note
+        self._watched_uris.add(f"board://{self.board_id}/ticket/{ticket_id}")
+        result = await self._call("ticket_human_resolve", arguments)
+        self._remember_event(result)
+        return result
+
     async def ticket_submit(
         self,
         ticket_id: str,

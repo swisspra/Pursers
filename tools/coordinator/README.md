@@ -47,6 +47,16 @@ last local cursor. Other healthy boards remain subscribed.
 
 ## Policy and safeguards
 
+Central exposes pending operator decisions as `needs_human` tickets. A worker
+calls `ticket_request_human`, which releases its lease and records the bounded
+question, optional flat answer schema, and safe handoff URL. An admitted board
+admin or a `board:coordinate` principal resolves the matching `request_id` with
+`ticket_human_resolve`: accepted answers reopen and immediately re-dispatch the
+ticket without preferring the asker; declined requests may stay parked or
+cancel the ticket; a dismissed request stays parked and may be asked again.
+Coordinator digests include unresolved human requests, while Dispatcher never
+offers or counts them as starving work.
+
 - Normal tickets starve at 30 minutes; critical tickets at 10 minutes.
 - At one threshold, the Dispatcher continues offering work to eligible seats;
   the coordinator makes no duplicate wake call.

@@ -12,6 +12,8 @@ OFFER_EXPIRED = "offer_expired"
 OFFER_REVOKED = "offer_revoked"
 REVIEW_OFFERED = "review_offered"
 DISPATCH_UNASSIGNABLE = "dispatch_unassignable"
+HUMAN_INPUT_REQUESTED = "human_input_requested"
+HUMAN_INPUT_RESOLVED = "human_input_resolved"
 
 DISPATCH_KINDS = frozenset(
     {TICKET_OFFERED, OFFER_EXPIRED, OFFER_REVOKED, REVIEW_OFFERED}
@@ -34,6 +36,8 @@ CORE_EVENT_KINDS = frozenset(
         "memory_written",
         "coordinator_assignment",
         "coordinator_nudge",
+        HUMAN_INPUT_REQUESTED,
+        HUMAN_INPUT_RESOLVED,
     }
 )
 ADMISSION_EVENT_KINDS = frozenset(
