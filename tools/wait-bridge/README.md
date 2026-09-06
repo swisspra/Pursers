@@ -487,3 +487,91 @@ Run the bridge tests with:
 ```sh
 python -m unittest discover -s tools/wait-bridge/tests -v
 ```
+
+## Human requests (needs_human)
+
+A ticket blocked on a human calls Central's `ticket_request_human(message,
+kind, requested_schema[, url])`, releases its work lease, and parks in the
+`needs_human` state with a structured question. The bridge delivers the
+question to the human through the host they already sit in:
+
+- `board_human_requests(boards="registry" | list, answer=None)` — without
+  `answer` it lists pending requests (`ticket_id`, board, `message`, `kind`,
+  `asked_by`, schema summary). Under the 2026-07-28 protocol, the client must
+  declare elicitation on each request in
+  `_meta.io.modelcontextprotocol/clientCapabilities`; a bare
+  `elicitation: {}` is form-only support for backwards compatibility. When
+  declared, the tool
+  returns an `InputRequiredResult` whose `inputRequests` carry one
+  `elicitation/create` per pending request: `mode: "form"` with the ticket's
+  `requested_schema` verbatim plus a mandatory `disposition` enum field
+  (`reopen | park | cancel` with titles), or `mode: "url"` when the request
+  carries a URL. If the ticket schema already owns `disposition`, the bridge
+  chooses a collision-free internal field name. `{board, ticket_id,
+  request_id}` ride `requestState`; on the
+  retried call `accept` maps to `ticket_human_resolve(action="accept",
+  content, disposition)`, `decline` to `resolve(decline, disposition from
+  content or park)`, and `cancel` leaves the request pending ("asked later").
+  On pre-2026 connections the same capability guard drives the legacy
+  `elicitation/create` back-channel and the tool returns only its final result,
+  never an `InputRequiredResult`. Clients that declared no elicitation get the list plus instructions to
+  answer via `board_human_requests(answer={"ticket_id": ..., "action": ...,
+  "content": {...}, "disposition": ...})` or the fleet dashboard. The bridge
+  never sends a mode the client did not declare. Every result exposes the
+  SDK-parsed declaration as `declared: {"form": bool, "url": bool, "raw":
+  object|null}` (inside `_meta` on `InputRequiredResult`), and the bridge writes
+  the same scrubbed value once to stderr for each call. A shared guard checks
+  schema property names and titles for secrets or credentials: passwords, API
+  keys, access tokens, and payment credentials require url mode. Names, email
+  addresses, usernames, ordinary request prose, and file deliverables remain
+  valid form fields.
+- Push: the `human_input_requested` / `human_input_resolved` journal kinds
+  wake orchestrator seats; `board_digest` shows a `human_requests` section
+  and `board_digest_ack` clears it.
+- Fleet dashboard: the hub "Waiting for you" panel renders each pending
+  request as an inline form generated from `requested_schema`
+  (string/number/boolean/enum/multi-enum, defaults, required) with a
+  disposition selector; `POST /api/human/resolve` calls
+  `ticket_human_resolve` with the coordinator token behind the same-origin
+  loopback guard. URL-mode requests show the target host prominently and open
+  in a new tab only on click.
+
+Elicitation host declarations (probed 2026-09-06):
+
+| Host / transport | raw declaration | measured result |
+| --- | --- | --- |
+| Claude Desktop / stdio | not captured by the pre-raw-value probe build | Live MCPB calls returned `elicitation_declared: false`; no form was rendered. An earlier fallback `answer` call accepted `choice=green`, `disposition=reopen`, and Central recorded the matching resolution. The corrected bridge will distinguish raw `null` from `{}` on the next host call. |
+| Claude Desktop / HTTP custom connector | not measured | This is a separate per-request `_meta` path; no declaration is inferred from the stdio probe. |
+| Codex app | not measured | The sandbox probe connector was not available to this Codex task, so no declaration is inferred. |
+| Goose / stdio | not captured by the pre-raw-value probe build | Live stdio probe verified the fallback list + instructions path; no raw declaration was retained by that build. |
+
+The fleet dashboard is the independent browser fallback, not an MCP App UI
+resource associated with `board_human_requests`. Keeping it open does not alter
+the MCP host's per-request capability declaration.
+
+Live Claude Desktop probe record (2026-09-06): dependency commit `78cad2e` ran
+in a loopback sandbox Central. Ticket `TK-claude-elicitation-probe` entered
+`needs_human` with request `HR-b576ee9577c14ccd`. After correcting bare
+`elicitation: {}` to mean form-only and selecting legacy back-channel versus
+2026 MRTR by protocol version, Claude Desktop was fully restarted. Its MCPB
+call still returned `elicitation_declared: false`, so no form was rendered and
+no unsupported mode was sent. The measured fallback then submitted `action=accept`,
+`content={"choice":"green"}`, and `disposition=reopen`; Central advanced the
+journal, recorded that exact resolution, and reopened the ticket. This proves
+the capability guard and fallback round trip on the measured host, but it does
+not claim form-MRTR support that the host did not declare. A separate live
+Python SDK 2.1.1 probe using protocol `2026-07-28` and an elicitation callback
+did declare form mode on the request: the bridge returned the expected schema,
+the SDK invoked the callback, retried the tool, and Central recorded
+`action=accept`, `content={"choice":"green"}`, and `disposition=reopen` for
+request `HR-4adce4d2f75071bc`. This verifies the bridge's 2026 per-request
+capability and MRTR path independently of Claude Desktop's host support. A
+second SDK probe in `2025-11-25` legacy mode invoked the form callback over
+the back-channel and returned a final tool result (not MRTR), resolving
+request `HR-48dc39e253b9604e` with `choice=blue` and `disposition=reopen`.
+An additional operator-authorized Claude Desktop call against pending request
+`HR-667f8dd55d230060` again returned `elicitation_declared: false` and rendered
+no form. Those calls predated the `declared.raw` result field, so this record
+does not infer whether the host sent nothing or the old bridge misread its
+declaration. The corrected bridge logs and returns the SDK-parsed raw value on
+the next call.

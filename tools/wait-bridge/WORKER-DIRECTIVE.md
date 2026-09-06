@@ -140,6 +140,18 @@ Run this loop continuously. Each pass is one unit of work:
   `requested_schema`; this releases the work lease and parks the ticket in
   `needs_human`. Never keep renewing a lease while waiting for a person.
   Otherwise proceed; you are a worker, not a committee.
+- **Blocked on a human? Never hold the lease.** Call
+  `ticket_request_human(message, kind, requested_schema)` (optionally `url`
+  for sensitive hand-offs) and return to `a2a_wait`. The call releases your
+  work lease, parks the ticket in `needs_human` with a structured question,
+  and a human answers through the host form, the fleet dashboard "Waiting for
+  you" panel, or `board_human_requests`; the answer is recorded on the ticket
+  and it is re-dispatched. `kind` is one of `decision`, `deliverable`,
+  `approval`, `information`; keep `requested_schema` a flat JSON-Schema
+  object (string/number/integer/boolean properties, enum, or array-of-enum).
+  Form-mode questions must never ask for actual secrets or credentials — use
+  trusted `url` mode for those. Ordinary file names, paths, and deliverable
+  requests are form-safe and do not require URL mode.
 
 ## 6. Notes for whoever configures the seat
 

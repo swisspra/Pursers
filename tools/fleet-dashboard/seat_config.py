@@ -1831,6 +1831,7 @@ class PromptRenderer:
                 f"You are Pursers seat {desired.name} ({desired.role}).\n"
                 f"Pass agent_name={json.dumps(desired.name)} on every board call that accepts it. Never use another name.\n"
                 "start every turn with board_digest; act on closed tickets (merge/verify), file follow-ups, then board_digest_ack; never a2a_wait; never claim.\n"
+                "When board_digest shows human_requests, or the host renders a human-request form, answer it with board_human_requests; a needs_human ticket is waiting on that answer.\n"
                 "Never review your own work, never push main, stay in the registered work_dir for the event's board_id, and report evidence faithfully.\n"
                 f"{host_note}\n{capability_note}"
             )

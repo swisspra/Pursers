@@ -457,7 +457,10 @@ class OrchestratorModeTests(unittest.IsolatedAsyncioTestCase):
 
                 # Advance ack with returned cursor_map
                 ack_resp = await engine.ack(digest1["cursor_map"])
-                self.assertEqual(set(ack_resp.keys()), {"ok", "cursor_map"})
+                self.assertEqual(
+                    set(ack_resp.keys()),
+                    {"ok", "cursor_map", "acknowledged_human_requests"},
+                )
                 self.assertTrue(ack_resp["ok"])
                 self.assertGreaterEqual(
                     ack_resp["cursor_map"].get("pursers", 0),
@@ -748,7 +751,10 @@ class OrchestratorModeTests(unittest.IsolatedAsyncioTestCase):
 
                 # 2. Call board_digest_ack
                 ack_res = await wait_server.board_digest_ack(ctx, digest_res["cursor_map"])
-                self.assertEqual(set(ack_res.keys()), {"ok", "cursor_map"})
+                self.assertEqual(
+                    set(ack_res.keys()),
+                    {"ok", "cursor_map", "acknowledged_human_requests"},
+                )
                 self.assertTrue(ack_res["ok"])
                 self.assertEqual(ack_res["cursor_map"], digest_res["cursor_map"])
 
