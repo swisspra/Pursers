@@ -3420,8 +3420,8 @@ def test_timer_refresh_pauses_while_operator_edits() -> None:
         "route()?.central===r.central&&!refreshPaused()){renderConfig(data)",
         "if(navKind()==='seats'&&!refreshPaused())renderHub()",
     ):
-    assert "if(navKind()==='seats')renderHub()" not in html
         assert fn in html, fn
+    assert "if(navKind()==='seats')renderHub()" not in html
 
 
 def test_dashboard_v2_ia_agents_and_responsive_contract() -> None:
