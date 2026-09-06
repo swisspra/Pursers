@@ -1147,6 +1147,26 @@ def _nonnegative_int(value: Any) -> int:
     return value if type(value) is int and value >= 0 else 0
 
 
+HUMAN_DISPOSITION_VALUES = ("reopen", "park", "cancel")
+HUMAN_ACTION_VALUES = ("accept", "decline", "cancel")
+
+
+def _pending_human_records(record: Any) -> list[dict[str, Any]]:
+    """Unresolved human_request records carried by a needs_human ticket."""
+    records = record if isinstance(record, list) else [record]
+    pending: list[dict[str, Any]] = []
+    for rec in records:
+        if not isinstance(rec, dict):
+            continue
+        if rec.get("resolution") is not None:
+            continue
+        request_id = rec.get("request_id")
+        if not isinstance(request_id, str) or not request_id:
+            continue
+        pending.append(rec)
+    return pending
+
+
 def read_overhead_stats(
     path: str | Path,
     *,
@@ -2859,11 +2879,34 @@ def aggregate_fleet(
             name: f">={value}" if ticket_counts_truncated else value
             for name, value in counts.items()
         }
+        human_rows: list[dict[str, Any]] = []
+        raw_human = raw.get("human_requests")
+        if isinstance(raw_human, list):
+            for record in raw_human[:10]:
+                if not isinstance(record, dict):
+                    continue
+                human_rows.append(
+                    {
+                        "ticket_id": _clip(record.get("ticket_id"), MAX_LABEL_CHARS) or None,
+                        "request_id": _clip(record.get("request_id"), MAX_LABEL_CHARS) or None,
+                        "message": _clip(record.get("message"), 500),
+                        "kind": _clip(record.get("kind"), 32) or None,
+                        "asked_by": _clip(record.get("asked_by"), MAX_LABEL_CHARS) or None,
+                        "asked_at": _clip(record.get("asked_at"), 40) or None,
+                        "requested_schema": (
+                            record.get("requested_schema")
+                            if isinstance(record.get("requested_schema"), dict)
+                            else None
+                        ),
+                        "url": _clip(record.get("url"), 2048) or None,
+                    }
+                )
         boards.append(
             {
                 "board_id": board_id,
                 "label": label,
                 "counts": rendered_counts,
+                "human_requests": human_rows,
                 "tickets": ticket_rows[:MAX_TICKET_ROWS],
                 "events": events,
                 "coordinator_heartbeat": (
@@ -3200,12 +3243,66 @@ class FleetFetcher:
                     )
                 snapshot["_commit_verification"] = verification
                 latest_seq = int(snapshot.get("latest_seq", 0))
+                human_requests: list[dict[str, Any]] = []
+                try:
+                    needs = await client.ticket_list(
+                        status="needs_human", include_closed=False, limit=50
+                    )
+                    rows = needs.get("tickets") if isinstance(needs, dict) else None
+                    for item in rows if isinstance(rows, list) else []:
+                        if not isinstance(item, dict):
+                            continue
+                        ticket_id = item.get("ticket_id")
+                        if not isinstance(ticket_id, str) or not ticket_id:
+                            continue
+                        record = item.get("human_request")
+                        if not isinstance(record, (dict, list)):
+                            try:
+                                exact = await client.ticket_get(ticket_id)
+                            except BoardClientError:
+                                continue
+                            ticket = exact.get("ticket")
+                            if (
+                                not isinstance(ticket, dict)
+                                or ticket.get("status") != "needs_human"
+                            ):
+                                continue
+                            record = ticket.get("human_request")
+                        for rec in _pending_human_records(record):
+                            asked_by = rec.get("asked_by")
+                            human_requests.append(
+                                {
+                                    "ticket_id": ticket_id,
+                                    "request_id": str(rec.get("request_id")),
+                                    "message": str(rec.get("message") or "")[:500],
+                                    "kind": str(rec.get("kind") or "")[:32] or None,
+                                    "asked_by": (
+                                        asked_by.get("agent_name")
+                                        if isinstance(asked_by, dict)
+                                        else None
+                                    ),
+                                    "asked_at": rec.get("asked_at"),
+                                    "requested_schema": (
+                                        rec.get("requested_schema")
+                                        if isinstance(rec.get("requested_schema"), dict)
+                                        else None
+                                    ),
+                                    "url": (
+                                        str(rec.get("url"))[:2048]
+                                        if rec.get("url")
+                                        else None
+                                    ),
+                                }
+                            )
+                except Exception:  # noqa: BLE001 - older centrals lack needs_human.
+                    human_requests = []
             return {
                 "label": label,
                 "board_id": board_id,
                 "snapshot": snapshot,
                 "events": events,
                 "event_window_truncated": latest_seq > event_limit,
+                "human_requests": human_requests[:10],
             }
         except Exception as exc:  # noqa: BLE001 - isolate one unavailable board.
             return {
@@ -3244,6 +3341,42 @@ class FleetFetcher:
         if row.get("error"):
             raise RuntimeError(str(row["error"]))
         return project_board_detail(row)
+
+    async def resolve_human_request(
+        self, board_id: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Resolve a pending needs_human request with the coordinator token."""
+        if not BOARD_ID_RE.fullmatch(board_id):
+            raise ValueError("invalid board_id")
+        ticket_id = payload.get("ticket_id")
+        request_id = payload.get("request_id")
+        action = payload.get("action")
+        if not isinstance(ticket_id, str) or not ticket_id:
+            raise ValueError("ticket_id is required")
+        if not isinstance(request_id, str) or not request_id:
+            raise ValueError("request_id is required")
+        if action not in HUMAN_ACTION_VALUES:
+            raise ValueError("action must be accept, decline, or cancel")
+        disposition = payload.get("disposition")
+        if disposition not in HUMAN_DISPOSITION_VALUES:
+            disposition = "reopen" if action == "accept" else "park"
+        content = payload.get("content")
+        if content is not None and not isinstance(content, dict):
+            raise ValueError("content must be an object")
+        async with self._client(board_id) as client:
+            result = await client.ticket_human_resolve(
+                ticket_id,
+                request_id=request_id,
+                action=str(action),
+                content=content,
+                disposition=str(disposition),
+            )
+        return {
+            "ok": True,
+            "board_id": board_id,
+            "ticket_id": ticket_id,
+            "result": result,
+        }
 
     async def fetch_dispatch(self, board_id: str) -> dict[str, Any]:
         if not BOARD_ID_RE.fullmatch(board_id):
@@ -5094,6 +5227,20 @@ class DashboardCache:
             asyncio.run(self.fetchers[label].retire_inert(board_id)), label
         )
 
+    def resolve_human_request(
+        self,
+        board_id: str,
+        payload: dict[str, Any],
+        central: str | None = None,
+    ) -> dict[str, Any]:
+        label = self.resolve_central(central)
+        return self._labeled(
+            asyncio.run(
+                self.fetchers[label].resolve_human_request(board_id, payload)
+            ),
+            label,
+        )
+
     def save_config(
         self,
         value: Any,
@@ -5329,14 +5476,20 @@ async function refreshAttentionState(){if(refreshPaused())return;try{const resul
 function attentionCandidates(){const rows=[];for(const [central,d] of Object.entries(fleetData)){for(const b of d.boards||[]){for(const f of b.coordinator_findings?.items||[]){rows.push({key:`finding|${central}|${b.board_id}|${f.kind}|${f.ticket_id||''}`,fingerprint:`${f.level}|${f.kind}|${f.text}`,type:'finding',central,board:b,level:f.level||'info',title:f.kind,text:f.text,ticket_id:f.ticket_id})}for(const t of b.tickets||[]){const age=Date.now()-new Date(t.updated_at||Date.now()).getTime();if(t.status==='open'&&age>1800000)rows.push({key:`starved|${central}|${b.board_id}|${t.id}`,fingerprint:'open-over-30m',type:'starved',central,board:b,level:'warn',title:'Starved ticket',text:t.title,ticket_id:t.id,age});if((t.abandoned_count||0)>0)rows.push({key:`lease-lapsed|${central}|${b.board_id}|${t.id}`,fingerprint:`lease-lapsed-${t.abandoned_count}`,type:'lease-lapsed',central,board:b,level:'warn',title:`Lease lapsed ${t.abandoned_count} times`,text:t.title,ticket_id:t.id,age});const expired=(t.dispatch_history||[]).filter(h=>h.state==='expired');if(expired.length>0){const names=[...new Set(expired.map(h=>h.agent_name||h.agent_id).filter(Boolean))];rows.push({key:`dispatch-non-acting|${central}|${b.board_id}|${t.id}`,fingerprint:`dispatch-non-acting-${t.id}-${expired.length}`,type:'dispatch',central,board:b,level:'warn',title:'Offers going to non-acting identities',text:`${t.title} · ${expired.length} expired offer(s) to ${names.join(', ')||'unnamed'}`,ticket_id:t.id,age})}}}for(const p of hubOverhead[central]?.sessions||[]){if(p.pressure==='ok')continue;rows.push({key:`context|${central}|${p.board_id}|${p.agent_name}`,fingerprint:`${p.pressure}|${p.mode||'unknown'}|${p.reason||''}`,type:'context',central,board:{board_id:p.board_id,label:p.board_id},level:p.pressure==='compact'||p.pressure==='anomaly'?'critical':'warn',title:p.pressure==='anomaly'?'Context stats anomaly':`Context ${p.pressure}`,text:p.pressure==='anomaly'?`${p.agent_name} · raw wait-return record requires inspection`:`${p.agent_name} · ${p.estimated_tokens_per_return??p.latest_estimated_tokens} tokens / return · ${p.estimated_tokens_per_hour??'—'} / hour · ${p.mode||'unknown'}${p.reason?' · '+p.reason:''}`})}for(const p of hubOverhead[central]?.push_unavailable||[]){rows.push({key:`push-unavailable|${central}|${p.board_id}|${p.agent_name}`,fingerprint:`${p.reason}|${p.observed_at}`,type:'push-unavailable',central,board:{board_id:p.board_id,label:p.board_id},level:'critical',title:'Push unavailable',text:p.warning||`push unavailable: ${p.reason}`})}}return rows}
 function reconcileAttention(){const now=new Date(),before=loadAttentionState(),next={},visible=[];for(const item of attentionCandidates()){if(!item.key||next[item.key])continue;const old=before[item.key],same=old?.fingerprint===item.fingerprint;const row={fingerprint:item.fingerprint,first_seen:same&&old.first_seen?old.first_seen:now.toISOString(),last_seen:now.toISOString(),acknowledged:same&&old.acknowledged===true,snooze_until:same?old.snooze_until||null:null};next[item.key]=row;const snoozed=row.snooze_until&&new Date(row.snooze_until)>now;if(!row.acknowledged&&!snoozed)visible.push({...item,...row})}saveAttentionState(next).catch(()=>{});window.__fleetAttentionPanel={generated_at:now.toISOString(),items:visible.map(x=>({key:x.key,type:x.type,central:x.central,board_id:x.board.board_id,ticket_id:x.ticket_id||null,first_seen:x.first_seen,last_seen:x.last_seen}))};return visible}
 function attentionRow(x){const link=x.ticket_id?`<a class="id" href="${ticketHref(x.central,x.board.board_id,x.ticket_id)}">${esc(x.ticket_id)}</a>`:`<a href="${centralHref(x.central,'overhead')}">Inspect</a>`;return `<div class="finding-row"><span class="severity ${esc(x.level)}"></span><div><b>${esc(x.title)}</b><p>${esc(x.text)}</p><span class="meta">${esc(x.central)} · ${esc(x.board.label)} · first seen ${esc(fmt(x.first_seen))}</span><div class="attention-actions"><button type="button" data-attention-action="ack" data-attention-key="${esc(x.key)}">Acknowledge</button><button type="button" data-attention-action="snooze" data-attention-key="${esc(x.key)}">Snooze 24h</button></div></div>${link}</div>`}
-function renderAttentionOverview(){const centrals=centralLabels.map(label=>{const d=fleetData[label],error=fleetErrors[label];if(!d)return `<article class="health-card"><div class="signal"><span class="signal-dot bad"></span><b>${esc(label)}</b></div><p class="error">${esc(error||'Connecting…')}</p></article>`;const s=d.pool_summary||{},heartbeat=(d.boards||[]).map(b=>b.coordinator_heartbeat).filter(Boolean).sort().at(-1),tc={open:0,claimed:0,submitted:0,closed_today:0};for(const b of d.boards||[])for(const k in tc)tc[k]+=numberCount((b.counts||{})[k]);return `<article class="health-card"><div class="signal"><span class="signal-dot"></span><b>${esc(label)}</b><span class="status">central up</span></div><p class="meta">Coordinator heartbeat ${esc(heartbeat?fmt(heartbeat):'not observed')}</p><div class="health-metrics"><span>Busy<b>${esc(s.busy||0)}</b></span><span>Ready<b>${esc(s.available||0)}</b></span><span>Stale<b>${esc(s.stale||0)}</b></span></div><div class="health-metrics"><span>Open<b>${esc(tc.open)}</b></span><span>Claimed<b>${esc(tc.claimed)}</b></span><span>Submitted${tc.submitted?' ⚠':''}<b>${esc(tc.submitted)}</b></span><span>Closed today<b>${esc(tc.closed_today)}</b></span></div></article>`}).join('');const surfaced=reconcileAttention().sort((a,b)=>(b.level==='critical')-(a.level==='critical')||(b.age||0)-(a.age||0)),attention=surfaced.slice(0,10);return `${pageHead('Home','Fleet overview','Health and attention across every central.')}<section class="health-grid">${centrals||'<div class="skeleton"></div>'}</section><div class="section-title"><h3>Needs attention</h3><span class="status">${surfaced.length} surfaced</span></div><section class="attention-card">${attention.map(attentionRow).join('')||'<p class="empty">Nothing needs attention. The fleet is calm.</p>'}</section>`}
+function humanRequestRows(){const rows=[];for(const [central,d] of Object.entries(fleetData)){for(const b of d.boards||[]){for(const h of b.human_requests||[]){rows.push({central,board:b,h})}}}return rows}
+function humanUrlHost(url){try{return new URL(url).host}catch(_error){return String(url)}}
+function humanFormField(name,prop){const p=prop&&typeof prop==='object'?prop:{};const title=p.title?esc(String(p.title)):esc(name);let enumValues=null;if(Array.isArray(p.enum)){enumValues=p.enum.map(String)}else if(Array.isArray(p.oneOf)){enumValues=[];for(const arm of p.oneOf){if(arm&&typeof arm==='object'&&'const' in arm){enumValues.push(String(arm.const))}else if(arm&&typeof arm==='object'&&Array.isArray(arm.enum)){enumValues.push(...arm.enum.map(String))}}}if(enumValues){if(p.type==='array'||Array.isArray(p.items)){return `<label class="human-field"><span>${title}</span><span>${enumValues.map(v=>`<label class="human-multi"><input type="checkbox" data-human-field="${esc(name)}" data-human-type="multi-enum" value="${esc(v)}"> ${esc(v)}</label>`).join('')}</span></label>`}return `<label class="human-field"><span>${title}</span><select data-human-field="${esc(name)}" data-human-type="enum"><option value="">\u2014</option>${enumValues.map(v=>`<option value="${esc(v)}">${esc(v)}</option>`).join('')}</select></label>`}if(p.type==='boolean'){return `<label class="human-field"><input type="checkbox" data-human-field="${esc(name)}" data-human-type="boolean" ${p.default===true?'checked':''}> <span>${title}</span></label>`}if(p.type==='number'||p.type==='integer'){return `<label class="human-field"><span>${title}</span><input type="number" step="${p.type==='integer'?'1':'any'}" data-human-field="${esc(name)}" data-human-type="${p.type}" value="${p.default!==undefined?esc(String(p.default)):''}"></label>`}return `<label class="human-field"><span>${title}</span><input type="text" data-human-field="${esc(name)}" data-human-type="string" value="${p.default!==undefined?esc(String(p.default)):''}"></label>`}
+function humanFormContent(form){const content={};const seen=new Set();for(const el of form.querySelectorAll('[data-human-field]')){const name=el.dataset.humanField;if(seen.has(name))continue;seen.add(name);const type=el.dataset.humanType||'string';if(type==='multi-enum'){content[name]=[...form.querySelectorAll('[data-human-field="'+name+'"]:checked')].map(x=>String(x.value))}else if(type==='boolean'){content[name]=Boolean(el.checked)}else if(type==='number'||type==='integer'){if(el.value!=='')content[name]=Number(el.value)}else if(el.value!==''){content[name]=String(el.value)}}return content}
+function humanRequestCard(row){const h=row.h||{};const schema=h.requested_schema&&typeof h.requested_schema==='object'?h.requested_schema:{};const props=schema.properties&&typeof schema.properties==='object'?schema.properties:{};const link=h.ticket_id?`<a class="id" href="${ticketHref(row.central,row.board.board_id,h.ticket_id)}">${esc(h.ticket_id)}</a>`:'';let body;if(h.url){body=`<p class="human-url-host">External hand-off on <b>${esc(humanUrlHost(h.url))}</b> (opens in a new tab only on click)</p><a class="button" href="${esc(h.url)}" target="_blank" rel="noopener noreferrer">Open ${esc(humanUrlHost(h.url))} \u2197</a>`}else{const fields=Object.entries(props).map(([name,prop])=>humanFormField(name,prop)).join('');body=`<form class="human-form" data-central="${esc(row.central)}" data-board="${esc(row.board.board_id)}" data-ticket="${esc(h.ticket_id||'')}" data-request="${esc(h.request_id||'')}">${fields}<label class="human-field"><span>Disposition *</span><select data-human-disposition><option value="reopen">reopen \u2014 resume the ticket with this answer</option><option value="park">park \u2014 keep the ticket waiting</option><option value="cancel">cancel \u2014 cancel the ticket</option></select></label><div class="attention-actions"><button type="button" class="primary-action" data-human-action="accept">Accept</button><button type="button" data-human-action="decline">Decline</button></div><p class="meta human-status"></p></form>`}return `<div class="finding-row"><span class="severity critical"></span><div><b>Waiting for you \u00b7 ${esc(h.kind||'request')}</b><p>${esc(h.message||'')}</p><span class="meta">${esc(row.central)} \u00b7 ${esc(row.board.label)} \u00b7 asked by ${esc(h.asked_by||'unknown')}${h.asked_at?' \u00b7 '+esc(fmt(h.asked_at)):''}</span>${body}</div>${link}</div>`}
+function renderWaitingForYou(){const rows=humanRequestRows();return `<div class="section-title"><h3>Waiting for you</h3><span class="status">${rows.length} pending</span></div><section class="attention-card">${rows.map(humanRequestCard).join('')||'<p class="empty">No tickets are waiting for a human answer.</p>'}</section>`}
+function renderAttentionOverview(){const centrals=centralLabels.map(label=>{const d=fleetData[label],error=fleetErrors[label];if(!d)return `<article class="health-card"><div class="signal"><span class="signal-dot bad"></span><b>${esc(label)}</b></div><p class="error">${esc(error||'Connecting…')}</p></article>`;const s=d.pool_summary||{},heartbeat=(d.boards||[]).map(b=>b.coordinator_heartbeat).filter(Boolean).sort().at(-1),tc={open:0,claimed:0,submitted:0,closed_today:0};for(const b of d.boards||[])for(const k in tc)tc[k]+=numberCount((b.counts||{})[k]);return `<article class="health-card"><div class="signal"><span class="signal-dot"></span><b>${esc(label)}</b><span class="status">central up</span></div><p class="meta">Coordinator heartbeat ${esc(heartbeat?fmt(heartbeat):'not observed')}</p><div class="health-metrics"><span>Busy<b>${esc(s.busy||0)}</b></span><span>Ready<b>${esc(s.available||0)}</b></span><span>Stale<b>${esc(s.stale||0)}</b></span></div><div class="health-metrics"><span>Open<b>${esc(tc.open)}</b></span><span>Claimed<b>${esc(tc.claimed)}</b></span><span>Submitted${tc.submitted?' ⚠':''}<b>${esc(tc.submitted)}</b></span><span>Closed today<b>${esc(tc.closed_today)}</b></span></div></article>`}).join('');const surfaced=reconcileAttention().sort((a,b)=>(b.level==='critical')-(a.level==='critical')||(b.age||0)-(a.age||0)),attention=surfaced.slice(0,10);return `${pageHead('Home','Fleet overview','Health and attention across every central.')}<section class="health-grid">${centrals||'<div class="skeleton"></div>'}</section>${renderWaitingForYou()}<div class="section-title"><h3>Needs attention</h3><span class="status">${surfaced.length} surfaced</span></div><section class="attention-card">${attention.map(attentionRow).join('')||'<p class="empty">Nothing needs attention. The fleet is calm.</p>'}</section>`}
 function renderAttentionBoardsHub(){const cards=[];for(const [central,d] of Object.entries(fleetData))for(const b of d.boards||[]){const total=Object.values(b.counts||{}).reduce((sum,v)=>sum+numberCount(v),0),tr=b.snapshot_truncation,info=tr&&tr.total>tr.returned?`<span class="status">snapshot truncated to ${esc(tr.returned)} of ${esc(tr.total)} tickets</span>`:'';cards.push(`<article class="board-card"><div><p class="eyebrow">${esc(central)}</p><h3>${esc(b.label)}</h3><span class="meta">${esc(b.board_id)} · ${esc(total)} visible tickets</span> ${info}</div><div class="counts">${Object.entries(b.counts||{}).map(([k,v])=>`<span class="pill">${esc(k.replace('_',' '))} <b>${esc(v)}</b></span>`).join('')}</div><div class="card-actions"><a class="primary-action" href="${boardHref(central,b.board_id)}">Workspace</a><a href="${boardHref(central,b.board_id,'flow')}">Flow</a><a href="${boardHref(central,b.board_id,'timeline')}">Timeline</a><a href="${boardHref(central,b.board_id,'changes')}">Changes</a><a href="${boardHref(central,b.board_id,'routes')}">Routes</a></div></article>`)}return `${pageHead('Boards','Board workspaces','Open one board, then move through tickets, findings, intake, flow, timeline, changes, and routes.')}<section class="boards-list">${cards.join('')||'<div class="skeleton"></div>'}</section>`}
 refreshAttentionState();
 </script></body>""",
     1,
 ).replace(
     "</style>",
-    ".attention-actions{display:flex;gap:6px;margin-top:6px}.attention-actions button{background:var(--panel2);border:1px solid var(--line);border-radius:7px;color:var(--text);padding:4px 7px}</style>",
+    ".attention-actions{display:flex;gap:6px;margin-top:6px}.attention-actions button{background:var(--panel2);border:1px solid var(--line);border-radius:7px;color:var(--text);padding:4px 7px}.human-field{display:grid;gap:4px;margin-top:8px;font-size:12px}.human-field input[type=text],.human-field input[type=number],.human-field select{background:var(--panel2);border:1px solid var(--line);border-radius:7px;color:var(--text);padding:5px 7px}.human-multi{display:inline-flex;align-items:center;gap:4px;margin-right:8px;font-size:12px}.human-url-host{margin:6px 0}</style>",
     1,
 )
 
@@ -5527,6 +5680,8 @@ const seatClickImportV1=seatClick;
 seatClick=async function(event){const action=event.target.closest('[data-seat-action]')?.dataset.seatAction;if(action!=='import')return seatClickImportV1(event);try{const result=await configPost('/api/config/import',{});seatActionMessage=`Imported ${(result.imported||[]).length} seat(s); Doctor started.`;await refreshSeats();if(result.doctor_job)watchConfigJob(result.doctor_job)}catch(e){seatActionMessage=`Import failed: ${e.message}`;renderHub()}}
 renderOverview=renderAttentionOverview;
 renderBoardsHub=renderAttentionBoardsHub;
+const humanHubClickV1=hubClick;
+hubClick=async function(event){const button=event.target.closest('[data-human-action]');if(!button)return humanHubClickV1(event);const form=button.closest('form.human-form');if(!form)return;const status=form.querySelector('.human-status');button.disabled=true;if(status)status.textContent='Sending\u2026';try{const disposition=form.querySelector('[data-human-disposition]')?.value||'reopen';const payload={board_id:form.dataset.board,ticket_id:form.dataset.ticket,request_id:form.dataset.request,action:button.dataset.humanAction,content:humanFormContent(form),disposition};await workerRequest('/api/human/resolve',form.dataset.central,payload);await refreshCentral(form.dataset.central);renderHub()}catch(error){button.disabled=false;if(status)status.textContent=`Failed: ${error.message}`}};
 const attentionHubClickV1=hubClick;
 hubClick=async function(event){const button=event.target.closest('[data-attention-action]');if(!button)return attentionHubClickV1(event);const state=loadAttentionState(),row=state[button.dataset.attentionKey];if(!row)return;if(button.dataset.attentionAction==='ack')row.acknowledged=true;else row.snooze_until=new Date(Date.now()+86400000).toISOString();await saveAttentionState(state);renderHub()};
 if(navKind()==='overview')renderHub();
@@ -5945,6 +6100,7 @@ def make_handler(
                 "/api/agents/retire",
                 "/api/agents/retire-inert",
                 "/api/attention",
+                "/api/human/resolve",
             }
             worker_action = re.fullmatch(
                 r"/api/workers/([a-z0-9-]{2,32})/(test|start|stop|restart)", route
@@ -6107,6 +6263,30 @@ def make_handler(
                     )
                 elif route == "/api/attention":
                     body = _json_bytes(seats.save_attention_state(request))
+                elif route == "/api/human/resolve":
+                    if not isinstance(request, dict):
+                        raise ValueError("request must be an object")
+                    human_required = {"board_id", "ticket_id", "request_id", "action"}
+                    missing = human_required - set(request)
+                    if missing:
+                        raise ValueError(
+                            "request must contain " + ", ".join(sorted(missing))
+                        )
+                    unexpected = (
+                        set(request) - human_required - {"content", "disposition"}
+                    )
+                    if unexpected:
+                        raise ValueError(
+                            "unexpected fields: " + ", ".join(sorted(unexpected))
+                        )
+                    body = _json_bytes(
+                        cache_call(
+                            "resolve_human_request",
+                            request["board_id"],
+                            request,
+                            central=central,
+                        )
+                    )
                 elif route == "/api/workers":
                     body = _json_bytes(
                         {

@@ -668,10 +668,12 @@ def test_prompt_renderer_has_exact_registry_rearm_and_role_rules(tmp_path: Path)
     assert "timeout_s=560" in worker
     assert "whole new_seq map" in worker
     assert "bound to this Codex window" in worker
+    assert "ticket_request_human(message, kind, requested_schema)" in worker
     assert "never claim, edit, commit, or push" in reviewer
     assert "200s bridge block" in reviewer
     assert "Never use another name" in reviewer
     assert "start every turn with board_digest; act on closed tickets (merge/verify), file follow-ups, then board_digest_ack; never a2a_wait; never claim" in orchestrator
+    assert "answer it with board_human_requests" in orchestrator
 
     orchestrator_seat = desired(tmp_path, "claude-desktop", role="orchestrator")
     bridge_json = seat_config._bridge_json(orchestrator_seat)

@@ -487,3 +487,56 @@ Run the bridge tests with:
 ```sh
 python -m unittest discover -s tools/wait-bridge/tests -v
 ```
+
+## Human requests (needs_human)
+
+A ticket blocked on a human calls Central's `ticket_request_human(message,
+kind, requested_schema[, url])`, releases its work lease, and parks in the
+`needs_human` state with a structured question. The bridge delivers the
+question to the human through the host they already sit in:
+
+- `board_human_requests(boards="registry" | list, answer=None)` — without
+  `answer` it lists pending requests (`ticket_id`, board, `message`, `kind`,
+  `asked_by`, schema summary). When the MCP client declared elicitation
+  (spec 2026-07-28, client/elicitation) in its capabilities, the tool returns
+  an `InputRequiredResult` whose `inputRequests` carry one
+  `elicitation/create` per pending request: `mode: "form"` with the ticket's
+  `requested_schema` verbatim plus a mandatory `disposition` enum field
+  (`reopen | park | cancel` with titles), or `mode: "url"` when the request
+  carries a URL. `{board, ticket_id, request_id}` ride `requestState`; on the
+  retried call `accept` maps to `ticket_human_resolve(action="accept",
+  content, disposition)`, `decline` to `resolve(decline, disposition from
+  content or park)`, and `cancel` leaves the request pending ("asked later").
+  Clients that declared no elicitation get the list plus instructions to
+  answer via `board_human_requests(answer={"ticket_id": ..., "action": ...,
+  "content": {...}, "disposition": ...})` or the fleet dashboard. The bridge
+  never sends a mode the client did not declare. Form mode never asks for
+  secrets; credentials and files go through url mode pointing at the
+  dashboard page or a described drop location.
+- Push: the `human_input_requested` / `human_input_resolved` journal kinds
+  wake orchestrator seats; `board_digest` shows a `human_requests` section
+  and `board_digest_ack` clears it.
+- Fleet dashboard: the hub "Waiting for you" panel renders each pending
+  request as an inline form generated from `requested_schema`
+  (string/number/boolean/enum/multi-enum, defaults, required) with a
+  disposition selector; `POST /api/human/resolve` calls
+  `ticket_human_resolve` with the coordinator token behind the same-origin
+  loopback guard. URL-mode requests show the target host prominently and open
+  in a new tab only on click.
+
+Elicitation host declarations (probed 2026-09-06):
+
+| Host | declares elicitation | probe status |
+| --- | --- | --- |
+| Claude Desktop | pending | form path implemented + unit-tested; end-to-end probe blocked until Central deploys `needs_human` (TK-75275d51735f) |
+| Codex app | pending | same blocker as Claude Desktop |
+| Goose | no | stdio probe verified the fallback list + instructions path live against Central |
+
+Live probe record (2026-09-06, bridge stdio vs the running Central): the tool
+registered and returned the bounded fallback payload for a client without
+elicitation and for one that declared it (no pending requests exist yet;
+Central answered `ticket_list(status="needs_human")` with "unsupported ticket
+status", which the bridge logs and survives). The Claude Desktop form round
+trip requires a sandbox `needs_human` ticket, so it is recorded as blocked on
+the Central `needs_human` ticket's merge + deployment.
+

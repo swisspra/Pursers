@@ -72,6 +72,8 @@ from typing import Any
 from pursers_client import (
     CENTRAL_EVENT_KINDS,
     CLAIM_TTL_EVENT_KINDS,
+    HUMAN_INPUT_REQUESTED,
+    HUMAN_INPUT_RESOLVED,
     OFFER_EXPIRED,
     OFFER_REVOKED,
     REVIEW_OFFERED,
@@ -90,6 +92,12 @@ from pursers_client import (
 )
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
+from mcp.types import (
+    ElicitRequest,
+    ElicitRequestFormParams,
+    ElicitRequestURLParams,
+    InputRequiredResult,
+)
 from mcp.server.subscriptions import ResourceUpdated
 from agent_naming import resolve_agent_name
 from backlog import (
@@ -198,6 +206,12 @@ _BACKLOG_SEEN: OrderedDict[
 ] = OrderedDict()
 CLAIMED_STATES = frozenset({"claimed", "in_progress", "creating_report"})
 HANDOFF_REJOIN_MESSAGE = "call board_onboard or board_join before more work"
+HUMAN_EVENT_KINDS = frozenset({HUMAN_INPUT_REQUESTED, HUMAN_INPUT_RESOLVED})
+HUMAN_REQUEST_KINDS = ("decision", "deliverable", "approval", "information")
+HUMAN_ACTIONS = ("accept", "decline", "cancel")
+HUMAN_DISPOSITIONS = ("reopen", "park", "cancel")
+HUMAN_SCHEMA_SUMMARY_CHARS = 280
+HUMAN_MESSAGE_CHARS = 2000
 PROJECT_REGISTRY_KEY = "project_registry"
 STATS_SCHEMA_VERSION = 4
 STATS_RETENTION_DAYS = 7
@@ -2020,6 +2034,7 @@ class OrchestratorEngine:
         self.ticket_cache: dict[str, dict[str, Any]] = {}
         self.watched_ticket_ids: set[str] = set()
         self.watched_tags: set[str] = set()
+        self.human_request_acks: set[str] = set()
         self.subscription_health: dict[str, Any] = {
             "connected": False,
             "last_event_at": None,
@@ -2063,6 +2078,10 @@ class OrchestratorEngine:
                 self.watched_ticket_ids = set(data["watched_ticket_ids"])
             if isinstance(data.get("watched_tags"), list):
                 self.watched_tags = set(data["watched_tags"])
+            if isinstance(data.get("human_request_acks"), list):
+                self.human_request_acks = {
+                    str(value) for value in data["human_request_acks"]
+                }
             if "reconnects" in data:
                 self.subscription_health["reconnects"] = int(data.get("reconnects", 0))
             if "last_event_at" in data:
@@ -2094,6 +2113,7 @@ class OrchestratorEngine:
                 "tickets": self.ticket_cache,
                 "watched_ticket_ids": sorted(self.watched_ticket_ids),
                 "watched_tags": sorted(self.watched_tags),
+                "human_request_acks": sorted(self.human_request_acks),
                 "reconnects": self.subscription_health["reconnects"],
                 "last_event_at": self.subscription_health["last_event_at"],
                 "last_saved_at": datetime.now(timezone.utc).isoformat(),
@@ -2255,6 +2275,18 @@ class OrchestratorEngine:
                                 if new_events:
                                     buffer_grew = True
                                     self.subscription_health["last_event_at"] = datetime.now(timezone.utc).isoformat()
+                                    human_cues = [
+                                        ev.get("kind")
+                                        for ev in new_events
+                                        if ev.get("kind") in HUMAN_EVENT_KINDS
+                                    ]
+                                    if human_cues:
+                                        _log(
+                                            f"human request cue on {b}: "
+                                            f"{len(human_cues)} event(s); "
+                                            "orchestrator seats can answer via "
+                                            "board_human_requests or board_digest"
+                                        )
                                     for tid in changed_tickets:
                                         try:
                                             t_resp = await view.ticket_get(tid)
@@ -2536,6 +2568,32 @@ class OrchestratorEngine:
             key=lambda item: (item["board_id"], item["ticket_id"])
         )
 
+        human_requests: list[dict[str, Any]] = []
+        for cache_key, ticket_data in self.ticket_cache.items():
+            board_id, separator, ticket_id = cache_key.partition(":")
+            if not separator or board_id not in target_boards:
+                continue
+            for record in _pending_human_request_records(ticket_data):
+                request_id = str(record.get("request_id"))
+                if request_id in self.human_request_acks:
+                    continue
+                asked_by = record.get("asked_by")
+                human_requests.append({
+                    "board_id": board_id,
+                    "ticket_id": ticket_id,
+                    "request_id": request_id,
+                    "message": str(record.get("message") or "")[:500],
+                    "kind": record.get("kind"),
+                    "requested_schema": record.get("requested_schema"),
+                    "url": record.get("url"),
+                    "asked_by": asked_by.get("agent_name") if isinstance(asked_by, dict) else None,
+                    "asked_at": record.get("asked_at"),
+                    "expires_at": record.get("expires_at"),
+                })
+        human_requests.sort(
+            key=lambda item: (item["board_id"], item["ticket_id"], item["request_id"])
+        )
+
         return {
             "cursor_map": current_cursor_map,
             "tickets": tickets,
@@ -2543,6 +2601,7 @@ class OrchestratorEngine:
             "annotations": annotations,
             "counts": counts,
             "unassignable_tickets": unassignable_tickets,
+            "human_requests": human_requests,
             "subscription": {
                 "connected": bool(self.subscription_health.get("connected", False)),
                 "last_event_at": self.subscription_health.get("last_event_at"),
@@ -2558,8 +2617,18 @@ class OrchestratorEngine:
             else:
                 for b, cur in cursor_map.items():
                     self.ack_cursor_map[b] = max(self.ack_cursor_map.get(b, 0), int(cur))
+            pending_ids: set[str] = set()
+            for ticket_data in self.ticket_cache.values():
+                for record in _pending_human_request_records(ticket_data):
+                    pending_ids.add(str(record.get("request_id")))
+            acknowledged_human_requests = len(pending_ids - self.human_request_acks)
+            self.human_request_acks = pending_ids
             self.save_state()
-            return {"ok": True, "cursor_map": dict(self.ack_cursor_map)}
+            return {
+                "ok": True,
+                "cursor_map": dict(self.ack_cursor_map),
+                "acknowledged_human_requests": acknowledged_human_requests,
+            }
 
     async def watch(
         self,
@@ -2814,6 +2883,498 @@ async def board_unwatch(
     """Remove ticket IDs or tags from watch list, or unwatch all."""
     engine = await _engine_for_tool(ctx)
     return await engine.unwatch(ticket_ids=ticket_ids, tags=tags, all=all)
+
+
+def _pending_human_request_records(ticket: dict[str, Any]) -> list[dict[str, Any]]:
+    """Unresolved human_request records carried by a needs_human ticket."""
+    if ticket.get("status") != "needs_human":
+        return []
+    raw = ticket.get("human_request")
+    records = raw if isinstance(raw, list) else [raw]
+    pending: list[dict[str, Any]] = []
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        if record.get("resolution") is not None:
+            continue
+        request_id = record.get("request_id")
+        if not isinstance(request_id, str) or not request_id:
+            continue
+        pending.append(record)
+    return pending
+
+
+def _elicitation_modes(capabilities: Any) -> tuple[bool, bool]:
+    """Return (form_ok, url_ok) from the client's declared elicitation capability.
+
+    Never sends an elicitation mode the client did not declare (spec MUST).
+    Accepts pydantic ClientCapabilities or plain dict fakes.
+    """
+    if capabilities is None:
+        return (False, False)
+    elicitation = (
+        capabilities.get("elicitation")
+        if isinstance(capabilities, dict)
+        else getattr(capabilities, "elicitation", None)
+    )
+    if elicitation is None:
+        return (False, False)
+    form = (
+        elicitation.get("form")
+        if isinstance(elicitation, dict)
+        else getattr(elicitation, "form", None)
+    )
+    url = (
+        elicitation.get("url")
+        if isinstance(elicitation, dict)
+        else getattr(elicitation, "url", None)
+    )
+    return (form is not None, url is not None)
+
+
+def _human_schema_summary(schema: Any) -> str:
+    if not isinstance(schema, dict):
+        return "no schema"
+    properties = schema.get("properties")
+    if not isinstance(properties, dict) or not properties:
+        return "empty schema"
+    required = schema.get("required")
+    required_names = {str(name) for name in required} if isinstance(required, list) else set()
+    parts: list[str] = []
+    for name, prop in properties.items():
+        prop_type = None
+        if isinstance(prop, dict):
+            if prop.get("enum") or isinstance(prop.get("oneOf"), list):
+                prop_type = "enum"
+            elif isinstance(prop.get("type"), str):
+                prop_type = prop["type"]
+            elif prop.get("type") == "array" or isinstance(prop.get("items"), dict):
+                prop_type = "multi-enum"
+        marker = "*" if str(name) in required_names else ""
+        parts.append(f"{name}{marker}:{prop_type or 'any'}")
+    summary = ", ".join(parts)
+    if len(summary) > HUMAN_SCHEMA_SUMMARY_CHARS:
+        summary = summary[: HUMAN_SCHEMA_SUMMARY_CHARS - 1] + "\u2026"
+    return summary
+
+
+def _form_schema_with_disposition(schema: Any) -> dict[str, Any]:
+    """Requested schema verbatim plus the mandatory disposition enum field."""
+    base = (
+        copy.deepcopy(schema)
+        if isinstance(schema, dict)
+        else {"type": "object", "properties": {}}
+    )
+    if base.get("type") != "object":
+        base = {"type": "object", "properties": {}}
+    properties = base.get("properties")
+    properties = dict(properties) if isinstance(properties, dict) else {}
+    properties["disposition"] = {
+        "type": "string",
+        "enum": list(HUMAN_DISPOSITIONS),
+        "title": "Disposition",
+        "description": (
+            "reopen: resume the ticket with this answer; "
+            "park: keep the ticket waiting for a later answer; "
+            "cancel: cancel the ticket"
+        ),
+    }
+    required = base.get("required")
+    required_list = [str(item) for item in required] if isinstance(required, list) else []
+    if "disposition" not in required_list:
+        required_list.append("disposition")
+    base["properties"] = properties
+    base["required"] = required_list
+    return base
+
+
+def _project_human_record(record: dict[str, Any]) -> dict[str, Any]:
+    asked_by = record.get("asked_by")
+    return {
+        "request_id": str(record.get("request_id")),
+        "message": str(record.get("message") or "")[:HUMAN_MESSAGE_CHARS],
+        "kind": record.get("kind"),
+        "asked_by": asked_by.get("agent_name") if isinstance(asked_by, dict) else None,
+        "asked_at": record.get("asked_at"),
+        "expires_at": record.get("expires_at"),
+        "requested_schema": record.get("requested_schema"),
+        "schema_summary": _human_schema_summary(record.get("requested_schema")),
+        "url": record.get("url"),
+    }
+
+
+async def _collect_pending_human_requests(
+    client: BoardClient, target_boards: list[str]
+) -> list[dict[str, Any]]:
+    pending: list[dict[str, Any]] = []
+    for board_id in target_boards:
+        view = _BoardView(client, board_id)
+        try:
+            result = await view.ticket_list(status="needs_human", limit=100)
+        except Exception as exc:
+            _log(f"board_human_requests: ticket_list({board_id}) failed: {exc}")
+            continue
+        for item in result.get("tickets", []):
+            if not isinstance(item, dict):
+                continue
+            ticket_id = item.get("ticket_id") or item.get("id")
+            if not isinstance(ticket_id, str) or not ticket_id:
+                continue
+            record = item.get("human_request")
+            status = item.get("status") or "needs_human"
+            if not isinstance(record, (dict, list)):
+                try:
+                    fetched = await view.ticket_get(ticket_id)
+                except Exception as exc:
+                    _log(
+                        f"board_human_requests: ticket_get({board_id}/{ticket_id}) failed: {exc}"
+                    )
+                    continue
+                ticket = fetched.get("ticket") if isinstance(fetched, dict) else None
+                if not isinstance(ticket, dict):
+                    continue
+                status = ticket.get("status")
+                record = ticket.get("human_request")
+            if status != "needs_human":
+                continue
+            projection = {"status": status, "human_request": record}
+            for rec in _pending_human_request_records(projection):
+                pending.append(
+                    {
+                        "board_id": board_id,
+                        "ticket_id": ticket_id,
+                        **_project_human_record(rec),
+                    }
+                )
+    pending.sort(key=lambda item: (item["board_id"], item["ticket_id"], item["request_id"]))
+    return pending
+
+
+def _elicit_response_parts(value: Any) -> tuple[str, dict[str, Any]] | None:
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        action = value.get("action")
+        content = value.get("content")
+    else:
+        action = getattr(value, "action", None)
+        content = getattr(value, "content", None)
+    if action not in HUMAN_ACTIONS:
+        return None
+    return (str(action), content if isinstance(content, dict) else {})
+
+
+async def _resolve_human_request(
+    client: BoardClient,
+    *,
+    board_id: str,
+    ticket_id: str,
+    request_id: str,
+    action: str,
+    content: dict[str, Any] | None,
+    disposition: str,
+) -> dict[str, Any]:
+    view = _BoardView(client, board_id)
+    arguments: dict[str, Any] = {
+        "agent_name": view.agent_name,
+        "ticket_id": ticket_id,
+        "request_id": request_id,
+        "action": action,
+        "disposition": disposition,
+    }
+    if content:
+        arguments["content"] = content
+    return await view._call("ticket_human_resolve", arguments)
+
+
+def _human_fallback_instructions() -> str:
+    return (
+        "This MCP client did not declare elicitation (form or url), so the "
+        "questions were not rendered. Answer each request by calling "
+        "board_human_requests again with answer={'ticket_id': ..., 'action': "
+        "'accept'|'decline'|'cancel', 'content': {...}, 'disposition': "
+        "'reopen'|'park'|'cancel'}, or use the fleet dashboard 'Waiting for "
+        "you' panel."
+    )
+
+
+async def board_human_requests_core(
+    client: BoardClient,
+    *,
+    boards: list[str] | str = "registry",
+    answer: dict[str, Any] | None = None,
+    capabilities: Any = None,
+    input_responses: Any = None,
+    request_state: str | None = None,
+) -> dict[str, Any] | InputRequiredResult:
+    """List or answer pending needs_human requests (a22 human-in-loop)."""
+    if isinstance(boards, str):
+        if boards.strip().lower() == "registry":
+            registry = await _read_project_registry(client)
+            target_boards = _registry_boards(registry) or [BOARD_ID]
+        else:
+            target_boards = [b.strip() for b in boards.split(",") if b.strip()] or [BOARD_ID]
+    elif isinstance(boards, list):
+        target_boards = _normalize_boards([str(b) for b in boards]) or [BOARD_ID]
+    else:
+        target_boards = [BOARD_ID]
+
+    # Round two (or explicit answer): apply the human's responses.
+    if answer is not None:
+        if not isinstance(answer, dict):
+            raise ToolError("answer must be an object")
+        ticket_id = answer.get("ticket_id")
+        if not isinstance(ticket_id, str) or not ticket_id:
+            raise ToolError("answer.ticket_id is required")
+        action = answer.get("action")
+        if action not in HUMAN_ACTIONS:
+            raise ToolError("answer.action must be accept, decline, or cancel")
+        if action == "cancel":
+            return {
+                "ok": True,
+                "resolved": [],
+                "deferred": [
+                    {
+                        "ticket_id": ticket_id,
+                        "reason": "asked later",
+                    }
+                ],
+            }
+        content = answer.get("content")
+        if content is not None and not isinstance(content, dict):
+            raise ToolError("answer.content must be an object")
+        disposition = answer.get("disposition")
+        if disposition not in HUMAN_DISPOSITIONS:
+            disposition = "reopen" if action == "accept" else "park"
+        pending = await _collect_pending_human_requests(client, target_boards)
+        request_id = answer.get("request_id")
+        board_hint = answer.get("board_id")
+        match = next(
+            (
+                item
+                for item in pending
+                if item["ticket_id"] == ticket_id
+                and (not board_hint or item["board_id"] == board_hint)
+                and (not request_id or item["request_id"] == request_id)
+            ),
+            None,
+        )
+        if match is None:
+            return {
+                "ok": False,
+                "error": f"no pending human request found for ticket {ticket_id}",
+            }
+        try:
+            result = await _resolve_human_request(
+                client,
+                board_id=str(match["board_id"]),
+                ticket_id=ticket_id,
+                request_id=str(match["request_id"]),
+                action=str(action),
+                content=content,
+                disposition=str(disposition),
+            )
+        except Exception as exc:
+            return {"ok": False, "error": f"ticket_human_resolve failed: {exc}"}
+        return {
+            "ok": True,
+            "resolved": [
+                {
+                    "board_id": match["board_id"],
+                    "ticket_id": ticket_id,
+                    "request_id": match["request_id"],
+                    "action": action,
+                    "disposition": disposition,
+                }
+            ],
+            "result": result,
+        }
+
+    if input_responses:
+        targets: dict[str, dict[str, str]] = {}
+        if isinstance(request_state, str) and request_state:
+            try:
+                decoded = json.loads(request_state)
+            except (json.JSONDecodeError, ValueError):
+                decoded = None
+            if isinstance(decoded, dict) and isinstance(decoded.get("targets"), dict):
+                for key, value in decoded["targets"].items():
+                    if isinstance(value, dict) and value.get("ticket_id") and value.get("request_id"):
+                        targets[str(key)] = {
+                            "board": str(value.get("board") or BOARD_ID),
+                            "ticket_id": str(value["ticket_id"]),
+                            "request_id": str(value["request_id"]),
+                        }
+        resolved: list[dict[str, Any]] = []
+        deferred: list[dict[str, Any]] = []
+        errors: list[dict[str, Any]] = []
+        responses = (
+            input_responses
+            if isinstance(input_responses, dict)
+            else getattr(input_responses, "root", {}) or {}
+        )
+        for key, target in targets.items():
+            response = _elicit_response_parts(responses.get(key))
+            if response is None:
+                deferred.append({**target, "reason": "asked later"})
+                continue
+            action, content = response
+            if action == "cancel":
+                deferred.append({**target, "reason": "asked later"})
+                continue
+            payload = dict(content)
+            disposition = payload.pop("disposition", None)
+            if disposition not in HUMAN_DISPOSITIONS:
+                disposition = "reopen" if action == "accept" else "park"
+            try:
+                await _resolve_human_request(
+                    client,
+                    board_id=target["board"],
+                    ticket_id=target["ticket_id"],
+                    request_id=target["request_id"],
+                    action=action,
+                    content=payload or None,
+                    disposition=str(disposition),
+                )
+                resolved.append({**target, "action": action, "disposition": disposition})
+            except Exception as exc:
+                errors.append({**target, "error": str(exc)})
+        if not targets:
+            return {
+                "ok": False,
+                "error": "input_responses received but request_state targets are missing",
+            }
+        return {"ok": not errors, "resolved": resolved, "deferred": deferred, "errors": errors}
+
+    pending = await _collect_pending_human_requests(client, target_boards)
+    if not pending:
+        return {
+            "ok": True,
+            "pending": [],
+            "message": "no tickets are waiting for a human answer",
+        }
+
+    form_ok, url_ok = _elicitation_modes(capabilities)
+    summaries = [
+        {
+            "board_id": item["board_id"],
+            "ticket_id": item["ticket_id"],
+            "request_id": item["request_id"],
+            "message": item["message"],
+            "kind": item["kind"],
+            "asked_by": item["asked_by"],
+            "schema_summary": item["schema_summary"],
+            "mode": "url" if item.get("url") else "form",
+            "url": item.get("url"),
+        }
+        for item in pending
+    ]
+    if not form_ok and not url_ok:
+        return {
+            "ok": True,
+            "elicitation_declared": False,
+            "pending": summaries,
+            "instructions": _human_fallback_instructions(),
+        }
+
+    input_requests: dict[str, ElicitRequest] = {}
+    targets: dict[str, dict[str, str]] = {}
+    unasked: list[dict[str, Any]] = []
+    for index, item in enumerate(pending):
+        key = f"r{index}"
+        message = f"[{item['board_id']}/{item['ticket_id']}] {item['message']}"[
+            :HUMAN_MESSAGE_CHARS
+        ]
+        if item.get("url"):
+            if not url_ok:
+                unasked.append(
+                    {
+                        "ticket_id": item["ticket_id"],
+                        "request_id": item["request_id"],
+                        "reason": "requires url mode, which this client did not declare",
+                    }
+                )
+                continue
+            input_requests[key] = ElicitRequest(
+                params=ElicitRequestURLParams(
+                    mode="url", message=message, url=str(item["url"])
+                )
+            )
+        else:
+            if not form_ok:
+                unasked.append(
+                    {
+                        "ticket_id": item["ticket_id"],
+                        "request_id": item["request_id"],
+                        "reason": "requires form mode, which this client did not declare",
+                    }
+                )
+                continue
+            input_requests[key] = ElicitRequest(
+                params=ElicitRequestFormParams(
+                    mode="form",
+                    message=message,
+                    requested_schema=_form_schema_with_disposition(
+                        item.get("requested_schema")
+                    ),
+                )
+            )
+        targets[key] = {
+            "board": item["board_id"],
+            "ticket_id": item["ticket_id"],
+            "request_id": item["request_id"],
+        }
+    if not input_requests:
+        return {
+            "ok": True,
+            "elicitation_declared": True,
+            "pending": summaries,
+            "unasked": unasked,
+            "instructions": _human_fallback_instructions(),
+        }
+    state = json.dumps({"targets": targets}, separators=(",", ":"))
+    return InputRequiredResult(
+        input_requests=input_requests,
+        request_state=state,
+    )
+
+
+@mcp.tool()
+async def board_human_requests(
+    ctx: Context,
+    boards: list[str] | str = "registry",
+    answer: dict[str, Any] | None = None,
+) -> dict[str, Any] | InputRequiredResult:
+    """List or answer pending needs_human ticket requests across boards.
+
+    Without `answer`: lists pending human requests. When this client declared
+    elicitation (form and/or url) the pending questions are returned as an
+    InputRequiredResult carrying one elicitation/create per request; retry the
+    call with the collected answers to resolve them. Without elicitation the
+    list includes instructions for answering via `answer` or the dashboard.
+    """
+    client = await _client_for_tool(ctx)
+    capabilities: Any = None
+    responses: Any = None
+    state: str | None = None
+    try:
+        capabilities = ctx.client_capabilities
+    except Exception:
+        capabilities = None
+    try:
+        responses = ctx.input_responses
+        state = ctx.request_state
+    except Exception:
+        responses = None
+        state = None
+    return await board_human_requests_core(
+        client,
+        boards=boards,
+        answer=answer,
+        capabilities=capabilities,
+        input_responses=responses,
+        request_state=state,
+    )
 
 
 @mcp.resource("board://{board_id}/digest")
