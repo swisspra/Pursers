@@ -264,24 +264,26 @@ from active registry boards; it contains no board or project allowlist.
 `retire` uses Central's principal membership removal, which clears the
 principal's seats from the selected board pool while preserving tickets,
 journal history, and other durable board data. It refuses every mutation when
-the principal holds an active claim. A seat seen within the stale threshold
-(300 seconds by default) also requires `--force`. Duplicate names across
-principals require `--principal`; registry-mode seat definitions must be
+the principal holds an active work or review claim. A seat seen within the
+stale threshold (300 seconds by default) also requires `--force`. Duplicate
+names across principals require `--principal`; registry-mode seat definitions must be
 retired with `--boards registry`. Each removed membership is read back from
 both membership and agents projections before success is printed.
 
 `dedupe` resolves one seat name used by multiple principals across every active
 fleet board. It keeps the named principal and plans retirement of all others.
-Dry-run is the default; `--commit` refuses admin principals, active claims, or
-incomplete snapshots, then removes and verifies each membership.
+Dry-run is the default and reports active work/review claims in the plan;
+`--commit` refuses admin principals, either claim kind, or incomplete snapshots,
+then removes and verifies each membership.
 
 `prune-stale` aggregates each principal's latest seat activity across every
 active registry board. It excludes reviewer/admin roles, names supplied by
 repeatable `--protect`/`--protected` flags (comma-separated names are accepted),
 unknown timestamps, recent seats, and memberships without complete agent
 activity evidence on every board. Role aggregation and removal targets come
-from membership rows even when `agent_names` is empty. Active claims are
-included in the plan as blockers and make `--commit` fail before any write.
+from membership rows even when `agent_names` is empty. Active work/review
+claims are included in the plan as blockers and make `--commit` fail before
+any write.
 Dry-run is the default
 and performs no membership or seat-registry writes; `--commit` executes the
 printed plan, verifies every board read-back, and removes matching durable seat

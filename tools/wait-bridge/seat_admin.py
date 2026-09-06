@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import math
 import os
 import re
 import shlex
@@ -28,6 +29,7 @@ SEAT_REGISTRY_KEY = "seat_registry"
 SEAT_REGISTRY_SCHEMA_VERSION = 1
 DEFAULT_STALE_SECONDS = 300
 ACTIVE_CLAIM_STATES = frozenset({"claimed", "in_progress", "creating_report"})
+ACTIVE_REVIEW_STATES = frozenset({"submitted", "reviewing", "in_review"})
 
 
 class SeatBackend(Protocol):
@@ -325,6 +327,7 @@ def _active_claims(
     snapshots: dict[str, dict[str, Any]], principals: set[str]
 ) -> list[dict[str, str]]:
     claims: list[dict[str, str]] = []
+    now_epoch = datetime.now(timezone.utc).timestamp()
     for board_id, snapshot in snapshots.items():
         omitted = _snapshot_omitted(snapshot, "tickets")
         if omitted:
@@ -332,25 +335,117 @@ def _active_claims(
                 f"ticket scan on {board_id!r} omitted {omitted} rows; "
                 "refusing an incomplete active-claim check"
             )
-        agent_ids = {
-            agent.get("agent_id")
-            for agent in snapshot.get("agents", [])
-            if isinstance(agent, dict) and agent.get("principal_id") in principals
+        agent_principals: dict[str, set[str]] = {}
+        for agent in snapshot.get("agents", []):
+            if not isinstance(agent, dict):
+                continue
+            agent_id = agent.get("agent_id")
+            principal_id = agent.get("principal_id")
+            if not isinstance(agent_id, str) or not isinstance(principal_id, str):
+                continue
+            agent_principals.setdefault(agent_id, set()).add(principal_id)
+        target_agent_ids = {
+            agent_id
+            for agent_id, owners in agent_principals.items()
+            if owners & principals
         }
         for ticket in snapshot.get("tickets", []):
+            if not isinstance(ticket, dict):
+                continue
+            ticket_id = str(ticket.get("ticket_id", "unknown"))
+            claimed_agent_id = ticket.get("claimed_by_agent_id")
             if (
-                isinstance(ticket, dict)
-                and ticket.get("status") in ACTIVE_CLAIM_STATES
-                and ticket.get("claimed_by_agent_id") in agent_ids
+                ticket.get("status") in ACTIVE_CLAIM_STATES
+                and claimed_agent_id in target_agent_ids
             ):
+                owners = agent_principals[str(claimed_agent_id)]
+                if len(owners) != 1:
+                    raise RegistryError(
+                        f"ambiguous active work claim holder on "
+                        f"{board_id}/{ticket_id}; refusing active-claim check"
+                    )
+                owner = next(iter(owners))
                 claims.append(
                     {
                         "board_id": board_id,
-                        "ticket_id": str(ticket.get("ticket_id", "unknown")),
+                        "ticket_id": ticket_id,
+                        "claim_kind": "work",
+                        "principal_id": owner,
                         "claimed_by": str(ticket.get("claimed_by", "unknown")),
                     }
                 )
+            lease = ticket.get("review_lease")
+            if lease is None or ticket.get("status") not in ACTIVE_REVIEW_STATES:
+                continue
+            if not isinstance(lease, dict):
+                raise RegistryError(
+                    f"malformed review lease on {board_id}/{ticket_id}; "
+                    "refusing active-claim check"
+                )
+            expires_at = lease.get("expires_at_epoch")
+            if isinstance(expires_at, bool):
+                raise RegistryError(
+                    f"malformed review lease expiry on {board_id}/{ticket_id}; "
+                    "refusing active-claim check"
+                )
+            try:
+                expiry = float(expires_at)
+            except (TypeError, ValueError):
+                raise RegistryError(
+                    f"malformed review lease expiry on {board_id}/{ticket_id}; "
+                    "refusing active-claim check"
+                ) from None
+            if not math.isfinite(expiry):
+                raise RegistryError(
+                    f"malformed review lease expiry on {board_id}/{ticket_id}; "
+                    "refusing active-claim check"
+                )
+            if expiry <= now_epoch:
+                continue
+            reviewer_agent_id = lease.get("reviewer_agent_id")
+            if not isinstance(reviewer_agent_id, str) or not reviewer_agent_id:
+                raise RegistryError(
+                    f"malformed live review lease on {board_id}/{ticket_id}; "
+                    "refusing active-claim check"
+                )
+            owners = agent_principals.get(reviewer_agent_id)
+            if not owners:
+                raise RegistryError(
+                    f"cannot resolve live review lease holder on "
+                    f"{board_id}/{ticket_id}; refusing active-claim check"
+                )
+            if len(owners) != 1:
+                raise RegistryError(
+                    f"ambiguous live review lease holder on "
+                    f"{board_id}/{ticket_id}; refusing active-claim check"
+                )
+            owner = next(iter(owners))
+            lease_principal = lease.get("reviewer_principal_id")
+            if lease_principal is not None and lease_principal != owner:
+                raise RegistryError(
+                    f"ambiguous live review lease principal on "
+                    f"{board_id}/{ticket_id}; refusing active-claim check"
+                )
+            if owner in principals:
+                claims.append(
+                    {
+                        "board_id": board_id,
+                        "ticket_id": ticket_id,
+                        "claim_kind": "review",
+                        "principal_id": owner,
+                        "claimed_by": str(
+                            lease.get("reviewer_agent_name", "unknown")
+                        ),
+                    }
+                )
     return claims
+
+
+def _format_active_claims(claims: list[dict[str, str]]) -> str:
+    return ", ".join(
+        f"{item['board_id']}/{item['ticket_id']} ({item['claim_kind']})"
+        for item in claims
+    )
 
 
 def _member_role(
@@ -688,9 +783,7 @@ async def _retire(
     }
     claims = _active_claims(target_snapshots, {principal})
     if claims:
-        listed = ", ".join(
-            f"{item['board_id']}/{item['ticket_id']}" for item in claims
-        )
+        listed = _format_active_claims(claims)
         raise RegistryError(f"active claims prevent retirement: {listed}")
 
     relevant_rows = [
@@ -818,22 +911,29 @@ async def _dedupe(
         )
 
     claims = _active_claims(snapshots, set(targets))
-    if claims:
-        listed = ", ".join(
-            f"{item['board_id']}/{item['ticket_id']}" for item in claims
+    claims_by_principal: dict[str, list[dict[str, str]]] = {}
+    for claim in claims:
+        claims_by_principal.setdefault(claim["principal_id"], []).append(claim)
+    for item in plan:
+        item["active_claims"] = claims_by_principal.get(
+            item["principal_id"], []
         )
-        raise RegistryError(f"active claims prevent dedupe: {listed}")
     result: dict[str, Any] = {
         "action": "dedupe",
         "mode": "commit" if args.commit else "dry-run",
         "name": name,
         "keep_principal": keep,
         "retire": plan,
+        "active_claims": claims,
         "writes": len(operations) if args.commit else 0,
     }
     if not args.commit:
         print(json.dumps(result, indent=2, sort_keys=True))
         return
+    if claims:
+        raise RegistryError(
+            "active claims prevent dedupe: " + _format_active_claims(claims)
+        )
 
     verified = await _remove_many_and_verify(
         backend, operations, action="dedupe"
@@ -964,26 +1064,8 @@ async def _prune_stale(
     principals = {item["principal_id"] for item in plan}
     claims = _active_claims(snapshots, principals)
     claims_by_principal: dict[str, list[dict[str, str]]] = {}
-    agent_principals = {
-        agent.get("agent_id"): agent.get("principal_id")
-        for snapshot in snapshots.values()
-        for agent in snapshot.get("agents", [])
-        if isinstance(agent, dict)
-    }
     for claim in claims:
-        snapshot = snapshots[claim["board_id"]]
-        ticket = next(
-            (
-                item
-                for item in snapshot.get("tickets", [])
-                if isinstance(item, dict)
-                and str(item.get("ticket_id")) == claim["ticket_id"]
-            ),
-            {},
-        )
-        principal = agent_principals.get(ticket.get("claimed_by_agent_id"))
-        if isinstance(principal, str):
-            claims_by_principal.setdefault(principal, []).append(claim)
+        claims_by_principal.setdefault(claim["principal_id"], []).append(claim)
     for item in plan:
         item["active_claims"] = claims_by_principal.get(item["principal_id"], [])
 
@@ -1005,9 +1087,7 @@ async def _prune_stale(
         )
         return
     if claims:
-        listed = ", ".join(
-            f"{item['board_id']}/{item['ticket_id']}" for item in claims
-        )
+        listed = _format_active_claims(claims)
         raise RegistryError(f"active claims prevent prune commit: {listed}")
 
     operations = [
