@@ -59,7 +59,7 @@ def validate_registry(document: Any) -> dict[str, Any]:
     for name, entry in projects.items():
         _require_clean_string(name, "project name")
         required = {"board_id", "work_dir", "status"}
-        optional = {"work_dir_owner", "fleet_clone_dir"}
+        optional = {"work_dir_owner", "fleet_clone_dir", "fleet"}
         if (
             not isinstance(entry, dict)
             or not required <= set(entry)
@@ -67,8 +67,7 @@ def validate_registry(document: Any) -> dict[str, Any]:
         ):
             raise RegistryError(
                 f"project {name!r} must contain exactly board_id, work_dir, and "
-                "status plus optional work_dir_owner and fleet_clone_dir; "
-                "only work_dir_owner and fleet_clone_dir are optional"
+                "status plus optional work_dir_owner, fleet_clone_dir, and fleet"
             )
         _require_clean_string(entry["board_id"], f"project {name!r} board_id")
         work_dir = _require_clean_string(entry["work_dir"], f"project {name!r} work_dir")
@@ -93,6 +92,8 @@ def validate_registry(document: Any) -> dict[str, Any]:
                 raise RegistryError(
                     f"project {name!r} fleet_clone_dir must be an absolute path"
                 )
+        if "fleet" in entry and type(entry["fleet"]) is not bool:
+            raise RegistryError(f"project {name!r} fleet must be boolean")
 
     return copy.deepcopy(document)
 
@@ -177,6 +178,10 @@ def build_parser() -> argparse.ArgumentParser:
         choices=sorted(VALID_WORK_DIR_OWNERS),
     )
     add.add_argument("--fleet-clone-dir")
+    fleet = add.add_mutually_exclusive_group()
+    fleet.add_argument("--fleet", dest="fleet", action="store_true")
+    fleet.add_argument("--operator-only", dest="fleet", action="store_false")
+    add.set_defaults(fleet=None)
     add.add_argument("--status", choices=sorted(VALID_STATUSES), default="active")
     add.add_argument(
         "--force",
@@ -219,6 +224,8 @@ async def execute(args: argparse.Namespace, client: RegistryClient) -> None:
             if not os.path.isabs(clone_dir):
                 raise RegistryError("fleet_clone_dir must be an absolute path")
             projects[name]["fleet_clone_dir"] = clone_dir
+        if args.fleet is not None:
+            projects[name]["fleet"] = args.fleet
     else:
         if name not in projects:
             raise RegistryError(f"unknown project {name!r}")

@@ -734,6 +734,179 @@ class SeatAdminTests(unittest.TestCase):
         self.assertNotIn("PR-worker", backend.roles["board-one"])
         self.assertIn("PR-other", backend.roles["board-two"])
 
+    def test_dedupe_dry_run_then_commit_retires_other_principal_everywhere(self) -> None:
+        backend = StrictFakeBackend()
+        for board_id in ("home", "board-one", "board-two"):
+            backend.roles[board_id]["PR-other"] = "member"
+            backend.agents[board_id].append(("PR-other", "worker-a", "stale"))
+            backend.last_activity[(board_id, "PR-other", "worker-a")] = (
+                "2020-01-01T00:00:00+00:00"
+            )
+        backend.seats["seats"]["worker-a"] = {
+            "principal_id": "PR-worker",
+            "role": "worker",
+            "board_mode": "registry",
+        }
+
+        dry_run = json.loads(
+            invoke(
+                backend, "dedupe", "--name", "worker-a",
+                "--keep-principal", "PR-worker",
+            )
+        )
+        self.assertEqual(dry_run["mode"], "dry-run")
+        self.assertEqual(dry_run["writes"], 0)
+        self.assertEqual(dry_run["retire"][0]["principal_id"], "PR-other")
+        self.assertEqual(backend.calls, [])
+
+        committed = json.loads(
+            invoke(
+                backend, "dedupe", "--name", "worker-a",
+                "--keep-principal", "PR-worker", "--commit",
+            )
+        )
+        self.assertEqual(committed["mode"], "commit")
+        self.assertEqual(
+            committed["writes"], 3
+        )
+        self.assertEqual(
+            [item["board_id"] for item in committed["verified_read_back"]],
+            ["home", "board-one", "board-two"],
+        )
+        for board_id in ("home", "board-one", "board-two"):
+            self.assertNotIn("PR-other", backend.roles[board_id])
+        self.assertIn("PR-worker", backend.roles["home"])
+        self.assertIn("PR-worker", backend.roles["board-one"])
+
+    def test_dedupe_reports_live_review_claim_and_commit_makes_no_writes(self) -> None:
+        backend = StrictFakeBackend()
+        for board_id in ("home", "board-one", "board-two"):
+            backend.roles[board_id]["PR-other"] = "member"
+            backend.agents[board_id].append(("PR-other", "worker-a", "stale"))
+            backend.last_activity[(board_id, "PR-other", "worker-a")] = (
+                "2020-01-01T00:00:00+00:00"
+            )
+        backend.tickets["board-one"] = [
+            {
+                "ticket_id": "TK-review-active",
+                "status": "submitted",
+                "review_lease": {
+                    "reviewer_agent_id": "AI-board-one-PR-other-worker-a",
+                    "reviewer_agent_name": "worker-a",
+                    "reviewer_principal_id": "PR-other",
+                    "expires_at_epoch": (
+                        datetime.now(timezone.utc) + timedelta(hours=1)
+                    ).timestamp(),
+                },
+            }
+        ]
+
+        dry_run = json.loads(
+            invoke(
+                backend,
+                "dedupe",
+                "--name",
+                "worker-a",
+                "--keep-principal",
+                "PR-worker",
+            )
+        )
+        claim = dry_run["retire"][0]["active_claims"][0]
+        self.assertEqual(claim["board_id"], "board-one")
+        self.assertEqual(claim["ticket_id"], "TK-review-active")
+        self.assertEqual(claim["claim_kind"], "review")
+        self.assertEqual(dry_run["writes"], 0)
+        self.assertEqual(backend.calls, [])
+
+        with self.assertRaisesRegex(
+            seat_admin.RegistryError, "TK-review-active.*review"
+        ):
+            invoke(
+                backend,
+                "dedupe",
+                "--name",
+                "worker-a",
+                "--keep-principal",
+                "PR-worker",
+                "--commit",
+            )
+        self.assertEqual(backend.calls, [])
+        for board_id in ("home", "board-one", "board-two"):
+            self.assertIn("PR-other", backend.roles[board_id])
+
+    def test_retire_fails_closed_on_malformed_review_lease(self) -> None:
+        backend = StrictFakeBackend()
+        backend.tickets["board-one"] = [
+            {
+                "ticket_id": "TK-review-malformed",
+                "status": "submitted",
+                "review_lease": {
+                    "reviewer_agent_id": "AI-board-one-PR-worker-worker-a",
+                    "expires_at_epoch": "not-a-time",
+                },
+            }
+        ]
+
+        with self.assertRaisesRegex(
+            seat_admin.RegistryError, "malformed review lease expiry"
+        ):
+            invoke(
+                backend,
+                "retire",
+                "--name",
+                "worker-a",
+                "--boards",
+                "board-one",
+                "--force",
+            )
+        self.assertEqual(backend.calls, [])
+        self.assertIn("PR-worker", backend.roles["board-one"])
+
+    def test_retire_fails_closed_on_ambiguous_review_lease_holder(self) -> None:
+        backend = StrictFakeBackend()
+        original_snapshot = backend.snapshot
+
+        async def ambiguous_snapshot(board_id: str) -> dict[str, Any]:
+            snapshot = await original_snapshot(board_id)
+            if board_id == "board-one":
+                duplicate = next(
+                    dict(agent)
+                    for agent in snapshot["agents"]
+                    if agent["principal_id"] == "PR-worker"
+                )
+                duplicate["principal_id"] = "PR-shadow"
+                snapshot["agents"].append(duplicate)
+            return snapshot
+
+        backend.snapshot = ambiguous_snapshot  # type: ignore[method-assign]
+        backend.tickets["board-one"] = [
+            {
+                "ticket_id": "TK-review-ambiguous",
+                "status": "reviewing",
+                "review_lease": {
+                    "reviewer_agent_id": "AI-board-one-PR-worker-worker-a",
+                    "expires_at_epoch": (
+                        datetime.now(timezone.utc) + timedelta(hours=1)
+                    ).timestamp(),
+                },
+            }
+        ]
+
+        with self.assertRaisesRegex(
+            seat_admin.RegistryError, "ambiguous live review lease holder"
+        ):
+            invoke(
+                backend,
+                "retire",
+                "--name",
+                "worker-a",
+                "--boards",
+                "board-one",
+                "--force",
+            )
+        self.assertEqual(backend.calls, [])
+        self.assertIn("PR-worker", backend.roles["board-one"])
+
     def test_prune_stale_defaults_to_dry_run_with_zero_writes(self) -> None:
         backend = StrictFakeBackend()
         result = json.loads(

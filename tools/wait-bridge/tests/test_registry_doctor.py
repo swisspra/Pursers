@@ -86,6 +86,17 @@ class FakeBackend:
             raise self.snapshot_errors[board_id]
         return self.snapshots[board_id]
 
+    async def board_tickets(self, board_id: str) -> dict[str, Any]:
+        self.calls.append(("board_tickets", board_id))
+        snapshot = self.snapshots[board_id]
+        omitted = snapshot.get("omitted_counts", {}).get("tickets", 0)
+        return {
+            "tickets": json.loads(json.dumps(snapshot.get("tickets", []))),
+            "omitted_by_status": {"open": omitted} if omitted else {},
+            "segments": len(doctor.TICKET_SCAN_STATUSES),
+            "limit_per_status": doctor.TICKET_SCAN_LIMIT,
+        }
+
     async def board_state_get(self, board_id: str, key: str) -> dict[str, Any]:
         self.calls.append(("board_state_get", board_id, key))
         value = self.registry if key == doctor.REGISTRY_KEY else self.coordinator
@@ -165,8 +176,38 @@ class RegistryDoctorTests(unittest.TestCase):
         )
         self.assertLessEqual(
             {call[0] for call in backend.calls},
-            {"board_status", "board_snapshot", "board_state_get"},
+            {"board_status", "board_snapshot", "board_state_get", "board_tickets"},
         )
+
+    def test_live_backend_segments_ticket_scan_and_reports_exact_omissions(self) -> None:
+        calls: list[dict[str, Any]] = []
+
+        class ListingClient:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args: Any) -> None:
+                return None
+
+            async def ticket_list(self, **arguments: Any) -> dict[str, Any]:
+                calls.append(arguments)
+                if arguments["status"] == "open":
+                    return {
+                        "tickets": [{"ticket_id": f"TK-{index}"} for index in range(500)],
+                        "total_matching": 503,
+                    }
+                return {"tickets": [], "total_matching": 0}
+
+        backend = doctor.LiveBackend(
+            "https://central.example/mcp", TOKEN, "doctor",
+            client_factory=lambda *_args, **_kwargs: ListingClient(),
+        )
+        result = asyncio.run(backend.board_tickets("alpha-board"))
+
+        self.assertEqual(len(calls), len(doctor.TICKET_SCAN_STATUSES))
+        self.assertTrue(all(call["limit"] == 500 for call in calls))
+        self.assertEqual(result["omitted_by_status"], {"open": 3})
+        self.assertEqual(len(result["tickets"]), 500)
 
     def test_central_and_registry_failures_are_fail(self) -> None:
         backend = self.backend()
@@ -209,17 +250,32 @@ class RegistryDoctorTests(unittest.TestCase):
         self.assertEqual(rows(unresolved)["project:alpha"]["status"], "FAIL")
         self.assertIn("not resolvable", rows(unresolved)["project:alpha"]["detail"])
 
-    def test_operator_checkout_is_refused_until_fleet_clone_is_configured(self) -> None:
+    def test_operator_checkout_severity_depends_on_recent_fleet_work(self) -> None:
         backend = self.backend()
         entry = backend.registry["projects"]["alpha"]
         entry["work_dir_owner"] = "operator"
 
-        unsafe = rows(self.report(backend))
-        self.assertEqual(unsafe["seat-workdir:alpha"]["status"], "FAIL")
+        idle_report = self.report(backend)
+        idle = rows(idle_report)
+        self.assertEqual(idle["seat-workdir:alpha"]["status"], "WARN")
+        self.assertEqual(idle["seat-workdir:alpha"]["severity"], "WARN")
+        self.assertEqual(idle_report["overall"], "PASS")
         self.assertIn(
             "operator checkout is read-only for seats",
-            unsafe["seat-workdir:alpha"]["detail"],
+            idle["seat-workdir:alpha"]["detail"],
         )
+
+        backend.snapshots["alpha-board"]["tickets"] = [
+            {
+                "ticket_id": "TK-recent", "status": "open",
+                "updated_at": stamp(60),
+            }
+        ]
+        active_report = self.report(backend)
+        active = rows(active_report)
+        self.assertEqual(active["seat-workdir:alpha"]["status"], "FAIL")
+        self.assertEqual(active["seat-workdir:alpha"]["severity"], "FAIL")
+        self.assertEqual(active_report["overall"], "FAIL")
 
         clone = self.root / "fleet-clone"
         clone.mkdir()
@@ -234,12 +290,70 @@ class RegistryDoctorTests(unittest.TestCase):
         self.assertEqual(safe["seat-workdir:alpha"]["status"], "PASS")
         self.assertEqual(set(seen), {clone})
 
+    def test_recent_ticket_routing_uses_exact_first_target_segment(self) -> None:
+        backend = self.backend()
+        app_dir = self.root / "app"
+        happy_dir = self.root / "happy"
+        app_dir.mkdir()
+        happy_dir.mkdir()
+        backend.registry["projects"] = {
+            "app": {
+                "board_id": "alpha-board",
+                "work_dir": str(app_dir),
+                "work_dir_owner": "operator",
+                "status": "active",
+            },
+            "happy": {
+                "board_id": "alpha-board",
+                "work_dir": str(happy_dir),
+                "work_dir_owner": "operator",
+                "status": "active",
+            },
+        }
+        backend.snapshots["alpha-board"]["tickets"] = [
+            {
+                "ticket_id": "TK-happy",
+                "status": "open",
+                "target_url": "happy/task",
+                "updated_at": stamp(60),
+            }
+        ]
+
+        report = self.report(backend)
+        checks = rows(report)
+
+        self.assertEqual(checks["seat-workdir:app"]["status"], "WARN")
+        self.assertIn("recent fleet tickets=0", checks["seat-workdir:app"]["detail"])
+        self.assertEqual(checks["seat-workdir:happy"]["status"], "FAIL")
+        self.assertIn(
+            "recent fleet tickets=1", checks["seat-workdir:happy"]["detail"]
+        )
+
+    def test_operator_only_project_is_info_and_outside_fleet_health(self) -> None:
+        backend = self.backend()
+        entry = backend.registry["projects"]["alpha"]
+        entry.update(
+            {"fleet": False, "work_dir_owner": "operator", "work_dir": "/missing"}
+        )
+        backend.status_errors["alpha-board"] = ConnectionError("must not read")
+        backend.snapshot_errors["alpha-board"] = ConnectionError("must not read")
+
+        report = self.report(backend)
+        checks = rows(report)
+
+        self.assertEqual(checks["seat-workdir:alpha"]["status"], "INFO")
+        self.assertEqual(checks["seat-workdir:alpha"]["severity"], "INFO")
+        self.assertEqual(checks["seat-workdir:alpha"]["scope"], "project:alpha")
+        self.assertEqual(report["overall"], "PASS")
+        self.assertNotIn(("board_status", "alpha-board"), backend.calls)
+
     def test_board_access_and_snapshot_failures_are_fail(self) -> None:
         backend = self.backend()
         backend.status_errors["alpha-board"] = ConnectionError("offline")
         backend.snapshot_errors["alpha-board"] = TimeoutError("slow")
 
-        checks = rows(self.report(backend))
+        report = self.report(backend)
+        checks = rows(report)
 
         self.assertEqual(checks["board:alpha-board"]["status"], "FAIL")
         self.assertEqual(checks["snapshot:alpha-board"]["status"], "FAIL")
@@ -252,7 +366,8 @@ class RegistryDoctorTests(unittest.TestCase):
             "tickets": 3,
         }
 
-        checks = rows(self.report(backend))
+        report = self.report(backend)
+        checks = rows(report)
         check = checks["snapshot:alpha-board"]
 
         self.assertEqual(check["status"], "WARN")
@@ -262,6 +377,7 @@ class RegistryDoctorTests(unittest.TestCase):
         self.assertIn("scan incomplete", checks["seats"]["detail"])
         self.assertEqual(checks["claims"]["status"], "WARN")
         self.assertEqual(checks["review-backlog"]["status"], "WARN")
+        self.assertEqual(report["overall"], "WARN")
 
     def test_seat_duplicates_and_staleness_are_warn(self) -> None:
         backend = self.backend()
@@ -285,6 +401,15 @@ class RegistryDoctorTests(unittest.TestCase):
         self.assertEqual(check["status"], "WARN")
         self.assertIn("duplicate names", check["detail"])
         self.assertIn("stale seats", check["detail"])
+        duplicate = rows(self.report(backend))["seat-duplicate:pool-worker"]
+        self.assertIn("principal=PR-one", duplicate["detail"])
+        self.assertIn("last_seen=", duplicate["detail"])
+        self.assertIn("retire_candidate=true", duplicate["detail"])
+        self.assertIn(
+            "seat_admin.py retire --name pool-worker --principal PR-one",
+            duplicate["detail"],
+        )
+        self.assertEqual(duplicate["severity"], "WARN")
 
     def test_expired_claim_and_review_backlog_are_warn(self) -> None:
         backend = self.backend()
@@ -359,11 +484,13 @@ class RegistryDoctorTests(unittest.TestCase):
 
     def test_exit_code_aggregates_worst_status(self) -> None:
         checks = [
-            doctor.Check("PASS", "a", "ok"),
-            doctor.Check("WARN", "b", "warning"),
+            doctor.Check("PASS", "a", "ok", "FAIL", "fleet"),
+            doctor.Check("WARN", "b", "warning", "WARN", "fleet"),
         ]
+        self.assertEqual(doctor.report_document(checks, NOW)["exit_code"], 0)
+        checks.append(doctor.Check("WARN", "c", "degraded", "FAIL", "fleet"))
         self.assertEqual(doctor.report_document(checks, NOW)["exit_code"], 1)
-        checks.append(doctor.Check("FAIL", "c", "failure"))
+        checks.append(doctor.Check("FAIL", "d", "failure", "FAIL", "fleet"))
         self.assertEqual(doctor.report_document(checks, NOW)["exit_code"], 2)
 
     def test_credential_never_appears_in_human_or_json_output(self) -> None:

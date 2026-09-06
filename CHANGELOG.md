@@ -8,6 +8,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 ## [Unreleased]
 
 ### Added
+- Registry operations: `fleet: false` marks operator-only projects; Doctor
+  reports per-check severity/scope and actionable duplicate-seat evidence, and
+  `seat_admin.py dedupe` safely plans or commits duplicate-principal cleanup
+  across active fleet boards (TK-f814e9bf3dde).
 - Dispatcher: unclaimed broadcast tickets are re-surfaced to idle identities on a
   cadence (`PURSERS_BACKLOG_RESURFACE_INTERVAL_S`, default 600 s) and re-offered after
   the board's `broadcast_reoffer_s`; coordinator identities are never offered work
@@ -16,6 +20,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   empty clone instead of refusing it as dirty (TK-416e256f9c72).
 
 ### Changed
+- Registry Doctor now segments bounded ticket scans by active status, reports
+  exact omissions, and treats a missing fleet clone as fleet-critical only
+  when recent fleet work exists; advisory WARN/INFO checks no longer make the
+  overall fleet result fail (TK-f814e9bf3dde).
 - Wait bridge: background lease keepalive renews only while the stdio session shows
   model liveness (`PURSERS_KEEPALIVE_IDLE_LIMIT_S`, default three claim TTLs); idle
   keepalive pauses with a `lease_keepalive_paused` cue and keepalive-only claims are
