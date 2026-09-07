@@ -45,6 +45,49 @@ SHA-256 `1a0981ec6cc47aed8eeb5e8f488bef260ab6b5fd5c7c88e2cd99604654103e1a`.
 For local HTTP, remote port forwarding, and public-certificate guidance, see
 [Deployment transport](../../docs/deployment-transport.md).
 
+## Doors
+
+A door is one shared bearer credential for a board and seat role. Every
+conversation still joins with its own `agent_name`, so worker or reviewer seats
+that enter through the same door remain distinct Central agents. The lead can
+keep a separately named credential. Treat the complete `prs1.…` door string as
+a secret: it packages the exact Central URL, board, role, and signed token into
+the one value a seat setup flow needs.
+
+Create or refresh the current worker door (the command prints only the door
+string):
+
+```console
+pursers-door issue --board BOARD --role worker \
+  --central-url http://127.0.0.1:8766/mcp \
+  --jwks /PATH/TO/jwks.json --keys-dir /PATH/TO/door-keys
+```
+
+Use `--role reviewer` for the reviewer door. A named lead credential uses
+`--named --sub NAME --scope 'board:read board:write board:review'`. Private
+RSA-2048 keys are stored under `--keys-dir` with mode `0600`; the JWKS contains
+only public keys and non-secret listing metadata.
+
+Rotation creates the next versioned key and removes the prior public key in one
+atomic JWKS replacement:
+
+```console
+pursers-door rotate --board BOARD --role worker \
+  --central-url http://127.0.0.1:8766/mcp \
+  --jwks /PATH/TO/jwks.json --keys-dir /PATH/TO/door-keys
+pursers-door list --jwks /PATH/TO/jwks.json
+```
+
+Rotation is revocation: Central reloads the JWKS for every verification and
+there is no separate revocation list, so a token signed by the removed `kid`
+fails immediately. `revoke-kid KID` removes an individual public key. `list`
+and `decode` show only board/role, `kid`, and expiry metadata and never render
+token material.
+
+Keep Central on loopback when practical. Remote seats should reach it through
+the port-forward pattern in [Deployment transport](../../docs/deployment-transport.md)
+and use the exact forwarded Central URL in the issued door.
+
 With no `ONBOARD_AGENT_INSTANCE`, the effective name is exactly
 `ONBOARD_AGENT_NAME`, preserving the single-instance behavior. When the value
 is set, the effective name is `<ONBOARD_AGENT_NAME>-<ONBOARD_AGENT_INSTANCE>`.
