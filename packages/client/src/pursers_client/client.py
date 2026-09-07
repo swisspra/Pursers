@@ -1212,6 +1212,10 @@ class BoardClient:
         side-effect-free catchup contract. ``subscription_callback`` runs after
         every successful listen handshake, including reconnects.
         """
+        if self.identity is None:
+            raise RuntimeError(
+                "BoardClient.events() requires board_join before starting a subscription"
+            )
         queue: asyncio.Queue[tuple[str, dict[str, Any] | BaseException]] = (
             asyncio.Queue(maxsize=1)
         )

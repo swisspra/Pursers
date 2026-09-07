@@ -32,6 +32,18 @@ def client() -> BoardClient:
     )
 
 
+def joined_event_client() -> BoardClient:
+    board = client()
+    board.identity = JoinedIdentity(
+        "board-multi-name",
+        "AI-env-default",
+        "PR-shared",
+        "env-default",
+        "worker",
+    )
+    return board
+
+
 @pytest.mark.anyio
 async def test_default_board_join_preserves_existing_behavior(monkeypatch) -> None:
     board = client()
@@ -507,12 +519,25 @@ async def test_interleaved_per_call_joins_do_not_clobber_state(monkeypatch) -> N
 
 
 @pytest.mark.anyio
+async def test_events_fail_fast_before_board_join() -> None:
+    board = client()
+
+    events = board.events(
+        resource_subscriptions=("board://board-multi-name/journal",)
+    )
+    with pytest.raises(RuntimeError, match="board_join"):
+        await anext(events)
+
+    assert board._watched_uris == set()
+
+
+@pytest.mark.anyio
 async def test_events_reports_each_honored_subscription_handshake(
     monkeypatch,
 ) -> None:
     import pursers_client.client as client_module
 
-    board = client()
+    board = joined_event_client()
     journal_uri = "board://board-multi-name/journal"
     ready = asyncio.Event()
     hold = asyncio.Event()
@@ -570,7 +595,7 @@ async def test_events_reports_each_honored_subscription_handshake(
 async def test_events_redeclares_after_subscription_reconnect(monkeypatch) -> None:
     import pursers_client.client as client_module
 
-    board = client()
+    board = joined_event_client()
     board.reconnect_delay_s = 0.01
     journal_uri = "board://board-multi-name/journal"
     second_handshake = asyncio.Event()
@@ -647,7 +672,7 @@ async def test_fifty_reconnects_reuse_one_http_pool_and_close_each_transport(
 ) -> None:
     import pursers_client.client as client_module
 
-    board = client()
+    board = joined_event_client()
     board.reconnect_delay_s = 0
     journal_uri = "board://board-multi-name/journal"
     shared_http = object()
@@ -750,7 +775,7 @@ async def test_fifty_reconnects_reuse_one_http_pool_and_close_each_transport(
 async def test_events_drops_unknown_kinds_and_keeps_subscription(monkeypatch) -> None:
     import pursers_client.client as client_module
 
-    board = client()
+    board = joined_event_client()
     journal_uri = "board://board-multi-name/journal"
     captured: list[frozenset[str]] = []
 
@@ -810,7 +835,7 @@ async def test_events_early_close_exits_listen_scopes_in_producer_task(
 ) -> None:
     import pursers_client.client as client_module
 
-    board = client()
+    board = joined_event_client()
     journal_uri = "board://board-multi-name/journal"
     scope_tasks: list[tuple[asyncio.Task[Any] | None, asyncio.Task[Any] | None]] = []
 

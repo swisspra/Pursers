@@ -1321,13 +1321,33 @@ def test_subscription_pool_ten_minute_idle_has_zero_calls_after_setup(
     import pursers_client
 
     calls: list[tuple[str, dict[str, Any]]] = []
+    lifecycle: list[tuple[str, str]] = []
     stop = asyncio.Event()
 
     class FakeBoardClient:
         def __init__(
-            self, _url: str, _token: str, board_id: str, *, agent_name: str
+            self,
+            _url: str,
+            _token: str,
+            board_id: str,
+            *,
+            agent_name: str,
+            role: str,
+            capabilities: dict[str, bool],
+            allow_takeover: bool,
         ) -> None:
+            assert agent_name == "coord"
+            assert role == "coordinator"
+            assert capabilities == {"can_work": False, "can_review": False}
+            assert allow_takeover is True
             self.board_id = board_id
+
+        async def __aenter__(self) -> "FakeBoardClient":
+            lifecycle.append((self.board_id, "joined"))
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            lifecycle.append((self.board_id, "left"))
 
         async def events(self, **arguments: Any) -> Any:
             calls.append((self.board_id, arguments))
@@ -1365,6 +1385,13 @@ def test_subscription_pool_ten_minute_idle_has_zero_calls_after_setup(
         )
         assert arguments["acknowledge"] is False
         assert arguments["touch"] is False
+        assert "reconnect" not in arguments
+    assert sorted(lifecycle) == [
+        ("board-a", "joined"),
+        ("board-a", "left"),
+        ("board-b", "joined"),
+        ("board-b", "left"),
+    ]
 
 
 def test_journal_cue_refreshes_only_cued_board_once(
@@ -1377,11 +1404,21 @@ def test_journal_cue_refreshes_only_cued_board_once(
 
     class FakeBoardClient:
         def __init__(
-            self, _url: str, _token: str, board_id: str, *, agent_name: str
+            self, _url: str, _token: str, board_id: str, **_kwargs: Any
         ) -> None:
             self.board_id = board_id
+            self.joined = False
+
+        async def __aenter__(self) -> "FakeBoardClient":
+            self.joined = True
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            self.joined = False
 
         async def events(self, **arguments: Any) -> Any:
+            if not self.joined:
+                raise RuntimeError("board_join required")
             event_calls.setdefault(self.board_id, []).append(arguments)
             arguments["subscription_callback"]()
             if self.board_id == "board-a":
@@ -1455,12 +1492,21 @@ def test_subscription_loss_falls_back_then_relistens(
         def __init__(self, *_args: Any, **_kwargs: Any) -> None:
             pass
 
+        async def __aenter__(self) -> "FakeBoardClient":
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
         async def events(self, **arguments: Any) -> Any:
             nonlocal attempts
             attempts += 1
             order.append(f"listen-{attempts}")
             if attempts == 1:
-                raise RuntimeError("synthetic subscription loss")
+                raise ExceptionGroup(
+                    "watcher task failed",
+                    [RuntimeError("synthetic subscription loss")],
+                )
             arguments["subscription_callback"]()
             await stop.wait()
             if False:
@@ -1492,6 +1538,7 @@ def test_subscription_loss_falls_back_then_relistens(
         lost = await asyncio.wait_for(pool.next_wake(), timeout=1)
         assert lost.kind == "lost"
         assert lost.error_class == "RuntimeError"
+        assert lost.error_message == "synthetic subscription loss"
 
         delay_s = pool.backoff_delay(1)
         assert delay_s == 1
@@ -1526,9 +1573,16 @@ def test_subscription_loss_falls_back_then_relistens(
         (),
         NOW,
         subscription_loss_streaks={"board-a": 3},
+        subscription_loss_details={
+            "board-a": ("RuntimeError", "synthetic subscription loss")
+        },
     )["board-a"]
     assert state["board_health"]["consecutive_lost_subscriptions"] == 3
-    assert any(item["kind"] == "board-degraded" for item in state["findings"])
+    finding = next(
+        item for item in state["findings"] if item["kind"] == "board-degraded"
+    )
+    assert finding["subscription_error_class"] == "RuntimeError"
+    assert finding["subscription_error_message"] == "synthetic subscription loss"
 
 
 def test_subscription_backoff_fake_clock_is_exponential_and_capped() -> None:
@@ -1561,6 +1615,23 @@ def test_subscription_backoff_fake_clock_is_exponential_and_capped() -> None:
 
     asyncio.run(exercise())
     assert clock.sleeps == expected
+
+
+def test_subscription_loss_log_names_inner_error_once(capsys: Any) -> None:
+    wake = coordinator.SubscriptionWake(
+        "board-a",
+        "lost",
+        "RuntimeError",
+        "synthetic subscription loss",
+    )
+
+    coordinator.log_subscription_loss(wake, 2, 2.0)
+
+    assert capsys.readouterr().err.splitlines() == [
+        "coordinator: journal subscription lost for board='board-a' "
+        "error_class=RuntimeError; error_message='synthetic subscription loss'; "
+        "backoff_step=2 fallback_refresh_in=2.00s"
+    ]
 
 
 def test_daemon_cue_recomputes_only_selected_board(

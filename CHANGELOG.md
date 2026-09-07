@@ -15,6 +15,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Changed
 
+- Coordinator journal watchers now join each board as a non-working,
+  non-reviewing coordinator before subscribing, report nested subscription
+  failures in board health, and adapt to clients without the optional event
+  reconnect parameter. Client event streams now fail fast until `board_join`.
 - Wait-bridge Central traffic now reuses one bounded HTTP pool per process,
   caps concurrent Central connections at four by default, and logs before an
   excess board subscription falls back to polling. Coordinator subscription
