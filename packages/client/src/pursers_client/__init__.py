@@ -11,6 +11,7 @@ from .client import (
 from .events import (
     ADMISSION_EVENT_KINDS,
     AGENT_LIFECYCLE_EVENT_KINDS,
+    ARCHIVE_EVENT_KINDS,
     CENTRAL_EVENT_KINDS,
     CLAIM_TTL_EVENT_KINDS,
     CLAIM_GATE_EVENT_KINDS,
@@ -41,6 +42,7 @@ from .events import (
     REVIEW_CLAIM_REFUSED,
     TICKET_PARKED,
     TICKET_UNPARKED,
+    TICKET_ARCHIVED,
 )
 from .human_input import SENSITIVE_FORM_FALLBACK, human_form_safety
 from .personal_profile import (
@@ -76,6 +78,7 @@ from .project_registry import (
 __all__ = [
     "ADMISSION_EVENT_KINDS",
     "AGENT_LIFECYCLE_EVENT_KINDS",
+    "ARCHIVE_EVENT_KINDS",
     "BoardClient",
     "BoardClientError",
     "CENTRAL_EVENT_KINDS",
@@ -120,6 +123,7 @@ __all__ = [
     "REVIEW_CLAIM_REFUSED",
     "TICKET_PARKED",
     "TICKET_UNPARKED",
+    "TICKET_ARCHIVED",
     "active_registry_boards",
     "bootstrap_personal_review_policy",
     "central_environment",

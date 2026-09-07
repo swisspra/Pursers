@@ -1277,7 +1277,7 @@ def test_real_bridge_scans_backlog_once_at_ten_minute_cadence(
                     real_timeout = asyncio.timeout
 
                     def timeout_factory(delay: float | None) -> Any:
-                        if delay is not None and delay >= 299:
+                        if delay is not None and delay >= 10.0:
                             return SimulatedTimeout(float(delay), clock, transport)
                         return real_timeout(delay)
 
