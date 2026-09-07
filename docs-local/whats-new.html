@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <link rel="icon" href="data:,">
-  <title>Pursers a8–a23 — What's new</title>
+  <title>Pursers a8–a24 — What's new</title>
   <style>
     :root { --ink:#17365d; --muted:#596579; --line:#d9d6cc; --paper:#fbf8f0; --card:#fff; --blue:#2f6f9f; --green:#28745a; --orange:#b75b24; }
     * { box-sizing:border-box; }
@@ -39,14 +39,14 @@
 </head>
 <body>
   <header>
-    <p class="eyebrow">What's new · a8 through a23</p>
+    <p class="eyebrow">What's new · a8 through a24</p>
     <h1>From a shared board to<br>a governed agent fleet.</h1>
-    <p class="lead">A continuous record from 5.0.0a8 through the 5.0.0a23 stopping point. The current released component set is listed exactly below.</p>
+    <p class="lead">A continuous record from 5.0.0a8 through the 5.0.0a24 stopping point. The current released component set is listed exactly below.</p>
   </header>
 
   <nav aria-label="Contents"><div>
-    <a href="#unreleased">5.0.0a23 release</a>
-    <a href="#timeline">a8–a23 timeline</a>
+    <a href="#unreleased">5.0.0a24 release</a>
+    <a href="#timeline">a8–a24 timeline</a>
     <a href="#operator-map">Operator feature map</a>
     <a href="#behavior">Behavior</a>
     <a href="#hosts">Host profiles</a>
@@ -57,23 +57,26 @@
 
   <main>
     <section id="unreleased">
-      <p class="eyebrow">Released · 5.0.0a23</p>
-      <h2>What shipped in 5.0.0a23</h2>
-      <p class="note"><strong>Release boundary:</strong> these capabilities are part of 5.0.0a23. Verify the approved tag, manifest, component versions, and artifact hashes before deployment.</p>
+      <p class="eyebrow">Released · 5.0.0a24</p>
+      <h2>What shipped in 5.0.0a24</h2>
+      <p class="note"><strong>Release boundary:</strong> these capabilities are part of 5.0.0a24. Verify the approved tag, manifest, component versions, and artifact hashes before deployment.</p>
       <div class="grid">
-        <article class="card"><strong>Exact-seat authorization</strong><p>Reviewer self-exclusion, claimed-ticket cancellation, and private-memory visibility now use <code>agent_id</code>. Worker and reviewer seats sharing one bearer principal no longer inherit each other's authority or private memories.</p></article>
-        <article class="card"><strong>Seat-name collision guard</strong><p>Fresh active seats cannot silently reuse a name under one principal. Central emits <code>seat_name_collision</code>; intentional stable-seat restarts must opt in with <code>allow_takeover=true</code>.</p></article>
-        <article class="card"><strong>Plain-HTTP loopback</strong><p>Central, client, wait bridge, coordinator, dashboard, simulation, and generated seat defaults now use <code>http://127.0.0.1:8766/mcp</code> for same-machine traffic.</p></article>
-        <article class="card"><strong>Remote transport boundary</strong><p>Remote seats use SSH or Tailscale port forwarding. Optional private-CA configuration remains available for explicit remote TLS, while a public certificate belongs only on a genuinely shared server.</p></article>
-        <article class="card"><strong>Generated seat cleanup</strong><p>Seat-kit templates drop CA environment lines from the documented local path while preserving the optional <code>PURSERS_CA_FILE</code> override for remote deployments.</p></article>
-        <article class="card"><strong>Stable runtime continuity</strong><p>The wait bridge, worker runtime, coordinator, and generated seat CLI opt in to takeover only when deliberately resuming their stable identities; ordinary client startup still refuses collisions.</p></article>
+        <article class="card"><strong>Pursers doors</strong><p>The wait bridge adds <code>pursers-door</code> to issue, inspect, rotate, and revoke per-board worker/reviewer door credentials with RSA-2048 keys, atomic JWKS replacement, and one secret-safe <code>prs1.…</code> setup string.</p></article>
+        <article class="card"><strong>One-string door join</strong><p>The bridge and seat-kit accept a single <code>prs1</code> door, store private per-board/per-role credentials, resolve missing runtime environment from them, assign durable collision-safe seat-name suffixes, and provide redacted join/status/rotate/forget commands. Generated door seats omit credential and CA lines from their launcher.</p></article>
+        <article class="card"><strong>Connection-storm fix</strong><p>Wait-bridge traffic reuses one bounded HTTP pool per process capped at four Central connections and logs before a poll fallback; coordinator reconnects wait with jittered backoff capped at 60 seconds; Central rejects excess per-principal listen streams at a soft cap of 32, reports stream counts through healthz, and attributes rejected coordinator joins.</p></article>
+        <article class="card"><strong>AionUi extension v0.1</strong><p>Worker and Reviewer presets plus a Join tab store a door through the wait bridge, register an environment-free stdio MCP server through AionUi's local API, and build a deterministic extension zip under <code>tools/aionui-extension</code>.</p></article>
+        <article class="card"><strong>Seat wait contract</strong><p>Seat-kit and wait-bridge waits subscribe to holder-targeted ticket updates, label offer/holder/broadcast wakes explicitly, permit claiming only verified dispatch broadcasts, reuse the home identity for registry waits, and carry stable-seat takeover intent.</p></article>
+        <article class="card"><strong>Coordinator join before subscribe</strong><p>Coordinator journal watchers join each board as a non-working, non-reviewing coordinator before subscribing, ending the <code>RuntimeError: no joined identity</code> fallback to 60-second polling, with the client per-call identity fix and fail-fast event streams until <code>board_join</code>.</p></article>
+        <article class="card"><strong>Soft ticket pinning</strong><p>The coordinator sets soft <code>prefer_agents</code> hints instead of hard pins on dispatch-enabled boards and excludes coordinator, orchestrator, coordinator-hosted, and capability-implicit identities; Central's <code>ticket_assign</code> can clear a pin and releases unavailable pins after the fallback cycle limit.</p></article>
       </div>
     </section>
 
     <section id="timeline">
       <p class="eyebrow">Released history</p>
-      <h2>Continuous release timeline: a8 through a23</h2>
-      <p><strong>Current released set (5.0.0a23, 2026-09-07):</strong> <code>pursers-central 0.1.0a27</code>, <code>pursers-client 0.1.0a20</code>, <code>pursers-wait-bridge 0.1.0a13</code>, <code>pursers-personal 5.0.0a23</code>, <code>pursers 5.0.0a23</code>, and <code>pursers-personal-import 5.0.0a3</code>.</p>
+      <h2>Continuous release timeline: a8 through a24</h2>
+      <p><strong>Current released set (5.0.0a24, 2026-09-07):</strong> <code>pursers-central 0.1.0a28</code>, <code>pursers-client 0.1.0a21</code>, <code>pursers-wait-bridge 0.1.0a14</code>, <code>pursers-personal 5.0.0a24</code>, <code>pursers 5.0.0a24</code>, and <code>pursers-personal-import 5.0.0a3</code>.</p>
+      <h3>5.0.0a24 · 2026-09-07</h3>
+      <p>Added <code>pursers-door</code> credential issuance and one-string door join to the wait bridge and seat-kit, bounded bridge HTTP traffic and Central listen streams to end connection storms, shipped the v0.1 AionUi extension with an eleventh CI suite, tightened seat waits to holder-targeted updates with labeled wakes and verified-broadcast claiming, made coordinator journal watchers join before subscribing, and replaced coordinator hard ticket pins with soft <code>prefer_agents</code> hints that Central can clear or release.</p>
       <h3>5.0.0a23 · 2026-09-07</h3>
       <p>Keyed authorization and private-memory checks to the exact seat, added explicit active seat-name collision refusal with intentional stable-seat takeover, and changed same-machine defaults to plain HTTP loopback. Remote seats use port forwarding, with private CA configuration retained only for explicit remote TLS deployments.</p>
       <h3>5.0.0a22 · 2026-09-06</h3>

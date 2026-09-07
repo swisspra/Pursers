@@ -7,6 +7,50 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [5.0.0a24] - 2026-09-07
+
+This release includes `pursers-central==0.1.0a28`,
+`pursers-client==0.1.0a21`, `pursers-personal-import==5.0.0a3`,
+`pursers-personal==5.0.0a24`, `pursers==5.0.0a24`, and
+`pursers-wait-bridge==0.1.0a14`.
+
+### Package summary
+
+- **Central 0.1.0a28:** caps per-principal listen streams at a soft limit of
+  32 with healthz stream counts and attributed rejected coordinator joins,
+  accepts `assigned_to_agent_id=null` to clear a ticket pin, and releases
+  unavailable pins after the fallback cycle limit.
+- **Client 0.1.0a21:** fails event streams fast until `board_join` and adapts
+  to runtimes without the optional event reconnect parameter.
+- **Wait Bridge 0.1.0a14:** adds the `pursers-door` issuer (RSA-2048 keys,
+  atomic JWKS replacement, one secret-safe `prs1` setup string), accepts one
+  `prs1` door at setup with private per-board/per-role credential storage,
+  runtime-environment resolution, collision-safe seat-name suffixes, and
+  redacted join/status/rotate/forget commands; reuses one bounded HTTP pool
+  capped at four Central connections and logs before a poll fallback; waits
+  subscribe to holder-targeted ticket updates, label offer/holder/broadcast
+  wakes, and claim only verified dispatch broadcasts.
+- **Personal and meta 5.0.0a24:** ship the matching component pins,
+  documentation, dashboard assets, and regenerated component lock. Personal
+  Import remains at 5.0.0a3.
+- **Seat kit:** generates door seats whose launchers omit credential and CA
+  lines, and its waits subscribe to holder-targeted ticket updates with
+  explicit wake labels, home-identity reuse for registry waits, and
+  stable-seat takeover intent.
+- **Coordinator:** journal watchers join their board as a non-working,
+  non-reviewing coordinator before subscribing and report nested subscription
+  failures in board health; dispatch-enabled boards get soft `prefer_agents`
+  hints instead of hard pins with coordinator, orchestrator,
+  coordinator-hosted, and capability-implicit identities excluded;
+  subscription-loss recovery waits with jittered backoff capped at 60
+  seconds.
+- **AionUi extension:** v0.1 under `tools/aionui-extension` with Worker and
+  Reviewer presets, a Join tab that stores a door through the wait bridge,
+  environment-free stdio MCP registration through AionUi's local API, and
+  deterministic extension zip builds.
+- **CI:** an eleventh suite covers the AionUi extension's vendored schema,
+  route adapter, governance contexts, and package secret/path scan.
+
 ### Added
 
 - Wait bridge: add `pursers-door` to issue, inspect, rotate, and revoke
