@@ -244,6 +244,10 @@ async def wait_for_boards(
     if client._client is None:  # package helper; BoardClient must be entered
         raise RuntimeError("BoardClient is not entered")
     for board_id in board_ids:
+        if board_id == client.board_id and client.identity is not None:
+            identities[board_id] = client.identity.agent_id
+            generations[board_id] = getattr(client, "generation_token", None)
+            continue
         try:
             join_arguments: dict[str, Any] = {
                 "board_id": board_id,
@@ -251,6 +255,8 @@ async def wait_for_boards(
             }
             if capabilities is not None:
                 join_arguments["capabilities"] = capabilities
+            if getattr(client, "allow_takeover", False):
+                join_arguments["allow_takeover"] = True
             joined = BoardClient._decode(
                 await client._client.call_tool(
                     "board_join",

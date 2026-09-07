@@ -316,5 +316,52 @@ def test_registry_wait_returns_only_this_seats_dispatch_offer(
         "tier": 3,
         "skills_required": ["dispatch"],
     }
-    join = next(arguments for name, arguments in calls if name == "board_join")
-    assert join["capabilities"] == capabilities
+    assert not [arguments for name, arguments in calls if name == "board_join"]
+
+
+def test_registry_wait_preserves_collision_refusal_without_takeover() -> None:
+    calls: list[tuple[str, dict]] = []
+
+    def result(value: dict, *, error: bool = False) -> SimpleNamespace:
+        return SimpleNamespace(
+            is_error=error,
+            structured_content={"result": value} if not error else None,
+            content=[SimpleNamespace(text=value.get("error", "error"))],
+        )
+
+    class Raw:
+        async def call_tool(self, name, arguments, **_kwargs):
+            calls.append((name, dict(arguments)))
+            assert name == "board_join"
+            return result(
+                {"error": "seat name already active under this principal"},
+                error=True,
+            )
+
+    raw = Raw()
+    client = SimpleNamespace(
+        board_id="pursers",
+        agent_name="worker-agent",
+        allow_takeover=False,
+        identity=SimpleNamespace(agent_id="AI-home"),
+        generation_token="gen-home",
+        _client=raw,
+    )
+    response = asyncio.run(registry_module.wait_for_boards(
+        client,
+        ["fullplatts", "pursers"],
+        0,
+        0,
+        kinds=DISPATCH_KINDS,
+        submitted=False,
+        poll_fallback=True,
+    ))
+
+    assert response["boards"] == ["pursers"]
+    assert response["skipped_boards"] == {
+        "fullplatts": "seat name already active under this principal"
+    }
+    assert calls == [(
+        "board_join",
+        {"board_id": "fullplatts", "agent_name": "worker-agent"},
+    )]

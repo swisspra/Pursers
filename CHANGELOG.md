@@ -18,7 +18,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - Seat-kit and wait-bridge waits now subscribe to holder-targeted ticket
   updates, label offer/holder/broadcast wakes explicitly, and permit workers
   and reviewers to claim only verified dispatch broadcasts when no live offer
-  belongs to another seat.
+  belongs to another seat. Registry waits reuse the entered home-board identity
+  and carry explicit stable-seat takeover intent when joining other boards.
 - Wait-bridge Central traffic now reuses one bounded HTTP pool per process,
   caps concurrent Central connections at four by default, and logs before an
   excess board subscription falls back to polling. Coordinator subscription

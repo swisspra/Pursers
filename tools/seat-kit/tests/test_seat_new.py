@@ -1579,6 +1579,211 @@ def test_live_holder_annotation_wakes_and_reviewer_claims_expired_broadcast(
     asyncio.run(exercise())
 
 
+def test_live_registry_wait_resumes_stable_seat_and_wakes_on_held_annotation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def exercise() -> None:
+        from mcp import Client
+        from pursers_client import (
+            BoardClient,
+            active_registry_boards,
+            registry_project_work_dirs,
+            registry_work_dirs,
+            wait_for_boards,
+        )
+        import pursers_client.client as client_module
+        import pursers_client.project_registry as registry_module
+
+        generated = load_generated(
+            seat_new.generate(args(tmp_path / "seat", client="goose"))
+            / "bin" / "board.py",
+            "board_registry_live_probe",
+        )
+        (
+            central,
+            mcp,
+            service,
+            principals,
+            active,
+            agent_ids,
+            call,
+            original_current_principal,
+        ) = await build_local_central(tmp_path / "central", monkeypatch)
+        other_board = "fullplatts"
+
+        async def call_other(name: str, **arguments: Any) -> Any:
+            return await mcp.call_tool(
+                name, {"board_id": other_board, **arguments}
+            )
+
+        capabilities = {
+            "tier_max": 3,
+            "skills": [],
+            "can_work": True,
+            "can_review": False,
+            "host": "test",
+            "max_parallel": 1,
+        }
+        registry = {
+            "schema_version": 1,
+            "projects": {
+                "home": {
+                    "board_id": "pursers",
+                    "work_dir": "/repo/home",
+                    "status": "active",
+                },
+                "other": {
+                    "board_id": other_board,
+                    "work_dir": "/repo/other",
+                    "status": "active",
+                },
+            },
+        }
+        try:
+            active["principal"] = principals["admin"]
+            await call_other("board_join", agent_name="admin-agent")
+            await call_other(
+                "board_member_add",
+                agent_name="admin-agent",
+                principal_id=principals["worker"].principal_id,
+                role="member",
+            )
+            active["principal"] = principals["worker"]
+            other_joined = await call_other(
+                "board_join",
+                agent_name="worker-agent",
+                capabilities=capabilities,
+            )
+            other_agent_id = other_joined.structured_content["agent_id"]
+
+            active["principal"] = principals["admin"]
+            created = await call(
+                "ticket_create",
+                agent_name="admin-agent",
+                title="registry held update live probe",
+                description="prove stable-seat registry subscription wake",
+                target_url="home/tools/seat-kit",
+                scope="interactive-no-send",
+                required_fields=["test_output"],
+                assigned_to=agent_ids["worker"],
+            )
+            ticket_id = created.structured_content["ticket"]["ticket_id"]
+            active["principal"] = principals["worker"]
+            await call("ticket_claim", agent_name="worker-agent", ticket_id=ticket_id)
+            cursors = {
+                board_id: int(service.journal.read_after(board_id, 0)["latest_cursor"])
+                for board_id in ("pursers", other_board)
+            }
+
+            @asynccontextmanager
+            async def http_context():
+                yield object()
+
+            class LocalBoardClient(BoardClient):
+                def _http(self):
+                    return http_context()
+
+            ready = asyncio.Event()
+
+            class SignalingClient:
+                def __init__(self, transport, **kwargs):
+                    self.inner = Client(transport, **kwargs)
+
+                async def __aenter__(self):
+                    await self.inner.__aenter__()
+                    return self
+
+                async def __aexit__(self, *args):
+                    return await self.inner.__aexit__(*args)
+
+                async def call_tool(self, *args, **kwargs):
+                    previous = active["principal"]
+                    active["principal"] = principals["worker"]
+                    try:
+                        return await self.inner.call_tool(*args, **kwargs)
+                    finally:
+                        active["principal"] = previous
+
+                @asynccontextmanager
+                async def listen(self, **kwargs):
+                    async with self.inner.listen(**kwargs) as subscription:
+                        async def signaled_subscription():
+                            ready.set()
+                            async for cue in subscription:
+                                yield cue
+
+                        yield signaled_subscription()
+
+            monkeypatch.setattr(
+                client_module, "streamable_http_client", lambda *_args, **_kwargs: mcp
+            )
+            monkeypatch.setattr(
+                registry_module,
+                "streamable_http_client",
+                lambda *_args, **_kwargs: mcp,
+            )
+            monkeypatch.setattr(registry_module, "Client", SignalingClient)
+
+            started = time.monotonic()
+            output = io.StringIO()
+            async with LocalBoardClient(
+                "http://central.invalid/mcp",
+                "test-token",
+                "pursers",
+                agent_name="worker-agent",
+                role="worker",
+                capabilities=capabilities,
+                allow_takeover=True,
+            ) as board_client:
+                await board_client.board_join(
+                    capabilities=capabilities, allow_takeover=True
+                )
+
+                async def run_wait() -> None:
+                    with redirect_stdout(output):
+                        await generated._cmd_wait(
+                            board_client,
+                            "pursers",
+                            cursors,
+                            3,
+                            boards="registry",
+                            registry=registry,
+                            active_registry_boards=active_registry_boards,
+                            registry_work_dirs=registry_work_dirs,
+                            registry_project_work_dirs=registry_project_work_dirs,
+                            wait_for_boards=wait_for_boards,
+                            dispatch_kinds=WORKER_WAIT_KINDS,
+                        )
+
+                waiting = asyncio.create_task(run_wait())
+                await asyncio.wait_for(ready.wait(), timeout=1)
+                active["principal"] = principals["admin"]
+                await call(
+                    "ticket_annotate",
+                    agent_name="admin-agent",
+                    ticket_id=ticket_id,
+                    text="registry live probe evidence",
+                    kind="evidence",
+                )
+                active["principal"] = principals["worker"]
+                await asyncio.wait_for(waiting, timeout=2)
+            elapsed = time.monotonic() - started
+            result = json.loads(output.getvalue())
+
+            assert elapsed < 2
+            assert result["boards"] == [other_board, "pursers"]
+            assert result["skipped_boards"] == {}
+            assert result["reason"] == "held_ticket_update"
+            assert result["events"][0]["kind"] == "ticket_annotated"
+            assert result["events"][0]["ticket_id"] == ticket_id
+            other_member = service.load(other_board)["members"][other_agent_id]
+            assert other_member["lifecycle_status"] == "active"
+        finally:
+            central.current_principal = original_current_principal
+
+    asyncio.run(exercise())
+
+
 def test_generated_submit_truncates_notes_and_reports_warning(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
