@@ -7,6 +7,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added
+
+- Wait bridge: add `pursers-door` to issue, inspect, rotate, and revoke
+  per-board worker/reviewer door credentials with RSA-2048 keys, atomic JWKS
+  replacement, and one secret-safe `prs1.…` setup string.
+
 ## [5.0.0a23] - 2026-09-07
 
 This release includes `pursers-central==0.1.0a27`,

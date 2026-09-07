@@ -10,10 +10,15 @@ requires-python = ">=3.11"
 license = "Apache-2.0"
 dependencies = [
   "pursers-client==0.1.0a20",
+  "PyJWT[crypto]>=2.10,<3",
 ]
 
 [project.scripts]
 pursers-wait-bridge = "pursers_wait_server:main"
+pursers-door = "door_admin:main"
 
 [tool.setuptools]
-py-modules = ["pursers_wait_server", "agent_naming", "backlog", "registry_admin", "registry_doctor", "seat_admin"]
+py-modules = ["pursers_wait_server", "agent_naming", "backlog", "door_admin", "registry_admin", "registry_doctor", "seat_admin"]
+
+[tool.pytest.ini_options]
+pythonpath = ["../../packages/client/src"]
