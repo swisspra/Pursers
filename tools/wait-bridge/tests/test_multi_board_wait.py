@@ -505,6 +505,13 @@ class MultiBoardWaitTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("denied", result["skipped_boards"])
         self.assertEqual(result["new_seq"], {"alpha": 1, "denied": 0})
         self.assertEqual(result["events"][0]["board_id"], "alpha")
+        joins = [
+            payload
+            for name, _board_id, payload in transport.calls
+            if name == "board_join"
+        ]
+        self.assertTrue(joins)
+        self.assertTrue(all(payload["allow_takeover"] is True for payload in joins))
 
     async def test_heartbeat_renews_only_on_board_holding_claim(self) -> None:
         transport = FakeTransport(["alpha", "beta"])

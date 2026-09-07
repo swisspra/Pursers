@@ -9,6 +9,8 @@ from contextlib import asynccontextmanager, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 CLIENT_SRC = ROOT.parents[1] / "packages" / "client" / "src"
@@ -90,6 +92,39 @@ def test_registry_cursor_map_round_trip_and_skipped_boards() -> None:
     assert result["new_seq"] == {"pursers": 4, "fullplatts": 7}
     assert result["skipped_boards"] == {"fullplatts": "authorization denied"}
     assert calls[0][0] == ["fullplatts", "pursers"]
+    assert calls[0][3]["allow_takeover"] is True
+
+
+def test_registry_wait_fails_when_every_board_is_skipped() -> None:
+    module = generated()
+
+    async def fake_wait(_client, boards, since, timeout_s, **kwargs):
+        raise RuntimeError(
+            "all selected boards were skipped:\n"
+            "fullplatts: authorization denied\n"
+            "pursers: seat collision"
+        )
+
+    with pytest.raises(
+        RuntimeError,
+        match="all selected boards were skipped",
+    ):
+        asyncio.run(
+            module._cmd_wait(
+                SimpleNamespace(identity=SimpleNamespace(agent_id="AI-seat")),
+                "pursers",
+                0,
+                1,
+                boards="registry",
+                registry=REGISTRY,
+                active_registry_boards=lambda _registry, _home: [
+                    "fullplatts", "pursers"
+                ],
+                registry_work_dirs=lambda _registry: {},
+                registry_project_work_dirs=lambda _registry: {},
+                wait_for_boards=fake_wait,
+            )
+        )
 
 
 def test_active_generated_stable_seat_resumes_registry_and_wakes_on_held_update(

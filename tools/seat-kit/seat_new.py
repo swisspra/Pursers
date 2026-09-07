@@ -797,6 +797,7 @@ async def _cmd_wait(
             project_work_dirs=registry_project_work_dirs(registry) if registry else {},
             poll_fallback=poll_fallback,
             capabilities=_seat_capabilities(),
+            allow_takeover=True,
         )
         _print(result)
         return
@@ -1399,7 +1400,7 @@ bin/board.sh submit <TK> <summary> <notes> <files-csv> --board <id>
 bin/board.sh wait --since '<cursor-or-json-map>' [--boards registry|home|<id,id>]"""
         loop = """Run this loop continuously:
 
-1. **WAIT** -- `bin/board.sh wait --since '<cursor-or-json-map>'` subscribes to every active registry board and returns only this seat's offer, held-ticket events, or legacy fallback broadcast. Re-arm with the entire returned `new_seq` map. On `reason=held_ticket_update`, GET that ticket immediately: follow evidence/decision annotations, fix and resubmit a rejection, or release a cancelled/parked ticket and return to WAIT.
+1. **WAIT** -- `bin/board.sh wait --since '<cursor-or-json-map>'` subscribes to every active registry board and returns only this seat's offer, held-ticket events, or legacy fallback broadcast. Re-arm with the entire returned `new_seq` map. On `reason=held_ticket_update`, GET that ticket immediately: follow evidence/decision annotations, fix and resubmit a rejection, or release a cancelled/parked ticket and return to WAIT. If every selected board is skipped, stop and report with `ticket_request_human` when holding a ticket or `SEAT_EXIT` otherwise; never re-arm blind.
 2. **UNDERSTAND** -- Use the offer's `ticket_id`, `board_id`, and registered fleet clone `work_dir`; never guess or use the operator checkout.
 3. **CLAIM** -- Claim a ticket offered to this seat. A work broadcast is also claimable only when GET confirms an open ticket with `dispatch_state.state=broadcast` and no live offer; Central resolves the race. Never claim a ticket offered to another seat. If the offer expired, was revoked, or belongs to another seat, go back to WAIT.
 4. **DO** -- Work only in the returned fleet clone (or this seat's own clone). The operator checkout is read-only for seats. Run `bin/board.sh renew <TK> --board <id>` every ~10 minutes.
@@ -1421,7 +1422,7 @@ bin/board.sh reject <TK> <notes> <fix> --board <id>
 bin/board.sh wait --submitted --since '<cursor-or-json-map>' [--boards registry|home|<id,id>]"""
         loop = """Run this loop continuously:
 
-1. **WAIT** -- `bin/board.sh wait --submitted --since '<cursor-or-json-map>'` returns only this reviewer's offer, held-review events, or legacy fallback broadcast. Re-arm with the entire returned `new_seq` map.
+1. **WAIT** -- `bin/board.sh wait --submitted --since '<cursor-or-json-map>'` returns only this reviewer's offer, held-review events, or legacy fallback broadcast. Re-arm with the entire returned `new_seq` map. If every selected board is skipped, stop and report with `ticket_request_human` when holding a ticket or `SEAT_EXIT` otherwise; never re-arm blind.
 2. **UNDERSTAND** -- Use the review offer's `ticket_id`, `board_id`, and registered `work_dir`.
 3. **CLAIM** -- Review-claim a ticket offered to this seat. A review broadcast is also claimable only when GET confirms `dispatch_state.state=broadcast` and no live review offer; Central resolves the race. Never claim a review offered to another reviewer. If the offer expired, was revoked, or belongs to another reviewer, return directly to WAIT.
 4. **VERIFY** -- Use the event's board: `bin/board.sh get <TK> --board <id>`, then `bin/board.sh verify <TK> --board <id>`. Add `--run-suites` only when the ticket carries allow-listed pytest/unittest commands. Renew every ~5 minutes with `bin/board.sh renew <TK> --board <id>`.
