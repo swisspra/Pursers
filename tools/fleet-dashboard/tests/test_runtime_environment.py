@@ -1,0 +1,56 @@
+from __future__ import annotations
+
+import importlib.util
+import os
+import stat
+import sys
+from pathlib import Path
+
+
+MODULE_DIR = Path(__file__).resolve().parents[1]
+if str(MODULE_DIR) not in sys.path:
+    sys.path.insert(0, str(MODULE_DIR))
+
+import runtime_environment
+
+
+def _load_dashboard():
+    path = MODULE_DIR / "fleet_dashboard.py"
+    spec = importlib.util.spec_from_file_location("hermetic_dashboard", path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_state_override_avoids_home_and_worker_creation_until_write(
+    tmp_path: Path, monkeypatch
+) -> None:
+    read_only_home = tmp_path / "empty-home"
+    read_only_home.mkdir()
+    read_only_home.chmod(stat.S_IRUSR | stat.S_IXUSR)
+    state_root = tmp_path / "state"
+    monkeypatch.setenv("HOME", str(read_only_home))
+    monkeypatch.setenv("PURSERS_STATE_DIR", str(state_root))
+    dashboard = _load_dashboard()
+
+    manager = dashboard.WorkerManager(platform="darwin")
+
+    assert manager.root == state_root / "workers"
+    assert not manager.root.exists()
+    assert list(read_only_home.iterdir()) == []
+
+
+def test_process_provider_reports_sandbox_denial_without_raising() -> None:
+    def denied(_command, **_kwargs):
+        raise PermissionError("sandbox denied process inspection")
+
+    result = runtime_environment._default_process_list_provider(
+        ["ps", "-axo", "pid="], runner=denied
+    )
+
+    assert result == runtime_environment.ProcessInspection(
+        False,
+        message=runtime_environment.PROCESS_INSPECTION_UNAVAILABLE,
+    )

@@ -32,12 +32,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Protocol, Sequence
 
+import runtime_environment
+
 
 REPOSITORY = Path(__file__).resolve().parents[2]
 WAIT_BRIDGE = REPOSITORY / "tools/wait-bridge"
 SEAT_KIT = REPOSITORY / "tools/seat-kit/seat_new.py"
-DEFAULT_STATE_DIR = Path("~/.pursers/fleet-dashboard").expanduser()
-DEFAULT_INVENTORY = DEFAULT_STATE_DIR / "seats.json"
 SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
 ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 MANAGED_COMMENT = "# pursers-managed; edit through the fleet dashboard"
@@ -1867,8 +1867,12 @@ class PromptRenderer:
 
 
 class SeatInventory:
-    def __init__(self, path: str | Path = DEFAULT_INVENTORY):
-        self.path = Path(path).expanduser()
+    def __init__(self, path: str | Path | None = None):
+        self.path = (
+            Path(path).expanduser()
+            if path is not None
+            else runtime_environment.dashboard_state_dir() / "seats.json"
+        )
 
     def load(self) -> dict[str, Any]:
         if not self.path.exists():
@@ -2250,6 +2254,8 @@ class Doctor:
         identity_probe: IdentityProbe | None = None,
         runtime_probe: RuntimeProbe | None = None,
         runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+        process_provider: Callable[..., runtime_environment.ProcessInspection]
+        | None = None,
         clock: Callable[[], float] = time.time,
         pypi_fetcher: Callable[[], str | None] | None = None,
     ) -> None:
@@ -2257,6 +2263,9 @@ class Doctor:
         self.identity_probe = identity_probe or _default_identity_probe
         self.runtime_probe = runtime_probe or _default_runtime_probe
         self.runner = runner
+        self.process_provider = (
+            process_provider or runtime_environment.PROCESS_LIST_PROVIDER
+        )
         self.clock = clock
         self.pypi_fetcher = pypi_fetcher
 
@@ -2709,11 +2718,9 @@ class Doctor:
             "claude-code": "claude",
             "headless": "pursers",
         }
-        process = self.runner(
+        process = self.process_provider(
             ["ps", "-axo", "etimes=,comm="],
-            check=False,
-            text=True,
-            capture_output=True,
+            runner=self.runner,
         )
         ages = []
         for line in process.stdout.splitlines():
@@ -2732,16 +2739,22 @@ class Doctor:
             and config.exists()
             and self.clock() - config.stat().st_mtime < max(ages)
         )
+        restart_status = (
+            "WARN" if not process.available else "WARN" if needs_restart else "PASS"
+        )
+        restart_message = (
+            runtime_environment.PROCESS_INSPECTION_UNAVAILABLE
+            if not process.available
+            else "restart required"
+            if needs_restart
+            else "no stale host process detected"
+        )
         rows.append(
             self._check(
                 desired,
                 "restart",
-                "WARN" if needs_restart else "PASS",
-                (
-                    "restart required"
-                    if needs_restart
-                    else "no stale host process detected"
-                ),
+                restart_status,
+                restart_message,
             )
         )
         return rows
@@ -2761,7 +2774,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     doctor = commands.add_parser("doctor", help="inspect configured seats")
-    doctor.add_argument("--inventory", default=str(DEFAULT_INVENTORY))
+    doctor.add_argument(
+        "--inventory",
+        default=str(runtime_environment.dashboard_state_dir() / "seats.json"),
+    )
     doctor.add_argument("--fix", action="store_true")
     doctor.add_argument("--json", action="store_true")
     return parser
