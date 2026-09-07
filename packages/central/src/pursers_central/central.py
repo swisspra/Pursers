@@ -45,6 +45,7 @@ types.Tool.model_rebuild(force=True)
 from pursers_client import (
     ADMISSION_EVENT_KINDS,
     AGENT_LIFECYCLE_EVENT_KINDS,
+    ARCHIVE_EVENT_KINDS,
     CLAIM_TTL_EVENT_KINDS,
     CLAIM_GATE_EVENT_KINDS,
     DEPRECATION_EVENT_KINDS,
@@ -60,6 +61,7 @@ from pursers_client import (
     REVIEW_LEASE_RELEASED,
     REVIEW_EVENT_KINDS,
     SCRUB_EVENT_KINDS,
+    TICKET_ARCHIVED,
     TICKET_REVIEW_CLAIMED,
     TICKET_OFFERED,
     TICKET_CLAIM_REFUSED,
@@ -108,6 +110,59 @@ MAX_BROADCAST_REOFFER_S = 86_400
 DEFAULT_STALE_AFTER_DAYS = 3
 MIN_STALE_AFTER_DAYS = 1
 MAX_STALE_AFTER_DAYS = 3_650
+# Archive tier: terminal tickets age out of the hot board document into
+# per-ticket archive documents; inline histories keep a bounded tail.
+ARCHIVE_SCHEMA_VERSION = 8
+DEFAULT_ARCHIVE_AFTER_DAYS = 2
+MIN_ARCHIVE_AFTER_DAYS = 0
+MAX_ARCHIVE_AFTER_DAYS = 365
+ARCHIVABLE_TICKET_STATES = frozenset({"closed", "canceled"})
+DEFAULT_INLINE_HISTORY_LIMIT = 50
+MIN_INLINE_HISTORY_LIMIT = 1
+MAX_INLINE_HISTORY_LIMIT = 500
+DEFAULT_JOURNAL_RETENTION_DAYS = 7
+DEFAULT_INVITE_PRUNE_AFTER_DAYS = 7
+MIN_RETENTION_DAYS = 0
+MAX_RETENTION_DAYS = 365
+BOUNDED_HISTORY_FIELDS = (
+    "dispatch_history",
+    "submission_history",
+    "review_history",
+)
+ARCHIVE_EVENT_FIELDS = frozenset(
+    {
+        "ticket_id",
+        "status_to",
+        "archived_reason",
+        "archived_at",
+        "archived_ticket_count",
+        "history_bounded_count",
+        "history_entries_archived",
+        "member_tombstoned_count",
+        "invite_pruned_count",
+        "bytes_freed",
+        "fixture_provenance",
+        "recipient_identities",
+    }
+)
+ARCHIVE_INDEX_FIELDS = (
+    "ticket_id",
+    "status",
+    "priority",
+    "title",
+    "created_at",
+    "updated_at",
+    "closed_at",
+    "canceled_at",
+    "assigned_to",
+    "assigned_to_agent_id",
+    "claimed_by",
+    "claimed_by_agent_id",
+    "abandoned_count",
+    "rejection_count",
+    "reviewed_by_agent_name",
+)
+ARCHIVE_INDEX_TITLE_CHARS = 120
 MIN_CLAIM_TTL_S = 1
 MAX_CLAIM_TTL_S = 86_400
 DEFAULT_PRINCIPAL_STREAM_CAP = 32
@@ -498,6 +553,7 @@ class CentralJournal(Journal):
             | AGENT_LIFECYCLE_EVENT_KINDS
             | CLAIM_GATE_EVENT_KINDS
             | PARK_EVENT_KINDS
+            | ARCHIVE_EVENT_KINDS
             | SEAT_IDENTITY_EVENT_KINDS
         ):
             raise ValueError(f"unsupported event kind: {kind}")
@@ -516,6 +572,7 @@ class CentralJournal(Journal):
             | AGENT_LIFECYCLE_EVENT_FIELDS
             | CLAIM_GATE_EVENT_FIELDS
             | PARK_EVENT_FIELDS
+            | ARCHIVE_EVENT_FIELDS
             | SEAT_IDENTITY_EVENT_FIELDS
         )
         semantic = {
@@ -572,6 +629,7 @@ class CentralJournal(Journal):
             | AGENT_LIFECYCLE_EVENT_KINDS
             | CLAIM_GATE_EVENT_KINDS
             | PARK_EVENT_KINDS
+            | ARCHIVE_EVENT_KINDS
             | SEAT_IDENTITY_EVENT_KINDS
         ):
             raise ValueError(f"unsupported event kind: {kind}")
@@ -592,6 +650,7 @@ class CentralJournal(Journal):
             | AGENT_LIFECYCLE_EVENT_FIELDS
             | CLAIM_GATE_EVENT_FIELDS
             | PARK_EVENT_FIELDS
+            | ARCHIVE_EVENT_FIELDS
             | SEAT_IDENTITY_EVENT_FIELDS
         )
         semantic = {
@@ -734,6 +793,7 @@ class CentralBoard:
             )
         self.active_streams_by_principal: dict[str, int] = {}
         self.last_seen_activity: dict[tuple[str, str], float] = {}
+        self.board_ids_by_token: dict[str, str] = {}
         self.offer_deadline_tasks: dict[
             tuple[str, str, str], asyncio.Task[None]
         ] = {}
@@ -840,7 +900,9 @@ class CentralBoard:
 
     def _path(self, board_id: str) -> Path:
         require_id("board_id", board_id)
-        return self.store.path("boards", f"{_board_token(board_id)}.json")
+        token = _board_token(board_id)
+        self.board_ids_by_token.setdefault(token, board_id)
+        return self.store.path("boards", f"{token}.json")
 
     def _import_path(self, board_id: str) -> Path:
         require_id("board_id", board_id)
@@ -922,6 +984,10 @@ class CentralBoard:
             "config": {
                 "claim_ttl_s": DEFAULT_CLAIM_TTL_S,
                 "stale_after_days": DEFAULT_STALE_AFTER_DAYS,
+                "archive_after_days": DEFAULT_ARCHIVE_AFTER_DAYS,
+                "inline_history_limit": DEFAULT_INLINE_HISTORY_LIMIT,
+                "journal_retention_days": DEFAULT_JOURNAL_RETENTION_DAYS,
+                "invite_prune_after_days": DEFAULT_INVITE_PRUNE_AFTER_DAYS,
                 "scrub_profile": "strict",
                 "review_policy": "strict",
                 "dispatch_policy": {
@@ -1061,6 +1127,37 @@ class CentralBoard:
             or not MIN_STALE_AFTER_DAYS <= stale_after_days <= MAX_STALE_AFTER_DAYS
         ):
             raise ValueError("board stale_after_days is invalid")
+        archive_after_days = config.setdefault(
+            "archive_after_days", DEFAULT_ARCHIVE_AFTER_DAYS
+        )
+        if (
+            isinstance(archive_after_days, bool)
+            or not isinstance(archive_after_days, int)
+            or not MIN_ARCHIVE_AFTER_DAYS <= archive_after_days <= MAX_ARCHIVE_AFTER_DAYS
+        ):
+            raise ValueError("board archive_after_days is invalid")
+        inline_history_limit = config.setdefault(
+            "inline_history_limit", DEFAULT_INLINE_HISTORY_LIMIT
+        )
+        if (
+            isinstance(inline_history_limit, bool)
+            or not isinstance(inline_history_limit, int)
+            or not MIN_INLINE_HISTORY_LIMIT
+            <= inline_history_limit
+            <= MAX_INLINE_HISTORY_LIMIT
+        ):
+            raise ValueError("board inline_history_limit is invalid")
+        for field, default in (
+            ("journal_retention_days", DEFAULT_JOURNAL_RETENTION_DAYS),
+            ("invite_prune_after_days", DEFAULT_INVITE_PRUNE_AFTER_DAYS),
+        ):
+            value = config.setdefault(field, default)
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or not MIN_RETENTION_DAYS <= value <= MAX_RETENTION_DAYS
+            ):
+                raise ValueError(f"board {field} is invalid")
         allow_counts = config.setdefault("scrub_allow_counts", {})
         if not isinstance(allow_counts, dict) or any(
             not isinstance(rule, str)
@@ -1269,6 +1366,16 @@ class CentralBoard:
         if document.get("board_id") != board_id:
             raise ValueError("board hash collision or corrupt document")
         self.ensure_schema(document)
+        if int(document.get("schema_version", 0) or 0) < ARCHIVE_SCHEMA_VERSION:
+            # One-shot idempotent upgrade: aged terminal tickets move to the
+            # archive tier and inline histories get bounded on first load.
+            self.migrate_archive_schema(board_id)
+            document = self.store.load(
+                self._path(board_id), lambda: self._default(board_id)
+            )
+            if document.get("board_id") != board_id:
+                raise ValueError("board hash collision or corrupt document")
+            self.ensure_schema(document)
         return self._bootstrap_admin_on_load(board_id, document)
 
     def _assert_expected_generation(self, document: dict[str, Any]) -> None:
@@ -1301,7 +1408,12 @@ class CentralBoard:
                 self._assert_expected_generation(document)
             result = callback(document)
 
-        self.store.read_modify_write(self._path(board_id), mutate_document, lambda: self._default(board_id))
+        # The transaction lets bounded-history appends persist their archive
+        # overflow atomically with the board write (nested RMWs reuse it).
+        with self.transaction():
+            self.store.read_modify_write(
+                self._path(board_id), mutate_document, lambda: self._default(board_id)
+            )
         return copy.deepcopy(result)
 
     def validate_generation(self, board_id: str) -> None:
@@ -1388,6 +1500,577 @@ class CentralBoard:
                 )
         return copy.deepcopy(result)
 
+    # ------------------------------------------------------------------
+    # Archive tier: aged terminal tickets and bounded inline histories live
+    # in per-ticket archive documents under archive/<board-token>/. The hot
+    # board document keeps a compact index row per archived ticket so reads,
+    # counts, and dedupe stay transparent without re-parsing archived bodies.
+    # ------------------------------------------------------------------
+
+    def _archive_path(self, board_id: str, ticket_id: str) -> Path:
+        require_id("board_id", board_id)
+        if not isinstance(ticket_id, str) or not ID_RE.fullmatch(ticket_id):
+            raise ValueError(f"ticket_id must match {ID_RE.pattern}")
+        token = _board_token(board_id)
+        self.board_ids_by_token.setdefault(token, board_id)
+        return self.store.path("archive", token, f"{ticket_id}.json")
+
+    def _archive_index_path(self, board_id: str) -> Path:
+        require_id("board_id", board_id)
+        token = _board_token(board_id)
+        self.board_ids_by_token.setdefault(token, board_id)
+        return self.store.path("archive", token, "index.json")
+
+    def load_archive_index(self, board_id: str) -> dict[str, Any]:
+        """Compact per-board index rows for every archived ticket."""
+        document = self.store.load(
+            self._archive_index_path(board_id),
+            lambda: {"board_id": board_id, "schema": 1, "tickets": {}},
+        )
+        if not isinstance(document, dict):
+            return {}
+        tickets = document.get("tickets")
+        return tickets if isinstance(tickets, dict) else {}
+
+    def load_archive_document(self, board_id: str, ticket_id: str) -> dict[str, Any] | None:
+        """Return one raw archive document, or None when nothing is archived."""
+        document = self.store.load(self._archive_path(board_id, ticket_id), dict)
+        if not isinstance(document, dict) or not document:
+            return None
+        if document.get("board_id") != board_id or document.get("ticket_id") != ticket_id:
+            raise ValueError("archive hash collision or corrupt document")
+        return document
+
+    def merged_archived_ticket(self, board_id: str, ticket_id: str) -> dict[str, Any] | None:
+        """Return the full archived ticket (histories merged), or None."""
+        document = self.load_archive_document(board_id, ticket_id)
+        if document is None:
+            return None
+        ticket = document.get("ticket")
+        if not isinstance(ticket, dict):
+            return None
+        return copy.deepcopy(ticket)
+
+    @staticmethod
+    def archive_index_row(board_id: str, ticket: Mapping[str, Any]) -> dict[str, Any]:
+        """Build one compact hot-document index row for an archived ticket."""
+        row: dict[str, Any] = {"archived": True}
+        for field in ARCHIVE_INDEX_FIELDS:
+            value = ticket.get(field)
+            if field == "title" and isinstance(value, str):
+                value = (
+                    value[: ARCHIVE_INDEX_TITLE_CHARS - 1] + "…"
+                    if len(value) > ARCHIVE_INDEX_TITLE_CHARS
+                    else value
+                )
+            row[field] = value
+        labels: dict[str, int] = {}
+        for review in ticket.get("review_history", []) or []:
+            label = review.get("review_label") if isinstance(review, Mapping) else None
+            if isinstance(label, str) and label:
+                labels[label] = labels.get(label, 0) + 1
+        row["review_label_counts"] = labels
+        return row
+
+    @staticmethod
+    def bound_ticket_history(ticket: dict[str, Any], limit: int) -> dict[str, list[Any]]:
+        """Trim inline histories to the newest ``limit`` entries.
+
+        Returns the removed older entries per field; callers persist them in
+        the ticket's archive document so nothing is lost.
+        """
+        overflow: dict[str, list[Any]] = {}
+        for field in BOUNDED_HISTORY_FIELDS:
+            entries = ticket.get(field)
+            if not isinstance(entries, list) or len(entries) <= limit:
+                continue
+            removed = entries[: len(entries) - limit]
+            ticket[field] = entries[len(entries) - limit:]
+            previous = ticket.get(f"{field}_omitted_count", 0)
+            previous = (
+                previous
+                if type(previous) is int and not isinstance(previous, bool) and previous > 0
+                else 0
+            )
+            ticket[f"{field}_omitted_count"] = previous + len(removed)
+            overflow[field] = removed
+        return overflow
+
+    @staticmethod
+    def _terminal_age_epoch(ticket: Mapping[str, Any]) -> float:
+        for field in ("closed_at", "canceled_at", "updated_at", "created_at"):
+            value = ticket.get(field)
+            if not isinstance(value, str) or not value:
+                continue
+            try:
+                parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed.timestamp()
+        return 0.0
+
+    def admin_agent_ids(self, document: Mapping[str, Any]) -> list[str]:
+        """Active admin agent ids for archive-event recipients."""
+        memberships = document.get("principal_memberships", {})
+        return sorted(
+            str(member.get("agent_id"))
+            for member in document.get("members", {}).values()
+            if member.get("lifecycle_status", "active") == "active"
+            and isinstance(memberships.get(member.get("principal_id")), Mapping)
+            and memberships[member.get("principal_id")].get("role") == "admin"
+        )
+
+    @staticmethod
+    def _member_last_activity_epoch(member: Mapping[str, Any]) -> float | None:
+        value = member.get("last_activity_at") or member.get("joined_at")
+        if not isinstance(value, str):
+            return None
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            return None
+        return parsed.timestamp()
+
+    def persist_archived_memories(
+        self, board_id: str, memories: list[dict[str, Any]]
+    ) -> None:
+        token = _board_token(board_id)
+        for mem in memories:
+            mem_id = mem.get("memory_id")
+            if not mem_id:
+                continue
+            path = self.store.path("archive", token, "memories", f"{mem_id}.json")
+            self.store.read_modify_write(
+                path,
+                lambda _current, _payload=mem: copy.deepcopy(_payload),
+                dict,
+            )
+
+    def load_archived_memories(self, board_id: str) -> list[dict[str, Any]]:
+        token = _board_token(board_id)
+        results: list[dict[str, Any]] = []
+        for path, _ in self.store.document_sizes(str(Path("archive") / token / "memories")):
+            doc = self.store.load(Path(path), dict)
+            if isinstance(doc, dict):
+                results.append(doc)
+        return results
+
+    def persist_history_overflow(
+        self, board_id: str, ticket_id: str, field: str, entries: list[Any]
+    ) -> None:
+        """Persist bounded-out history entries into the ticket archive doc.
+
+        Called from inside board write transactions (``mutate`` opens one), so
+        the inline trim and the durable overflow commit atomically together.
+        """
+        if not entries:
+            return
+
+        def merge(current: Any) -> dict[str, Any]:
+            document = current if isinstance(current, dict) and current else {}
+            document.setdefault("schema", 1)
+            document["board_id"] = board_id
+            document["ticket_id"] = ticket_id
+            document["archived_at"] = iso_at(time.time())
+            document.setdefault("archive_reason", "history_overflow")
+            overflow = document.get("history_overflow")
+            overflow = dict(overflow) if isinstance(overflow, dict) else {}
+            overflow[field] = list(entries) + list(overflow.get(field) or [])
+            document["history_overflow"] = overflow
+            return document
+
+        self.store.read_modify_write(
+            self._archive_path(board_id, ticket_id), merge, dict
+        )
+
+    def archive_due_tickets(
+        self, board_id: str, now: float, *, migrate: bool = False
+    ) -> dict[str, Any]:
+        """One automatic, on-by-default bloat sweep (operator decision).
+
+        (1) closed/canceled tickets older than ``archive_after_days`` (default
+        2; 0 archives at close time) move to per-ticket archive documents;
+        (2) inline dispatch/submission/review histories keep the newest
+        ``inline_history_limit`` (default 50) entries and older ones move to
+        the ticket archive document; (4) retired members without activity for
+        ``stale_after_days`` compact to tombstones; (6) invites expired more
+        than ``invite_prune_after_days`` (default 7) are pruned. One journal
+        entry with counts goes to board admins per sweep, and cumulative
+        bytes freed / items archived land in the archive index totals that
+        healthz reports. ``migrate=True`` stamps ``schema_version`` so the
+        one-shot legacy upgrade is idempotent.
+        """
+        require_id("board_id", board_id)
+        summary: dict[str, Any] = {}
+        events: list[dict[str, Any]] = []
+        to_archive: dict[str, dict[str, Any]] = {}
+        to_bound: dict[str, dict[str, list[Any]]] = {}
+        reason = "legacy_migration" if migrate else "auto_sweep"
+
+        def encoded_size(value: Any) -> int:
+            return len(
+                json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            )
+
+        def sweep(document: dict[str, Any]) -> None:
+            nonlocal summary
+            if document.get("board_id") != board_id:
+                raise ValueError("board hash collision or corrupt document")
+            self.ensure_schema(document)
+            config = document.get("config", {})
+            archive_after_days = int(
+                config.get("archive_after_days", DEFAULT_ARCHIVE_AFTER_DAYS)
+            )
+            history_limit = int(
+                config.get("inline_history_limit", DEFAULT_INLINE_HISTORY_LIMIT)
+            )
+            stale_after_days = int(
+                config.get("stale_after_days", DEFAULT_STALE_AFTER_DAYS)
+            )
+            invite_prune_after_days = int(
+                config.get("invite_prune_after_days", DEFAULT_INVITE_PRUNE_AFTER_DAYS)
+            )
+            cutoff = now - archive_after_days * 86_400
+            stale_cutoff = now - stale_after_days * 86_400
+            invite_cutoff = now - invite_prune_after_days * 86_400
+            archived_ids: list[str] = []
+            bounded_ids: list[str] = []
+            tombstoned_ids: list[str] = []
+            pruned_invites: list[str] = []
+            bytes_freed = 0
+            history_entries_archived = 0
+            for ticket_id in sorted(document["tickets"]):
+                ticket = document["tickets"][ticket_id]
+                status = ticket.get("status")
+                if (
+                    status in ARCHIVABLE_TICKET_STATES
+                    and self._terminal_age_epoch(ticket) <= cutoff
+                ):
+                    archived = copy.deepcopy(ticket)
+                    existing = self.load_archive_document(board_id, ticket_id) or {}
+                    overflow = existing.get("history_overflow")
+                    if isinstance(overflow, dict):
+                        for field in BOUNDED_HISTORY_FIELDS:
+                            entries = overflow.get(field)
+                            if isinstance(entries, list) and entries:
+                                archived[field] = list(entries) + list(
+                                    archived.get(field) or []
+                                )
+                                archived[f"{field}_omitted_count"] = 0
+                    to_archive[ticket_id] = archived
+                    bytes_freed += encoded_size(archived)
+                    del document["tickets"][ticket_id]
+                    archived_ids.append(ticket_id)
+                    continue
+                overflow = self.bound_ticket_history(ticket, history_limit)
+                if not overflow:
+                    continue
+                to_bound[ticket_id] = overflow
+                bounded_ids.append(ticket_id)
+                history_entries_archived += sum(
+                    len(entries) for entries in overflow.values()
+                )
+                bytes_freed += sum(
+                    encoded_size(entries) for entries in overflow.values()
+                )
+            members = document.get("members", {})
+            for member_id in sorted(members):
+                member = members[member_id]
+                if not isinstance(member, dict):
+                    continue
+                if member.get("lifecycle_status", "active") != "retired":
+                    continue
+                if member.get("tombstoned_at") is not None:
+                    continue
+                last_activity = self._member_last_activity_epoch(member)
+                if last_activity is not None and last_activity > stale_cutoff:
+                    continue
+                tombstone = {
+                    "agent_id": member.get("agent_id", member_id),
+                    "agent_name": member.get("agent_name"),
+                    "principal_id": member.get("principal_id"),
+                    "lifecycle_status": "retired",
+                    "membership_role": member.get("membership_role"),
+                    "joined_at": member.get("joined_at"),
+                    "tombstoned_at": iso_at(now),
+                    "tombstone": True,
+                }
+                bytes_freed += max(0, encoded_size(member) - encoded_size(tombstone))
+                members[member_id] = tombstone
+                tombstoned_ids.append(member_id)
+            invites = document.get("invites", {})
+            for invite_key in sorted(invites):
+                invite = invites[invite_key]
+                if not isinstance(invite, dict):
+                    continue
+                expires = invite.get("expires_at_epoch")
+                if isinstance(expires, bool) or not isinstance(expires, (int, float)):
+                    continue
+                if float(expires) >= invite_cutoff:
+                    continue
+                bytes_freed += encoded_size(invite)
+                del invites[invite_key]
+                pruned_invites.append(str(invite_key))
+            memories = document.get("memories", [])
+            to_archive_memories: list[dict[str, Any]] = []
+            hot_memories: list[dict[str, Any]] = []
+            for mem in memories:
+                if isinstance(mem, dict) and mem.get("archived") is True:
+                    to_archive_memories.append(mem)
+                    bytes_freed += encoded_size(mem)
+                else:
+                    hot_memories.append(mem)
+            if to_archive_memories:
+                document["memories"] = hot_memories
+                self.persist_archived_memories(board_id, to_archive_memories)
+            if migrate:
+                document["schema_version"] = max(
+                    ARCHIVE_SCHEMA_VERSION, int(document.get("schema_version", 0) or 0)
+                )
+            recipients = self.admin_agent_ids(document)
+            summary = {
+                "board_id": board_id,
+                "archived_ticket_ids": archived_ids,
+                "history_bounded_ticket_ids": bounded_ids,
+                "member_tombstoned_ids": tombstoned_ids,
+                "pruned_invite_keys": pruned_invites,
+                "history_entries_archived": history_entries_archived,
+                "bytes_freed": bytes_freed,
+                "recipients": recipients,
+                "migrated": bool(migrate),
+                "schema_version": int(document.get("schema_version", 0) or 0),
+                "hot_ticket_count": len(document["tickets"]),
+            }
+            if archived_ids or bounded_ids or tombstoned_ids or pruned_invites or to_archive_memories:
+                archived_event = {
+                    "kind": TICKET_ARCHIVED,
+                    "actor": "board-archive-sweep",
+                    "payload_ref": resource_uri(board_id, "board", board_id),
+                    "recipient_identities": recipients,
+                    "fixture_provenance": "pursers-personal-runtime",
+                    "archived_reason": reason,
+                    "archived_at": iso_at(now),
+                    "archived_ticket_count": len(archived_ids),
+                    "archived_memory_count": len(to_archive_memories),
+                    "history_bounded_count": len(bounded_ids),
+                    "history_entries_archived": history_entries_archived,
+                    "member_tombstoned_count": len(tombstoned_ids),
+                    "invite_pruned_count": len(pruned_invites),
+                    "bytes_freed": bytes_freed,
+                }
+                if len(archived_ids) == 1:
+                    archived_event["ticket_id"] = archived_ids[0]
+                    archived_event["payload_ref"] = resource_uri(
+                        board_id, "ticket", archived_ids[0]
+                    )
+                events.append(archived_event)
+
+        with self.transaction():
+            self.store.read_modify_write(
+                self._path(board_id), sweep, lambda: self._default(board_id)
+            )
+            for ticket_id, archived in to_archive.items():
+                archive_document = {
+                    "schema": 1,
+                    "board_id": board_id,
+                    "ticket_id": ticket_id,
+                    "archived_at": iso_at(now),
+                    "archive_reason": reason,
+                    "ticket": archived,
+                }
+                self.store.read_modify_write(
+                    self._archive_path(board_id, ticket_id),
+                    lambda _current, _payload=archive_document: copy.deepcopy(_payload),
+                    dict,
+                )
+            for ticket_id, overflow in to_bound.items():
+                existing = self.load_archive_document(board_id, ticket_id) or {}
+                merged = existing.get("history_overflow")
+                merged = dict(merged) if isinstance(merged, dict) else {}
+                for field, entries in overflow.items():
+                    merged[field] = list(entries) + list(merged.get(field) or [])
+                archive_document = {
+                    "schema": 1,
+                    "board_id": board_id,
+                    "ticket_id": ticket_id,
+                    "archived_at": iso_at(now),
+                    "archive_reason": "history_overflow",
+                    "history_overflow": merged,
+                }
+                if isinstance(existing.get("ticket"), dict):
+                    archive_document["ticket"] = existing["ticket"]
+                self.store.read_modify_write(
+                    self._archive_path(board_id, ticket_id),
+                    lambda _current, _payload=archive_document: copy.deepcopy(_payload),
+                    dict,
+                )
+            items_archived = (
+                len(to_archive)
+                + int(summary.get("history_entries_archived", 0))
+                + len(summary.get("member_tombstoned_ids", []))
+                + len(summary.get("pruned_invite_keys", []))
+            )
+            if to_archive or items_archived:
+                def update_index(current: dict[str, Any]) -> None:
+                    current.setdefault("board_id", board_id)
+                    current.setdefault("schema", 1)
+                    rows = current.setdefault("tickets", {})
+                    for ticket_id, archived in to_archive.items():
+                        rows[ticket_id] = self.archive_index_row(board_id, archived)
+                    totals = current.setdefault("totals", {})
+                    totals["bytes_freed"] = int(
+                        totals.get("bytes_freed", 0) or 0
+                    ) + int(summary.get("bytes_freed", 0))
+                    totals["items_archived"] = int(
+                        totals.get("items_archived", 0) or 0
+                    ) + items_archived
+
+                self.store.read_modify_write(
+                    self._archive_index_path(board_id),
+                    update_index,
+                    lambda: {"board_id": board_id, "schema": 1, "tickets": {}},
+                )
+            summary["archived_ticket_count"] = len(self.load_archive_index(board_id))
+            for event in events:
+                self.journal.append(board_id, event)
+        return {**copy.deepcopy(summary), "journal_events": len(events)}
+
+    def migrate_archive_schema(self, board_id: str) -> None:
+        """One-shot, idempotent upgrade of a legacy document on first load."""
+        for attempt in range(3):
+            try:
+                self.archive_due_tickets(board_id, time.time(), migrate=True)
+                return
+            except RuntimeError as exc:
+                if "optimistic version conflict" not in str(exc) or attempt == 2:
+                    raise
+                document = self.store.load(
+                    self._path(board_id), lambda: self._default(board_id)
+                )
+                if int(document.get("schema_version", 0) or 0) >= ARCHIVE_SCHEMA_VERSION:
+                    return
+
+    def journal_sweep(
+        self,
+        board_id: str,
+        *,
+        retention_days: int = DEFAULT_JOURNAL_RETENTION_DAYS,
+        now: float | None = None,
+    ) -> dict[str, int]:
+        """Compact journal rows beyond the retention window.
+
+        Retention default (operator decision): keep every row at or after the
+        oldest acknowledged consumer cursor PLUS every row newer than
+        ``journal_retention_days`` (default 7), never fewer than
+        ``MIN_COMPACTION_RETAIN_LAST`` (500) rows. Boards without consumers
+        keep the time window and the floor.
+        """
+        require_id("board_id", board_id)
+        current_time = time.time() if now is None else now
+        journal_document = self.store.load(
+            self.journal._path(board_id), lambda: {"rows": [], "next_seq": 1}
+        )
+        rows = journal_document.get("rows", [])
+        if not isinstance(rows, list) or len(rows) <= MIN_COMPACTION_RETAIN_LAST:
+            return {"removed": 0, "retained": len(rows) if isinstance(rows, list) else 0}
+        doc = self.load(board_id)
+        active_principals = {
+            m.get("principal_id")
+            for m in doc.get("members", {}).values()
+            if isinstance(m, dict) and m.get("lifecycle_status", "active") == "active"
+        }
+        stale_days = int(doc.get("config", {}).get("stale_after_days", DEFAULT_STALE_AFTER_DAYS))
+        oldest = self.cursors.oldest_live_cursor(
+            board_id,
+            active_principals=active_principals,
+            stale_after_s=stale_days * 86_400,
+            now=current_time,
+        )
+        cutoff = current_time - retention_days * 86_400
+        keep_from = len(rows)
+        for index, row in enumerate(rows):
+            if not isinstance(row, dict):
+                continue
+            if oldest is not None and int(row.get("seq", 0) or 0) >= int(oldest):
+                keep_from = index
+                break
+            occurred = row.get("occurred_at")
+            if isinstance(occurred, str):
+                try:
+                    parsed = datetime.fromisoformat(occurred.replace("Z", "+00:00"))
+                except ValueError:
+                    parsed = None
+                if parsed is not None:
+                    if parsed.tzinfo is None:
+                        parsed = parsed.replace(tzinfo=timezone.utc)
+                    if parsed.timestamp() >= cutoff:
+                        keep_from = index
+                        break
+        retain = max(MIN_COMPACTION_RETAIN_LAST, len(rows) - keep_from)
+        if retain >= len(rows):
+            return {"removed": 0, "retained": len(rows)}
+        compacted = self.journal.compact(board_id, retain)
+        if compacted.get("removed", 0) > 0:
+            recipients = [
+                m["agent_id"]
+                for m in doc.get("members", {}).values()
+                if isinstance(m, dict) and m.get("role") in {"admin", "coordinator"}
+            ]
+            self.journal.append(
+                board_id,
+                {
+                    "kind": TICKET_ARCHIVED,
+                    "actor": "board-journal-compact",
+                    "payload_ref": resource_uri(board_id, "journal", "compaction"),
+                    "recipient_identities": recipients,
+                    "fixture_provenance": "pursers-personal-runtime",
+                    "archived_reason": "journal_compaction",
+                    "archived_at": iso_at(current_time),
+                    "compacted_through": compacted.get("compacted_through", 0),
+                    "removed_rows": compacted.get("removed", 0),
+                    "retained_rows": compacted.get("retained", 0),
+                    "bytes_freed": compacted.get("removed", 0) * 100,
+                },
+            )
+        return compacted
+
+    def board_health_stats(self) -> dict[str, Any]:
+        """Per-board hot-document size, archive depth, and 60s load/save counts."""
+        stats: dict[str, Any] = {}
+        for path, size in self.store.document_sizes("boards"):
+            token = Path(path).stem
+            board_id = self.board_ids_by_token.get(token) or f"token:{token[:12]}"
+            archived_count = None
+            bytes_freed_total = None
+            items_archived_total = None
+            try:
+                index_document = self.store.load(
+                    Path("archive") / token / "index.json", dict
+                )
+                rows = index_document.get("tickets")
+                archived_count = len(rows) if isinstance(rows, dict) else 0
+                totals = index_document.get("totals")
+                totals = totals if isinstance(totals, dict) else {}
+                bytes_freed_total = int(totals.get("bytes_freed", 0) or 0)
+                archived_memories_count = len(self.load_archived_memories(board_id))
+                items_archived_total = int(totals.get("items_archived", 0) or 0) + archived_memories_count
+            except Exception:  # noqa: BLE001 - health must never fail on one board
+                archived_count = None
+            activity = self.store.activity_counts(Path(path))
+            stats[board_id] = {
+                "hot_document_bytes": int(size),
+                "archived_ticket_count": archived_count,
+                "bytes_freed_total": bytes_freed_total,
+                "items_archived_total": items_archived_total,
+                "document_loads_last_60s": int(activity.get("loads", 0)),
+                "document_saves_last_60s": int(activity.get("saves", 0)),
+            }
+        return stats
+
     def member(
         self, document: dict[str, Any], principal: Principal, agent_name: str
     ) -> dict[str, Any]:
@@ -1433,19 +2116,28 @@ class CentralBoard:
         )
 
     def board_documents_for(self, principal_id: str) -> list[dict[str, Any]]:
-        iterator = getattr(self.store, "iter_documents", None)
-        if iterator is not None:
-            documents = iterator("boards")
+        extractor = getattr(self.store, "document_values", None)
+        if callable(extractor):
+            board_ids = [
+                value for _, value in extractor("boards", "board_id") if value
+            ]
         else:
-            boards_dir = self.store.path("boards")
-            if not boards_dir.exists():
-                return []
-            documents = [self.store.load(path, {}) for path in sorted(boards_dir.glob("*.json"))]
+            iterator = getattr(self.store, "iter_documents", None)
+            if iterator is not None:
+                documents = iterator("boards")
+            else:
+                boards_dir = self.store.path("boards")
+                if not boards_dir.exists():
+                    return []
+                documents = [self.store.load(path, {}) for path in sorted(boards_dir.glob("*.json"))]
+            board_ids = []
+            for discovered in documents:
+                if not isinstance(discovered, dict) or not discovered.get("board_id"):
+                    raise ValueError("invalid board document")
+                board_ids.append(discovered["board_id"])
         visible: list[dict[str, Any]] = []
-        for discovered in documents:
-            if not isinstance(discovered, dict) or not discovered.get("board_id"):
-                raise ValueError("invalid board document")
-            document = self.load(str(discovered["board_id"]))
+        for discovered_board_id in board_ids:
+            document = self.load(str(discovered_board_id))
             try:
                 self.resolve_board_context(document, principal_id)
             except PermissionError:
@@ -2054,8 +2746,51 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 return at
         return parse_epoch(ticket.get("updated_at") or ticket.get("created_at"))
 
+    def inline_history_limit(document: Mapping[str, Any]) -> int:
+        try:
+            return int(
+                document.get("config", {}).get(
+                    "inline_history_limit", DEFAULT_INLINE_HISTORY_LIMIT
+                )
+            )
+        except (TypeError, ValueError):
+            return DEFAULT_INLINE_HISTORY_LIMIT
+
+    def append_bounded_history(
+        document: dict[str, Any], ticket: dict[str, Any], field: str, entry: Any
+    ) -> None:
+        """Append one history entry, bounding inline history as part of the write.
+
+        Operator decision: dispatch/submission/review histories are always
+        bounded inline (newest ``inline_history_limit`` entries, default 50);
+        older entries archive durably inside the same board transaction.
+        """
+        entries = ticket.setdefault(field, [])
+        entries.append(copy.deepcopy(entry))
+        limit = inline_history_limit(document)
+        if len(entries) <= limit:
+            return
+        overflow = entries[: len(entries) - limit]
+        del entries[: len(entries) - limit]
+        previous = ticket.get(f"{field}_omitted_count", 0)
+        previous = (
+            previous
+            if type(previous) is int
+            and not isinstance(previous, bool)
+            and previous > 0
+            else 0
+        )
+        ticket[f"{field}_omitted_count"] = previous + len(overflow)
+        service.persist_history_overflow(
+            document["board_id"], str(ticket.get("ticket_id", "")), field, overflow
+        )
+
     def set_broadcast_state(
-        ticket: dict[str, Any], now: float, kind: str, reason: str,
+        document: dict[str, Any],
+        ticket: dict[str, Any],
+        now: float,
+        kind: str,
+        reason: str,
     ) -> None:
         cycle = int(ticket.get(f"{kind}_dispatch_cycle", 0) or 0)
         state = {
@@ -2063,7 +2798,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             "at": iso_at(now), "cycle": cycle,
         }
         ticket["dispatch_state"] = state
-        ticket.setdefault("dispatch_history", []).append(copy.deepcopy(state))
+        append_bounded_history(document, ticket, "dispatch_history", copy.deepcopy(state))
 
     def agent_matches(values: Iterable[str], member: Mapping[str, Any]) -> bool:
         wanted = {str(value).casefold() for value in values}
@@ -2210,7 +2945,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 ticket.get(f"{kind}_dispatch_cycle", 0) or 0
             ) + 1
             attempts = 0
-            ticket.setdefault("dispatch_history", []).append(
+            append_bounded_history(document, ticket, "dispatch_history",
                 {
                     "state": "requeued", "kind": kind,
                     "reason": "broadcast_reoffer_due", "at": iso_at(now),
@@ -2221,13 +2956,23 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             policy.get("fallback_broadcast", True)
             and attempts >= DEFAULT_FALLBACK_AFTER_OFFERS
         ):
-            set_broadcast_state(ticket, now, kind, "offer_limit_reached")
+            set_broadcast_state(document, ticket, now, kind, "offer_limit_reached")
             return None
         required_tier = int(ticket.get("tier", 2))
         preferred = list(ticket.get("prefer_agents", []))
+        dispatch_history = list(ticket.get("dispatch_history") or [])
+        if ticket.get("dispatch_history_omitted_count"):
+            archived_doc = service.load_archive_document(
+                document["board_id"], str(ticket.get("ticket_id", ""))
+            )
+            if isinstance(archived_doc, dict):
+                overflow = archived_doc.get("history_overflow", {}).get("dispatch_history")
+                if isinstance(overflow, list):
+                    dispatch_history = list(overflow) + dispatch_history
+
         expired_for_this_ticket = {
             entry["agent_id"]
-            for entry in ticket.get("dispatch_history", [])
+            for entry in dispatch_history
             if isinstance(entry, Mapping)
             and entry.get("state") == "expired"
             and entry.get("kind") == kind
@@ -2260,17 +3005,17 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             candidates = alternatives
         if not candidates:
             if reoffer_cycle:
-                set_broadcast_state(ticket, now, kind, "no_live_candidates")
+                set_broadcast_state(document, ticket, now, kind, "no_live_candidates")
                 return None
             if attempts > 0 and policy.get("fallback_broadcast", True):
-                set_broadcast_state(ticket, now, kind, "no_candidates_remaining")
+                set_broadcast_state(document, ticket, now, kind, "no_candidates_remaining")
                 return None
             reason = f"no_eligible_{'worker' if kind == 'work' else 'reviewer'}"
             state = {"state": "unassignable", "kind": kind, "reason": reason}
             if ticket.get("dispatch_state") == state:
                 return None
             ticket["dispatch_state"] = state
-            ticket.setdefault("dispatch_history", []).append({**state, "at": iso_at(now)})
+            append_bounded_history(document, ticket, "dispatch_history", {**state, "at": iso_at(now)})
             return {
                 "kind": "dispatch_unassignable", "ticket_id": ticket["ticket_id"],
                 "offer_kind": kind, "dispatch_reason": reason,
@@ -2298,7 +3043,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         }
         ticket[offer_key] = offer
         ticket["dispatch_state"] = {"state": "offered", **copy.deepcopy(offer)}
-        ticket.setdefault("dispatch_history", []).append(
+        append_bounded_history(document, ticket, "dispatch_history",
             {"state": "offered", **copy.deepcopy(offer)}
         )
         return {
@@ -2326,7 +3071,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             ticket[f"{kind}_offer_expirations"] = int(
                 ticket.get(f"{kind}_offer_expirations", 0)
             ) + 1
-            ticket.setdefault("dispatch_history", []).append(
+            append_bounded_history(document, ticket, "dispatch_history",
                 {
                     "state": "expired", "kind": kind,
                     "agent_id": expired.get("agent_id"),
@@ -2656,10 +3401,69 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             released.extend(redispatch_queue(document, now))
         return released
 
+    def active_board_ids() -> list[str]:
+        boards = list(service.board_ids_by_token.values())
+        for path, _ in service.store.document_sizes("boards"):
+            token = Path(path).stem
+            if token in service.board_ids_by_token:
+                continue
+            doc = service.store.load(Path(path), dict)
+            if isinstance(doc, dict) and "board_id" in doc:
+                b_id = doc["board_id"]
+                service.board_ids_by_token.setdefault(token, b_id)
+                boards.append(b_id)
+        return sorted(set(boards))
+
+    async def _recurring_reaper_loop(interval_s: float = 30.0) -> None:
+        while True:
+            try:
+                await asyncio.sleep(interval_s)
+                now = time.time()
+                for board_id in active_board_ids():
+                    try:
+                        async with service.tool_lock:
+                            with service.board_operation(board_id):
+                                with service.transaction():
+                                    await check_and_reap_expired(board_id, now)
+                    except Exception:
+                        pass
+            except asyncio.CancelledError:
+                break
+
+    reaper_task_holder: list[asyncio.Task[None] | None] = [None]
+
+    def ensure_recurring_reaper() -> None:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        task = reaper_task_holder[0]
+        if task is None or task.done():
+            task = loop.create_task(
+                _recurring_reaper_loop(),
+                name="central-recurring-reaper-sweep",
+            )
+            reaper_task_holder[0] = task
+            service.recurring_reaper_task = task
+
     async def check_and_reap_expired(
         board_id: str, now: float, principal: Principal | None = None, ctx: Context | None = None,
     ) -> list[dict[str, Any]]:
+        ensure_recurring_reaper()
         document = service.load(board_id)
+        # The reaper timer doubles as the archive-tier sweep: aged terminal
+        # tickets move out of the hot document and the journal compacts down
+        # to the oldest live consumer cursor. Both are no-ops when nothing is
+        # due, and read-only board state never rewrites the blob.
+        service.archive_due_tickets(board_id, now)
+        service.journal_sweep(
+            board_id,
+            retention_days=int(
+                document.get("config", {}).get(
+                    "journal_retention_days", DEFAULT_JOURNAL_RETENTION_DAYS
+                )
+            ),
+        )
         has_expired = False
         for ticket in document.get("tickets", {}).values():
             for key in ("work_offer", "review_offer"):
@@ -3528,10 +4332,14 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
     def visible_memories(
         document: dict[str, Any], principal: Principal,
         agent_id_value: str | None = None,
+        include_archived: bool = False,
     ) -> list[dict[str, Any]]:
+        entries = list(document.get("memories", []))
+        if include_archived:
+            entries.extend(service.load_archived_memories(document["board_id"]))
         return [
             entry
-            for entry in document.get("memories", [])
+            for entry in entries
             if _memory_is_visible(
                 entry, principal.principal_id, agent_id_value
             )
@@ -3756,7 +4564,10 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             ).hexdigest()[:12]
             candidate = f"TK-{digest}"
             seq += 1
-            if candidate not in document["tickets"]:
+            if (
+                candidate not in document["tickets"]
+                and candidate not in service.load_archive_index(document["board_id"])
+            ):
                 document["next_ticket_seq"] = seq
                 return candidate
 
@@ -4103,6 +4914,9 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             "principal_id": principal.principal_id,
             "joined_at": iso_at(now),
         }
+        # Rejoining a compacted tombstone restores the full live record.
+        member.pop("tombstone", None)
+        member.pop("tombstoned_at", None)
         member.update(
             {
                 "role": role,
@@ -4216,15 +5030,40 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
     ) -> dict[str, Any]:
         tickets = [
             snapshot_ticket_payload(document["board_id"], ticket)
-            for ticket in sorted(
-                document["tickets"].values(), key=lambda item: item["ticket_id"]
-            )
+            for ticket in document["tickets"].values()
         ]
+        archived_index = service.load_archive_index(document["board_id"])
+        archived_rows = []
+        if isinstance(archived_index, dict):
+            for row in archived_index.values():
+                if not isinstance(row, dict):
+                    continue
+                compact = copy.deepcopy(row)
+                compact_id = str(compact.get("ticket_id") or "")
+                if compact_id:
+                    compact["payload_ref"] = resource_uri(
+                        document["board_id"], "ticket", compact_id
+                    )
+                archived_rows.append(compact)
+        tickets = sorted(
+            tickets + archived_rows,
+            key=lambda item: str(item.get("ticket_id") or ""),
+        )
         return {
             "board": {
                 "board_id": document["board_id"],
                 "claim_ttl_s": claim_ttl(document),
                 "stale_after_days": board_stale_after_days(document),
+                "archive_after_days": int(
+                    document["config"].get(
+                        "archive_after_days", DEFAULT_ARCHIVE_AFTER_DAYS
+                    )
+                ),
+                "inline_history_limit": int(
+                    document["config"].get(
+                        "inline_history_limit", DEFAULT_INLINE_HISTORY_LIMIT
+                    )
+                ),
                 "scrub_profile": board_scrub_profile(document),
                 "review_policy": board_review_policy(document),
                 "dispatch_policy": dispatch_policy(document),
@@ -4234,6 +5073,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 "member_count": len(document["members"]),
                 "principal_member_count": len(document["principal_memberships"]),
                 "ticket_count": len(tickets),
+                "archived_ticket_count": len(archived_rows),
             },
             "agents": project_agents(document, include_retired=include_retired),
             "tickets": tickets,
@@ -4404,10 +5244,29 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         current_review_policy = board_review_policy(document)
         review_label_counts: dict[str, int] = {}
         for item in document["tickets"].values():
-            for review in item.get("review_history", []):
+            reviews = list(item.get("review_history", []))
+            if item.get("review_history_omitted_count"):
+                archive_doc = service.load_archive_document(document["board_id"], str(item.get("ticket_id", "")))
+                if isinstance(archive_doc, dict):
+                    overflow = archive_doc.get("history_overflow", {}).get("review_history", [])
+                    if isinstance(overflow, list):
+                        reviews = list(overflow) + reviews
+            for review in reviews:
                 label = review.get("review_label")
                 if isinstance(label, str) and label:
                     review_label_counts[label] = review_label_counts.get(label, 0) + 1
+        briefing_archived = service.load_archive_index(document["board_id"])
+        if isinstance(briefing_archived, dict):
+            for archived_row in briefing_archived.values():
+                if not isinstance(archived_row, dict):
+                    continue
+                for label, count in (
+                    archived_row.get("review_label_counts") or {}
+                ).items():
+                    if isinstance(label, str) and label and type(count) is int:
+                        review_label_counts[label] = (
+                            review_label_counts.get(label, 0) + count
+                        )
         review_policy_text = (
             "workflow (agent cross-checks are workflow-review, not "
             "independent-principal approval)"
@@ -4945,7 +5804,12 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                     "review_policy": board_review_policy(document),
                     "member_count": len(document["members"]),
                     "principal_member_count": len(document["principal_memberships"]),
-                    "ticket_count": len(document["tickets"]),
+                    "ticket_count": len(document["tickets"]) + len(
+                        service.load_archive_index(board_id)
+                    ),
+                    "archived_ticket_count": len(
+                        service.load_archive_index(board_id)
+                    ),
                     "latest_seq": latest_seq(board_id),
                 }
             )
@@ -5850,6 +6714,14 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         service.principal_members(document, principal.principal_id)
         ticket = document["tickets"].get(ticket_id)
         if ticket is None:
+            archived = service.merged_archived_ticket(board_id, ticket_id)
+            if archived is not None:
+                return {
+                    "ok": True,
+                    "ticket": project_ticket(board_id, archived),
+                    "archived": True,
+                    "latest_seq": latest_seq(board_id),
+                }
             raise ValueError("ticket not found")
         return {
             "ok": True,
@@ -5994,7 +6866,10 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 actor = service.member(document, principal, agent_name)
                 released, renewed = [], []
                 actual_id = ticket_id or allocate_ticket_id(document)
-                if actual_id in document["tickets"]:
+                if (
+                    actual_id in document["tickets"]
+                    or actual_id in service.load_archive_index(document["board_id"])
+                ):
                     raise ValueError("ticket already exists")
                 cutoff = now - INTAKE_RATE_WINDOW_SECONDS
                 recent = 0
@@ -6027,7 +6902,10 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                     document, principal, agent_name, now
                 )
                 actual_id = ticket_id or allocate_ticket_id(document)
-                if actual_id in document["tickets"]:
+                if (
+                    actual_id in document["tickets"]
+                    or actual_id in service.load_archive_index(document["board_id"])
+                ):
                     raise ValueError("ticket already exists")
             requested_assignment = safe_assigned
             if explicit_id and safe_assigned is None and not unassigned:
@@ -6211,7 +7089,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             if park_changed:
                 ticket["parked"] = parked
                 state_name = "parked" if parked else "unparked"
-                ticket.setdefault("dispatch_history", []).append(
+                append_bounded_history(document, ticket, "dispatch_history",
                     {
                         "state": state_name,
                         "kind": kind,
@@ -6708,7 +7586,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                             }
                         )
                     ticket.pop("work_offer", None)
-                    ticket.setdefault("dispatch_history", []).append(
+                    append_bounded_history(document, ticket, "dispatch_history",
                         {"state": "accepted", "kind": "work", "agent_id": actor["agent_id"], "at": iso_at(now)}
                     )
                 ticket["dispatch_state"] = {
@@ -7369,7 +8247,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 "submitted_by_principal_id": principal.principal_id,
                 "submitted_at": iso_at(now),
             }
-            ticket.setdefault("submission_history", []).append(copy.deepcopy(submission))
+            append_bounded_history(document, ticket, "submission_history", copy.deepcopy(submission))
             ticket.update(submission)
             ticket["status"] = "submitted"
             ticket["submitted_by_agent_id"] = actor["agent_id"]
@@ -7524,7 +8402,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                             }
                         )
                     ticket.pop("review_offer", None)
-                    ticket.setdefault("dispatch_history", []).append(
+                    append_bounded_history(document, ticket, "dispatch_history",
                         {"state": "accepted", "kind": "review", "agent_id": actor["agent_id"], "at": iso_at(now)}
                     )
                 ticket["dispatch_state"] = {
@@ -7879,7 +8757,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 "reviewed_at": iso_at(now),
                 "status_to": new_status,
             }
-            ticket.setdefault("review_history", []).append(review_record)
+            append_bounded_history(document, ticket, "review_history", review_record)
             ticket.pop("review_lease", None)
             if retryable_rejection:
                 ticket["last_claimed_by_agent_id"] = ticket.get("claimed_by_agent_id")
@@ -7931,6 +8809,10 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             }
 
         changed = service.mutate(board_id, review)
+        if changed.get("new_status") == "closed":
+            doc = service.load(board_id)
+            if int(doc.get("config", {}).get("archive_after_days", DEFAULT_ARCHIVE_AFTER_DAYS)) == 0:
+                service.archive_due_tickets(board_id, now)
         release_events = await publish_releases(board_id, changed["released"], principal, ctx)
         if "error" in changed:
             if isinstance(changed["error"], Mapping):
@@ -7966,7 +8848,10 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             reviewed_by_agent_name=changed["review_record"]["reviewed_by_agent_name"],
             reviewed_by_principal_id=changed["review_record"]["reviewed_by_principal_id"],
             rejection_count=changed["ticket"].get("rejection_count", 0),
-            review_notes_ref=f"{uri}#review-{len(changed['ticket'].get('review_history', []))}",
+            review_notes_ref=(
+                f"{uri}#review-"
+                f"{len(changed['ticket'].get('review_history', [])) + int(changed['ticket'].get('review_history_omitted_count', 0) or 0)}"
+            ),
             fix_instructions_ref=(
                 f"{uri}#fix-{changed['ticket'].get('rejection_count', 0)}"
                 if changed["ticket"].get("fix_instructions") else None
@@ -8092,6 +8977,9 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             }
 
         changed = service.mutate(board_id, cancel)
+        doc = service.load(board_id)
+        if int(doc.get("config", {}).get("archive_after_days", DEFAULT_ARCHIVE_AFTER_DAYS)) == 0:
+            service.archive_due_tickets(board_id, now)
         release_events = await publish_releases(
             board_id, changed["released"], principal, ctx
         )
@@ -8117,13 +9005,22 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         status: str | None = None,
         assigned_to: str | None = None,
         include_closed: bool = False,
+        include_archived: bool = True,
         limit: int = 100,
         agent_name: str | None = None,
         review_unclaimed_only: bool = False,
         ticket_ids: list[str] | None = None,
     ) -> dict[str, Any]:
-        """List authorized tickets with bounded server-side filters."""
+        """List authorized tickets with bounded server-side filters.
+
+        Terminal closed/canceled tickets that aged into the archive tier stay
+        visible through the compact hot-document index; their full bodies are
+        read through from the archive for the returned page only.
+        ``include_archived=False`` restricts results to the hot document.
+        """
         board_id = require_id("board_id", board_id)
+        if type(include_archived) is not bool:
+            raise ValueError("include_archived must be a boolean")
         if status is not None and status not in ACTIVE_TICKET_STATES | TERMINAL_TICKET_STATES:
             raise ValueError("unsupported ticket status")
         if not 1 <= limit <= 500:
@@ -8179,15 +9076,67 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 if item.get("status") == "submitted"
                 and not review_lease_is_live(item, now)
             ]
+        archived_rows: list[dict[str, Any]] = []
+        wants_archived = (
+            include_archived
+            and not review_unclaimed_only
+            and (
+                status in ARCHIVABLE_TICKET_STATES
+                or (status is None and include_closed)
+            )
+        )
+        if wants_archived:
+            archived_index = service.load_archive_index(board_id)
+            for row in archived_index.values():
+                if not isinstance(row, dict):
+                    continue
+                if status is not None and row.get("status") != status:
+                    continue
+                row_id = str(row.get("ticket_id") or "")
+                if (
+                    selected_ticket_ids is not None
+                    and row_id not in selected_ticket_ids
+                ):
+                    continue
+                if assigned_to:
+                    needle = assigned_to.casefold()
+                    values = {
+                        str(row.get("assigned_to") or ""),
+                        str(row.get("claimed_by") or ""),
+                        str(row.get("assigned_to_agent_id") or ""),
+                        str(row.get("claimed_by_agent_id") or ""),
+                    }
+                    if not any(needle in value.casefold() for value in values):
+                        continue
+                archived_rows.append(row)
         priority_order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
-        tickets.sort(
-            key=lambda item: (
-                priority_order.get(item.get("priority", "medium"), 9),
-                item["ticket_id"],
+        combined: list[tuple[dict[str, Any], bool]] = [
+            (item, False) for item in tickets
+        ] + [(row, True) for row in archived_rows]
+        combined.sort(
+            key=lambda pair: (
+                priority_order.get(pair[0].get("priority", "medium"), 9),
+                str(pair[0].get("ticket_id") or ""),
             )
         )
         projected = []
-        for item in tickets[:limit]:
+        for item, is_archived in combined[:limit]:
+            if is_archived:
+                archived_id = str(item.get("ticket_id") or "")
+                full = (
+                    service.merged_archived_ticket(board_id, archived_id)
+                    if archived_id else None
+                )
+                if full is None:
+                    compact_row = copy.deepcopy(item)
+                    projected.append(compact_row)
+                    continue
+                archived_row = project_ticket(
+                    board_id, full, include_annotations=False
+                )
+                archived_row["archived"] = True
+                projected.append(archived_row)
+                continue
             row = project_ticket(board_id, item, include_annotations=False)
             lease = item.get("review_lease")
             if item.get("status") != "submitted":
@@ -8214,11 +9163,13 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             "ok": True,
             "tickets": projected,
             "count": len(projected),
-            "total_matching": len(tickets),
+            "total_matching": len(combined),
+            "archived_matching": len(archived_rows),
             "filters": {
                 "status": status,
                 "assigned_to": assigned_to,
                 "include_closed": include_closed,
+                "include_archived": include_archived,
                 "review_unclaimed_only": review_unclaimed_only,
                 "ticket_ids": sorted(selected_ticket_ids)
                 if selected_ticket_ids is not None else None,
@@ -8491,7 +9442,9 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         actor = service.member(document, principal, agent_name)
         visible = [
             project_memory(entry)
-            for entry in visible_memories(document, principal, actor["agent_id"])
+            for entry in visible_memories(
+                document, principal, actor["agent_id"], include_archived=include_archived
+            )
         ]
         if not include_archived:
             visible = [item for item in visible if not item.get("archived")]
@@ -8627,7 +9580,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             service.principal_members(document, principal.principal_id)
         needle = safe_query.casefold()
         ranked: list[tuple[int, float, str, dict[str, Any]]] = []
-        for raw in visible_memories(document, principal, agent_id_value):
+        for raw in visible_memories(document, principal, agent_id_value, include_archived=include_archived):
             item = project_memory(raw)
             if item.get("archived") and not include_archived:
                 continue
@@ -9015,10 +9968,35 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                             "threshold_s": reoffer_after,
                         }
                     )
-            for review in ticket.get("review_history", []):
+            reviews = list(ticket.get("review_history", []))
+            if ticket.get("review_history_omitted_count"):
+                archive_doc = service.load_archive_document(board_id, str(ticket.get("ticket_id", "")))
+                if isinstance(archive_doc, dict):
+                    overflow = archive_doc.get("history_overflow", {}).get("review_history", [])
+                    if isinstance(overflow, list):
+                        reviews = list(overflow) + reviews
+            for review in reviews:
                 label = review.get("review_label")
                 if isinstance(label, str) and label:
                     review_label_counts[label] = review_label_counts.get(label, 0) + 1
+        archived_index = service.load_archive_index(board_id)
+        archived_count = 0
+        if isinstance(archived_index, dict):
+            for archived_row in archived_index.values():
+                if not isinstance(archived_row, dict):
+                    continue
+                archived_count += 1
+                archived_status = str(archived_row.get("status", "unknown"))
+                status_counts[archived_status] = (
+                    status_counts.get(archived_status, 0) + 1
+                )
+                for label, count in (
+                    archived_row.get("review_label_counts") or {}
+                ).items():
+                    if isinstance(label, str) and label and type(count) is int:
+                        review_label_counts[label] = (
+                            review_label_counts.get(label, 0) + count
+                        )
         agents = project_agents(document, include_retired=include_retired)
         hidden_lifecycle_count = sum(
             1 for member in document["members"].values()
@@ -9033,7 +10011,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         rendered = "\n".join(
             [
                 f"# Board status: {board_id}",
-                f"Agents: {len(agents)} | Tickets: {len(document['tickets'])} | Visible memories: {len(memories)}",
+                f"Agents: {len(agents)} | Tickets: {len(document['tickets']) + archived_count} | Visible memories: {len(memories)}",
                 f"Review policy: {review_policy_text}",
                 "Unassignable: " + (
                     ", ".join(
@@ -9234,6 +10212,55 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             "ok": True,
             "board_id": board_id,
             **compacted,
+            "durable_records_untouched": True,
+        }
+
+    @tool()
+    async def board_archive_run(
+        board_id: str,
+        ctx: Context,
+    ) -> dict[str, Any]:
+        """Manual operator sweep; the automatic reaper-timer sweep is primary.
+
+        Runs the same automatic bloat rules on demand: archives closed/
+        canceled tickets older than ``archive_after_days`` (default 2) into
+        per-ticket archive documents, bounds inline histories to
+        ``inline_history_limit`` (default 50) newest entries, tombstones
+        retired members inactive for ``stale_after_days``, prunes invites
+        expired more than ``invite_prune_after_days`` (default 7), journals
+        one ``ticket_archived`` entry with counts for board admins, and
+        compacts journal rows beyond the retention window (oldest live
+        consumer cursor plus ``journal_retention_days``, default 7, with a
+        500-row floor). Durable archived records are never deleted; archived
+        tickets stay readable through ticket_get and ticket_list.
+        """
+        board_id = require_id("board_id", board_id)
+        principal = current_principal()
+        require_scope(principal, "board:write")
+        document = service.load(board_id)
+        membership = service.resolve_board_context(document, principal.principal_id)
+        if (
+            membership.get("role") != "admin"
+            and COORDINATOR_SCOPE not in principal.scopes
+        ):
+            raise PermissionError("board role not authorized")
+        now = time.time()
+        with service.transaction():
+            summary = service.archive_due_tickets(board_id, now)
+            compacted = service.journal_sweep(
+                board_id,
+                retention_days=int(
+                    document.get("config", {}).get(
+                        "journal_retention_days", DEFAULT_JOURNAL_RETENTION_DAYS
+                    )
+                ),
+            )
+        if ctx is not None:
+            await ctx.notify_resource_updated(f"board://{board_id}/journal")
+        return {
+            "ok": True,
+            **summary,
+            "journal_compaction": compacted,
             "durable_records_untouched": True,
         }
 
@@ -9585,6 +10612,10 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         return tools
 
     mcp.list_tools = custom_list_tools
+    service.dispatch_ticket = dispatch_ticket
+    service.ensure_recurring_reaper = ensure_recurring_reaper
+    service.active_board_ids = active_board_ids
+    service.check_and_reap_expired = check_and_reap_expired
     return mcp, service
 
 
