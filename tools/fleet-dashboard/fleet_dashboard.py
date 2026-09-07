@@ -69,6 +69,7 @@ from seat_config import (  # noqa: I001
     discover_managed_seats,
 )
 from release_ops import ReleaseOpsManager
+import runtime_environment
 
 
 DEFAULT_URL = "http://127.0.0.1:8766/mcp"
@@ -113,14 +114,12 @@ CONFIG_OPS_PLAN_TTL_SECONDS = 120
 CONFIG_PLAN_LIMIT = 50
 GIT_TIMEOUT_SECONDS = 120
 GIT_ERROR_TAIL_CHARS = 2_000
-CONFIG_STATE_DIR = Path("~/.pursers/fleet-dashboard")
 MAX_REVIEW_STATE_BYTES = 4_096
 REVIEW_STATE_SUFFIX = ".review-state.json"
 WORKER_NAME_RE = re.compile(r"^[a-z0-9-]{2,32}$")
 WORKER_KEYCHAIN_SERVICE = "pursers-worker"
 WORKER_SECURITY_CLI = Path("/usr/bin/security")
 WORKER_AUTH_SCHEME_PARTS = ("Bea", "rer")
-DEFAULT_WORKERS_DIR = Path("~/.pursers/workers")
 DEFAULT_WORKER_SCRIPT = (
     Path(__file__).resolve().parents[1] / "worker-runtime" / "pursers_worker.py"
 )
@@ -664,26 +663,36 @@ class WorkerManager:
 
     def __init__(
         self,
-        root: str | Path = DEFAULT_WORKERS_DIR,
+        root: str | Path | None = None,
         *,
         worker_script: str | Path = DEFAULT_WORKER_SCRIPT,
         platform: str | None = None,
         command_runner: Callable[..., Any] = subprocess.run,
         process_factory: Callable[..., Any] = subprocess.Popen,
         process_matches: Callable[[int, Path], bool] | None = None,
+        process_provider: Callable[..., runtime_environment.ProcessInspection]
+        | None = None,
     ) -> None:
-        self.root = Path(root).expanduser().resolve()
+        self.root = (
+            Path(root).expanduser().resolve()
+            if root is not None
+            else runtime_environment.pursers_state_root() / "workers"
+        )
         self.worker_script = Path(worker_script).expanduser().resolve()
         self.platform = sys.platform if platform is None else platform
         self.command_runner = command_runner
         self.process_factory = process_factory
+        self.process_provider = (
+            process_provider or runtime_environment.PROCESS_LIST_PROVIDER
+        )
         self.process_matches = process_matches or self._default_process_matches
+        self._process_inspection_available = True
         self._children: dict[str, Any] = {}
         self._lock = threading.RLock()
-        if self.platform == "darwin":
-            self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
-            os.chmod(self.root, 0o700)
-            self.adopt_orphans()
+
+    def _ensure_root(self) -> None:
+        self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(self.root, 0o700)
 
     @property
     def enabled(self) -> bool:
@@ -758,6 +767,7 @@ class WorkerManager:
         }
 
     def _write_private(self, path: Path, payload: bytes) -> None:
+        self._ensure_root()
         temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
         descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         try:
@@ -881,14 +891,12 @@ class WorkerManager:
             return None
 
     def _default_process_matches(self, pid: int, config_path: Path) -> bool:
-        try:
-            result = self.command_runner(
-                ["/bin/ps", "-p", str(pid), "-o", "command="],
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-        except (OSError, subprocess.CalledProcessError):
+        result = self.process_provider(
+            ["/bin/ps", "-p", str(pid), "-o", "command="],
+            runner=self.command_runner,
+        )
+        self._process_inspection_available = result.available
+        if not result.available:
             return False
         command = str(result.stdout)
         return str(self.worker_script) in command and str(config_path) in command
@@ -902,6 +910,13 @@ class WorkerManager:
         pid = self._read_pid(name)
         if pid is not None and self.process_matches(pid, self._config_path(name)):
             return {"running": True, "pid": pid, "adopted": True}
+        if pid is not None and not self._process_inspection_available:
+            return {
+                "running": False,
+                "pid": pid,
+                "adopted": False,
+                "process_inspection": runtime_environment.PROCESS_INSPECTION_UNAVAILABLE,
+            }
         self._pid_path(name).unlink(missing_ok=True)
         return {"running": False, "pid": None, "adopted": False}
 
@@ -999,6 +1014,10 @@ class WorkerManager:
 
     def _fence_active_review(self, name: str, reason: str) -> None:
         """Append a bounded local lifecycle fence before clearing review state."""
+        # Lazy-root contract: the fence may be the first private write (e.g.
+        # an idempotent stop on a never-created worker), so create the root
+        # on demand instead of assuming construction made it.
+        self._ensure_root()
         path = self._log_path(name)
         flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
         flags |= getattr(os, "O_NOFOLLOW", 0)
@@ -3916,7 +3935,7 @@ class SeatConfigManager:
         self,
         inventory_path: str | Path | None = None,
         *,
-        state_dir: str | Path = CONFIG_STATE_DIR,
+        state_dir: str | Path | None = None,
         bridge_installer: BridgeInstaller | None = None,
         doctor_factory: Callable[[], Doctor] = Doctor,
         latest_version: Callable[[], str | None] | None = None,
@@ -3924,7 +3943,11 @@ class SeatConfigManager:
         git_runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
         discovered_configs: list[tuple[str, str | Path]] | None = None,
     ) -> None:
-        self.state_dir = Path(state_dir).expanduser()
+        self.state_dir = (
+            Path(state_dir).expanduser()
+            if state_dir is not None
+            else runtime_environment.dashboard_state_dir()
+        )
         self.inventory = SeatInventory(inventory_path or self.state_dir / "seats.json")
         self.bridge_installer = bridge_installer or BridgeInstaller()
         self.doctor_factory = doctor_factory
@@ -6573,9 +6596,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--agent-name", default="fleet-dashboard-viewer")
     parser.add_argument("--stale-seconds", type=int, default=300)
     parser.add_argument("--cache-seconds", type=float, default=5.0)
-    parser.add_argument("--workers-dir", default=str(DEFAULT_WORKERS_DIR))
     parser.add_argument(
-        "--seat-state-dir", default=str(CONFIG_STATE_DIR), help=argparse.SUPPRESS
+        "--workers-dir",
+        default=str(runtime_environment.pursers_state_root() / "workers"),
+    )
+    parser.add_argument(
+        "--seat-state-dir",
+        default=str(runtime_environment.dashboard_state_dir()),
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--worker-script", default=str(DEFAULT_WORKER_SCRIPT), help=argparse.SUPPRESS

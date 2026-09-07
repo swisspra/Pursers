@@ -15,6 +15,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Changed
 
+- fleet-dashboard: hermetic tests (state root override, injectable process
+  lister). Dashboard state resolves through a lazy `PURSERS_STATE_DIR`
+  override, worker directories and lifecycle fences are created only on first
+  private write, and process listing degrades to an explicit unavailable
+  result when inspection is denied.
 - Wait-bridge Central traffic now reuses one bounded HTTP pool per process,
   caps concurrent Central connections at four by default, and logs before an
   excess board subscription falls back to polling. Coordinator subscription
