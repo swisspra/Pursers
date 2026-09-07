@@ -895,7 +895,7 @@ class WorkerManager:
                 capture_output=True,
                 text=True,
             )
-        except (OSError, subprocess.CalledProcessError):
+        except (OSError, subprocess.CalledProcessError, PermissionError):
             return False
         command = str(result.stdout)
         return str(self.worker_script) in command and str(config_path) in command
@@ -3992,12 +3992,27 @@ class FleetFetcher:
 
         return {"ok": True, "doors": rows}
 
+    async def _authorize_door_action(self, board_id: str) -> None:
+        reg_payload = await self.fetch_project_registry()
+        registry = reg_payload.get("registry", {}) if isinstance(reg_payload, dict) else {}
+        active_boards = {self.config.home_board}
+        active_boards.update(
+            project.get("board_id")
+            for project in registry.get("projects", {}).values()
+            if isinstance(project, dict) and project.get("status") == "active"
+        )
+        if board_id not in active_boards:
+            raise ValueError(f"board {board_id!r} is not an active registry project")
+        async with self._client(board_id) as client:
+            await _client_call(client, "board_status", {})
+
     async def copy_door(self, board_id: str, role: str) -> dict[str, Any]:
         if not BOARD_ID_RE.fullmatch(board_id):
             raise ValueError("invalid board_id")
         if role not in door_admin.VALID_ROLES:
             raise ValueError("role must be worker or reviewer")
         keys_dir, jwks_path = self._require_doors_config()
+        await self._authorize_door_action(board_id)
         issued = door_admin.issue_credential(
             board=board_id,
             role=role,
@@ -4019,6 +4034,7 @@ class FleetFetcher:
         if role not in door_admin.VALID_ROLES:
             raise ValueError("role must be worker or reviewer")
         keys_dir, jwks_path = self._require_doors_config()
+        await self._authorize_door_action(board_id)
         issued = door_admin.issue_credential(
             board=board_id,
             role=role,
@@ -4100,27 +4116,20 @@ class FleetFetcher:
             })
 
         # Step b: board create + first board_onboard as admin (or detect existing)
-        async with self._client(board_id) as client:
-            board_already_present = False
-            try:
-                bl = await _client_call(client, "board_list", {})
+        board_already_present = False
+        try:
+            async with self._client(self.config.home_board) as home_client:
+                bl = await _client_call(home_client, "board_list", {})
                 existing_boards = {
                     b.get("board_id")
                     for b in bl.get("boards", [])
                     if isinstance(b, dict)
                 }
                 board_already_present = board_id in existing_boards
-            except Exception:
-                board_already_present = False
+        except Exception:
+            board_already_present = False
 
-            if not board_already_present:
-                try:
-                    bm = await _client_call(client, "board_members", {})
-                    if bm.get("members") or bm.get("principal_member_count", 0) > 0:
-                        board_already_present = True
-                except Exception:
-                    board_already_present = False
-
+        async with self._client(board_id) as client:
             if board_already_present:
                 steps.append({
                     "step": "board_create",

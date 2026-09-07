@@ -5147,6 +5147,21 @@ def _run_js_with_seats(esc_fn: str, render_fn: str, seats: list[dict], fallback:
     return result.stdout.strip()
 
 
+@pytest.fixture(autouse=True)
+def _isolate_operator_and_worker_state(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+):
+    worker_dir = tmp_path_factory.mktemp("workers")
+    state_dir = tmp_path_factory.mktemp("fleet_dashboard_state")
+    monkeypatch.setattr(dashboard, "DEFAULT_WORKERS_DIR", worker_dir)
+    monkeypatch.setattr(dashboard, "CONFIG_STATE_DIR", state_dir)
+    monkeypatch.setattr(
+        dashboard.WorkerManager,
+        "_default_process_matches",
+        lambda self, pid, config_path: False,
+    )
+
+
 @pytest.fixture(scope="module")
 def _role_chip_js():
     """Extract esc and renderRoleChips from the dashboard HTML once per module."""
@@ -6411,8 +6426,9 @@ DOOR_SHAPE = re.compile(r"prs1\.[A-Za-z0-9_-]+")
 
 
 class FakeDoorBoardClient:
-    def __init__(self, board_id: str, *, is_admin: bool = True) -> None:
+    def __init__(self, board_id: str, *, central: Any = None, is_admin: bool = True) -> None:
         self.board_id = board_id
+        self.central = central
         self.is_admin = is_admin
         self.memberships: dict[str, str] = {}
         self.onboarded = False
@@ -6425,6 +6441,10 @@ class FakeDoorBoardClient:
         self.review_policy = "workflow"
 
     async def __aenter__(self) -> Self:
+        # Faithful to BoardClient entry behavior: BoardClient.__aenter__ joins the board.
+        # Joining a fresh board on Central admits the creator as admin and creates the board.
+        if self.central is not None and self.is_admin:
+            self.central.created_boards.add(self.board_id)
         return self
 
     async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
@@ -6433,15 +6453,19 @@ class FakeDoorBoardClient:
     async def board_list(self) -> dict:
         if not self.is_admin:
             raise PermissionError("board access denied")
-        boards = [{"board_id": "pursers"}]
-        if self.onboarded:
-            boards.append({"board_id": self.board_id})
-        return {"ok": True, "boards": boards}
+        boards = (
+            sorted(self.central.created_boards)
+            if self.central is not None
+            else ["pursers", self.board_id]
+        )
+        return {"ok": True, "boards": [{"board_id": b} for b in boards]}
 
     async def board_onboard(self, **kwargs: object) -> dict:
         if not self.is_admin:
             raise PermissionError("board access denied: require admin")
         self.onboarded = True
+        if self.central is not None:
+            self.central.created_boards.add(self.board_id)
         return {"ok": True, "board_id": self.board_id}
 
     async def board_members(self) -> dict:
@@ -6505,11 +6529,12 @@ class FakeDoorCentral:
                 }
             },
         }
+        self.created_boards: set[str] = {"pursers", "existing-board"}
         self.boards: dict[str, FakeDoorBoardClient] = {}
 
     def client_factory(self, url: str, token: str, board_id: str, **kwargs: object) -> FakeDoorBoardClient:
         if board_id not in self.boards:
-            self.boards[board_id] = FakeDoorBoardClient(board_id, is_admin=self.is_admin)
+            self.boards[board_id] = FakeDoorBoardClient(board_id, central=self, is_admin=self.is_admin)
         board = self.boards[board_id]
 
         async def state_get(key: str | None = None) -> dict:
@@ -6831,11 +6856,45 @@ def test_guards_reject_cross_origin_and_non_admin(tmp_path: Path) -> None:
     base2 = f"http://127.0.0.1:{server2.server_port}"
 
     try:
+        # Baseline key files and JWKS bytes before non-admin mutations
+        initial_jwks = b'{"keys":[]}'
+        jwks_path.write_bytes(initial_jwks)
+        keys_dir.mkdir(parents=True, exist_ok=True)
+        marker_file = keys_dir / "marker.txt"
+        marker_file.write_text("untouched", encoding="utf-8")
+        initial_keys_files = {p.name: p.read_bytes() for p in keys_dir.iterdir()}
+
         # GET /api/doors with non-admin fails with 403
         req_doors = urllib.request.Request(base2 + "/api/doors", headers={"Origin": base2})
         with pytest.raises(urllib.error.HTTPError) as exc_info:
             urllib.request.urlopen(req_doors)
         assert exc_info.value.code == 403
+
+        # POST /api/doors/copy with non-admin fails with 403
+        req_copy = urllib.request.Request(
+            base2 + "/api/doors/copy",
+            data=json.dumps({"board": "existing-board", "role": "worker"}).encode(),
+            headers={"Content-Type": "application/json", "Origin": base2},
+            method="POST",
+        )
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            urllib.request.urlopen(req_copy)
+        assert exc_info.value.code == 403
+
+        # POST /api/doors/rotate with non-admin fails with 403
+        req_rotate = urllib.request.Request(
+            base2 + "/api/doors/rotate",
+            data=json.dumps({"board": "existing-board", "role": "worker"}).encode(),
+            headers={"Content-Type": "application/json", "Origin": base2},
+            method="POST",
+        )
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            urllib.request.urlopen(req_rotate)
+        assert exc_info.value.code == 403
+
+        # Keys directory and JWKS remain byte-for-byte unchanged
+        assert jwks_path.read_bytes() == initial_jwks
+        assert {p.name: p.read_bytes() for p in keys_dir.iterdir()} == initial_keys_files
 
         # POST /api/projects/add with non-admin fails with 403
         req_add = urllib.request.Request(
@@ -6856,6 +6915,8 @@ def test_guards_reject_cross_origin_and_non_admin(tmp_path: Path) -> None:
 def test_no_secret_assertions_in_state_logs_and_listings(tmp_path: Path) -> None:
     keys_dir = tmp_path / "keys"
     jwks_path = tmp_path / "jwks.json"
+    state_dir = tmp_path / "dashboard_state"
+    state_dir.mkdir(parents=True, exist_ok=True)
     fake_central = FakeDoorCentral()
 
     config = dashboard.Config(
@@ -6871,26 +6932,58 @@ def test_no_secret_assertions_in_state_logs_and_listings(tmp_path: Path) -> None
     fetcher = dashboard.FleetFetcher(config, client_factory=fake_central.client_factory)
     cache = dashboard.DashboardCache([fetcher], 60)
 
-    class FakeListingSeatManager:
-        def registry(self, fleet: dict, reg: dict) -> dict:
-            return {"projects": []}
+    class FakeSecretSeatManager(dashboard.SeatConfigManager):
+        def _clone_state(self, path: Path, ref: str = "main") -> dict:
+            return {"status": "ready", "dirty": False}
+
+        def prepare_fleet_clone(self, registry_payload: dict, project_name: str) -> dict:
+            reg = copy.deepcopy(registry_payload["registry"])
+            clone_path = self.state_dir / "fleet-clone"
+            clone_path.mkdir(parents=True, exist_ok=True)
+            reg["projects"][project_name]["fleet_clone_dir"] = str(clone_path)
+            return {
+                "project": project_name,
+                "clone": {"path": str(clone_path), "status": "ready"},
+                "registry": reg,
+                "expected_sha256": registry_payload["expected_sha256"],
+            }
+
+    seat_mgr = FakeSecretSeatManager(state_dir=state_dir)
 
     server = dashboard.ThreadingHTTPServer(
-        ("127.0.0.1", 0), dashboard.make_handler(cache, seat_manager=FakeListingSeatManager())
+        ("127.0.0.1", 0), dashboard.make_handler(cache, seat_manager=seat_mgr)
     )
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     base = f"http://127.0.0.1:{server.server_port}"
 
     try:
-        # Mint doors via copy
-        req = urllib.request.Request(
+        # Mint doors via copy, rotate, and add project
+        req_copy = urllib.request.Request(
             base + "/api/doors/copy",
             data=json.dumps({"board": "existing-board", "role": "worker"}).encode(),
             headers={"Content-Type": "application/json", "Origin": base},
             method="POST",
         )
-        with urllib.request.urlopen(req) as response:
+        with urllib.request.urlopen(req_copy) as response:
+            assert response.status == 200
+
+        req_rotate = urllib.request.Request(
+            base + "/api/doors/rotate",
+            data=json.dumps({"board": "existing-board", "role": "worker"}).encode(),
+            headers={"Content-Type": "application/json", "Origin": base},
+            method="POST",
+        )
+        with urllib.request.urlopen(req_rotate) as response:
+            assert response.status == 200
+
+        req_add = urllib.request.Request(
+            base + "/api/projects/add",
+            data=json.dumps({"name": "secret-test", "board_id": "secret-test", "work_dir": "/PATH/TO/SECRET"}).encode(),
+            headers={"Content-Type": "application/json", "Origin": base},
+            method="POST",
+        )
+        with urllib.request.urlopen(req_add) as response:
             assert response.status == 200
 
         # Verify listing endpoints NEVER contain door strings or JWT substrings
@@ -6899,6 +6992,18 @@ def test_no_secret_assertions_in_state_logs_and_listings(tmp_path: Path) -> None
                 content = response.read().decode("utf-8")
                 assert not DOOR_SHAPE.search(content), f"Door string leak in {listing_path}"
                 assert not JWT_SHAPE.search(content), f"JWT leak in {listing_path}"
+
+        # Inspect all dashboard state files and audit logs under state_dir
+        state_files = [p for p in state_dir.rglob("*") if p.is_file()]
+        for sf in state_files:
+            content = sf.read_text(encoding="utf-8", errors="replace")
+            assert not DOOR_SHAPE.search(content), f"Door string leak in state file {sf.name}"
+            assert not JWT_SHAPE.search(content), f"JWT leak in state file {sf.name}"
+
+        # Inspect JWKS public key file
+        jwks_content = jwks_path.read_text(encoding="utf-8")
+        assert not DOOR_SHAPE.search(jwks_content), "Door string leak in JWKS"
+        assert not JWT_SHAPE.search(jwks_content), "JWT leak in JWKS"
     finally:
         server.shutdown()
         server.server_close()
