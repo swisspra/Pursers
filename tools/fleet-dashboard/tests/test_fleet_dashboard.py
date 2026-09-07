@@ -2689,7 +2689,10 @@ def test_multi_central_param_routing_and_config_save_target() -> None:
     assert work.saved == [(valid_coordinator_config(), "a" * 64)]
 
 
-def test_single_central_flags_and_response_shape_remain_compatible() -> None:
+def test_single_central_flags_and_response_shape_remain_compatible(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("ONBOARD_CENTRAL_URL", raising=False)
     args = dashboard.parse_args(["--port", "8899"])
     args.token_file = None
     old = os.environ.get("ONBOARD_CENTRAL_TOKEN")
