@@ -2178,6 +2178,33 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             int(policy.get("offer_ttl_s", DEFAULT_OFFER_TTL_S)),
         )
 
+    def release_assignment_pin(
+        ticket: dict[str, Any], now: float, reason: str,
+    ) -> str | None:
+        previous = ticket.get("assigned_to_agent_id")
+        next_cycle = int(ticket.get("work_dispatch_cycle", 0) or 0) + 1
+        for key in (
+            "assigned_to",
+            "assigned_to_agent_id",
+            "assigned_to_kind",
+            "work_pin_unavailable_cycles",
+            "work_pin_unavailable_last_at",
+        ):
+            ticket.pop(key, None)
+        ticket["updated_at"] = iso_at(now)
+        ticket["work_dispatch_cycle"] = next_cycle
+        ticket.setdefault("dispatch_history", []).append(
+            {
+                "state": "pin_released",
+                "kind": "work",
+                "reason": reason,
+                "previous_assigned_to_agent_id": previous,
+                "at": iso_at(now),
+                "cycle": next_cycle,
+            }
+        )
+        return str(previous) if previous else None
+
     def dispatch_ticket(
         document: dict[str, Any], ticket: dict[str, Any], now: float, kind: str,
     ) -> dict[str, Any] | None:
@@ -2217,6 +2244,14 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                     "cycle": ticket[f"{kind}_dispatch_cycle"],
                 }
             )
+        if (
+            kind == "work"
+            and ticket.get("assigned_to_agent_id")
+            and attempts >= DEFAULT_FALLBACK_AFTER_OFFERS
+        ):
+            release_assignment_pin(ticket, now, "offer_limit_reached")
+            ticket[f"{kind}_offer_expirations"] = 0
+            attempts = 0
         elif (
             policy.get("fallback_broadcast", True)
             and attempts >= DEFAULT_FALLBACK_AFTER_OFFERS
@@ -2259,6 +2294,38 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         if alternatives:
             candidates = alternatives
         if not candidates:
+            if kind == "work" and ticket.get("assigned_to_agent_id"):
+                cycle_key = "work_pin_unavailable_cycles"
+                last_key = "work_pin_unavailable_last_at"
+                now_marker = iso_at(now)
+                cycles = int(ticket.get(cycle_key, 0) or 0)
+                if ticket.get(last_key) != now_marker:
+                    cycles += 1
+                    ticket[cycle_key] = cycles
+                    ticket[last_key] = now_marker
+                if cycles >= DEFAULT_FALLBACK_AFTER_OFFERS:
+                    release_assignment_pin(ticket, now, "pinned_seat_unavailable")
+                    ticket[f"{kind}_offer_expirations"] = 0
+                    return dispatch_ticket(document, ticket, now, kind)
+                state = {
+                    "state": "unassignable",
+                    "kind": kind,
+                    "reason": "pinned_seat_unavailable",
+                    "pin_unavailable_cycles": cycles,
+                }
+                if ticket.get("dispatch_state") == state:
+                    return None
+                ticket["dispatch_state"] = state
+                ticket.setdefault("dispatch_history", []).append(
+                    {**state, "at": now_marker}
+                )
+                return {
+                    "kind": "dispatch_unassignable",
+                    "ticket_id": ticket["ticket_id"],
+                    "offer_kind": kind,
+                    "dispatch_reason": state["reason"],
+                    "recipients": service.admitted_agent_ids(document),
+                }
             if reoffer_cycle:
                 set_broadcast_state(ticket, now, kind, "no_live_candidates")
                 return None
@@ -2285,6 +2352,9 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 str(pair[0]["agent_id"]),
             )
         )
+        if kind == "work":
+            ticket.pop("work_pin_unavailable_cycles", None)
+            ticket.pop("work_pin_unavailable_last_at", None)
         selected, _ = candidates[0]
         selected["last_offered_at"] = iso_at(now)
         offer_ttl_s = int(policy.get("offer_ttl_s", DEFAULT_OFFER_TTL_S))
@@ -4227,6 +4297,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 "stale_after_days": board_stale_after_days(document),
                 "scrub_profile": board_scrub_profile(document),
                 "review_policy": board_review_policy(document),
+                "dispatch_enabled": dispatch_enabled(document),
                 "dispatch_policy": dispatch_policy(document),
                 "scrub_allow_counts": copy.deepcopy(
                     document["config"].get("scrub_allow_counts", {})
@@ -6433,7 +6504,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         board_id: str,
         agent_name: str,
         ticket_id: str,
-        assigned_to_agent_id: str,
+        assigned_to_agent_id: str | None,
         expected_status: str,
         coordinator_op_key: str,
         reason: str,
@@ -6441,12 +6512,13 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         expected_assigned_to_agent_id: str | None = None,
         expected_generation: str | None = None,
     ) -> dict[str, Any]:
-        """Atomically assign one open ticket as an admin with coordination scope."""
+        """Atomically assign or unassign an open ticket as a coordinator."""
         board_id = require_id("board_id", board_id)
         ticket_id = require_id("ticket_id", ticket_id)
-        assigned_to_agent_id = require_id(
-            "assigned_to_agent_id", assigned_to_agent_id
-        )
+        if assigned_to_agent_id is not None:
+            assigned_to_agent_id = require_id(
+                "assigned_to_agent_id", assigned_to_agent_id
+            )
         if expected_assigned_to_agent_id is not None:
             expected_assigned_to_agent_id = require_id(
                 "expected_assigned_to_agent_id", expected_assigned_to_agent_id
@@ -6499,17 +6571,24 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                     "assignment state precondition failed: ticket must remain open, "
                     "unclaimed, and at the expected assignee"
                 )
-            target = document["members"].get(assigned_to_agent_id)
-            if (
-                target is None
-                or assigned_to_agent_id == actor["agent_id"]
-                or target.get("lifecycle_status", "active") != "active"
-                or target.get("membership_role") not in {"member", "admin"}
-            ):
-                raise ValueError("assignment target is not an active eligible seat")
-            ticket["assigned_to"] = assigned_to_agent_id
-            ticket["assigned_to_agent_id"] = assigned_to_agent_id
-            ticket["assigned_to_kind"] = "agent_id"
+            if assigned_to_agent_id is not None:
+                target = document["members"].get(assigned_to_agent_id)
+                if (
+                    target is None
+                    or assigned_to_agent_id == actor["agent_id"]
+                    or target.get("lifecycle_status", "active") != "active"
+                    or target.get("membership_role") not in {"member", "admin"}
+                ):
+                    raise ValueError("assignment target is not an active eligible seat")
+                ticket["assigned_to"] = assigned_to_agent_id
+                ticket["assigned_to_agent_id"] = assigned_to_agent_id
+                ticket["assigned_to_kind"] = "agent_id"
+            else:
+                ticket.pop("assigned_to", None)
+                ticket.pop("assigned_to_agent_id", None)
+                ticket.pop("assigned_to_kind", None)
+            ticket.pop("work_pin_unavailable_cycles", None)
+            ticket.pop("work_pin_unavailable_last_at", None)
             ticket["updated_at"] = iso_at(now)
             ticket["coordinator_assignment"] = {
                 "op_key": safe_key,
@@ -6526,6 +6605,11 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 "op_key": safe_key,
                 "reason": safe_reason,
                 "replayed": False,
+                "recipients": [
+                    value
+                    for value in (assigned_to_agent_id, current_assignee)
+                    if value
+                ],
             }
 
         changed = service.mutate(board_id, assign)
@@ -6543,7 +6627,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             changed["actor"],
             "coordinator_assignment",
             uri,
-            [assigned_to_agent_id],
+            changed["recipients"],
             ctx,
             unique_fields=("coordinator_op_key",),
             ticket_id=ticket_id,
@@ -9070,6 +9154,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             "retired_or_stale_count": hidden_lifecycle_count,
             "scrub_profile": board_scrub_profile(document),
             "review_policy": current_review_policy,
+            "dispatch_enabled": dispatch_enabled(document),
             "dispatch_policy": dispatch_policy(document),
             "unassignable_tickets": unassignable,
             "unclaimed_tickets": unclaimed_attention,

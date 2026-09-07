@@ -15,6 +15,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Changed
 
+- Coordinator no longer hard-pins tickets on dispatch-enabled boards; it sets
+  soft `prefer_agents` hints instead and excludes coordinator, orchestrator,
+  coordinator-hosted, and capability-implicit identities. Central now accepts
+  `assigned_to_agent_id=null` to clear a pin and releases unavailable pins
+  after the fallback cycle limit.
 - Wait-bridge Central traffic now reuses one bounded HTTP pool per process,
   caps concurrent Central connections at four by default, and logs before an
   excess board subscription falls back to polling. Coordinator subscription

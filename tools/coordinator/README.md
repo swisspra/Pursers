@@ -7,9 +7,11 @@ leaving worker claim, submission, and independent review paths unchanged.
 ## Modes and kill switch
 
 `--mode shadow` is the default. It computes the same decisions as active mode
-and writes `would_assign` findings, but performs zero workflow mutations.
-`--mode active` performs `ticket_assign` calls and
-records each outcome in `coordinator_findings` and the digest.
+and writes `would_prefer` findings, but performs zero workflow mutations.
+`--mode active` writes soft `prefer_agents` hints on dispatch-enabled boards
+and records each outcome in `coordinator_findings` and the digest. Legacy
+`ticket_assign` calls require both a dispatch-disabled board and the explicit
+`--pin-assignments` flag.
 
 Mode is a process-start flag and cannot be toggled at runtime. The kill switch
 is either:
@@ -69,14 +71,14 @@ offers or counts them as starving work.
 - Normal tickets starve at 30 minutes; critical tickets at 10 minutes.
 - At one threshold, the Dispatcher continues offering work to eligible seats;
   the coordinator makes no duplicate wake call.
-- At exactly twice the threshold, the oldest fleet-fair ticket is assigned to
-  the least-loaded eligible seat. Critical work ranks before other priorities.
+- At exactly twice the threshold, the oldest fleet-fair ticket prefers the
+  least-loaded eligible seat without excluding other dispatcher candidates.
+  Critical work ranks before other priorities.
 - Seats with three proven drops in seven days remain eligible but rank last.
-- Assignment is atomic only while the ticket is open, unclaimed, and at the
-  expected assignee. A lost race is reported and never overwritten.
-- Central publishes `coordinator_assignment` cues only to the selected agent.
-  Ordinary `ticket_created` and reopened-ticket events
-  remain visible to all admitted workers through open-backlog catch-up.
+- Legacy pin assignment is atomic only while the ticket is open, unclaimed,
+  and at the expected assignee. A lost race is reported and never overwritten.
+- Central releases an unavailable hard pin after the dispatcher fallback cycle
+  limit and records `pin_released` before resuming unpinned selection.
 - Operation keys are deterministic across restarts. The limit is one assignment
   per board per 10 minutes.
 - Three consecutive mutation failures open the circuit breaker and change the

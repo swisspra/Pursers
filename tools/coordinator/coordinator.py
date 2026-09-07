@@ -883,6 +883,17 @@ def tier_allows(agent: Mapping[str, Any], ticket: Mapping[str, Any]) -> bool:
     return TIER_ORDER[agent_max_tier(agent)] >= TIER_ORDER[ticket_tier(ticket)]
 
 
+def assignment_candidate(agent: Mapping[str, Any]) -> bool:
+    return bool(
+        agent.get("agent_id")
+        and agent.get("capabilities_explicit") is True
+        and agent.get("membership_role") in {"member", "admin"}
+        and agent.get("role") not in {"coordinator", "orchestrator"}
+        and str(agent.get("host", "")).casefold() != "coordinator"
+        and agent.get("agent_name") != COORDINATOR_NAME
+    )
+
+
 def choose_assignee(
     agents: Sequence[Mapping[str, Any]],
     tickets: Sequence[Mapping[str, Any]],
@@ -895,9 +906,7 @@ def choose_assignee(
         agent
         for agent in agents
         if classify_agent(agent, now, thresholds) == "available"
-        and agent.get("agent_name") != COORDINATOR_NAME
-        and agent.get("agent_id")
-        and agent.get("membership_role") in {"member", "admin"}
+        and assignment_candidate(agent)
     ]
     if not eligible:
         return None
@@ -925,9 +934,7 @@ def eligible_agents(
             agent
             for agent in agents
             if classify_agent(agent, now, thresholds) == "available"
-            and agent.get("agent_name") != COORDINATOR_NAME
-            and agent.get("agent_id")
-            and agent.get("membership_role") in {"member", "admin"}
+            and assignment_candidate(agent)
         ),
         key=lambda item: (
             str(item["agent_id"]) in repeat_abandoners,
@@ -980,6 +987,8 @@ def _finding_next_action(
         "board_unreachable": f"Restore coordinator access to {board_id}, then confirm one successful join and read.",
         "would_assign": f"Review the proposed assignment for {ticket_id} before enabling active mode.",
         "assign": f"Verify the assigned seat claims {ticket_id} on {board_id}.",
+        "would_prefer": f"Review the proposed dispatch preference for {ticket_id} before enabling active mode.",
+        "prefer": f"Verify the dispatcher offers {ticket_id} across eligible seats on {board_id}.",
         "mutation_failed": f"Review the failed coordinator mutation for {ticket_id} before retrying.",
         "coordinator_circuit_open": f"Resolve the coordinator mutation failures on {board_id} before restoring active mode.",
     }
@@ -1505,11 +1514,14 @@ def plan_actions(
     previous: Mapping[str, Mapping[str, Any]],
     now: datetime,
     thresholds: Thresholds = Thresholds(),
+    *,
+    pin_assignments: bool = False,
 ) -> list[Action]:
     """Plan deterministic fleet-fair actions from current live projections."""
     history = _recent_action_history(previous, now)
     ranked: list[tuple[int, datetime, str, Mapping[str, Any]]] = []
     eligible_by_board: dict[str, list[Mapping[str, Any]]] = {}
+    action_kind_by_board: dict[str, str] = {}
     for board_id, snapshot in snapshots.items():
         omitted = snapshot.get("omitted_counts") or snapshot.get("truncation_counts")
         history_incomplete = _history_incomplete_until(
@@ -1546,6 +1558,21 @@ def plan_actions(
         eligible_by_board[board_id] = eligible_agents(
             agents, tickets, now, thresholds, repeated
         )
+        board = snapshot.get("board", {})
+        reported_dispatch = (
+            board.get("dispatch_enabled") if isinstance(board, Mapping) else None
+        )
+        dispatch_active = (
+            reported_dispatch
+            if isinstance(reported_dispatch, bool)
+            else any(agent.get("capabilities_explicit") is True for agent in agents)
+        )
+        if dispatch_active:
+            action_kind_by_board[board_id] = "prefer"
+        elif pin_assignments:
+            action_kind_by_board[board_id] = "assign"
+        else:
+            continue
         for ticket in tickets:
             if starvation_stage(ticket, now, thresholds):
                 ranked.append(
@@ -1574,16 +1601,17 @@ def plan_actions(
         ]
         if stage == 2:
             recent_assign = any(
-                row.get("kind") == "assign"
+                row.get("kind") in {"assign", "prefer"}
                 and (age_seconds(row.get("performed_at"), now) or 0) < ASSIGN_RATE_SECONDS
                 for row in history.get(board_id, [])
             )
             if eligible and board_id not in assignment_planned and not recent_assign:
                 target = eligible[0]
                 target_id = str(target["agent_id"])
+                action_kind = action_kind_by_board[board_id]
                 actions.append(
                     Action(
-                        "assign",
+                        action_kind,
                         board_id,
                         ticket_id,
                         target_id,
@@ -1592,7 +1620,12 @@ def plan_actions(
                         threshold,
                         window,
                         action_op_key(
-                            board_id, ticket_id, "assign", stage, window, target_id
+                            board_id,
+                            ticket_id,
+                            action_kind,
+                            stage,
+                            window,
+                            target_id,
                         ),
                         "Oldest fleet-fair starved ticket reached twice its threshold.",
                     )
@@ -1605,7 +1638,7 @@ def plan_actions(
 def action_finding(action: Action, kind: str, mode: str, **extra: Any) -> dict[str, Any]:
     return _finding(
         kind,
-        "info" if kind.startswith("would_") or kind == "assign" else "warn",
+        "info" if kind.startswith("would_") or kind in {"assign", "prefer"} else "warn",
         action.board_id,
         action.reason,
         ticket_id=action.ticket_id,
@@ -2911,6 +2944,10 @@ async def mutate_action(
         role="coordinator",
         allow_takeover=True,
     ) as client:
+        if action.kind == "prefer":
+            return await client.ticket_update(
+                action.ticket_id, prefer_agents=[action.target_agent_id]
+            )
         if action.kind != "assign":
             raise ValueError(f"unsupported coordinator action: {action.kind}")
         return await client._call(  # noqa: SLF001 - phase-2 primitive wrapper.
@@ -3629,6 +3666,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--home-board", default=os.environ.get("ONBOARD_BOARD_ID", "pursers"))
     parser.add_argument("--agent-name", default="coordinator-1")
     parser.add_argument("--mode", choices=("shadow", "active"), default="shadow")
+    parser.add_argument(
+        "--pin-assignments",
+        action="store_true",
+        help="Allow legacy ticket_assign mutations on dispatch-disabled boards",
+    )
     parser.add_argument("--stale-seconds", type=int, default=Thresholds.stale_seconds)
     parser.add_argument("--lease-warning-ratio", type=float, default=Thresholds.lease_warning_fraction)
     parser.add_argument("--grace-seconds", type=int, default=Thresholds.lease_grace_seconds)
@@ -3866,7 +3908,12 @@ async def run(args: argparse.Namespace) -> None:
             if project.board_id in selected_snapshots
         ]
         actions = plan_actions(
-            selected_snapshots, states, selected_previous, now, thresholds
+            selected_snapshots,
+            states,
+            selected_previous,
+            now,
+            thresholds,
+            pin_assignments=args.pin_assignments,
         )
         action_findings, histories = await execute_actions(
             actions,
