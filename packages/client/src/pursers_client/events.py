@@ -18,6 +18,7 @@ TICKET_CLAIM_REFUSED = "ticket_claim_refused"
 REVIEW_CLAIM_REFUSED = "review_claim_refused"
 TICKET_PARKED = "ticket_parked"
 TICKET_UNPARKED = "ticket_unparked"
+TICKET_ARCHIVED = "ticket_archived"
 SEAT_NAME_COLLISION = "seat_name_collision"
 
 DISPATCH_KINDS = frozenset(
@@ -28,6 +29,7 @@ CLAIM_GATE_EVENT_KINDS = frozenset(
     {TICKET_CLAIM_REFUSED, REVIEW_CLAIM_REFUSED}
 )
 PARK_EVENT_KINDS = frozenset({TICKET_PARKED, TICKET_UNPARKED})
+ARCHIVE_EVENT_KINDS = frozenset({TICKET_ARCHIVED})
 
 REVIEW_LEASE_KINDS = frozenset(
     {TICKET_REVIEW_CLAIMED, REVIEW_LEASE_EXPIRED, REVIEW_LEASE_RELEASED}
@@ -71,6 +73,7 @@ CENTRAL_EVENT_KINDS = (
     | DISPATCH_EVENT_KINDS
     | CLAIM_GATE_EVENT_KINDS
     | PARK_EVENT_KINDS
+    | ARCHIVE_EVENT_KINDS
 )
 
 # Legacy client aliases remain accepted even though current Central emits the
