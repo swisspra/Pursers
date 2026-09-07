@@ -342,6 +342,48 @@ class CoordinatorWriteTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(non_target_catchup.structured_content["events"], [])
 
+    async def test_assignment_accepts_null_to_clear_existing_pin(self) -> None:
+        ticket_id = await self.create_ticket("clear assignment pin")
+        self.principal = self.coordinator
+        await self.call(
+            "ticket_assign",
+            agent_name="coordinator-1",
+            ticket_id=ticket_id,
+            assigned_to_agent_id=self.worker_id,
+            expected_status="open",
+            expected_assigned_to_agent_id=None,
+            coordinator_op_key="coord-op-assignment-set",
+            reason="set a temporary pin",
+        )
+
+        cleared = await self.call(
+            "ticket_assign",
+            agent_name="coordinator-1",
+            ticket_id=ticket_id,
+            assigned_to_agent_id=None,
+            expected_status="open",
+            expected_assigned_to_agent_id=self.worker_id,
+            coordinator_op_key="coord-op-assignment-clear",
+            reason="clear the temporary pin",
+        )
+
+        self.assertFalse(cleared.is_error)
+        ticket = cleared.structured_content["ticket"]
+        self.assertNotIn("assigned_to", ticket)
+        self.assertNotIn("assigned_to_agent_id", ticket)
+        self.assertNotIn("assigned_to_kind", ticket)
+        self.assertIsNone(
+            ticket["coordinator_assignment"]["assigned_to_agent_id"]
+        )
+        self.assertEqual(
+            ticket["coordinator_assignment"]["previous_assigned_to_agent_id"],
+            self.worker_id,
+        )
+        event = cleared.structured_content["event"]
+        self.assertEqual(event["recipient_identities"], [self.worker_id])
+        self.assertIsNone(event["assigned_to_agent_id"])
+        self.assertEqual(event["previous_assigned_to_agent_id"], self.worker_id)
+
     async def test_assignment_requires_admin_membership(self) -> None:
         ticket_id = await self.create_ticket("admin-only assignment")
         for principal, agent_name in (

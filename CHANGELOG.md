@@ -27,6 +27,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   non-reviewing coordinator before subscribing, report nested subscription
   failures in board health, and adapt to clients without the optional event
   reconnect parameter. Client event streams now fail fast until `board_join`.
+- Coordinator no longer hard-pins tickets on dispatch-enabled boards; it sets
+  soft `prefer_agents` hints instead and excludes coordinator, orchestrator,
+  coordinator-hosted, and capability-implicit identities. Central now accepts
+  `assigned_to_agent_id=null` to clear a pin and releases unavailable pins
+  after the fallback cycle limit.
 - Wait-bridge Central traffic now reuses one bounded HTTP pool per process,
   caps concurrent Central connections at four by default, and logs before an
   excess board subscription falls back to polling. Coordinator subscription

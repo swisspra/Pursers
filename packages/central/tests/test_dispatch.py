@@ -601,6 +601,58 @@ class DispatchTests(unittest.IsolatedAsyncioTestCase):
         )
         await assert_refusal("ticket is parked by the board owner")
 
+    async def test_dead_assignment_pin_is_released_after_fallback_cycles(self) -> None:
+        pinned = await self.add_seat(
+            self.worker_a, "pinned-worker", {"tier_max": 2}
+        )
+        fallback = await self.add_seat(
+            self.worker_b, "fallback-worker", {"tier_max": 2}
+        )
+        self.principal = self.admin
+        await self.call(
+            "board_dispatch_policy_set", agent_name="admin-agent", offer_ttl_s=10
+        )
+        base_time = central.time.time()
+        with patch.object(central.time, "time", return_value=base_time):
+            created = await self.create(assigned_to=pinned)
+        ticket_id = created.structured_content["ticket"]["ticket_id"]
+        self.assertEqual(
+            created.structured_content["ticket"]["work_offer"]["agent_id"], pinned
+        )
+
+        stale_at = base_time - 31
+
+        def make_pin_stale(document: dict[str, Any]) -> None:
+            document["members"][pinned]["last_activity_at"] = central.iso_at(
+                stale_at
+            )
+
+        self.service.mutate(
+            "pursers", make_pin_stale, require_generation=False
+        )
+        self.service.record_agent_activity("pursers", pinned, stale_at)
+        self.service.unregister_listener("pursers", pinned)
+
+        for offset in (20, 21, 22):
+            with patch.object(central.time, "time", return_value=base_time + offset):
+                await self.call("board_reap")
+
+        ticket = (
+            await self.call("ticket_get", ticket_id=ticket_id)
+        ).structured_content["ticket"]
+        self.assertNotIn("assigned_to_agent_id", ticket)
+        self.assertEqual(ticket["work_offer"]["agent_id"], fallback)
+        released = [
+            entry
+            for entry in ticket["dispatch_history"]
+            if entry.get("state") == "pin_released"
+        ]
+        self.assertEqual(len(released), 1)
+        self.assertEqual(released[0]["reason"], "pinned_seat_unavailable")
+        self.assertEqual(
+            released[0]["previous_assigned_to_agent_id"], pinned
+        )
+
     async def test_dispatch_disabled_preserves_assigned_claim_error(self) -> None:
         assigned = await self.add_seat(
             self.worker_a, "legacy-assigned", {"tier_max": 2}

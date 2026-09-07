@@ -75,8 +75,8 @@ def test_stage_two_names_least_loaded_live_assignee() -> None:
     snapshot = {
         "board": {"claim_ttl_s": 900},
         "agents": [
-            {"agent_id": "AI-busy", "agent_name": "worker-a", "last_activity_at": ago(10), "status": "working", "membership_role": "member"},
-            {"agent_id": "AI-free", "agent_name": "worker-b", "last_activity_at": ago(20), "status": "active", "membership_role": "member"},
+            {"agent_id": "AI-busy", "agent_name": "worker-a", "last_activity_at": ago(10), "status": "working", "membership_role": "member", "capabilities_explicit": True},
+            {"agent_id": "AI-free", "agent_name": "worker-b", "last_activity_at": ago(20), "status": "active", "membership_role": "member", "capabilities_explicit": True},
         ],
         "tickets": [{"ticket_id": "TK-old", "status": "open", "priority": "medium", "created_at": ago(3_601)}],
     }
@@ -95,6 +95,7 @@ def test_force_assignment_respects_advertised_max_tier() -> None:
                     "last_activity_at": ago(20),
                     "status": "active",
                     "membership_role": "member",
+                    "capabilities_explicit": True,
                     "task_focus": "worker-runtime max_tier=light",
                 },
                 {
@@ -103,6 +104,7 @@ def test_force_assignment_respects_advertised_max_tier() -> None:
                     "last_activity_at": ago(10),
                     "status": "active",
                     "membership_role": "member",
+                    "capabilities_explicit": True,
                     "task_focus": "worker-runtime max_tier=heavy",
                 },
             ],
@@ -123,13 +125,118 @@ def test_force_assignment_respects_advertised_max_tier() -> None:
     )
 
     assert len(actions) == 1
-    assert actions[0].kind == "assign"
+    assert actions[0].kind == "prefer"
     assert actions[0].target_agent_id == "AI-heavy"
 
     snapshot["board-a"]["agents"] = snapshot["board-a"]["agents"][:1]
     assert coordinator.plan_actions(
         snapshot, {"board-a": {"drop_history": []}}, {}, NOW
     ) == []
+
+
+def test_planner_uses_soft_preferences_and_excludes_unsafe_identities() -> None:
+    ticket = {
+        "ticket_id": "TK-old",
+        "status": "open",
+        "priority": "medium",
+        "created_at": ago(3_601),
+    }
+    agents = [
+        {
+            "agent_id": "AI-worker",
+            "agent_name": "worker",
+            "last_activity_at": ago(1),
+            "status": "active",
+            "membership_role": "member",
+            "capabilities_explicit": True,
+            "role": "worker",
+            "host": "codex",
+        },
+        {
+            "agent_id": "AI-coordinator-role",
+            "agent_name": "coord-role",
+            "last_activity_at": ago(1),
+            "status": "active",
+            "membership_role": "member",
+            "capabilities_explicit": True,
+            "role": "coordinator",
+        },
+        {
+            "agent_id": "AI-orchestrator-role",
+            "agent_name": "orch-role",
+            "last_activity_at": ago(1),
+            "status": "active",
+            "membership_role": "member",
+            "capabilities_explicit": True,
+            "role": "orchestrator",
+        },
+        {
+            "agent_id": "AI-coordinator-host",
+            "agent_name": "coord-host",
+            "last_activity_at": ago(1),
+            "status": "active",
+            "membership_role": "member",
+            "capabilities_explicit": True,
+            "role": "worker",
+            "host": "coordinator",
+        },
+        {
+            "agent_id": "AI-implicit",
+            "agent_name": "implicit-worker",
+            "last_activity_at": ago(1),
+            "status": "active",
+            "membership_role": "member",
+            "role": "worker",
+        },
+    ]
+    snapshot = {
+        "board-a": {
+            "board": {"dispatch_enabled": True},
+            "agents": agents,
+            "tickets": [ticket],
+        }
+    }
+
+    actions = coordinator.plan_actions(
+        snapshot, {"board-a": {"drop_history": []}}, {}, NOW
+    )
+
+    assert [(item.kind, item.target_agent_id) for item in actions] == [
+        ("prefer", "AI-worker")
+    ]
+
+
+def test_legacy_pin_requires_explicit_flag_and_dispatch_disabled_board() -> None:
+    snapshot = {
+        "board-a": {
+            "board": {"dispatch_enabled": False},
+            "agents": [
+                {
+                    "agent_id": "AI-worker",
+                    "agent_name": "worker",
+                    "last_activity_at": ago(1),
+                    "status": "active",
+                    "membership_role": "member",
+                    "capabilities_explicit": True,
+                }
+            ],
+            "tickets": [
+                {
+                    "ticket_id": "TK-old",
+                    "status": "open",
+                    "priority": "medium",
+                    "created_at": ago(3_601),
+                }
+            ],
+        }
+    }
+    states = {"board-a": {"drop_history": []}}
+
+    assert coordinator.plan_actions(snapshot, states, {}, NOW) == []
+    actions = coordinator.plan_actions(
+        snapshot, states, {}, NOW, pin_assignments=True
+    )
+    assert [item.kind for item in actions] == ["assign"]
 
 
 def test_absent_ticket_tier_defaults_standard_for_coordinator() -> None:
@@ -159,6 +266,8 @@ def test_absent_ticket_tier_defaults_standard_for_coordinator() -> None:
         "privacy-scan-truncated",
         "would_assign",
         "assign",
+        "would_prefer",
+        "prefer",
         "mutation_failed",
         "coordinator_circuit_open",
         "review-backlog",
@@ -1865,9 +1974,9 @@ def test_write_reports_isolates_failed_board_and_mirrors_degraded_finding(
     assert len(json.dumps(home_payload, separators=(",", ":"))) <= coordinator.MAX_STATE_CHARS
 
 
-def action(index: int = 0) -> coordinator.Action:
+def action(index: int = 0, *, kind: str = "assign") -> coordinator.Action:
     return coordinator.Action(
-        kind="assign",
+        kind=kind,
         board_id="board-a",
         ticket_id=f"TK-{index}",
         target_agent_id="AI-target",
@@ -1875,7 +1984,7 @@ def action(index: int = 0) -> coordinator.Action:
         stage=2,
         threshold_seconds=1_800,
         threshold_window=2,
-        op_key=f"coord-op-assign-{index}",
+        op_key=f"coord-op-{kind}-{index}",
         reason="deterministic test decision",
     )
 
@@ -1944,6 +2053,45 @@ def test_mutate_action_declares_coordinator_role(
     assert active_seats == {("board-a", "coordinator-test")}
 
 
+def test_mutate_action_updates_soft_preference(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import pursers_client
+
+    captured: dict[str, Any] = {}
+
+    class FakeBoardClient:
+        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+            pass
+
+        async def __aenter__(self) -> "FakeBoardClient":
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+        async def ticket_update(
+            self, ticket_id: str, *, prefer_agents: list[str]
+        ) -> dict[str, bool]:
+            captured.update(ticket_id=ticket_id, prefer_agents=prefer_agents)
+            return {"ok": True}
+
+    monkeypatch.setattr(pursers_client, "BoardClient", FakeBoardClient)
+
+    result = asyncio.run(
+        coordinator.mutate_action(
+            "https://board.invalid/mcp",
+            "TOKEN_PLACEHOLDER",
+            "coordinator-test",
+            action(kind="prefer"),
+            NOW,
+        )
+    )
+
+    assert result == {"ok": True}
+    assert captured == {"ticket_id": "TK-0", "prefer_agents": ["AI-target"]}
+
+
 def test_shadow_mode_emits_would_findings_and_makes_zero_mutation_calls() -> None:
     calls: list[coordinator.Action] = []
 
@@ -1998,6 +2146,7 @@ def test_action_idempotency_key_is_stable_across_restart() -> None:
                     "last_activity_at": ago(1),
                     "status": "active",
                     "membership_role": "member",
+                    "capabilities_explicit": True,
                 }
             ],
             "tickets": [
@@ -2028,6 +2177,7 @@ def test_rate_limits_assignment_across_restart() -> None:
             "last_activity_at": ago(1),
             "status": "active",
             "membership_role": "member",
+            "capabilities_explicit": True,
         }
     ]
     previous = {"board-a": {"action_history": []}}
@@ -2072,7 +2222,7 @@ def test_rate_limits_assignment_across_restart() -> None:
     previous["board-a"]["action_history"][0]["performed_at"] = ago(600)
     assert [item.kind for item in coordinator.plan_actions(
         stage_two, {"board-a": {"drop_history": []}}, previous, NOW
-    )] == ["assign"]
+    )] == ["prefer"]
 
 
 def test_three_mutation_failures_open_circuit_and_remaining_actions_are_shadowed() -> None:
@@ -2111,6 +2261,7 @@ def test_repeat_abandoner_is_deprioritized_using_live_pool_eligibility() -> None
                     "last_activity_at": ago(1),
                     "status": "active",
                     "membership_role": "member",
+                    "capabilities_explicit": True,
                 },
                 {
                     "agent_id": "AI-clean",
@@ -2118,6 +2269,7 @@ def test_repeat_abandoner_is_deprioritized_using_live_pool_eligibility() -> None
                     "last_activity_at": ago(2),
                     "status": "active",
                     "membership_role": "member",
+                    "capabilities_explicit": True,
                 },
             ],
             "tickets": [
@@ -2159,6 +2311,10 @@ def test_restart_kill_switch_defaults_to_shadow(tmp_path: Path) -> None:
 
     assert default_args.mode == "shadow"
     assert active_args.mode == "active"
+    assert default_args.pin_assignments is False
+    assert coordinator.parse_args(
+        ["--token-path", str(token), "--pin-assignments"]
+    ).pin_assignments is True
     assert default_args.poll_seconds == 60
     assert default_args.review_backlog_seconds == 1_800
     tuned = coordinator.parse_args(
@@ -2194,6 +2350,7 @@ def test_coordination_uses_complete_active_list_but_fails_closed_on_missing_agen
         "last_activity_at": ago(1),
         "status": "active",
         "membership_role": "member",
+        "capabilities_explicit": True,
     }
     snapshot = {
         "board-a": {
@@ -2209,7 +2366,7 @@ def test_coordination_uses_complete_active_list_but_fails_closed_on_missing_agen
 
     assert [item.kind for item in coordinator.plan_actions(
         snapshot, states, {}, NOW
-    )] == ["assign"]
+    )] == ["prefer"]
     snapshot["board-a"]["omitted_counts"]["agents"] = 1
     assert coordinator.plan_actions(snapshot, states, {}, NOW) == []
 
@@ -2224,6 +2381,7 @@ def test_truncated_rate_history_fails_closed_until_safety_window_expires() -> No
                     "last_activity_at": ago(1),
                     "status": "active",
                     "membership_role": "member",
+                    "capabilities_explicit": True,
                 }
             ],
             "tickets": [
@@ -2247,7 +2405,7 @@ def test_truncated_rate_history_fails_closed_until_safety_window_expires() -> No
         {"board-a": {"drop_history": []}},
         previous,
         NOW + timedelta(seconds=2),
-    )] == ["assign"]
+    )] == ["prefer"]
 
 
 @pytest.mark.parametrize("category", coordinator.INTAKE_CATEGORIES)
