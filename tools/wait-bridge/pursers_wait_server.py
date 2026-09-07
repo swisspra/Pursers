@@ -187,6 +187,8 @@ CONNECTOR_TOKEN_ENV = "PURSERS_BOARD_CONNECTOR_TOKEN"
 DEFAULT_TIMEOUT_S = 180
 DEFAULT_POLL_INTERVAL_S = 2.0
 DEFAULT_CLAIM_TTL_S = 900
+DEFAULT_CENTRAL_CONNECTION_CAP = 4
+MAX_CENTRAL_CONNECTION_CAP = 64
 DEFAULT_KEEPALIVE_IDLE_TTL_MULTIPLIER = 3
 MAX_LEASE_RENEW_INTERVAL_S = 300.0
 PROGRESS_INTERVAL_S = 300.0
@@ -839,6 +841,9 @@ class BridgeStats:
 class MeteredBoardClient(BoardClient):
     def __init__(self, *args: Any, meter: BridgeStats, **kwargs: Any) -> None:
         self.meter = meter
+        connection_cap = _central_connection_cap()
+        kwargs.setdefault("max_connections", connection_cap)
+        self.connection_limiter = CentralConnectionLimiter(connection_cap)
         super().__init__(*args, **kwargs)
 
     async def _measure(
@@ -1038,6 +1043,62 @@ def _progress_cadence_s() -> float | None:
 def _log(msg: str) -> None:
     # stderr only -- stdout is the stdio JSON-RPC channel.
     print(f"[a2a_wait] {msg}", file=sys.stderr, flush=True)
+
+
+def _central_connection_cap() -> int:
+    raw = os.environ.get("PURSERS_CENTRAL_CONNECTION_CAP", "").strip()
+    if not raw:
+        return DEFAULT_CENTRAL_CONNECTION_CAP
+    try:
+        value = int(raw)
+    except ValueError:
+        _log(
+            "invalid PURSERS_CENTRAL_CONNECTION_CAP; using default "
+            f"{DEFAULT_CENTRAL_CONNECTION_CAP}"
+        )
+        return DEFAULT_CENTRAL_CONNECTION_CAP
+    if not 1 <= value <= MAX_CENTRAL_CONNECTION_CAP:
+        _log(
+            "PURSERS_CENTRAL_CONNECTION_CAP must be between 1 and "
+            f"{MAX_CENTRAL_CONNECTION_CAP}; using default "
+            f"{DEFAULT_CENTRAL_CONNECTION_CAP}"
+        )
+        return DEFAULT_CENTRAL_CONNECTION_CAP
+    return value
+
+
+class CentralConnectionLimiter:
+    """Reserve one main Central connection and bound concurrent subscriptions."""
+
+    def __init__(self, limit: int) -> None:
+        self.limit = limit
+        self.active = 1
+        self.peak = 1
+        self._lock = asyncio.Lock()
+        self._cap_logged = False
+
+    @asynccontextmanager
+    async def subscription(self, board_id: str) -> AsyncIterator[None]:
+        async with self._lock:
+            if self.active >= self.limit:
+                if not self._cap_logged:
+                    _log(
+                        "Central connection cap hit; refusing a new subscription "
+                        f"board={board_id!r} active={self.active} limit={self.limit}"
+                    )
+                    self._cap_logged = True
+                raise BoardClientError(
+                    f"Central connection cap hit (limit={self.limit})"
+                )
+            self.active += 1
+            self.peak = max(self.peak, self.active)
+        try:
+            yield
+        finally:
+            async with self._lock:
+                self.active = max(1, self.active - 1)
+                if self.active < self.limit:
+                    self._cap_logged = False
 
 
 if _RAW_WAIT_MODE not in {"poll", "push"}:
@@ -4654,8 +4715,8 @@ async def _event_stream(
     seat_uri = f"board://{board_id}/agent/{identity.agent_id}"
 
     async def stream(resources: list[str]) -> AsyncIterator[dict[str, Any]]:
-        # Use a fresh client for each attempt because BoardClient retains every
-        # watched URI. Reusing it would silently put the rejected seat URI back.
+        # Each logical stream has isolated watched URIs while sharing the
+        # lifespan HTTP client and its bounded connection pool.
         event_client = BoardClient(
             parent.url,
             parent.token,
@@ -4663,6 +4724,10 @@ async def _event_stream(
             agent_name=identity.agent_name,
             role=identity.role,
             reconnect_delay_s=parent.reconnect_delay_s,
+            max_connections=getattr(
+                parent, "max_connections", DEFAULT_CENTRAL_CONNECTION_CAP
+            ),
+            http_client=getattr(parent, "_http_client", None),
         )
         event_client.identity = identity
         event_client.generation_token = generation_token
@@ -4679,19 +4744,30 @@ async def _event_stream(
             )
             event_client.generation_token = joined.get("generation_token")
 
-        events = event_client.events(
-            from_cursor=from_cursor,
-            only_mine=False,
-        kinds=SUBSCRIPTION_KINDS,
-            resource_subscriptions=resources,
-            acknowledge=False,
-            touch=False if pure_catchup else None,
-            cursor_callback=cursor_callback,
-            subscription_callback=redeclare_capabilities,
-        )
-        async with aclosing(events):
-            async for event in events:
-                yield event
+        limiter = getattr(parent, "connection_limiter", None)
+
+        @asynccontextmanager
+        async def subscription_slot() -> AsyncIterator[None]:
+            if limiter is None:
+                yield
+                return
+            async with limiter.subscription(board_id):
+                yield
+
+        async with subscription_slot():
+            events = event_client.events(
+                from_cursor=from_cursor,
+                only_mine=False,
+                kinds=SUBSCRIPTION_KINDS,
+                resource_subscriptions=resources,
+                acknowledge=False,
+                touch=False if pure_catchup else None,
+                cursor_callback=cursor_callback,
+                subscription_callback=redeclare_capabilities,
+            )
+            async with aclosing(events):
+                async for event in events:
+                    yield event
 
     try:
         async for event in stream([journal_uri, seat_uri]):

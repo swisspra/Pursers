@@ -110,6 +110,8 @@ MIN_STALE_AFTER_DAYS = 1
 MAX_STALE_AFTER_DAYS = 3_650
 MIN_CLAIM_TTL_S = 1
 MAX_CLAIM_TTL_S = 86_400
+DEFAULT_PRINCIPAL_STREAM_CAP = 32
+MAX_PRINCIPAL_STREAM_CAP = 4_096
 DISPATCH_ACTIVITY_WINDOW_MULTIPLIER = 3.0
 BRANCH_AND_COMMIT_RE = re.compile(
     r"(?im)^\s*branch_and_commit\s*:\s*(.+?)\s*$"
@@ -716,6 +718,21 @@ class CentralBoard:
         self.journal = CentralJournal(self.store)
         self.cursors = CursorStore(self.store)
         self.active_listeners: dict[str, set[str]] = {}
+        raw_stream_cap = os.environ.get(
+            "CENTRAL_PRINCIPAL_STREAM_CAP", str(DEFAULT_PRINCIPAL_STREAM_CAP)
+        ).strip()
+        try:
+            self.principal_stream_cap = int(raw_stream_cap)
+        except ValueError as exc:
+            raise ValueError(
+                "CENTRAL_PRINCIPAL_STREAM_CAP must be an integer"
+            ) from exc
+        if not 1 <= self.principal_stream_cap <= MAX_PRINCIPAL_STREAM_CAP:
+            raise ValueError(
+                "CENTRAL_PRINCIPAL_STREAM_CAP must be between 1 and "
+                f"{MAX_PRINCIPAL_STREAM_CAP}"
+            )
+        self.active_streams_by_principal: dict[str, int] = {}
         self.last_seen_activity: dict[tuple[str, str], float] = {}
         self.offer_deadline_tasks: dict[
             tuple[str, str, str], asyncio.Task[None]
@@ -736,6 +753,24 @@ class CentralBoard:
     def unregister_listener(self, board_id: str, agent_id: str) -> None:
         if board_id in self.active_listeners:
             self.active_listeners[board_id].discard(agent_id)
+
+    @property
+    def active_stream_count(self) -> int:
+        return sum(self.active_streams_by_principal.values())
+
+    def register_principal_stream(self, principal_id: str) -> bool:
+        active = self.active_streams_by_principal.get(principal_id, 0)
+        if active >= self.principal_stream_cap:
+            return False
+        self.active_streams_by_principal[principal_id] = active + 1
+        return True
+
+    def unregister_principal_stream(self, principal_id: str) -> None:
+        active = self.active_streams_by_principal.get(principal_id, 0)
+        if active <= 1:
+            self.active_streams_by_principal.pop(principal_id, None)
+        else:
+            self.active_streams_by_principal[principal_id] = active - 1
 
     def record_agent_activity(self, board_id: str, agent_id: str, now: float) -> None:
         self.last_seen_activity[(board_id, agent_id)] = now
@@ -1565,24 +1600,41 @@ class SubscriptionAuthorization:
             uris = notifications.get("resourceSubscriptions") or notifications.get("resource_subscriptions") or []
             principal = current_principal()
             require_scope(principal, "board:read")
+            if not self.service.register_principal_stream(principal.principal_id):
+                log_runtime_event(
+                    "subscription_stream_limit_hit",
+                    principal_id_prefix=principal.principal_id[:12],
+                    active_streams=self.service.active_streams_by_principal.get(
+                        principal.principal_id, 0
+                    ),
+                    stream_cap=self.service.principal_stream_cap,
+                )
+                raise MCPError(
+                    INVALID_REQUEST,
+                    "subscription stream limit exceeded for principal "
+                    f"(cap={self.service.principal_stream_cap})",
+                )
             registered_agents: list[tuple[str, str]] = []
-            for uri in uris:
-                if not self.service.subscription_allowed(str(uri), principal.principal_id):
-                    raise MCPError(INVALID_REQUEST, "subscription denied: principal is not a board member")
-                parsed = urlparse(str(uri))
-                if parsed.scheme == "board" and parsed.netloc and parsed.path.startswith("/agent/"):
-                    segments = parsed.path.split("/")
-                    if len(segments) == 3 and segments[1] == "agent":
-                        registered_agents.append((parsed.netloc, segments[2]))
-            now = time.time()
-            for board_id, agent_id in registered_agents:
-                self.service.register_listener(board_id, agent_id)
-                self.service.record_agent_activity(board_id, agent_id, now)
             try:
-                return await call_next(ctx)
-            finally:
+                for uri in uris:
+                    if not self.service.subscription_allowed(str(uri), principal.principal_id):
+                        raise MCPError(INVALID_REQUEST, "subscription denied: principal is not a board member")
+                    parsed = urlparse(str(uri))
+                    if parsed.scheme == "board" and parsed.netloc and parsed.path.startswith("/agent/"):
+                        segments = parsed.path.split("/")
+                        if len(segments) == 3 and segments[1] == "agent":
+                            registered_agents.append((parsed.netloc, segments[2]))
+                now = time.time()
                 for board_id, agent_id in registered_agents:
-                    self.service.unregister_listener(board_id, agent_id)
+                    self.service.register_listener(board_id, agent_id)
+                    self.service.record_agent_activity(board_id, agent_id, now)
+                try:
+                    return await call_next(ctx)
+                finally:
+                    for board_id, agent_id in registered_agents:
+                        self.service.unregister_listener(board_id, agent_id)
+            finally:
+                self.service.unregister_principal_stream(principal.principal_id)
         return await call_next(ctx)
 
 
@@ -4537,9 +4589,19 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             raise ValueError("allow_takeover must be a boolean")
         principal = current_principal()
         selected_renewal_source = normalize_renewal_source(renewal_source)
-        requested_role = (
-            validate_seat_role(principal, role) if role is not None else None
-        )
+        try:
+            requested_role = (
+                validate_seat_role(principal, role) if role is not None else None
+            )
+        except PermissionError:
+            log_runtime_event(
+                "board_join_authorization_failed",
+                board_id=board_id,
+                principal_id_prefix=principal.principal_id[:12],
+                agent_name=agent_name,
+                requested_role=role or "default",
+            )
+            raise
         if (
             requested_role in {"orchestrator", "coordinator"}
             and claim_ttl_s is not None
@@ -4627,7 +4689,17 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 "capabilities": member.get("capabilities", {}),
             }
 
-        result = service.mutate(board_id, join, require_generation=False)
+        try:
+            result = service.mutate(board_id, join, require_generation=False)
+        except PermissionError:
+            log_runtime_event(
+                "board_join_authorization_failed",
+                board_id=board_id,
+                principal_id_prefix=principal.principal_id[:12],
+                agent_name=agent_name,
+                requested_role=role or "default",
+            )
+            raise
         collision = result.get("collision")
         if collision is not None:
             actor = collision["actor"]

@@ -18,6 +18,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Changed
 
+- Wait-bridge Central traffic now reuses one bounded HTTP pool per process,
+  caps concurrent Central connections at four by default, and logs before an
+  excess board subscription falls back to polling. Coordinator subscription
+  loss recovery now waits with jittered exponential backoff capped at 60
+  seconds. Central rejects excess per-principal listen streams at a soft cap
+  of 32, reports active stream counts through healthz, and attributes rejected
+  coordinator joins by principal prefix, agent name, and requested role.
 - Wait bridge and seat-kit setup now accept one `prs1` door: the bridge stores
   private per-board/per-role credentials, resolves missing runtime environment
   from them, assigns durable collision-safe seat-name suffixes, and provides
