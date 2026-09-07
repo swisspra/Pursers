@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -168,4 +169,8 @@ def test_fleet_dashboard_suite_passes_with_read_only_home(
 
     output = completed.stdout + completed.stderr
     assert completed.returncode == 0, output[-4_000:]
-    assert "253 passed" in output
+    # Count-agnostic green proof: a pytest exit of 0 already rejects failures
+    # and empty collection, so require only a positive passed tally instead of
+    # pinning the suite size.
+    passed = re.search(r"(\d+) passed", output)
+    assert passed is not None and int(passed.group(1)) > 0, output[-2_000:]

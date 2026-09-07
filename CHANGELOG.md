@@ -15,6 +15,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Changed
 
+- fleet-dashboard: hermetic tests (state root override, injectable process
+  lister). Dashboard state resolves through a lazy `PURSERS_STATE_DIR`
+  override, worker directories and lifecycle fences are created only on first
+  private write, and process listing degrades to an explicit unavailable
+  result when inspection is denied.
 - Wait-bridge Central traffic now reuses one bounded HTTP pool per process,
   caps concurrent Central connections at four by default, and logs before an
   excess board subscription falls back to polling. Coordinator subscription
@@ -65,10 +70,6 @@ This release includes `pursers-central==0.1.0a27`,
 
 ### Changed
 
-- Fleet-dashboard tests are hermetic under workspace-write sandboxes: dashboard
-  state supports a lazy `PURSERS_STATE_DIR` override, worker directories are
-  created only on first use, and process listing is injectable with an explicit
-  unavailable result when inspection is denied.
 - Central identity checks now use the exact seat (`agent_id`) for reviewer
   self-exclusion, claimed-ticket cancellation, and private-memory visibility.
   Multiple worker or reviewer seats may share one bearer principal without

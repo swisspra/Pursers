@@ -3664,6 +3664,31 @@ def test_active_review_runtime_session_fence_invalidates_stale_lifecycle() -> No
     assert dashboard._active_review_from_log([started, session_fence]) is None
 
 
+def test_stop_on_never_created_root_is_safe_and_creates_it_on_first_write(
+    tmp_path: Path,
+) -> None:
+    """Idempotent stop must honour the lazy worker-root contract on darwin."""
+    root = tmp_path / "never-created" / "workers"
+    manager = dashboard.WorkerManager(root, platform="darwin")
+    # Construction stays lazy: nothing exists until the first private write.
+    assert not root.exists()
+
+    # Regression: the fence write used to raise FileNotFoundError here because
+    # stop() no longer had a constructor-created root to write into.
+    stopped = manager.stop("worker-one")
+
+    assert stopped == {"ok": True, "name": "worker-one", "running": False}
+    assert root.is_dir()
+    assert stat.S_IMODE(root.stat().st_mode) == 0o700
+    log_path = root / "worker-one.session.log"
+    assert stat.S_IMODE(log_path.stat().st_mode) == 0o600
+    assert json.loads(log_path.read_text().splitlines()[-1]) == {
+        "event": "review_session_reset",
+        "reason": "managed_stopped",
+    }
+    assert not manager._review_state_path("worker-one").exists()
+
+
 def test_worker_provider_test_uses_keychain_without_echoing_secret(
     tmp_path: Path,
 ) -> None:
