@@ -18,6 +18,3 @@ dependencies = [
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["pursers_client*"]
-
-[tool.pytest.ini_options]
-pythonpath = ["src"]

@@ -45,9 +45,8 @@ subscription-loss recovery delay and defaults to 60 seconds. Consecutive loss
 steps wait about 1, 2, 4, 8, 16, 32, then at most 60 seconds, with 10 percent
 jitter. Only the first loss for a pending step is logged. After that actual
 delay, the daemon performs one fallback refresh for the affected board and
-then re-listens from its last local cursor. A healthy cue resets the streak;
-fallback reads keep increasing the loss streak until streaming recovers, while
-other healthy boards remain subscribed.
+then re-listens from its last local cursor. A healthy cue or successful
+fallback refresh resets the streak; other healthy boards remain subscribed.
 
 ## Policy and safeguards
 

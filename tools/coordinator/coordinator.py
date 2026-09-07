@@ -4024,6 +4024,7 @@ async def run(args: argparse.Namespace) -> None:
             }
             await subscriptions.sync(next_cursors)
             if wake.kind == "fallback" and wake.board_id in active:
+                subscription_loss_streaks[wake.board_id] = 0
                 await subscriptions.rearm(wake.board_id)
     finally:
         await subscriptions.close()
