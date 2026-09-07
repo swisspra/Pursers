@@ -32,6 +32,7 @@ SHA-256 `1a0981ec6cc47aed8eeb5e8f488bef260ab6b5fd5c7c88e2cd99604654103e1a`.
 | `ONBOARD_AGENT_INSTANCE` | no | Stable per-instance suffix, such as `window-a`. |
 | `PURSERS_ROLE` | no | Explicit seat role: `worker`, `reviewer`, `orchestrator`, or `coordinator`. When omitted, Central maps reviewer membership to `reviewer`; admin/member membership maps to `worker`. |
 | `PURSERS_WAIT_MODE` | no | `push` (default) or explicit compatibility `poll`; a subscription error polls only that board for the current call and push is retried on re-arm. |
+| `PURSERS_CENTRAL_CONNECTION_CAP` | no | Process-wide Central connection ceiling; defaults to `4` and accepts `1`-`64`. One slot is reserved for ordinary calls and excess board subscriptions fall back to polling with a clear stderr warning. |
 | `PURSERS_KEEPALIVE_IDLE_LIMIT_S` | no | Maximum seconds since this stdio session's last model tool call before background lease renewal pauses. Defaults to three times each claim's live TTL. |
 | `PURSERS_BACKLOG_RESURFACE_INTERVAL_S` | no | Seconds before an unchanged open broadcast ticket may wake the same idle identity again; defaults to `600`. |
 | `PURSERS_HOST` | no | `codex` (default), `codex-cli`, `goose`, `claude-code`, `claude-desktop`, or `headless`; selects the safe call ceiling. |
@@ -52,6 +53,30 @@ Give each host window a unique, durable instance value and reuse that value
 after restarts. The explicit value is the stability anchor; the bridge does
 not guess window identity or create lock files that can swap identities when
 processes restart in a different order.
+
+## Connection hygiene
+
+The bridge keeps one HTTP client for its Central URL for the life of the stdio
+process. Ordinary calls and subscription reconnects share that client's
+bounded pool instead of creating a new pool per wait. The default
+four-connection ceiling reserves one connection for ordinary calls and permits
+up to three concurrent board subscriptions; an additional subscription logs
+`Central connection cap hit` and uses the existing per-board poll fallback.
+
+Some desktop hosts launch a fresh stdio bridge for every conversation and do
+not necessarily terminate old children when the host restarts. Those orphaned
+processes each retain their own bounded pool, so the per-process cap is not a
+substitute for process cleanup. Stop the host first, then inspect only bridge
+processes and their Central sockets:
+
+```sh
+pgrep -af 'pursers_wait_server.py'
+lsof -nP -a -p PID -iTCP
+```
+
+After confirming a listed PID belongs to an obsolete bridge, stop it with
+`kill PID`; use the host's normal process manager for managed services. Restart
+the host and confirm that only the expected current bridge processes remain.
 
 ## Per-call identities
 
@@ -117,7 +142,7 @@ seat remains legacy and open/backlog broadcast behavior is unchanged.
 ## Multi-board response
 
 Pass `boards` to operate one worker identity across several boards without
-opening another transport:
+opening another HTTP client:
 
 ```text
 a2a_wait(

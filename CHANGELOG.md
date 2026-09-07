@@ -9,6 +9,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Changed
 
+- Wait-bridge Central traffic now reuses one bounded HTTP pool per process,
+  caps concurrent Central connections at four by default, and logs before an
+  excess board subscription falls back to polling. Coordinator subscription
+  loss recovery now waits with jittered exponential backoff capped at 60
+  seconds. Central rejects excess per-principal listen streams at a soft cap
+  of 32, reports active stream counts through healthz, and attributes rejected
+  coordinator joins by principal prefix, agent name, and requested role.
 - Central identity checks now use the exact seat (`agent_id`) for reviewer
   self-exclusion, claimed-ticket cancellation, and private-memory visibility.
   Multiple worker or reviewer seats may share one bearer principal without
