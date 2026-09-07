@@ -345,7 +345,8 @@ class Cache:
 def test_human_resolve_endpoint_guard_and_validation() -> None:
     cache = Cache()
     server = dashboard.ThreadingHTTPServer(
-        ("127.0.0.1", 0), dashboard.make_handler(cache)
+        ("127.0.0.1", 0),
+        dashboard.make_handler(cache, worker_manager=SimpleNamespace()),
     )
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()

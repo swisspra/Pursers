@@ -125,6 +125,11 @@ for every step and changes nothing. All door and project mutation endpoints enfo
 - Administrative token authorization on Central (non-admin callers are rejected with HTTP 403);
 - No door strings or JWT-shaped substrings are ever logged or included in listing APIs.
 
+The authorization check uses Central's `board_list` membership projection and
+requires `membership_role=admin` on each affected board. A successful
+member-authorized status or member listing is not treated as proof of admin
+authority, and door key/JWKS files are not touched until this check succeeds.
+
 ## Release & Operations panel
 
 The Config page integrates release status and guarded operational controls

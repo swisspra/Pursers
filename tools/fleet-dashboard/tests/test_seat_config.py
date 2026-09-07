@@ -22,6 +22,13 @@ REAL_RUNTIME_PROBE = seat_config._default_runtime_probe
 REAL_IDENTITY_PROBE = seat_config._default_identity_probe
 
 
+def hermetic_doctor_runner(command, **kwargs):
+    """Keep Doctor process-age checks deterministic in restricted sandboxes."""
+    if command[:3] == ["ps", "-axo", "etimes=,comm="]:
+        return subprocess.CompletedProcess(command, 0, "", "")
+    return subprocess.run(command, **kwargs)
+
+
 @pytest.fixture(autouse=True)
 def stub_doctor_network_probes(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
@@ -246,6 +253,7 @@ def test_codex_worker_and_reviewer_connectors_coexist_and_match_independently(
         assert f"${{{target.token_env_var}-}}" in wait["args"][1]
 
     doctor = seat_config.Doctor(
+        runner=hermetic_doctor_runner,
         pypi_fetcher=lambda: "0.1.0a12",
         live_probe=lambda _d, _t: {
             "mode": "push", "registry_boards": ["pursers"], "skipped_boards": {}
@@ -916,6 +924,7 @@ def test_claude_desktop_doctor_reports_identity_and_runtime_start(
     adapter = seat_config.ClaudeDesktopAdapter(target.config_path)
     adapter.apply(adapter.plan(target))
     doctor = seat_config.Doctor(
+        runner=hermetic_doctor_runner,
         runtime_probe=lambda _desired, _inspection, _timeout: (True, "started"),
         live_probe=lambda _desired, _timeout: {
             "mode": "push",
@@ -1200,6 +1209,7 @@ def test_doctor_reports_split_identity_fail_and_shared_token_pass(
     adapter = seat_config.CodexAdapter(target.config_path)
     adapter.apply(adapter.plan(target))
     doctor = seat_config.Doctor(
+        runner=hermetic_doctor_runner,
         pypi_fetcher=lambda: "0.1.0a12",
         live_probe=lambda _d, _t: {
             "mode": "push", "registry_boards": ["pursers"], "skipped_boards": {}
@@ -1242,6 +1252,7 @@ def test_doctor_compares_central_principals_and_managed_literal(
         return "PR-shared", "PR-shared"
 
     doctor = seat_config.Doctor(
+        runner=hermetic_doctor_runner,
         identity_probe=identity_probe,
         runtime_probe=lambda _d, _i, _t: (True, "stub ok"),
         pypi_fetcher=lambda: "0.1.0a12",

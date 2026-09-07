@@ -671,7 +671,7 @@ class WorkerManager:
 
     def __init__(
         self,
-        root: str | Path = DEFAULT_WORKERS_DIR,
+        root: str | Path | None = None,
         *,
         worker_script: str | Path = DEFAULT_WORKER_SCRIPT,
         platform: str | None = None,
@@ -679,7 +679,8 @@ class WorkerManager:
         process_factory: Callable[..., Any] = subprocess.Popen,
         process_matches: Callable[[int, Path], bool] | None = None,
     ) -> None:
-        self.root = Path(root).expanduser().resolve()
+        selected_root = DEFAULT_WORKERS_DIR if root is None else root
+        self.root = Path(selected_root).expanduser().resolve()
         self.worker_script = Path(worker_script).expanduser().resolve()
         self.platform = sys.platform if platform is None else platform
         self.command_runner = command_runner
@@ -3953,6 +3954,8 @@ class FleetFetcher:
             if not board_id:
                 continue
 
+            await self._require_board_admin(str(board_id))
+
             board_members_list: list[dict[str, Any]] = []
             try:
                 async with self._client(board_id) as client:
@@ -3992,6 +3995,23 @@ class FleetFetcher:
 
         return {"ok": True, "doors": rows}
 
+    async def _require_board_admin(self, board_id: str) -> None:
+        async with self._client(board_id) as client:
+            response = await _client_call(client, "board_list", {})
+        boards = response.get("boards", []) if isinstance(response, dict) else []
+        membership = next(
+            (
+                row.get("membership_role")
+                for row in boards
+                if isinstance(row, dict) and row.get("board_id") == board_id
+            ),
+            None,
+        )
+        if membership != "admin":
+            raise PermissionError(
+                f"board access denied: admin membership required for {board_id!r}"
+            )
+
     async def _authorize_door_action(self, board_id: str) -> None:
         reg_payload = await self.fetch_project_registry()
         registry = reg_payload.get("registry", {}) if isinstance(reg_payload, dict) else {}
@@ -4003,8 +4023,7 @@ class FleetFetcher:
         )
         if board_id not in active_boards:
             raise ValueError(f"board {board_id!r} is not an active registry project")
-        async with self._client(board_id) as client:
-            await _client_call(client, "board_status", {})
+        await self._require_board_admin(board_id)
 
     async def copy_door(self, board_id: str, role: str) -> dict[str, Any]:
         if not BOARD_ID_RE.fullmatch(board_id):

@@ -16,6 +16,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Changed
 
+- Fleet dashboard door endpoints now require Central's authoritative admin
+  membership projection before reading or mutating door material, and dashboard
+  tests inject temporary worker roots and process probes for hermetic replay.
 - Wait bridge and seat-kit setup now accept one `prs1` door: the bridge stores
   private per-board/per-role credentials, resolves missing runtime environment
   from them, assigns durable collision-safe seat-name suffixes, and provides

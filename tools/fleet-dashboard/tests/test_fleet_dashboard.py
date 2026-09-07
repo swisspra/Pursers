@@ -6451,14 +6451,21 @@ class FakeDoorBoardClient:
         pass
 
     async def board_list(self) -> dict:
-        if not self.is_admin:
-            raise PermissionError("board access denied")
         boards = (
             sorted(self.central.created_boards)
             if self.central is not None
             else ["pursers", self.board_id]
         )
-        return {"ok": True, "boards": [{"board_id": b} for b in boards]}
+        return {
+            "ok": True,
+            "boards": [
+                {
+                    "board_id": board,
+                    "membership_role": "admin" if self.is_admin else "member",
+                }
+                for board in boards
+            ],
+        }
 
     async def board_onboard(self, **kwargs: object) -> dict:
         if not self.is_admin:
@@ -6469,8 +6476,6 @@ class FakeDoorBoardClient:
         return {"ok": True, "board_id": self.board_id}
 
     async def board_members(self) -> dict:
-        if not self.is_admin:
-            raise PermissionError("board access denied")
         members = [
             {"principal_id": pid, "role": role, "agent_names": ["seat-1"]}
             for pid, role in self.memberships.items()
@@ -6484,8 +6489,6 @@ class FakeDoorBoardClient:
         return {"ok": True}
 
     async def board_status(self) -> dict:
-        if not self.is_admin:
-            raise PermissionError("board access denied")
         return {
             "ok": True,
             "board_id": self.board_id,
@@ -6847,6 +6850,13 @@ def test_guards_reject_cross_origin_and_non_admin(tmp_path: Path) -> None:
     fetcher_non_admin = dashboard.FleetFetcher(
         config_non_admin, client_factory=non_admin_central.client_factory
     )
+    member_client = non_admin_central.client_factory(
+        config_non_admin.url,
+        config_non_admin.token,
+        "existing-board",
+    )
+    assert asyncio.run(member_client.board_status())["ok"] is True
+    assert asyncio.run(member_client.board_members())["ok"] is True
     cache_non_admin = dashboard.DashboardCache([fetcher_non_admin], 60)
     server2 = dashboard.ThreadingHTTPServer(
         ("127.0.0.1", 0), dashboard.make_handler(cache_non_admin, seat_manager=SimpleNamespace())
