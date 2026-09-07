@@ -663,6 +663,7 @@ Elicitation host declarations (probed 2026-09-06):
 | Claude Desktop / stdio | not captured by the pre-raw-value probe build | Live MCPB calls returned `elicitation_declared: false`; no form was rendered. An earlier fallback `answer` call accepted `choice=green`, `disposition=reopen`, and Central recorded the matching resolution. The corrected bridge will distinguish raw `null` from `{}` on the next host call. |
 | Claude Desktop / HTTP custom connector | not measured | This is a separate per-request `_meta` path; no declaration is inferred from the stdio probe. |
 | Codex app | not measured | The sandbox probe connector was not available to this Codex task, so no declaration is inferred. |
+| AionUi 2.2.1 / imported stdio bridge | no usable native form renderer | Push is available through the stored-door wait bridge; AionUi did not render the requested elicitation schema, so use the dashboard or coordinator fallback. |
 | Goose / stdio | not captured by the pre-raw-value probe build | Live stdio probe verified the fallback list + instructions path; no raw declaration was retained by that build. |
 
 The fleet dashboard is the independent browser fallback, not an MCP App UI
