@@ -92,11 +92,12 @@ Response: UNAVAILABLE
 Persisted snapshot: mcp_server_ids=[] mcp_servers=[] mcp_statuses=[]
 ```
 
-The fallback import was:
+The fallback import used `AIONUI_SESSION_HEADER`, a shell variable containing
+the authenticated browser-session header. Its value is intentionally omitted:
 
 ```sh
 curl -X POST http://127.0.0.1:<AIONUI_PORT>/api/mcp/servers/import \
-  -H 'Authorization: Bearer <LOCAL_SESSION>' \
+  -H "${AIONUI_SESSION_HEADER}" \
   -H 'x-csrf-token: <CSRF>' \
   -H 'Cookie: aionui-csrf-token=<CSRF>' \
   -H 'content-type: application/json' \
@@ -148,7 +149,7 @@ Request:
 
 ```sh
 curl -X POST http://127.0.0.1:<AIONUI_PORT>/api/conversations \
-  -H 'Authorization: Bearer <LOCAL_SESSION>' \
+  -H "${AIONUI_SESSION_HEADER}" \
   -H 'x-csrf-token: <CSRF>' \
   -H 'Cookie: aionui-csrf-token=<CSRF>' \
   -H 'content-type: application/json' \
