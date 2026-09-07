@@ -124,6 +124,18 @@ class RuntimeHealthUnitTests(unittest.IsolatedAsyncioTestCase):
         return output, handler
 
     def test_healthz_success_exposes_bounded_runtime_fields(self) -> None:
+        self.assertTrue(
+            self.service.register_principal_stream(self.principal.principal_id)
+        )
+        self.assertTrue(
+            self.service.register_principal_stream(self.principal.principal_id)
+        )
+        self.addCleanup(
+            self.service.unregister_principal_stream, self.principal.principal_id
+        )
+        self.addCleanup(
+            self.service.unregister_principal_stream, self.principal.principal_id
+        )
         response = health_response(self.service, self.service.diagnostics)
         payload = json.loads(response.body)
 
@@ -136,6 +148,8 @@ class RuntimeHealthUnitTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("open_file_descriptors", payload)
         self.assertIn("soft_file_descriptor_limit", payload)
         self.assertIn("file_descriptor_pressure", payload)
+        self.assertEqual(payload["active_subscription_streams"], 2)
+        self.assertEqual(payload["principal_stream_cap"], 32)
         self.assertEqual(response.headers["cache-control"], "no-store")
 
     def test_healthz_failure_logs_full_single_line_and_safe_payload(self) -> None:
