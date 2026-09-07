@@ -123,12 +123,6 @@ def _health_counts(service: Any) -> dict[str, int]:
     return {
         "board_count": len(boards),
         "journal_head": max(heads, default=0),
-        "active_subscription_streams": int(
-            getattr(service, "active_stream_count", 0)
-        ),
-        "principal_stream_cap": int(
-            getattr(service, "principal_stream_cap", 0)
-        ),
     }
 
 

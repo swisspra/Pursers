@@ -1255,29 +1255,6 @@ class PushWaitTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("retrying journal-only", stderr.getvalue())
         self.assertNotIn("falling back to poll", stderr.getvalue())
 
-    async def test_process_connection_limiter_reserves_main_and_caps_streams(
-        self,
-    ) -> None:
-        limiter = wait_server.CentralConnectionLimiter(4)
-        stderr = io.StringIO()
-
-        with redirect_stderr(stderr):
-            async with (
-                limiter.subscription("board-a"),
-                limiter.subscription("board-b"),
-                limiter.subscription("board-c"),
-            ):
-                self.assertEqual(limiter.active, 4)
-                with self.assertRaisesRegex(
-                    BoardClientError, "connection cap hit"
-                ):
-                    async with limiter.subscription("board-d"):
-                        self.fail("connection cap must reject the fourth stream")
-
-        self.assertEqual(limiter.active, 1)
-        self.assertEqual(limiter.peak, 4)
-        self.assertIn("Central connection cap hit", stderr.getvalue())
-
     async def test_push_backlog_scan_precedes_subscription(self) -> None:
         ticket = {
             "ticket_id": "TK-before-cursor",

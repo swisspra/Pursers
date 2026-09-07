@@ -113,7 +113,6 @@ class DispatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(
             worker.structured_content["role_defaulted_from_membership"]
         )
-
         self.assertTrue(worker.structured_content["capabilities"]["can_work"])
         self.assertFalse(worker.structured_content["capabilities"]["can_review"])
 
@@ -250,26 +249,6 @@ class DispatchTests(unittest.IsolatedAsyncioTestCase):
             description="dispatch by capability", target_url="pursers/packages/central",
             scope="interactive-no-send", required_fields=["test_output"],
             **extra,
-        )
-
-    async def test_board_join_authorization_failure_logs_caller_context(
-        self,
-    ) -> None:
-        self.principal = self.worker_a
-        with patch.object(central, "log_runtime_event") as runtime_event:
-            with self.assertRaisesRegex(ToolError, "board:coordinate"):
-                await self.call(
-                    "board_join",
-                    agent_name="misconfigured-coordinator",
-                    role="coordinator",
-                )
-
-        runtime_event.assert_any_call(
-            "board_join_authorization_failed",
-            board_id="pursers",
-            principal_id_prefix=self.worker_a.principal_id[:12],
-            agent_name="misconfigured-coordinator",
-            requested_role="coordinator",
         )
 
     async def test_ticket_list_filters_a_bounded_set_of_ticket_ids(self) -> None:

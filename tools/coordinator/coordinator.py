@@ -9,7 +9,6 @@ import base64
 import hashlib
 import json
 import os
-import random
 import re
 import subprocess
 import sys
@@ -53,9 +52,6 @@ INTAKE_REQUIRED_SCOPES = frozenset({"board:read", "board:intake"})
 INTAKE_FORBIDDEN_SCOPES = frozenset({"board:write"})
 BOARD_FAILURE_LOG_COOLDOWN_SECONDS = 300
 HOME_BACKOFF_MAX_SECONDS = 300
-SUBSCRIPTION_BACKOFF_BASE_SECONDS = 1.0
-SUBSCRIPTION_BACKOFF_MAX_SECONDS = 60.0
-SUBSCRIPTION_BACKOFF_JITTER_FRACTION = 0.10
 INTAKE_DOCUMENT_SCHEMA_VERSION = 1
 MAX_INTAKE_TOMBSTONES = 20
 INTAKE_CATEGORIES = (
@@ -2262,16 +2258,7 @@ class SubscriptionWake:
 class JournalSubscriptionPool:
     """Keep one public BoardClient.events() driver open per registry board."""
 
-    def __init__(
-        self,
-        url: str,
-        token: str,
-        agent_name: str,
-        *,
-        fallback_cap_s: float = SUBSCRIPTION_BACKOFF_MAX_SECONDS,
-        sleeper: Callable[[float], Awaitable[None]] = asyncio.sleep,
-        jitter: Callable[[float, float], float] = random.uniform,
-    ) -> None:
+    def __init__(self, url: str, token: str, agent_name: str) -> None:
         self.url = url
         self._token = token
         self.agent_name = agent_name
@@ -2279,24 +2266,6 @@ class JournalSubscriptionPool:
         self._queue: asyncio.Queue[SubscriptionWake] = asyncio.Queue()
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._fallback_tasks: dict[str, asyncio.Task[None]] = {}
-        self._fallback_cap_s = min(
-            SUBSCRIPTION_BACKOFF_MAX_SECONDS,
-            max(SUBSCRIPTION_BACKOFF_BASE_SECONDS, float(fallback_cap_s)),
-        )
-        self._sleeper = sleeper
-        self._jitter = jitter
-
-    def backoff_delay(self, streak: int) -> float:
-        exponent = min(6, max(0, int(streak) - 1))
-        nominal = min(
-            self._fallback_cap_s,
-            SUBSCRIPTION_BACKOFF_BASE_SECONDS * (2 ** exponent),
-        )
-        spread = nominal * SUBSCRIPTION_BACKOFF_JITTER_FRACTION
-        return min(
-            self._fallback_cap_s,
-            max(0.0, self._jitter(nominal - spread, nominal + spread)),
-        )
 
     async def sync(self, cursors: Mapping[str, int]) -> None:
         selected = set(cursors)
@@ -2331,21 +2300,19 @@ class JournalSubscriptionPool:
         self,
         board_id: str,
         delay_s: float,
-        sleeper: Callable[[float], Awaitable[None]] | None = None,
-    ) -> bool:
+        sleeper: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    ) -> None:
         if board_id in self._fallback_tasks:
-            return False
-        selected_sleeper = sleeper or self._sleeper
+            return
 
         async def defer() -> None:
             try:
-                await selected_sleeper(delay_s)
+                await sleeper(delay_s)
                 await self._queue.put(SubscriptionWake(board_id, "fallback"))
             finally:
                 self._fallback_tasks.pop(board_id, None)
 
         self._fallback_tasks[board_id] = asyncio.create_task(defer())
-        return True
 
     async def _watch(self, board_id: str) -> None:
         from pursers_client import BoardClient
@@ -2370,7 +2337,6 @@ class JournalSubscriptionPool:
                 touch=False,
                 cursor_callback=advance,
                 subscription_callback=ready,
-                reconnect=False,
             )
             async with aclosing(events):
                 async for _event in events:
@@ -3648,10 +3614,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--poll-seconds",
         type=int,
-        default=60,
+        default=900,
         help=(
-            "maximum jittered subscription-loss backoff before fallback "
-            "refresh (capped at 60 seconds); healthy subscriptions never poll"
+            "fallback refresh delay after a journal subscription is lost; "
+            "healthy subscriptions never poll"
         ),
     )
     parser.add_argument("--once", action="store_true")
@@ -3959,28 +3925,28 @@ async def run(args: argparse.Namespace) -> None:
         for board_id, snapshot in snapshots.items()
     }
     subscriptions = JournalSubscriptionPool(
-        args.url,
-        token,
-        args.agent_name,
-        fallback_cap_s=args.poll_seconds,
+        args.url, token, args.agent_name
     )
     await subscriptions.sync(cursors)
     try:
         while True:
             wake = await subscriptions.next_wake()
             if wake.kind == "ready":
+                subscription_loss_streaks[wake.board_id] = 0
                 continue
             if wake.kind == "lost":
-                streak = subscription_loss_streaks.get(wake.board_id, 0) + 1
-                delay_s = subscriptions.backoff_delay(streak)
-                if subscriptions.defer_fallback(wake.board_id, delay_s):
-                    subscription_loss_streaks[wake.board_id] = streak
-                    print(
-                        "coordinator: journal subscription lost for "
-                        f"board={wake.board_id!r} error_class={wake.error_class}; "
-                        f"backoff_step={streak} fallback_refresh_in={delay_s:.2f}s",
-                        file=sys.stderr,
-                    )
+                subscription_loss_streaks[wake.board_id] = (
+                    subscription_loss_streaks.get(wake.board_id, 0) + 1
+                )
+                print(
+                    "coordinator: journal subscription lost for "
+                    f"board={wake.board_id!r} error_class={wake.error_class}; "
+                    f"fallback refresh in {args.poll_seconds}s",
+                    file=sys.stderr,
+                )
+                subscriptions.defer_fallback(
+                    wake.board_id, args.poll_seconds
+                )
                 continue
             if wake.kind == "fallback":
                 selected = {wake.board_id}
@@ -4024,7 +3990,6 @@ async def run(args: argparse.Namespace) -> None:
             }
             await subscriptions.sync(next_cursors)
             if wake.kind == "fallback" and wake.board_id in active:
-                subscription_loss_streaks[wake.board_id] = 0
                 await subscriptions.rearm(wake.board_id)
     finally:
         await subscriptions.close()

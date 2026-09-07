@@ -150,39 +150,6 @@ class PushWaitCentralTests(unittest.IsolatedAsyncioTestCase):
             request, accepted
         )
 
-    async def test_principal_stream_cap_rejects_excess_and_releases_count(
-        self,
-    ) -> None:
-        self.service.principal_stream_cap = 1
-        self.principal = self.worker
-        entered = asyncio.Event()
-        release = asyncio.Event()
-        request = SimpleNamespace(
-            method="subscriptions/listen",
-            params={
-                "notifications": {
-                    "resourceSubscriptions": ["board://pursers/journal"]
-                }
-            },
-            meta={},
-        )
-
-        async def held(_ctx: object) -> object:
-            entered.set()
-            await release.wait()
-            return {"accepted": True}
-
-        middleware = central.SubscriptionAuthorization(self.service)
-        first = asyncio.create_task(middleware(request, held))
-        await asyncio.wait_for(entered.wait(), timeout=1)
-        self.assertEqual(self.service.active_stream_count, 1)
-        with self.assertRaisesRegex(MCPError, "stream limit exceeded"):
-            await middleware(request, held)
-        self.assertEqual(self.service.active_stream_count, 1)
-        release.set()
-        self.assertEqual(await first, {"accepted": True})
-        self.assertEqual(self.service.active_stream_count, 0)
-
     async def assert_target_only_cue(
         self,
         action,

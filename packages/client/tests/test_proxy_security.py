@@ -61,8 +61,6 @@ def test_board_client_disables_environment_proxy_inheritance(monkeypatch) -> Non
     assert captured["headers"] == {
         "Authorization": "Bearer synthetic-local-bearer"
     }
-    assert captured["limits"].max_connections == 4
-    assert captured["limits"].max_keepalive_connections == 4
 
 
 def test_proxy_environment_never_receives_local_bearer(monkeypatch) -> None:
