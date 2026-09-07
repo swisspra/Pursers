@@ -738,6 +738,7 @@ class PursersBoardAPI:
             self.wait_bridge.BOARD_ID,
             agent_name=config.agent_name,
             role=config.role,
+            allow_takeover=True,
         )
         self.registry: dict[str, Any] | None = None
         self.views: dict[str, Any] = {}
@@ -767,6 +768,7 @@ class PursersBoardAPI:
             try:
                 await view.board_join(
                     agent_name=self.config.agent_name,
+                    allow_takeover=True,
                     task_focus=(
                         f"worker-runtime role={self.config.role} "
                         f"max_tier={self.config.max_tier}"

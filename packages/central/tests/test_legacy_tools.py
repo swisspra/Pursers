@@ -165,6 +165,7 @@ class LegacyToolsTests(unittest.IsolatedAsyncioTestCase):
                     "board_id": "pursers",
                     "agent_name": "legacy-seat",
                     "capabilities": {"legacy_tools": False},
+                    "allow_takeover": True,
                 },
             )
             self.assertFalse(rejoin.is_error)

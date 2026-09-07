@@ -128,7 +128,9 @@ class DispatchTests(unittest.IsolatedAsyncioTestCase):
             "board_join", agent_name="role-migration", role="reviewer"
         )
         self.assertTrue(inferred.structured_content["capabilities"]["can_review"])
-        migrated = await self.call("board_join", agent_name="role-migration")
+        migrated = await self.call(
+            "board_join", agent_name="role-migration", allow_takeover=True
+        )
         self.assertEqual(migrated.structured_content["role"], "worker")
         self.assertFalse(migrated.structured_content["capabilities"]["can_review"])
 
@@ -143,7 +145,8 @@ class DispatchTests(unittest.IsolatedAsyncioTestCase):
                 "board_join", agent_name="membership-reviewer"
             )
             repeated = await self.call(
-                "board_join", agent_name="membership-reviewer"
+                "board_join", agent_name="membership-reviewer",
+                allow_takeover=True,
             )
         self.assertEqual(inferred_reviewer.structured_content["role"], "reviewer")
         self.assertEqual(repeated.structured_content["role"], "reviewer")
@@ -163,7 +166,8 @@ class DispatchTests(unittest.IsolatedAsyncioTestCase):
             effective_role="reviewer",
         )
         explicit_worker = await self.call(
-            "board_join", agent_name="membership-reviewer", role="worker"
+            "board_join", agent_name="membership-reviewer", role="worker",
+            allow_takeover=True,
         )
         self.assertEqual(explicit_worker.structured_content["role"], "worker")
         self.assertFalse(

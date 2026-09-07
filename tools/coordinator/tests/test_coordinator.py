@@ -1657,8 +1657,10 @@ def test_write_reports_isolates_failed_board_and_mirrors_degraded_finding(
             *,
             agent_name: str,
             role: str,
+            allow_takeover: bool,
         ) -> None:
             assert role == "coordinator"
+            assert allow_takeover is True
             self.board_id = board_id
 
         async def __aenter__(self) -> "FakeBoardClient":
@@ -1763,13 +1765,22 @@ def test_mutate_action_declares_coordinator_role(
     import pursers_client
 
     captured: dict[str, Any] = {}
+    active_seats: set[tuple[str, str]] = set()
 
     class FakeBoardClient:
         def __init__(self, *args: Any, **kwargs: Any) -> None:
             captured["args"] = args
             captured["kwargs"] = kwargs
+            self.seat = (str(args[2]), str(kwargs["agent_name"]))
+            self.allow_takeover = bool(kwargs["allow_takeover"])
 
         async def __aenter__(self) -> "FakeBoardClient":
+            if self.seat in active_seats and not self.allow_takeover:
+                raise RuntimeError(
+                    "seat name already active under this principal; "
+                    "choose another name or pass allow_takeover=true"
+                )
+            active_seats.add(self.seat)
             return self
 
         async def __aexit__(self, *_args: Any) -> None:
@@ -1797,7 +1808,19 @@ def test_mutate_action_declares_coordinator_role(
     assert captured["kwargs"] == {
         "agent_name": "coordinator-test",
         "role": "coordinator",
+        "allow_takeover": True,
     }
+    restarted = asyncio.run(
+        coordinator.mutate_action(
+            "https://board.invalid/mcp",
+            "TOKEN_PLACEHOLDER",
+            "coordinator-test",
+            action(),
+            NOW,
+        )
+    )
+    assert restarted == {"ok": True}
+    assert active_seats == {("board-a", "coordinator-test")}
 
 
 def test_shadow_mode_emits_would_findings_and_makes_zero_mutation_calls() -> None:
@@ -3552,8 +3575,10 @@ def test_write_reports_isolates_join_rejection_and_publishes_unreachable_home_fi
             *,
             agent_name: str,
             role: str,
+            allow_takeover: bool,
         ) -> None:
             assert role == "coordinator"
+            assert allow_takeover is True
             self.board_id = board_id
 
         async def __aenter__(self) -> "FakeBoardClient":

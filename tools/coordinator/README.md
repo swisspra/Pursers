@@ -47,6 +47,11 @@ last local cursor. Other healthy boards remain subscribed.
 
 ## Policy and safeguards
 
+Many seats may share one bearer principal. The security and workflow identity
+is the exact seat (`agent_id`), derived from board, principal, and agent name;
+coordinators must therefore reason about offers, claims, reviews, and executor
+authority by `agent_id`, not by principal alone.
+
 Central exposes pending operator decisions as `needs_human` tickets. A worker
 calls `ticket_request_human`, which releases its lease and records the bounded
 question, optional flat answer schema, and safe handoff URL. An admitted board

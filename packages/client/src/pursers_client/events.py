@@ -18,6 +18,7 @@ TICKET_CLAIM_REFUSED = "ticket_claim_refused"
 REVIEW_CLAIM_REFUSED = "review_claim_refused"
 TICKET_PARKED = "ticket_parked"
 TICKET_UNPARKED = "ticket_unparked"
+SEAT_NAME_COLLISION = "seat_name_collision"
 
 DISPATCH_KINDS = frozenset(
     {TICKET_OFFERED, OFFER_EXPIRED, OFFER_REVOKED, REVIEW_OFFERED}
@@ -46,6 +47,7 @@ CORE_EVENT_KINDS = frozenset(
         "coordinator_nudge",
         HUMAN_INPUT_REQUESTED,
         HUMAN_INPUT_RESOLVED,
+        SEAT_NAME_COLLISION,
     }
 )
 ADMISSION_EVENT_KINDS = frozenset(

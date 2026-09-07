@@ -797,6 +797,44 @@ def test_board_api_constructs_client_with_declared_role(
     worker_module.PursersBoardAPI(selected, "TOKEN_PLACEHOLDER")
 
     assert captured["kwargs"]["role"] == role
+    assert captured["kwargs"]["allow_takeover"] is True
+
+
+def test_board_api_restart_opts_into_stable_seat_takeover(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    active_seats: set[str] = set()
+
+    class CollisionAwareClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            self.agent_name = str(kwargs["agent_name"])
+            self.allow_takeover = bool(kwargs["allow_takeover"])
+
+        async def __aenter__(self) -> "CollisionAwareClient":
+            if self.agent_name in active_seats and not self.allow_takeover:
+                raise worker_module.BoardClientError(
+                    "seat name already active under this principal; "
+                    "choose another name or pass allow_takeover=true"
+                )
+            active_seats.add(self.agent_name)
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+    monkeypatch.setattr(worker_module, "BoardClient", CollisionAwareClient)
+    selected = config(tmp_path, "http://unused")
+
+    async def restart() -> None:
+        first = worker_module.PursersBoardAPI(selected, "TOKEN_PLACEHOLDER")
+        await first.__aenter__()
+        await first.__aexit__(None, None, None)
+        second = worker_module.PursersBoardAPI(selected, "TOKEN_PLACEHOLDER")
+        await second.__aenter__()
+        await second.__aexit__(None, None, None)
+
+    asyncio.run(restart())
+    assert active_seats == {selected.agent_name}
 
 
 def test_board_api_maps_reviewer_role_denial_to_operator_error(

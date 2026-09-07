@@ -149,6 +149,7 @@ class ResponseBoundsTests(unittest.IsolatedAsyncioTestCase):
         result = await self.call(
             "board_onboard",
             agent_name="admin-agent",
+            allow_takeover=True,
             token_budget=256,
         )
 
@@ -193,6 +194,7 @@ class ResponseBoundsTests(unittest.IsolatedAsyncioTestCase):
         onboard = await self.call(
             "board_onboard",
             agent_name="admin-agent",
+            allow_takeover=True,
             snapshot_limit=10,
             snapshot_max_bytes=100_000,
         )
@@ -240,6 +242,7 @@ class ResponseBoundsTests(unittest.IsolatedAsyncioTestCase):
         result = await self.call(
             "board_onboard",
             agent_name="admin-agent",
+            allow_takeover=True,
             token_budget=256,
             snapshot_limit=2,
             snapshot_max_bytes=100_000,
