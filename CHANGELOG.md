@@ -44,6 +44,10 @@ This release includes `pursers-central==0.1.0a27`,
 
 ### Changed
 
+- Fleet-dashboard tests are hermetic under workspace-write sandboxes: dashboard
+  state supports a lazy `PURSERS_STATE_DIR` override, worker directories are
+  created only on first use, and process listing is injectable with an explicit
+  unavailable result when inspection is denied.
 - Central identity checks now use the exact seat (`agent_id`) for reviewer
   self-exclusion, claimed-ticket cancellation, and private-memory visibility.
   Multiple worker or reviewer seats may share one bearer principal without
