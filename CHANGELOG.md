@@ -63,6 +63,24 @@ This release includes `pursers-central==0.1.0a28`,
 
 ### Changed
 
+- Central: archive tier keeps the hot board document small — closed/canceled
+  tickets older than `archive_after_days` (default 2) move to per-ticket
+  archive documents with a compact per-board index, and ticket_get,
+  ticket_list, board_snapshot, board_status, briefing, and board_list read
+  through transparently. A one-shot idempotent migration (schema_version 8)
+  upgrades legacy documents on first load; a generated 5.8 MB legacy document
+  shrinks below 100 KB with every archived ticket still readable. Parsed
+  documents are cached per board keyed by the store version, read-only calls
+  never bump the version or rewrite the blob, and inline
+  dispatch/submission/review histories keep the newest
+  `inline_history_limit` (default 50) entries with omitted counts while older
+  entries live in the archive document. New `board_archive_run` admin sweep,
+  an automatic sweep on the reaper timer, `ticket_archived` journal events for
+  board admins, journal compaction to the oldest live consumer cursor with a
+  500-row retention floor, and healthz per-board hot-document size, archived
+  ticket count, and trailing 60s document load/save counters. Client
+  `ticket_list(include_archived=True)` passes through and
+  `KNOWN_EVENT_KINDS` gains `ticket_archived`.
 - Seat-kit and wait-bridge waits now subscribe to holder-targeted ticket
   updates, label offer/holder/broadcast wakes explicitly, and permit workers
   and reviewers to claim only verified dispatch broadcasts when no live offer

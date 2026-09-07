@@ -50,11 +50,25 @@ class TransactionalSQLiteStore(SQLiteStore):
             return super().load(path, default)
         key = self._key(path)
         row = connection.execute(
-            "SELECT doc FROM documents WHERE path = ?", (key,)
+            "SELECT version FROM documents WHERE path = ?", (key,)
         ).fetchone()
+        version: int | None = None
+        if row is not None:
+            version = int(row[0])
+            cached = self._cache_get_shared(key, version)
+            if cached is not None:
+                self._record_activity(self._load_activity, key)
+                return cached
+            row = connection.execute(
+                "SELECT doc FROM documents WHERE path = ?", (key,)
+            ).fetchone()
+        self._record_activity(self._load_activity, key)
         if row is None:
             return self._fresh_default(default)
-        return json.loads(row[0])
+        document = json.loads(row[0])
+        if version is not None:
+            self._cache_put(key, version, document)
+        return document
 
     def read_modify_write(
         self, path: str | Path, mutate_fn: Mutator[T], default: DefaultFactory[T]
@@ -69,17 +83,20 @@ class TransactionalSQLiteStore(SQLiteStore):
         if row is None:
             current = self._fresh_default(default)
             version = 0
+            stored_blob = None
         else:
-            current = json.loads(row[0])
             version = int(row[1])
-        before = copy.deepcopy(current)
+            stored_blob = row[0]
+            cached = self._cache_get_copy(key, version)
+            current = json.loads(stored_blob) if cached is None else cached
         replacement = mutate_fn(current)
         updated = current if replacement is None else replacement
-        if row is not None and updated == before:
-            return copy.deepcopy(updated)
         encoded = json.dumps(
             updated, ensure_ascii=False, sort_keys=True, separators=(",", ":")
         )
+        if row is not None and encoded == stored_blob:
+            # No-op mutation: never bump the version or rewrite the blob.
+            return copy.deepcopy(updated)
         next_version = version + 1
         if row is None:
             connection.execute(
@@ -93,6 +110,8 @@ class TransactionalSQLiteStore(SQLiteStore):
             )
             if cursor.rowcount != 1:
                 raise RuntimeError("optimistic version conflict inside write transaction")
+        self._record_activity(self._save_activity, key)
+        self._cache_put(key, next_version, updated)
         return copy.deepcopy(updated)
 
     def iter_documents(self, prefix: str) -> list[dict[str, Any]]:
