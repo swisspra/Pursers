@@ -1400,6 +1400,15 @@ def test_live_registry_wait_restarts_stable_seat_and_delivers_offer(
             assert result["skipped_boards"] == {}
             assert result["events"][0]["ticket_id"] == ticket_id
             assert result["events"][0]["kind"] == "ticket_offered"
+            if os.environ.get("PURSERS_LIVE_PROBE_OUTPUT") == "1":
+                print(json.dumps({
+                    "boards": result["boards"],
+                    "skipped_boards": result["skipped_boards"],
+                    "events": [{
+                        "kind": result["events"][0]["kind"],
+                        "ticket_id": ticket_id,
+                    }],
+                }, sort_keys=True))
         finally:
             central.current_principal = original_current_principal
 
