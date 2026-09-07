@@ -180,6 +180,17 @@ bridge process and one Central connection serve multiple session identities:
 a2a_wait(since_seq=0, project="PROJECT_PLACEHOLDER", agent_name="session-a")
 ```
 
+Holder updates use the same push path as offers. A worker or reviewer receives
+`reason="held_ticket_update"` when its held ticket is annotated, rejected,
+cancelled, parked/unparked, answered by a human, or loses a lease. Refetch the
+ticket and act on its authoritative state before re-arming.
+
+Broadcasts return `reason="broadcast"`. Workers may claim an OPEN work
+broadcast, and reviewers may review-claim a SUBMITTED review broadcast, only
+after a refetch confirms `dispatch_state.state=broadcast` and no live offer to
+another seat. Central rejects races; never claim a ticket with a live offer to
+someone else.
+
 `wait_for="auto"` is the default: the effective role returned by Central is
 used, so a seat declared or membership-defaulted as `reviewer` waits for
 `submitted` tickets, while a `worker` waits for `claimable` tickets.

@@ -75,8 +75,10 @@ Run this loop continuously. Each pass is one unit of work:
 1. **WAIT** — call `a2a_wait(since_seq=<last>, project="<your-project>")`. It
    opens a subscription-first wait until Central offers this seat a claimable
    ticket for your project, then returns `reason="offer"` and offer details.
-   Never claim an unoffered ticket. If the offer expires or is revoked, re-arm
-   and wait for the next offer. Legacy boards continue broadcast behavior.
+   A legacy work broadcast returns `reason="broadcast"` and is claimable only
+   when a refetch confirms an OPEN ticket with `dispatch_state.state=broadcast`
+   and no live work offer. Never claim a ticket offered to another seat. If an
+   offer expires or is revoked, re-arm and wait for the next offer.
    `PURSERS_WAIT_MODE=poll` is compatibility-only.
    - On first use, omitting `since_seq` resumes and advances Central's persisted
      cursor. Large history is bounded with `compacted`, `dropped`, and
@@ -86,6 +88,10 @@ Run this loop continuously. Each pass is one unit of work:
      call `a2a_wait` again with `since_seq` set to the returned `new_seq`. Keep
      re-arming. This is how you stay available for hours without a human poking
      you each time.
+   - If it returns `reason="held_ticket_update"`, immediately refetch that
+     ticket. Follow attributed evidence/decision annotations; apply rejection
+     `fix_instructions` and resubmit; on cancellation or parking, release the
+     slot and return to WAIT.
 2. **CLAIM** — `ticket_claim` the returned ticket. If the claim fails (another
    worker won the race), go back to WAIT — do not fight for it.
    Central enforces offers server-side: outside an eligible broadcast fallback,
@@ -120,7 +126,8 @@ Run this loop continuously. Each pass is one unit of work:
    evidence needed. Client and generated seat helpers truncate oversized notes
    at a line boundary, emit a warning, and report the truncation in the result.
 6. **AWAIT REVIEW** — a reviewer (not you) will approve or reject. If rejected,
-   the ticket returns with fix instructions; pick it back up and address them.
+   the held-ticket wake returns with fix instructions; refetch it immediately,
+   address them, and resubmit before accepting other work.
 7. **RE-ARM** — return to WAIT for the next ticket.
 
 ## 5. Governance rules (these are not optional)

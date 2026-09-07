@@ -37,6 +37,7 @@ class BacklogTests(unittest.TestCase):
                     "source": "backlog_scan",
                     "ticket_id": "TK-open",
                     "status": "open",
+                    "reason": "broadcast",
                     "payload_ref": "board://pursers/ticket/TK-open",
                 }
             ],

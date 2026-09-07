@@ -353,7 +353,7 @@ class PerCallWaitTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertFalse(result["timed_out"])
-        self.assertEqual(result["reason"], "backlog")
+        self.assertEqual(result["reason"], "broadcast")
         self.assertEqual(result["events"][0]["ticket_id"], "TK-submitted")
         self.assertEqual(
             list_calls,
@@ -371,7 +371,11 @@ class PerCallWaitTests(unittest.IsolatedAsyncioTestCase):
                     **arguments: Any,
                 ) -> dict[str, Any]:
                     return {
-                        "events": [{"kind": kind, "ticket_id": "TK-review"}],
+                        "events": [{
+                            "kind": kind,
+                            "ticket_id": "TK-review",
+                            "reviewer_agent_id": client.identity.agent_id,
+                        }],
                         "next_cursor": int(arguments["cursor"]) + index,
                         "has_more": False,
                         "resync_required": False,
@@ -387,7 +391,7 @@ class PerCallWaitTests(unittest.IsolatedAsyncioTestCase):
                 )
 
                 self.assertFalse(result["timed_out"])
-                self.assertEqual(result["reason"], "journal")
+                self.assertEqual(result["reason"], "held_ticket_update")
                 self.assertEqual(result["events"][0]["kind"], kind)
 
     async def test_wait_for_override_requires_reviewer_authorization(self) -> None:

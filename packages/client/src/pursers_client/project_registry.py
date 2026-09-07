@@ -14,6 +14,7 @@ from mcp.client.streamable_http import streamable_http_client
 
 from .client import GENERATION_META_KEY, BoardClient, BoardClientError
 from .events import (
+    HELD_TICKET_KINDS,
     OFFER_EXPIRED,
     OFFER_REVOKED,
     REVIEW_LEASE_KINDS,
@@ -29,6 +30,44 @@ WORK_DIR_OWNERS = frozenset({"operator", "fleet"})
 CATCHUP_PAGE_LIMIT = 100
 MAX_CATCHUP_PAGES_PER_BOARD = 8
 MAX_EVENTS_PER_BOARD = 1
+
+
+def _held_ticket_update(
+    ticket: dict[str, Any],
+    event: dict[str, Any],
+    agent_id: str,
+    *,
+    submitted: bool,
+) -> bool:
+    """Return whether an authoritative holder-targeted event belongs to a seat."""
+    kind = event.get("kind")
+    if kind not in HELD_TICKET_KINDS and not (
+        submitted and kind in REVIEW_LEASE_KINDS
+    ):
+        return False
+    review_lease = ticket.get("review_lease")
+    human_request = ticket.get("human_request")
+    if submitted:
+        return bool(
+            event.get("reviewer_agent_id") == agent_id
+            or (
+                isinstance(review_lease, dict)
+                and review_lease.get("reviewer_agent_id") == agent_id
+            )
+        )
+    return bool(
+        ticket.get("claimed_by_agent_id") == agent_id
+        or event.get("submitted_by_agent_id") == agent_id
+        or event.get("last_abandoned_by") == agent_id
+        or (
+            ticket.get("claimed_by_agent_id") is None
+            and ticket.get("last_claimed_by_agent_id") == agent_id
+        )
+        or (
+            isinstance(human_request, dict)
+            and human_request.get("asked_by", {}).get("agent_id") == agent_id
+        )
+    )
 
 
 def parse_project_registry(result: dict[str, Any]) -> dict[str, Any]:
@@ -205,6 +244,10 @@ async def wait_for_boards(
     if client._client is None:  # package helper; BoardClient must be entered
         raise RuntimeError("BoardClient is not entered")
     for board_id in board_ids:
+        if board_id == client.board_id and client.identity is not None:
+            identities[board_id] = client.identity.agent_id
+            generations[board_id] = getattr(client, "generation_token", None)
+            continue
         try:
             join_arguments: dict[str, Any] = {
                 "board_id": board_id,
@@ -212,6 +255,8 @@ async def wait_for_boards(
             }
             if capabilities is not None:
                 join_arguments["capabilities"] = capabilities
+            if getattr(client, "allow_takeover", False):
+                join_arguments["allow_takeover"] = True
             joined = BoardClient._decode(
                 await client._client.call_tool(
                     "board_join",
@@ -285,6 +330,12 @@ async def wait_for_boards(
                         "review" if submitted else "work"
                     )
                 dispatch_state = ticket.get("dispatch_state")
+                held_update = _held_ticket_update(
+                    ticket,
+                    event,
+                    identities[board_id],
+                    submitted=submitted,
+                )
                 if relevant and isinstance(dispatch_state, dict):
                     state = dispatch_state.get("state")
                     offer_kind = "review" if submitted else "work"
@@ -303,6 +354,7 @@ async def wait_for_boards(
                                 and isinstance(offer, dict)
                                 and offer.get("agent_id") == identities[board_id]
                             )
+                            or held_update
                             or (
                                 event.get("kind") in REVIEW_LEASE_KINDS
                                 and (
@@ -329,7 +381,7 @@ async def wait_for_boards(
                                 and isinstance(offer, dict)
                                 and offer.get("agent_id") == identities[board_id]
                             )
-                            or ticket.get("claimed_by_agent_id") == identities[board_id]
+                            or held_update
                             or (state == "broadcast" and ticket.get("status") == "open")
                         )
                     expected_offer_kind = (
@@ -347,13 +399,27 @@ async def wait_for_boards(
                             "tier": ticket.get("tier", 2),
                             "skills_required": list(ticket.get("skills_required") or []),
                         }
+                    if relevant:
+                        enriched["reason"] = (
+                            "offer"
+                            if event.get("kind") == expected_offer_kind or lifecycle
+                            else "held_ticket_update"
+                            if held_update
+                            else "broadcast"
+                        )
                 elif relevant:
-                    if submitted:
+                    if held_update:
+                        enriched["reason"] = "held_ticket_update"
+                    elif submitted:
                         relevant = event.get("status_to") == "submitted"
+                        if relevant:
+                            enriched["reason"] = "broadcast"
                     else:
                         relevant = identities[board_id] in event.get(
                             "recipient_identities", []
                         )
+                        if relevant:
+                            enriched["reason"] = "broadcast"
                 if not relevant:
                     cursors[board_id] = max(cursors[board_id], event_seq)
                     continue
@@ -373,16 +439,7 @@ async def wait_for_boards(
         return [], True
 
     def response(events: list[dict[str, Any]]) -> dict[str, Any]:
-        reason = "timeout"
-        if events:
-            reason = (
-                "offer"
-                if any(
-                    event.get("kind") in {TICKET_OFFERED, REVIEW_OFFERED}
-                    for event in events
-                )
-                else "journal"
-            )
+        reason = events[0].get("reason", "held_ticket_update") if events else "timeout"
         return {
             "new_seq": dict(cursors),
             "events": events,
