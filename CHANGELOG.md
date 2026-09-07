@@ -7,6 +7,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added
+
+- Wait bridge: add `pursers-door` to issue, inspect, rotate, and revoke
+  per-board worker/reviewer door credentials with RSA-2048 keys, atomic JWKS
+  replacement, and one secret-safe `prs1.…` setup string.
+
 ### Changed
 
 - Wait bridge and seat-kit setup now accept one `prs1` door: the bridge stores

@@ -16,7 +16,7 @@ from typing import Any, Mapping
 from urllib.parse import urlsplit
 
 SCHEMA_VERSION = 1
-SEAT_ROLES = frozenset({"worker", "reviewer", "orchestrator", "coordinator"})
+SEAT_ROLES = frozenset({"worker", "reviewer"})
 
 
 def default_state_dir(env: Mapping[str, str] | None = None) -> Path:
@@ -60,14 +60,18 @@ def _fallback_decode_door(value: str) -> dict[str, Any]:
 
 def _door_admin_decode(value: str) -> dict[str, Any]:
     """Use the issuer's public decoder, accepting its bounded result shapes."""
+    envelope = _fallback_decode_door(value)
     try:
         module = importlib.import_module("door_admin")
     except ImportError:
-        return _fallback_decode_door(value)
+        return envelope
     decoder = getattr(module, "decode_door", None) or getattr(module, "parse_door", None)
     if decoder is None:
-        return _fallback_decode_door(value)
-    decoded = decoder(value)
+        raise ValueError("door_admin has no supported decoder")
+    try:
+        decoded = decoder(value)
+    except Exception as exc:  # door_admin exposes a secret-safe domain error.
+        raise ValueError(str(exc)) from None
     if hasattr(decoded, "to_dict"):
         decoded = decoded.to_dict()
     elif not isinstance(decoded, dict) and hasattr(decoded, "__dict__"):
@@ -75,7 +79,14 @@ def _door_admin_decode(value: str) -> dict[str, Any]:
     if not isinstance(decoded, dict):
         raise ValueError("door_admin returned an invalid door payload")
     nested = decoded.get("claims") or decoded.get("payload")
-    return dict(nested) if isinstance(nested, dict) else dict(decoded)
+    validated = dict(nested) if isinstance(nested, dict) else dict(decoded)
+    for field in ("u", "b", "r"):
+        if field in validated and validated[field] != envelope.get(field):
+            raise ValueError(f"door_admin returned mismatched {field}")
+    kid, exp = _jwt_metadata(str(envelope.get("t") or ""))
+    if validated.get("kid", kid) != kid or validated.get("exp", exp) != exp:
+        raise ValueError("door_admin returned mismatched token metadata")
+    return envelope
 
 
 def _jwt_metadata(token: str) -> tuple[str, int]:
