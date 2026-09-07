@@ -12,6 +12,7 @@ import stat
 import subprocess
 import sys
 import time
+import base64
 from contextlib import asynccontextmanager, redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
@@ -59,6 +60,19 @@ def args(
 
 def mode(path: Path) -> int:
     return stat.S_IMODE(path.stat().st_mode)
+
+
+def synthetic_door(*, role: str = "worker") -> str:
+    def segment(value: dict[str, object]) -> str:
+        return base64.urlsafe_b64encode(
+            json.dumps(value, separators=(",", ":")).encode()
+        ).decode().rstrip("=")
+
+    compact = (
+        f"{segment({'alg': 'RS256', 'kid': 'seat-test'})}."
+        f"{segment({'exp': 2_000_000_000})}.synthetic-signature"
+    )
+    return f"prs1.{segment({'u': 'http://127.0.0.1:8766/mcp', 'b': 'sandbox', 'r': role, 't': compact})}"
 
 
 def load_generated(path: Path, name: str) -> Any:
@@ -198,6 +212,56 @@ def test_worker_folder_permissions_and_secret_safety(tmp_path: Path) -> None:
     assert "worker-a" in generated
     assert "ticket_review" in generated
     assert "never call ticket_review" in generated
+
+
+def test_door_setup_writes_private_state_and_secret_free_launcher(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    parsed = seat_new.build_parser().parse_args(
+        [
+            "--role", "worker",
+            "--name", "worker-door",
+            "--dest", str(tmp_path / "worker"),
+            "--door", synthetic_door(),
+            "--client", "codex",
+        ]
+    )
+    dest = seat_new.generate(parsed)
+    state = dest / ".pursers" / "wait-bridge" / "doors.json"
+    shell = (dest / "bin" / "board.sh").read_text(encoding="utf-8")
+    assert state.is_file()
+    assert mode(state) == 0o600
+    assert "TOKEN" not in shell
+    assert "SSL_CERT_FILE" not in shell
+    assert "PURSERS_CA_FILE" not in shell
+    assert "PURSERS_BRIDGE_STATE_DIR" in shell
+    generated = load_generated(dest / "bin" / "board.py", "board_door_state")
+    for name in tuple(os.environ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("PURSERS_BRIDGE_STATE_DIR", str(state.parent))
+    generated._load_stored_door_environment()
+    assert os.environ["ONBOARD_BOARD_ID"] == "sandbox"
+    assert os.environ["PURSERS_ROLE"] == "worker"
+
+
+def test_door_is_mutually_exclusive_and_role_checked(tmp_path: Path) -> None:
+    parsed = seat_new.build_parser().parse_args(
+        [
+            "--role", "worker", "--name", "worker-door",
+            "--dest", str(tmp_path / "mixed"), "--door", synthetic_door(),
+            "--central-url", "http://127.0.0.1:8766/mcp",
+        ]
+    )
+    with pytest.raises(ValueError, match="cannot be combined"):
+        seat_new.generate(parsed)
+    wrong_role = seat_new.build_parser().parse_args(
+        [
+            "--role", "reviewer", "--name", "reviewer-door",
+            "--dest", str(tmp_path / "wrong"), "--door", synthetic_door(),
+        ]
+    )
+    with pytest.raises(ValueError, match="role must match"):
+        seat_new.generate(wrong_role)
 
 
 def test_worker_and_reviewer_variants_have_only_their_commands(tmp_path: Path) -> None:

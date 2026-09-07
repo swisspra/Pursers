@@ -7,8 +7,19 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added
+
+- Wait bridge: add `pursers-door` to issue, inspect, rotate, and revoke
+  per-board worker/reviewer door credentials with RSA-2048 keys, atomic JWKS
+  replacement, and one secret-safe `prs1.…` setup string.
+
 ### Changed
 
+- Wait bridge and seat-kit setup now accept one `prs1` door: the bridge stores
+  private per-board/per-role credentials, resolves missing runtime environment
+  from them, assigns durable collision-safe seat-name suffixes, and provides
+  redacted join/status/rotate/forget commands. Generated door seats omit
+  credential and CA lines from their launcher.
 - Central identity checks now use the exact seat (`agent_id`) for reviewer
   self-exclusion, claimed-ticket cancellation, and private-memory visibility.
   Multiple worker or reviewer seats may share one bearer principal without
