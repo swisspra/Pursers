@@ -77,6 +77,10 @@ This release includes `pursers-central==0.1.0a28`,
   coordinator-hosted, and capability-implicit identities. Central now accepts
   `assigned_to_agent_id=null` to clear a pin and releases unavailable pins
   after the fallback cycle limit.
+- Client and seat-kit registry waits now re-take stable seat names after a
+  restart, reuse board identities within a process, fail loudly when every
+  selected board is skipped, and resync after journal compaction instead of
+  waiting blind.
 - Wait-bridge Central traffic now reuses one bounded HTTP pool per process,
   caps concurrent Central connections at four by default, and logs before an
   excess board subscription falls back to polling. Coordinator subscription

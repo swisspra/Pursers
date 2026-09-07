@@ -181,6 +181,7 @@ class BoardClient:
         self._owns_http_client = False
         self._local_events: list[dict[str, Any]] = []
         self._watched_uris: set[str] = set()
+        self._registry_wait_sessions: dict[str, dict[str, Any]] = {}
 
     def _http(self) -> httpx2.AsyncClient:
         return httpx2.AsyncClient(
@@ -198,6 +199,7 @@ class BoardClient:
         stack = self._stack
         self._stack = None
         self._client = None
+        self._registry_wait_sessions.clear()
         owns_http_client = self._owns_http_client
         self._owns_http_client = False
         if stack is None:
@@ -1135,6 +1137,16 @@ class BoardClient:
                 client, "board_catchup",
                 catchup_arguments,
             )
+            if page.get("resync_required"):
+                reset_cursor = page.get("reset_cursor")
+                if type(reset_cursor) is not int:
+                    raise RuntimeError(
+                        "board_catchup resync is missing an integer reset_cursor"
+                    )
+                cursor = max(int(cursor or 0), reset_cursor)
+                if cursor_callback is not None:
+                    cursor_callback(cursor)
+                return
             start = page["next_cursor"] - page["scan_count"]
             for event in page["events"]:
                 if event["id"] not in seen:
@@ -1314,9 +1326,7 @@ class BoardClient:
                                 cursor_callback=remember_cursor,
                             ):
                                 await queue.put(("event", event))
-                            initial_cursor = (
-                                None if acknowledge else cursor_state[0]
-                            )
+                            initial_cursor = cursor_state[0]
                             async for _cue in subscription:
                                 while self._local_events:
                                     local = self._local_events.pop(0)
@@ -1324,6 +1334,7 @@ class BoardClient:
                                 async for event in self._drain(
                                     event_client,
                                     seen,
+                                    cursor_state[0],
                                     kinds=selected_kinds,
                                     only_mine=only_mine,
                                     acknowledge=acknowledge,

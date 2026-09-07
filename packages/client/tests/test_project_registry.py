@@ -9,7 +9,10 @@ import pytest
 
 import pursers_client.project_registry as registry_module
 from pursers_client import (
+    BoardClient,
+    BoardClientError,
     DISPATCH_KINDS,
+    JoinedIdentity,
     SUBMITTED_RELEVANT_KINDS,
     active_registry_boards,
     parse_project_registry,
@@ -342,7 +345,6 @@ def test_registry_wait_preserves_collision_refusal_without_takeover() -> None:
     client = SimpleNamespace(
         board_id="pursers",
         agent_name="worker-agent",
-        allow_takeover=False,
         identity=SimpleNamespace(agent_id="AI-home"),
         generation_token="gen-home",
         _client=raw,
@@ -365,3 +367,195 @@ def test_registry_wait_preserves_collision_refusal_without_takeover() -> None:
         "board_join",
         {"board_id": "fullplatts", "agent_name": "worker-agent"},
     )]
+
+
+def test_registry_wait_forwards_takeover_and_reuses_join() -> None:
+    calls: list[tuple[str, dict]] = []
+
+    class Raw:
+        async def call_tool(self, name, arguments, **_kwargs):
+            calls.append((name, dict(arguments)))
+            assert name == "board_join"
+            return SimpleNamespace(
+                is_error=False,
+                structured_content={
+                    "result": {"agent_id": "AI-other", "generation_token": "gen"}
+                },
+                content=[],
+            )
+
+    client = SimpleNamespace(
+        board_id="pursers",
+        agent_name="worker-agent",
+        identity=SimpleNamespace(agent_id="AI-home"),
+        generation_token="home-gen",
+        _client=Raw(),
+    )
+
+    for _ in range(2):
+        response = asyncio.run(registry_module.wait_for_boards(
+            client,
+            ["fullplatts", "pursers"],
+            0,
+            0,
+            kinds=DISPATCH_KINDS,
+            submitted=False,
+            poll_fallback=True,
+            capabilities={"tier_max": 2},
+            allow_takeover=True,
+        ))
+        assert response["boards"] == ["fullplatts", "pursers"]
+
+    assert calls == [(
+        "board_join",
+        {
+            "board_id": "fullplatts",
+            "agent_name": "worker-agent",
+            "capabilities": {"tier_max": 2},
+            "allow_takeover": True,
+        },
+    )]
+
+
+def test_registry_wait_fails_when_every_board_is_skipped() -> None:
+    class Raw:
+        async def call_tool(self, name, arguments, **_kwargs):
+            assert name == "board_join"
+            assert "allow_takeover" not in arguments
+            message = f"{arguments['board_id']} denied"
+            return SimpleNamespace(
+                is_error=True,
+                structured_content=None,
+                content=[SimpleNamespace(text=message)],
+            )
+
+    client = SimpleNamespace(
+        board_id="pursers",
+        agent_name="worker-agent",
+        identity=SimpleNamespace(agent_id="AI-home"),
+        _client=Raw(),
+    )
+
+    with pytest.raises(BoardClientError) as error:
+        asyncio.run(registry_module.wait_for_boards(
+            client,
+            ["alpha", "beta"],
+            0,
+            1,
+            kinds=DISPATCH_KINDS,
+            submitted=False,
+        ))
+
+    assert str(error.value).splitlines() == [
+        "all selected boards were skipped:",
+        "alpha: alpha denied",
+        "beta: beta denied",
+    ]
+
+
+def test_registry_wait_resyncs_compacted_cursor_without_spinning(monkeypatch) -> None:
+    catchup_calls = 0
+
+    def result(value: dict) -> SimpleNamespace:
+        return SimpleNamespace(
+            is_error=False, structured_content={"result": value}, content=[]
+        )
+
+    class Raw:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def call_tool(self, name, arguments, **_kwargs):
+            nonlocal catchup_calls
+            assert name == "board_catchup"
+            catchup_calls += 1
+            return result({
+                "events": [],
+                "next_cursor": 0,
+                "has_more": False,
+                "resync_required": True,
+                "reset_cursor": 42,
+            })
+
+        @asynccontextmanager
+        async def listen(self, **_kwargs):
+            async def empty():
+                if False:
+                    yield None
+
+            yield empty()
+
+    raw = Raw()
+
+    @asynccontextmanager
+    async def http():
+        yield None
+
+    client = SimpleNamespace(
+        board_id="pursers",
+        agent_name="worker-agent",
+        identity=SimpleNamespace(agent_id="AI-home"),
+        generation_token="gen",
+        _client=raw,
+        _http=http,
+        url="http://central.invalid/mcp",
+    )
+    monkeypatch.setattr(
+        registry_module, "streamable_http_client", lambda *_args, **_kwargs: object()
+    )
+    monkeypatch.setattr(registry_module, "Client", lambda *_args, **_kwargs: raw)
+
+    response = asyncio.run(registry_module.wait_for_boards(
+        client,
+        ["pursers"],
+        0,
+        1,
+        kinds=DISPATCH_KINDS,
+        submitted=False,
+    ))
+
+    assert response["new_seq"] == {"pursers": 42}
+    assert response["events"] == []
+    assert catchup_calls == 1
+
+
+def test_single_board_drain_resyncs_compacted_cursor() -> None:
+    client = BoardClient(
+        "http://central.invalid/mcp",
+        "test-token",
+        "pursers",
+        agent_name="worker-agent",
+    )
+    client.identity = JoinedIdentity(
+        "pursers", "AI-worker", "PR-worker", "worker-agent", "worker"
+    )
+    observed: list[int] = []
+
+    async def fake_call_with(_raw, name, arguments):
+        assert name == "board_catchup"
+        assert arguments["cursor"] == 0
+        return {
+            "events": [],
+            "next_cursor": 0,
+            "has_more": False,
+            "resync_required": True,
+            "reset_cursor": 57,
+        }
+
+    client._call_with = fake_call_with
+
+    async def drain() -> list[dict]:
+        return [event async for event in client._drain(
+            SimpleNamespace(),
+            set(),
+            0,
+            kinds=DISPATCH_KINDS,
+            only_mine=False,
+            cursor_callback=observed.append,
+        )]
+
+    assert asyncio.run(drain()) == []
+    assert observed == [57]
