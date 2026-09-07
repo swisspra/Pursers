@@ -1184,7 +1184,6 @@ def _board_shell(
     board: str,
     central_url: str,
     token_file: Path,
-    ca_file: Path,
     python: Path,
     tier_max: int,
     skills: str,
@@ -1201,7 +1200,6 @@ def _board_shell(
         "boards": shlex.quote(boards),
         "url": shlex.quote(central_url),
         "token": shlex.quote(str(token_file)),
-        "ca": shlex.quote(str(ca_file)),
         "python": shlex.quote(str(python)),
         "skills": shlex.quote(skills),
         "host": shlex.quote(host),
@@ -1213,14 +1211,9 @@ set -eu
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 TOKEN_FILE=${{PURSERS_TOKEN_FILE:-{values["token"]}}}
-CA_FILE=${{PURSERS_CA_FILE:-{values["ca"]}}}
 
 if [ ! -r "$TOKEN_FILE" ]; then
   echo "board.sh: token file is not readable: $TOKEN_FILE" >&2
-  exit 1
-fi
-if [ ! -r "$CA_FILE" ]; then
-  echo "board.sh: CA file is not readable: $CA_FILE" >&2
   exit 1
 fi
 
@@ -1242,7 +1235,13 @@ export PURSERS_CAN_WORK={str(can_work).lower()}
 export PURSERS_HOST={values["host"]}
 export PURSERS_MODEL={values["model"]}
 export PURSERS_PROVIDER={values["provider"]}
-export SSL_CERT_FILE="$CA_FILE"
+if [ -n "${{PURSERS_CA_FILE:-}}" ]; then
+  if [ ! -r "$PURSERS_CA_FILE" ]; then
+    echo "board.sh: CA file is not readable: $PURSERS_CA_FILE" >&2
+    exit 1
+  fi
+  export SSL_CERT_FILE="$PURSERS_CA_FILE"
+fi
 
 exec {values["python"]} "$SCRIPT_DIR/board.py" "$@"
 '''
@@ -1506,7 +1505,6 @@ def generate(args: argparse.Namespace) -> Path:
 
     dest = Path(args.dest).expanduser().resolve()
     token_file = Path(args.token_file).expanduser().resolve()
-    ca_file = Path(args.ca_file).expanduser().resolve()
     repo_leaf = _repo_leaf(args.repo) if args.repo else None
     python = _select_interpreter(args, dest)
     skills = ",".join(
@@ -1547,7 +1545,6 @@ def generate(args: argparse.Namespace) -> Path:
             boards="home" if args.board else "registry",
             central_url=args.central_url,
             token_file=token_file,
-            ca_file=ca_file,
             python=python,
             tier_max=args.tier_max,
             skills=skills,
@@ -1579,7 +1576,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dest", required=True)
     parser.add_argument("--central-url", required=True)
     parser.add_argument("--token-file", required=True)
-    parser.add_argument("--ca-file", required=True)
     parser.add_argument(
         "--python",
         help=(

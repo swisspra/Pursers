@@ -213,7 +213,7 @@ def test_config_requires_0600_and_contains_only_pat_environment_name(
             "pat_env": "ADO_CONNECTOR_PAT",
         },
         "central": {
-            "url": "https://127.0.0.1:8766/mcp",
+            "url": "http://127.0.0.1:8766/mcp",
             "token_path": str(token),
         },
         "board": {

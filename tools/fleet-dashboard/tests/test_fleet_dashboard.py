@@ -974,7 +974,7 @@ def test_fetcher_requests_central_max_snapshot_bounds() -> None:
             return {"events": []}
 
     config = dashboard.Config(
-        url="https://127.0.0.1:8766/mcp",
+        url="http://127.0.0.1:8766/mcp",
         token="test-token",
         home_board="pursers",
         agent_name="viewer",
@@ -1165,7 +1165,7 @@ def test_fetch_board_uses_bounded_snapshot_and_catchup() -> None:
             return {"events": []}
 
     config = dashboard.Config(
-        url="https://127.0.0.1:8766/mcp",
+        url="http://127.0.0.1:8766/mcp",
         token="test-token",
         home_board="home-board",
         agent_name="viewer",
@@ -2844,7 +2844,7 @@ def test_config_save_writes_only_coordinator_config_with_cas() -> None:
             return {"ok": True}
 
     config = dashboard.Config(
-        url="https://127.0.0.1:8766/mcp",
+        url="http://127.0.0.1:8766/mcp",
         token="token",
         home_board="pursers",
         agent_name="dashboard-seat",
@@ -2889,7 +2889,7 @@ def test_config_endpoint_enforces_create_then_cas() -> None:
 
     client = Client()
     config = dashboard.Config(
-        url="https://127.0.0.1:8766/mcp",
+        url="http://127.0.0.1:8766/mcp",
         token="token",
         home_board="pursers",
         agent_name="dashboard-seat",
@@ -3051,7 +3051,7 @@ def intake_fetcher(
     now: datetime = datetime(2030, 1, 1, 12, tzinfo=timezone.utc),
 ) -> dashboard.FleetFetcher:
     config = dashboard.Config(
-        url="https://127.0.0.1:8766/mcp",
+        url="http://127.0.0.1:8766/mcp",
         token="token",
         home_board="pursers",
         agent_name="dashboard-seat",
@@ -3539,7 +3539,7 @@ def test_worker_manager_keychain_config_lifecycle_and_adoption(tmp_path: Path) -
             "model": "model-one",
             "api_key": secret,
         },
-        "https://127.0.0.1:8766/mcp",
+        "http://127.0.0.1:8766/mcp",
     )
     config_path = tmp_path / "workers" / "worker-one.toml"
     document = tomllib.loads(config_path.read_text())
@@ -3703,7 +3703,7 @@ def test_worker_provider_test_uses_keychain_without_echoing_secret(
                 "model": "model-one",
                 "api_key": secret,
             },
-            "https://127.0.0.1:8766/mcp",
+            "http://127.0.0.1:8766/mcp",
         )
         result = manager.test_provider("provider-test")
     finally:
@@ -3740,7 +3740,7 @@ def test_worker_api_is_local_and_board_write_surface_is_unchanged(
             return "default"
 
         def central_url(self, _value: str | None) -> str:
-            return "https://127.0.0.1:8766/mcp"
+            return "http://127.0.0.1:8766/mcp"
 
         def get(self) -> dict:
             return {"agents": [{"agent_name": "endpoint-worker"}]}
@@ -3991,7 +3991,7 @@ def test_seat_config_manager_plan_apply_backup_restart_and_no_token_leak(
         "host": "codex",
         "role": "worker",
         "name": "worker-one",
-        "central_url": "https://127.0.0.1:8766/mcp",
+        "central_url": "http://127.0.0.1:8766/mcp",
         "home_board": "pursers",
         "token_file": str(token),
         "ca_file": str(ca),
@@ -4239,7 +4239,7 @@ def test_seat_config_registry_coverage_uses_live_fleet_seats(tmp_path: Path) -> 
         host="codex",
         role="worker",
         name="covered-seat",
-        central_url="https://127.0.0.1:8766/mcp",
+        central_url="http://127.0.0.1:8766/mcp",
         home_board="board-one",
         token_file=str(tmp_path / "token"),
         ca_file=str(tmp_path / "ca.pem"),
@@ -4304,7 +4304,7 @@ def test_seat_config_doctor_reports_operator_checkout(
         host="codex",
         role="worker",
         name="worker-one",
-        central_url="https://127.0.0.1:8766/mcp",
+        central_url="http://127.0.0.1:8766/mcp",
         home_board="pursers",
         token_file=str(tmp_path / "token"),
         ca_file=str(tmp_path / "ca.pem"),
@@ -4319,7 +4319,7 @@ def test_seat_config_doctor_reports_operator_checkout(
         host="goose",
         role="worker",
         name="worker-two",
-        central_url="https://127.0.0.1:8766/mcp",
+        central_url="http://127.0.0.1:8766/mcp",
         home_board="pursers",
         token_file=str(tmp_path / "token2"),
         ca_file=str(tmp_path / "ca2.pem"),
@@ -4959,7 +4959,7 @@ def test_worker_manager_accepts_v2_role_and_tier_only_when_supported(
             "api_key": "",
             "max_tier": "standard",
         },
-        "https://127.0.0.1:8766/mcp",
+        "http://127.0.0.1:8766/mcp",
     )
 
     definition = manager.list()[0]
@@ -5333,7 +5333,7 @@ def test_dispatch_fetcher_projects_policy_gaps_offers_and_timeline() -> None:
             }
 
     config = dashboard.Config(
-        url="https://127.0.0.1:8766/mcp",
+        url="http://127.0.0.1:8766/mcp",
         token="token",
         home_board="pursers",
         agent_name="dashboard-seat",
@@ -5509,7 +5509,7 @@ def test_dispatch_timeline_reads_cross_seat_central_projection(
                 )
 
         config = dashboard.Config(
-            url="https://127.0.0.1:8766/mcp",
+            url="http://127.0.0.1:8766/mcp",
             token="token",
             home_board="pursers",
             agent_name="dashboard-seat",
@@ -5567,7 +5567,7 @@ def test_dispatch_policy_save_validates_and_forwards_exact_contract() -> None:
             return {"claim_ttl_s": claim_ttl_s, "previous_claim_ttl_s": 900}
 
     config = dashboard.Config(
-        url="https://127.0.0.1:8766/mcp",
+        url="http://127.0.0.1:8766/mcp",
         token="token",
         home_board="pursers",
         agent_name="dashboard-seat",
@@ -5957,7 +5957,7 @@ def test_truncated_snapshot_splices_active_ticket_list() -> None:
             return {"events": []}
 
     config = dashboard.Config(
-        url="https://127.0.0.1:8766/mcp",
+        url="http://127.0.0.1:8766/mcp",
         token="token",
         home_board="pursers",
         agent_name="viewer",

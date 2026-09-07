@@ -36,7 +36,7 @@ LOGGER = logging.getLogger("pursers.fleet.release_ops")
 
 DEFAULT_CENTRAL_JOB = "com.onboard.central"
 DEFAULT_DASHBOARD_JOB = "com.pursers.fleet-dashboard"
-DEFAULT_CENTRAL_URL = "https://127.0.0.1:8766/mcp"
+DEFAULT_CENTRAL_URL = "http://127.0.0.1:8766/mcp"
 DEFAULT_REPO = "swisspra/Pursers"
 CI_WORKFLOW_FILE = "ci.yml"
 PUBLISH_WORKFLOW_FILE = "publish-pypi.yml"

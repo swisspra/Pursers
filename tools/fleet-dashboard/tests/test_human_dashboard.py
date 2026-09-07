@@ -125,7 +125,7 @@ class FakeHumanClient:
 
 def _fetcher(client: FakeHumanClient) -> dashboard.FleetFetcher:
     config = SimpleNamespace(
-        url="https://127.0.0.1:8766/mcp",
+        url="http://127.0.0.1:8766/mcp",
         token="TOKEN",
         home_board="pursers",
         agent_name="fleet-dashboard",

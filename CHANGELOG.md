@@ -21,6 +21,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   seats remain reclaimable without it. `BoardClient` context startup defaults
   to collision refusal, while the wait bridge, worker runtime, coordinator,
   and generated seat CLI opt in when intentionally resuming a stable seat.
+- Central, client, wait-bridge, coordinator, dashboard, simulation, and seat-kit
+  defaults now use plain HTTP on loopback. Remote seats use port forwarding;
+  optional private-CA configuration remains available only for explicit remote
+  TLS deployments (TK-64e7bef5f4eb).
 
 ## [5.0.0a22] - 2026-09-06
 

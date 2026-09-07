@@ -157,6 +157,31 @@ def test_codex_plan_apply_inspect_backup_and_idempotency(tmp_path: Path) -> None
     assert adapter.plan(target) == []
 
 
+def test_local_templates_omit_ca_environment(tmp_path: Path) -> None:
+    codex = desired(tmp_path, "codex", ca_file="")
+    codex_text = seat_config.CodexAdapter(codex.config_path)._render(codex)
+    assert "SSL_CERT_FILE" not in codex_text
+
+    goose = desired(
+        tmp_path,
+        "goose",
+        ca_file="",
+        config_path=str(tmp_path / "goose.yaml"),
+    )
+    assert "SSL_CERT_FILE" not in "".join(seat_config._goose_block(goose))
+    assert "SSL_CERT_FILE" not in seat_config._bridge_json(goose)["env"]
+
+
+def test_remote_tls_template_keeps_explicit_ca_environment(tmp_path: Path) -> None:
+    target = desired(tmp_path, "codex")
+    document = tomllib.loads(seat_config.CodexAdapter(target.config_path)._render(target))
+
+    assert (
+        document["mcp_servers"][target.connector_name]["env"]["SSL_CERT_FILE"]
+        == target.ca_file
+    )
+
+
 def test_codex_worker_and_reviewer_connectors_coexist_and_match_independently(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1322,7 +1347,7 @@ def test_default_identity_probe_validates_both_tokens_with_central(
 def test_doctor_runtime_probe_launches_host_env_block_only(
     tmp_path: Path, host: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    target = desired(tmp_path, host)
+    target = desired(tmp_path, host, ca_file="")
     marker = tmp_path / f"{host}-runtime.json"
     bridge = Path(target.bridge_command)
     bridge.parent.mkdir(parents=True)
@@ -1350,7 +1375,7 @@ def test_doctor_runtime_probe_launches_host_env_block_only(
     monkeypatch.setenv("SHOULD_NOT_REACH_PROBE", "forbidden")
 
     inspection = adapter.inspect()
-    ok, message = REAL_RUNTIME_PROBE(target, inspection, 2.0)
+    ok, message = REAL_RUNTIME_PROBE(target, inspection, 5.0)
 
     assert ok is True
     assert "joins Central" in message

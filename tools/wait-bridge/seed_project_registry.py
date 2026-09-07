@@ -36,7 +36,7 @@ async def seed() -> None:
     token = os.environ.get("ONBOARD_CENTRAL_TOKEN", "")
     if not token:
         raise RuntimeError("ONBOARD_CENTRAL_TOKEN is not set")
-    url = os.environ.get("ONBOARD_CENTRAL_URL", "https://127.0.0.1:8766/mcp")
+    url = os.environ.get("ONBOARD_CENTRAL_URL", "http://127.0.0.1:8766/mcp")
     agent_name = os.environ.get(
         "ONBOARD_AGENT_NAME", "project-registry-seeder"
     )
