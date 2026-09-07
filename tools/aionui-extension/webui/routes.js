@@ -149,6 +149,9 @@ function createHandlers(dependencies = {}) {
         return jsonResponse(502, { ok: false, error: 'mcp_import_failed', joined: true });
       }
       imported = await response.json();
+      if (imported.success === false) {
+        return jsonResponse(502, { ok: false, error: 'mcp_import_failed', joined: true });
+      }
     } catch (_error) {
       return jsonResponse(502, { ok: false, error: 'mcp_import_failed', joined: true });
     }
@@ -191,6 +194,7 @@ module.exports = {
   INSTALL_HINT,
   createHandlers,
   handle: defaultHandlers.handle,
+  fetch: defaultHandlers.handle,
   join: defaultHandlers.join,
   status: defaultHandlers.status,
   default: defaultHandlers.handle,

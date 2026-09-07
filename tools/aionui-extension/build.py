@@ -28,7 +28,9 @@ def build(output: Path | None = None) -> Path:
     destination = output or repository_root / "dist" / ARCHIVE_NAME
     destination.parent.mkdir(parents=True, exist_ok=True)
 
-    manifest = json.loads((extension_root / "aion-extension.json").read_text())
+    manifest = json.loads(
+        (extension_root / "aion-extension.json").read_text(encoding="utf-8")
+    )
     expected_name = f"pursers-aionui-{manifest['version']}.zip"
     if destination.name != expected_name:
         raise ValueError(f"output filename must be {expected_name}")
@@ -47,7 +49,12 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
-    print(build(args.output).relative_to(Path.cwd()))
+    destination = build(args.output)
+    try:
+        display = destination.relative_to(Path.cwd())
+    except ValueError:
+        display = destination
+    print(display)
     return 0
 
 
