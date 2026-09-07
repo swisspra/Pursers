@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import base64
 import fcntl
+import hmac
 import importlib
 import ipaddress
 import json
 import os
+import re
 import socket
 import tempfile
 from datetime import datetime, timezone
@@ -17,6 +19,7 @@ from urllib.parse import urlsplit
 
 SCHEMA_VERSION = 1
 SEAT_ROLES = frozenset({"worker", "reviewer"})
+NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
 
 
 def default_state_dir(env: Mapping[str, str] | None = None) -> Path:
@@ -65,7 +68,9 @@ def _door_admin_decode(value: str) -> dict[str, Any]:
         module = importlib.import_module("door_admin")
     except ImportError:
         return envelope
-    decoder = getattr(module, "decode_door", None) or getattr(module, "parse_door", None)
+    decoder = getattr(module, "decode_door", None) or getattr(
+        module, "parse_door", None
+    )
     if decoder is None:
         raise ValueError("door_admin has no supported decoder")
     try:
@@ -113,7 +118,10 @@ def decode_door(value: str) -> dict[str, Any]:
     board = decoded["b"]
     role = decoded["r"]
     token = decoded["t"]
-    if not all(isinstance(item, str) and item.strip() for item in (url, board, role, token)):
+    if not all(
+        isinstance(item, str) and item.strip()
+        for item in (url, board, role, token)
+    ):
         raise ValueError("door fields must be non-empty strings")
     normalized_role = role.strip().lower()
     if normalized_role not in SEAT_ROLES:
@@ -169,7 +177,16 @@ def _validate_document(value: Any) -> dict[str, Any]:
     for raw in raw_entries:
         if not isinstance(raw, dict):
             raise ValueError("doors.json contains an invalid entry")
-        required = {"u", "b", "r", "t", "kid", "exp", "joined_at", "seat_names_used"}
+        required = {
+            "u",
+            "b",
+            "r",
+            "t",
+            "kid",
+            "exp",
+            "joined_at",
+            "seat_names_used",
+        }
         if set(raw) != required:
             raise ValueError("doors.json entry has invalid fields")
         decoded = decode_door(_encode_for_validation(raw))
@@ -186,7 +203,13 @@ def _validate_document(value: Any) -> dict[str, Any]:
         if key in seen:
             raise ValueError("doors.json has duplicate board/role entries")
         seen.add(key)
-        entries.append({**decoded, "joined_at": raw["joined_at"], "seat_names_used": list(names)})
+        entries.append(
+            {
+                **decoded,
+                "joined_at": raw["joined_at"],
+                "seat_names_used": list(names),
+            }
+        )
     return {"schema_version": SCHEMA_VERSION, "doors": entries}
 
 
@@ -214,7 +237,9 @@ def _atomic_write(path: Path, document: dict[str, Any]) -> None:
     path.parent.chmod(0o700)
     temporary_name: str | None = None
     try:
-        descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{path.name}.", dir=path.parent
+        )
         with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
             os.fchmod(stream.fileno(), 0o600)
             json.dump(document, stream, sort_keys=True, separators=(",", ":"))
@@ -224,6 +249,11 @@ def _atomic_write(path: Path, document: dict[str, Any]) -> None:
         os.replace(temporary_name, path)
         temporary_name = None
         path.chmod(0o600)
+        directory = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
     finally:
         if temporary_name is not None:
             Path(temporary_name).unlink(missing_ok=True)
@@ -266,9 +296,17 @@ def store(
             None,
         )
         if rotate and existing is None:
-            raise ValueError("--rotate requires an existing door for the same board and role")
-        if existing is not None and not rotate and not __import__("hmac").compare_digest(existing["t"], entry["t"]):
-            raise ValueError("a door already exists for this board and role; use --rotate")
+            raise ValueError(
+                "--rotate requires an existing door for the same board and role"
+            )
+        if (
+            existing is not None
+            and not rotate
+            and not hmac.compare_digest(existing["t"], entry["t"])
+        ):
+            raise ValueError(
+                "a door already exists for this board and role; use --rotate"
+            )
         names = list(existing.get("seat_names_used", [])) if existing else []
         joined_at = (now or datetime.now(timezone.utc)).isoformat()
         replacement = {**entry, "joined_at": joined_at, "seat_names_used": names}
@@ -288,7 +326,9 @@ def forget(path: str | Path, board: str, role: str) -> bool:
     def update(document: dict[str, Any]) -> bool:
         before = len(document["doors"])
         document["doors"] = [
-            item for item in document["doors"] if (item["b"], item["r"]) != (board, role)
+            item
+            for item in document["doors"]
+            if (item["b"], item["r"]) != (board, role)
         ]
         return len(document["doors"]) != before
 
@@ -317,7 +357,12 @@ def select(
     return dict(entries[0])
 
 
-def reserve_name(path: str | Path, board: str, role: str, requested: str | None = None) -> str:
+def reserve_name(
+    path: str | Path,
+    board: str,
+    role: str,
+    requested: str | None = None,
+) -> str:
     selected_path = Path(path)
 
     def update(document: dict[str, Any]) -> str:
@@ -325,9 +370,15 @@ def reserve_name(path: str | Path, board: str, role: str, requested: str | None 
         names = entry["seat_names_used"]
         if requested:
             name = requested
+            if not NAME_RE.fullmatch(name):
+                raise ValueError("seat name must be a safe 1-80 character identifier")
         else:
             host = socket.gethostname().split(".", 1)[0].strip().lower() or "host"
-            safe_host = "".join(character if character.isalnum() or character in "-_" else "-" for character in host).strip("-") or "host"
+            safe_host = "".join(
+                character if character.isalnum() or character in "-_" else "-"
+                for character in host
+            ).strip("-") or "host"
+            safe_host = safe_host[: max(1, 72 - len(role))].rstrip("-") or "host"
             suffix = 1
             while f"{role}-{safe_host}-{suffix}" in names:
                 suffix += 1
@@ -358,11 +409,14 @@ def resolve(env: Mapping[str, str] | None = None) -> dict[str, str]:
             stored = select(document, board=board, role=role)
     if not direct_token and token_file:
         try:
-            direct_token = Path(token_file).expanduser().read_text(encoding="utf-8").strip()
+            direct_token = (
+                Path(token_file).expanduser().read_text(encoding="utf-8").strip()
+            )
         except OSError as exc:
             raise ValueError("ONBOARD_CENTRAL_TOKEN_FILE is not readable") from exc
     return {
-        "url": selected.get("ONBOARD_CENTRAL_URL", "").strip() or str(stored.get("u") or "http://127.0.0.1:8766/mcp"),
+        "url": selected.get("ONBOARD_CENTRAL_URL", "").strip()
+        or str(stored.get("u") or "http://127.0.0.1:8766/mcp"),
         "token": direct_token or str(stored.get("t") or ""),
         "board": board or str(stored.get("b") or "pursers"),
         "role": role or str(stored.get("r") or ""),

@@ -38,7 +38,8 @@ def door(
     exp: int = 2_000_000_000,
     signature: str = "synthetic-signature",
 ) -> str:
-    token = f"{_segment({'alg': 'RS256', 'kid': kid})}.{_segment({'exp': exp})}.{signature}"
+    encoded_signature = base64.urlsafe_b64encode(signature.encode()).decode().rstrip("=")
+    token = f"{_segment({'alg': 'RS256', 'kid': kid})}.{_segment({'exp': exp})}.{encoded_signature}"
     envelope = {"u": url, "b": board, "r": role, "t": token}
     return f"prs1.{_segment(envelope)}"
 
@@ -97,6 +98,22 @@ class DoorStateTests(unittest.TestCase):
                 }
             )
             self.assertEqual(resolved["token"], "explicit-file-token")
+
+    def test_omitted_board_and_role_fail_closed_when_ambiguous(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "doors.json"
+            door_state.store(path, door(board="alpha"))
+            door_state.store(path, door(board="beta"))
+            with self.assertRaisesRegex(ValueError, "ONBOARD_BOARD_ID"):
+                door_state.resolve({"PURSERS_BRIDGE_STATE_DIR": raw})
+            door_state.store(path, door(board="alpha", role="reviewer"))
+            with self.assertRaisesRegex(ValueError, "PURSERS_ROLE"):
+                door_state.resolve(
+                    {
+                        "PURSERS_BRIDGE_STATE_DIR": raw,
+                        "ONBOARD_BOARD_ID": "alpha",
+                    }
+                )
 
     def test_remote_requires_confirmation(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -175,6 +192,47 @@ class DoorCommandTests(unittest.IsolatedAsyncioTestCase):
             with redirect_stdout(io.StringIO()):
                 wait_server._door_forget(forget_args)
             self.assertFalse(door_state.load(path)["doors"])
+
+    def test_runtime_door_reserves_explicit_name_and_disables_takeover(self) -> None:
+        original = (
+            wait_server.CENTRAL_URL,
+            wait_server.CENTRAL_TOKEN,
+            wait_server.BOARD_ID,
+            wait_server.RUNTIME_ROLE,
+            wait_server.RUNTIME_FROM_DOOR,
+            wait_server.BASE_AGENT_NAME,
+            wait_server.AGENT_NAME,
+        )
+        with tempfile.TemporaryDirectory() as raw:
+            path = door_state.state_path(raw)
+            door_state.store(path, door())
+            try:
+                with patch.dict(
+                    os.environ,
+                    {
+                        "PURSERS_BRIDGE_STATE_DIR": raw,
+                        "PURSERS_ROLE": "worker",
+                        "ONBOARD_AGENT_NAME": "worker-explicit",
+                    },
+                    clear=True,
+                ):
+                    wait_server._configure_runtime()
+                self.assertTrue(wait_server.RUNTIME_FROM_DOOR)
+                self.assertEqual(wait_server.AGENT_NAME, "worker-explicit")
+                self.assertEqual(
+                    door_state.load(path)["doors"][0]["seat_names_used"],
+                    ["worker-explicit"],
+                )
+            finally:
+                (
+                    wait_server.CENTRAL_URL,
+                    wait_server.CENTRAL_TOKEN,
+                    wait_server.BOARD_ID,
+                    wait_server.RUNTIME_ROLE,
+                    wait_server.RUNTIME_FROM_DOOR,
+                    wait_server.BASE_AGENT_NAME,
+                    wait_server.AGENT_NAME,
+                ) = original
 
 
 if __name__ == "__main__":

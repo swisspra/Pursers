@@ -169,6 +169,10 @@ CENTRAL_URL = _RUNTIME_CONFIG["url"]
 BOARD_ID = _RUNTIME_CONFIG["board"]
 CENTRAL_TOKEN = _RUNTIME_CONFIG["token"]
 RUNTIME_ROLE = _RUNTIME_CONFIG["role"]
+RUNTIME_FROM_DOOR = bool(CENTRAL_TOKEN) and not (
+    os.environ.get("ONBOARD_CENTRAL_TOKEN", "").strip()
+    or os.environ.get("ONBOARD_CENTRAL_TOKEN_FILE", "").strip()
+)
 BASE_AGENT_NAME = os.environ.get("ONBOARD_AGENT_NAME", "pursers-wait-bridge")
 AGENT_NAME = resolve_agent_name(
     BASE_AGENT_NAME, os.environ.get("ONBOARD_AGENT_INSTANCE")
@@ -1346,7 +1350,7 @@ class DeferredBoardConnection:
             role=_declared_role(),
             meter=self.meter,
             capabilities=startup_caps,
-            allow_takeover=True,
+            allow_takeover=not RUNTIME_FROM_DOOR,
         )
         entered = False
         try:
@@ -1355,7 +1359,8 @@ class DeferredBoardConnection:
                     await client.__aenter__()
                     if startup_caps is not None and hasattr(client, "board_join"):
                         await client.board_join(
-                            capabilities=startup_caps, allow_takeover=True
+                            capabilities=startup_caps,
+                            allow_takeover=not RUNTIME_FROM_DOOR,
                         )
                 entered = True
             except asyncio.CancelledError:
@@ -5649,6 +5654,8 @@ async def _probe_join_push(client: BoardClient, board: str, agent_id: str) -> bo
 
 
 async def _door_join(args: argparse.Namespace) -> None:
+    if args.name and not door_state.NAME_RE.fullmatch(args.name):
+        raise ValueError("--name must be a safe 1-80 character identifier")
     path = door_state.state_path(args.state_dir)
     entry = door_state.store(
         path,
@@ -5670,7 +5677,7 @@ async def _door_join(args: argparse.Namespace) -> None:
     )
     async with client:
         onboarded = await client.board_onboard(
-            role=entry["r"], capabilities=_seat_capabilities(), allow_takeover=False
+            role=entry["r"], capabilities=_seat_capabilities(), allow_takeover=True
         )
         push = await _probe_join_push(client, entry["b"], onboarded["agent_id"])
     print(f"board={entry['b']}")
@@ -5699,27 +5706,37 @@ def _door_forget(args: argparse.Namespace) -> None:
 
 
 def _configure_runtime() -> None:
-    global CENTRAL_URL, BOARD_ID, CENTRAL_TOKEN, RUNTIME_ROLE
+    global CENTRAL_URL, BOARD_ID, CENTRAL_TOKEN, RUNTIME_ROLE, RUNTIME_FROM_DOOR
     global BASE_AGENT_NAME, AGENT_NAME, _RUNTIME_CONFIG_ERROR
     config = door_state.resolve()
     CENTRAL_URL = config["url"]
     BOARD_ID = config["board"]
     CENTRAL_TOKEN = config["token"]
     RUNTIME_ROLE = config["role"]
-    if not os.environ.get("ONBOARD_AGENT_NAME", "").strip() and CENTRAL_TOKEN:
+    RUNTIME_FROM_DOOR = bool(CENTRAL_TOKEN) and not (
+        os.environ.get("ONBOARD_CENTRAL_TOKEN", "").strip()
+        or os.environ.get("ONBOARD_CENTRAL_TOKEN_FILE", "").strip()
+    )
+    if RUNTIME_FROM_DOOR:
         document = door_state.load(door_state.state_path())
         if document["doors"]:
             entry = door_state.select(
                 document,
-                board=os.environ.get("ONBOARD_BOARD_ID", "").strip() or None,
-                role=os.environ.get("PURSERS_ROLE", "").strip().lower() or None,
+                board=BOARD_ID,
+                role=RUNTIME_ROLE,
             )
-            BASE_AGENT_NAME = door_state.reserve_name(
-                door_state.state_path(), entry["b"], entry["r"]
+            requested_name = os.environ.get("ONBOARD_AGENT_NAME", "").strip()
+            if requested_name:
+                requested_name = resolve_agent_name(
+                    requested_name, os.environ.get("ONBOARD_AGENT_INSTANCE")
+                )
+            AGENT_NAME = door_state.reserve_name(
+                door_state.state_path(),
+                entry["b"],
+                entry["r"],
+                requested_name or None,
             )
-            AGENT_NAME = resolve_agent_name(
-                BASE_AGENT_NAME, os.environ.get("ONBOARD_AGENT_INSTANCE")
-            )
+            BASE_AGENT_NAME = AGENT_NAME
     _RUNTIME_CONFIG_ERROR = None
 
 
