@@ -1531,25 +1531,36 @@ def test_subscription_loss_falls_back_then_relistens(
     assert any(item["kind"] == "board-degraded" for item in state["findings"])
 
 
-def test_subscription_backoff_is_exponential_jittered_and_capped() -> None:
+def test_subscription_backoff_fake_clock_is_exponential_and_capped() -> None:
+    class FakeClock:
+        def __init__(self) -> None:
+            self.sleeps: list[float] = []
+
+        async def sleep(self, delay_s: float) -> None:
+            self.sleeps.append(delay_s)
+
+    clock = FakeClock()
     pool = coordinator.JournalSubscriptionPool(
         "https://board.invalid",
         "x",
         "coord",
         fallback_cap_s=60,
+        sleeper=clock.sleep,
         jitter=lambda low, high: (low + high) / 2,
     )
+    expected = [1, 2, 4, 8, 16, 32, 60, 60]
 
-    assert [pool.backoff_delay(streak) for streak in range(1, 9)] == [
-        1,
-        2,
-        4,
-        8,
-        16,
-        32,
-        60,
-        60,
-    ]
+    async def exercise() -> None:
+        for streak, expected_delay in enumerate(expected, start=1):
+            delay_s = pool.backoff_delay(streak)
+            assert delay_s == expected_delay
+            assert pool.defer_fallback("board-a", delay_s)
+            wake = await asyncio.wait_for(pool.next_wake(), timeout=1)
+            assert wake == coordinator.SubscriptionWake("board-a", "fallback")
+        await pool.close()
+
+    asyncio.run(exercise())
+    assert clock.sleeps == expected
 
 
 def test_daemon_cue_recomputes_only_selected_board(
