@@ -232,10 +232,20 @@ class SharedPrincipalIdentityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(event["refusal_reason"], reason)
         self.assertEqual(event["recipient_identities"], [self.admin_agent_id])
 
+        before_takeover = self.service.journal.read_after("pursers", 0, 1_000)[
+            "latest_cursor"
+        ]
         takeover = await self.call(
             "board_join", agent_name="worker-a", allow_takeover=True
         )
         self.assertTrue(takeover.structured_content["rejoined"])
+        takeover_events = self.service.journal.read_after(
+            "pursers", before_takeover, 1_000
+        )["events"]
+        self.assertNotIn(
+            "seat_name_collision",
+            {event["kind"] for event in takeover_events},
+        )
         with self.assertRaisesRegex(ToolError, "seat name already active"):
             await self.call("board_onboard", agent_name="worker-a")
 

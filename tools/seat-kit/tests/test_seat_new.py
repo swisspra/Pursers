@@ -24,7 +24,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 CLIENT_SRC = ROOT.parents[1] / "packages" / "client" / "src"
 sys.path.insert(0, str(CLIENT_SRC))
-from pursers_client import SUBMITTED_RELEVANT_KINDS  # noqa: E402
+from pursers_client import DISPATCH_KINDS, SUBMITTED_RELEVANT_KINDS  # noqa: E402
 
 SPEC = importlib.util.spec_from_file_location("seat_new", ROOT / "seat_new.py")
 assert SPEC and SPEC.loader
@@ -308,6 +308,8 @@ def test_generator_writes_dispatch_capabilities_and_offer_guidance(tmp_path: Pat
     assert 'if [ -n "${PURSERS_CA_FILE:-}" ]' in shell
     assert 'export SSL_CERT_FILE="$PURSERS_CA_FILE"' in shell
     assert "Claim only a ticket offered to this seat" in guidance
+    assert "If every selected board is skipped, stop and report" in guidance
+    assert "never re-arm blind" in guidance
     assert "this ticket was offered to another seat; wait for your own offer" in generated_py
 
 
@@ -1247,6 +1249,170 @@ async def build_local_central(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         agent_ids[key] = joined.structured_content["agent_id"]
         active["principal"] = principals["admin"]
     return central, mcp, service, principals, active, agent_ids, call, original_current_principal
+
+
+def test_live_registry_wait_restarts_stable_seat_and_delivers_offer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def exercise() -> None:
+        from mcp import Client
+        from pursers_client import BoardClient, wait_for_boards
+        import pursers_client.client as client_module
+        import pursers_client.project_registry as registry_module
+
+        (
+            central,
+            mcp,
+            service,
+            principals,
+            active,
+            agent_ids,
+            call,
+            original_current_principal,
+        ) = await build_local_central(tmp_path / "central", monkeypatch)
+        other_board = "fullplatts"
+
+        async def call_other(name: str, **arguments: Any) -> Any:
+            return await mcp.call_tool(
+                name, {"board_id": other_board, **arguments}
+            )
+
+        capabilities = {
+            "tier_max": 3,
+            "skills": [],
+            "can_work": True,
+            "can_review": False,
+            "host": "test",
+            "max_parallel": 1,
+        }
+        try:
+            active["principal"] = principals["admin"]
+            await call_other("board_join", agent_name="admin-agent")
+            await call_other(
+                "board_member_add",
+                agent_name="admin-agent",
+                principal_id=principals["worker"].principal_id,
+                role="member",
+            )
+            active["principal"] = principals["worker"]
+            await call_other(
+                "board_join",
+                agent_name="worker-agent",
+                capabilities=capabilities,
+            )
+            cursors = {
+                board_id: int(service.journal.read_after(board_id, 0)["latest_cursor"])
+                for board_id in ("pursers", other_board)
+            }
+
+            @asynccontextmanager
+            async def http_context():
+                yield object()
+
+            class LocalBoardClient(BoardClient):
+                def _http(self):
+                    return http_context()
+
+            ready = asyncio.Event()
+
+            class SignalingClient:
+                def __init__(self, transport, **kwargs):
+                    self.inner = Client(transport, **kwargs)
+
+                async def __aenter__(self):
+                    await self.inner.__aenter__()
+                    return self
+
+                async def __aexit__(self, *arguments):
+                    return await self.inner.__aexit__(*arguments)
+
+                async def call_tool(self, *arguments, **kwargs):
+                    previous = active["principal"]
+                    active["principal"] = principals["worker"]
+                    try:
+                        return await self.inner.call_tool(*arguments, **kwargs)
+                    finally:
+                        active["principal"] = previous
+
+                @asynccontextmanager
+                async def listen(self, **kwargs):
+                    async with self.inner.listen(**kwargs) as subscription:
+                        async def signaled_subscription():
+                            ready.set()
+                            async for cue in subscription:
+                                yield cue
+
+                        yield signaled_subscription()
+
+            monkeypatch.setattr(
+                client_module, "streamable_http_client", lambda *_args, **_kwargs: mcp
+            )
+            monkeypatch.setattr(
+                registry_module,
+                "streamable_http_client",
+                lambda *_args, **_kwargs: mcp,
+            )
+            monkeypatch.setattr(registry_module, "Client", SignalingClient)
+
+            active["principal"] = principals["worker"]
+            async with LocalBoardClient(
+                "http://central.invalid/mcp",
+                "test-token",
+                "pursers",
+                agent_name="worker-agent",
+                role="worker",
+                capabilities=capabilities,
+                allow_takeover=True,
+            ) as board_client:
+                waiting = asyncio.create_task(wait_for_boards(
+                    board_client,
+                    ["pursers", other_board],
+                    cursors,
+                    3,
+                    kinds=DISPATCH_KINDS | {
+                        "ticket_created", "ticket_status_changed"
+                    },
+                    submitted=False,
+                    work_dirs={
+                        "pursers": "/repo/home",
+                        other_board: "/repo/other",
+                    },
+                    capabilities=capabilities,
+                    allow_takeover=True,
+                ))
+                await asyncio.wait_for(ready.wait(), timeout=1)
+                active["principal"] = principals["admin"]
+                created = await call(
+                    "ticket_create",
+                    agent_name="admin-agent",
+                    title="registry restart offer probe",
+                    description="prove restarted stable-seat registry delivery",
+                    target_url="home/item",
+                    scope="interactive-no-send",
+                    required_fields=["test_output"],
+                    assigned_to=agent_ids["worker"],
+                )
+                ticket_id = created.structured_content["ticket"]["ticket_id"]
+                active["principal"] = principals["worker"]
+                result = await asyncio.wait_for(waiting, timeout=2)
+
+            assert result["boards"] == [other_board, "pursers"]
+            assert result["skipped_boards"] == {}
+            assert result["events"][0]["ticket_id"] == ticket_id
+            assert result["events"][0]["kind"] == "ticket_offered"
+            if os.environ.get("PURSERS_LIVE_PROBE_OUTPUT") == "1":
+                print(json.dumps({
+                    "boards": result["boards"],
+                    "skipped_boards": result["skipped_boards"],
+                    "events": [{
+                        "kind": result["events"][0]["kind"],
+                        "ticket_id": ticket_id,
+                    }],
+                }, sort_keys=True))
+        finally:
+            central.current_principal = original_current_principal
+
+    asyncio.run(exercise())
 
 
 def test_goose_generated_wait_60_second_idle_is_pure_and_rearms(
