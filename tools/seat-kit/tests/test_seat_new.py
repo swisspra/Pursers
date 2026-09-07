@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import html
 import importlib.util
 import io
@@ -1249,7 +1250,27 @@ async def build_local_central(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
             frozenset({"board:read", "board:write", "board:review"}),
         ),
     }
-    active = {"principal": principals["admin"]}
+    class PrincipalSelection:
+        def __init__(self, principal: Any) -> None:
+            self._principal = contextvars.ContextVar(
+                "seat_kit_test_principal", default=principal
+            )
+
+        def __getitem__(self, key: str) -> Any:
+            assert key == "principal"
+            return self._principal.get()
+
+        def __setitem__(self, key: str, principal: Any) -> None:
+            assert key == "principal"
+            self._principal.set(principal)
+
+        def set(self, principal: Any) -> contextvars.Token[Any]:
+            return self._principal.set(principal)
+
+        def reset(self, token: contextvars.Token[Any]) -> None:
+            self._principal.reset(token)
+
+    active = PrincipalSelection(principals["admin"])
     original_current_principal = central.current_principal
     central.current_principal = lambda: active["principal"]
 
@@ -1348,12 +1369,11 @@ def test_live_registry_wait_restarts_stable_seat_and_delivers_offer(
                     return await self.inner.__aexit__(*arguments)
 
                 async def call_tool(self, *arguments, **kwargs):
-                    previous = active["principal"]
-                    active["principal"] = principals["worker"]
+                    token = active.set(principals["worker"])
                     try:
                         return await self.inner.call_tool(*arguments, **kwargs)
                     finally:
-                        active["principal"] = previous
+                        active.reset(token)
 
                 @asynccontextmanager
                 async def listen(self, **kwargs):
@@ -1863,12 +1883,11 @@ def test_live_registry_wait_resumes_stable_seat_and_wakes_on_held_annotation(
                     return await self.inner.__aexit__(*args)
 
                 async def call_tool(self, *args, **kwargs):
-                    previous = active["principal"]
-                    active["principal"] = principals["worker"]
+                    token = active.set(principals["worker"])
                     try:
                         return await self.inner.call_tool(*args, **kwargs)
                     finally:
-                        active["principal"] = previous
+                        active.reset(token)
 
                 @asynccontextmanager
                 async def listen(self, **kwargs):
@@ -2255,7 +2274,7 @@ def test_generated_main_real_listen_event_exits_zero_without_stderr(
         return fixture, created.structured_content["ticket"]["ticket_id"]
 
     fixture, ticket_id = asyncio.run(prepare())
-    central, mcp, _service, _principals, _active, _agent_ids, _call, original = fixture
+    central, mcp, _service, principals, active, _agent_ids, _call, original = fixture
 
     @asynccontextmanager
     async def http_context():
@@ -2280,6 +2299,7 @@ def test_generated_main_real_listen_event_exits_zero_without_stderr(
     stdout = io.StringIO()
     stderr = io.StringIO()
     try:
+        active["principal"] = principals["worker"]
         with redirect_stdout(stdout), redirect_stderr(stderr):
             returncode = generated.main()
     finally:
