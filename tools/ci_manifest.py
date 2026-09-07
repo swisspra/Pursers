@@ -4,7 +4,7 @@
 The workflow deliberately delegates suite discovery, collection, execution, and
 verification to this module so the suite list has one source of truth.
 
-All ten suites must pass from a workspace-write seat sandbox where the user home
+All required suites must pass from a workspace-write seat sandbox where the user home
 is read-only and process inspection may be unavailable. Tests must inject local
 state and process providers rather than depend on operator-machine access.
 """
