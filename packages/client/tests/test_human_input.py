@@ -9,6 +9,7 @@ from pursers_client import (
     HUMAN_INPUT_REQUESTED,
     HUMAN_INPUT_RESOLVED,
     KNOWN_EVENT_KINDS,
+    TICKET_ARCHIVED,
     human_form_safety,
 )
 
@@ -75,6 +76,7 @@ async def test_human_request_and_resolution_forward_exact_arguments(monkeypatch)
     assert "board://board-a/ticket/TK-1" in board._watched_uris
     assert len(board._local_events) == 2
     assert {HUMAN_INPUT_REQUESTED, HUMAN_INPUT_RESOLVED} <= KNOWN_EVENT_KINDS
+    assert TICKET_ARCHIVED in KNOWN_EVENT_KINDS
 
 
 @pytest.mark.parametrize(

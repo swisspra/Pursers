@@ -40,6 +40,20 @@ class CursorStore:
         entry = document["consumers"].get(_identity_key(principal_id, agent_name))
         return int(entry["cursor"]) if entry else 0
 
+    def oldest_live_cursor(self, board_id: str) -> int | None:
+        """Return the smallest acknowledged consumer cursor, or None when unset."""
+        board_id = _require_text("board_id", board_id)
+        document = self.store.load(self._path(board_id), lambda: self._default(board_id))
+        self._check_document(document, board_id)
+        cursors = [
+            int(entry["cursor"])
+            for entry in document.get("consumers", {}).values()
+            if isinstance(entry, dict)
+            and type(entry.get("cursor")) is int
+            and int(entry["cursor"]) >= 0
+        ]
+        return min(cursors) if cursors else None
+
     def ack(self, principal_id: str, agent_name: str, board_id: str, cursor: int) -> int:
         principal_id = _require_text("principal_id", principal_id)
         agent_name = _require_text("agent_name", agent_name)
