@@ -76,6 +76,11 @@ This release includes `pursers-central==0.1.0a28`,
   coordinator-hosted, and capability-implicit identities. Central now accepts
   `assigned_to_agent_id=null` to clear a pin and releases unavailable pins
   after the fallback cycle limit.
+- fleet-dashboard: hermetic tests (state root override, injectable process
+  lister). Dashboard state resolves through a lazy `PURSERS_STATE_DIR`
+  override, worker directories and lifecycle fences are created only on first
+  private write, and process listing degrades to an explicit unavailable
+  result when inspection is denied.
 - Wait-bridge Central traffic now reuses one bounded HTTP pool per process,
   caps concurrent Central connections at four by default, and logs before an
   excess board subscription falls back to polling. Coordinator subscription

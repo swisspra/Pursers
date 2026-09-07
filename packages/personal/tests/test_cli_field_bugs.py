@@ -3,12 +3,11 @@ from __future__ import annotations
 import argparse
 import json
 import plistlib
-from importlib.metadata import version
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from pursers_personal import cli
+from pursers_personal import PRODUCT_VERSION, cli
 from pursers_personal.integration import IntegrationError, prepare_integration
 
 
@@ -434,4 +433,4 @@ def test_cli_version_matches_package_metadata(
     with pytest.raises(SystemExit) as caught:
         cli.main(["--version"])
     assert caught.value.code == 0
-    assert capsys.readouterr().out.strip() == version("pursers-personal")
+    assert capsys.readouterr().out.strip() == PRODUCT_VERSION
