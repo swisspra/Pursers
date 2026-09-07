@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import importlib.util
 import json
@@ -6399,3 +6400,516 @@ def test_ops_confirmation_plan_is_one_time_and_digest_bound(tmp_path: Path) -> N
         manager.ops_action(plan["plan_id"], "b" * 64)
     with pytest.raises(KeyError):
         manager.ops_action(plan["plan_id"], plan["digest"])
+
+
+# --- DOORS & ADD PROJECT TESTS (TK-764a0f67271c) ---
+
+JWT_SHAPE = re.compile(
+    r"(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}(?![A-Za-z0-9_-])"
+)
+DOOR_SHAPE = re.compile(r"prs1\.[A-Za-z0-9_-]+")
+
+
+class FakeDoorBoardClient:
+    def __init__(self, board_id: str, *, is_admin: bool = True) -> None:
+        self.board_id = board_id
+        self.is_admin = is_admin
+        self.memberships: dict[str, str] = {}
+        self.onboarded = False
+        self.dispatch_policy = {
+            "offer_ttl_s": 120,
+            "broadcast_reoffer_s": 600,
+            "second_opinion": False,
+            "fallback_broadcast": False,
+        }
+        self.review_policy = "workflow"
+
+    async def __aenter__(self) -> Self:
+        return self
+
+    async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
+        pass
+
+    async def board_list(self) -> dict:
+        if not self.is_admin:
+            raise PermissionError("board access denied")
+        boards = [{"board_id": "pursers"}]
+        if self.onboarded:
+            boards.append({"board_id": self.board_id})
+        return {"ok": True, "boards": boards}
+
+    async def board_onboard(self, **kwargs: object) -> dict:
+        if not self.is_admin:
+            raise PermissionError("board access denied: require admin")
+        self.onboarded = True
+        return {"ok": True, "board_id": self.board_id}
+
+    async def board_members(self) -> dict:
+        if not self.is_admin:
+            raise PermissionError("board access denied")
+        members = [
+            {"principal_id": pid, "role": role, "agent_names": ["seat-1"]}
+            for pid, role in self.memberships.items()
+        ]
+        return {"ok": True, "members": members, "principal_member_count": len(members)}
+
+    async def board_member_add(self, principal_id: str, role: str = "member", **kwargs: object) -> dict:
+        if not self.is_admin:
+            raise PermissionError("board access denied: require admin")
+        self.memberships[principal_id] = role
+        return {"ok": True}
+
+    async def board_status(self) -> dict:
+        if not self.is_admin:
+            raise PermissionError("board access denied")
+        return {
+            "ok": True,
+            "board_id": self.board_id,
+            "dispatch_policy": self.dispatch_policy,
+            "review_policy": self.review_policy,
+        }
+
+    async def board_dispatch_policy_set(self, **kwargs: object) -> dict:
+        if not self.is_admin:
+            raise PermissionError("board access denied: require admin")
+        self.dispatch_policy.update(kwargs)
+        return {"ok": True}
+
+    async def board_review_policy_set(self, review_policy: str, **kwargs: object) -> dict:
+        if not self.is_admin:
+            raise PermissionError("board access denied: require admin")
+        self.review_policy = review_policy
+        return {"ok": True}
+
+    async def board_state_get(self, key: str | None = None) -> dict:
+        return {"state": {"value": json.dumps({"schema_version": 1, "projects": {}})}}
+
+    async def _call(self, name: str, arguments: dict) -> dict:
+        if name == "board_members":
+            return await self.board_members()
+        if name == "board_member_add":
+            return await self.board_member_add(arguments["principal_id"], arguments.get("role", "member"))
+        raise NotImplementedError(name)
+
+
+class FakeDoorCentral:
+    def __init__(self, *, is_admin: bool = True) -> None:
+        self.is_admin = is_admin
+        self.registry_data = {
+            "schema_version": 1,
+            "projects": {
+                "existing-proj": {
+                    "board_id": "existing-board",
+                    "work_dir": "/PATH/TO/EXISTING",
+                    "status": "active",
+                }
+            },
+        }
+        self.boards: dict[str, FakeDoorBoardClient] = {}
+
+    def client_factory(self, url: str, token: str, board_id: str, **kwargs: object) -> FakeDoorBoardClient:
+        if board_id not in self.boards:
+            self.boards[board_id] = FakeDoorBoardClient(board_id, is_admin=self.is_admin)
+        board = self.boards[board_id]
+
+        async def state_get(key: str | None = None) -> dict:
+            return {"state": {"value": json.dumps(self.registry_data)}}
+
+        async def state_update(key: str, value: str, **kwargs: object) -> dict:
+            self.registry_data = json.loads(value)
+            return {"ok": True}
+
+        async def call(name: str, arguments: dict) -> dict:
+            if name == "board_state_update":
+                self.registry_data = json.loads(arguments["value"])
+                return {"ok": True}
+            return await board._call(name, arguments)
+
+        board.board_state_get = state_get
+        board.board_state_update = state_update
+        board._call = call
+        return board
+
+
+def test_doors_config_validation_and_missing_error(tmp_path: Path) -> None:
+    config = dashboard.Config(
+        url="http://127.0.0.1:8766/mcp",
+        token="test-token",
+        home_board="pursers",
+        agent_name="viewer",
+        stale_seconds=300,
+        cache_seconds=5,
+        doors_keys_dir=None,
+        jwks_path=None,
+    )
+    fetcher = dashboard.FleetFetcher(config)
+    with pytest.raises(ValueError, match="Doors configuration missing"):
+        asyncio.run(fetcher.fetch_doors())
+
+    with pytest.raises(ValueError, match="Doors configuration missing"):
+        asyncio.run(fetcher.copy_door("pursers", "worker"))
+
+    with pytest.raises(ValueError, match="Doors configuration missing"):
+        asyncio.run(fetcher.rotate_door("pursers", "worker"))
+
+    with pytest.raises(ValueError, match="Doors configuration missing"):
+        asyncio.run(fetcher.add_project(project_name="demo", board_id="demo", work_dir="/PATH/TO/DEMO"))
+
+
+def test_doors_endpoints_and_library_calls(tmp_path: Path) -> None:
+    keys_dir = tmp_path / "keys"
+    jwks_path = tmp_path / "jwks.json"
+    fake_central = FakeDoorCentral()
+
+    config = dashboard.Config(
+        url="http://127.0.0.1:8766/mcp",
+        token="test-token",
+        home_board="pursers",
+        agent_name="viewer",
+        stale_seconds=300,
+        cache_seconds=5,
+        doors_keys_dir=keys_dir,
+        jwks_path=jwks_path,
+    )
+    fetcher = dashboard.FleetFetcher(config, client_factory=fake_central.client_factory)
+    cache = dashboard.DashboardCache([fetcher], 60)
+
+    server = dashboard.ThreadingHTTPServer(
+        ("127.0.0.1", 0), dashboard.make_handler(cache, seat_manager=SimpleNamespace())
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+
+    try:
+        # GET /api/doors listing
+        with urllib.request.urlopen(base + "/api/doors") as response:
+            assert response.status == 200
+            data = json.load(response)
+            assert data["ok"] is True
+            assert len(data["doors"]) == 2  # worker and reviewer for existing-proj
+            worker_entry = next(d for d in data["doors"] if d["role"] == "worker")
+            assert worker_entry["project"] == "existing-proj"
+            assert worker_entry["board_id"] == "existing-board"
+
+        # POST /api/doors/copy
+        req = urllib.request.Request(
+            base + "/api/doors/copy",
+            data=json.dumps({"board": "existing-board", "role": "worker"}).encode(),
+            headers={"Content-Type": "application/json", "Origin": base},
+            method="POST",
+        )
+        with urllib.request.urlopen(req) as response:
+            assert response.status == 200
+            assert response.headers.get("Cache-Control") == "no-store"
+            copy_data = json.load(response)
+            assert copy_data["ok"] is True
+            assert copy_data["door_string"].startswith("prs1.")
+            initial_kid = copy_data["kid"]
+            assert initial_kid
+
+        # POST /api/doors/rotate
+        req_rot = urllib.request.Request(
+            base + "/api/doors/rotate",
+            data=json.dumps({"board": "existing-board", "role": "worker"}).encode(),
+            headers={"Content-Type": "application/json", "Origin": base},
+            method="POST",
+        )
+        with urllib.request.urlopen(req_rot) as response:
+            assert response.status == 200
+            assert response.headers.get("Cache-Control") == "no-store"
+            rot_data = json.load(response)
+            assert rot_data["ok"] is True
+            assert rot_data["door_string"].startswith("prs1.")
+            assert rot_data["kid"] != initial_kid
+            assert "warning" in rot_data
+
+        # Verify JWKS was updated
+        jwks_content = json.loads(jwks_path.read_text(encoding="utf-8"))
+        active_kids = [k["kid"] for k in jwks_content["keys"]]
+        assert rot_data["kid"] in active_kids
+        assert initial_kid not in active_kids
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+def test_add_project_single_action_happy_path_and_idempotent_rerun(tmp_path: Path) -> None:
+    keys_dir = tmp_path / "keys"
+    jwks_path = tmp_path / "jwks.json"
+    fake_central = FakeDoorCentral()
+
+    config = dashboard.Config(
+        url="http://127.0.0.1:8766/mcp",
+        token="test-token",
+        home_board="pursers",
+        agent_name="viewer",
+        stale_seconds=300,
+        cache_seconds=5,
+        doors_keys_dir=keys_dir,
+        jwks_path=jwks_path,
+    )
+    fetcher = dashboard.FleetFetcher(config, client_factory=fake_central.client_factory)
+    cache = dashboard.DashboardCache([fetcher], 60)
+
+    clone_dir = tmp_path / "fleet-clone"
+    clone_dir.mkdir()
+
+    class FakeSeatManager:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def _clone_state(self, path: Path, ref: str = "main") -> dict:
+            return {"status": "ready", "dirty": False}
+
+        def prepare_fleet_clone(self, registry_payload: dict, project_name: str) -> dict:
+            self.calls += 1
+            reg = copy.deepcopy(registry_payload["registry"])
+            reg["projects"][project_name]["fleet_clone_dir"] = str(clone_dir)
+            return {
+                "project": project_name,
+                "clone": {"path": str(clone_dir), "status": "ready"},
+                "registry": reg,
+                "expected_sha256": registry_payload["expected_sha256"],
+            }
+
+    seats = FakeSeatManager()
+    server = dashboard.ThreadingHTTPServer(
+        ("127.0.0.1", 0), dashboard.make_handler(cache, seat_manager=seats)
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+
+    payload = {
+        "name": "new-svc",
+        "board_id": "new-board",
+        "work_dir": str(tmp_path / "work"),
+        "integration_ref": "main",
+    }
+    (tmp_path / "work").mkdir()
+
+    try:
+        # First call: Happy path
+        req = urllib.request.Request(
+            base + "/api/projects/add",
+            data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json", "Origin": base},
+            method="POST",
+        )
+        with urllib.request.urlopen(req) as response:
+            assert response.status == 200
+            assert response.headers.get("Cache-Control") == "no-store"
+            result = json.load(response)
+            assert result["ok"] is True
+            assert result["doors"]["worker"].startswith("prs1.")
+            assert result["doors"]["reviewer"].startswith("prs1.")
+            statuses = {s["step"]: s["status"] for s in result["steps"]}
+            assert statuses["registry_admin"] == "created"
+            assert statuses["board_create"] == "created"
+            assert statuses["door_principals"] == "created"
+            assert statuses["policies"] == "configured"
+            assert statuses["fleet_clone"] == "prepared"
+
+        # Verify board state on fake central
+        new_board = fake_central.boards["new-board"]
+        assert new_board.onboarded is True
+        assert new_board.dispatch_policy["offer_ttl_s"] == 600
+        assert new_board.dispatch_policy["broadcast_reoffer_s"] == 180
+        assert new_board.dispatch_policy["second_opinion"] is True
+        assert new_board.dispatch_policy["fallback_broadcast"] is True
+        assert new_board.review_policy == "strict"
+        assert len(new_board.memberships) == 2  # worker and reviewer doors
+
+        # Second call: Idempotent re-run
+        req2 = urllib.request.Request(
+            base + "/api/projects/add",
+            data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json", "Origin": base},
+            method="POST",
+        )
+        with urllib.request.urlopen(req2) as response:
+            assert response.status == 200
+            result2 = json.load(response)
+            assert result2["ok"] is True
+            statuses2 = {s["step"]: s["status"] for s in result2["steps"]}
+            assert statuses2["registry_admin"] == "already present"
+            assert statuses2["board_create"] == "already present"
+            assert statuses2["door_principals"] == "already present"
+            assert statuses2["policies"] == "already present"
+            assert statuses2["fleet_clone"] == "already present"
+            assert result2["doors"]["worker"].startswith("prs1.")
+            assert result2["doors"]["reviewer"].startswith("prs1.")
+            # Verify clone preparation was not repeated
+            assert seats.calls == 1
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+def test_guards_reject_cross_origin_and_non_admin(tmp_path: Path) -> None:
+    keys_dir = tmp_path / "keys"
+    jwks_path = tmp_path / "jwks.json"
+
+    # 1. Cross-origin rejection
+    admin_central = FakeDoorCentral(is_admin=True)
+    config = dashboard.Config(
+        url="http://127.0.0.1:8766/mcp",
+        token="admin-token",
+        home_board="pursers",
+        agent_name="viewer",
+        stale_seconds=300,
+        cache_seconds=5,
+        doors_keys_dir=keys_dir,
+        jwks_path=jwks_path,
+    )
+    fetcher = dashboard.FleetFetcher(config, client_factory=admin_central.client_factory)
+    cache = dashboard.DashboardCache([fetcher], 60)
+    server = dashboard.ThreadingHTTPServer(
+        ("127.0.0.1", 0), dashboard.make_handler(cache, seat_manager=SimpleNamespace())
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+
+    try:
+        for path, body in (
+            ("/api/doors/copy", {"board": "pursers", "role": "worker"}),
+            ("/api/doors/rotate", {"board": "pursers", "role": "worker"}),
+            (
+                "/api/projects/add",
+                {"name": "demo", "board_id": "demo", "work_dir": "/PATH/TO/DEMO"},
+            ),
+        ):
+            req = urllib.request.Request(
+                base + path,
+                data=json.dumps(body).encode(),
+                headers={"Content-Type": "application/json", "Origin": "https://attacker.invalid"},
+                method="POST",
+            )
+            with pytest.raises(urllib.error.HTTPError) as exc_info:
+                urllib.request.urlopen(req)
+            assert exc_info.value.code == 403
+
+        # Cross-origin GET /api/doors rejected
+        req_get = urllib.request.Request(
+            base + "/api/doors",
+            headers={"Origin": "https://attacker.invalid"},
+            method="GET",
+        )
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            urllib.request.urlopen(req_get)
+        assert exc_info.value.code == 403
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+    # 2. Non-admin rejection
+    non_admin_central = FakeDoorCentral(is_admin=False)
+    config_non_admin = dashboard.Config(
+        url="http://127.0.0.1:8766/mcp",
+        token="non-admin-token",
+        home_board="pursers",
+        agent_name="viewer",
+        stale_seconds=300,
+        cache_seconds=5,
+        doors_keys_dir=keys_dir,
+        jwks_path=jwks_path,
+    )
+    fetcher_non_admin = dashboard.FleetFetcher(
+        config_non_admin, client_factory=non_admin_central.client_factory
+    )
+    cache_non_admin = dashboard.DashboardCache([fetcher_non_admin], 60)
+    server2 = dashboard.ThreadingHTTPServer(
+        ("127.0.0.1", 0), dashboard.make_handler(cache_non_admin, seat_manager=SimpleNamespace())
+    )
+    thread2 = threading.Thread(target=server2.serve_forever, daemon=True)
+    thread2.start()
+    base2 = f"http://127.0.0.1:{server2.server_port}"
+
+    try:
+        # GET /api/doors with non-admin fails with 403
+        req_doors = urllib.request.Request(base2 + "/api/doors", headers={"Origin": base2})
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            urllib.request.urlopen(req_doors)
+        assert exc_info.value.code == 403
+
+        # POST /api/projects/add with non-admin fails with 403
+        req_add = urllib.request.Request(
+            base2 + "/api/projects/add",
+            data=json.dumps({"name": "demo", "board_id": "demo", "work_dir": "/PATH/TO/DEMO"}).encode(),
+            headers={"Content-Type": "application/json", "Origin": base2},
+            method="POST",
+        )
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            urllib.request.urlopen(req_add)
+        assert exc_info.value.code == 403
+    finally:
+        server2.shutdown()
+        server2.server_close()
+        thread2.join()
+
+
+def test_no_secret_assertions_in_state_logs_and_listings(tmp_path: Path) -> None:
+    keys_dir = tmp_path / "keys"
+    jwks_path = tmp_path / "jwks.json"
+    fake_central = FakeDoorCentral()
+
+    config = dashboard.Config(
+        url="http://127.0.0.1:8766/mcp",
+        token="test-token",
+        home_board="pursers",
+        agent_name="viewer",
+        stale_seconds=300,
+        cache_seconds=5,
+        doors_keys_dir=keys_dir,
+        jwks_path=jwks_path,
+    )
+    fetcher = dashboard.FleetFetcher(config, client_factory=fake_central.client_factory)
+    cache = dashboard.DashboardCache([fetcher], 60)
+
+    class FakeListingSeatManager:
+        def registry(self, fleet: dict, reg: dict) -> dict:
+            return {"projects": []}
+
+    server = dashboard.ThreadingHTTPServer(
+        ("127.0.0.1", 0), dashboard.make_handler(cache, seat_manager=FakeListingSeatManager())
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+
+    try:
+        # Mint doors via copy
+        req = urllib.request.Request(
+            base + "/api/doors/copy",
+            data=json.dumps({"board": "existing-board", "role": "worker"}).encode(),
+            headers={"Content-Type": "application/json", "Origin": base},
+            method="POST",
+        )
+        with urllib.request.urlopen(req) as response:
+            assert response.status == 200
+
+        # Verify listing endpoints NEVER contain door strings or JWT substrings
+        for listing_path in ("/api/doors", "/api/fleet", "/api/config/registry"):
+            with urllib.request.urlopen(base + listing_path) as response:
+                content = response.read().decode("utf-8")
+                assert not DOOR_SHAPE.search(content), f"Door string leak in {listing_path}"
+                assert not JWT_SHAPE.search(content), f"JWT leak in {listing_path}"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+def test_doors_ui_rendering() -> None:
+    html = dashboard.HTML
+    assert "doors-panel" in html
+    assert "add-project-panel" in html
+    assert "add-project-form" in html
+    assert 'data-door-action="copy"' in html
+    assert 'data-door-action="rotate"' in html
+    assert 'name="integration_ref"' in html
