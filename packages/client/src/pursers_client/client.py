@@ -748,6 +748,7 @@ class BoardClient:
         status: str | None = None,
         assigned_to: str | None = None,
         include_closed: bool = False,
+        include_archived: bool = True,
         limit: int = 100,
         review_unclaimed_only: bool = False,
         ticket_ids: list[str] | None = None,
@@ -755,6 +756,7 @@ class BoardClient:
         arguments: dict[str, Any] = {
             "agent_name": self.agent_name,
             "include_closed": include_closed,
+            "include_archived": include_archived,
             "limit": limit,
             "review_unclaimed_only": review_unclaimed_only,
         }

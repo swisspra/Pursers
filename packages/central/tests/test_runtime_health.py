@@ -143,6 +143,11 @@ class RuntimeHealthUnitTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["status"], "ok")
         self.assertEqual(payload["store_backend"], "sqlite")
         self.assertEqual(payload["board_count"], 1)
+        board_stats = payload["boards"]["pursers"]
+        self.assertGreater(board_stats["hot_document_bytes"], 0)
+        self.assertEqual(board_stats["archived_ticket_count"], 0)
+        self.assertGreater(board_stats["document_loads_last_60s"], 0)
+        self.assertGreaterEqual(board_stats["document_saves_last_60s"], 0)
         self.assertGreaterEqual(payload["uptime_seconds"], 0)
         self.assertIsNone(payload["last_error_class"])
         self.assertIn("open_file_descriptors", payload)
@@ -157,7 +162,7 @@ class RuntimeHealthUnitTests(unittest.IsolatedAsyncioTestCase):
         failure = sqlite3.OperationalError("unable to open database file")
 
         with patch.object(
-            self.service.store, "iter_documents", side_effect=failure
+            self.service.store, "document_sizes", side_effect=failure
         ):
             response = health_response(self.service, self.service.diagnostics)
 
