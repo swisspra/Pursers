@@ -34,6 +34,7 @@ SUITES: tuple[Suite, ...] = (
     Suite("coordinator", "tools/coordinator/tests"),
     Suite("worker-runtime", "tools/worker-runtime/tests"),
     Suite("seat-kit", "tools/seat-kit/tests"),
+    Suite("aionui-extension", "tools/aionui-extension/tests"),
     Suite("release-tools", "tools/tests"),
 )
 
