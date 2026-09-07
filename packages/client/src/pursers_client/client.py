@@ -316,6 +316,7 @@ class BoardClient:
         agent_name: str | None = None,
         role: str | None = None,
         capabilities: dict[str, Any] | None = None,
+        allow_takeover: bool = False,
     ) -> dict[str, Any]:
         selected_name = self.agent_name if agent_name is None else agent_name
         arguments: dict[str, Any] = {"agent_name": selected_name}
@@ -333,6 +334,8 @@ class BoardClient:
             caps.setdefault("legacy_tools", True)
         if caps or capabilities is not None:
             arguments["capabilities"] = caps
+        if allow_takeover:
+            arguments["allow_takeover"] = True
         joined = await (
             self._call_refresh("board_join", arguments)
             if agent_name is None
@@ -361,6 +364,7 @@ class BoardClient:
         ticket_id: str | None = None,
         role: str | None = None,
         capabilities: dict[str, Any] | None = None,
+        allow_takeover: bool = False,
     ) -> dict[str, Any]:
         arguments: dict[str, Any] = {
             "agent_name": self.agent_name,
@@ -382,6 +386,8 @@ class BoardClient:
             "capabilities": capabilities,
         }
         arguments.update({key: value for key, value in optional.items() if value is not None})
+        if allow_takeover:
+            arguments["allow_takeover"] = True
         result = await self._call_refresh("board_onboard", arguments)
         self.identity = JoinedIdentity(
             result["board_id"],
@@ -806,7 +812,11 @@ class BoardClient:
         author: str | None = None,
         limit: int = 20,
     ) -> dict[str, Any]:
-        arguments: dict[str, Any] = {"query": query, "limit": limit}
+        arguments: dict[str, Any] = {
+            "agent_name": self.agent_name,
+            "query": query,
+            "limit": limit,
+        }
         if tag is not None:
             arguments["tag"] = tag
         if author is not None:
@@ -823,7 +833,11 @@ class BoardClient:
         depth: int = 2,
         limit: int = 50,
     ) -> dict[str, Any]:
-        arguments: dict[str, Any] = {"depth": depth, "limit": limit}
+        arguments: dict[str, Any] = {
+            "agent_name": self.agent_name,
+            "depth": depth,
+            "limit": limit,
+        }
         optional = {
             "memory_id": memory_id,
             "ticket_id": ticket_id,

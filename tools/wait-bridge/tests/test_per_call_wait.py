@@ -41,7 +41,9 @@ class FakeClient:
         self.catchup_error_once = False
         self.renewed: list[str] = []
 
-    async def board_join(self, *, agent_name: str | None = None):
+    async def board_join(
+        self, *, agent_name: str | None = None, allow_takeover: bool = False
+    ):
         self.join_calls.append(agent_name)
         selected = self.agent_name if agent_name is None else agent_name
         identity = JoinedIdentity(
@@ -136,14 +138,18 @@ class PerCallWaitTests(unittest.IsolatedAsyncioTestCase):
         second_joined = asyncio.Event()
         original_join = client.board_join
 
-        async def interleaved_join(*, agent_name: str | None = None):
+        async def interleaved_join(
+            *, agent_name: str | None = None, allow_takeover: bool = False
+        ):
             if agent_name == "session-a":
                 first_joined.set()
                 await second_joined.wait()
             elif agent_name == "session-b":
                 await first_joined.wait()
                 second_joined.set()
-            return await original_join(agent_name=agent_name)
+            return await original_join(
+                agent_name=agent_name, allow_takeover=allow_takeover
+            )
 
         client.board_join = interleaved_join  # type: ignore[method-assign]
 

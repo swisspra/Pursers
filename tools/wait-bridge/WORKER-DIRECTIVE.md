@@ -22,6 +22,10 @@ your accountability are now defined here, not by a folder path.
 
 ## 1. Your identity is permanent and attributed
 
+Many seats may share one bearer principal. Your identity is the exact seat
+(`agent_id`), derived from the board, principal, and stable `agent_name`; shared
+credentials do not make two seat names the same worker or reviewer.
+
 You act on the board as a stable agent name — either the process default
 (`ONBOARD_AGENT_NAME`, e.g. `purser-desktop-1`) or, if your session was told to
 use its own name, the `agent_name` you pass to `a2a_wait` on every call. Either

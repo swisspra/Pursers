@@ -152,6 +152,7 @@ class HumanInputTests(unittest.IsolatedAsyncioTestCase):
             joined = await self.call(
                 "board_join", agent_name=principal.canonical,
                 capabilities={"can_work": True, "can_review": False},
+                allow_takeover=True,
             )
             self.service.register_listener(
                 "pursers", joined.structured_content["agent_id"]
@@ -435,7 +436,9 @@ class HumanInputTests(unittest.IsolatedAsyncioTestCase):
         request = snapshot.structured_content["tickets"][0]["human_request"]
         self.assertGreater(request["omitted_counts"]["message_chars"], 0)
         self.assertLessEqual(len(request["message"]), 500)
-        onboard = await self.call("board_onboard", agent_name="admin-agent")
+        onboard = await self.call(
+            "board_onboard", agent_name="admin-agent", allow_takeover=True
+        )
         pending = onboard.structured_content["briefing"]["pending_human_requests"]
         self.assertEqual(pending[0]["request_id"], requested["request_id"])
         self.assertIn(HUMAN_INPUT_REQUESTED, KNOWN_EVENT_KINDS)

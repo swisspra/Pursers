@@ -89,6 +89,18 @@ from transactional_sqlite import TransactionalSQLiteStore
 
 
 ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,80}$")
+SEAT_NAME_COLLISION = "seat_name_collision"
+SEAT_IDENTITY_EVENT_KINDS = frozenset({SEAT_NAME_COLLISION})
+SEAT_IDENTITY_EVENT_FIELDS = frozenset(
+    {
+        "attempted_agent_id",
+        "attempted_agent_name",
+        "principal_id",
+        "refusal_reason",
+        "fixture_provenance",
+        "recipient_identities",
+    }
+)
 DEFAULT_CLAIM_TTL_S = 900
 DEFAULT_BROADCAST_REOFFER_S = 600
 MIN_BROADCAST_REOFFER_S = 60
@@ -366,12 +378,21 @@ def require_id(field: str, value: str) -> str:
     return value
 
 
-def _memory_is_visible(entry: Mapping[str, Any], principal_id: str) -> bool:
+def _memory_is_visible(
+    entry: Mapping[str, Any], principal_id: str, agent_id_value: str | None = None
+) -> bool:
     """Fail closed for unknown/missing scopes before projection or ranking."""
     scope = entry.get("scope")
-    return scope == "project" or (
-        scope == "private" and entry.get("author_principal_id") == principal_id
-    )
+    if scope == "project":
+        return True
+    if scope != "private":
+        return False
+    author_agent_id = entry.get("author_agent_id")
+    if author_agent_id:
+        return author_agent_id == agent_id_value
+    # Migration compatibility: legacy private memories did not carry an
+    # author_agent_id and retain principal visibility until rewritten.
+    return entry.get("author_principal_id") == principal_id
 
 
 def agent_id(board_id: str, principal_id: str, agent_name: str) -> str:
@@ -475,6 +496,7 @@ class CentralJournal(Journal):
             | AGENT_LIFECYCLE_EVENT_KINDS
             | CLAIM_GATE_EVENT_KINDS
             | PARK_EVENT_KINDS
+            | SEAT_IDENTITY_EVENT_KINDS
         ):
             raise ValueError(f"unsupported event kind: {kind}")
         board_id = _require_text("board_id", board_id)
@@ -492,6 +514,7 @@ class CentralJournal(Journal):
             | AGENT_LIFECYCLE_EVENT_FIELDS
             | CLAIM_GATE_EVENT_FIELDS
             | PARK_EVENT_FIELDS
+            | SEAT_IDENTITY_EVENT_FIELDS
         )
         semantic = {
             key: copy.deepcopy(event[key])
@@ -547,6 +570,7 @@ class CentralJournal(Journal):
             | AGENT_LIFECYCLE_EVENT_KINDS
             | CLAIM_GATE_EVENT_KINDS
             | PARK_EVENT_KINDS
+            | SEAT_IDENTITY_EVENT_KINDS
         ):
             raise ValueError(f"unsupported event kind: {kind}")
         if not unique_fields:
@@ -566,6 +590,7 @@ class CentralJournal(Journal):
             | AGENT_LIFECYCLE_EVENT_FIELDS
             | CLAIM_GATE_EVENT_FIELDS
             | PARK_EVENT_FIELDS
+            | SEAT_IDENTITY_EVENT_FIELDS
         )
         semantic = {
             key: copy.deepcopy(event[key])
@@ -2078,7 +2103,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         else:
             if not caps["can_review"] or membership.get("role") not in {"admin", "reviewer"}:
                 return False
-            if member.get("principal_id") == ticket.get("submitted_by_principal_id"):
+            if member.get("agent_id") == ticket.get("submitted_by_agent_id"):
                 return False
             if (
                 board_review_policy(document) == "workflow"
@@ -3446,20 +3471,18 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         if scope == "project":
             return ticket_recipients(document, actor)
         service.resolve_board_context(document, actor["principal_id"])
-        return [
-            item["agent_id"]
-            for item in document["members"].values()
-            if item.get("principal_id") == actor.get("principal_id")
-            and item.get("agent_id") != actor.get("agent_id")
-        ]
+        return [actor["agent_id"]]
 
     def visible_memories(
-        document: dict[str, Any], principal: Principal
+        document: dict[str, Any], principal: Principal,
+        agent_id_value: str | None = None,
     ) -> list[dict[str, Any]]:
         return [
             entry
             for entry in document.get("memories", [])
-            if _memory_is_visible(entry, principal.principal_id)
+            if _memory_is_visible(
+                entry, principal.principal_id, agent_id_value
+            )
         ]
 
     def memory_identifier(entry: dict[str, Any]) -> str:
@@ -3590,7 +3613,8 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         return result
 
     def memory_target(
-        document: dict[str, Any], principal: Principal, memory_id: str
+        document: dict[str, Any], principal: Principal,
+        agent_id_value: str, memory_id: str,
     ) -> dict[str, Any] | None:
         target = next(
             (
@@ -3601,7 +3625,9 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         )
         if target is None:
             return None
-        visible = _memory_is_visible(target, principal.principal_id)
+        visible = _memory_is_visible(
+            target, principal.principal_id, agent_id_value
+        )
         return target if visible else None
 
     def board_role_allows_review(
@@ -3625,10 +3651,13 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         return actor
 
     def can_moderate_memory(
-        document: dict[str, Any], target: dict[str, Any], principal: Principal
+        document: dict[str, Any], target: dict[str, Any], principal: Principal,
+        agent_id_value: str,
     ) -> bool:
         if target.get("scope") == "private":
-            return target.get("author_principal_id") == principal.principal_id
+            return _memory_is_visible(
+                target, principal.principal_id, agent_id_value
+            )
         return (
             target.get("author_principal_id") == principal.principal_id
             or board_role_allows_review(document, principal)
@@ -3960,6 +3989,16 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             require_scope(principal, required_scope)
         return role
 
+    def board_admin_agent_ids(document: dict[str, Any]) -> list[str]:
+        memberships = document.get("principal_memberships", {})
+        return sorted(
+            str(member["agent_id"])
+            for member in document.get("members", {}).values()
+            if member.get("lifecycle_status", "active") == "active"
+            and isinstance(memberships.get(member.get("principal_id")), Mapping)
+            and memberships[member["principal_id"]].get("role") == "admin"
+        )
+
     def join_member(
         document: dict[str, Any], principal: Principal, agent_name: str,
         now: float, claim_ttl_s: int | None,
@@ -3968,8 +4007,29 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         capabilities: Mapping[str, Any] | None = None,
         *, allow_workflow_side_effects: bool = True,
         lease_renewal_source: str = "model",
+        allow_takeover: bool = False,
     ) -> dict[str, Any]:
         membership = service.resolve_board_context(document, principal.principal_id)
+        identity_id = agent_id(document["board_id"], principal.principal_id, agent_name)
+        existing = document["members"].get(identity_id)
+        if (
+            existing is not None
+            and existing.get("lifecycle_status", "active") == "active"
+            and (member_last_activity_epoch(existing) or 0)
+            > now - board_stale_after_days(document) * 86_400
+            and not allow_takeover
+        ):
+            reason = (
+                "seat name already active under this principal; choose another name "
+                "or pass allow_takeover=true"
+            )
+            return {
+                "collision": {
+                    "actor": copy.deepcopy(existing),
+                    "recipients": board_admin_agent_ids(document),
+                    "reason": reason,
+                }
+            }
         configured_ttl = claim_ttl(document)
         if claim_ttl_s is not None:
             if document["members"] and claim_ttl_s != configured_ttl:
@@ -3979,8 +4039,6 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             document["config"]["claim_ttl_s"] = claim_ttl_s
             configured_ttl = claim_ttl_s
         released = reap_expired(document, now) if allow_workflow_side_effects else []
-        identity_id = agent_id(document["board_id"], principal.principal_id, agent_name)
-        existing = document["members"].get(identity_id)
         rejoined = existing is not None
         previous_role = existing.get("role") if existing is not None else None
         previous_lifecycle = (
@@ -4237,11 +4295,14 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
 
     def briefing_payload(
         document: dict[str, Any], principal: Principal, token_budget: int,
-        *, ticket_id: str | None = None,
+        *, ticket_id: str | None = None, agent_id_value: str | None = None,
     ) -> dict[str, Any]:
         if not 256 <= token_budget <= 50_000:
             raise ValueError("token_budget must be between 256 and 50000")
-        memories = [project_memory(item) for item in visible_memories(document, principal)]
+        memories = [
+            project_memory(item)
+            for item in visible_memories(document, principal, agent_id_value)
+        ]
         project_handoffs = [
             item for item in memories
             if item.get("memory_type") == "handoff"
@@ -4463,6 +4524,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         role: str | None = None,
         capabilities: dict[str, Any] | None = None,
         renewal_source: str | None = None,
+        allow_takeover: bool = False,
     ) -> dict[str, Any]:
         """Join one explicit board under the verified bearer principal."""
         board_id = require_id("board_id", board_id)
@@ -4471,6 +4533,8 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             raise ValueError(
                 f"claim_ttl_s must be between {MIN_CLAIM_TTL_S} and {MAX_CLAIM_TTL_S}"
             )
+        if type(allow_takeover) is not bool:
+            raise ValueError("allow_takeover must be a boolean")
         principal = current_principal()
         selected_renewal_source = normalize_renewal_source(renewal_source)
         requested_role = (
@@ -4530,7 +4594,10 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 safe_platform, safe_focus, effective_role, capabilities,
                 allow_workflow_side_effects=not coordinate_only,
                 lease_renewal_source=selected_renewal_source,
+                allow_takeover=allow_takeover,
             )
+            if "collision" in joined:
+                return joined
             member = joined["actor"]
             return {
                 "ok": True,
@@ -4561,6 +4628,23 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             }
 
         result = service.mutate(board_id, join, require_generation=False)
+        collision = result.get("collision")
+        if collision is not None:
+            actor = collision["actor"]
+            reason = collision["reason"]
+            await append_and_publish(
+                board_id,
+                actor,
+                SEAT_NAME_COLLISION,
+                resource_uri(board_id, "agent", actor["agent_id"]),
+                collision["recipients"],
+                ctx,
+                attempted_agent_id=actor["agent_id"],
+                attempted_agent_name=agent_name,
+                principal_id=principal.principal_id,
+                refusal_reason=reason,
+            )
+            raise ValueError(reason)
         if result["role_defaulted_from_membership"]:
             note_key = (board_id, principal.principal_id, agent_name)
             if note_key not in membership_role_default_notes:
@@ -4604,6 +4688,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         snapshot_max_bytes: int = DEFAULT_SNAPSHOT_MAX_BYTES,
         role: str = "worker",
         capabilities: dict[str, Any] | None = None,
+        allow_takeover: bool = False,
     ) -> dict[str, Any]:
         """Join or reactivate an identity and return a compact bounded board briefing."""
         board_id = require_id("board_id", board_id)
@@ -4614,6 +4699,8 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             )
         if not 256 <= token_budget <= 50_000:
             raise ValueError("token_budget must be between 256 and 50000")
+        if type(allow_takeover) is not bool:
+            raise ValueError("allow_takeover must be a boolean")
         validate_snapshot_bounds(snapshot_limit, snapshot_max_bytes)
         if ticket_id is not None:
             ticket_id = require_id("ticket_id", ticket_id)
@@ -4640,9 +4727,13 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 document, principal, agent_name, now, claim_ttl_s,
                 safe_platform, safe_focus, role, capabilities,
                 allow_workflow_side_effects=not coordinate_only,
+                allow_takeover=allow_takeover,
             )
+            if "collision" in joined:
+                return joined
             briefing = briefing_payload(
-                document, principal, token_budget, ticket_id=ticket_id
+                document, principal, token_budget, ticket_id=ticket_id,
+                agent_id_value=joined["actor"]["agent_id"],
             )
             return {
                 "actor": copy.deepcopy(joined["actor"]),
@@ -4662,6 +4753,23 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             }
 
         result = service.mutate(board_id, onboard, require_generation=False)
+        collision = result.get("collision")
+        if collision is not None:
+            actor = collision["actor"]
+            reason = collision["reason"]
+            await append_and_publish(
+                board_id,
+                actor,
+                SEAT_NAME_COLLISION,
+                resource_uri(board_id, "agent", actor["agent_id"]),
+                collision["recipients"],
+                ctx,
+                attempted_agent_id=actor["agent_id"],
+                attempted_agent_name=agent_name,
+                principal_id=principal.principal_id,
+                refusal_reason=reason,
+            )
+            raise ValueError(reason)
         release_events = await publish_releases(
             board_id, result["released"], principal, ctx
         )
@@ -7301,17 +7409,9 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 raise PermissionError(
                     "reviewing agent lacks reviewer board role and board:review authorization"
                 )
-            if ticket.get("submitted_by_principal_id") == principal.principal_id:
+            if ticket.get("submitted_by_agent_id") == actor["agent_id"]:
                 raise PermissionError(
-                    "self-review denied: authenticated principal submitted this work"
-                )
-            submitted_by_agent_id = ticket.get("submitted_by_agent_id")
-            if (
-                board_review_policy(document) == "workflow"
-                and submitted_by_agent_id == actor["agent_id"]
-            ):
-                raise PermissionError(
-                    "workflow review denied: submitting and reviewing agent must differ"
+                    "self-review denied: authenticated seat submitted this work"
                 )
             if ticket.get("parked") is True and not operator_override:
                 return refuse("ticket is parked by the board owner")
@@ -7589,15 +7689,13 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             policy = board_review_policy(document)
             submitted_by_agent_id = ticket.get("submitted_by_agent_id")
             submitted_by_principal_id = ticket.get("submitted_by_principal_id")
-            if submitted_by_principal_id == principal.principal_id:
-                raise PermissionError("self-review denied: authenticated principal submitted this work")
+            if submitted_by_agent_id == actor["agent_id"]:
+                raise PermissionError(
+                    "self-review denied: authenticated seat submitted this work"
+                )
             if policy == "workflow":
                 if not submitted_by_agent_id or not submitted_by_principal_id:
                     raise ValueError("submitted ticket is missing review provenance")
-                if submitted_by_agent_id == actor["agent_id"]:
-                    raise PermissionError(
-                        "workflow review denied: submitting and reviewing agent must differ"
-                    )
             if not board_role_allows_review(document, principal):
                 if policy == "strict":
                     raise PermissionError(
@@ -7864,8 +7962,8 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             basis = None
             if ticket.get("created_by_principal_id") == principal.principal_id:
                 basis = "creator principal"
-            elif ticket.get("claimed_by_principal_id") == principal.principal_id:
-                basis = "current executor principal"
+            elif ticket.get("claimed_by_agent_id") == actor["agent_id"]:
+                basis = "current executor agent_id"
             elif board_role_allows_review(document, principal):
                 basis = "board:review"
             if basis is None:
@@ -8225,9 +8323,11 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 )
             retracted = None
             if safe_retracts:
-                target = memory_target(document, principal, safe_retracts)
+                target = memory_target(
+                    document, principal, actor["agent_id"], safe_retracts
+                )
                 if target is None or not can_moderate_memory(
-                    document, target, principal
+                    document, target, principal, actor["agent_id"]
                 ):
                     raise PermissionError("memory not found or not authorized")
                 if (target.get("scope") or "project") != scope:
@@ -8316,8 +8416,11 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         principal = current_principal()
         require_scope(principal, "board:read")
         document = service.load(board_id)
-        service.member(document, principal, agent_name)
-        visible = [project_memory(entry) for entry in visible_memories(document, principal)]
+        actor = service.member(document, principal, agent_name)
+        visible = [
+            project_memory(entry)
+            for entry in visible_memories(document, principal, actor["agent_id"])
+        ]
         if not include_archived:
             visible = [item for item in visible if not item.get("archived")]
         if memory_type is not None:
@@ -8381,9 +8484,11 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             actor, released, renewed = prepare_board_call(
                 document, principal, agent_name, now
             )
-            target = memory_target(document, principal, safe_id)
+            target = memory_target(
+                document, principal, actor["agent_id"], safe_id
+            )
             if target is None or not can_moderate_memory(
-                document, target, principal
+                document, target, principal, actor["agent_id"]
             ):
                 raise PermissionError("memory not found or not authorized")
             changed = unpin_memory(
@@ -8425,6 +8530,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         board_id: str,
         query: str,
         ctx: Context,
+        agent_name: str | None = None,
         tag: str | None = None,
         author: str | None = None,
         include_archived: bool = False,
@@ -8439,10 +8545,17 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         principal = current_principal()
         require_scope(principal, "board:read")
         document = service.load(board_id)
-        service.principal_members(document, principal.principal_id)
+        agent_id_value = None
+        if agent_name is not None:
+            agent_name = require_id("agent_name", agent_name)
+            agent_id_value = service.member(
+                document, principal, agent_name
+            )["agent_id"]
+        else:
+            service.principal_members(document, principal.principal_id)
         needle = safe_query.casefold()
         ranked: list[tuple[int, float, str, dict[str, Any]]] = []
-        for raw in visible_memories(document, principal):
+        for raw in visible_memories(document, principal, agent_id_value):
             item = project_memory(raw)
             if item.get("archived") and not include_archived:
                 continue
@@ -8486,6 +8599,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
     async def memory_links(
         board_id: str,
         ctx: Context,
+        agent_name: str | None = None,
         memory_id: str | None = None,
         ticket_id: str | None = None,
         file: str | None = None,
@@ -8502,8 +8616,18 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         principal = current_principal()
         require_scope(principal, "board:read")
         document = service.load(board_id)
-        service.principal_members(document, principal.principal_id)
-        items = [project_memory(raw) for raw in visible_memories(document, principal)]
+        agent_id_value = None
+        if agent_name is not None:
+            agent_name = require_id("agent_name", agent_name)
+            agent_id_value = service.member(
+                document, principal, agent_name
+            )["agent_id"]
+        else:
+            service.principal_members(document, principal.principal_id)
+        items = [
+            project_memory(raw)
+            for raw in visible_memories(document, principal, agent_id_value)
+        ]
         by_id = {
             memory_identifier(item): item for item in items
         }

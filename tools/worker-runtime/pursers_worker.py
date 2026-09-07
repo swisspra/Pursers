@@ -767,6 +767,7 @@ class PursersBoardAPI:
             try:
                 await view.board_join(
                     agent_name=self.config.agent_name,
+                    allow_takeover=True,
                     task_focus=(
                         f"worker-runtime role={self.config.role} "
                         f"max_tier={self.config.max_tier}"

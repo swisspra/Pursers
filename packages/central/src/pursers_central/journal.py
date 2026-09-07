@@ -44,6 +44,10 @@ SEMANTIC_FIELDS = frozenset(
         "request_id",
         "human_action",
         "human_disposition",
+        "attempted_agent_id",
+        "attempted_agent_name",
+        "principal_id",
+        "refusal_reason",
     }
 )
 

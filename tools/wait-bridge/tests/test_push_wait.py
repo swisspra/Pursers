@@ -808,7 +808,7 @@ class PushWaitTests(unittest.IsolatedAsyncioTestCase):
             client_module, "streamable_http_client", return_value=self.mcp
         ):
             async with board:
-                await board.board_join()
+                await board.board_join(allow_takeover=True)
                 async with Client(
                     self.mcp, mode="2026-07-28", cache=None
                 ) as actor:

@@ -1115,6 +1115,7 @@ class _BoardView:
         task_focus: str | None = None,
         capabilities: dict[str, Any] | None = None,
         renewal_source: str | None = None,
+        allow_takeover: bool = False,
     ) -> dict[str, Any]:
         selected = self.agent_name if agent_name is None else agent_name
         arguments: dict[str, Any] = {"agent_name": selected}
@@ -1129,6 +1130,8 @@ class _BoardView:
             arguments["capabilities"] = caps
         if renewal_source is not None:
             arguments["renewal_source"] = renewal_source
+        if allow_takeover:
+            arguments["allow_takeover"] = True
         joined = await self._call(
             "board_join", arguments, refresh=True
         )
@@ -1178,10 +1181,12 @@ async def _join_for_call(
         kwargs: dict[str, Any] = {"agent_name": agent_name}
         if capabilities is not None:
             kwargs["capabilities"] = capabilities
-        return await client.board_join(**kwargs)
+        return await client.board_join(**kwargs, allow_takeover=True)
     if capabilities is not None:
-        return await client.board_join(capabilities=capabilities)
-    return await client.board_join()
+        return await client.board_join(
+            capabilities=capabilities, allow_takeover=True
+        )
+    return await client.board_join(allow_takeover=True)
 
 
 class BoardJoinFailure(ToolError):
@@ -1333,7 +1338,9 @@ class DeferredBoardConnection:
                 async with asyncio.timeout(self.JOIN_TIMEOUT_S):
                     await client.__aenter__()
                     if startup_caps is not None and hasattr(client, "board_join"):
-                        await client.board_join(capabilities=startup_caps)
+                        await client.board_join(
+                            capabilities=startup_caps, allow_takeover=True
+                        )
                 entered = True
             except asyncio.CancelledError:
                 raise
@@ -1758,6 +1765,7 @@ class LeaseKeepalive:
                     agent_name=AGENT_NAME,
                     capabilities=capabilities,
                     renewal_source=selected_source,
+                    allow_takeover=True,
                 )
                 self.observe_join(board_id, joined)
             except Exception as exc:
@@ -4646,6 +4654,7 @@ async def _event_stream(
             joined = await view.board_join(
                 agent_name=identity.agent_name,
                 capabilities=capabilities,
+                allow_takeover=True,
             )
             event_client.generation_token = joined.get("generation_token")
 
@@ -4753,6 +4762,7 @@ async def _wait_for_work_many(
                 agent_name=call_agent_name,
                 task_focus=task_focus,
                 capabilities=capabilities,
+                allow_takeover=True,
             )
             if _GLOBAL_KEEPALIVE is not None:
                 _GLOBAL_KEEPALIVE.observe_join(board_id, joined)

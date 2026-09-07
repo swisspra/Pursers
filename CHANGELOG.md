@@ -7,6 +7,19 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Changed
+
+- Central identity checks now use the exact seat (`agent_id`) for reviewer
+  self-exclusion, claimed-ticket cancellation, and private-memory visibility.
+  Multiple worker or reviewer seats may share one bearer principal without
+  inheriting each other's authority or private memories. Existing private
+  memories that predate `author_agent_id` retain principal visibility until
+  rewritten.
+- `board_join` and `board_onboard` refuse a fresh active seat-name collision
+  under the same principal and emit `seat_name_collision` to board admins.
+  Intentional re-takeover requires `allow_takeover=true`; stale and retired
+  seats remain reclaimable without it.
+
 ## [5.0.0a22] - 2026-09-06
 
 This release includes `pursers-central==0.1.0a26`,
