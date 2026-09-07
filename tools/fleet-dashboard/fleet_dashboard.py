@@ -1014,6 +1014,10 @@ class WorkerManager:
 
     def _fence_active_review(self, name: str, reason: str) -> None:
         """Append a bounded local lifecycle fence before clearing review state."""
+        # Lazy-root contract: the fence may be the first private write (e.g.
+        # an idempotent stop on a never-created worker), so create the root
+        # on demand instead of assuming construction made it.
+        self._ensure_root()
         path = self._log_path(name)
         flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
         flags |= getattr(os, "O_NOFOLLOW", 0)
