@@ -21,17 +21,66 @@ The imported source was reconstructed from board memories `MEM-000001` and
 `MEM-000002`. Before the instance-naming change, the 14,252-byte file matched
 SHA-256 `1a0981ec6cc47aed8eeb5e8f488bef260ab6b5fd5c7c88e2cd99604654103e1a`.
 
+## Seat setup
+
+Install the bridge with `uvx` or `pipx`, then paste the single door issued by
+your Pursers administrator:
+
+```sh
+pursers-wait-bridge join '<DOOR>'
+```
+
+The command validates the door, refuses non-loopback Central URLs unless you
+confirm them with `--allow-remote`, writes private `doors.json` state with mode
+`0600`, onboards the seat, and reports the board, role, seat name, push probe,
+and verifier outcome. It never prints the embedded credential. Add
+`pursers-wait-bridge` to the host as a stdio MCP server with no environment
+block. A host that needs an explicit executable can use the `uvx
+pursers-wait-bridge` or `pipx run pursers-wait-bridge` command form.
+
+Use `--name NAME` for an explicit seat name. Otherwise the first unused
+`<role>-<short-hostname>-<n>` name is recorded. Central's active-name collision
+refusal is returned unchanged; the bridge never silently takes over a live
+seat. Door maintenance is explicit and redacted:
+
+```sh
+pursers-wait-bridge status
+pursers-wait-bridge join --rotate '<REPLACEMENT_DOOR>'
+pursers-wait-bridge forget --board BOARD --role worker
+```
+
+`--rotate` requires an existing entry with the same board and role. `status`
+shows board, role, key ID, expiration, recorded seat names, and current push
+mode, but not URLs or credentials.
+
+Legacy explicit environment remains supported. Runtime values resolve in this
+order:
+
+| Value | First choice | Stored-door fallback |
+| --- | --- | --- |
+| Central URL | `ONBOARD_CENTRAL_URL` | `u` |
+| credential | `ONBOARD_CENTRAL_TOKEN`, then `ONBOARD_CENTRAL_TOKEN_FILE` | `t` |
+| board | `ONBOARD_BOARD_ID` | `b`, requiring the only stored board when omitted |
+| role | `PURSERS_ROLE` | `r`, requiring the only stored role when omitted |
+| seat name | `ONBOARD_AGENT_NAME` | first unused `<role>-<short-hostname>-<n>` in `doors.json` |
+
+Each explicit value wins independently. This allows, for example, an explicit
+URL with the stored board, role, and credential. Ambiguous stored boards or
+roles fail closed and tell the operator which selector to set.
+
 ## Environment
 
 | Variable | Required | Purpose |
 | --- | --- | --- |
-| `ONBOARD_CENTRAL_TOKEN` | yes | Bearer token for Central. Treat it as a secret. |
+| `ONBOARD_CENTRAL_TOKEN` | no | Explicit Central credential; overrides `ONBOARD_CENTRAL_TOKEN_FILE` and stored-door state. |
+| `ONBOARD_CENTRAL_TOKEN_FILE` | no | Explicit credential file; used before stored-door state when the direct credential is absent. |
 | `ONBOARD_CENTRAL_URL` | no | Central MCP URL; defaults to `http://127.0.0.1:8766/mcp`. |
 | `ONBOARD_BOARD_ID` | no | Board ID; defaults to `pursers`. |
 | `ONBOARD_AGENT_NAME` | no | Base board identity; defaults to `pursers-wait-bridge`. |
 | `ONBOARD_AGENT_INSTANCE` | no | Stable per-instance suffix, such as `window-a`. |
 | `PURSERS_ROLE` | no | Explicit seat role: `worker`, `reviewer`, `orchestrator`, or `coordinator`. When omitted, Central maps reviewer membership to `reviewer`; admin/member membership maps to `worker`. |
 | `PURSERS_WAIT_MODE` | no | `push` (default) or explicit compatibility `poll`; a subscription error polls only that board for the current call and push is retried on re-arm. |
+| `PURSERS_CENTRAL_CONNECTION_CAP` | no | Process-wide Central connection ceiling; defaults to `4` and accepts `1`-`64`. One slot is reserved for ordinary calls and excess board subscriptions fall back to polling with a clear stderr warning. |
 | `PURSERS_KEEPALIVE_IDLE_LIMIT_S` | no | Maximum seconds since this stdio session's last model tool call before background lease renewal pauses. Defaults to three times each claim's live TTL. |
 | `PURSERS_BACKLOG_RESURFACE_INTERVAL_S` | no | Seconds before an unchanged open broadcast ticket may wake the same idle identity again; defaults to `600`. |
 | `PURSERS_HOST` | no | `codex` (default), `codex-cli`, `goose`, `claude-code`, `claude-desktop`, or `headless`; selects the safe call ceiling. |
@@ -41,9 +90,53 @@ SHA-256 `1a0981ec6cc47aed8eeb5e8f488bef260ab6b5fd5c7c88e2cd99604654103e1a`.
 | `PURSERS_CAN_REVIEW` | no | Boolean reviewer capability declared when the seat joins. |
 | `PURSERS_CAN_WORK` | no | Boolean worker capability declared when the seat joins. |
 | `PURSERS_MODEL` / `PURSERS_PROVIDER` | no | Optional model and provider metadata included in the declaration. |
+| `PURSERS_BRIDGE_STATE_DIR` | no | Directory containing `doors.json`; defaults to the bridge state directory under the user's Pursers data. |
 
 For local HTTP, remote port forwarding, and public-certificate guidance, see
 [Deployment transport](../../docs/deployment-transport.md).
+
+## Doors
+
+A door is one shared bearer credential for a board and seat role. Every
+conversation still joins with its own `agent_name`, so worker or reviewer seats
+that enter through the same door remain distinct Central agents. The lead can
+keep a separately named credential. Treat the complete `prs1.…` door string as
+a secret: it packages the exact Central URL, board, role, and signed token into
+the one value a seat setup flow needs.
+
+Create or refresh the current worker door (the command prints only the door
+string):
+
+```console
+pursers-door issue --board BOARD --role worker \
+  --central-url http://127.0.0.1:8766/mcp \
+  --jwks /PATH/TO/jwks.json --keys-dir /PATH/TO/door-keys
+```
+
+Use `--role reviewer` for the reviewer door. A named lead credential uses
+`--named --sub NAME --scope 'board:read board:write board:review'`. Private
+RSA-2048 keys are stored under `--keys-dir` with mode `0600`; the JWKS contains
+only public keys and non-secret listing metadata.
+
+Rotation creates the next versioned key and removes the prior public key in one
+atomic JWKS replacement:
+
+```console
+pursers-door rotate --board BOARD --role worker \
+  --central-url http://127.0.0.1:8766/mcp \
+  --jwks /PATH/TO/jwks.json --keys-dir /PATH/TO/door-keys
+pursers-door list --jwks /PATH/TO/jwks.json
+```
+
+Rotation is revocation: Central reloads the JWKS for every verification and
+there is no separate revocation list, so a token signed by the removed `kid`
+fails immediately. `revoke-kid KID` removes an individual public key. `list`
+and `decode` show only board/role, `kid`, and expiry metadata and never render
+token material.
+
+Keep Central on loopback when practical. Remote seats should reach it through
+the port-forward pattern in [Deployment transport](../../docs/deployment-transport.md)
+and use the exact forwarded Central URL in the issued door.
 
 With no `ONBOARD_AGENT_INSTANCE`, the effective name is exactly
 `ONBOARD_AGENT_NAME`, preserving the single-instance behavior. When the value
@@ -52,6 +145,30 @@ Give each host window a unique, durable instance value and reuse that value
 after restarts. The explicit value is the stability anchor; the bridge does
 not guess window identity or create lock files that can swap identities when
 processes restart in a different order.
+
+## Connection hygiene
+
+The bridge keeps one HTTP client for its Central URL for the life of the stdio
+process. Ordinary calls and subscription reconnects share that client's
+bounded pool instead of creating a new pool per wait. The default
+four-connection ceiling reserves one connection for ordinary calls and permits
+up to three concurrent board subscriptions; an additional subscription logs
+`Central connection cap hit` and uses the existing per-board poll fallback.
+
+Some desktop hosts launch a fresh stdio bridge for every conversation and do
+not necessarily terminate old children when the host restarts. Those orphaned
+processes each retain their own bounded pool, so the per-process cap is not a
+substitute for process cleanup. Stop the host first, then inspect only bridge
+processes and their Central sockets:
+
+```sh
+pgrep -af 'pursers_wait_server.py'
+lsof -nP -a -p PID -iTCP
+```
+
+After confirming a listed PID belongs to an obsolete bridge, stop it with
+`kill PID`; use the host's normal process manager for managed services. Restart
+the host and confirm that only the expected current bridge processes remain.
 
 ## Per-call identities
 
@@ -117,7 +234,7 @@ seat remains legacy and open/backlog broadcast behavior is unchanged.
 ## Multi-board response
 
 Pass `boards` to operate one worker identity across several boards without
-opening another transport:
+opening another HTTP client:
 
 ```text
 a2a_wait(
@@ -385,7 +502,7 @@ map, the home board's cursor is preserved:
 }
 ```
 
-## Connector examples
+## Legacy explicit-environment connector examples
 
 Use placeholder paths and secrets as shown, then substitute values locally.
 For a second window, duplicate the entry and change only the connector name

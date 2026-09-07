@@ -1468,18 +1468,35 @@ def test_subscription_loss_falls_back_then_relistens(
 
     monkeypatch.setattr(pursers_client, "BoardClient", FakeBoardClient)
 
+    class FakeClock:
+        def __init__(self) -> None:
+            self.elapsed = 0.0
+            self.sleeps: list[float] = []
+
+        async def sleep(self, delay_s: float) -> None:
+            self.sleeps.append(delay_s)
+            self.elapsed += delay_s
+
+    clock = FakeClock()
+
     async def exercise() -> None:
-        pool = coordinator.JournalSubscriptionPool("https://board.invalid", "x", "coord")
+        pool = coordinator.JournalSubscriptionPool(
+            "https://board.invalid",
+            "x",
+            "coord",
+            fallback_cap_s=60,
+            sleeper=clock.sleep,
+            jitter=lambda low, high: (low + high) / 2,
+        )
         await pool.sync({"board-a": 7})
         lost = await asyncio.wait_for(pool.next_wake(), timeout=1)
         assert lost.kind == "lost"
         assert lost.error_class == "RuntimeError"
 
-        async def fallback_delay(delay_s: float) -> None:
-            assert delay_s == 900
-            order.append("fallback-delay")
-
-        pool.defer_fallback("board-a", 900, fallback_delay)
+        delay_s = pool.backoff_delay(1)
+        assert delay_s == 1
+        assert pool.defer_fallback("board-a", delay_s)
+        assert not pool.defer_fallback("board-a", delay_s)
         fallback = await asyncio.wait_for(pool.next_wake(), timeout=1)
         assert fallback.kind == "fallback"
         order.append("fallback-refresh")
@@ -1492,10 +1509,11 @@ def test_subscription_loss_falls_back_then_relistens(
 
     assert order == [
         "listen-1",
-        "fallback-delay",
         "fallback-refresh",
         "listen-2",
     ]
+    assert clock.sleeps == [1]
+    assert clock.elapsed == 1
     healthy = {
         "board": {"board_id": "board-a"},
         "agents": [],
@@ -1511,6 +1529,38 @@ def test_subscription_loss_falls_back_then_relistens(
     )["board-a"]
     assert state["board_health"]["consecutive_lost_subscriptions"] == 3
     assert any(item["kind"] == "board-degraded" for item in state["findings"])
+
+
+def test_subscription_backoff_fake_clock_is_exponential_and_capped() -> None:
+    class FakeClock:
+        def __init__(self) -> None:
+            self.sleeps: list[float] = []
+
+        async def sleep(self, delay_s: float) -> None:
+            self.sleeps.append(delay_s)
+
+    clock = FakeClock()
+    pool = coordinator.JournalSubscriptionPool(
+        "https://board.invalid",
+        "x",
+        "coord",
+        fallback_cap_s=60,
+        sleeper=clock.sleep,
+        jitter=lambda low, high: (low + high) / 2,
+    )
+    expected = [1, 2, 4, 8, 16, 32, 60, 60]
+
+    async def exercise() -> None:
+        for streak, expected_delay in enumerate(expected, start=1):
+            delay_s = pool.backoff_delay(streak)
+            assert delay_s == expected_delay
+            assert pool.defer_fallback("board-a", delay_s)
+            wake = await asyncio.wait_for(pool.next_wake(), timeout=1)
+            assert wake == coordinator.SubscriptionWake("board-a", "fallback")
+        await pool.close()
+
+    asyncio.run(exercise())
+    assert clock.sleeps == expected
 
 
 def test_daemon_cue_recomputes_only_selected_board(
@@ -1544,7 +1594,7 @@ def test_daemon_cue_recomputes_only_selected_board(
             return None
 
     class FakePool:
-        def __init__(self, *_args: Any) -> None:
+        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
             self.cursors: dict[str, int] = {}
             self.wakes = iter(
                 [
@@ -2038,7 +2088,7 @@ def test_restart_kill_switch_defaults_to_shadow(tmp_path: Path) -> None:
 
     assert default_args.mode == "shadow"
     assert active_args.mode == "active"
-    assert default_args.poll_seconds == 900
+    assert default_args.poll_seconds == 60
     assert default_args.review_backlog_seconds == 1_800
     tuned = coordinator.parse_args(
         [

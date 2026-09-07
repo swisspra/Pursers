@@ -46,6 +46,7 @@ RELEVANCE
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import copy
 import fcntl
@@ -104,6 +105,7 @@ from mcp.types import (
 from mcp.types.version import is_version_at_least
 from mcp.server.subscriptions import ResourceUpdated
 from agent_naming import resolve_agent_name
+import door_state
 from backlog import (
     WAIT_FOR_CLAIMABLE,
     WAIT_FOR_SUBMITTED,
@@ -149,11 +151,28 @@ def _runtime_version() -> str:
 
 VERSION = _runtime_version()
 
-# --- config from env -------------------------------------------------------
+# --- config from env / persisted doors ------------------------------------
 
-CENTRAL_URL = os.environ.get("ONBOARD_CENTRAL_URL", "http://127.0.0.1:8766/mcp")
-BOARD_ID = os.environ.get("ONBOARD_BOARD_ID", "pursers")
-CENTRAL_TOKEN = os.environ.get("ONBOARD_CENTRAL_TOKEN", "")
+try:
+    _RUNTIME_CONFIG = door_state.resolve()
+    _RUNTIME_CONFIG_ERROR: str | None = None
+except ValueError as exc:
+    _RUNTIME_CONFIG = {
+        "url": os.environ.get("ONBOARD_CENTRAL_URL", "http://127.0.0.1:8766/mcp"),
+        "token": os.environ.get("ONBOARD_CENTRAL_TOKEN", ""),
+        "board": os.environ.get("ONBOARD_BOARD_ID", "pursers"),
+        "role": os.environ.get("PURSERS_ROLE", ""),
+    }
+    _RUNTIME_CONFIG_ERROR = str(exc)
+
+CENTRAL_URL = _RUNTIME_CONFIG["url"]
+BOARD_ID = _RUNTIME_CONFIG["board"]
+CENTRAL_TOKEN = _RUNTIME_CONFIG["token"]
+RUNTIME_ROLE = _RUNTIME_CONFIG["role"]
+RUNTIME_FROM_DOOR = bool(CENTRAL_TOKEN) and not (
+    os.environ.get("ONBOARD_CENTRAL_TOKEN", "").strip()
+    or os.environ.get("ONBOARD_CENTRAL_TOKEN_FILE", "").strip()
+)
 BASE_AGENT_NAME = os.environ.get("ONBOARD_AGENT_NAME", "pursers-wait-bridge")
 AGENT_NAME = resolve_agent_name(
     BASE_AGENT_NAME, os.environ.get("ONBOARD_AGENT_INSTANCE")
@@ -168,6 +187,8 @@ CONNECTOR_TOKEN_ENV = "PURSERS_BOARD_CONNECTOR_TOKEN"
 DEFAULT_TIMEOUT_S = 180
 DEFAULT_POLL_INTERVAL_S = 2.0
 DEFAULT_CLAIM_TTL_S = 900
+DEFAULT_CENTRAL_CONNECTION_CAP = 4
+MAX_CENTRAL_CONNECTION_CAP = 64
 DEFAULT_KEEPALIVE_IDLE_TTL_MULTIPLIER = 3
 MAX_LEASE_RENEW_INTERVAL_S = 300.0
 PROGRESS_INTERVAL_S = 300.0
@@ -820,6 +841,9 @@ class BridgeStats:
 class MeteredBoardClient(BoardClient):
     def __init__(self, *args: Any, meter: BridgeStats, **kwargs: Any) -> None:
         self.meter = meter
+        connection_cap = _central_connection_cap()
+        kwargs.setdefault("max_connections", connection_cap)
+        self.connection_limiter = CentralConnectionLimiter(connection_cap)
         super().__init__(*args, **kwargs)
 
     async def _measure(
@@ -973,7 +997,7 @@ def _seat_capabilities() -> dict[str, Any] | None:
 
 
 def _declared_role() -> str | None:
-    role = os.environ.get("PURSERS_ROLE", "").strip().lower()
+    role = (os.environ.get("PURSERS_ROLE", "").strip() or RUNTIME_ROLE).lower()
     if not role:
         return None
     if role not in SEAT_ROLES:
@@ -1019,6 +1043,62 @@ def _progress_cadence_s() -> float | None:
 def _log(msg: str) -> None:
     # stderr only -- stdout is the stdio JSON-RPC channel.
     print(f"[a2a_wait] {msg}", file=sys.stderr, flush=True)
+
+
+def _central_connection_cap() -> int:
+    raw = os.environ.get("PURSERS_CENTRAL_CONNECTION_CAP", "").strip()
+    if not raw:
+        return DEFAULT_CENTRAL_CONNECTION_CAP
+    try:
+        value = int(raw)
+    except ValueError:
+        _log(
+            "invalid PURSERS_CENTRAL_CONNECTION_CAP; using default "
+            f"{DEFAULT_CENTRAL_CONNECTION_CAP}"
+        )
+        return DEFAULT_CENTRAL_CONNECTION_CAP
+    if not 1 <= value <= MAX_CENTRAL_CONNECTION_CAP:
+        _log(
+            "PURSERS_CENTRAL_CONNECTION_CAP must be between 1 and "
+            f"{MAX_CENTRAL_CONNECTION_CAP}; using default "
+            f"{DEFAULT_CENTRAL_CONNECTION_CAP}"
+        )
+        return DEFAULT_CENTRAL_CONNECTION_CAP
+    return value
+
+
+class CentralConnectionLimiter:
+    """Reserve one main Central connection and bound concurrent subscriptions."""
+
+    def __init__(self, limit: int) -> None:
+        self.limit = limit
+        self.active = 1
+        self.peak = 1
+        self._lock = asyncio.Lock()
+        self._cap_logged = False
+
+    @asynccontextmanager
+    async def subscription(self, board_id: str) -> AsyncIterator[None]:
+        async with self._lock:
+            if self.active >= self.limit:
+                if not self._cap_logged:
+                    _log(
+                        "Central connection cap hit; refusing a new subscription "
+                        f"board={board_id!r} active={self.active} limit={self.limit}"
+                    )
+                    self._cap_logged = True
+                raise BoardClientError(
+                    f"Central connection cap hit (limit={self.limit})"
+                )
+            self.active += 1
+            self.peak = max(self.peak, self.active)
+        try:
+            yield
+        finally:
+            async with self._lock:
+                self.active = max(1, self.active - 1)
+                if self.active < self.limit:
+                    self._cap_logged = False
 
 
 if _RAW_WAIT_MODE not in {"poll", "push"}:
@@ -1331,7 +1411,7 @@ class DeferredBoardConnection:
             role=_declared_role(),
             meter=self.meter,
             capabilities=startup_caps,
-            allow_takeover=True,
+            allow_takeover=not RUNTIME_FROM_DOOR,
         )
         entered = False
         try:
@@ -1340,7 +1420,8 @@ class DeferredBoardConnection:
                     await client.__aenter__()
                     if startup_caps is not None and hasattr(client, "board_join"):
                         await client.board_join(
-                            capabilities=startup_caps, allow_takeover=True
+                            capabilities=startup_caps,
+                            allow_takeover=not RUNTIME_FROM_DOOR,
                         )
                 entered = True
             except asyncio.CancelledError:
@@ -4634,8 +4715,8 @@ async def _event_stream(
     seat_uri = f"board://{board_id}/agent/{identity.agent_id}"
 
     async def stream(resources: list[str]) -> AsyncIterator[dict[str, Any]]:
-        # Use a fresh client for each attempt because BoardClient retains every
-        # watched URI. Reusing it would silently put the rejected seat URI back.
+        # Each logical stream has isolated watched URIs while sharing the
+        # lifespan HTTP client and its bounded connection pool.
         event_client = BoardClient(
             parent.url,
             parent.token,
@@ -4643,6 +4724,10 @@ async def _event_stream(
             agent_name=identity.agent_name,
             role=identity.role,
             reconnect_delay_s=parent.reconnect_delay_s,
+            max_connections=getattr(
+                parent, "max_connections", DEFAULT_CENTRAL_CONNECTION_CAP
+            ),
+            http_client=getattr(parent, "_http_client", None),
         )
         event_client.identity = identity
         event_client.generation_token = generation_token
@@ -4659,19 +4744,30 @@ async def _event_stream(
             )
             event_client.generation_token = joined.get("generation_token")
 
-        events = event_client.events(
-            from_cursor=from_cursor,
-            only_mine=False,
-        kinds=SUBSCRIPTION_KINDS,
-            resource_subscriptions=resources,
-            acknowledge=False,
-            touch=False if pure_catchup else None,
-            cursor_callback=cursor_callback,
-            subscription_callback=redeclare_capabilities,
-        )
-        async with aclosing(events):
-            async for event in events:
-                yield event
+        limiter = getattr(parent, "connection_limiter", None)
+
+        @asynccontextmanager
+        async def subscription_slot() -> AsyncIterator[None]:
+            if limiter is None:
+                yield
+                return
+            async with limiter.subscription(board_id):
+                yield
+
+        async with subscription_slot():
+            events = event_client.events(
+                from_cursor=from_cursor,
+                only_mine=False,
+                kinds=SUBSCRIPTION_KINDS,
+                resource_subscriptions=resources,
+                acknowledge=False,
+                touch=False if pure_catchup else None,
+                cursor_callback=cursor_callback,
+                subscription_callback=redeclare_capabilities,
+            )
+            async with aclosing(events):
+                async for event in events:
+                    yield event
 
     try:
         async for event in stream([journal_uri, seat_uri]):
@@ -5597,12 +5693,156 @@ async def _wait_for_work(
     })
 
 
+def _door_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="pursers-wait-bridge")
+    commands = parser.add_subparsers(dest="command", required=True)
+    join = commands.add_parser("join", help="store a door and onboard a seat")
+    join.add_argument("door")
+    join.add_argument("--name")
+    join.add_argument("--state-dir")
+    join.add_argument("--allow-remote", action="store_true")
+    join.add_argument("--rotate", action="store_true")
+    status = commands.add_parser("status", help="show redacted stored-door status")
+    status.add_argument("--state-dir")
+    forget = commands.add_parser("forget", help="delete one stored door")
+    forget.add_argument("--board", required=True)
+    forget.add_argument("--role", required=True, choices=sorted(door_state.SEAT_ROLES))
+    forget.add_argument("--state-dir")
+    return parser
+
+
+async def _probe_join_push(client: BoardClient, board: str, agent_id: str) -> bool:
+    raw_client = getattr(client, "_client", None)
+    if raw_client is None:
+        return False
+    subscriptions = [
+        f"board://{board}/journal",
+        f"board://{board}/agent/{agent_id}",
+    ]
+    try:
+        async with asyncio.timeout(3):
+            async with raw_client.listen(resource_subscriptions=subscriptions) as stream:
+                honored = getattr(stream, "honored", None)
+                selected = getattr(honored, "resource_subscriptions", None)
+                return selected is None or set(subscriptions).issubset(set(selected))
+    except Exception:  # noqa: BLE001 - join reports a bounded yes/no probe.
+        return False
+
+
+async def _door_join(args: argparse.Namespace) -> None:
+    if args.name and not door_state.NAME_RE.fullmatch(args.name):
+        raise ValueError("--name must be a safe 1-80 character identifier")
+    path = door_state.state_path(args.state_dir)
+    entry = door_state.store(
+        path,
+        args.door,
+        rotate=args.rotate,
+        allow_remote=args.allow_remote,
+    )
+    name = door_state.reserve_name(
+        path, entry["b"], entry["r"], requested=args.name
+    )
+    client = BoardClient(
+        entry["u"],
+        entry["t"],
+        entry["b"],
+        agent_name=name,
+        role=entry["r"],
+        capabilities=_seat_capabilities(),
+        allow_takeover=False,
+    )
+    async with client:
+        onboarded = await client.board_onboard(
+            role=entry["r"], capabilities=_seat_capabilities(), allow_takeover=False
+        )
+        push = await _probe_join_push(client, entry["b"], onboarded["agent_id"])
+    print(f"board={entry['b']}")
+    print(f"role={entry['r']}")
+    print(f"seat_name={name}")
+    print(f"push={'yes' if push else 'no'}")
+    print("verifier=accepted")
+
+
+def _door_status(args: argparse.Namespace) -> None:
+    document = door_state.load(door_state.state_path(args.state_dir))
+    print(f"push_mode={WAIT_MODE}")
+    for entry in document["doors"]:
+        names = ",".join(entry["seat_names_used"]) or "-"
+        print(
+            f"board={entry['b']} role={entry['r']} kid={entry['kid']} "
+            f"exp={entry['exp']} seat_names_used={names}"
+        )
+
+
+def _door_forget(args: argparse.Namespace) -> None:
+    removed = door_state.forget(
+        door_state.state_path(args.state_dir), args.board, args.role
+    )
+    print(f"forgot={'yes' if removed else 'no'} board={args.board} role={args.role}")
+
+
+def _configure_runtime() -> None:
+    global CENTRAL_URL, BOARD_ID, CENTRAL_TOKEN, RUNTIME_ROLE, RUNTIME_FROM_DOOR
+    global BASE_AGENT_NAME, AGENT_NAME, _RUNTIME_CONFIG_ERROR
+    config = door_state.resolve()
+    CENTRAL_URL = config["url"]
+    BOARD_ID = config["board"]
+    CENTRAL_TOKEN = config["token"]
+    RUNTIME_ROLE = config["role"]
+    RUNTIME_FROM_DOOR = bool(CENTRAL_TOKEN) and not (
+        os.environ.get("ONBOARD_CENTRAL_TOKEN", "").strip()
+        or os.environ.get("ONBOARD_CENTRAL_TOKEN_FILE", "").strip()
+    )
+    if RUNTIME_FROM_DOOR:
+        document = door_state.load(door_state.state_path())
+        if document["doors"]:
+            entry = door_state.select(
+                document,
+                board=BOARD_ID,
+                role=RUNTIME_ROLE,
+            )
+            requested_name = os.environ.get("ONBOARD_AGENT_NAME", "").strip()
+            if requested_name:
+                requested_name = resolve_agent_name(
+                    requested_name, os.environ.get("ONBOARD_AGENT_INSTANCE")
+                )
+            AGENT_NAME = door_state.reserve_name(
+                door_state.state_path(),
+                entry["b"],
+                entry["r"],
+                requested_name or None,
+            )
+            BASE_AGENT_NAME = AGENT_NAME
+    _RUNTIME_CONFIG_ERROR = None
+
+
 def main() -> None:
     if "--version" in sys.argv[1:]:
         print(VERSION)
         return
+    if sys.argv[1:] and sys.argv[1] in {"join", "status", "forget"}:
+        args = _door_parser().parse_args(sys.argv[1:])
+        try:
+            if args.command == "join":
+                asyncio.run(_door_join(args))
+            elif args.command == "status":
+                _door_status(args)
+            else:
+                _door_forget(args)
+        except (BoardClientError, OSError, RuntimeError, ValueError) as exc:
+            print(f"pursers-wait-bridge: {exc}", file=sys.stderr)
+            raise SystemExit(1) from None
+        return
+    try:
+        _configure_runtime()
+    except (OSError, ValueError) as exc:
+        print(f"FATAL: {exc}", file=sys.stderr)
+        return
     if not CENTRAL_TOKEN:
-        print("FATAL: ONBOARD_CENTRAL_TOKEN is not set", file=sys.stderr)
+        print(
+            "FATAL: no Central token; set explicit environment or join a door",
+            file=sys.stderr,
+        )
     mcp.run(transport="stdio")
 
 
