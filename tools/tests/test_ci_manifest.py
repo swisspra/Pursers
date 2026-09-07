@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-import os
-import stat
-import subprocess
 import sys
 from pathlib import Path
 
@@ -115,35 +112,3 @@ def test_verify_counts_rejects_a_missing_suite() -> None:
 
     with pytest.raises(ValueError, match="second"):
         verify_counts(payload, suites=suites)
-
-
-def test_fleet_dashboard_suite_passes_with_read_only_home(
-    tmp_path: Path,
-) -> None:
-    read_only_home = tmp_path / "empty-home"
-    read_only_home.mkdir()
-    read_only_home.chmod(stat.S_IRUSR | stat.S_IXUSR)
-    environment = os.environ.copy()
-    environment["HOME"] = str(read_only_home)
-    environment["PURSERS_STATE_DIR"] = str(tmp_path / "state")
-    try:
-        completed = subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "pytest",
-                "-q",
-                "tools/fleet-dashboard/tests",
-            ],
-            cwd=REPOSITORY_ROOT,
-            env=environment,
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-    finally:
-        read_only_home.chmod(stat.S_IRWXU)
-
-    output = completed.stdout + completed.stderr
-    assert completed.returncode == 0, output[-4_000:]
-    assert "252 passed" in output

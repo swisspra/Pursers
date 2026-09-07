@@ -2,13 +2,6 @@
 
 A standalone, loopback-only web dashboard for the active boards in the live project registry and their shared agent pool. It is a read-only viewer and does not require a browser extension, build step, or desktop host.
 
-Local dashboard state defaults to `~/.pursers`. Set `PURSERS_STATE_DIR` to an
-absolute writable directory to relocate the entire state root, including
-`fleet-dashboard/` configuration and `workers/`. Paths are resolved lazily and
-worker directories are created only when worker state is first written. If the
-host denies process inspection, status and Doctor surfaces report `process
-inspection unavailable` instead of failing the dashboard.
-
 ## Configure seats in the dashboard
 
 Start the loopback Fleet Dashboard, open **Config**, and use **Add or update
