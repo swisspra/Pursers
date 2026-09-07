@@ -23,6 +23,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   and reviewers to claim only verified dispatch broadcasts when no live offer
   belongs to another seat. Registry waits reuse the entered home-board identity
   and carry explicit stable-seat takeover intent when joining other boards.
+- Coordinator journal watchers now join each board as a non-working,
+  non-reviewing coordinator before subscribing, report nested subscription
+  failures in board health, and adapt to clients without the optional event
+  reconnect parameter. Client event streams now fail fast until `board_join`.
 - Wait-bridge Central traffic now reuses one bounded HTTP pool per process,
   caps concurrent Central connections at four by default, and logs before an
   excess board subscription falls back to polling. Coordinator subscription

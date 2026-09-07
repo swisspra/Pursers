@@ -7,6 +7,7 @@ import argparse
 import asyncio
 import base64
 import hashlib
+import inspect
 import json
 import os
 import random
@@ -14,10 +15,12 @@ import re
 import subprocess
 import sys
 import time
+import tomllib
 from collections import Counter
 from contextlib import AsyncExitStack, aclosing
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from importlib.metadata import PackageNotFoundError, version as package_version
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping, Protocol, Sequence
 
@@ -1939,6 +1942,10 @@ def _bounded_finding(item: Mapping[str, Any]) -> dict[str, Any]:
         )
     if result["kind"] == "board_unreachable":
         protected.add("reason")
+    if result["kind"] == "board-degraded":
+        protected.update(
+            {"subscription_error_class", "subscription_error_message"}
+        )
     while len(json.dumps(result, sort_keys=True, separators=(",", ":"))) > finding_limit:
         removable = next(
             (key for key in reversed(result) if key not in protected), None
@@ -2257,6 +2264,60 @@ class SubscriptionWake:
     board_id: str
     kind: str
     error_class: str | None = None
+    error_message: str | None = None
+
+
+def _innermost_exception(exc: BaseException) -> BaseException:
+    """Return the deepest deterministic exception from chains/groups."""
+    linked = exc.__cause__ or exc.__context__
+    if linked is not None:
+        return _innermost_exception(linked)
+    if isinstance(exc, BaseExceptionGroup) and exc.exceptions:
+        return _innermost_exception(exc.exceptions[0])
+    return exc
+
+
+def _exception_message(exc: BaseException) -> str:
+    return " ".join(str(exc).split())[:MAX_EVIDENCE_CHARS]
+
+
+def client_runtime_info() -> tuple[str, tuple[str, ...]]:
+    """Describe optional installed-client features used by the coordinator."""
+    from pursers_client import BoardClient
+
+    try:
+        installed_version = package_version("pursers-client")
+    except PackageNotFoundError:
+        try:
+            source_pyproject = (
+                Path(inspect.getfile(BoardClient)).resolve().parents[2]
+                / "pyproject.toml"
+            )
+            source_metadata = tomllib.loads(
+                source_pyproject.read_text(encoding="utf-8")
+            )
+            installed_version = str(source_metadata["project"]["version"])
+        except (OSError, KeyError, TypeError, tomllib.TOMLDecodeError):
+            installed_version = "unknown"
+    try:
+        event_parameters = inspect.signature(BoardClient.events).parameters
+    except (TypeError, ValueError):
+        event_parameters = {}
+    features = ("events-reconnect",) if "reconnect" in event_parameters else ()
+    return installed_version, features
+
+
+def log_subscription_loss(
+    wake: SubscriptionWake, streak: int, delay_s: float
+) -> None:
+    """Emit one complete loss diagnostic for an accepted backoff step."""
+    print(
+        "coordinator: journal subscription lost for "
+        f"board={wake.board_id!r} error_class={wake.error_class}; "
+        f"error_message={wake.error_message!r}; "
+        f"backoff_step={streak} fallback_refresh_in={delay_s:.2f}s",
+        file=sys.stderr,
+    )
 
 
 class JournalSubscriptionPool:
@@ -2358,31 +2419,58 @@ class JournalSubscriptionPool:
         def ready() -> None:
             self._queue.put_nowait(SubscriptionWake(board_id, "ready"))
 
-        client = BoardClient(
-            self.url, self._token, board_id, agent_name=self.agent_name
-        )
         try:
-            events = client.events(
-                from_cursor=self.cursors.get(board_id, 0),
-                only_mine=False,
-                resource_subscriptions=(f"board://{board_id}/journal",),
-                acknowledge=False,
-                touch=False,
-                cursor_callback=advance,
-                subscription_callback=ready,
-                reconnect=False,
+            client = BoardClient(
+                self.url,
+                self._token,
+                board_id,
+                agent_name=self.agent_name,
+                role="coordinator",
+                capabilities={"can_work": False, "can_review": False},
+                allow_takeover=True,
             )
-            async with aclosing(events):
-                async for _event in events:
-                    await self._queue.put(SubscriptionWake(board_id, "cue"))
+            async with client:
+                event_arguments: dict[str, Any] = {
+                    "from_cursor": self.cursors.get(board_id, 0),
+                    "only_mine": False,
+                    "resource_subscriptions": (f"board://{board_id}/journal",),
+                    "acknowledge": False,
+                    "touch": False,
+                    "cursor_callback": advance,
+                    "subscription_callback": ready,
+                }
+                try:
+                    supports_reconnect = (
+                        "reconnect"
+                        in inspect.signature(client.events).parameters
+                    )
+                except (TypeError, ValueError):
+                    supports_reconnect = False
+                if supports_reconnect:
+                    event_arguments["reconnect"] = False
+                events = client.events(**event_arguments)
+                async with aclosing(events):
+                    async for _event in events:
+                        await self._queue.put(SubscriptionWake(board_id, "cue"))
             await self._queue.put(
-                SubscriptionWake(board_id, "lost", "StreamEnded")
+                SubscriptionWake(
+                    board_id,
+                    "lost",
+                    "StreamEnded",
+                    "subscription event stream ended",
+                )
             )
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            inner = _innermost_exception(exc)
             await self._queue.put(
-                SubscriptionWake(board_id, "lost", type(exc).__name__)
+                SubscriptionWake(
+                    board_id,
+                    "lost",
+                    type(inner).__name__,
+                    _exception_message(inner),
+                )
             )
 
     async def next_wake(self) -> SubscriptionWake:
@@ -2602,6 +2690,7 @@ def analyze_cycle(
     effective_mode: str = "shadow",
     degraded_streaks: dict[str, int] | None = None,
     subscription_loss_streaks: Mapping[str, int] | None = None,
+    subscription_loss_details: Mapping[str, tuple[str, str]] | None = None,
     selected_boards: set[str] | None = None,
 ) -> dict[str, dict[str, Any]]:
     selected = set(snapshots) if selected_boards is None else selected_boards
@@ -2676,6 +2765,7 @@ def analyze_cycle(
                 (subscription_loss_streaks or {}).get(board_id, 0) or 0
             ),
         )
+        subscription_error = (subscription_loss_details or {}).get(board_id)
         unhealthy = degraded or lost_subscriptions > 0
         board_health: dict[str, Any] = {
             "status": "degraded" if unhealthy else "healthy",
@@ -2686,6 +2776,9 @@ def analyze_cycle(
             ),
             "error_class": error_class,
         }
+        if lost_subscriptions and subscription_error is not None:
+            board_health["subscription_error_class"] = subscription_error[0]
+            board_health["subscription_error_message"] = subscription_error[1]
         if not degraded and snapshot_is_truncated(snapshot):
             large_finding, refreshed_at = board_large_finding(
                 board_id, snapshot, previous.get(board_id, {}), now
@@ -2714,6 +2807,11 @@ def analyze_cycle(
                     observed_consecutive_lost_subscriptions=lost_subscriptions,
                     threshold_lost_subscriptions=BOARD_LOST_SUBSCRIPTIONS,
                 )
+                if subscription_error is not None:
+                    health_evidence.update(
+                        subscription_error_class=subscription_error[0],
+                        subscription_error_message=subscription_error[1],
+                    )
             findings_by_board[board_id].append(
                 _finding(
                     "board-degraded",
@@ -3740,6 +3838,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 
 async def run(args: argparse.Namespace) -> None:
+    installed_client_version, client_features = client_runtime_info()
+    print(
+        f"coordinator: client {installed_client_version}, features: "
+        f"{','.join(client_features) or 'none'}",
+        file=sys.stderr,
+    )
     token = _read_token(args.token_path)
     terms_path = os.environ.get("PURSERS_PRIVACY_TERMS")
     runtime = RuntimeState.for_mode("shadow" if args.dry_run else args.mode)
@@ -3764,6 +3868,7 @@ async def run(args: argparse.Namespace) -> None:
     failure_logger = DEFAULT_BOARD_FAILURE_LOGGER
     degraded_streaks: dict[str, int] = {}
     subscription_loss_streaks: dict[str, int] = {}
+    subscription_loss_details: dict[str, tuple[str, str]] = {}
     reported_intake_issues: set[str] = set()
     projects: list[Project] = []
     snapshots: dict[str, dict[str, Any]] = {}
@@ -3790,6 +3895,7 @@ async def run(args: argparse.Namespace) -> None:
             state_cache.pop(stale, None)
             degraded_streaks.pop(stale, None)
             subscription_loss_streaks.pop(stale, None)
+            subscription_loss_details.pop(stale, None)
         snapshots.update(fresh_snapshots)
         previous.update(fresh_previous)
         for board_id, snapshot in fresh_snapshots.items():
@@ -3843,6 +3949,7 @@ async def run(args: argparse.Namespace) -> None:
             effective_mode=runtime.effective_mode,
             degraded_streaks=degraded_streaks,
             subscription_loss_streaks=subscription_loss_streaks,
+            subscription_loss_details=subscription_loss_details,
             selected_boards=selected,
         )
         home_state = states.get(args.home_board)
@@ -3975,20 +4082,21 @@ async def run(args: argparse.Namespace) -> None:
                 delay_s = subscriptions.backoff_delay(streak)
                 if subscriptions.defer_fallback(wake.board_id, delay_s):
                     subscription_loss_streaks[wake.board_id] = streak
-                    print(
-                        "coordinator: journal subscription lost for "
-                        f"board={wake.board_id!r} error_class={wake.error_class}; "
-                        f"backoff_step={streak} fallback_refresh_in={delay_s:.2f}s",
-                        file=sys.stderr,
+                    subscription_loss_details[wake.board_id] = (
+                        wake.error_class or "UnknownError",
+                        wake.error_message or "",
                     )
+                    log_subscription_loss(wake, streak, delay_s)
                 continue
             if wake.kind == "fallback":
                 selected = {wake.board_id}
             else:
                 subscription_loss_streaks[wake.board_id] = 0
+                subscription_loss_details.pop(wake.board_id, None)
                 selected = subscriptions.coalesce_cues(wake)
                 for board_id in selected:
                     subscription_loss_streaks[board_id] = 0
+                    subscription_loss_details.pop(board_id, None)
 
             async def selected_cycle() -> set[str]:
                 try:
