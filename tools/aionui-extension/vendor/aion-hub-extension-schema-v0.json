@@ -1,0 +1,156 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pursers.invalid/schemas/aion-hub-extension-v0.json",
+  "$comment": "Vendored interoperability snapshot for AionUi 2.2.1 / AionCore 0.2.1. Provenance is recorded in PROVENANCE.md.",
+  "title": "Aion Hub extension manifest v0",
+  "type": "object",
+  "required": ["name", "version", "permissions", "risk", "contributes"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "name": { "type": "string", "pattern": "^[a-z][a-z0-9-]*$" },
+    "displayName": { "type": "string", "minLength": 1 },
+    "version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$" },
+    "description": { "type": "string" },
+    "author": { "type": "string" },
+    "engine": {
+      "type": "object",
+      "required": ["aionui"],
+      "properties": { "aionui": { "type": "string" } },
+      "additionalProperties": false
+    },
+    "permissions": { "$ref": "#/$defs/permissions" },
+    "risk": {
+      "type": "object",
+      "required": ["level", "reasoning"],
+      "properties": {
+        "level": { "enum": ["safe", "moderate", "dangerous"] },
+        "reasoning": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "contributes": {
+      "type": "object",
+      "properties": {
+        "assistants": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/assistant" }
+        },
+        "settingsTabs": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/settingsTab" }
+        },
+        "webui": { "$ref": "#/$defs/webui" },
+        "mcpServers": { "type": "array", "items": { "type": "object" } },
+        "skills": { "type": "array", "items": { "type": "object" } },
+        "agents": { "type": "array", "items": { "type": "object" } },
+        "acpAdapters": { "type": "array", "items": { "type": "object" } },
+        "channelPlugins": { "type": "array", "items": { "type": "object" } },
+        "themes": { "type": "array", "items": { "type": "object" } }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "permissions": {
+      "type": "object",
+      "properties": {
+        "storage": { "type": "boolean" },
+        "network": {
+          "oneOf": [
+            { "type": "boolean" },
+            {
+              "type": "object",
+              "required": ["allowedDomains", "reasoning"],
+              "properties": {
+                "allowedDomains": {
+                  "type": "array",
+                  "minItems": 1,
+                  "uniqueItems": true,
+                  "items": { "type": "string", "minLength": 1 }
+                },
+                "reasoning": { "type": "string", "minLength": 1 }
+              },
+              "additionalProperties": false
+            }
+          ]
+        },
+        "shell": { "type": "boolean" },
+        "filesystem": { "enum": ["extension-only", "workspace", "full"] },
+        "clipboard": { "type": "boolean" },
+        "activeUser": { "type": "boolean" },
+        "events": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "assistant": {
+      "type": "object",
+      "required": ["id", "name", "presetAgentType", "contextFile"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "name": { "type": "string", "minLength": 1 },
+        "description": { "type": "string" },
+        "agentId": { "type": "string", "minLength": 1 },
+        "presetAgentType": { "type": "string", "minLength": 1 },
+        "contextFile": { "type": "string", "pattern": "^contexts/[^/]+\\.md$" }
+      },
+      "additionalProperties": false
+    },
+    "settingsTab": {
+      "type": "object",
+      "required": ["id", "name", "entryPoint"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "name": { "type": "string", "minLength": 1 },
+        "entryPoint": { "type": "string", "minLength": 1 },
+        "icon": { "type": "string" },
+        "position": {
+          "type": "object",
+          "required": ["anchor", "placement"],
+          "properties": {
+            "anchor": { "type": "string", "minLength": 1 },
+            "placement": { "enum": ["before", "after"] }
+          },
+          "additionalProperties": false
+        },
+        "order": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "webui": {
+      "type": "object",
+      "required": ["apiRoutes", "staticAssets"],
+      "properties": {
+        "apiRoutes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["path", "entryPoint", "auth"],
+            "properties": {
+              "path": { "type": "string", "pattern": "^/[a-z0-9-]+/" },
+              "method": { "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"] },
+              "entryPoint": { "type": "string", "minLength": 1 },
+              "description": { "type": "string" },
+              "auth": { "type": "boolean" }
+            },
+            "additionalProperties": false
+          }
+        },
+        "staticAssets": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["urlPrefix", "directory"],
+            "properties": {
+              "urlPrefix": { "type": "string", "pattern": "^/" },
+              "directory": { "type": "string", "minLength": 1 },
+              "description": { "type": "string" }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}
