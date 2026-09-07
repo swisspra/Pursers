@@ -9,6 +9,23 @@ python tools/seat-kit/seat_new.py \
   --role worker \
   --name worker-a \
   --dest /path/to/worker-a \
+  --door '<DOOR>' \
+  --client codex
+```
+
+`--door` is the preferred alternative to `--central-url`, `--token-file`, and
+`--board`. It writes a private door store beneath the generated seat; the
+launcher contains no credential-file or CA environment lines. Use
+`--allow-remote` to confirm a door whose Central URL is not loopback. The door
+role must match `--role`.
+
+The legacy explicit configuration remains available:
+
+```sh
+python tools/seat-kit/seat_new.py \
+  --role worker \
+  --name worker-a \
+  --dest /path/to/worker-a \
   --central-url http://127.0.0.1:8766/mcp \
   --token-file /path/to/worker-a.jwt \
   --repo https://github.com/example/Pursers.git \
@@ -51,7 +68,7 @@ existing launcher. A bare interpreter must import `pursers_client`, `mcp`, and
 or the generated `board.py --help` self-check fails. The fleet dashboard chooses
 the wait-bridge tool environment as the known runtime.
 
-The token contents are never read by the generator or copied into the seat.
+In explicit configuration, token contents are never read by the generator or copied into the seat.
 `bin/board.sh` reads the configured token file at runtime and honors
 `PURSERS_BOARD`. You may override the generated values with
 `PURSERS_TOKEN_FILE` and `PURSERS_CENTRAL_URL`. Remote deployments that use a
