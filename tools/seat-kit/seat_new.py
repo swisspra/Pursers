@@ -4,11 +4,18 @@
 from __future__ import annotations
 
 import argparse
+import json
+import os
 import re
 import shlex
 import subprocess
 import sys
 from pathlib import Path
+
+WAIT_BRIDGE_DIR = Path(__file__).resolve().parents[1] / "wait-bridge"
+if str(WAIT_BRIDGE_DIR) not in sys.path:
+    sys.path.insert(0, str(WAIT_BRIDGE_DIR))
+import door_state  # noqa: E402
 
 
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
@@ -139,6 +146,40 @@ LEAK_PATTERNS = {
         r"[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b"
     ),
 }
+
+
+def _load_stored_door_environment() -> None:
+    if os.environ.get("ONBOARD_CENTRAL_TOKEN", "").strip():
+        return
+    state_dir = os.environ.get("PURSERS_BRIDGE_STATE_DIR", "").strip()
+    if not state_dir:
+        return
+    path = Path(state_dir).expanduser() / "doors.json"
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError("seat door state is unreadable or invalid") from exc
+    entries = document.get("doors") if isinstance(document, dict) else None
+    if not isinstance(entries, list):
+        raise ValueError("seat door state has no doors list")
+    board = os.environ.get("PURSERS_BOARD", "").strip()
+    matches = [
+        item
+        for item in entries
+        if isinstance(item, dict)
+        and item.get("r") == ROLE
+        and (not board or item.get("b") == board)
+    ]
+    if len(matches) != 1:
+        raise ValueError("seat door selection is missing or ambiguous")
+    entry = matches[0]
+    for field in ("u", "b", "t"):
+        if not isinstance(entry.get(field), str) or not entry[field]:
+            raise ValueError("seat door entry is invalid")
+    os.environ["ONBOARD_CENTRAL_URL"] = entry["u"]
+    os.environ["ONBOARD_CENTRAL_TOKEN"] = entry["t"]
+    os.environ["ONBOARD_BOARD_ID"] = entry["b"]
+    os.environ["PURSERS_ROLE"] = ROLE
 
 
 def _capability_bool(name: str, default: bool) -> bool:
@@ -807,6 +848,7 @@ async def _cmd_wait(
 
 
 async def _execute(args: argparse.Namespace) -> None:
+    _load_stored_door_environment()
     if ROLE != "worker" and args.command == "approve":
         args.notes = _approve_notes(
             args.notes, bool(args.force_approve_without_evidence)
@@ -1247,6 +1289,47 @@ exec {values["python"]} "$SCRIPT_DIR/board.py" "$@"
 '''
 
 
+def _board_shell_door(
+    *,
+    name: str,
+    state_dir: Path,
+    python: Path,
+    tier_max: int,
+    skills: str,
+    can_review: bool,
+    can_work: bool,
+    host: str,
+    model: str | None = None,
+    provider: str | None = None,
+) -> str:
+    values = {
+        "agent": shlex.quote(name),
+        "state": shlex.quote(str(state_dir)),
+        "python": shlex.quote(str(python)),
+        "skills": shlex.quote(skills),
+        "host": shlex.quote(host),
+        "model": shlex.quote(model or ""),
+        "provider": shlex.quote(provider or ""),
+    }
+    return f'''#!/bin/sh
+set -eu
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+export PURSERS_BRIDGE_STATE_DIR={values["state"]}
+export PURSERS_BOARDS=${{PURSERS_BOARDS:-home}}
+export ONBOARD_AGENT_NAME={values["agent"]}
+export PURSERS_TIER_MAX={tier_max}
+export PURSERS_SKILLS={values["skills"]}
+export PURSERS_CAN_REVIEW={str(can_review).lower()}
+export PURSERS_CAN_WORK={str(can_work).lower()}
+export PURSERS_HOST={values["host"]}
+export PURSERS_MODEL={values["model"]}
+export PURSERS_PROVIDER={values["provider"]}
+
+exec {values["python"]} "$SCRIPT_DIR/board.py" "$@"
+'''
+
+
 def _profile_guidance(client: str) -> str:
     host_timeout, wait_timeout = CLIENT_PROFILES[client]
     if client == "goose":
@@ -1498,13 +1581,23 @@ def _self_check(python: Path, board_script: Path) -> None:
 def generate(args: argparse.Namespace) -> Path:
     if not NAME_RE.fullmatch(args.name):
         raise ValueError("--name must be a safe 1-80 character agent name")
+    if args.door:
+        if args.central_url or args.token_file or args.board:
+            raise ValueError("--door cannot be combined with --central-url, --token-file, or --board")
+        decoded_door = door_state.decode_door(args.door)
+        if decoded_door["r"] != args.role:
+            raise ValueError("--door role must match --role")
+    else:
+        if not args.central_url or not args.token_file:
+            raise ValueError("--central-url and --token-file are required without --door")
+        decoded_door = None
     if args.board and not BOARD_RE.fullmatch(args.board):
         raise ValueError("--board must be blank or a safe 1-80 character board ID")
     if not BOARD_RE.fullmatch(args.registry_board):
         raise ValueError("--registry-board must be a safe 1-80 character board ID")
 
     dest = Path(args.dest).expanduser().resolve()
-    token_file = Path(args.token_file).expanduser().resolve()
+    token_file = Path(args.token_file).expanduser().resolve() if args.token_file else None
     repo_leaf = _repo_leaf(args.repo) if args.repo else None
     python = _select_interpreter(args, dest)
     skills = ",".join(
@@ -1524,6 +1617,15 @@ def generate(args: argparse.Namespace) -> Path:
     dest.mkdir(parents=True, mode=0o700, exist_ok=True)
     dest.chmod(0o700)
 
+    door_state_dir: Path | None = None
+    if args.door:
+        door_state_dir = dest / ".pursers" / "wait-bridge"
+        door_state.store(
+            door_state.state_path(door_state_dir),
+            args.door,
+            allow_remote=args.allow_remote,
+        )
+
     if args.repo:
         clone_dest = dest / repo_leaf
         if not clone_dest.exists():
@@ -1537,9 +1639,22 @@ def generate(args: argparse.Namespace) -> Path:
     bin_dir = dest / "bin"
     bin_dir.mkdir(mode=0o755, exist_ok=True)
     bin_dir.chmod(0o755)
-    _write(
-        bin_dir / "board.sh",
-        _board_shell(
+    if door_state_dir is not None:
+        board_shell = _board_shell_door(
+            name=args.name,
+            state_dir=door_state_dir,
+            python=python,
+            tier_max=args.tier_max,
+            skills=skills,
+            can_review=can_review,
+            can_work=can_work,
+            host=host,
+            model=args.model,
+            provider=args.provider,
+        )
+    else:
+        assert token_file is not None and args.central_url is not None
+        board_shell = _board_shell(
             name=args.name,
             board=args.board or args.registry_board,
             boards="home" if args.board else "registry",
@@ -1553,9 +1668,8 @@ def generate(args: argparse.Namespace) -> Path:
             host=host,
             model=args.model,
             provider=args.provider,
-        ),
-        0o755,
-    )
+        )
+    _write(bin_dir / "board.sh", board_shell, 0o755)
     wait_timeout = CLIENT_PROFILES[args.client][1]
     _write(
         bin_dir / "board.py",
@@ -1574,8 +1688,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--role", required=True, choices=("worker", "reviewer"))
     parser.add_argument("--name", required=True)
     parser.add_argument("--dest", required=True)
-    parser.add_argument("--central-url", required=True)
-    parser.add_argument("--token-file", required=True)
+    parser.add_argument("--central-url")
+    parser.add_argument("--token-file")
+    parser.add_argument(
+        "--door",
+        help="stored-door setup alternative to --central-url/--token-file/--board",
+    )
+    parser.add_argument(
+        "--allow-remote",
+        action="store_true",
+        help="confirm storing a door whose Central URL is not loopback",
+    )
     parser.add_argument(
         "--python",
         help=(
