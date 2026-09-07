@@ -36,15 +36,23 @@ class FakeClient:
             role,
         )
         self.join_calls: list[str | None] = []
+        self.join_capabilities: list[dict[str, Any] | None] = []
         self.catchup_calls: list[str | None] = []
         self.tickets: dict[str, dict[str, Any]] = {}
         self.catchup_error_once = False
         self.renewed: list[str] = []
 
     async def board_join(
-        self, *, agent_name: str | None = None, allow_takeover: bool = False
+        self,
+        *,
+        agent_name: str | None = None,
+        capabilities: dict[str, Any] | None = None,
+        allow_takeover: bool = False,
     ):
         self.join_calls.append(agent_name)
+        self.join_capabilities.append(
+            None if capabilities is None else dict(capabilities)
+        )
         selected = self.agent_name if agent_name is None else agent_name
         identity = JoinedIdentity(
             wait_server.BOARD_ID,
@@ -132,6 +140,26 @@ class PerCallWaitTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["events"][0]["ticket_id"], "TK-session-x")
         self.assertEqual(client.identity.agent_name, "env-default")
 
+    async def test_explicit_name_forwards_seat_capabilities(self) -> None:
+        client = FakeClient()
+        capabilities = {
+            "host": "codex",
+            "max_parallel": 1,
+            "tier_max": 2,
+            "skills": ["python"],
+            "can_review": False,
+            "can_work": True,
+        }
+
+        with patch.object(
+            wait_server, "_seat_capabilities", return_value=capabilities
+        ):
+            await wait_server._wait_for_work(
+                client, since_seq=0, only_mine=True, agent_name="session-x"
+            )
+
+        self.assertEqual(client.join_capabilities, [capabilities])
+
     async def test_concurrent_names_have_no_cross_talk(self) -> None:
         client = FakeClient()
         first_joined = asyncio.Event()
@@ -139,7 +167,10 @@ class PerCallWaitTests(unittest.IsolatedAsyncioTestCase):
         original_join = client.board_join
 
         async def interleaved_join(
-            *, agent_name: str | None = None, allow_takeover: bool = False
+            *,
+            agent_name: str | None = None,
+            capabilities: dict[str, Any] | None = None,
+            allow_takeover: bool = False,
         ):
             if agent_name == "session-a":
                 first_joined.set()
@@ -148,7 +179,9 @@ class PerCallWaitTests(unittest.IsolatedAsyncioTestCase):
                 await first_joined.wait()
                 second_joined.set()
             return await original_join(
-                agent_name=agent_name, allow_takeover=allow_takeover
+                agent_name=agent_name,
+                capabilities=capabilities,
+                allow_takeover=allow_takeover,
             )
 
         client.board_join = interleaved_join  # type: ignore[method-assign]

@@ -456,6 +456,11 @@ class CatchupPerformanceTests(unittest.IsolatedAsyncioTestCase):
 
 class RealCentralCatchupPerformanceTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
+        capabilities_patcher = patch.object(
+            wait_server, "_seat_capabilities", return_value=None
+        )
+        capabilities_patcher.start()
+        self.addCleanup(capabilities_patcher.stop)
         self.temp_dir = tempfile.TemporaryDirectory(dir=ROOT)
         self.root = Path(self.temp_dir.name)
         jwks_path = self.root / "jwks.json"
