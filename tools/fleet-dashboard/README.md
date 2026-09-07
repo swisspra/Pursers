@@ -145,7 +145,7 @@ export ONBOARD_CENTRAL_TOKEN="..."
 python tools/fleet-dashboard/fleet_dashboard.py
 ```
 
-Open `http://127.0.0.1:8899`. Use `--port` to select another port. The central URL defaults to `https://127.0.0.1:8766/mcp` and can be changed with `--url` or `ONBOARD_CENTRAL_URL`. Use `--token-file /path/to/token` instead of the environment variable when preferred. The file must contain only the bearer token.
+Open `http://127.0.0.1:8899`. Use `--port` to select another port. The central URL defaults to `http://127.0.0.1:8766/mcp` and can be changed with `--url` or `ONBOARD_CENTRAL_URL`. Use `--token-file /path/to/token` instead of the environment variable when preferred. The file must contain only the bearer token.
 
 The server refuses non-loopback binding. It never returns tokens to the browser
 or writes them to logs. Central TLS verification follows
@@ -159,14 +159,14 @@ Use one viewer process for several independent trust domains with `--centrals`:
 [
   {
     "label": "personal",
-    "url": "https://127.0.0.1:8766/mcp",
+    "url": "http://127.0.0.1:8766/mcp",
     "token_path": "personal.token",
     "home_board": "pursers",
     "stats_path": "personal-bridge-stats.json"
   },
   {
     "label": "work",
-    "url": "https://127.0.0.1:9766/mcp",
+    "url": "http://127.0.0.1:9766/mcp",
     "token_path": "work.token",
     "home_board": "work-registry",
     "stats_path": "work-bridge-stats.json"

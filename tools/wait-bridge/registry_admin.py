@@ -16,7 +16,7 @@ from typing import Any, Protocol
 from pursers_client import BoardClient
 
 
-CENTRAL_URL_DEFAULT = "https://127.0.0.1:8766/mcp"
+CENTRAL_URL_DEFAULT = "http://127.0.0.1:8766/mcp"
 HOME_BOARD_ID = "pursers"
 REGISTRY_KEY = "project_registry"
 SCHEMA_VERSION = 1

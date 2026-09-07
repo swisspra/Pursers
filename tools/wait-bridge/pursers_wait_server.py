@@ -151,7 +151,7 @@ VERSION = _runtime_version()
 
 # --- config from env -------------------------------------------------------
 
-CENTRAL_URL = os.environ.get("ONBOARD_CENTRAL_URL", "https://127.0.0.1:8766/mcp")
+CENTRAL_URL = os.environ.get("ONBOARD_CENTRAL_URL", "http://127.0.0.1:8766/mcp")
 BOARD_ID = os.environ.get("ONBOARD_BOARD_ID", "pursers")
 CENTRAL_TOKEN = os.environ.get("ONBOARD_CENTRAL_TOKEN", "")
 BASE_AGENT_NAME = os.environ.get("ONBOARD_AGENT_NAME", "pursers-wait-bridge")

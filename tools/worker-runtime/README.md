@@ -14,7 +14,7 @@ boards = "registry"
 [seat]
 agent_name = "worker-api-1"
 role = "worker" # worker | reviewer; default worker
-central_url = "https://127.0.0.1:8766/mcp"
+central_url = "http://127.0.0.1:8766/mcp"
 token_file = "/private/path/seat.jwt"
 
 [claim]

@@ -31,7 +31,7 @@ class BridgeLegacyToolsTests(unittest.IsolatedAsyncioTestCase):
     async def test_board_join_passes_legacy_capability_when_env_set(self) -> None:
         """MeteredBoardClient.board_join includes legacy_tools capability when PURSERS_LEGACY_TOOLS=1."""
         client = wait_server.MeteredBoardClient(
-            "https://127.0.0.1:8766/mcp",
+            "http://127.0.0.1:8766/mcp",
             "test-token",
             "pursers",
             agent_name="test-worker",
@@ -55,7 +55,7 @@ class BridgeLegacyToolsTests(unittest.IsolatedAsyncioTestCase):
     async def test_board_join_omits_legacy_capability_when_env_unset(self) -> None:
         """MeteredBoardClient.board_join does not set legacy_tools capability by default."""
         client = wait_server.MeteredBoardClient(
-            "https://127.0.0.1:8766/mcp",
+            "http://127.0.0.1:8766/mcp",
             "test-token",
             "pursers",
             agent_name="test-worker",

@@ -9,9 +9,8 @@ python tools/seat-kit/seat_new.py \
   --role worker \
   --name worker-a \
   --dest /path/to/worker-a \
-  --central-url https://127.0.0.1:8766/mcp \
+  --central-url http://127.0.0.1:8766/mcp \
   --token-file /path/to/worker-a.jwt \
-  --ca-file /path/to/central-ca.pem \
   --repo https://github.com/example/Pursers.git \
   --board fullplatts \
   --client codex \
@@ -53,10 +52,14 @@ or the generated `board.py --help` self-check fails. The fleet dashboard chooses
 the wait-bridge tool environment as the known runtime.
 
 The token contents are never read by the generator or copied into the seat.
-`bin/board.sh` reads the configured token file at runtime, sets
-`SSL_CERT_FILE`, and honors `PURSERS_BOARD`. You may also override the generated
-paths with `PURSERS_TOKEN_FILE`, `PURSERS_CA_FILE`, and
-`PURSERS_CENTRAL_URL`.
+`bin/board.sh` reads the configured token file at runtime and honors
+`PURSERS_BOARD`. You may override the generated values with
+`PURSERS_TOKEN_FILE` and `PURSERS_CENTRAL_URL`. Remote deployments that use a
+private CA may set `PURSERS_CA_FILE`; the launcher then validates that file and
+exports it as `SSL_CERT_FILE`.
+
+See [Deployment transport](../../docs/deployment-transport.md) for the local
+HTTP and remote forwarding model.
 
 ## Commands
 

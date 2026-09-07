@@ -24,7 +24,7 @@ environment variable; the Central token is read from an absolute file path.
     "pat_env": "ADO_CONNECTOR_PAT"
   },
   "central": {
-    "url": "https://127.0.0.1:8766/mcp",
+    "url": "http://127.0.0.1:8766/mcp",
     "token_path": "/absolute/path/to/central-token",
     "create_mode": "intake"
   },

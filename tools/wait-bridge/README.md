@@ -26,7 +26,7 @@ SHA-256 `1a0981ec6cc47aed8eeb5e8f488bef260ab6b5fd5c7c88e2cd99604654103e1a`.
 | Variable | Required | Purpose |
 | --- | --- | --- |
 | `ONBOARD_CENTRAL_TOKEN` | yes | Bearer token for Central. Treat it as a secret. |
-| `ONBOARD_CENTRAL_URL` | no | Central MCP URL; defaults to `https://127.0.0.1:8766/mcp`. |
+| `ONBOARD_CENTRAL_URL` | no | Central MCP URL; defaults to `http://127.0.0.1:8766/mcp`. |
 | `ONBOARD_BOARD_ID` | no | Board ID; defaults to `pursers`. |
 | `ONBOARD_AGENT_NAME` | no | Base board identity; defaults to `pursers-wait-bridge`. |
 | `ONBOARD_AGENT_INSTANCE` | no | Stable per-instance suffix, such as `window-a`. |
@@ -41,6 +41,9 @@ SHA-256 `1a0981ec6cc47aed8eeb5e8f488bef260ab6b5fd5c7c88e2cd99604654103e1a`.
 | `PURSERS_CAN_REVIEW` | no | Boolean reviewer capability declared when the seat joins. |
 | `PURSERS_CAN_WORK` | no | Boolean worker capability declared when the seat joins. |
 | `PURSERS_MODEL` / `PURSERS_PROVIDER` | no | Optional model and provider metadata included in the declaration. |
+
+For local HTTP, remote port forwarding, and public-certificate guidance, see
+[Deployment transport](../../docs/deployment-transport.md).
 
 With no `ONBOARD_AGENT_INSTANCE`, the effective name is exactly
 `ONBOARD_AGENT_NAME`, preserving the single-instance behavior. When the value

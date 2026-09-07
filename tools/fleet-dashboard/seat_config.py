@@ -1269,7 +1269,7 @@ PURSERS_BOARDS = {_toml_string(desired.boards or '')}
 PURSERS_HOME_BOARD = {_toml_string(desired.home_board)}
 PURSERS_REQUIRE_TOKEN_MATCH = "1"
 {desired.token_env_var} = {_toml_string(connector_token)}
-SSL_CERT_FILE = {_toml_string(desired.ca_file)}
+{f'SSL_CERT_FILE = {_toml_string(desired.ca_file)}' if desired.ca_file else ''}
 
 [mcp_servers.{board_name}]
 url = {_toml_string(desired.central_url)}
@@ -1336,7 +1336,11 @@ def _goose_block(desired: DesiredSeat) -> list[str]:
             f"      {name}: {_yaml_quote(value)}\n"
             for name, value in capability_env(desired).items()
         ],
-        f"      SSL_CERT_FILE: {_yaml_quote(desired.ca_file)}\n",
+        *(
+            [f"      SSL_CERT_FILE: {_yaml_quote(desired.ca_file)}\n"]
+            if desired.ca_file
+            else []
+        ),
     ]
 
 
@@ -1413,7 +1417,6 @@ class GooseAdapter(FileAdapter):
                         boards=desired.boards or "registry",
                         central_url=desired.central_url,
                         token_file=Path(desired.token_file).expanduser(),
-                        ca_file=Path(desired.ca_file).expanduser(),
                         python=python,
                         tier_max=2,
                         skills="",
@@ -1516,9 +1519,10 @@ def _bridge_json(desired: DesiredSeat) -> dict[str, Any]:
         "ONBOARD_AGENT_NAME": desired.name,
         "PURSERS_HOST": desired.host,
         "PURSERS_ROLE": desired.role,
-        "SSL_CERT_FILE": desired.ca_file,
         **capability_env(desired),
     }
+    if desired.ca_file:
+        env["SSL_CERT_FILE"] = desired.ca_file
     return {
         "command": "/bin/sh",
         "args": _bridge_shell_args(desired.token_env_var),
@@ -2485,14 +2489,21 @@ class Doctor:
                 )
             )
 
-        ca_path = Path(desired.ca_file).expanduser()
-        ca_ok = ca_path.is_file() and os.access(ca_path, os.R_OK)
+        ca_path = Path(desired.ca_file).expanduser() if desired.ca_file else None
+        ca_ok = ca_path is None or (
+            ca_path.is_file() and os.access(ca_path, os.R_OK)
+        )
+        ca_message = (
+            "not configured; using system trust"
+            if ca_path is None
+            else "readable" if ca_ok else "missing or unreadable"
+        )
         rows.append(
             self._check(
                 desired,
                 "ca-file",
                 "PASS" if ca_ok else "FAIL",
-                "readable" if ca_ok else "missing or unreadable",
+                ca_message,
             )
         )
 

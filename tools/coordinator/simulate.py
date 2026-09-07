@@ -1208,7 +1208,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--central-url",
         type=_loopback_url,
-        default=os.environ.get("ONBOARD_CENTRAL_URL", "https://127.0.0.1:8766/mcp"),
+        default=os.environ.get("ONBOARD_CENTRAL_URL", "http://127.0.0.1:8766/mcp"),
     )
     parser.add_argument(
         "--home-board", default=os.environ.get("ONBOARD_BOARD_ID", "home")

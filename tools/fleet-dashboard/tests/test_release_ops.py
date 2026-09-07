@@ -162,7 +162,7 @@ def test_release_card_status_and_pypi_checks(tmp_path: Path) -> None:
         root=tmp_path,
         manifest_path=manifest,
         profile_env_path=profile,
-        central_url="https://127.0.0.1:8766/mcp",
+        central_url="http://127.0.0.1:8766/mcp",
         runner=mock_runner,
         http_get=mock_http,
         state_dir=tmp_path,

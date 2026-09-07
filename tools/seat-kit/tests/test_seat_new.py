@@ -50,8 +50,6 @@ def args(
             "https://central.example/mcp",
             "--token-file",
             str(tmp_path / "seat.jwt"),
-            "--ca-file",
-            str(tmp_path / "ca.pem"),
             "--client",
             client,
             *(["--repo", repo] if repo else []),
@@ -242,6 +240,9 @@ def test_generator_writes_dispatch_capabilities_and_offer_guidance(tmp_path: Pat
     assert "export PURSERS_HOST=codex" in shell
     assert "export PURSERS_MODEL=gpt-test" in shell
     assert "export PURSERS_PROVIDER=openai" in shell
+    assert str(tmp_path / "ca.pem") not in shell
+    assert 'if [ -n "${PURSERS_CA_FILE:-}" ]' in shell
+    assert 'export SSL_CERT_FILE="$PURSERS_CA_FILE"' in shell
     assert "Claim only a ticket offered to this seat" in guidance
     assert "this ticket was offered to another seat; wait for your own offer" in generated_py
 
@@ -1014,8 +1015,6 @@ def test_goose_generator_prints_exact_timeout_guidance(
             "https://central.example/mcp",
             "--token-file",
             str(tmp_path / "seat.jwt"),
-            "--ca-file",
-            str(tmp_path / "ca.pem"),
             "--client",
             "goose",
         ]

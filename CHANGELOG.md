@@ -7,6 +7,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Changed
+
+- Central, client, wait-bridge, coordinator, dashboard, simulation, and seat-kit
+  defaults now use plain HTTP on loopback. Remote seats use port forwarding;
+  optional private-CA configuration remains available only for explicit remote
+  TLS deployments (TK-64e7bef5f4eb).
+
 ## [5.0.0a22] - 2026-09-06
 
 This release includes `pursers-central==0.1.0a26`,
