@@ -12,9 +12,6 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - Wait bridge: add `pursers-door` to issue, inspect, rotate, and revoke
   per-board worker/reviewer door credentials with RSA-2048 keys, atomic JWKS
   replacement, and one secret-safe `prs1.…` setup string.
-- AionUi extension: add Worker and Reviewer presets plus a Join tab that stores
-  a door through the wait bridge, registers an environment-free stdio MCP
-  server through AionUi's local API, and builds a deterministic extension zip.
 
 ### Changed
 
@@ -30,8 +27,6 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   from them, assigns durable collision-safe seat-name suffixes, and provides
   redacted join/status/rotate/forget commands. Generated door seats omit
   credential and CA lines from their launcher.
-- CI manifest: cover the AionUi extension's vendored schema, route adapter,
-  governance contexts, and package secret/path scan as an eleventh suite.
 
 ## [5.0.0a23] - 2026-09-07
 
