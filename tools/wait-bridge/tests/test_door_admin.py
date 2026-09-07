@@ -201,6 +201,24 @@ class DoorAdminTests(unittest.TestCase):
         with self.assertRaisesRegex(door_admin.DoorAdminError, "unknown kid"):
             door_admin.revoke_kid(self.jwks, worker.kid)
 
+    def test_maximum_length_board_generated_kid_can_be_revoked(self) -> None:
+        board = "b" * 80
+        issued = door_admin.issue_credential(
+            board=board,
+            role="reviewer",
+            central_url=self.central_url,
+            jwks_path=self.jwks,
+            keys_dir=self.keys,
+            now=self.now,
+        )
+        self.assertEqual(len(issued.kid), 97)
+        self.assertIsNotNone(self.verify(issued.token))
+
+        door_admin.revoke_kid(self.jwks, issued.kid)
+
+        self.assertEqual(json.loads(self.jwks.read_text())["keys"], [])
+        self.assertIsNone(self.verify(issued.token))
+
     def test_issue_command_prints_only_one_door_string(self) -> None:
         arguments = door_admin.build_parser().parse_args(
             [

@@ -30,7 +30,8 @@ ROLE_SCOPES = {
     "worker": "board:read board:write",
     "reviewer": "board:read board:review",
 }
-IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9._-]{1,80}$")
+BOARD_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,80}$")
+KID_RE = re.compile(r"^[A-Za-z0-9._-]{1,256}$")
 METADATA_KEY = "pursers_door"
 
 
@@ -46,9 +47,15 @@ class IssuedCredential:
     claims: dict[str, Any]
 
 
-def _identifier(value: str, label: str) -> str:
-    if not isinstance(value, str) or not IDENTIFIER_RE.fullmatch(value):
-        raise DoorAdminError(f"{label} must match {IDENTIFIER_RE.pattern}")
+def _board_id(value: str) -> str:
+    if not isinstance(value, str) or not BOARD_ID_RE.fullmatch(value):
+        raise DoorAdminError(f"board must match {BOARD_ID_RE.pattern}")
+    return value
+
+
+def _kid(value: str) -> str:
+    if not isinstance(value, str) or not KID_RE.fullmatch(value):
+        raise DoorAdminError(f"kid must match {KID_RE.pattern}")
     return value
 
 
@@ -169,7 +176,7 @@ def _identity(
     subject: str | None,
     scope: str | None,
 ) -> tuple[str, str, str, str]:
-    board = _identifier(board, "board")
+    board = _board_id(board)
     if named:
         if role is not None:
             raise DoorAdminError("--named cannot be combined with --role")
@@ -315,7 +322,7 @@ def issue_credential(
 ) -> IssuedCredential:
     if exp_days < 1:
         raise DoorAdminError("exp-days must be at least 1")
-    board = _identifier(board, "board")
+    board = _board_id(board)
     central_url = _central_url(central_url)
     identity_role, actual_sub, client_id, actual_scope = _identity(
         board, role, named=named, subject=subject, scope=scope
@@ -406,7 +413,7 @@ def list_doors(jwks_path: Path) -> list[dict[str, Any]]:
 
 
 def revoke_kid(jwks_path: Path, kid: str) -> None:
-    kid = _identifier(kid, "kid")
+    kid = _kid(kid)
     document = _load_jwks(jwks_path)
     retained = [item for item in document["keys"] if item.get("kid") != kid]
     if len(retained) == len(document["keys"]):
