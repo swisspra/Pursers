@@ -166,6 +166,56 @@ async def test_takeover_and_memory_identity_are_forwarded(monkeypatch) -> None:
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("allow_takeover", [False, True])
+async def test_context_startup_forwards_explicit_takeover_policy(
+    monkeypatch, allow_takeover: bool
+) -> None:
+    import pursers_client.client as client_module
+
+    @asynccontextmanager
+    async def context(value):
+        yield value
+
+    board = BoardClient(
+        "https://central.example/mcp",
+        "TOKEN_PLACEHOLDER",
+        "board-multi-name",
+        agent_name="stable-seat",
+        allow_takeover=allow_takeover,
+    )
+    captured: dict[str, Any] = {}
+
+    async def board_join(
+        _claim_ttl_s: int | None = None,
+        *,
+        capabilities: dict[str, Any] | None = None,
+        allow_takeover: bool = False,
+    ) -> dict[str, Any]:
+        captured.update(
+            capabilities=capabilities,
+            allow_takeover=allow_takeover,
+        )
+        return joined("stable-seat")
+
+    monkeypatch.setattr(board, "_http", lambda: context(object()))
+    monkeypatch.setattr(board, "board_join", board_join)
+    monkeypatch.setattr(
+        client_module, "streamable_http_client", lambda *_args, **_kwargs: object()
+    )
+    monkeypatch.setattr(
+        client_module, "Client", lambda *_args, **_kwargs: context(object())
+    )
+
+    async with board:
+        pass
+
+    assert captured == {
+        "capabilities": None,
+        "allow_takeover": allow_takeover,
+    }
+
+
+@pytest.mark.anyio
 async def test_board_catchup_uses_explicit_or_default_name(monkeypatch) -> None:
     board = client()
     calls: list[dict[str, Any]] = []

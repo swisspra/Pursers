@@ -145,6 +145,7 @@ class BoardClient:
         reconnect_delay_s: float = 0.05,
         claim_ttl_s: int | None = None,
         capabilities: dict[str, Any] | None = None,
+        allow_takeover: bool = False,
     ):
         self.url = url
         self.token = token
@@ -160,6 +161,7 @@ class BoardClient:
         self.reconnect_delay_s = reconnect_delay_s
         self.claim_ttl_s = claim_ttl_s
         self.capabilities = capabilities
+        self.allow_takeover = allow_takeover
         self.identity: JoinedIdentity | None = None
         self.generation_token: str | None = None
         self._stack: AsyncExitStack | None = None
@@ -197,7 +199,11 @@ class BoardClient:
             self._client = await self._stack.enter_async_context(
                 Client(transport, mode="2026-07-28", cache=None)
             )
-            await self.board_join(self.claim_ttl_s, capabilities=self.capabilities)
+            await self.board_join(
+                self.claim_ttl_s,
+                capabilities=self.capabilities,
+                allow_takeover=self.allow_takeover,
+            )
         except BaseException:
             await self._close_transport()
             raise

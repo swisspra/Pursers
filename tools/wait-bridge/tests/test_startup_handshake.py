@@ -80,13 +80,24 @@ class StartupHandshakeTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         events: list[str] = []
+        active_seats: set[str] = set()
 
         class HealthyClient:
             def __init__(self, *_args: object, **kwargs: object) -> None:
-                events.append(f"constructed:{kwargs['role']}")
+                events.append(
+                    f"constructed:{kwargs['role']}:{kwargs['allow_takeover']}"
+                )
+                self.agent_name = str(kwargs["agent_name"])
+                self.allow_takeover = bool(kwargs["allow_takeover"])
                 self.identity: JoinedIdentity | None = None
 
             async def __aenter__(self) -> "HealthyClient":
+                if self.agent_name in active_seats and not self.allow_takeover:
+                    raise BoardClientError(
+                        "seat name already active under this principal; "
+                        "choose another name or pass allow_takeover=true"
+                    )
+                active_seats.add(self.agent_name)
                 events.append("join")
                 self.identity = JoinedIdentity(
                     "pursers", "AI-test", "PR-test", "startup-test", "worker"
@@ -107,9 +118,29 @@ class StartupHandshakeTests(unittest.IsolatedAsyncioTestCase):
             first = await connection.client()
             second = await connection.client()
             self.assertIs(first, second)
-            self.assertEqual(events, ["constructed:reviewer", "join"])
+            self.assertEqual(events, ["constructed:reviewer:True", "join"])
             await connection.close()
-        self.assertEqual(events, ["constructed:reviewer", "join", "close"])
+        self.assertEqual(
+            events, ["constructed:reviewer:True", "join", "close"]
+        )
+
+        restarted = wait_server.DeferredBoardConnection(
+            wait_server.BridgeStats(Path(tempfile.gettempdir()) / "unused.json")
+        )
+        with patch.object(wait_server, "MeteredBoardClient", HealthyClient):
+            await restarted.client()
+            await restarted.close()
+        self.assertEqual(
+            events,
+            [
+                "constructed:reviewer:True",
+                "join",
+                "close",
+                "constructed:None:True",
+                "join",
+                "close",
+            ],
+        )
 
     async def test_board_join_rejection_has_board_cause_class(self) -> None:
         failure = wait_server._classify_board_join_failure(

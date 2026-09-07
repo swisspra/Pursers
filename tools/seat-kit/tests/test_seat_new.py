@@ -542,7 +542,8 @@ def test_routed_verify_uses_and_cleans_reviewer_owned_clone_without_mutation(
         async def __aexit__(self, *_arguments) -> None:
             pass
 
-        async def board_join(self):
+        async def board_join(self, **kwargs):
+            assert kwargs["allow_takeover"] is True
             return {"ok": True}
 
         async def board_state_get(self, *, key):
@@ -1360,18 +1361,28 @@ def test_generated_submit_truncates_notes_and_reports_warning(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     captured: dict[str, object] = {}
+    active_seats: set[str] = set()
 
     class Client:
-        def __init__(self, *_args: object, **_kwargs: object) -> None:
-            pass
+        def __init__(self, *_args: object, **kwargs: object) -> None:
+            captured["constructor_kwargs"] = kwargs
+            self.agent_name = str(kwargs["agent_name"])
+            self.allow_takeover = bool(kwargs["allow_takeover"])
 
         async def __aenter__(self):
+            if self.agent_name in active_seats and not self.allow_takeover:
+                raise RuntimeError(
+                    "seat name already active under this principal; "
+                    "choose another name or pass allow_takeover=true"
+                )
+            active_seats.add(self.agent_name)
             return self
 
         async def __aexit__(self, *_args: object) -> None:
             return None
 
-        async def board_join(self) -> dict[str, object]:
+        async def board_join(self, **kwargs: object) -> dict[str, object]:
+            assert kwargs["allow_takeover"] is True
             return {"ok": True}
 
         async def ticket_submit(self, ticket_id: str, **arguments: object):
@@ -1394,12 +1405,17 @@ def test_generated_submit_truncates_notes_and_reports_warning(
 
     streams = capsys.readouterr()
     result = json.loads(streams.out)
+    asyncio.run(generated._execute(parsed))
+    restarted_streams = capsys.readouterr()
+    assert json.loads(restarted_streams.out)["ok"] is True
     submitted = captured["notes"]
     metadata = result["input_truncation"]["notes"]
+    assert captured["constructor_kwargs"]["allow_takeover"] is True
     assert len(submitted) <= 5_000
     assert submitted.endswith(metadata["marker"])
     assert metadata["truncated_chars"] > 0
     assert "warning: ticket_submit notes exceeded 5000 characters" in streams.err
+    assert active_seats == {"worker-agent"}
 
 
 def test_generated_claim_refuses_operator_checkout_before_board_mutation(

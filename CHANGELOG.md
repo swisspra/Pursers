@@ -18,7 +18,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - `board_join` and `board_onboard` refuse a fresh active seat-name collision
   under the same principal and emit `seat_name_collision` to board admins.
   Intentional re-takeover requires `allow_takeover=true`; stale and retired
-  seats remain reclaimable without it.
+  seats remain reclaimable without it. `BoardClient` context startup defaults
+  to collision refusal, while the wait bridge, worker runtime, coordinator,
+  and generated seat CLI opt in when intentionally resuming a stable seat.
 
 ## [5.0.0a22] - 2026-09-06
 

@@ -854,6 +854,41 @@ class PushWaitTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(close_result, [None])
 
+    async def test_real_context_restart_requires_explicit_takeover(self) -> None:
+        import pursers_client.client as client_module
+
+        @asynccontextmanager
+        async def http_context():
+            yield object()
+
+        def make_client(*, allow_takeover: bool = False) -> BoardClient:
+            client = BoardClient(
+                "http://central.invalid/mcp",
+                "test-token",
+                wait_server.BOARD_ID,
+                agent_name="restart-seat",
+                allow_takeover=allow_takeover,
+            )
+            client._http = http_context  # type: ignore[method-assign]
+            return client
+
+        with patch.object(
+            client_module, "streamable_http_client", return_value=self.mcp
+        ):
+            async with make_client() as first:
+                self.assertEqual(first.identity.agent_name, "restart-seat")
+
+            with self.assertRaisesRegex(
+                BoardClientError,
+                "seat name already active under this principal; choose another "
+                "name or pass allow_takeover=true",
+            ):
+                async with make_client():
+                    pass
+
+            async with make_client(allow_takeover=True) as restarted:
+                self.assertEqual(restarted.identity.agent_name, "restart-seat")
+
     def test_host_profiles_apply_timeout_minus_margin(self) -> None:
         cases = {
             "codex": 560,

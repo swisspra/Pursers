@@ -738,6 +738,7 @@ class PursersBoardAPI:
             self.wait_bridge.BOARD_ID,
             agent_name=config.agent_name,
             role=config.role,
+            allow_takeover=True,
         )
         self.registry: dict[str, Any] | None = None
         self.views: dict[str, Any] = {}

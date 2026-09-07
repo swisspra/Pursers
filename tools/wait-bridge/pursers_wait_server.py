@@ -1331,6 +1331,7 @@ class DeferredBoardConnection:
             role=_declared_role(),
             meter=self.meter,
             capabilities=startup_caps,
+            allow_takeover=True,
         )
         entered = False
         try:

@@ -2875,6 +2875,7 @@ async def mutate_action(
         action.board_id,
         agent_name=agent_name,
         role="coordinator",
+        allow_takeover=True,
     ) as client:
         if action.kind != "assign":
             raise ValueError(f"unsupported coordinator action: {action.kind}")
@@ -3384,6 +3385,7 @@ async def write_reports(
                 board_id,
                 agent_name=agent_name,
                 role="coordinator",
+                allow_takeover=True,
             ) as client:
                 await client.board_state_update(
                     STATE_KEY,
@@ -3425,6 +3427,7 @@ async def write_reports(
                 home_board,
                 agent_name=agent_name,
                 role="coordinator",
+                allow_takeover=True,
             ) as client:
                 if write_daily:
                     await client.memory_write(
@@ -3455,6 +3458,7 @@ async def write_reports(
                 home_board,
                 agent_name=agent_name,
                 role="coordinator",
+                allow_takeover=True,
             ) as client:
                 await client.board_state_update(
                     STATE_KEY,

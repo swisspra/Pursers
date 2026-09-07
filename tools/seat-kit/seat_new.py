@@ -853,12 +853,19 @@ async def _execute(args: argparse.Namespace) -> None:
     board_id = os.environ["ONBOARD_BOARD_ID"]
     agent_name = os.environ["ONBOARD_AGENT_NAME"]
     async with BoardClient(
-        central_url, token, board_id, agent_name=agent_name, role=ROLE
+        central_url,
+        token,
+        board_id,
+        agent_name=agent_name,
+        role=ROLE,
+        allow_takeover=True,
     ) as client:
         if supports_capabilities:
-            await client.board_join(capabilities=_seat_capabilities())
+            await client.board_join(
+                capabilities=_seat_capabilities(), allow_takeover=True
+            )
         else:
-            await client.board_join()
+            await client.board_join(allow_takeover=True)
         registry = None
         if not legacy_client_only:
             try:
@@ -1128,12 +1135,19 @@ async def _execute(args: argparse.Namespace) -> None:
             await run(client)
         else:
             async with BoardClient(
-                central_url, token, target_board, agent_name=agent_name, role=ROLE
+                central_url,
+                token,
+                target_board,
+                agent_name=agent_name,
+                role=ROLE,
+                allow_takeover=True,
             ) as target:
                 if supports_capabilities:
-                    await target.board_join(capabilities=_seat_capabilities())
+                    await target.board_join(
+                        capabilities=_seat_capabilities(), allow_takeover=True
+                    )
                 else:
-                    await target.board_join()
+                    await target.board_join(allow_takeover=True)
                 await run(target)
         return
 
