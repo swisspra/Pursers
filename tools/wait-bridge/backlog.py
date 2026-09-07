@@ -179,6 +179,7 @@ def backlog_events(
             "source": "backlog_scan",
             "ticket_id": ticket_id,
             "status": wanted_status,
+            "reason": "offer" if offered_to_me else "broadcast",
         }
         if offered_to_me:
             event["offer"] = {

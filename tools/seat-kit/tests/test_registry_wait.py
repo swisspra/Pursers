@@ -14,9 +14,11 @@ ROOT = Path(__file__).resolve().parents[1]
 CLIENT_SRC = ROOT.parents[1] / "packages" / "client" / "src"
 sys.path.insert(0, str(CLIENT_SRC))
 from pursers_client import (  # noqa: E402
+    HELD_TICKET_KINDS,
+    REVIEWER_WAIT_KINDS,
     REVIEW_LEASE_EXPIRED,
     REVIEW_LEASE_RELEASED,
-    SUBMITTED_RELEVANT_KINDS,
+    WORKER_WAIT_KINDS,
 )
 
 SPEC = importlib.util.spec_from_file_location("seat_registry", ROOT / "seat_new.py")
@@ -138,11 +140,11 @@ def test_reviewer_submitted_wait_fans_out_registry() -> None:
                 registry_work_dirs=lambda _registry: {},
                 registry_project_work_dirs=lambda _registry: {},
                 wait_for_boards=fake_wait,
-                submitted_relevant_kinds=SUBMITTED_RELEVANT_KINDS,
+                submitted_relevant_kinds=REVIEWER_WAIT_KINDS,
             )
         )
     assert observed["submitted"] is True
-    assert observed["kinds"] == SUBMITTED_RELEVANT_KINDS
+    assert observed["kinds"] == REVIEWER_WAIT_KINDS
 
 
 def test_reviewer_home_wait_wakes_on_release_and_expiry() -> None:
@@ -173,7 +175,7 @@ def test_reviewer_home_wait_wakes_on_release_and_expiry() -> None:
                 module._cmd_wait(
                     HomeClient(), "pursers", sequence - 1, 1,
                     submitted=True,
-                    submitted_relevant_kinds=SUBMITTED_RELEVANT_KINDS,
+                    submitted_relevant_kinds=REVIEWER_WAIT_KINDS,
                 )
             )
         result = json.loads(output.getvalue())
@@ -253,12 +255,95 @@ def test_reviewer_home_wait_suppresses_another_reviewers_offer() -> None:
     with redirect_stdout(output):
         asyncio.run(module._cmd_wait(
             HomeClient(), "pursers", 0, 1, submitted=True,
-            submitted_relevant_kinds=SUBMITTED_RELEVANT_KINDS,
+            submitted_relevant_kinds=REVIEWER_WAIT_KINDS,
         ))
 
     result = json.loads(output.getvalue())
     assert result["reason"] == "offer"
     assert [event["ticket_id"] for event in result["events"]] == ["TK-mine"]
+
+
+def test_worker_and_reviewer_held_event_wake_matrix() -> None:
+    async def exercise() -> None:
+        for role in ("worker", "reviewer"):
+            module = generated(role)
+            submitted = role == "reviewer"
+            mine = f"AI-{role}"
+            for kind in sorted(HELD_TICKET_KINDS):
+                event = {
+                    "kind": kind,
+                    "ticket_id": f"TK-{role}-{kind}",
+                    "reviewer_agent_id": mine,
+                }
+                held_ticket = {
+                    "ticket_id": event["ticket_id"],
+                    "status": "submitted" if submitted else "in_progress",
+                    "dispatch_state": {"state": "claimed"},
+                    "review_lease": {"reviewer_agent_id": mine},
+                    "claimed_by_agent_id": mine,
+                }
+                other_ticket = {
+                    **held_ticket,
+                    "review_lease": {"reviewer_agent_id": "AI-other"},
+                    "claimed_by_agent_id": "AI-other",
+                }
+                other_event = {**event, "reviewer_agent_id": "AI-other"}
+
+                class Client:
+                    identity = SimpleNamespace(agent_id=mine)
+
+                    def __init__(self, ticket):
+                        self.ticket = ticket
+
+                    async def ticket_get(self, _ticket_id):
+                        return {"ticket": self.ticket}
+
+                selected = await module._event_for_seat(
+                    Client(held_ticket), event, submitted=submitted, board_id="pursers"
+                )
+                assert selected is not None, (role, kind)
+                assert selected["reason"] == "held_ticket_update"
+                assert await module._event_for_seat(
+                    Client(other_ticket),
+                    other_event,
+                    submitted=submitted,
+                    board_id="pursers",
+                ) is None, (role, kind)
+
+        worker = generated("worker")
+        reviewer = generated("reviewer")
+
+        class BroadcastClient:
+            identity = SimpleNamespace(agent_id="AI-seat")
+
+            def __init__(self, status):
+                self.status = status
+
+            async def ticket_get(self, ticket_id):
+                return {"ticket": {
+                    "ticket_id": ticket_id,
+                    "status": self.status,
+                    "dispatch_state": {"state": "broadcast"},
+                }}
+
+        worker_event = {
+            "kind": "ticket_status_changed", "ticket_id": "TK-work",
+            "status_to": "open",
+        }
+        reviewer_event = {
+            "kind": "ticket_status_changed", "ticket_id": "TK-review",
+            "status_to": "submitted",
+        }
+        assert (await worker._event_for_seat(
+            BroadcastClient("open"), worker_event,
+            submitted=False, board_id="pursers",
+        ))["reason"] == "broadcast"
+        assert (await reviewer._event_for_seat(
+            BroadcastClient("submitted"), reviewer_event,
+            submitted=True, board_id="pursers",
+        ))["reason"] == "broadcast"
+
+    asyncio.run(exercise())
 
 
 def test_all_routed_verbs_accept_board_flag() -> None:

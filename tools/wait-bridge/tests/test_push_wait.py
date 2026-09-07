@@ -32,6 +32,7 @@ from mcp import Client  # noqa: E402
 from pursers_client import (  # noqa: E402
     CENTRAL_EVENT_KINDS,
     CORE_EVENT_KINDS,
+    HELD_TICKET_KINDS,
     KNOWN_EVENT_KINDS,
     REVIEW_LEASE_EXPIRED,
     REVIEW_LEASE_KINDS,
@@ -367,6 +368,77 @@ class ManualClock:
 
 
 class PushWaitTests(unittest.IsolatedAsyncioTestCase):
+    async def test_worker_and_reviewer_held_event_wake_matrix(self) -> None:
+        client = SimpleNamespace(board_id=wait_server.BOARD_ID)
+        for wait_for, mine in (
+            ("claimable", "AI-worker"),
+            ("submitted", "AI-reviewer"),
+        ):
+            for kind in sorted(HELD_TICKET_KINDS):
+                event = {
+                    "kind": kind,
+                    "ticket_id": f"TK-{wait_for}-{kind}",
+                    "reviewer_agent_id": mine,
+                }
+                held = {
+                    "ticket_id": event["ticket_id"],
+                    "status": "submitted" if wait_for == "submitted" else "in_progress",
+                    "dispatch_state": {"state": "claimed"},
+                    "claimed_by_agent_id": mine,
+                    "review_lease": {"reviewer_agent_id": mine},
+                    "target_url": "pursers/tools/wait-bridge",
+                }
+                other = {
+                    **held,
+                    "claimed_by_agent_id": "AI-other",
+                    "review_lease": {"reviewer_agent_id": "AI-other"},
+                }
+                other_event = {**event, "reviewer_agent_id": "AI-other"}
+
+                selected = await wait_server._is_relevant(
+                    client,
+                    event,
+                    mine,
+                    True,
+                    "pursers",
+                    wait_for,
+                    tickets_by_id={event["ticket_id"]: held},
+                )
+                self.assertTrue(selected, (wait_for, kind))
+                self.assertEqual(event["reason"], "held_ticket_update")
+                self.assertFalse(await wait_server._is_relevant(
+                    client,
+                    other_event,
+                    mine,
+                    True,
+                    "pursers",
+                    wait_for,
+                    tickets_by_id={event["ticket_id"]: other},
+                ), (wait_for, kind))
+
+        for wait_for, status in (("claimable", "open"), ("submitted", "submitted")):
+            event = {
+                "kind": "ticket_status_changed",
+                "ticket_id": f"TK-broadcast-{wait_for}",
+                "status_to": status,
+            }
+            ticket = {
+                "ticket_id": event["ticket_id"],
+                "status": status,
+                "dispatch_state": {"state": "broadcast"},
+                "target_url": "pursers/tools/wait-bridge",
+            }
+            self.assertTrue(await wait_server._is_relevant(
+                client,
+                event,
+                "AI-seat",
+                True,
+                "pursers",
+                wait_for,
+                tickets_by_id={event["ticket_id"]: ticket},
+            ))
+            self.assertEqual(event["reason"], "broadcast")
+
     def test_review_lease_events_are_push_wait_cues(self) -> None:
         self.assertEqual(
             wait_server.SUBMITTED_RELEVANT_KINDS, SUBMITTED_RELEVANT_KINDS
@@ -383,6 +455,9 @@ class PushWaitTests(unittest.IsolatedAsyncioTestCase):
             (REVIEW_LEASE_RELEASED, REVIEW_LEASE_EXPIRED), start=1
         ):
             with self.subTest(kind=kind):
+                reviewer_id = wait_server._derived_agent_id(
+                    "PR-reviewer", "reviewer-a"
+                )
                 subscription = StubSubscription(
                     [object()], "board://pursers/journal"
                 )
@@ -390,13 +465,17 @@ class PushWaitTests(unittest.IsolatedAsyncioTestCase):
                     [
                         ([], 0),
                         ([], 0),
-                        ([{"kind": kind, "ticket_id": "TK-review"}], sequence),
+                        ([{
+                            "kind": kind,
+                            "ticket_id": "TK-review",
+                            "reviewer_agent_id": reviewer_id,
+                        }], sequence),
                     ],
                     transport=StubListenClient(subscription),
                 )
                 client.identity = JoinedIdentity(
                     wait_server.BOARD_ID,
-                    "AI-reviewer",
+                    reviewer_id,
                     "PR-reviewer",
                     "reviewer-a",
                     "reviewer",
@@ -411,8 +490,47 @@ class PushWaitTests(unittest.IsolatedAsyncioTestCase):
                     )
 
                 self.assertFalse(result["timed_out"])
-                self.assertEqual(result["reason"], "journal")
+                self.assertEqual(result["reason"], "held_ticket_update")
                 self.assertEqual(result["events"][0]["kind"], kind)
+
+    async def test_live_worker_annotation_wakes_bridge_within_two_seconds(self) -> None:
+        async with Client(self.mcp, mode="2026-07-28", cache=None) as raw:
+            client = await self._joined_client(raw, role="worker")
+            created = await client.create_ticket("held annotation bridge probe")
+            ticket_id = created["ticket"]["ticket_id"]
+            await client._call(
+                "ticket_claim", agent_name="push-listener", ticket_id=ticket_id
+            )
+            cursor = int(
+                self.service.journal.read_after(wait_server.BOARD_ID, 0)[
+                    "latest_cursor"
+                ]
+            )
+            ready = asyncio.Event()
+            client._client = SignalingListenClient(raw, ready)
+            with patch.object(wait_server, "WAIT_MODE", "push"):
+                waiting = asyncio.create_task(wait_server._wait_for_work(
+                    client,
+                    since_seq=cursor,
+                    timeout_s=3,
+                    only_mine=True,
+                    wait_for="claimable",
+                ))
+                await asyncio.wait_for(ready.wait(), timeout=1)
+                started = time.monotonic()
+                await client._call(
+                    "ticket_annotate",
+                    agent_name="push-actor",
+                    ticket_id=ticket_id,
+                    text="bridge live evidence",
+                    kind="evidence",
+                )
+                result = await asyncio.wait_for(waiting, timeout=2)
+                elapsed = time.monotonic() - started
+
+        self.assertLess(elapsed, 2)
+        self.assertEqual(result["reason"], "held_ticket_update")
+        self.assertEqual(result["events"][0]["kind"], "ticket_annotated")
 
     def setUp(self) -> None:
         wait_server._BACKLOG_SEEN.clear()
@@ -985,7 +1103,7 @@ class PushWaitTests(unittest.IsolatedAsyncioTestCase):
                 result = await asyncio.wait_for(waiting, timeout=1)
 
             self.assertEqual(client.identity.role, "reviewer")
-            self.assertEqual(result["reason"], "journal")
+            self.assertEqual(result["reason"], "broadcast")
             self.assertFalse(result["timed_out"])
             self.assertEqual(
                 [event.get("ticket_id") for event in result["events"]],
@@ -1311,6 +1429,7 @@ class PushWaitTests(unittest.IsolatedAsyncioTestCase):
                     "source": "backlog_scan",
                     "ticket_id": "TK-before-cursor",
                     "status": "open",
+                    "reason": "broadcast",
                 }
             ],
         )

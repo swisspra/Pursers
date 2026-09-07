@@ -19,6 +19,7 @@ from mcp.client.subscriptions import SubscriptionLost
 from .events import (
     CLAIM_GATE_EVENT_KINDS,
     DISPATCH_KINDS,
+    HELD_TICKET_KINDS,
     KNOWN_EVENT_KINDS,
     PARK_EVENT_KINDS,
     REVIEW_LEASE_KINDS,
@@ -1181,8 +1182,29 @@ class BoardClient:
             return False
         ticket = result["ticket"]
         mine = self.identity.agent_id
+        review_lease = ticket.get("review_lease")
+        human_request = ticket.get("human_request")
+        held_update = event.get("kind") in HELD_TICKET_KINDS and (
+            ticket.get("claimed_by_agent_id") == mine
+            or event.get("submitted_by_agent_id") == mine
+            or event.get("last_abandoned_by") == mine
+            or (
+                ticket.get("claimed_by_agent_id") is None
+                and ticket.get("last_claimed_by_agent_id") == mine
+            )
+            or event.get("reviewer_agent_id") == mine
+            or (
+                isinstance(review_lease, dict)
+                and review_lease.get("reviewer_agent_id") == mine
+            )
+            or (
+                isinstance(human_request, dict)
+                and human_request.get("asked_by", {}).get("agent_id") == mine
+            )
+        )
         return (
-            ticket.get("assigned_to_agent_id") == mine
+            held_update
+            or ticket.get("assigned_to_agent_id") == mine
             or ticket.get("created_by_agent_id") == mine
             or ticket.get("claimed_by_agent_id") == mine
             or (

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 TICKET_REVIEW_CLAIMED = "ticket_review_claimed"
 TICKET_ANNOTATED = "ticket_annotated"
+TICKET_STATUS_CHANGED = "ticket_status_changed"
 REVIEW_LEASE_EXPIRED = "review_lease_expired"
 REVIEW_LEASE_RELEASED = "review_lease_released"
 TICKET_OFFERED = "ticket_offered"
@@ -33,13 +34,29 @@ REVIEW_LEASE_KINDS = frozenset(
     {TICKET_REVIEW_CLAIMED, REVIEW_LEASE_EXPIRED, REVIEW_LEASE_RELEASED}
 )
 SUBMISSION_KINDS = frozenset(
-    {"ticket_status_changed", "ticket_submitted", "ticket_resubmitted"}
+    {TICKET_STATUS_CHANGED, "ticket_submitted", "ticket_resubmitted"}
 )
 SUBMITTED_RELEVANT_KINDS = SUBMISSION_KINDS | REVIEW_LEASE_KINDS | DISPATCH_KINDS
 
+# Central represents cancellation and work-lease expiry as status changes; it
+# does not emit separate ``ticket_cancelled`` or ``lease_expired`` kinds.
+# Review lease expiry does have its own authoritative journal kind.
+HELD_TICKET_KINDS = frozenset(
+    {
+        TICKET_ANNOTATED,
+        TICKET_STATUS_CHANGED,
+        HUMAN_INPUT_RESOLVED,
+        TICKET_PARKED,
+        TICKET_UNPARKED,
+        REVIEW_LEASE_EXPIRED,
+    }
+)
+WORKER_WAIT_KINDS = DISPATCH_KINDS | HELD_TICKET_KINDS
+REVIEWER_WAIT_KINDS = SUBMITTED_RELEVANT_KINDS | HELD_TICKET_KINDS
+
 CORE_EVENT_KINDS = frozenset(
     {
-        "ticket_status_changed",
+        TICKET_STATUS_CHANGED,
         "ticket_created",
         TICKET_ANNOTATED,
         "memory_written",

@@ -352,7 +352,7 @@ class MultiBoardWaitTests(unittest.IsolatedAsyncioTestCase):
             only_mine=False,
         )
 
-        self.assertEqual(result["reason"], "backlog")
+        self.assertEqual(result["reason"], "broadcast")
         self.assertEqual(result["events"][0]["ticket_id"], "TK-submitted")
 
     async def test_push_cue_refetches_only_the_cued_board(self) -> None:

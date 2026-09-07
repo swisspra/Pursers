@@ -25,7 +25,7 @@ THE TOOL
          a2a_wait request is still in progress.
       3. Bound large replays by compacting to the latest event per ticket, and
          return partial progress if catch-up consumes the call deadline.
-         reason is journal|backlog|partial|timeout.
+         reason is offer|held_ticket_update|broadcast|partial|timeout.
          timed_out=True is the re-arm cue: call again with since_seq=new_seq.
 
 RELEVANCE
@@ -73,6 +73,7 @@ from typing import Any
 from pursers_client import (
     CENTRAL_EVENT_KINDS,
     CLAIM_TTL_EVENT_KINDS,
+    HELD_TICKET_KINDS,
     HUMAN_INPUT_REQUESTED,
     HUMAN_INPUT_RESOLVED,
     OFFER_EXPIRED,
@@ -81,6 +82,7 @@ from pursers_client import (
     REVIEW_LEASE_EXPIRED,
     REVIEW_LEASE_KINDS,
     REVIEW_LEASE_RELEASED,
+    REVIEWER_WAIT_KINDS,
     TICKET_ANNOTATED,
     TICKET_OFFERED,
     GENERATION_META_KEY,
@@ -89,6 +91,7 @@ from pursers_client import (
     JoinedIdentity,
     SENSITIVE_FORM_FALLBACK,
     SUBMITTED_RELEVANT_KINDS,
+    WORKER_WAIT_KINDS,
     human_form_safety,
     parse_project_registry,
     registry_work_dirs,
@@ -205,18 +208,12 @@ except ValueError:
 if BACKLOG_RESURFACE_INTERVAL_S <= 0:
     BACKLOG_RESURFACE_INTERVAL_S = 600.0
 CLAIMABLE_RELEVANT_KINDS = frozenset(
-    {
-        "ticket_created",
-        "ticket_status_changed",
-        TICKET_OFFERED,
-        OFFER_EXPIRED,
-        OFFER_REVOKED,
-    }
+    {"ticket_created"}
 )
+CLAIMABLE_RELEVANT_KINDS |= WORKER_WAIT_KINDS
 RELEVANT_KINDS = (
     CLAIMABLE_RELEVANT_KINDS
-    | SUBMITTED_RELEVANT_KINDS
-    | frozenset({TICKET_ANNOTATED})
+    | REVIEWER_WAIT_KINDS
 )
 KEEPALIVE_SIGNAL_KINDS = CLAIM_TTL_EVENT_KINDS
 RELEVANT_KINDS = RELEVANT_KINDS | KEEPALIVE_SIGNAL_KINDS
@@ -3916,7 +3913,9 @@ async def _ticket_projection(
     }
     if ticket_ids:
         arguments["ticket_ids"] = sorted(ticket_ids)
-    if wait_for == WAIT_FOR_SUBMITTED:
+    # Keyed catchup projection must also find tickets that just transitioned
+    # away from submitted (verdict/cancel), so holder updates are not dropped.
+    if wait_for == WAIT_FOR_SUBMITTED and not ticket_ids:
         arguments["status"] = "submitted"
     try:
         listed = await asyncio.wait_for(
@@ -4086,11 +4085,7 @@ def _event_matches_wait(event: dict[str, Any], wait_for: str) -> bool:
             return False
         if kind in {OFFER_EXPIRED, OFFER_REVOKED}:
             return event.get("offer_kind") == "review"
-        if kind not in SUBMITTED_RELEVANT_KINDS:
-            return False
-        if kind == "ticket_status_changed":
-            return event.get("status_to") == "submitted"
-        return True
+        return kind in REVIEWER_WAIT_KINDS
     if kind == REVIEW_OFFERED:
         return False
     if kind in {OFFER_EXPIRED, OFFER_REVOKED}:
@@ -4099,11 +4094,55 @@ def _event_matches_wait(event: dict[str, Any], wait_for: str) -> bool:
 
 
 def _wait_reason(events: list[dict[str, Any]]) -> str:
+    if events and events[0].get("reason") in {
+        "offer", "held_ticket_update", "broadcast"
+    }:
+        return str(events[0]["reason"])
     if any(event.get("kind") in {TICKET_OFFERED, REVIEW_OFFERED} for event in events):
         return "offer"
     if events and all(event.get("source") == "backlog_scan" for event in events):
         return "backlog"
     return "journal" if events else "timeout"
+
+
+def _held_ticket_update(
+    ticket: dict[str, Any],
+    event: dict[str, Any],
+    my_agent_id: str | None,
+    wait_for: str,
+) -> bool:
+    """Classify holder-targeted journal events after authoritative projection."""
+    if my_agent_id is None:
+        return False
+    kind = event.get("kind")
+    submitted = wait_for == WAIT_FOR_SUBMITTED
+    if kind not in HELD_TICKET_KINDS and not (
+        submitted and kind in REVIEW_LEASE_KINDS
+    ):
+        return False
+    review_lease = ticket.get("review_lease")
+    human_request = ticket.get("human_request")
+    if submitted:
+        return bool(
+            event.get("reviewer_agent_id") == my_agent_id
+            or (
+                isinstance(review_lease, dict)
+                and review_lease.get("reviewer_agent_id") == my_agent_id
+            )
+        )
+    return bool(
+        ticket.get("claimed_by_agent_id") == my_agent_id
+        or event.get("submitted_by_agent_id") == my_agent_id
+        or event.get("last_abandoned_by") == my_agent_id
+        or (
+            ticket.get("claimed_by_agent_id") is None
+            and ticket.get("last_claimed_by_agent_id") == my_agent_id
+        )
+        or (
+            isinstance(human_request, dict)
+            and human_request.get("asked_by", {}).get("agent_id") == my_agent_id
+        )
+    )
 
 
 def _forget_backlog_for_events(board_id: str, events: list[dict]) -> None:
@@ -4197,24 +4236,38 @@ async def _is_relevant(
         if isinstance(recipients, list) and my_agent_id not in recipients:
             return False
     if kind in {OFFER_EXPIRED, OFFER_REVOKED}:
-        return bool(
+        relevant_lifecycle = bool(
             event.get("offered_agent_id") == my_agent_id
             and event.get("offer_kind")
             == ("review" if wait_for == WAIT_FOR_SUBMITTED else "work")
         )
+        if relevant_lifecycle:
+            event["reason"] = "offer"
+        return relevant_lifecycle
     if tickets_by_id is not None:
         ticket = tickets_by_id.get(ticket_id)
         if not isinstance(ticket, dict):
-            return bool(
+            relevant_without_projection = bool(
                 wait_for == WAIT_FOR_SUBMITTED
                 and kind in {REVIEW_LEASE_EXPIRED, REVIEW_LEASE_RELEASED}
+                and event.get("reviewer_agent_id") == my_agent_id
             )
+            if relevant_without_projection:
+                event["reason"] = "held_ticket_update"
+            return relevant_without_projection
     else:
         try:
             result = await client.ticket_get(ticket_id)
         except Exception as exc:
             if kind in {TICKET_OFFERED, REVIEW_OFFERED}:
                 return False
+            if (
+                wait_for == WAIT_FOR_SUBMITTED
+                and kind in REVIEW_LEASE_KINDS
+                and event.get("reviewer_agent_id") == my_agent_id
+            ):
+                event["reason"] = "held_ticket_update"
+                return True
             if isinstance(exc, (BoardClientError, AttributeError, KeyError)):
                 return not only_mine and project is None
             raise
@@ -4242,9 +4295,12 @@ async def _is_relevant(
                 },
             )
     dispatch_state = ticket.get("dispatch_state")
+    held_update = _held_ticket_update(ticket, event, my_agent_id, wait_for)
     if isinstance(dispatch_state, dict):
         state = dispatch_state.get("state")
-        if wait_for == WAIT_FOR_SUBMITTED:
+        if held_update:
+            relevant = True
+        elif wait_for == WAIT_FOR_SUBMITTED:
             offer = ticket.get("review_offer")
             lease = ticket.get("review_lease")
             relevant = bool(
@@ -4293,7 +4349,7 @@ async def _is_relevant(
                 or (state == "broadcast" and ticket.get("status") == "open")
             )
     else:
-        relevant = ticket_is_relevant(
+        relevant = held_update or ticket_is_relevant(
             ticket, my_agent_id, only_mine, project, wait_for
         )
     if relevant and event.get("kind") == offered_kind:
@@ -4309,6 +4365,13 @@ async def _is_relevant(
                 "skills_required": list(ticket.get("skills_required") or []),
             }
     if relevant:
+        event["reason"] = (
+            "offer"
+            if kind == offered_kind
+            else "held_ticket_update"
+            if held_update
+            else "broadcast"
+        )
         continuation = continuation_hint(ticket)
         if continuation is not None:
             event["continuation"] = continuation
@@ -4340,7 +4403,18 @@ async def _filter_relevant(
     out = []
     for ev in candidates:
         if ev.get("ticket_id") in unprojected:
-            out.append({**ev, "projection_state": "unprojected"})
+            reason = (
+                "offer"
+                if ev.get("kind") in {TICKET_OFFERED, REVIEW_OFFERED}
+                else "held_ticket_update"
+                if ev.get("reviewer_agent_id") == my_agent_id
+                else "broadcast"
+            )
+            out.append({
+                **ev,
+                "projection_state": "unprojected",
+                "reason": reason,
+            })
             continue
         if await _is_relevant(
             client, ev, my_agent_id, only_mine, project, wait_for,
@@ -4519,7 +4593,8 @@ async def _a2a_wait_impl(
 
     Returns {new_seq, events, waited_s, timed_out, reason, resynced}, with
     compacted/dropped/event_counts, partial, and warnings when applicable.
-    reason is "journal", "backlog", "partial", or "timeout". timed_out=True
+    reason is "offer", "held_ticket_update", "broadcast", "partial", or
+    "timeout" (legacy internal cues may still report "journal"/"backlog"). timed_out=True
     means "no work" -- call again with since_seq=new_seq to re-arm. resynced=True
     means the journal was compacted past our cursor and events were lost:
     re-fetch full state (e.g. ticket_list) before trusting events as complete.

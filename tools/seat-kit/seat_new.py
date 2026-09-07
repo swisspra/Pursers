@@ -78,6 +78,17 @@ ROLE = '{role}'
 REPO_LEAF = {repo_leaf}
 DEFAULT_WAIT_S = {wait_timeout}
 TICKET_SUBMIT_NOTES_MAX_CHARS = 5_000
+HELD_TICKET_KINDS = frozenset({
+    "ticket_annotated",
+    "ticket_status_changed",
+    "human_input_resolved",
+    "ticket_parked",
+    "ticket_unparked",
+    "review_lease_expired",
+})
+REVIEW_LEASE_KINDS = frozenset({
+    "ticket_review_claimed", "review_lease_expired", "review_lease_released"
+})
 APPROVE_OVERRIDE_ENV = "PURSERS_ALLOW_FORCE_APPROVE_WITHOUT_EVIDENCE"
 SHA_RE = re.compile(r"(?<![0-9a-fA-F])[0-9a-fA-F]{40}(?![0-9a-fA-F])")
 PYTEST_SUCCESS_RE = re.compile(
@@ -492,9 +503,9 @@ def _load_client() -> tuple[Any, ...]:
     try:
         from pursers_client import (
             BoardClient,
-            DISPATCH_KINDS,
             PROJECT_REGISTRY_KEY,
-            SUBMITTED_RELEVANT_KINDS,
+            REVIEWER_WAIT_KINDS,
+            WORKER_WAIT_KINDS,
             active_registry_boards,
             parse_project_registry,
             registry_project_work_dirs,
@@ -507,9 +518,9 @@ def _load_client() -> tuple[Any, ...]:
         ) from exc
     return (
         BoardClient,
-        DISPATCH_KINDS,
+        WORKER_WAIT_KINDS,
         PROJECT_REGISTRY_KEY,
-        SUBMITTED_RELEVANT_KINDS,
+        REVIEWER_WAIT_KINDS,
         active_registry_boards,
         parse_project_registry,
         registry_project_work_dirs,
@@ -621,10 +632,12 @@ async def _event_for_seat(
     if not submitted and kind == "review_offered":
         return None
     if kind in {"offer_expired", "offer_revoked"}:
-        return event if (
+        if (
             event.get("offer_kind") == ("review" if submitted else "work")
             and event.get("offered_agent_id") == client.identity.agent_id
-        ) else None
+        ):
+            return {**event, "reason": "offer"}
+        return None
     try:
         ticket = (await client.ticket_get(ticket_id)).get("ticket", {})
     except AttributeError:
@@ -632,19 +645,53 @@ async def _event_for_seat(
     except Exception:
         return None
     state = ticket.get("dispatch_state")
-    if not isinstance(state, dict):
-        if submitted:
-            return event if event.get("status_to") == "submitted" else None
-        return (
-            event
-            if client.identity.agent_id in event.get("recipient_identities", [])
-            else None
+    mine = client.identity.agent_id
+    review_lease = ticket.get("review_lease")
+    human_request = ticket.get("human_request")
+    held = bool(
+        (
+            submitted
+            and (
+                event.get("reviewer_agent_id") == mine
+                or (
+                    isinstance(review_lease, dict)
+                    and review_lease.get("reviewer_agent_id") == mine
+                )
+            )
         )
+        or (
+            not submitted
+            and (
+                ticket.get("claimed_by_agent_id") == mine
+                or event.get("submitted_by_agent_id") == mine
+                or event.get("last_abandoned_by") == mine
+                or (
+                    ticket.get("claimed_by_agent_id") is None
+                    and ticket.get("last_claimed_by_agent_id") == mine
+                )
+                or (
+                    isinstance(human_request, dict)
+                    and human_request.get("asked_by", {}).get("agent_id") == mine
+                )
+            )
+        )
+    )
+    held_update = held and (
+        kind in HELD_TICKET_KINDS
+        or (submitted and kind in REVIEW_LEASE_KINDS)
+    )
+    if not isinstance(state, dict):
+        if held_update:
+            return {**event, "reason": "held_ticket_update"}
+        if submitted and event.get("status_to") == "submitted":
+            return {**event, "reason": "broadcast"}
+        if not submitted and mine in event.get("recipient_identities", []):
+            return {**event, "reason": "broadcast"}
+        return None
     offer_kind = "review" if submitted else "work"
     offer = ticket.get(f"{offer_kind}_offer")
     expected = "review_offered" if submitted else "ticket_offered"
     if submitted:
-        lease = ticket.get("review_lease")
         relevant = bool(
             (
                 kind == expected
@@ -652,20 +699,7 @@ async def _event_for_seat(
                 and offer.get("agent_id") == client.identity.agent_id
             )
             or (
-                kind
-                in {
-                    "ticket_review_claimed",
-                    "review_lease_expired",
-                    "review_lease_released",
-                }
-                and (
-                    event.get("reviewer_agent_id") == client.identity.agent_id
-                    or (
-                        isinstance(lease, dict)
-                        and lease.get("reviewer_agent_id")
-                        == client.identity.agent_id
-                    )
-                )
+                held_update
             )
             or (
                 state.get("state") == "broadcast"
@@ -685,12 +719,19 @@ async def _event_for_seat(
                 and isinstance(offer, dict)
                 and offer.get("agent_id") == client.identity.agent_id
             )
-            or ticket.get("claimed_by_agent_id") == client.identity.agent_id
+            or held_update
             or (state.get("state") == "broadcast" and ticket.get("status") == "open")
         )
     if not relevant:
         return None
     selected = dict(event)
+    selected["reason"] = (
+        "offer"
+        if kind == expected
+        else "held_ticket_update"
+        if held_update
+        else "broadcast"
+    )
     if kind == expected and isinstance(offer, dict):
         selected["offer"] = {
             "ticket_id": ticket_id,
@@ -731,8 +772,8 @@ async def _cmd_wait(
     selected_kinds = (
         frozenset(submitted_relevant_kinds or ())
         if submitted
-        else frozenset({"ticket_created", "ticket_status_changed"})
-    ) | frozenset(dispatch_kinds or ())
+        else frozenset({"ticket_created"}) | frozenset(dispatch_kinds or ())
+    )
 
     if boards != "home":
         if wait_for_boards is None:
@@ -830,14 +871,7 @@ async def _cmd_wait(
             pass
 
     timed_out = not events
-    reason = (
-        "offer"
-        if any(
-            event.get("kind") in {"ticket_offered", "review_offered"}
-            for event in events
-        )
-        else "journal" if events else "timeout"
-    )
+    reason = events[0].get("reason", "held_ticket_update") if events else "timeout"
     _print({
         "new_seq": cursor,
         "events": events,
@@ -1365,9 +1399,9 @@ bin/board.sh submit <TK> <summary> <notes> <files-csv> --board <id>
 bin/board.sh wait --since '<cursor-or-json-map>' [--boards registry|home|<id,id>]"""
         loop = """Run this loop continuously:
 
-1. **WAIT** -- `bin/board.sh wait --since '<cursor-or-json-map>'` subscribes to every active registry board and returns only this seat's offer, held-ticket events, or legacy fallback broadcast. Re-arm with the entire returned `new_seq` map.
+1. **WAIT** -- `bin/board.sh wait --since '<cursor-or-json-map>'` subscribes to every active registry board and returns only this seat's offer, held-ticket events, or legacy fallback broadcast. Re-arm with the entire returned `new_seq` map. On `reason=held_ticket_update`, GET that ticket immediately: follow evidence/decision annotations, fix and resubmit a rejection, or release a cancelled/parked ticket and return to WAIT.
 2. **UNDERSTAND** -- Use the offer's `ticket_id`, `board_id`, and registered fleet clone `work_dir`; never guess or use the operator checkout.
-3. **CLAIM** -- Claim only a ticket offered to this seat. Never claim an unoffered ticket. If the offer expired, was revoked, or belongs to another seat, go back to WAIT.
+3. **CLAIM** -- Claim a ticket offered to this seat. A work broadcast is also claimable only when GET confirms an open ticket with `dispatch_state.state=broadcast` and no live offer; Central resolves the race. Never claim a ticket offered to another seat. If the offer expired, was revoked, or belongs to another seat, go back to WAIT.
 4. **DO** -- Work only in the returned fleet clone (or this seat's own clone). The operator checkout is read-only for seats. Run `bin/board.sh renew <TK> --board <id>` every ~10 minutes.
 5. **SUBMIT** -- `bin/board.sh submit <TK> <summary> <notes> <files-csv> --board <id>`. Notes are capped at 5000 characters; trim test tails to the evidence needed. The helper truncates oversized notes at a line boundary and reports it.
 6. **AWAIT REVIEW** -- Keep the same ticket slot occupied. WAIT, then GET that ticket after a cue. If rejected, follow fix instructions and resubmit; if approved/closed, release the slot.
@@ -1389,7 +1423,7 @@ bin/board.sh wait --submitted --since '<cursor-or-json-map>' [--boards registry|
 
 1. **WAIT** -- `bin/board.sh wait --submitted --since '<cursor-or-json-map>'` returns only this reviewer's offer, held-review events, or legacy fallback broadcast. Re-arm with the entire returned `new_seq` map.
 2. **UNDERSTAND** -- Use the review offer's `ticket_id`, `board_id`, and registered `work_dir`.
-3. **CLAIM** -- Review-claim only a ticket offered to this seat. Never claim an unoffered review. If the offer expired, was revoked, or belongs to another reviewer, return directly to WAIT.
+3. **CLAIM** -- Review-claim a ticket offered to this seat. A review broadcast is also claimable only when GET confirms `dispatch_state.state=broadcast` and no live review offer; Central resolves the race. Never claim a review offered to another reviewer. If the offer expired, was revoked, or belongs to another reviewer, return directly to WAIT.
 4. **VERIFY** -- Use the event's board: `bin/board.sh get <TK> --board <id>`, then `bin/board.sh verify <TK> --board <id>`. Add `--run-suites` only when the ticket carries allow-listed pytest/unittest commands. Renew every ~5 minutes with `bin/board.sh renew <TK> --board <id>`.
 5. **HARD REVIEW** -- Complete every item in the checklist below against the exact submitted SHA and ticket dependencies.
 6. **APPROVE/REJECT** -- Approve only with mechanically accepted evidence notes. Reject with concrete non-empty fix instructions when any check fails; both verdict commands ensure the lease is held.
