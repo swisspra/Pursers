@@ -7,6 +7,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Documentation
+
+- Documented the AionUi 2.2.1 sandbox spike results for extension MCP
+  injection, assistant presets, API-created conversations, parallel-seat
+  identity, push wait, and MCP elicitation rendering.
+
 ## [5.0.0a22] - 2026-09-06
 
 This release includes `pursers-central==0.1.0a26`,
