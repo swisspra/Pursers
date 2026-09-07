@@ -195,6 +195,7 @@ async def wait_for_boards(
     project_work_dirs: dict[str, str] | None = None,
     poll_fallback: bool = False,
     capabilities: dict[str, Any] | None = None,
+    allow_takeover: bool = False,
 ) -> dict[str, Any]:
     """Wait on all authorized board journals in one listen subscription."""
     board_ids = sorted({str(board).strip() for board in boards if str(board).strip()})
@@ -204,7 +205,24 @@ async def wait_for_boards(
     generations: dict[str, str | None] = {}
     if client._client is None:  # package helper; BoardClient must be entered
         raise RuntimeError("BoardClient is not entered")
+    sessions = getattr(client, "_registry_wait_sessions", None)
+    if not isinstance(sessions, dict):
+        sessions = {}
+        setattr(client, "_registry_wait_sessions", sessions)
     for board_id in board_ids:
+        if board_id == client.board_id and client.identity is not None:
+            identities[board_id] = client.identity.agent_id
+            generations[board_id] = getattr(client, "generation_token", None)
+            continue
+        cached = sessions.get(board_id)
+        if (
+            isinstance(cached, dict)
+            and cached.get("agent_name") == client.agent_name
+            and cached.get("capabilities") == capabilities
+        ):
+            identities[board_id] = cached["agent_id"]
+            generations[board_id] = cached.get("generation_token")
+            continue
         try:
             join_arguments: dict[str, Any] = {
                 "board_id": board_id,
@@ -212,6 +230,8 @@ async def wait_for_boards(
             }
             if capabilities is not None:
                 join_arguments["capabilities"] = capabilities
+            if allow_takeover:
+                join_arguments["allow_takeover"] = True
             joined = BoardClient._decode(
                 await client._client.call_tool(
                     "board_join",
@@ -220,9 +240,24 @@ async def wait_for_boards(
             )
             identities[board_id] = joined["agent_id"]
             generations[board_id] = joined.get("generation_token")
+            sessions[board_id] = {
+                "agent_name": client.agent_name,
+                "capabilities": (
+                    dict(capabilities) if capabilities is not None else None
+                ),
+                "agent_id": joined["agent_id"],
+                "generation_token": joined.get("generation_token"),
+            }
         except BoardClientError as exc:
+            sessions.pop(board_id, None)
             skipped[board_id] = str(exc)
     active = [board for board in board_ids if board in identities]
+    if not active:
+        details = "\n".join(
+            f"{board_id}: {skipped.get(board_id, 'join failed')}"
+            for board_id in board_ids
+        )
+        raise BoardClientError(f"all selected boards were skipped:\n{details}")
     selected_kinds = frozenset(kinds)
     work_dirs = work_dirs or {}
     project_work_dirs = project_work_dirs or {}
@@ -248,6 +283,14 @@ async def wait_for_boards(
                     **({"meta": {GENERATION_META_KEY: generation}} if generation else {}),
                 )
             )
+            if result.get("resync_required"):
+                reset_cursor = result.get("reset_cursor")
+                if type(reset_cursor) is not int:
+                    raise RuntimeError(
+                        "board_catchup resync is missing an integer reset_cursor"
+                    )
+                cursors[board_id] = max(initial_cursor, reset_cursor)
+                return [], False
             page = result.get("events", [])
             found: list[dict[str, Any]] = []
             for index, event in enumerate(page):
@@ -393,8 +436,6 @@ async def wait_for_boards(
             "reason": reason,
         }
 
-    if not active:
-        return response([])
     if poll_fallback:
         deadline = started + timeout_s
         while time.monotonic() < deadline:
