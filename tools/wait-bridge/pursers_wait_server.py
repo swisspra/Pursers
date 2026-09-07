@@ -46,6 +46,7 @@ RELEVANCE
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import copy
 import fcntl
@@ -104,6 +105,7 @@ from mcp.types import (
 from mcp.types.version import is_version_at_least
 from mcp.server.subscriptions import ResourceUpdated
 from agent_naming import resolve_agent_name
+import door_state
 from backlog import (
     WAIT_FOR_CLAIMABLE,
     WAIT_FOR_SUBMITTED,
@@ -149,11 +151,24 @@ def _runtime_version() -> str:
 
 VERSION = _runtime_version()
 
-# --- config from env -------------------------------------------------------
+# --- config from env / persisted doors ------------------------------------
 
-CENTRAL_URL = os.environ.get("ONBOARD_CENTRAL_URL", "http://127.0.0.1:8766/mcp")
-BOARD_ID = os.environ.get("ONBOARD_BOARD_ID", "pursers")
-CENTRAL_TOKEN = os.environ.get("ONBOARD_CENTRAL_TOKEN", "")
+try:
+    _RUNTIME_CONFIG = door_state.resolve()
+    _RUNTIME_CONFIG_ERROR: str | None = None
+except ValueError as exc:
+    _RUNTIME_CONFIG = {
+        "url": os.environ.get("ONBOARD_CENTRAL_URL", "http://127.0.0.1:8766/mcp"),
+        "token": os.environ.get("ONBOARD_CENTRAL_TOKEN", ""),
+        "board": os.environ.get("ONBOARD_BOARD_ID", "pursers"),
+        "role": os.environ.get("PURSERS_ROLE", ""),
+    }
+    _RUNTIME_CONFIG_ERROR = str(exc)
+
+CENTRAL_URL = _RUNTIME_CONFIG["url"]
+BOARD_ID = _RUNTIME_CONFIG["board"]
+CENTRAL_TOKEN = _RUNTIME_CONFIG["token"]
+RUNTIME_ROLE = _RUNTIME_CONFIG["role"]
 BASE_AGENT_NAME = os.environ.get("ONBOARD_AGENT_NAME", "pursers-wait-bridge")
 AGENT_NAME = resolve_agent_name(
     BASE_AGENT_NAME, os.environ.get("ONBOARD_AGENT_INSTANCE")
@@ -973,7 +988,7 @@ def _seat_capabilities() -> dict[str, Any] | None:
 
 
 def _declared_role() -> str | None:
-    role = os.environ.get("PURSERS_ROLE", "").strip().lower()
+    role = (os.environ.get("PURSERS_ROLE", "").strip() or RUNTIME_ROLE).lower()
     if not role:
         return None
     if role not in SEAT_ROLES:
@@ -5597,12 +5612,144 @@ async def _wait_for_work(
     })
 
 
+def _door_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="pursers-wait-bridge")
+    commands = parser.add_subparsers(dest="command", required=True)
+    join = commands.add_parser("join", help="store a door and onboard a seat")
+    join.add_argument("door")
+    join.add_argument("--name")
+    join.add_argument("--state-dir")
+    join.add_argument("--allow-remote", action="store_true")
+    join.add_argument("--rotate", action="store_true")
+    status = commands.add_parser("status", help="show redacted stored-door status")
+    status.add_argument("--state-dir")
+    forget = commands.add_parser("forget", help="delete one stored door")
+    forget.add_argument("--board", required=True)
+    forget.add_argument("--role", required=True, choices=sorted(door_state.SEAT_ROLES))
+    forget.add_argument("--state-dir")
+    return parser
+
+
+async def _probe_join_push(client: BoardClient, board: str, agent_id: str) -> bool:
+    raw_client = getattr(client, "_client", None)
+    if raw_client is None:
+        return False
+    subscriptions = [
+        f"board://{board}/journal",
+        f"board://{board}/agent/{agent_id}",
+    ]
+    try:
+        async with asyncio.timeout(3):
+            async with raw_client.listen(resource_subscriptions=subscriptions) as stream:
+                honored = getattr(stream, "honored", None)
+                selected = getattr(honored, "resource_subscriptions", None)
+                return selected is None or set(subscriptions).issubset(set(selected))
+    except Exception:  # noqa: BLE001 - join reports a bounded yes/no probe.
+        return False
+
+
+async def _door_join(args: argparse.Namespace) -> None:
+    path = door_state.state_path(args.state_dir)
+    entry = door_state.store(
+        path,
+        args.door,
+        rotate=args.rotate,
+        allow_remote=args.allow_remote,
+    )
+    name = door_state.reserve_name(
+        path, entry["b"], entry["r"], requested=args.name
+    )
+    client = BoardClient(
+        entry["u"],
+        entry["t"],
+        entry["b"],
+        agent_name=name,
+        role=entry["r"],
+        capabilities=_seat_capabilities(),
+        allow_takeover=False,
+    )
+    async with client:
+        onboarded = await client.board_onboard(
+            role=entry["r"], capabilities=_seat_capabilities(), allow_takeover=False
+        )
+        push = await _probe_join_push(client, entry["b"], onboarded["agent_id"])
+    print(f"board={entry['b']}")
+    print(f"role={entry['r']}")
+    print(f"seat_name={name}")
+    print(f"push={'yes' if push else 'no'}")
+    print("verifier=accepted")
+
+
+def _door_status(args: argparse.Namespace) -> None:
+    document = door_state.load(door_state.state_path(args.state_dir))
+    print(f"push_mode={WAIT_MODE}")
+    for entry in document["doors"]:
+        names = ",".join(entry["seat_names_used"]) or "-"
+        print(
+            f"board={entry['b']} role={entry['r']} kid={entry['kid']} "
+            f"exp={entry['exp']} seat_names_used={names}"
+        )
+
+
+def _door_forget(args: argparse.Namespace) -> None:
+    removed = door_state.forget(
+        door_state.state_path(args.state_dir), args.board, args.role
+    )
+    print(f"forgot={'yes' if removed else 'no'} board={args.board} role={args.role}")
+
+
+def _configure_runtime() -> None:
+    global CENTRAL_URL, BOARD_ID, CENTRAL_TOKEN, RUNTIME_ROLE
+    global BASE_AGENT_NAME, AGENT_NAME, _RUNTIME_CONFIG_ERROR
+    config = door_state.resolve()
+    CENTRAL_URL = config["url"]
+    BOARD_ID = config["board"]
+    CENTRAL_TOKEN = config["token"]
+    RUNTIME_ROLE = config["role"]
+    if not os.environ.get("ONBOARD_AGENT_NAME", "").strip() and CENTRAL_TOKEN:
+        document = door_state.load(door_state.state_path())
+        if document["doors"]:
+            entry = door_state.select(
+                document,
+                board=os.environ.get("ONBOARD_BOARD_ID", "").strip() or None,
+                role=os.environ.get("PURSERS_ROLE", "").strip().lower() or None,
+            )
+            BASE_AGENT_NAME = door_state.reserve_name(
+                door_state.state_path(), entry["b"], entry["r"]
+            )
+            AGENT_NAME = resolve_agent_name(
+                BASE_AGENT_NAME, os.environ.get("ONBOARD_AGENT_INSTANCE")
+            )
+    _RUNTIME_CONFIG_ERROR = None
+
+
 def main() -> None:
     if "--version" in sys.argv[1:]:
         print(VERSION)
         return
+    if sys.argv[1:] and sys.argv[1] in {"join", "status", "forget"}:
+        args = _door_parser().parse_args(sys.argv[1:])
+        try:
+            if args.command == "join":
+                asyncio.run(_door_join(args))
+            elif args.command == "status":
+                _door_status(args)
+            else:
+                _door_forget(args)
+        except (BoardClientError, OSError, RuntimeError, ValueError) as exc:
+            print(f"pursers-wait-bridge: {exc}", file=sys.stderr)
+            raise SystemExit(1) from None
+        return
+    try:
+        _configure_runtime()
+    except (OSError, ValueError) as exc:
+        print(f"FATAL: {exc}", file=sys.stderr)
+        return
     if not CENTRAL_TOKEN:
-        print("FATAL: ONBOARD_CENTRAL_TOKEN is not set", file=sys.stderr)
+        print(
+            "FATAL: no Central token; set explicit environment or join a door",
+            file=sys.stderr,
+        )
     mcp.run(transport="stdio")
 
 

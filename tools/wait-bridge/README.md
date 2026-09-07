@@ -21,11 +21,59 @@ The imported source was reconstructed from board memories `MEM-000001` and
 `MEM-000002`. Before the instance-naming change, the 14,252-byte file matched
 SHA-256 `1a0981ec6cc47aed8eeb5e8f488bef260ab6b5fd5c7c88e2cd99604654103e1a`.
 
+## Seat setup
+
+Install the bridge with `uvx` or `pipx`, then paste the single door issued by
+your Pursers administrator:
+
+```sh
+pursers-wait-bridge join '<DOOR>'
+```
+
+The command validates the door, refuses non-loopback Central URLs unless you
+confirm them with `--allow-remote`, writes private `doors.json` state with mode
+`0600`, onboards the seat, and reports the board, role, seat name, push probe,
+and verifier outcome. It never prints the embedded credential. Add
+`pursers-wait-bridge` to the host as a stdio MCP server with no environment
+block. A host that needs an explicit executable can use the `uvx
+pursers-wait-bridge` or `pipx run pursers-wait-bridge` command form.
+
+Use `--name NAME` for an explicit seat name. Otherwise the first unused
+`<role>-<short-hostname>-<n>` name is recorded. Central's active-name collision
+refusal is returned unchanged; the bridge never silently takes over a live
+seat. Door maintenance is explicit and redacted:
+
+```sh
+pursers-wait-bridge status
+pursers-wait-bridge join --rotate '<REPLACEMENT_DOOR>'
+pursers-wait-bridge forget --board BOARD --role worker
+```
+
+`--rotate` requires an existing entry with the same board and role. `status`
+shows board, role, key ID, expiration, recorded seat names, and current push
+mode, but not URLs or credentials.
+
+Legacy explicit environment remains supported. Runtime values resolve in this
+order:
+
+| Value | First choice | Stored-door fallback |
+| --- | --- | --- |
+| Central URL | `ONBOARD_CENTRAL_URL` | `u` |
+| credential | `ONBOARD_CENTRAL_TOKEN`, then `ONBOARD_CENTRAL_TOKEN_FILE` | `t` |
+| board | `ONBOARD_BOARD_ID` | `b`, requiring the only stored board when omitted |
+| role | `PURSERS_ROLE` | `r`, requiring the only stored role when omitted |
+| seat name | `ONBOARD_AGENT_NAME` | first unused `<role>-<short-hostname>-<n>` in `doors.json` |
+
+Each explicit value wins independently. This allows, for example, an explicit
+URL with the stored board, role, and credential. Ambiguous stored boards or
+roles fail closed and tell the operator which selector to set.
+
 ## Environment
 
 | Variable | Required | Purpose |
 | --- | --- | --- |
-| `ONBOARD_CENTRAL_TOKEN` | yes | Bearer token for Central. Treat it as a secret. |
+| `ONBOARD_CENTRAL_TOKEN` | no | Explicit Central credential; overrides `ONBOARD_CENTRAL_TOKEN_FILE` and stored-door state. |
+| `ONBOARD_CENTRAL_TOKEN_FILE` | no | Explicit credential file; used before stored-door state when the direct credential is absent. |
 | `ONBOARD_CENTRAL_URL` | no | Central MCP URL; defaults to `http://127.0.0.1:8766/mcp`. |
 | `ONBOARD_BOARD_ID` | no | Board ID; defaults to `pursers`. |
 | `ONBOARD_AGENT_NAME` | no | Base board identity; defaults to `pursers-wait-bridge`. |
@@ -41,6 +89,7 @@ SHA-256 `1a0981ec6cc47aed8eeb5e8f488bef260ab6b5fd5c7c88e2cd99604654103e1a`.
 | `PURSERS_CAN_REVIEW` | no | Boolean reviewer capability declared when the seat joins. |
 | `PURSERS_CAN_WORK` | no | Boolean worker capability declared when the seat joins. |
 | `PURSERS_MODEL` / `PURSERS_PROVIDER` | no | Optional model and provider metadata included in the declaration. |
+| `PURSERS_BRIDGE_STATE_DIR` | no | Directory containing `doors.json`; defaults to the bridge state directory under the user's Pursers data. |
 
 For local HTTP, remote port forwarding, and public-certificate guidance, see
 [Deployment transport](../../docs/deployment-transport.md).
@@ -385,7 +434,7 @@ map, the home board's cursor is preserved:
 }
 ```
 
-## Connector examples
+## Legacy explicit-environment connector examples
 
 Use placeholder paths and secrets as shown, then substitute values locally.
 For a second window, duplicate the entry and change only the connector name
