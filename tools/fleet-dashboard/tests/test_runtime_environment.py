@@ -27,9 +27,11 @@ def _load_dashboard():
 def test_state_override_avoids_home_and_worker_creation_until_write(
     tmp_path: Path, monkeypatch
 ) -> None:
-    missing_home = tmp_path / "missing-home"
+    read_only_home = tmp_path / "empty-home"
+    read_only_home.mkdir()
+    read_only_home.chmod(stat.S_IRUSR | stat.S_IXUSR)
     state_root = tmp_path / "state"
-    monkeypatch.setenv("HOME", str(missing_home))
+    monkeypatch.setenv("HOME", str(read_only_home))
     monkeypatch.setenv("PURSERS_STATE_DIR", str(state_root))
     dashboard = _load_dashboard()
 
@@ -37,7 +39,7 @@ def test_state_override_avoids_home_and_worker_creation_until_write(
 
     assert manager.root == state_root / "workers"
     assert not manager.root.exists()
-    assert not missing_home.exists()
+    assert list(read_only_home.iterdir()) == []
 
 
 def test_process_provider_reports_sandbox_denial_without_raising() -> None:

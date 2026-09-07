@@ -2739,15 +2739,16 @@ class Doctor:
             and config.exists()
             and self.clock() - config.stat().st_mtime < max(ages)
         )
-        if not process.available:
-            restart_status = "WARN"
-            restart_message = runtime_environment.PROCESS_INSPECTION_UNAVAILABLE
-        elif needs_restart:
-            restart_status = "WARN"
-            restart_message = "restart required"
-        else:
-            restart_status = "PASS"
-            restart_message = "no stale host process detected"
+        restart_status = (
+            "WARN" if not process.available else "WARN" if needs_restart else "PASS"
+        )
+        restart_message = (
+            runtime_environment.PROCESS_INSPECTION_UNAVAILABLE
+            if not process.available
+            else "restart required"
+            if needs_restart
+            else "no stale host process detected"
+        )
         rows.append(
             self._check(
                 desired,

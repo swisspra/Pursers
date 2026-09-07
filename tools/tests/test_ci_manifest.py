@@ -85,7 +85,7 @@ def test_pytest_target_is_relative_to_suite_working_directory() -> None:
     assert pytest_target(suite) == "tests"
 
 
-def test_suite_environment_prepends_checkout_package_sources(
+def test_suite_environment_prepends_checkout_client_source(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("PYTHONPATH", "/existing/source")
