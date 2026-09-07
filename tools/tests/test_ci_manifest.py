@@ -17,6 +17,7 @@ from ci_manifest import (  # noqa: E402
     Suite,
     parse_collected_count,
     pytest_target,
+    suite_environment,
     validate_manifest,
     verify_counts,
 )
@@ -84,6 +85,27 @@ def test_pytest_target_is_relative_to_suite_working_directory() -> None:
     assert pytest_target(suite) == "tests"
 
 
+def test_suite_environment_prepends_checkout_client_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PYTHONPATH", "/existing/source")
+
+    environment = suite_environment(tmp_path)
+
+    assert environment["PYTHONPATH"].split(os.pathsep) == ["/existing/source"]
+
+    for package in ("central", "client", "personal"):
+        (tmp_path / "packages" / package / "src").mkdir(parents=True)
+    environment = suite_environment(tmp_path)
+
+    assert environment["PYTHONPATH"].split(os.pathsep) == [
+        str(tmp_path / "packages/central/src"),
+        str(tmp_path / "packages/client/src"),
+        str(tmp_path / "packages/personal/src"),
+        "/existing/source",
+    ]
+
+
 def test_verify_counts_requires_every_suite_to_be_positive() -> None:
     suites = (
         Suite("first", "packages/first/tests"),
@@ -146,4 +168,4 @@ def test_fleet_dashboard_suite_passes_with_read_only_home(
 
     output = completed.stdout + completed.stderr
     assert completed.returncode == 0, output[-4_000:]
-    assert "252 passed" in output
+    assert "253 passed" in output

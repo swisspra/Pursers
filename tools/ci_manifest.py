@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -104,6 +105,17 @@ def pytest_target(suite: Suite) -> str:
     return Path(suite.path).relative_to(suite.cwd).as_posix()
 
 
+def suite_environment(root: Path) -> dict[str, str]:
+    """Prefer checkout package sources over operator installations."""
+    environment = os.environ.copy()
+    sources = [str(path) for path in sorted((root / "packages").glob("*/src"))]
+    inherited = environment.get("PYTHONPATH", "").strip()
+    if inherited:
+        sources.append(inherited)
+    environment["PYTHONPATH"] = os.pathsep.join(sources)
+    return environment
+
+
 def collect_counts(root: Path, suites: Sequence[Suite] = SUITES) -> dict[str, Any]:
     results: list[dict[str, Any]] = []
     for suite in suites:
@@ -117,6 +129,7 @@ def collect_counts(root: Path, suites: Sequence[Suite] = SUITES) -> dict[str, An
                 pytest_target(suite),
             ],
             cwd=root / suite.cwd,
+            env=suite_environment(root),
             check=False,
             capture_output=True,
             text=True,
@@ -144,6 +157,7 @@ def run_suites(root: Path, suites: Sequence[Suite] = SUITES) -> None:
         completed = subprocess.run(
             [sys.executable, "-m", "pytest", "-q", pytest_target(suite)],
             cwd=root / suite.cwd,
+            env=suite_environment(root),
             check=False,
         )
         print("::endgroup::", flush=True)

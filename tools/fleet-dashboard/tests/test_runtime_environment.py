@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
-import os
+import json
 import stat
 import sys
 from pathlib import Path
@@ -54,3 +54,37 @@ def test_process_provider_reports_sandbox_denial_without_raising() -> None:
         False,
         message=runtime_environment.PROCESS_INSPECTION_UNAVAILABLE,
     )
+
+
+def test_worker_status_preserves_pid_when_process_inspection_is_unavailable(
+    tmp_path: Path,
+) -> None:
+    dashboard = _load_dashboard()
+    root = tmp_path / "workers"
+    root.mkdir()
+    pid_path = root / "worker-one.pid"
+    pid_path.write_text(json.dumps({"pid": 43210}), encoding="utf-8")
+    pid_path.chmod(stat.S_IRUSR | stat.S_IWUSR)
+
+    def unavailable(
+        _command: object, *, runner: object = None
+    ) -> runtime_environment.ProcessInspection:
+        del runner
+        return runtime_environment.ProcessInspection(
+            False,
+            message=runtime_environment.PROCESS_INSPECTION_UNAVAILABLE,
+        )
+
+    manager = dashboard.WorkerManager(
+        root,
+        platform="darwin",
+        process_provider=unavailable,
+    )
+
+    assert manager.status("worker-one") == {
+        "running": False,
+        "pid": 43210,
+        "adopted": False,
+        "process_inspection": "process inspection unavailable",
+    }
+    assert pid_path.exists()
