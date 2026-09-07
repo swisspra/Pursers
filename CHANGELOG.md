@@ -7,41 +7,6 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
-## [5.0.0a23] - 2026-09-07
-
-This release includes `pursers-central==0.1.0a27`,
-`pursers-client==0.1.0a20`, `pursers-personal-import==5.0.0a3`,
-`pursers-personal==5.0.0a23`, `pursers==5.0.0a23`, and
-`pursers-wait-bridge==0.1.0a13`.
-
-### Package summary
-
-- **Central 0.1.0a27:** keys reviewer exclusion, claimed-ticket cancellation,
-  and private-memory visibility to the exact seat identity, and rejects active
-  seat-name collisions unless an intentional takeover is requested.
-- **Client 0.1.0a20:** carries exact seat identity through the affected
-  authorization and memory contracts and makes collision refusal the default
-  while allowing stable-seat runtimes to opt in to takeover.
-- **Wait Bridge 0.1.0a13:** uses plain HTTP for same-machine loopback Central
-  connections, retains optional private-CA support for remote TLS, and opts in
-  when resuming its stable seat identity.
-- **Personal and meta 5.0.0a23:** ship the matching component pins, local HTTP
-  defaults, documentation, dashboard assets, and regenerated component lock.
-  Personal Import remains at 5.0.0a3.
-- **Seat kit:** generates plain-HTTP loopback configuration without local CA
-  environment lines, preserves optional remote CA configuration, and opts in
-  when intentionally resuming a generated stable seat.
-- **Fleet Dashboard tooling:** uses the loopback HTTP transport by default and
-  keeps managed seat configuration aligned with the new local-versus-remote
-  deployment boundary.
-- **Coordinator:** uses loopback HTTP by default and explicitly resumes its
-  stable identity without weakening collision refusal for fresh seats.
-- **Worker runtime:** applies exact-seat identity rules, uses loopback HTTP by
-  default, and opts in only when resuming a stable runtime seat.
-- **Docs:** add the deployment transport decision: HTTP for same-machine
-  loopback, port forwarding for remote seats, and public certificates only for
-  a genuinely shared server.
-
 ### Changed
 
 - Central identity checks now use the exact seat (`agent_id`) for reviewer
