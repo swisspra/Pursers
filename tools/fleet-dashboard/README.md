@@ -44,6 +44,92 @@ Automatic legacy recovery requires the missing Git index left by the former
 `--no-checkout` flow. Unstaged or staged deletions in an initialized clone stay
 classified as local changes and are never restored automatically.
 
+## Doors
+
+The Config page includes a **Doors** panel managing secret-safe door credentials
+for active projects and roles (`worker` and `reviewer`):
+
+- **Door inventory table**: lists `(board x role)` for every active project in the
+  project registry with its key identifier (`kid`), expiration date, and seats
+  currently connected on that door principal (grouped by agent name with last activity).
+- **Copy door string**: issues or fetches the non-secret `prs1.…` door string directly
+  using `door_admin` as an in-process library without shelling out or logging credentials.
+  The door string is returned once over loopback same-origin HTTP with
+  `Cache-Control: no-store` and is never persisted in state files or listing endpoints.
+- **Rotate**: generates a new RSA-2048 signing key version, publishes it to the public
+  JWKS, and returns the new door string. A warning is displayed that existing seats
+  operating under the previous key version must re-join with the new door string.
+
+### Configuration and Central wiring
+
+Doors require two configuration paths provided via environment variables, CLI options,
+or the multi-central JSON configuration file:
+
+```bash
+export PURSERS_DOORS_KEYS_DIR="/PATH/TO/keys"
+export PURSERS_JWKS_PATH="/PATH/TO/jwks.json"
+```
+
+CLI flags `--doors-keys-dir` and `--jwks-path` are also accepted. When these settings
+are unset, door actions refuse with a descriptive message rather than failing silently.
+
+Central must be told where the public JWKS file resides so it can verify incoming
+door credentials without access to private key material. In Central's service configuration:
+
+```bash
+export CENTRAL_JWKS_PATH="/PATH/TO/jwks.json"
+```
+
+Central already supports `CENTRAL_JWKS_PATH` and re-reads the JWKS file to validate
+incoming tokens. Operator files outside the dashboard checkout should not be modified.
+
+## Add project
+
+The **Add project** card provides single-action provisioning to transform onboarding
+into "Add project once, copy door twice":
+
+### Operator flow
+
+1. Configure `PURSERS_DOORS_KEYS_DIR` and `PURSERS_JWKS_PATH` for the dashboard,
+   and configure `CENTRAL_JWKS_PATH` pointing to the public JWKS for Central.
+2. Open **Config** in the Fleet Dashboard (`http://127.0.0.1:8899/#/seats`).
+3. Under **Add project**, fill out the form:
+   - **Project name**: unique identifier (e.g., `my-service`).
+   - **Board ID**: target board identifier matching `[A-Za-z0-9._-]{1,80}`.
+   - **Work dir**: absolute path to the operator repository checkout.
+   - **Integration ref**: target integration git ref (defaults to `main`).
+4. Click **Add project**. The dashboard executes the following five steps in order,
+   displaying status for each step:
+   - **Registry add**: adds the project entry to `project_registry` under schema v1.
+   - **Board create**: detects if the board exists, or creates the board and onboards
+     the caller as administrative coordinator.
+   - **Door principals**: adds board memberships for the worker door principal
+     (`sub door:<board>:worker`, `client_id door-<board>-worker`) with role `member`,
+     and the reviewer door principal (`sub door:<board>:reviewer`, `client_id door-<board>-reviewer`)
+     with role `reviewer`.
+   - **Policy defaults**: configures dispatch policy defaults (`offer_ttl_s 600`,
+     `broadcast_reoffer_s 180`, `second_opinion true`, `fallback_broadcast true`)
+     and review policy default (`strict`).
+   - **Fleet clone**: prepares a dedicated fleet work checkout using `prepare_fleet_clone`.
+5. The worker and reviewer `prs1.…` door strings are displayed once upon completion.
+   Copy the respective door string for seats joining this board.
+6. Seats join using `pursers-door join <door-string>`.
+
+### Idempotency and guards
+
+Re-running **Add project** with an existing project name reports `already present`
+for every step and changes nothing. All door and project mutation endpoints enforce:
+- Loopback client address check;
+- Same-origin `Host` and `Origin` header validation;
+- Application/json Content-Type requirement;
+- Administrative token authorization on Central (non-admin callers are rejected with HTTP 403);
+- No door strings or JWT-shaped substrings are ever logged or included in listing APIs.
+
+The authorization check uses Central's `board_list` membership projection and
+requires `membership_role=admin` on each affected board. A successful
+member-authorized status or member listing is not treated as proof of admin
+authority, and door key/JWKS files are not touched until this check succeeds.
+
 ## Release & Operations panel
 
 The Config page integrates release status and guarded operational controls

@@ -53,6 +53,7 @@ This release includes `pursers-central==0.1.0a28`,
 
 ### Added
 
+- Fleet dashboard: add Doors panel (per board x role: copy door string, rotate with new kid, seats on door with last activity) and one-click 'Add project' single action (registry add, board create, door principals, policy defaults, fleet clone) with secret-safe door issuance, same-origin guards, and Cache-Control: no-store.
 - Wait bridge: add `pursers-door` to issue, inspect, rotate, and revoke
   per-board worker/reviewer door credentials with RSA-2048 keys, atomic JWKS
   replacement, and one secret-safe `prs1.…` setup string.
@@ -83,6 +84,9 @@ This release includes `pursers-central==0.1.0a28`,
   seconds. Central rejects excess per-principal listen streams at a soft cap
   of 32, reports active stream counts through healthz, and attributes rejected
   coordinator joins by principal prefix, agent name, and requested role.
+- Fleet dashboard door endpoints now require Central's authoritative admin
+  membership projection before reading or mutating door material, and dashboard
+  tests inject temporary worker roots and process probes for hermetic replay.
 - Wait bridge and seat-kit setup now accept one `prs1` door: the bridge stores
   private per-board/per-role credentials, resolves missing runtime environment
   from them, assigns durable collision-safe seat-name suffixes, and provides

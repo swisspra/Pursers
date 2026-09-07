@@ -53,6 +53,11 @@ from pursers_client import (
 from pursers_central.scrub import Policy as BoardScrubPolicy
 from pursers_central.scrub import scrub as board_scrub
 
+_WAIT_BRIDGE_DIR = Path(__file__).resolve().parents[1] / "wait-bridge"
+if (_WAIT_BRIDGE_DIR / "door_admin.py").is_file() and str(_WAIT_BRIDGE_DIR) not in sys.path:
+    sys.path.insert(0, str(_WAIT_BRIDGE_DIR))
+import door_admin
+
 _DASHBOARD_DIR = Path(__file__).resolve().parent
 if str(_DASHBOARD_DIR) not in sys.path:
     sys.path.insert(0, str(_DASHBOARD_DIR))
@@ -589,6 +594,8 @@ class Config:
     cache_seconds: float
     label: str = "default"
     overhead_path: Path | None = None
+    doors_keys_dir: Path | None = None
+    jwks_path: Path | None = None
 
 
 def _worker_text(value: Any, label: str, *, limit: int = 500) -> str:
@@ -664,7 +671,7 @@ class WorkerManager:
 
     def __init__(
         self,
-        root: str | Path = DEFAULT_WORKERS_DIR,
+        root: str | Path | None = None,
         *,
         worker_script: str | Path = DEFAULT_WORKER_SCRIPT,
         platform: str | None = None,
@@ -672,7 +679,8 @@ class WorkerManager:
         process_factory: Callable[..., Any] = subprocess.Popen,
         process_matches: Callable[[int, Path], bool] | None = None,
     ) -> None:
-        self.root = Path(root).expanduser().resolve()
+        selected_root = DEFAULT_WORKERS_DIR if root is None else root
+        self.root = Path(selected_root).expanduser().resolve()
         self.worker_script = Path(worker_script).expanduser().resolve()
         self.platform = sys.platform if platform is None else platform
         self.command_runner = command_runner
@@ -888,7 +896,7 @@ class WorkerManager:
                 capture_output=True,
                 text=True,
             )
-        except (OSError, subprocess.CalledProcessError):
+        except (OSError, subprocess.CalledProcessError, PermissionError):
             return False
         command = str(result.stdout)
         return str(self.worker_script) in command and str(config_path) in command
@@ -3025,6 +3033,31 @@ def dispatch_missing_capabilities(
     return missing
 
 
+def door_principal_id(
+    board_id: str,
+    role: str,
+    central_url: str,
+    issuer: str | None = None,
+) -> str:
+    actual_issuer = issuer if issuer is not None else door_admin.default_issuer(central_url)
+    client_id = f"door-{board_id}-{role}"
+    subject = f"door:{board_id}:{role}"
+    canonical = json.dumps([client_id, actual_issuer, subject], separators=(",", ":"))
+    return "PR-" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+async def _client_call(client: Any, name: str, arguments: dict[str, Any]) -> Any:
+    method = getattr(client, name, None)
+    if callable(method):
+        try:
+            return await method(**arguments)
+        except TypeError:
+            return await method()
+    if hasattr(client, "_call"):
+        return await client._call(name, arguments)
+    raise AttributeError(f"Client {type(client).__name__} does not support {name}")
+
+
 class FleetFetcher:
     def __init__(
         self,
@@ -3887,6 +3920,408 @@ class FleetFetcher:
             "config": clean,
             "expected_sha256": hashlib.sha256(encoded.encode("utf-8")).hexdigest(),
             "concurrency": "cas" if expected_sha256 is not None else "lww",
+        }
+
+    def _require_doors_config(self) -> tuple[Path, Path]:
+        keys_dir = self.config.doors_keys_dir
+        jwks_path = self.config.jwks_path
+        if not keys_dir or not jwks_path:
+            raise ValueError(
+                "Doors configuration missing: PURSERS_DOORS_KEYS_DIR and PURSERS_JWKS_PATH must be set"
+            )
+        return Path(keys_dir).expanduser().resolve(), Path(jwks_path).expanduser().resolve()
+
+    async def fetch_doors(self) -> dict[str, Any]:
+        keys_dir, jwks_path = self._require_doors_config()
+        reg_payload = await self.fetch_project_registry()
+        registry = reg_payload.get("registry", {})
+        projects = registry.get("projects", {}) if isinstance(registry, dict) else {}
+
+        doors_meta = door_admin.list_doors(jwks_path)
+        doors_by_key = {(d["board"], d["role"]): d for d in doors_meta}
+
+        fleet = await self.fetch()
+        agent_activity: dict[str, str | None] = {}
+        for agent in fleet.get("agents", []):
+            if isinstance(agent, dict) and "agent_name" in agent:
+                agent_activity[agent["agent_name"]] = agent.get("last_seen")
+
+        rows: list[dict[str, Any]] = []
+        for project_name, entry in projects.items():
+            if not isinstance(entry, dict) or entry.get("status") != "active":
+                continue
+            board_id = entry.get("board_id")
+            if not board_id:
+                continue
+
+            await self._require_board_admin(str(board_id))
+
+            board_members_list: list[dict[str, Any]] = []
+            try:
+                async with self._client(board_id) as client:
+                    res = await _client_call(client, "board_members", {})
+                    board_members_list = res.get("members", [])
+            except PermissionError:
+                raise
+            except Exception:
+                board_members_list = []
+
+            members_by_pid = {
+                m.get("principal_id"): m
+                for m in board_members_list
+                if isinstance(m, dict) and "principal_id" in m
+            }
+
+            for role in ("worker", "reviewer"):
+                key_info = doors_by_key.get((board_id, role))
+                door_pid = door_principal_id(board_id, role, self.config.url)
+                mem = members_by_pid.get(door_pid, {})
+                agent_names = mem.get("agent_names", [])
+                seats = [
+                    {
+                        "agent_name": name,
+                        "last_activity": agent_activity.get(name),
+                    }
+                    for name in agent_names
+                ]
+                rows.append({
+                    "project": project_name,
+                    "board_id": board_id,
+                    "role": role,
+                    "kid": key_info.get("kid") if key_info else None,
+                    "exp": key_info.get("exp") if key_info else None,
+                    "seats": seats,
+                })
+
+        return {"ok": True, "doors": rows}
+
+    async def _require_board_admin(self, board_id: str) -> None:
+        async with self._client(board_id) as client:
+            response = await _client_call(client, "board_list", {})
+        boards = response.get("boards", []) if isinstance(response, dict) else []
+        membership = next(
+            (
+                row.get("membership_role")
+                for row in boards
+                if isinstance(row, dict) and row.get("board_id") == board_id
+            ),
+            None,
+        )
+        if membership != "admin":
+            raise PermissionError(
+                f"board access denied: admin membership required for {board_id!r}"
+            )
+
+    async def _authorize_door_action(self, board_id: str) -> None:
+        reg_payload = await self.fetch_project_registry()
+        registry = reg_payload.get("registry", {}) if isinstance(reg_payload, dict) else {}
+        active_boards = {self.config.home_board}
+        active_boards.update(
+            project.get("board_id")
+            for project in registry.get("projects", {}).values()
+            if isinstance(project, dict) and project.get("status") == "active"
+        )
+        if board_id not in active_boards:
+            raise ValueError(f"board {board_id!r} is not an active registry project")
+        await self._require_board_admin(board_id)
+
+    async def copy_door(self, board_id: str, role: str) -> dict[str, Any]:
+        if not BOARD_ID_RE.fullmatch(board_id):
+            raise ValueError("invalid board_id")
+        if role not in door_admin.VALID_ROLES:
+            raise ValueError("role must be worker or reviewer")
+        keys_dir, jwks_path = self._require_doors_config()
+        await self._authorize_door_action(board_id)
+        issued = door_admin.issue_credential(
+            board=board_id,
+            role=role,
+            central_url=self.config.url,
+            jwks_path=jwks_path,
+            keys_dir=keys_dir,
+            rotate=False,
+        )
+        return {
+            "ok": True,
+            "door_string": issued.door_string,
+            "kid": issued.kid,
+            "exp": issued.claims.get("exp"),
+        }
+
+    async def rotate_door(self, board_id: str, role: str) -> dict[str, Any]:
+        if not BOARD_ID_RE.fullmatch(board_id):
+            raise ValueError("invalid board_id")
+        if role not in door_admin.VALID_ROLES:
+            raise ValueError("role must be worker or reviewer")
+        keys_dir, jwks_path = self._require_doors_config()
+        await self._authorize_door_action(board_id)
+        issued = door_admin.issue_credential(
+            board=board_id,
+            role=role,
+            central_url=self.config.url,
+            jwks_path=jwks_path,
+            keys_dir=keys_dir,
+            rotate=True,
+        )
+        return {
+            "ok": True,
+            "door_string": issued.door_string,
+            "kid": issued.kid,
+            "exp": issued.claims.get("exp"),
+            "warning": "Seats on the previous key must re-join with the new door string.",
+        }
+
+    async def add_project(
+        self,
+        *,
+        project_name: str,
+        board_id: str,
+        work_dir: str,
+        integration_ref: str = "main",
+        seats_manager: Any = None,
+    ) -> dict[str, Any]:
+        keys_dir, jwks_path = self._require_doors_config()
+        if not isinstance(project_name, str) or not project_name.strip():
+            raise ValueError("project name must be a non-empty string")
+        project_name = project_name.strip()
+        if not BOARD_ID_RE.fullmatch(board_id):
+            raise ValueError(f"board_id must match {BOARD_ID_RE.pattern}")
+        if not isinstance(work_dir, str) or not os.path.isabs(work_dir):
+            raise ValueError("work_dir must be an absolute path")
+        if (
+            not isinstance(integration_ref, str)
+            or not integration_ref.strip()
+            or integration_ref.startswith("-")
+        ):
+            raise ValueError("integration_ref must be a valid git reference")
+        integration_ref = integration_ref.strip()
+
+        steps: list[dict[str, Any]] = []
+
+        # Step a: registry_admin add (schema v1)
+        reg_payload = await self.fetch_project_registry()
+        registry = copy.deepcopy(reg_payload["registry"])
+        expected_sha256 = reg_payload["expected_sha256"]
+        projects = registry.setdefault("projects", {})
+
+        existing_entry = projects.get(project_name)
+        if (
+            isinstance(existing_entry, dict)
+            and existing_entry.get("board_id") == board_id
+            and existing_entry.get("work_dir") == work_dir
+            and existing_entry.get("status") == "active"
+        ):
+            steps.append({
+                "step": "registry_admin",
+                "status": "already present",
+                "message": f"Project {project_name!r} already registered.",
+            })
+        else:
+            new_entry = {
+                "board_id": board_id,
+                "work_dir": work_dir,
+                "status": "active",
+            }
+            if isinstance(existing_entry, dict) and "fleet_clone_dir" in existing_entry:
+                new_entry["fleet_clone_dir"] = existing_entry["fleet_clone_dir"]
+            if integration_ref != "main":
+                new_entry["integration_ref"] = integration_ref
+            projects[project_name] = new_entry
+            saved = await self.save_project_registry(registry, expected_sha256)
+            expected_sha256 = saved["expected_sha256"]
+            steps.append({
+                "step": "registry_admin",
+                "status": "created",
+                "message": f"Project {project_name!r} added to project registry.",
+            })
+
+        # Step b: board create + first board_onboard as admin (or detect existing)
+        board_already_present = False
+        try:
+            async with self._client(self.config.home_board) as home_client:
+                bl = await _client_call(home_client, "board_list", {})
+                existing_boards = {
+                    b.get("board_id")
+                    for b in bl.get("boards", [])
+                    if isinstance(b, dict)
+                }
+                board_already_present = board_id in existing_boards
+        except Exception:
+            board_already_present = False
+
+        async with self._client(board_id) as client:
+            if board_already_present:
+                steps.append({
+                    "step": "board_create",
+                    "status": "already present",
+                    "message": f"Board {board_id!r} already present.",
+                })
+            else:
+                await _client_call(client, "board_onboard", {"role": "coordinator"})
+                steps.append({
+                    "step": "board_create",
+                    "status": "created",
+                    "message": f"Board {board_id!r} created with admin onboard.",
+                })
+
+            # Step c: board_member_add for worker and reviewer door principals
+            worker_pid = door_principal_id(board_id, "worker", self.config.url)
+            reviewer_pid = door_principal_id(board_id, "reviewer", self.config.url)
+            existing_members = {}
+            try:
+                bm = await _client_call(client, "board_members", {})
+                for m in bm.get("members", []):
+                    if isinstance(m, dict) and "principal_id" in m:
+                        existing_members[m["principal_id"]] = m.get("role")
+            except Exception:
+                existing_members = {}
+
+            worker_present = existing_members.get(worker_pid) in {"member", "admin"}
+            reviewer_present = existing_members.get(reviewer_pid) in {"reviewer", "admin"}
+
+            if not worker_present:
+                await _client_call(
+                    client,
+                    "board_member_add",
+                    {
+                        "agent_name": self.config.agent_name,
+                        "principal_id": worker_pid,
+                        "role": "member",
+                    },
+                )
+            if not reviewer_present:
+                await _client_call(
+                    client,
+                    "board_member_add",
+                    {
+                        "agent_name": self.config.agent_name,
+                        "principal_id": reviewer_pid,
+                        "role": "reviewer",
+                    },
+                )
+
+            if worker_present and reviewer_present:
+                steps.append({
+                    "step": "door_principals",
+                    "status": "already present",
+                    "message": "Door principals (worker and reviewer) already present.",
+                })
+            else:
+                steps.append({
+                    "step": "door_principals",
+                    "status": "created",
+                    "message": "Door principals provisioned on board.",
+                })
+
+            # Step d: dispatch policy defaults and review policy default
+            status = await _client_call(client, "board_status", {})
+            board_obj = (
+                status.get("board", {})
+                if isinstance(status.get("board"), dict)
+                else status
+            )
+            dp = board_obj.get("dispatch_policy") or {}
+            rp = board_obj.get("review_policy")
+
+            dp_match = (
+                dp.get("offer_ttl_s") == 600
+                and dp.get("broadcast_reoffer_s") == 180
+                and dp.get("second_opinion") is True
+                and dp.get("fallback_broadcast") is True
+            )
+            rp_match = (rp == "strict")
+
+            if dp_match and rp_match:
+                steps.append({
+                    "step": "policies",
+                    "status": "already present",
+                    "message": "Dispatch and review policy defaults already present.",
+                })
+            else:
+                await _client_call(
+                    client,
+                    "board_dispatch_policy_set",
+                    {
+                        "offer_ttl_s": 600,
+                        "broadcast_reoffer_s": 180,
+                        "second_opinion": True,
+                        "fallback_broadcast": True,
+                    },
+                )
+                await _client_call(
+                    client,
+                    "board_review_policy_set",
+                    {"review_policy": "strict"},
+                )
+                steps.append({
+                    "step": "policies",
+                    "status": "configured",
+                    "message": "Dispatch and review policy defaults configured.",
+                })
+
+        # Step e: fleet clone prepare (existing prepare_fleet_clone path)
+        if seats_manager is not None and hasattr(seats_manager, "prepare_fleet_clone"):
+            reg_payload = await self.fetch_project_registry()
+            reg_entry = reg_payload["registry"]["projects"].get(project_name, {})
+            clone_dir_str = reg_entry.get("fleet_clone_dir")
+            already_cloned = False
+            if clone_dir_str:
+                clone_path = Path(clone_dir_str).expanduser().resolve()
+                if clone_path.exists():
+                    try:
+                        cstate = seats_manager._clone_state(clone_path, integration_ref)
+                        if cstate.get("status") == "ready" and not cstate.get("dirty"):
+                            already_cloned = True
+                    except Exception:
+                        already_cloned = False
+
+            if already_cloned:
+                steps.append({
+                    "step": "fleet_clone",
+                    "status": "already present",
+                    "message": f"Fleet clone already present at {clone_dir_str}.",
+                })
+            else:
+                prepared = seats_manager.prepare_fleet_clone(reg_payload, project_name)
+                await self.save_project_registry(
+                    prepared["registry"], prepared["expected_sha256"]
+                )
+                steps.append({
+                    "step": "fleet_clone",
+                    "status": "prepared",
+                    "message": f"Fleet clone prepared at {prepared['clone']['path']}.",
+                })
+        else:
+            steps.append({
+                "step": "fleet_clone",
+                "status": "already present",
+                "message": "Fleet clone step skipped (no seats manager).",
+            })
+
+        # Issue door strings
+        worker_door = door_admin.issue_credential(
+            board=board_id,
+            role="worker",
+            central_url=self.config.url,
+            jwks_path=jwks_path,
+            keys_dir=keys_dir,
+            rotate=False,
+        )
+        reviewer_door = door_admin.issue_credential(
+            board=board_id,
+            role="reviewer",
+            central_url=self.config.url,
+            jwks_path=jwks_path,
+            keys_dir=keys_dir,
+            rotate=False,
+        )
+
+        return {
+            "ok": True,
+            "steps": steps,
+            "doors": {
+                "worker": worker_door.door_string,
+                "reviewer": reviewer_door.door_string,
+            },
         }
 
 
@@ -5291,6 +5726,51 @@ class DashboardCache:
             label,
         )
 
+    def get_doors(self, central: str | None = None) -> dict[str, Any]:
+        label = self.resolve_central(central)
+        return self._labeled(
+            asyncio.run(self.fetchers[label].fetch_doors()), label
+        )
+
+    def copy_door(
+        self, board_id: str, role: str, central: str | None = None
+    ) -> dict[str, Any]:
+        label = self.resolve_central(central)
+        return self._labeled(
+            asyncio.run(self.fetchers[label].copy_door(board_id, role)), label
+        )
+
+    def rotate_door(
+        self, board_id: str, role: str, central: str | None = None
+    ) -> dict[str, Any]:
+        label = self.resolve_central(central)
+        return self._labeled(
+            asyncio.run(self.fetchers[label].rotate_door(board_id, role)), label
+        )
+
+    def add_project(
+        self,
+        project_name: str,
+        board_id: str,
+        work_dir: str,
+        integration_ref: str = "main",
+        seats_manager: Any = None,
+        central: str | None = None,
+    ) -> dict[str, Any]:
+        label = self.resolve_central(central)
+        return self._labeled(
+            asyncio.run(
+                self.fetchers[label].add_project(
+                    project_name=project_name,
+                    board_id=board_id,
+                    work_dir=work_dir,
+                    integration_ref=integration_ref,
+                    seats_manager=seats_manager,
+                )
+            ),
+            label,
+        )
+
 
 HTML = r"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -5703,6 +6183,194 @@ if(navKind()==='overview')renderHub();
     "</style>",
     ".dispatch-form{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.dispatch-form label{display:grid;gap:4px}.dispatch-form input,.dispatch-form button{background:var(--panel2);border:1px solid var(--line);border-radius:8px;color:var(--text);padding:7px}.ops-grid-2{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px}.ops-button-group{display:flex;flex-wrap:wrap;gap:8px;margin:10px 0}.ops-output{background:var(--panel2,#18181b);border:1px solid var(--line,#27272a);border-radius:8px;padding:10px;font-family:monospace;font-size:12px;max-height:160px;overflow-y:auto;white-space:pre-wrap;word-break:break-all}.status.pass{background:rgba(34,197,94,0.15);color:#22c55e;border:1px solid rgba(34,197,94,0.3);padding:2px 6px;border-radius:4px;font-size:11px}.status.fail{background:rgba(239,68,68,0.15);color:#ef4444;border:1px solid rgba(239,68,68,0.3);padding:2px 6px;border-radius:4px;font-size:11px}.status.warn{background:rgba(234,179,8,0.15);color:#eab308;border:1px solid rgba(234,179,8,0.3);padding:2px 6px;border-radius:4px;font-size:11px}</style>",
     1,
+).replace(
+    "</script></body>",
+    r"""
+</script><script>
+let doorsData = {doors: []};
+function doorsPanel() {
+  const doors = doorsData.doors || [];
+  return `<section class="card pool" id="doors-panel">
+    <div class="section-title">
+      <h3>Doors</h3>
+      <span class="status">${doors.length} door keys</span>
+    </div>
+    <p class="muted">Per-project door credentials for worker and reviewer seats. Copy door string to onboard a seat, or Rotate to generate a new key.</p>
+    <div id="door-rotate-warning" class="warning" style="display:none;margin-bottom:10px;"></div>
+    <div id="door-copy-status" class="status pass" style="display:none;margin-bottom:10px;"></div>
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr>
+            <th>Project / Board</th>
+            <th>Role</th>
+            <th>Key ID (kid)</th>
+            <th>Expires</th>
+            <th>Seats on door</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${doors.length ? doors.map(d => `<tr>
+            <td><b>${esc(d.project)}</b><div class="meta">${esc(d.board_id)}</div></td>
+            <td><span class="status">${esc(d.role)}</span></td>
+            <td><span class="id">${esc(d.kid || 'not issued')}</span></td>
+            <td class="meta">${d.exp ? esc(new Date(d.exp * 1000).toLocaleDateString()) : '—'}</td>
+            <td>${d.seats && d.seats.length ? d.seats.map(s => `<div><b>${esc(s.agent_name)}</b> <span class="meta">${esc(relativeAge(s.last_activity))}</span></div>`).join('') : '<span class="muted">None active</span>'}</td>
+            <td>
+              <div class="worker-actions">
+                <button type="button" data-door-action="copy" data-board="${esc(d.board_id)}" data-role="${esc(d.role)}">Copy door string</button>
+                <button type="button" data-door-action="rotate" data-board="${esc(d.board_id)}" data-role="${esc(d.role)}">Rotate</button>
+              </div>
+            </td>
+          </tr>`).join('') : '<tr><td colspan="6" class="empty">No doors available. Configure PURSERS_DOORS_KEYS_DIR and PURSERS_JWKS_PATH.</td></tr>'}
+        </tbody>
+      </table>
+    </div>
+  </section>`;
+}
+
+function addProjectPanel() {
+  return `<section class="card pool" id="add-project-panel">
+    <div class="section-title">
+      <h3>Add project</h3>
+      <span class="status">Single action</span>
+    </div>
+    <p class="muted">Add a project to registry, create its board, onboard admin, add door principals, set policy defaults, and prepare fleet clone in one click.</p>
+    <form id="add-project-form" class="dispatch-form" style="margin-top:12px">
+      <label>Project name <input name="name" required placeholder="my-service"></label>
+      <label>Board ID <input name="board_id" required pattern="[A-Za-z0-9._-]{1,80}" placeholder="my-service"></label>
+      <label>Work dir (operator checkout) <input name="work_dir" required placeholder="/absolute/path/to/repo"></label>
+      <label>Integration ref <input name="integration_ref" value="main" placeholder="main"></label>
+      <div style="grid-column:1/-1">
+        <button type="submit" class="primary-action" id="add-project-submit">Add project</button>
+      </div>
+    </form>
+    <div id="add-project-result" style="display:none;margin-top:16px"></div>
+  </section>`;
+}
+
+const renderSeatsBeforeDoors = renderSeats;
+renderSeats = function() {
+  return renderSeatsBeforeDoors() + addProjectPanel() + doorsPanel();
+};
+
+const refreshSeatsBeforeDoors = refreshSeats;
+refreshSeats = async function() {
+  await refreshSeatsBeforeDoors();
+  try {
+    const central = centralLabels[0];
+    if (central) {
+      doorsData = await fetchJson('/api/doors?' + apiCentral(central));
+    }
+  } catch (e) {
+    doorsData = { doors: [] };
+  }
+};
+
+const seatClickBeforeDoors = seatClick;
+seatClick = async function(event) {
+  const doorBtn = event.target.closest('[data-door-action]');
+  if (doorBtn) {
+    const action = doorBtn.dataset.doorAction;
+    const board = doorBtn.dataset.board;
+    const role = doorBtn.dataset.role;
+    doorBtn.disabled = true;
+    const central = centralLabels[0];
+    try {
+      if (action === 'copy') {
+        const res = await configPost(`/api/doors/copy?${apiCentral(central)}`, {board, role});
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          await navigator.clipboard.writeText(res.door_string);
+        }
+        const st = document.querySelector('#door-copy-status');
+        if (st) {
+          st.textContent = `Door string copied for ${board} (${role}). Door strings are shown only once.`;
+          st.style.display = 'block';
+          setTimeout(() => { st.style.display = 'none'; }, 6000);
+        }
+      } else if (action === 'rotate') {
+        const res = await configPost(`/api/doors/rotate?${apiCentral(central)}`, {board, role});
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          await navigator.clipboard.writeText(res.door_string);
+        }
+        const warn = document.querySelector('#door-rotate-warning');
+        if (warn) {
+          warn.textContent = `Rotated ${board} (${role}) to key ${res.kid}. Warning: ${res.warning}`;
+          warn.style.display = 'block';
+        }
+        await refreshSeats();
+        renderHub();
+      }
+    } catch (e) {
+      alert(`Door action failed: ${e.message}`);
+    } finally {
+      doorBtn.disabled = false;
+    }
+    return;
+  }
+  const copyInputBtn = event.target.closest('[data-copy-input]');
+  if (copyInputBtn) {
+    const input = document.getElementById(copyInputBtn.dataset.copyInput);
+    if (input) {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(input.value);
+      }
+      copyInputBtn.textContent = 'Copied';
+      setTimeout(() => { copyInputBtn.textContent = 'Copy'; }, 2000);
+    }
+    return;
+  }
+  return seatClickBeforeDoors(event);
+};
+
+const bindSeatsBeforeDoors = bindSeats;
+bindSeats = function() {
+  bindSeatsBeforeDoors();
+  const addForm = document.querySelector('#add-project-form');
+  if (addForm && !addForm.dataset.bound) {
+    addForm.dataset.bound = 'true';
+    addForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const btn = document.querySelector('#add-project-submit');
+      if (btn) btn.disabled = true;
+      const resultDiv = document.querySelector('#add-project-result');
+      if (resultDiv) {
+        resultDiv.style.display = 'block';
+        resultDiv.innerHTML = '<p class="muted">Running Add project steps in order…</p>';
+      }
+      const central = centralLabels[0];
+      const payload = {
+        name: addForm.elements.name.value.trim(),
+        board_id: addForm.elements.board_id.value.trim(),
+        work_dir: addForm.elements.work_dir.value.trim(),
+        integration_ref: addForm.elements.integration_ref.value.trim() || 'main'
+      };
+      try {
+        const res = await configPost(`/api/projects/add?${apiCentral(central)}`, payload);
+        let out = '<h4>Setup steps:</h4><ul style="list-style:none;padding-left:0">';
+        for (const s of (res.steps || [])) {
+          const badgeClass = s.status === 'already present' ? 'warn' : 'pass';
+          out += `<li style="margin:4px 0"><b>${esc(s.step)}:</b> <span class="status ${badgeClass}">${esc(s.status)}</span> — <span class="meta">${esc(s.message)}</span></li>`;
+        }
+        out += '</ul>';
+        if (res.doors) {
+          out += '<h4>Door strings (returned once, copy now):</h4>';
+          out += `<div style="margin:6px 0"><b>Worker door:</b> <input type="password" value="${esc(res.doors.worker)}" id="new-worker-door" readonly style="width:300px"> <button type="button" data-copy-input="new-worker-door">Copy</button></div>`;
+          out += `<div style="margin:6px 0"><b>Reviewer door:</b> <input type="password" value="${esc(res.doors.reviewer)}" id="new-reviewer-door" readonly style="width:300px"> <button type="button" data-copy-input="new-reviewer-door">Copy</button></div>`;
+        }
+        if (resultDiv) resultDiv.innerHTML = out;
+        await refreshSeats();
+      } catch (err) {
+        if (resultDiv) resultDiv.innerHTML = `<p class="error">Add project failed: ${esc(err.message)}</p>`;
+      } finally {
+        if (btn) btn.disabled = false;
+      }
+    });
+  }
+};
+</script></body>""",
+    1,
 )
 
 
@@ -5738,8 +6406,10 @@ def make_handler(
             return resolver(value)
         return value or "default"
 
-    def cache_call(name: str, *args: Any, central: str | None) -> dict[str, Any]:
+    def cache_call(name: str, *args: Any, central: str | None, **kwargs: Any) -> dict[str, Any]:
         method = getattr(cache, name)
+        if kwargs:
+            return method(*args, central=central, **kwargs)
         return method(*args) if central is None else method(*args, central)
 
     def fleet_seats(central: str | None) -> set[str]:
@@ -5939,6 +6609,71 @@ def make_handler(
                     return
                 self._send(200, "application/json; charset=utf-8", body)
                 return
+            if route == "/api/doors":
+                try:
+                    is_loopback = ipaddress.ip_address(
+                        self.client_address[0]
+                    ).is_loopback
+                except ValueError:
+                    is_loopback = False
+                if not is_loopback:
+                    self._send(
+                        403,
+                        "application/json; charset=utf-8",
+                        b'{"error":"loopback required"}',
+                    )
+                    return
+                host = self.headers.get("Host", "")
+                try:
+                    parsed_host = urlsplit("//" + host)
+                    hostname = (parsed_host.hostname or "").casefold()
+                    port = parsed_host.port or 80
+                    loopback_host = hostname == "localhost" or ipaddress.ip_address(
+                        hostname
+                    ).is_loopback
+                except ValueError:
+                    loopback_host = False
+                server_port = int(getattr(self.server, "server_port", 0))
+                if not loopback_host or (server_port and port != server_port):
+                    self._send(
+                        403,
+                        "application/json; charset=utf-8",
+                        b'{"error":"loopback Host required"}',
+                    )
+                    return
+                origin = self.headers.get("Origin")
+                if origin is not None and origin != "http://" + host:
+                    self._send(
+                        403,
+                        "application/json; charset=utf-8",
+                        b'{"error":"same-origin request required"}',
+                    )
+                    return
+                try:
+                    body = _json_bytes(cache_call("get_doors", central=central))
+                except ValueError as exc:
+                    self._send(
+                        400,
+                        "application/json; charset=utf-8",
+                        _json_bytes({"error": str(exc), "central": label}),
+                    )
+                    return
+                except PermissionError as exc:
+                    self._send(
+                        403,
+                        "application/json; charset=utf-8",
+                        _json_bytes({"error": str(exc), "central": label}),
+                    )
+                    return
+                except Exception as exc:  # noqa: BLE001
+                    self._send(
+                        503,
+                        "application/json; charset=utf-8",
+                        _json_bytes({"error": type(exc).__name__, "central": label}),
+                    )
+                    return
+                self._send(200, "application/json; charset=utf-8", body)
+                return
             if route == "/api/overhead":
                 try:
                     resolver = getattr(cache, "overhead_path", None)
@@ -6113,6 +6848,9 @@ def make_handler(
                 "/api/agents/retire-inert",
                 "/api/attention",
                 "/api/human/resolve",
+                "/api/doors/copy",
+                "/api/doors/rotate",
+                "/api/projects/add",
             }
             worker_action = re.fullmatch(
                 r"/api/workers/([a-z0-9-]{2,32})/(test|start|stop|restart)", route
@@ -6299,6 +7037,50 @@ def make_handler(
                             central=central,
                         )
                     )
+                elif route == "/api/doors/copy":
+                    if not isinstance(request, dict) or set(request) != {"board", "role"}:
+                        raise ValueError("request must contain only board and role")
+                    body = _json_bytes(
+                        cache_call(
+                            "copy_door",
+                            request["board"],
+                            request["role"],
+                            central=central,
+                        )
+                    )
+                elif route == "/api/doors/rotate":
+                    if not isinstance(request, dict) or set(request) != {"board", "role"}:
+                        raise ValueError("request must contain only board and role")
+                    body = _json_bytes(
+                        cache_call(
+                            "rotate_door",
+                            request["board"],
+                            request["role"],
+                            central=central,
+                        )
+                    )
+                elif route == "/api/projects/add":
+                    if not isinstance(request, dict):
+                        raise ValueError("request must be an object")
+                    req_fields = {"name", "board_id", "work_dir"}
+                    opt_fields = {"integration_ref"}
+                    if not req_fields.issubset(set(request)) or not set(request).issubset(
+                        req_fields | opt_fields
+                    ):
+                        raise ValueError(
+                            f"request must contain {', '.join(sorted(req_fields))} and optionally integration_ref"
+                        )
+                    body = _json_bytes(
+                        cache_call(
+                            "add_project",
+                            request["name"],
+                            request["board_id"],
+                            request["work_dir"],
+                            request.get("integration_ref", "main"),
+                            seats,
+                            central=central,
+                        )
+                    )
                 elif route == "/api/workers":
                     body = _json_bytes(
                         {
@@ -6397,6 +7179,13 @@ def make_handler(
                     _json_bytes({"error": "KeyError", "central": label}),
                 )
                 return
+            except PermissionError as exc:
+                self._send(
+                    403,
+                    "application/json; charset=utf-8",
+                    _json_bytes({"error": str(exc), "central": label}),
+                )
+                return
             except (ValueError, TypeError, json.JSONDecodeError) as exc:
                 self._send(
                     400,
@@ -6472,6 +7261,16 @@ def _read_mode_0600(path: Path, description: str) -> str:
 
 def load_central_configs(args: argparse.Namespace) -> list[Config]:
     """Load ordered multi-central config without exposing token material."""
+    cli_keys_dir = (
+        Path(args.doors_keys_dir).expanduser().resolve()
+        if getattr(args, "doors_keys_dir", None)
+        else None
+    )
+    cli_jwks = (
+        Path(args.jwks_path).expanduser().resolve()
+        if getattr(args, "jwks_path", None)
+        else None
+    )
     if not args.centrals:
         return [
             Config(
@@ -6481,6 +7280,8 @@ def load_central_configs(args: argparse.Namespace) -> list[Config]:
                 agent_name=args.agent_name,
                 stale_seconds=args.stale_seconds,
                 cache_seconds=args.cache_seconds,
+                doors_keys_dir=cli_keys_dir,
+                jwks_path=cli_jwks,
             )
         ]
     source = Path(args.centrals).expanduser().resolve()
@@ -6495,7 +7296,7 @@ def load_central_configs(args: argparse.Namespace) -> list[Config]:
     seen: set[str] = set()
     for index, entry in enumerate(entries):
         required = {"label", "url", "token_path", "home_board"}
-        allowed = required | {"stats_path"}
+        allowed = required | {"stats_path", "doors_keys_dir", "jwks_path"}
         if (
             not isinstance(entry, dict)
             or not required <= set(entry)
@@ -6503,7 +7304,7 @@ def load_central_configs(args: argparse.Namespace) -> list[Config]:
         ):
             raise SystemExit(
                 f"centrals entry {index} must contain label, url, token_path, "
-                "and home_board, with optional stats_path"
+                "and home_board, with optional stats_path, doors_keys_dir, and jwks_path"
             )
         label, url, token_path, home_board = (
             entry.get("label"),
@@ -6526,6 +7327,24 @@ def load_central_configs(args: argparse.Namespace) -> list[Config]:
             not isinstance(raw_stats_path, str) or not raw_stats_path
         ):
             raise SystemExit(f"centrals entry {index} has an invalid stats_path")
+        raw_keys_dir = entry.get("doors_keys_dir")
+        keys_dir = cli_keys_dir
+        if raw_keys_dir is not None:
+            if not isinstance(raw_keys_dir, str) or not raw_keys_dir:
+                raise SystemExit(f"centrals entry {index} has an invalid doors_keys_dir")
+            p = Path(raw_keys_dir).expanduser()
+            if not p.is_absolute():
+                p = source.parent / p
+            keys_dir = p.resolve()
+        raw_jwks = entry.get("jwks_path")
+        jwks_path = cli_jwks
+        if raw_jwks is not None:
+            if not isinstance(raw_jwks, str) or not raw_jwks:
+                raise SystemExit(f"centrals entry {index} has an invalid jwks_path")
+            p = Path(raw_jwks).expanduser()
+            if not p.is_absolute():
+                p = source.parent / p
+            jwks_path = p.resolve()
         token_file = Path(token_path).expanduser()
         if not token_file.is_absolute():
             token_file = source.parent / token_file
@@ -6549,6 +7368,8 @@ def load_central_configs(args: argparse.Namespace) -> list[Config]:
                 cache_seconds=args.cache_seconds,
                 label=label,
                 overhead_path=stats_path,
+                doors_keys_dir=keys_dir,
+                jwks_path=jwks_path,
             )
         )
         seen.add(label)
@@ -6563,6 +7384,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--url", default=os.environ.get("ONBOARD_CENTRAL_URL", DEFAULT_URL)
     )
     parser.add_argument("--token-file")
+    parser.add_argument(
+        "--doors-keys-dir",
+        default=os.environ.get("PURSERS_DOORS_KEYS_DIR"),
+        help="Directory for door RSA private keys (default: $PURSERS_DOORS_KEYS_DIR)",
+    )
+    parser.add_argument(
+        "--jwks-path",
+        default=os.environ.get("PURSERS_JWKS_PATH"),
+        help="Path to public JWKS file (default: $PURSERS_JWKS_PATH)",
+    )
     parser.add_argument(
         "--centrals",
         help=(
