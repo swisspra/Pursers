@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 
 from .harness import (
@@ -7,9 +10,11 @@ from .harness import (
     MUTATION_OPT_IN,
     SEQUENCE,
     AcceptanceError,
+    RepositoryCapabilities,
     discover_repository_capabilities,
     redact,
     require_mutation_opt_in,
+    validate_evidence_report,
     validate_live_target,
 )
 
@@ -95,3 +100,44 @@ def test_redaction_removes_sensitive_keys_and_values() -> None:
         "nested": ["[REDACTED]", {"jwt": "[REDACTED]"}],
         "safe": "worker",
     }
+
+
+def test_evidence_validation_stops_when_sibling_contracts_are_missing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("PURSERS_HOME_ACCEPTANCE_MUTATE", MUTATION_OPT_IN)
+    report = tmp_path / "evidence.json"
+    report.write_text("{}", encoding="utf-8")
+    with pytest.raises(AcceptanceError, match="sibling interface capabilities unavailable"):
+        validate_evidence_report(
+            report,
+            validate_live_target("http://127.0.0.1:8765", "sandbox-home"),
+            discover_repository_capabilities(),
+        )
+
+
+def test_synthetic_report_cannot_establish_gui_acceptance(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("PURSERS_HOME_ACCEPTANCE_MUTATE", MUTATION_OPT_IN)
+    report = tmp_path / "evidence.json"
+    report.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "evidence_kind": "synthetic",
+                "mocked": True,
+                "synthetic": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    capabilities = RepositoryCapabilities((), (), (), (), ())
+    with pytest.raises(AcceptanceError, match="real_browser_host"):
+        validate_evidence_report(
+            report,
+            validate_live_target("http://127.0.0.1:8765", "sandbox-home"),
+            capabilities,
+        )
