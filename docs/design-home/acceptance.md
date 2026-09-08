@@ -39,6 +39,13 @@ ticket lifecycle, or result-visibility contracts required for destructive
 acceptance. When sibling implementations land, update discovery only from
 their shipped interface contract; do not invent routes or fixtures here.
 
+This matrix uses the dashboard sibling's published inventory from
+`TK-f8a62bab8d05` at `dfa4fa535bbc9aa665f0d8856971472651659af5`. That
+artifact enumerates the Personal, Fleet Dashboard, extension, and Personal MCP
+server surfaces. The Team adapter `TK-628602eedb90` and door onboarding
+`TK-4ba6bd1964de` had not published implementation contracts at this snapshot,
+so their mutation steps remain blocked rather than inferred.
+
 An installed real host can be probed read-only:
 
 ```sh
@@ -124,6 +131,9 @@ offers, pending human approvals, and reconnect behavior are cross-cutting cases.
   edges, pinned state, truncation, unavailable, and no-link states.
 - Activity: scope disclosure, ordered bounded feed, cursor, dropped events,
   has-more/resync notice, stale/error/offline behavior, and no-activity state.
+- Data sources: `board_snapshot`, `fleet_snapshot`, `link_snapshot`, and
+  `board_event_feed`; confirm visibility boundaries without exposing or
+  acknowledging the complete Central journal.
 
 ### Fleet Dashboard
 
@@ -132,8 +142,11 @@ offers, pending human approvals, and reconnect behavior are cross-cutting cases.
 - Online/busy/available/stale pool metrics; board cards, ticket counts, bounded
   active rows; agent pool, current claims, duplicate names, retired/stale drawer;
   board detail, ticket metadata, activity, and truncation.
-- Protocol overhead and coordinator configuration, including empty/unavailable
-  diagnostics and pending human input.
+- Overview, Boards, Agents, and Operations hubs; board Tickets, Timeline,
+  Changes, Flow, and Routes tabs; default-Central aliases and unknown-route
+  recovery.
+- Protocol overhead, coordinator configuration, worker management, intake, and
+  findings, including empty/unavailable diagnostics and pending human input.
 - Config: seat inventory, discovery/import conflicts, add/update preview, exact
   diff confirmation, bridge versions, Doctor, tier/skill/role capabilities,
   current offers, dispatch policy/gaps/history, and registry work trees.

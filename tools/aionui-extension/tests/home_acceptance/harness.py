@@ -72,9 +72,18 @@ REQUIRED_INVENTORY = frozenset(
         "fleet.board_cards",
         "fleet.active_tickets",
         "fleet.agent_pool",
-        "fleet.board_detail",
+        "fleet.overview",
+        "fleet.boards_hub",
+        "fleet.agents_hub",
+        "fleet.operations_hub",
+        "fleet.board_tickets",
+        "fleet.board_timeline",
+        "fleet.board_changes",
+        "fleet.board_flow",
+        "fleet.board_routes",
         "fleet.overhead",
         "fleet.coordinator_config",
+        "fleet.workers",
         "fleet.seat_inventory",
         "fleet.seat_import",
         "fleet.bridge",
@@ -119,22 +128,12 @@ class LiveTarget:
 
 
 def _semantic_capabilities(routes: tuple[str, ...]) -> set[str]:
-    lowered = tuple(route.lower() for route in routes)
+    lowered = {route.lower() for route in routes}
     capabilities = {"read_only_discovery"}
     if "/pursers/join" in lowered:
         capabilities.add("door_join")
     if "/pursers/status" in lowered:
         capabilities.add("seat_status")
-    if any("team" in route for route in lowered):
-        capabilities.add("team_lifecycle")
-    if any("rotate" in route for route in lowered):
-        capabilities.add("door_rotation")
-    if any(any(word in route for word in ("pause", "resume", "stop")) for route in lowered):
-        capabilities.add("seat_lifecycle")
-    if any("ticket" in route for route in lowered):
-        capabilities.add("ticket_lifecycle")
-    if any(any(word in route for word in ("result", "dashboard", "home")) for route in lowered):
-        capabilities.add("result_visibility")
     return capabilities
 
 
