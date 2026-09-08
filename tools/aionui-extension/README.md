@@ -1,7 +1,9 @@
 # Pursers for AionUi
 
-This extension adds Pursers Worker and Pursers Reviewer presets and a Pursers
-settings tab for joining a seat with one coordinator-issued door.
+This extension adds a guided Pursers Home plus Worker and Reviewer presets. Home
+connects one project with a coordinator-issued door, prepares distinct Team
+seats through a dry-run-first plan, reports partial results, and exposes bounded
+pause, stop, recovery, and roster controls.
 
 ## Build and install
 
@@ -18,12 +20,16 @@ The Join tab expects `pursers-wait-bridge` on AionUi's executable path. Install
 it with `uv tool install pursers-wait-bridge` or
 `pipx install pursers-wait-bridge` if the tab reports that it is missing.
 
-## Join a seat
+## Set up a project
 
 1. Open Settings, then Pursers.
-2. Paste the door supplied by your coordinator and select Join.
-3. Confirm the redacted board, role, seat name, push mode, key ID, and expiry.
-4. Start a new conversation and pick the matching Worker or Reviewer preset.
+2. Paste the door supplied by your coordinator, check it, and connect. The input
+   is cleared immediately and status only shows redacted metadata.
+3. Open an existing AionUi Team conversation. Enter its exact Team and monitor
+   lead identity plus a unique name, folder, role, and tier ceiling per seat.
+4. Preview the Team plan. Starting seats requires a separate confirmation of
+   that exact plan; each result is reported independently.
+5. Start a new conversation and pick the matching Worker or Reviewer preset.
 
 The Join route passes the door directly to `pursers-wait-bridge join`, which
 owns the private mode-0600 credential store. The extension does not log or
@@ -44,6 +50,20 @@ dispatches work. A partial MCP import is recoverable without replaying or
 returning the door. See `door/DOOR_ONBOARDING_CONTRACT.md` for result codes,
 idempotency, and current host limitations.
 
+## Team controls
+
+The authenticated `/pursers/team/` routes use the packaged approved Team
+adapter. Status reads the host roster and task list. Plan is always read-only;
+apply remains dry-run unless the request includes both
+`options.confirm="apply-live"` and `options.dry_run=false`.
+
+Pause interrupts one teammate turn with a safe-checkpoint message. Stop sends a
+cooperative shutdown request and is not reported as complete until roster state
+confirms it. The supported agent-facing host contract cannot create a Team,
+archive a Team, remove a teammate, or resume one; Pursers Home states these
+boundaries instead of simulating them. The dashboard remains the Pursers
+Personal MCP app entrypoint (or `board_snapshot` fallback), not an invented URL.
+
 ## AionUi 2.2.1 limitations
 
 - AionUi lists extension-declared MCP servers but does not inject them into
@@ -54,5 +74,5 @@ idempotency, and current host limitations.
   the conversation explicitly and apply the matching context file.
 - AionUi does not render Pursers MCP elicitation forms. Use the dashboard or the
   coordinator-provided fallback for human-input requests.
-- A full GUI verification is an operator step and is not performed by the build
-  or test suite.
+- Host-connected mutation verification remains an operator step. Repository
+  tests cover the route, secret-handling, package, and static Home contracts.
