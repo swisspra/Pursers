@@ -1,0 +1,40 @@
+:root {
+  --pursers-font-body: "DM Sans", ui-sans-serif, system-ui, sans-serif;
+  --pursers-font-heading: "Manrope", ui-sans-serif, system-ui, sans-serif;
+
+  --pursers-color-canvas: #f7f4ee;
+  --pursers-color-surface: #ffffff;
+  --pursers-color-surface-subtle: #fbfaf7;
+  --pursers-color-surface-muted: #f4f0e8;
+  --pursers-color-text: #26332f;
+  --pursers-color-text-secondary: #66736d;
+  --pursers-color-text-muted: #8b968f;
+  --pursers-color-border: #e6e0d5;
+
+  --pursers-color-action: #367568;
+  --pursers-color-action-hover: #2d6257;
+  --pursers-color-action-soft: #e8f2ed;
+  --pursers-color-success: #4d9a7c;
+  --pursers-color-warning: #d6a34c;
+  --pursers-color-warning-soft: #f0d9b5;
+  --pursers-color-danger: #a85846;
+  --pursers-color-danger-soft: #f8e4d9;
+  --pursers-color-focus: #76aaa0;
+
+  --pursers-radius-control: 0.75rem;
+  --pursers-radius-card: 1.375rem;
+  --pursers-radius-feature: 1.5rem;
+  --pursers-control-min-size: 2.75rem;
+  --pursers-content-max-width: 92.5rem;
+  --pursers-shadow-card: 0 0.5rem 1.875rem rgb(72 63 48 / 5%);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    scroll-behavior: auto !important;
+    transition: none !important;
+  }
+}
