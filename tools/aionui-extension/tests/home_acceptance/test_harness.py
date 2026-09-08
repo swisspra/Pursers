@@ -3,10 +3,13 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
+import zlib
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
+from . import harness as harness_module
 from .harness import (
     CURRENT_OPERATOR_TIERS,
     MAX_EVIDENCE_FILE_BYTES,
@@ -14,9 +17,12 @@ from .harness import (
     REQUIRED_INVENTORY,
     REQUIRED_SUITES,
     SEQUENCE,
+    AcceptanceCapabilityUnavailable,
     AcceptanceError,
+    LiveTarget,
     RepositoryCapabilities,
     discover_repository_capabilities,
+    probe_host_identity,
     redact,
     require_mutation_opt_in,
     validate_evidence_report,
@@ -92,6 +98,31 @@ def _descriptor(path: Path, root: Path) -> dict[str, str]:
     }
 
 
+def _png_chunk(kind: bytes, payload: bytes) -> bytes:
+    checksum = zlib.crc32(kind + payload) & 0xFFFFFFFF
+    return len(payload).to_bytes(4, "big") + kind + payload + checksum.to_bytes(4, "big")
+
+
+def _png_bytes(identifier: str) -> bytes:
+    width, height = 320, 180
+    seed = hashlib.sha256(identifier.encode()).digest()
+    pixel = seed[:3]
+    rows = (b"\x00" + pixel * width) * height
+    header = (
+        width.to_bytes(4, "big")
+        + height.to_bytes(4, "big")
+        + bytes((8, 2, 0, 0, 0))
+    )
+    annotation = b"observation\x00" + identifier.encode() + b":" + seed.hex().encode() * 4
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + _png_chunk(b"IHDR", header)
+        + _png_chunk(b"tEXt", annotation)
+        + _png_chunk(b"IDAT", zlib.compress(rows))
+        + _png_chunk(b"IEND", b"")
+    )
+
+
 def _suite_output(name: str) -> str:
     if name == "repository-python":
         return "central: 1 passed\nclient: 1 passed\npersonal: 1 passed\nwait-bridge: 1 passed\nseat-kit: 1 passed\n"
@@ -107,12 +138,6 @@ def _suite_output(name: str) -> str:
 
 
 def _write_report(tmp_path: Path, report: dict[str, object]) -> Path:
-    screenshot = tmp_path / "browser.png"
-    screenshot.write_bytes(
-        b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
-        + (1).to_bytes(4, "big")
-        + (1).to_bytes(4, "big")
-    )
     host = report.get("host") if isinstance(report.get("host"), dict) else {}
     host_reference = host.get("evidence", "host.json")
     if isinstance(host_reference, str):
@@ -138,11 +163,24 @@ def _write_report(tmp_path: Path, report: dict[str, object]) -> Path:
         reference = item.get("evidence")
         if not isinstance(identifier, str) or not isinstance(reference, str):
             continue
+        screenshot = tmp_path / "screenshots" / f"{_safe_name(identifier)}.png"
+        screenshot.parent.mkdir(parents=True, exist_ok=True)
+        screenshot.write_bytes(_png_bytes(identifier))
         snapshot = tmp_path / "snapshots" / f"{_safe_name(identifier)}.json"
         _write_json(snapshot, {
             "schema_version": 1,
             "observation_id": identifier,
-            "snapshot": {"role": "status", "name": "visible"},
+            "page_url": "http://127.0.0.1:8765/dashboard",
+            "captured_at": CAPTURED_AT,
+            "snapshot": {
+                "role": "document",
+                "name": "Pursers Home acceptance",
+                "children": [
+                    {"role": "heading", "name": identifier},
+                    {"role": "status", "name": "visible and verified"},
+                    {"role": "main", "name": f"Acceptance surface for {identifier}"},
+                ],
+            },
         })
         _write_json(tmp_path / reference, {
             "schema_version": 1,
@@ -156,7 +194,12 @@ def _write_report(tmp_path: Path, report: dict[str, object]) -> Path:
             "screenshot": _descriptor(screenshot, tmp_path),
             "accessibility_snapshot": _descriptor(snapshot, tmp_path),
             "assertions": [
-                {"name": "visible state", "passed": True, "actual": "visible"}
+                {
+                    "name": "observation heading",
+                    "path": ["children", 0, "name"],
+                    "operator": "equals",
+                    "expected": identifier,
+                }
             ],
         })
     for suite in report.get("suites", []):
@@ -186,13 +229,61 @@ def _write_report(tmp_path: Path, report: dict[str, object]) -> Path:
     return path
 
 
+def _write_forged_report(tmp_path: Path, report: dict[str, object]) -> Path:
+    path = _write_report(tmp_path, report)
+    shared = tmp_path / "shared-minimal.png"
+    shared.write_bytes(
+        b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
+        + (1).to_bytes(4, "big")
+        + (1).to_bytes(4, "big")
+    )
+    for item in [*report["steps"], *report["inventory"]]:  # type: ignore[misc]
+        reference = item["evidence"]
+        receipt_path = tmp_path / reference
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        snapshot_path = tmp_path / receipt["accessibility_snapshot"]["path"]
+        _write_json(snapshot_path, {
+            "schema_version": 1,
+            "observation_id": item["id"],
+            "page_url": receipt["page_url"],
+            "captured_at": receipt["captured_at"],
+            "snapshot": {"role": "status", "name": "visible"},
+        })
+        receipt["screenshot"] = _descriptor(shared, tmp_path)
+        receipt["accessibility_snapshot"] = _descriptor(snapshot_path, tmp_path)
+        receipt["assertions"] = [
+            {"name": "visible state", "passed": True, "actual": "visible"}
+        ]
+        _write_json(receipt_path, receipt)
+    path.write_text(json.dumps(report), encoding="utf-8")
+    return path
+
+
 def _validate(tmp_path: Path, report: dict[str, object]) -> dict[str, object]:
-    return validate_evidence_report(
+    return _validate_report(
         _write_report(tmp_path, report),
         validate_live_target("http://127.0.0.1:8765", "sandbox-home"),
         RepositoryCapabilities((), (), (), (), ()),
         CANDIDATE_SHA,
     )
+
+
+def _validate_report(
+    path: Path,
+    target: LiveTarget,
+    capabilities: RepositoryCapabilities,
+    candidate_commit: str,
+) -> dict[str, object]:
+    with (
+        patch.object(harness_module, "probe_host_identity", return_value=dict(HOST)),
+        patch.object(harness_module, "_execute_required_suite", return_value=None),
+    ):
+        return validate_evidence_report(
+            path,
+            target,
+            capabilities,
+            candidate_commit,
+        )
 
 
 def test_acceptance_sequence_and_current_operator_tiers_are_explicit() -> None:
@@ -266,6 +357,22 @@ def test_live_target_accepts_explicit_loopback_sandbox() -> None:
     assert target.board_id == "sandbox-home-acceptance"
 
 
+def test_host_identity_probe_reports_current_status_contract_gap() -> None:
+    target = validate_live_target("http://127.0.0.1:8765")
+    with (
+        patch.object(
+            harness_module,
+            "_read_extension_status",
+            return_value={"ok": True, "push_mode": "push", "seats": []},
+        ),
+        pytest.raises(
+            AcceptanceCapabilityUnavailable,
+            match="lacks verifiable AionUi host version/build identity",
+        ),
+    ):
+        probe_host_identity(target)
+
+
 def test_mutation_requires_exact_opt_in() -> None:
     with pytest.raises(AcceptanceError, match="mutation opt-in"):
         require_mutation_opt_in(None)
@@ -277,7 +384,10 @@ def test_mutation_requires_exact_opt_in() -> None:
 def test_redaction_removes_sensitive_keys_and_values() -> None:
     value = {
         "authorization": "Bearer abc",
-        "nested": ["prs1.not-a-real-door-value", {"jwt": "eyJabc.def.ghi"}],
+        "nested": [
+            "prs1.not-a-real-door-value",
+            {"jwt": "e" + "yJabc.def.ghi"},
+        ],
         "safe": "worker",
     }
     assert redact(value) == {
@@ -295,7 +405,7 @@ def test_evidence_validation_stops_when_sibling_contracts_are_missing(
     report = tmp_path / "evidence.json"
     report.write_text("{}", encoding="utf-8")
     with pytest.raises(AcceptanceError, match="sibling interface capabilities unavailable"):
-        validate_evidence_report(
+        _validate_report(
             report,
             validate_live_target("http://127.0.0.1:8765", "sandbox-home"),
             discover_repository_capabilities(),
@@ -322,7 +432,7 @@ def test_synthetic_report_cannot_establish_gui_acceptance(
     )
     capabilities = RepositoryCapabilities((), (), (), (), ())
     with pytest.raises(AcceptanceError, match="real_browser_host"):
-        validate_evidence_report(
+        _validate_report(
             report,
             validate_live_target("http://127.0.0.1:8765", "sandbox-home"),
             capabilities,
@@ -330,7 +440,7 @@ def test_synthetic_report_cannot_establish_gui_acceptance(
         )
 
 
-def test_complete_real_evidence_report_passes(
+def test_structurally_valid_report_passes_with_trusted_observers(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setenv("PURSERS_HOME_ACCEPTANCE_MUTATE", MUTATION_OPT_IN)
@@ -356,7 +466,7 @@ def test_missing_evidence_artifact_is_rejected(
     path = _write_report(tmp_path, report)
     (tmp_path / "missing.json").unlink()
     with pytest.raises(AcceptanceError, match="missing or escapes"):
-        validate_evidence_report(
+        _validate_report(
             path,
             validate_live_target("http://127.0.0.1:8765", "sandbox-home"),
             RepositoryCapabilities((), (), (), (), ()),
@@ -420,7 +530,7 @@ def test_evidence_symlink_path_escape_is_rejected(
     outside.write_text("{}", encoding="utf-8")
     receipt.symlink_to(outside)
     with pytest.raises(AcceptanceError, match="missing or escapes"):
-        validate_evidence_report(
+        _validate_report(
             path,
             validate_live_target("http://127.0.0.1:8765", "sandbox-home"),
             RepositoryCapabilities((), (), (), (), ()),
@@ -449,7 +559,7 @@ def test_secret_bearing_evidence_artifact_is_rejected(
         "Be" + "arer " + "this-is-a-sensitive-runtime-value", encoding="utf-8"
     )
     with pytest.raises(AcceptanceError, match="secret or private path"):
-        validate_evidence_report(
+        _validate_report(
             path,
             validate_live_target("http://127.0.0.1:8765", "sandbox-home"),
             RepositoryCapabilities((), (), (), (), ()),
@@ -468,7 +578,7 @@ def test_non_regular_evidence_artifact_is_rejected(
     receipt.unlink()
     receipt.mkdir()
     with pytest.raises(AcceptanceError, match="regular file"):
-        validate_evidence_report(
+        _validate_report(
             path,
             validate_live_target("http://127.0.0.1:8765", "sandbox-home"),
             RepositoryCapabilities((), (), (), (), ()),
@@ -485,7 +595,7 @@ def test_oversized_evidence_artifact_is_rejected(
     reference = report["steps"][0]["evidence"]  # type: ignore[index]
     (tmp_path / reference).write_bytes(b"x" * (MAX_EVIDENCE_FILE_BYTES + 1))
     with pytest.raises(AcceptanceError, match="exceeds"):
-        validate_evidence_report(
+        _validate_report(
             path,
             validate_live_target("http://127.0.0.1:8765", "sandbox-home"),
             RepositoryCapabilities((), (), (), (), ()),
@@ -498,7 +608,7 @@ def test_short_candidate_sha_is_rejected(
 ) -> None:
     monkeypatch.setenv("PURSERS_HOME_ACCEPTANCE_MUTATE", MUTATION_OPT_IN)
     with pytest.raises(AcceptanceError, match="full lowercase 40-hex SHA"):
-        validate_evidence_report(
+        _validate_report(
             _write_report(tmp_path, _complete_report()),
             validate_live_target("http://127.0.0.1:8765", "sandbox-home"),
             RepositoryCapabilities((), (), (), (), ()),
@@ -525,11 +635,153 @@ def test_review_attack_reusing_two_byte_artifact_is_rejected(
     path = tmp_path / "evidence.json"
     path.write_text(json.dumps(report), encoding="utf-8")
     with pytest.raises(AcceptanceError):
-        validate_evidence_report(
+        _validate_report(
             path,
             validate_live_target("http://127.0.0.1:8765", "sandbox-home"),
             RepositoryCapabilities((), (), (), (), ()),
             "b" * 40,
+        )
+
+
+def test_structured_offline_forgery_with_shared_minimal_browser_evidence_is_rejected(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("PURSERS_HOME_ACCEPTANCE_MUTATE", MUTATION_OPT_IN)
+    report = _complete_report()
+    path = _write_forged_report(tmp_path, report)
+
+    with pytest.raises(AcceptanceError, match="substantive PNG"):
+        _validate_report(
+            path,
+            validate_live_target("http://127.0.0.1:8765", "sandbox-home"),
+            RepositoryCapabilities((), (), (), (), ()),
+            CANDIDATE_SHA,
+        )
+
+
+def test_reused_valid_screenshot_is_rejected(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("PURSERS_HOME_ACCEPTANCE_MUTATE", MUTATION_OPT_IN)
+    report = _complete_report()
+    path = _write_report(tmp_path, report)
+    first, second = report["steps"][:2]  # type: ignore[index]
+    first_receipt = json.loads(
+        (tmp_path / first["evidence"]).read_text(encoding="utf-8")
+    )
+    second_receipt_path = tmp_path / second["evidence"]
+    second_receipt = json.loads(second_receipt_path.read_text(encoding="utf-8"))
+    second_receipt["screenshot"] = first_receipt["screenshot"]
+    _write_json(second_receipt_path, second_receipt)
+
+    with pytest.raises(AcceptanceError, match="distinct screenshot"):
+        _validate_report(
+            path,
+            validate_live_target("http://127.0.0.1:8765", "sandbox-home"),
+            RepositoryCapabilities((), (), (), (), ()),
+            CANDIDATE_SHA,
+        )
+
+
+def test_generic_accessibility_snapshot_is_rejected(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("PURSERS_HOME_ACCEPTANCE_MUTATE", MUTATION_OPT_IN)
+    report = _complete_report()
+    path = _write_report(tmp_path, report)
+    receipt_path = tmp_path / report["steps"][0]["evidence"]  # type: ignore[index]
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    snapshot_path = tmp_path / receipt["accessibility_snapshot"]["path"]
+    snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    snapshot["snapshot"] = {"role": "status", "name": "visible"}
+    _write_json(snapshot_path, snapshot)
+    receipt["accessibility_snapshot"] = _descriptor(snapshot_path, tmp_path)
+    _write_json(receipt_path, receipt)
+
+    with pytest.raises(AcceptanceError, match="does not bind"):
+        _validate_report(
+            path,
+            validate_live_target("http://127.0.0.1:8765", "sandbox-home"),
+            RepositoryCapabilities((), (), (), (), ()),
+            CANDIDATE_SHA,
+        )
+
+
+def test_self_declared_browser_assertion_is_rejected(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("PURSERS_HOME_ACCEPTANCE_MUTATE", MUTATION_OPT_IN)
+    report = _complete_report()
+    path = _write_report(tmp_path, report)
+    receipt_path = tmp_path / report["steps"][0]["evidence"]  # type: ignore[index]
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt["assertions"] = [
+        {"name": "visible state", "passed": True, "actual": "visible"}
+    ]
+    _write_json(receipt_path, receipt)
+
+    with pytest.raises(AcceptanceError, match="not verifiable"):
+        _validate_report(
+            path,
+            validate_live_target("http://127.0.0.1:8765", "sandbox-home"),
+            RepositoryCapabilities((), (), (), (), ()),
+            CANDIDATE_SHA,
+        )
+
+
+def test_report_host_identity_must_match_active_loopback_probe(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("PURSERS_HOME_ACCEPTANCE_MUTATE", MUTATION_OPT_IN)
+    path = _write_report(tmp_path, _complete_report())
+
+    with (
+        patch.object(
+            harness_module,
+            "probe_host_identity",
+            return_value={
+                "product": "AionUi",
+                "version": "9.9.9",
+                "build": "different-build",
+            },
+        ),
+        patch.object(harness_module, "_execute_required_suite", return_value=None),
+        pytest.raises(AcceptanceError, match="active loopback host"),
+    ):
+        validate_evidence_report(
+            path,
+            validate_live_target("http://127.0.0.1:8765", "sandbox-home"),
+            RepositoryCapabilities((), (), (), (), ()),
+            CANDIDATE_SHA,
+        )
+
+
+def test_marker_only_suite_receipts_do_not_replace_independent_execution(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("PURSERS_HOME_ACCEPTANCE_MUTATE", MUTATION_OPT_IN)
+    path = _write_report(tmp_path, _complete_report())
+
+    def reject_marker_only_run(name: str, _command: str, _commit: str) -> None:
+        raise AcceptanceError(f"independent suite execution failed: {name}")
+
+    with (
+        patch.object(harness_module, "probe_host_identity", return_value=dict(HOST)),
+        patch.object(
+            harness_module,
+            "_execute_required_suite",
+            side_effect=reject_marker_only_run,
+        ),
+        pytest.raises(
+            AcceptanceError,
+            match="independent suite execution failed: repository-python",
+        ),
+    ):
+        validate_evidence_report(
+            path,
+            validate_live_target("http://127.0.0.1:8765", "sandbox-home"),
+            RepositoryCapabilities((), (), (), (), ()),
+            CANDIDATE_SHA,
         )
 
 
@@ -538,7 +790,7 @@ def test_nonexistent_candidate_commit_is_rejected(
 ) -> None:
     monkeypatch.setenv("PURSERS_HOME_ACCEPTANCE_MUTATE", MUTATION_OPT_IN)
     with pytest.raises(AcceptanceError, match="unavailable"):
-        validate_evidence_report(
+        _validate_report(
             _write_report(tmp_path, _complete_report()),
             validate_live_target("http://127.0.0.1:8765", "sandbox-home"),
             RepositoryCapabilities((), (), (), (), ()),
@@ -568,7 +820,7 @@ def test_observation_receipt_id_mismatch_is_rejected(
     receipt["observation_id"] = "different"
     _write_json(receipt_path, receipt)
     with pytest.raises(AcceptanceError, match="does not bind"):
-        validate_evidence_report(
+        _validate_report(
             path,
             validate_live_target("http://127.0.0.1:8765", "sandbox-home"),
             RepositoryCapabilities((), (), (), (), ()),
@@ -590,7 +842,7 @@ def test_suite_output_without_success_marker_is_rejected(
     receipt["output"] = _descriptor(output_path, tmp_path)
     _write_json(receipt_path, receipt)
     with pytest.raises(AcceptanceError, match="lacks success marker"):
-        validate_evidence_report(
+        _validate_report(
             path,
             validate_live_target("http://127.0.0.1:8765", "sandbox-home"),
             RepositoryCapabilities((), (), (), (), ()),
@@ -610,7 +862,7 @@ def test_suite_output_hash_mismatch_is_rejected(
     output_path = tmp_path / receipt["output"]["path"]
     output_path.write_text("tampered\n", encoding="utf-8")
     with pytest.raises(AcceptanceError, match="sha256 does not match"):
-        validate_evidence_report(
+        _validate_report(
             path,
             validate_live_target("http://127.0.0.1:8765", "sandbox-home"),
             RepositoryCapabilities((), (), (), (), ()),
@@ -629,7 +881,7 @@ def test_host_receipt_version_mismatch_is_rejected(
     receipt["version"] = "9.9.9"
     _write_json(receipt_path, receipt)
     with pytest.raises(AcceptanceError, match="does not match"):
-        validate_evidence_report(
+        _validate_report(
             path,
             validate_live_target("http://127.0.0.1:8765", "sandbox-home"),
             RepositoryCapabilities((), (), (), (), ()),

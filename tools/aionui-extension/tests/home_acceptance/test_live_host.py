@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from .harness import (
+    AcceptanceCapabilityUnavailable,
     AcceptanceError,
     discover_repository_capabilities,
     probe_extension_status,
@@ -24,7 +25,10 @@ def _host_url() -> str:
 
 
 def test_real_host_read_only_capability_probe() -> None:
-    result = probe_extension_status(validate_live_target(_host_url()))
+    try:
+        result = probe_extension_status(validate_live_target(_host_url()))
+    except AcceptanceCapabilityUnavailable as error:
+        pytest.skip(str(error))
     assert set(result) == {"ok", "push_mode", "roles", "seat_count"}
 
 
@@ -35,6 +39,11 @@ def test_real_browser_host_acceptance_evidence() -> None:
         pytest.skip(
             "real browser/host evidence unavailable: set explicit sandbox board and evidence report"
         )
+    live_target = validate_live_target(_host_url())
+    try:
+        probe_extension_status(live_target)
+    except AcceptanceCapabilityUnavailable as error:
+        pytest.skip(str(error))
     capabilities = discover_repository_capabilities()
     if capabilities.missing_mutation_capabilities:
         pytest.skip(
@@ -51,5 +60,7 @@ def test_real_browser_host_acceptance_evidence() -> None:
             capabilities,
             candidate_commit,
         )
+    except AcceptanceCapabilityUnavailable as error:
+        pytest.skip(str(error))
     except AcceptanceError as error:
         pytest.fail(str(error))

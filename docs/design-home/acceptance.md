@@ -218,16 +218,28 @@ session. Do not commit the report or screenshots. Required top-level fields are:
 The actual report must contain exactly every step and inventory ID enforced by
 `harness.py`. The host, each observation, and each suite must use a distinct
 structured JSON receipt; a generic file reused across claims is invalid. Every
-receipt repeats the exact sandbox target and candidate commit. Host receipts
-also bind the semantic host version and exact build to an `aionui-about` or
-`host-api` capture. Browser receipts bind their exact step or inventory ID to a
-same-origin page URL, timestamp, explicit passing assertions, a nonempty PNG,
-and an accessibility snapshot carrying the same observation ID. Screenshot and
-snapshot descriptors contain relative `path` and lowercase `sha256` fields.
+receipt repeats the exact sandbox target and candidate commit. Validation
+actively contacts the explicit loopback `/pursers/status` endpoint. That
+response must expose exact `host.product`, `host.version`, and `host.build`
+identity matching the report; until the host supports this capability, the
+real acceptance test reports SKIP rather than PASS. A self-authored About or
+host receipt alone cannot establish host identity.
+
+Browser receipts bind their exact step or inventory ID to a same-origin page
+URL and timestamp. Each observation needs unique screenshot and accessibility
+artifacts: a structurally valid PNG at least 320x180 and a substantive snapshot
+whose wrapper repeats the observation ID, page URL, and capture time. Assertions
+use `name`, `path`, `operator`, and `expected`; the validator resolves the path
+against the snapshot and evaluates `equals` or `contains`. Self-declared
+`passed=true` assertions, generic snapshots, shared minimal images, and reused
+artifact digests are rejected. Screenshot and snapshot descriptors contain
+relative `path` and lowercase `sha256` fields.
 
 Suite receipts bind the exact suite name, command, commit, target, timestamps,
 zero exit code, and hashed output log. The log must contain suite-specific
-success markers; candidate diff verification is also rerun locally. References
+success markers, but markers are not execution proof: after artifact validation
+the harness independently runs every allow-listed `REQUIRED_SUITES` command at
+the verification checkout. Candidate diff verification is also rerun locally. References
 must resolve to regular files inside the report directory. The validator rejects
 missing, escaping, malformed, hash-mismatched, oversized, secret-bearing, and
 private-path artifacts, and bounds both individual and aggregate bytes. The
@@ -238,7 +250,9 @@ every suite row must carry that full lowercase 40-hex candidate SHA.
 Receipt shapes are exact. A browser receipt has
 `schema_version`, `evidence_kind=browser_observation`, `observation_id`,
 `target`, `host`, `candidate_commit`, `captured_at`, `page_url`, `screenshot`,
-`accessibility_snapshot`, and nonempty `assertions`. A suite receipt has
+`accessibility_snapshot`, and nonempty machine-evaluated `assertions`. The
+snapshot JSON has `schema_version`, `observation_id`, `page_url`, `captured_at`,
+and `snapshot`. A suite receipt has
 `schema_version`, `evidence_kind=suite_run`, `name`, `command`, `commit`,
 `target`, `started_at`, `finished_at`, `exit_code`, and `output`. Verification
 requires the exact sandbox target, candidate SHA, and mutation opt-in:

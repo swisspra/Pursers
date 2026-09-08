@@ -7,11 +7,13 @@ import os
 import re
 import subprocess
 import sys
+import zlib
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin, urlsplit
+from urllib.error import HTTPError, URLError
 from urllib.request import ProxyHandler, build_opener
 
 EXTENSION_ROOT = Path(__file__).resolve().parents[2]
@@ -21,6 +23,10 @@ MUTATION_OPT_IN = "I_UNDERSTAND_SANDBOX_ONLY"
 MAX_REPORT_BYTES = 1_000_000
 MAX_EVIDENCE_FILE_BYTES = 10_000_000
 MAX_EVIDENCE_TOTAL_BYTES = 100_000_000
+MIN_SCREENSHOT_BYTES = 256
+MIN_SCREENSHOT_WIDTH = 320
+MIN_SCREENSHOT_HEIGHT = 180
+MAX_SCREENSHOT_DIMENSION = 16_384
 FULL_SHA = re.compile(r"[0-9a-f]{40}")
 SHA256 = re.compile(r"[0-9a-f]{64}")
 SEMVER = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?")
@@ -265,8 +271,10 @@ REQUIRED_SUITES = {
     "candidate-diff-check": "git diff --check",
 }
 SENSITIVE_KEY = re.compile(r"(?:authorization|bearer|cookie|door|jwt|secret|token)", re.I)
+JWT_PREFIX = "e" + "yJ"
 SECRET_VALUE = re.compile(
-    r"(?:prs1\.[A-Za-z0-9._-]{12,}|eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+|Bearer\s+\S+)",
+    rf"(?:prs1\.[A-Za-z0-9._-]{{12,}}|{JWT_PREFIX}[A-Za-z0-9_-]+\."
+    r"[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+|Bearer\s+\S+)",
     re.I,
 )
 PRIVATE_PATH = re.compile(r"(?:/Users/|/home/|[A-Za-z]:\\Users\\)")
@@ -286,6 +294,10 @@ SUITE_LOG_MARKERS = {
 
 
 class AcceptanceError(ValueError):
+    pass
+
+
+class AcceptanceCapabilityUnavailable(AcceptanceError):
     pass
 
 
@@ -388,16 +400,28 @@ def redact(value: Any) -> Any:
     return value
 
 
-def probe_extension_status(target: LiveTarget, timeout_s: float = 3.0) -> dict[str, Any]:
+def _read_extension_status(target: LiveTarget, timeout_s: float) -> dict[str, Any]:
     opener = build_opener(ProxyHandler({}))
     endpoint = urljoin(f"{target.base_url}/", "pursers/status")
-    with opener.open(endpoint, timeout=timeout_s) as response:
-        final_target = validate_live_target(response.geturl().rsplit("/pursers/status", 1)[0])
-        if final_target.base_url != target.base_url:
-            raise AcceptanceError("status probe redirected to a different origin")
-        payload = json.loads(response.read(1_048_577).decode("utf-8"))
+    try:
+        with opener.open(endpoint, timeout=timeout_s) as response:
+            final_target = validate_live_target(
+                response.geturl().rsplit("/pursers/status", 1)[0]
+            )
+            if final_target.base_url != target.base_url:
+                raise AcceptanceError("status probe redirected to a different origin")
+            payload = json.loads(response.read(1_048_577).decode("utf-8"))
+    except (HTTPError, URLError, TimeoutError, OSError, UnicodeError) as exc:
+        raise AcceptanceCapabilityUnavailable(
+            "real loopback Pursers status capability is unavailable"
+        ) from exc
     if not isinstance(payload, dict) or not isinstance(payload.get("ok"), bool):
         raise AcceptanceError("status response is not the Pursers status contract")
+    return payload
+
+
+def probe_extension_status(target: LiveTarget, timeout_s: float = 3.0) -> dict[str, Any]:
+    payload = _read_extension_status(target, timeout_s)
     seats = payload.get("seats") if isinstance(payload.get("seats"), list) else []
     return {
         "ok": payload["ok"],
@@ -411,6 +435,23 @@ def probe_extension_status(target: LiveTarget, timeout_s: float = 3.0) -> dict[s
             }
         ),
     }
+
+
+def probe_host_identity(target: LiveTarget, timeout_s: float = 3.0) -> dict[str, str]:
+    payload = _read_extension_status(target, timeout_s)
+    host = payload.get("host")
+    if not isinstance(host, dict):
+        raise AcceptanceCapabilityUnavailable(
+            "Pursers status lacks verifiable AionUi host version/build identity"
+        )
+    product = _require_exact_text(host.get("product"), "observed host product")
+    version = _require_exact_text(host.get("version"), "observed host version")
+    build = _require_exact_text(host.get("build"), "observed host build")
+    if product != "AionUi" or not SEMVER.fullmatch(version) or not BUILD_ID.fullmatch(build):
+        raise AcceptanceCapabilityUnavailable(
+            "Pursers status lacks verifiable AionUi host version/build identity"
+        )
+    return {"product": product, "version": version, "build": build}
 
 
 def validate_evidence_report(
@@ -456,6 +497,15 @@ def validate_evidence_report(
         raise AcceptanceError("host version must be an exact semantic version")
     if not BUILD_ID.fullmatch(host_build):
         raise AcceptanceError("host build must be an exact build identifier")
+    observed_host = probe_host_identity(target)
+    if observed_host != {
+        "product": "AionUi",
+        "version": host_version,
+        "build": host_build,
+    }:
+        raise AcceptanceError(
+            "report host version/build does not match the active loopback host"
+        )
     host_reference = host.get("evidence")
     if not isinstance(host_reference, str):
         raise AcceptanceError("host identity needs an evidence receipt")
@@ -533,9 +583,9 @@ def validate_evidence_report(
         host_build,
         candidate_commit,
     )
-    attachment_references: list[str] = []
+    browser_attachment_references: list[str] = []
     for identifier, reference in {**passed_steps, **passed_inventory}.items():
-        attachment_references.extend(_validate_browser_receipt(
+        browser_attachment_references.extend(_validate_browser_receipt(
             evidence_root,
             reference,
             identifier,
@@ -544,15 +594,38 @@ def validate_evidence_report(
             host_build,
             candidate_commit,
         ))
+    if len(browser_attachment_references) != len(set(browser_attachment_references)):
+        raise AcceptanceError(
+            "each browser observation needs distinct screenshot and snapshot artifacts"
+        )
+    browser_digests = [
+        hashlib.sha256(
+            _resolve_evidence_file(
+                evidence_root, reference, "browser observation artifact"
+            ).read_bytes()
+        ).hexdigest()
+        for reference in browser_attachment_references
+    ]
+    if len(browser_digests) != len(set(browser_digests)):
+        raise AcceptanceError(
+            "each browser observation needs unique substantive screenshot and snapshot evidence"
+        )
+    suite_output_references: list[str] = []
     for suite in suite_rows:
-        attachment_references.append(_validate_suite_receipt(
+        suite_output_references.append(_validate_suite_receipt(
             evidence_root, suite, target, candidate_commit
         ))
     _validate_evidence_artifacts(
         evidence_root,
-        [*primary_references, *attachment_references],
+        [
+            *primary_references,
+            *browser_attachment_references,
+            *suite_output_references,
+        ],
         excluded=resolved_report,
     )
+    for suite in suite_rows:
+        _execute_required_suite(suite["name"], suite["command"], candidate_commit)
     if report.get("all_existing_suites_passed") is not True:
         raise AcceptanceError("all_existing_suites_passed must be true")
     return {
@@ -709,13 +782,7 @@ def _validate_browser_receipt(
     _screenshot_path, screenshot = _artifact_descriptor(
         evidence_root, receipt["screenshot"], "browser screenshot"
     )
-    if (
-        len(screenshot) < 24
-        or screenshot[:8] != b"\x89PNG\r\n\x1a\n"
-        or int.from_bytes(screenshot[16:20], "big") < 1
-        or int.from_bytes(screenshot[20:24], "big") < 1
-    ):
-        raise AcceptanceError("browser screenshot must be a non-empty PNG image")
+    _validate_png(screenshot)
     _snapshot_path, snapshot_data = _artifact_descriptor(
         evidence_root,
         receipt["accessibility_snapshot"],
@@ -725,11 +792,22 @@ def _validate_browser_receipt(
         snapshot = json.loads(snapshot_data)
     except (json.JSONDecodeError, UnicodeDecodeError):
         raise AcceptanceError("accessibility snapshot must be JSON") from None
+    if not isinstance(snapshot, dict) or set(snapshot) != {
+        "schema_version",
+        "observation_id",
+        "page_url",
+        "captured_at",
+        "snapshot",
+    }:
+        raise AcceptanceError("accessibility snapshot fields do not match schema")
     if (
-        not isinstance(snapshot, dict)
-        or snapshot.get("schema_version") != 1
-        or snapshot.get("observation_id") != identifier
-        or not snapshot.get("snapshot")
+        snapshot["schema_version"] != 1
+        or snapshot["observation_id"] != identifier
+        or snapshot["page_url"] != receipt["page_url"]
+        or snapshot["captured_at"] != receipt["captured_at"]
+        or not isinstance(snapshot["snapshot"], (dict, list))
+        or _structured_node_count(snapshot["snapshot"]) < 5
+        or len(json.dumps(snapshot["snapshot"], sort_keys=True)) < 128
     ):
         raise AcceptanceError("accessibility snapshot does not bind the observation id")
     assertions = receipt["assertions"]
@@ -738,14 +816,22 @@ def _validate_browser_receipt(
     for assertion in assertions:
         if (
             not isinstance(assertion, dict)
-            or set(assertion) != {"name", "passed", "actual"}
+            or set(assertion) != {"name", "path", "operator", "expected"}
             or not isinstance(assertion["name"], str)
             or not assertion["name"].strip()
-            or assertion["passed"] is not True
-            or not isinstance(assertion["actual"], (str, int, float, bool))
-            or len(json.dumps(assertion["actual"])) > 1_000
+            or assertion["operator"] not in {"equals", "contains"}
+            or not isinstance(assertion["path"], list)
+            or not assertion["path"]
+            or len(json.dumps(assertion["expected"])) > 1_000
         ):
             raise AcceptanceError("browser observation assertion is not verifiable")
+        actual = _resolve_snapshot_path(snapshot["snapshot"], assertion["path"])
+        if assertion["operator"] == "equals":
+            passed = actual == assertion["expected"]
+        else:
+            passed = isinstance(actual, (str, list)) and assertion["expected"] in actual
+        if not passed:
+            raise AcceptanceError("browser observation assertion failed against snapshot")
     return [
         receipt["screenshot"]["path"],
         receipt["accessibility_snapshot"]["path"],
@@ -804,6 +890,115 @@ def _validate_suite_receipt(
         if result.returncode or result.stdout or result.stderr:
             raise AcceptanceError("candidate commit fails git diff --check")
     return receipt["output"]["path"]
+
+
+def _validate_png(data: bytes) -> None:
+    if len(data) < MIN_SCREENSHOT_BYTES or data[:8] != b"\x89PNG\r\n\x1a\n":
+        raise AcceptanceError("browser screenshot must be a substantive PNG image")
+    offset = 8
+    width = height = 0
+    saw_idat = saw_iend = False
+    while offset + 12 <= len(data):
+        length = int.from_bytes(data[offset:offset + 4], "big")
+        chunk_type = data[offset + 4:offset + 8]
+        end = offset + 12 + length
+        if end > len(data):
+            raise AcceptanceError("browser screenshot PNG is truncated")
+        payload = data[offset + 8:offset + 8 + length]
+        expected_crc = int.from_bytes(data[offset + 8 + length:end], "big")
+        if zlib.crc32(chunk_type + payload) & 0xFFFFFFFF != expected_crc:
+            raise AcceptanceError("browser screenshot PNG checksum is invalid")
+        if chunk_type == b"IHDR":
+            if length != 13:
+                raise AcceptanceError("browser screenshot PNG header is invalid")
+            width = int.from_bytes(payload[:4], "big")
+            height = int.from_bytes(payload[4:8], "big")
+        elif chunk_type == b"IDAT":
+            saw_idat = saw_idat or bool(payload)
+        elif chunk_type == b"IEND":
+            saw_iend = True
+            if end != len(data):
+                raise AcceptanceError("browser screenshot PNG has trailing data")
+            break
+        offset = end
+    if (
+        width < MIN_SCREENSHOT_WIDTH
+        or height < MIN_SCREENSHOT_HEIGHT
+        or width > MAX_SCREENSHOT_DIMENSION
+        or height > MAX_SCREENSHOT_DIMENSION
+        or not saw_idat
+        or not saw_iend
+    ):
+        raise AcceptanceError("browser screenshot must be a substantive PNG image")
+
+
+def _structured_node_count(value: Any) -> int:
+    if isinstance(value, dict):
+        return 1 + sum(_structured_node_count(item) for item in value.values())
+    if isinstance(value, list):
+        return 1 + sum(_structured_node_count(item) for item in value)
+    return 1
+
+
+def _resolve_snapshot_path(snapshot: Any, path: list[Any]) -> Any:
+    current = snapshot
+    for part in path:
+        if isinstance(current, dict) and isinstance(part, str) and part in current:
+            current = current[part]
+        elif (
+            isinstance(current, list)
+            and type(part) is int
+            and 0 <= part < len(current)
+        ):
+            current = current[part]
+        else:
+            raise AcceptanceError("browser assertion path is absent from snapshot")
+    return current
+
+
+def _execute_required_suite(name: str, command: str, candidate_commit: str) -> None:
+    if command != REQUIRED_SUITES.get(name):
+        raise AcceptanceError("independent suite command is not authorized")
+    if name == "repository-python":
+        arguments = ["python3", "tools/ci_manifest.py", "run"]
+        cwd = REPOSITORY_ROOT
+        environment = None
+    elif name.startswith("extension-"):
+        test_file = {
+            "extension-routes-node": "routes.test.cjs",
+            "extension-door-node": "door_adapter.test.cjs",
+            "extension-team-node": "team_adapter.test.cjs",
+        }[name]
+        arguments = ["node", "--test", f"tools/aionui-extension/tests/{test_file}"]
+        cwd = REPOSITORY_ROOT
+        environment = None
+    elif name in {"dashboard-typecheck", "dashboard-build"}:
+        arguments = ["npm", "run", name.removeprefix("dashboard-")]
+        cwd = REPOSITORY_ROOT / "tools" / "dashboard-ui"
+        environment = {**os.environ, "NODE_ENV": ""}
+    elif name == "repository-leak-scan":
+        arguments = ["python3", "tools/leak_scan.py"]
+        cwd = REPOSITORY_ROOT
+        environment = None
+    elif name == "candidate-diff-check":
+        arguments = [
+            "git", "diff", "--check", f"{candidate_commit}^", candidate_commit
+        ]
+        cwd = REPOSITORY_ROOT
+        environment = None
+    else:
+        raise AcceptanceError("independent suite name is not authorized")
+    completed = subprocess.run(
+        arguments,
+        cwd=cwd,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=1_800,
+    )
+    if completed.returncode:
+        raise AcceptanceError(f"independent suite execution failed: {name}")
 
 
 def _require_exact_text(value: Any, label: str) -> str:
