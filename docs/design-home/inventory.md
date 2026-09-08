@@ -8,13 +8,13 @@ Complete inventory of every rendered surface across the Pursers project, includi
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `dashboard-entry.html` | ~290 lines | Entry HTML with semantic structure for all 6 views |
-| `src/dashboard.ts` | ~820 lines | Full TypeScript SPA logic: decoding, rendering, refresh, search, host integration |
-| `src/dashboard.css` | ~290 lines | Complete CSS with dark/light themes, responsive, accessibility |
+| `dashboard-entry.html` | 145 lines | Entry HTML with semantic structure for all 6 views |
+| `src/dashboard.ts` | 1528 lines | Full TypeScript SPA logic: decoding, rendering, refresh, search, host integration |
+| `src/dashboard.css` | 619 lines | Complete CSS with dark/light themes, responsive, accessibility |
 | `package.json` | — | Vite + vite-plugin-singlefile build config |
 | `vite.config.ts` | — | Vite single-file build → `dist/dashboard-entry.html` |
 
-**Build output:** `packages/personal/src/pursers_personal/resources/dashboard.html` (single-file, ~350+ lines, inlined JS+CSS+HTML)
+**Build output:** `packages/personal/src/pursers_personal/resources/dashboard.html` (single-file, 257 physical lines/404280 bytes, inlined JS+CSS+HTML)
 
 **Live entrypoint:** Served by Personal MCP server as `apps.add_html_resource(UI_URI, ...)` with `title="On Board Personal"`, `csp=ResourceCsp()`, `prefers_border=True`.
 
@@ -213,35 +213,35 @@ Additional licenses: `packages/personal/licenses/EXT_APPS_LICENSE`
 
 | Artifact | Lines | Approx KB |
 |----------|-------|-----------|
-| `components.md` | ~221 | ~9 KB |
-| `layouts.md` | ~150 | ~6 KB |
-| `routes.md` | ~151 | ~7 KB |
-| `theme.md` | ~200 | ~8 KB |
-| `pages.md` | ~156 | ~6 KB |
-| `extractable-components.md` | ~175 | ~8 KB |
-| `inventory.md` (this file) | ~200 | ~9 KB |
-| **Total** | ~1253 | **~53 KB** |
+| `components.md` | 221 | 7.1 KB |
+| `layouts.md` | 150 | 5.1 KB |
+| `routes.md` | 151 | 8.5 KB |
+| `theme.md` | 200 | 7.5 KB |
+| `pages.md` | 156 | 6.4 KB |
+| `extractable-components.md` | 175 | 8.9 KB |
+| `inventory.md` (this file) | 259 | 15.3 KB |
+| **Total** | **1312** | **58.8 KB** |
 
 ## Bounded Context Bundle for Primary Dashboard Reproduction
 
 The primary dashboard is `dashboard-ui` (the personal board view). To reproduce it for Superdesign:
 
-**Required files (all <900 lines, included in full):**
-1. `tools/dashboard-ui/dashboard-entry.html` — 290 lines (full HTML structure)
-2. `tools/dashboard-ui/src/dashboard.ts` — ~820 lines (full TS source)
-3. `tools/dashboard-ui/src/dashboard.css` — ~290 lines (full CSS source)
+**Required files:**
+1. `tools/dashboard-ui/dashboard-entry.html` — 145 lines (full HTML structure)
+2. `tools/dashboard-ui/src/dashboard.css` — 619 lines (full responsive/theme source)
+3. `.superdesign/context/primary-dashboard-current.md` — bounded render/import contract for the 1528-line `tools/dashboard-ui/src/dashboard.ts`; do not upload the full module
 
 **Context token range references (larger files, ranges only):**
-- `tools/fleet-dashboard/fleet_dashboard.py` — 453 KB, ~6200+ lines. Key ranges:
+- `tools/fleet-dashboard/fleet_dashboard.py` — 453502 bytes, 7507 lines. Key ranges:
   - Lines 5828-5892: HTML document + CSS
   - Lines 5892-6173: HTML.replace() patches (legacy route + hub extensions)
-  - Lines 5950-5960: route() function
-  - Lines 6104-6114: hub renderers (overview, boards, agents, operations)
-  - Lines 6435-6950: Python HTTPHandler (do_GET, do_POST)
-- `packages/personal/src/pursers_personal/apps_server.py` — ~800+ lines. Key ranges:
-  - `LiveDashboard` class: projection, view subscription, event handling
-  - `build_dashboard_server()`: MCP tool registration + HTML resource
-  - `build_personal_server()` / `run_personal_mcp()`: profile-backed factory
+  - Line 5859: route() function
+  - Lines 6106-6114: hub renderers (overview, boards, agents, operations)
+  - Line 6537 onward: Python HTTPHandler; `do_GET()` at 6580 and `do_POST()` at 6885
+- `packages/personal/src/pursers_personal/apps_server.py` — 2401 lines. Key symbols:
+  - `LiveDashboard` at line 510: projection, view subscription, event handling
+  - `build_dashboard_server()` at line 1949: MCP tool registration + HTML resource
+  - `build_personal_server()` at line 2375 / `run_personal_mcp()` at line 2398: profile-backed factory
 
 **Git baseline:** origin/main at `c2ebac5` (release: consolidate 5.0.0a25 train)
 
