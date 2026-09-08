@@ -23,13 +23,13 @@
       ],
       "fingerprints": {
         ".superdesign/design-system.md": "8bad0f20428b6c4519646352426fe6d11c81322cff40864ce00c03cba88399ab",
-        ".superdesign/context/primary-dashboard-current.md": "3cf64059281a025dd0affe9d78a72178a13c09d81c9302dfaab5185a82518837",
-        ".superdesign/init/components.md": "051b4ed0de5a7fa8ee7ef7734c0c6a69838c9cee796682c8f64bc967153297da",
-        ".superdesign/init/layouts.md": "cc5c33d48618031815ba3e28863661b40bd2a392d35312b9295377cc33264e52",
-        ".superdesign/init/routes.md": "619dcb1f08615398f34ee90041a1e47f1d7e91348bd9afdc750d3deda1d56659",
-        ".superdesign/init/theme.md": "34454ea043733b2faf72dbaf00d3becda13092288694421add4002ee6ed0bfdf",
-        ".superdesign/init/pages.md": "a75e4a71ada1435e83579f4a4e5c95bcdafef39fe41ab8550bbf64a2042a135f",
-        ".superdesign/init/extractable-components.md": "c3e593bea1f138f39265dc97d30e8acf81efe5ebc16ae362907926da6bf0bc9d",
+        ".superdesign/context/primary-dashboard-current.md": "57f9992b819b1d2ec38749d63f71c6b2b654225534adae2da3d7a8e436d1e4aa",
+        ".superdesign/init/components.md": "837e5e23a1ec024800c5b2a16e3bbe0b818d2842ea970c9921e1d8680b18d366",
+        ".superdesign/init/layouts.md": "6d60e63bec699e4bda0676de41604a8b401e4a696e648a2327d6b67219d75845",
+        ".superdesign/init/routes.md": "81171cb907bb08e0f8090a70fbbde2420120b76b1a1d4194c1f5efdb7e0d72f4",
+        ".superdesign/init/theme.md": "7e2f7d08f5ba87d203335fb97cd3aa927763489d3fd67ef9524e7d7b77fc88ae",
+        ".superdesign/init/pages.md": "c27ecf4b5dae604b3f03dfb09401aa4824b66d6c815a7e38e1bf7ba4b0102afa",
+        ".superdesign/init/extractable-components.md": "f19812f9f485883bb431cc5f605e3e64fa055df2070af43acc9dc1b6e7957212",
         "docs/design-home/journeys.md": "2062f8089fb64bbe8c4b44505ad7d34c4abb0ead41df837d98070bb449045e3c",
         "tools/dashboard-ui/dashboard-entry.html": "cb640ae68837d02d3d0eb2843c4c31e9c8d563351264d0c3a7c68699e16500e7",
         "tools/dashboard-ui/src/dashboard.css": "9d3b71edd4e0149337da441e769deeddb44c87d058d94455e3921ce0907f0fbd"
@@ -61,7 +61,7 @@
           "title": "Direction A — Warm Guided Home",
           "visualDirection": "warm off-white and teal guided AionUI Home",
           "parentDraftId": "ee6dcdae-d401-4b66-851a-68ffc2d3a05b",
-          "currentVersion": 3
+          "currentVersion": 4
         },
         "2bcc013f-c1b0-4fc6-a6f7-a7b8fc62ceb2": {
           "title": "Direction B — Calm Project Home",
@@ -70,7 +70,7 @@
           "currentVersion": 4
         }
       },
-      "updatedAt": "2026-09-08T08:17:20.759Z"
+      "updatedAt": "2026-09-08T11:19:36Z"
     },
     "/projects": {
       "targetKind": "new-ui",
@@ -95,13 +95,13 @@
       ],
       "fingerprints": {
         ".superdesign/design-system.md": "8bad0f20428b6c4519646352426fe6d11c81322cff40864ce00c03cba88399ab",
-        ".superdesign/context/primary-dashboard-current.md": "3cf64059281a025dd0affe9d78a72178a13c09d81c9302dfaab5185a82518837",
-        ".superdesign/init/components.md": "051b4ed0de5a7fa8ee7ef7734c0c6a69838c9cee796682c8f64bc967153297da",
-        ".superdesign/init/layouts.md": "cc5c33d48618031815ba3e28863661b40bd2a392d35312b9295377cc33264e52",
-        ".superdesign/init/routes.md": "619dcb1f08615398f34ee90041a1e47f1d7e91348bd9afdc750d3deda1d56659",
-        ".superdesign/init/theme.md": "34454ea043733b2faf72dbaf00d3becda13092288694421add4002ee6ed0bfdf",
-        ".superdesign/init/pages.md": "a75e4a71ada1435e83579f4a4e5c95bcdafef39fe41ab8550bbf64a2042a135f",
-        ".superdesign/init/extractable-components.md": "c3e593bea1f138f39265dc97d30e8acf81efe5ebc16ae362907926da6bf0bc9d",
+        ".superdesign/context/primary-dashboard-current.md": "57f9992b819b1d2ec38749d63f71c6b2b654225534adae2da3d7a8e436d1e4aa",
+        ".superdesign/init/components.md": "837e5e23a1ec024800c5b2a16e3bbe0b818d2842ea970c9921e1d8680b18d366",
+        ".superdesign/init/layouts.md": "6d60e63bec699e4bda0676de41604a8b401e4a696e648a2327d6b67219d75845",
+        ".superdesign/init/routes.md": "81171cb907bb08e0f8090a70fbbde2420120b76b1a1d4194c1f5efdb7e0d72f4",
+        ".superdesign/init/theme.md": "7e2f7d08f5ba87d203335fb97cd3aa927763489d3fd67ef9524e7d7b77fc88ae",
+        ".superdesign/init/pages.md": "c27ecf4b5dae604b3f03dfb09401aa4824b66d6c815a7e38e1bf7ba4b0102afa",
+        ".superdesign/init/extractable-components.md": "f19812f9f485883bb431cc5f605e3e64fa055df2070af43acc9dc1b6e7957212",
         "docs/design-home/journeys.md": "2062f8089fb64bbe8c4b44505ad7d34c4abb0ead41df837d98070bb449045e3c",
         "tools/dashboard-ui/dashboard-entry.html": "cb640ae68837d02d3d0eb2843c4c31e9c8d563351264d0c3a7c68699e16500e7",
         "tools/dashboard-ui/src/dashboard.css": "9d3b71edd4e0149337da441e769deeddb44c87d058d94455e3921ce0907f0fbd"
@@ -131,7 +131,7 @@
           "currentVersion": 2
         }
       },
-      "updatedAt": "2026-09-08T08:17:20.759Z"
+      "updatedAt": "2026-09-08T11:19:36Z"
     },
     "/work": {
       "targetKind": "new-ui",
@@ -156,13 +156,13 @@
       ],
       "fingerprints": {
         ".superdesign/design-system.md": "8bad0f20428b6c4519646352426fe6d11c81322cff40864ce00c03cba88399ab",
-        ".superdesign/context/primary-dashboard-current.md": "3cf64059281a025dd0affe9d78a72178a13c09d81c9302dfaab5185a82518837",
-        ".superdesign/init/components.md": "051b4ed0de5a7fa8ee7ef7734c0c6a69838c9cee796682c8f64bc967153297da",
-        ".superdesign/init/layouts.md": "cc5c33d48618031815ba3e28863661b40bd2a392d35312b9295377cc33264e52",
-        ".superdesign/init/routes.md": "619dcb1f08615398f34ee90041a1e47f1d7e91348bd9afdc750d3deda1d56659",
-        ".superdesign/init/theme.md": "34454ea043733b2faf72dbaf00d3becda13092288694421add4002ee6ed0bfdf",
-        ".superdesign/init/pages.md": "a75e4a71ada1435e83579f4a4e5c95bcdafef39fe41ab8550bbf64a2042a135f",
-        ".superdesign/init/extractable-components.md": "c3e593bea1f138f39265dc97d30e8acf81efe5ebc16ae362907926da6bf0bc9d",
+        ".superdesign/context/primary-dashboard-current.md": "57f9992b819b1d2ec38749d63f71c6b2b654225534adae2da3d7a8e436d1e4aa",
+        ".superdesign/init/components.md": "837e5e23a1ec024800c5b2a16e3bbe0b818d2842ea970c9921e1d8680b18d366",
+        ".superdesign/init/layouts.md": "6d60e63bec699e4bda0676de41604a8b401e4a696e648a2327d6b67219d75845",
+        ".superdesign/init/routes.md": "81171cb907bb08e0f8090a70fbbde2420120b76b1a1d4194c1f5efdb7e0d72f4",
+        ".superdesign/init/theme.md": "7e2f7d08f5ba87d203335fb97cd3aa927763489d3fd67ef9524e7d7b77fc88ae",
+        ".superdesign/init/pages.md": "c27ecf4b5dae604b3f03dfb09401aa4824b66d6c815a7e38e1bf7ba4b0102afa",
+        ".superdesign/init/extractable-components.md": "f19812f9f485883bb431cc5f605e3e64fa055df2070af43acc9dc1b6e7957212",
         "docs/design-home/journeys.md": "2062f8089fb64bbe8c4b44505ad7d34c4abb0ead41df837d98070bb449045e3c",
         "tools/dashboard-ui/dashboard-entry.html": "cb640ae68837d02d3d0eb2843c4c31e9c8d563351264d0c3a7c68699e16500e7",
         "tools/dashboard-ui/src/dashboard.css": "9d3b71edd4e0149337da441e769deeddb44c87d058d94455e3921ce0907f0fbd"
@@ -192,7 +192,7 @@
           "currentVersion": 1
         }
       },
-      "updatedAt": "2026-09-08T08:17:20.759Z"
+      "updatedAt": "2026-09-08T11:19:36Z"
     },
     "/team": {
       "targetKind": "new-ui",
@@ -217,13 +217,13 @@
       ],
       "fingerprints": {
         ".superdesign/design-system.md": "8bad0f20428b6c4519646352426fe6d11c81322cff40864ce00c03cba88399ab",
-        ".superdesign/context/primary-dashboard-current.md": "3cf64059281a025dd0affe9d78a72178a13c09d81c9302dfaab5185a82518837",
-        ".superdesign/init/components.md": "051b4ed0de5a7fa8ee7ef7734c0c6a69838c9cee796682c8f64bc967153297da",
-        ".superdesign/init/layouts.md": "cc5c33d48618031815ba3e28863661b40bd2a392d35312b9295377cc33264e52",
-        ".superdesign/init/routes.md": "619dcb1f08615398f34ee90041a1e47f1d7e91348bd9afdc750d3deda1d56659",
-        ".superdesign/init/theme.md": "34454ea043733b2faf72dbaf00d3becda13092288694421add4002ee6ed0bfdf",
-        ".superdesign/init/pages.md": "a75e4a71ada1435e83579f4a4e5c95bcdafef39fe41ab8550bbf64a2042a135f",
-        ".superdesign/init/extractable-components.md": "c3e593bea1f138f39265dc97d30e8acf81efe5ebc16ae362907926da6bf0bc9d",
+        ".superdesign/context/primary-dashboard-current.md": "57f9992b819b1d2ec38749d63f71c6b2b654225534adae2da3d7a8e436d1e4aa",
+        ".superdesign/init/components.md": "837e5e23a1ec024800c5b2a16e3bbe0b818d2842ea970c9921e1d8680b18d366",
+        ".superdesign/init/layouts.md": "6d60e63bec699e4bda0676de41604a8b401e4a696e648a2327d6b67219d75845",
+        ".superdesign/init/routes.md": "81171cb907bb08e0f8090a70fbbde2420120b76b1a1d4194c1f5efdb7e0d72f4",
+        ".superdesign/init/theme.md": "7e2f7d08f5ba87d203335fb97cd3aa927763489d3fd67ef9524e7d7b77fc88ae",
+        ".superdesign/init/pages.md": "c27ecf4b5dae604b3f03dfb09401aa4824b66d6c815a7e38e1bf7ba4b0102afa",
+        ".superdesign/init/extractable-components.md": "f19812f9f485883bb431cc5f605e3e64fa055df2070af43acc9dc1b6e7957212",
         "docs/design-home/journeys.md": "2062f8089fb64bbe8c4b44505ad7d34c4abb0ead41df837d98070bb449045e3c",
         "tools/dashboard-ui/dashboard-entry.html": "cb640ae68837d02d3d0eb2843c4c31e9c8d563351264d0c3a7c68699e16500e7",
         "tools/dashboard-ui/src/dashboard.css": "9d3b71edd4e0149337da441e769deeddb44c87d058d94455e3921ce0907f0fbd"
@@ -253,7 +253,7 @@
           "currentVersion": 1
         }
       },
-      "updatedAt": "2026-09-08T08:17:20.759Z"
+      "updatedAt": "2026-09-08T11:19:36Z"
     },
     "/approvals": {
       "targetKind": "new-ui",
@@ -278,13 +278,13 @@
       ],
       "fingerprints": {
         ".superdesign/design-system.md": "8bad0f20428b6c4519646352426fe6d11c81322cff40864ce00c03cba88399ab",
-        ".superdesign/context/primary-dashboard-current.md": "3cf64059281a025dd0affe9d78a72178a13c09d81c9302dfaab5185a82518837",
-        ".superdesign/init/components.md": "051b4ed0de5a7fa8ee7ef7734c0c6a69838c9cee796682c8f64bc967153297da",
-        ".superdesign/init/layouts.md": "cc5c33d48618031815ba3e28863661b40bd2a392d35312b9295377cc33264e52",
-        ".superdesign/init/routes.md": "619dcb1f08615398f34ee90041a1e47f1d7e91348bd9afdc750d3deda1d56659",
-        ".superdesign/init/theme.md": "34454ea043733b2faf72dbaf00d3becda13092288694421add4002ee6ed0bfdf",
-        ".superdesign/init/pages.md": "a75e4a71ada1435e83579f4a4e5c95bcdafef39fe41ab8550bbf64a2042a135f",
-        ".superdesign/init/extractable-components.md": "c3e593bea1f138f39265dc97d30e8acf81efe5ebc16ae362907926da6bf0bc9d",
+        ".superdesign/context/primary-dashboard-current.md": "57f9992b819b1d2ec38749d63f71c6b2b654225534adae2da3d7a8e436d1e4aa",
+        ".superdesign/init/components.md": "837e5e23a1ec024800c5b2a16e3bbe0b818d2842ea970c9921e1d8680b18d366",
+        ".superdesign/init/layouts.md": "6d60e63bec699e4bda0676de41604a8b401e4a696e648a2327d6b67219d75845",
+        ".superdesign/init/routes.md": "81171cb907bb08e0f8090a70fbbde2420120b76b1a1d4194c1f5efdb7e0d72f4",
+        ".superdesign/init/theme.md": "7e2f7d08f5ba87d203335fb97cd3aa927763489d3fd67ef9524e7d7b77fc88ae",
+        ".superdesign/init/pages.md": "c27ecf4b5dae604b3f03dfb09401aa4824b66d6c815a7e38e1bf7ba4b0102afa",
+        ".superdesign/init/extractable-components.md": "f19812f9f485883bb431cc5f605e3e64fa055df2070af43acc9dc1b6e7957212",
         "docs/design-home/journeys.md": "2062f8089fb64bbe8c4b44505ad7d34c4abb0ead41df837d98070bb449045e3c",
         "tools/dashboard-ui/dashboard-entry.html": "cb640ae68837d02d3d0eb2843c4c31e9c8d563351264d0c3a7c68699e16500e7",
         "tools/dashboard-ui/src/dashboard.css": "9d3b71edd4e0149337da441e769deeddb44c87d058d94455e3921ce0907f0fbd"
@@ -314,7 +314,7 @@
           "currentVersion": 1
         }
       },
-      "updatedAt": "2026-09-08T08:17:20.759Z"
+      "updatedAt": "2026-09-08T11:19:36Z"
     },
     "/activity": {
       "targetKind": "new-ui",
@@ -339,13 +339,13 @@
       ],
       "fingerprints": {
         ".superdesign/design-system.md": "8bad0f20428b6c4519646352426fe6d11c81322cff40864ce00c03cba88399ab",
-        ".superdesign/context/primary-dashboard-current.md": "3cf64059281a025dd0affe9d78a72178a13c09d81c9302dfaab5185a82518837",
-        ".superdesign/init/components.md": "051b4ed0de5a7fa8ee7ef7734c0c6a69838c9cee796682c8f64bc967153297da",
-        ".superdesign/init/layouts.md": "cc5c33d48618031815ba3e28863661b40bd2a392d35312b9295377cc33264e52",
-        ".superdesign/init/routes.md": "619dcb1f08615398f34ee90041a1e47f1d7e91348bd9afdc750d3deda1d56659",
-        ".superdesign/init/theme.md": "34454ea043733b2faf72dbaf00d3becda13092288694421add4002ee6ed0bfdf",
-        ".superdesign/init/pages.md": "a75e4a71ada1435e83579f4a4e5c95bcdafef39fe41ab8550bbf64a2042a135f",
-        ".superdesign/init/extractable-components.md": "c3e593bea1f138f39265dc97d30e8acf81efe5ebc16ae362907926da6bf0bc9d",
+        ".superdesign/context/primary-dashboard-current.md": "57f9992b819b1d2ec38749d63f71c6b2b654225534adae2da3d7a8e436d1e4aa",
+        ".superdesign/init/components.md": "837e5e23a1ec024800c5b2a16e3bbe0b818d2842ea970c9921e1d8680b18d366",
+        ".superdesign/init/layouts.md": "6d60e63bec699e4bda0676de41604a8b401e4a696e648a2327d6b67219d75845",
+        ".superdesign/init/routes.md": "81171cb907bb08e0f8090a70fbbde2420120b76b1a1d4194c1f5efdb7e0d72f4",
+        ".superdesign/init/theme.md": "7e2f7d08f5ba87d203335fb97cd3aa927763489d3fd67ef9524e7d7b77fc88ae",
+        ".superdesign/init/pages.md": "c27ecf4b5dae604b3f03dfb09401aa4824b66d6c815a7e38e1bf7ba4b0102afa",
+        ".superdesign/init/extractable-components.md": "f19812f9f485883bb431cc5f605e3e64fa055df2070af43acc9dc1b6e7957212",
         "docs/design-home/journeys.md": "2062f8089fb64bbe8c4b44505ad7d34c4abb0ead41df837d98070bb449045e3c",
         "tools/dashboard-ui/dashboard-entry.html": "cb640ae68837d02d3d0eb2843c4c31e9c8d563351264d0c3a7c68699e16500e7",
         "tools/dashboard-ui/src/dashboard.css": "9d3b71edd4e0149337da441e769deeddb44c87d058d94455e3921ce0907f0fbd"
@@ -375,7 +375,7 @@
           "currentVersion": 2
         }
       },
-      "updatedAt": "2026-09-08T08:17:20.759Z"
+      "updatedAt": "2026-09-08T11:19:36Z"
     },
     "/settings": {
       "targetKind": "new-ui",
@@ -400,13 +400,13 @@
       ],
       "fingerprints": {
         ".superdesign/design-system.md": "8bad0f20428b6c4519646352426fe6d11c81322cff40864ce00c03cba88399ab",
-        ".superdesign/context/primary-dashboard-current.md": "3cf64059281a025dd0affe9d78a72178a13c09d81c9302dfaab5185a82518837",
-        ".superdesign/init/components.md": "051b4ed0de5a7fa8ee7ef7734c0c6a69838c9cee796682c8f64bc967153297da",
-        ".superdesign/init/layouts.md": "cc5c33d48618031815ba3e28863661b40bd2a392d35312b9295377cc33264e52",
-        ".superdesign/init/routes.md": "619dcb1f08615398f34ee90041a1e47f1d7e91348bd9afdc750d3deda1d56659",
-        ".superdesign/init/theme.md": "34454ea043733b2faf72dbaf00d3becda13092288694421add4002ee6ed0bfdf",
-        ".superdesign/init/pages.md": "a75e4a71ada1435e83579f4a4e5c95bcdafef39fe41ab8550bbf64a2042a135f",
-        ".superdesign/init/extractable-components.md": "c3e593bea1f138f39265dc97d30e8acf81efe5ebc16ae362907926da6bf0bc9d",
+        ".superdesign/context/primary-dashboard-current.md": "57f9992b819b1d2ec38749d63f71c6b2b654225534adae2da3d7a8e436d1e4aa",
+        ".superdesign/init/components.md": "837e5e23a1ec024800c5b2a16e3bbe0b818d2842ea970c9921e1d8680b18d366",
+        ".superdesign/init/layouts.md": "6d60e63bec699e4bda0676de41604a8b401e4a696e648a2327d6b67219d75845",
+        ".superdesign/init/routes.md": "81171cb907bb08e0f8090a70fbbde2420120b76b1a1d4194c1f5efdb7e0d72f4",
+        ".superdesign/init/theme.md": "7e2f7d08f5ba87d203335fb97cd3aa927763489d3fd67ef9524e7d7b77fc88ae",
+        ".superdesign/init/pages.md": "c27ecf4b5dae604b3f03dfb09401aa4824b66d6c815a7e38e1bf7ba4b0102afa",
+        ".superdesign/init/extractable-components.md": "f19812f9f485883bb431cc5f605e3e64fa055df2070af43acc9dc1b6e7957212",
         "docs/design-home/journeys.md": "2062f8089fb64bbe8c4b44505ad7d34c4abb0ead41df837d98070bb449045e3c",
         "tools/dashboard-ui/dashboard-entry.html": "cb640ae68837d02d3d0eb2843c4c31e9c8d563351264d0c3a7c68699e16500e7",
         "tools/dashboard-ui/src/dashboard.css": "9d3b71edd4e0149337da441e769deeddb44c87d058d94455e3921ce0907f0fbd"
@@ -436,7 +436,7 @@
           "currentVersion": 2
         }
       },
-      "updatedAt": "2026-09-08T08:17:20.759Z"
+      "updatedAt": "2026-09-08T11:19:36Z"
     }
   }
 }

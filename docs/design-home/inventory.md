@@ -8,7 +8,7 @@ Source baseline: `c2ebac5de803a0f7a00468ec4d3cdf06e4719096` (origin/main, 5.0.0a
 | --- | --- | --- | --- | --- | --- |
 | 1 | Dashboard-UI SPA | `tools/dashboard-ui/src/dashboard.ts` | 1528 | Vite single-file | `packages/personal/resources/dashboard.html` |
 | 1 | Dashboard-UI CSS | `tools/dashboard-ui/src/dashboard.css` | 619 | Vite single-file | (bundled into dashboard.html) |
-| 1 | Dashboard-UI entry | `tools/dashboard-ui/dashboard-entry.html` | ~30 | Vite single-file | (bundled into dashboard.html) |
+| 1 | Dashboard-UI entry | `tools/dashboard-ui/dashboard-entry.html` | 145 | Vite single-file | (bundled into dashboard.html) |
 | 2 | Fleet Dashboard | `tools/fleet-dashboard/fleet_dashboard.py` | 7507 | None (inline) | Served by HTTP handler |
 | 3 | Extension Join/Settings | `tools/aionui-extension/webui/` | 360 | None (static) | `webui/index.html` |
 | 4 | Personal MCP Server | `packages/personal/src/pursers_personal/apps_server.py` | 2401 | None | MCP tools + HTML resource |
@@ -56,7 +56,7 @@ Source baseline: `c2ebac5de803a0f7a00468ec4d3cdf06e4719096` (origin/main, 5.0.0a
 | State | How rendered | Location |
 | --- | --- | --- |
 | Initial (no door) | Join form with intro text | `index.html` |
-| Joining | `message.textContent = 'Joining…'` | `app.js` line ~30 |
+| Joining | `message.textContent = 'Joining…'` | `app.js` line 30 |
 | Joined | `message.textContent = 'Joined and registered…'` + status card | `app.js` line ~35 |
 | Join failed | `message.textContent = result.install_hint \|\| 'Join failed…'` | `app.js` line ~32 |
 | Bridge missing | `install_hint: INSTALL_HINT` from routes.js | `routes.js` status() |
@@ -98,18 +98,20 @@ required for text marks.
 | `vite-plugin-singlefile` | 2.3.3 | MIT | Dashboard-UI (single-file output) |
 | `mcp` (Python) | 2.1.1 | MIT | Wait bridge, Personal MCP server |
 
-## Total context size
+## Context line counts
 
-| Artifact | Lines | Approx size |
-| --- | --- | --- |
-| components.md | ~230 | ~8 KB |
-| layouts.md | ~160 | ~5 KB |
-| routes.md | 288 | ~10 KB |
-| theme.md | ~210 | ~7 KB |
-| pages.md | ~165 | ~5 KB |
-| extractable-components.md | ~185 | ~6 KB |
-| inventory.md (this file) | ~180 | ~6 KB |
-| **Total** | **~1418** | **~47 KB** |
+| Artifact | Exact lines |
+| --- | ---: |
+| components.md | 223 |
+| layouts.md | 152 |
+| routes.md | 290 |
+| theme.md | 200 |
+| pages.md | 158 |
+| extractable-components.md | 177 |
+| inventory.md (this file) | 150 |
+| **Total** | **1350** |
+
+The total covers these seven Markdown artifacts only. Byte totals are intentionally omitted so this manifest does not depend on a self-referential byte count.
 
 ## Bounded context bundle for primary dashboard reproduction
 
@@ -117,7 +119,7 @@ To reproduce the Dashboard-UI primary surface, include:
 
 1. `tools/dashboard-ui/src/dashboard.ts` (1528 lines) — full TypeScript SPA logic
 2. `tools/dashboard-ui/src/dashboard.css` (619 lines) — full CSS with dark/light themes
-3. `tools/dashboard-ui/dashboard-entry.html` (~30 lines) — HTML shell
+3. `tools/dashboard-ui/dashboard-entry.html` (145 lines) — HTML shell
 4. `tools/dashboard-ui/vite.config.ts` — Vite build config
 5. `tools/dashboard-ui/package.json` — dependency manifest
 6. `tools/dashboard-ui/tsconfig.json` — TypeScript config

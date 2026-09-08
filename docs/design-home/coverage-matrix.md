@@ -50,4 +50,4 @@ This matrix prevents the approachable Home redesign from silently removing capab
 
 Direction A, Warm Guided Home, was selected through `HR-d68423777f76a864`. The canvas now includes Home, Projects, Work, Team, Approvals, Activity, and Settings in that visual system. Direction B remains preserved as an unselected alternative and is not an implementation foundation.
 
-The page-level implementation contract and preview map live in `docs/design-home/page-specs.md`. The route boundary is source-backed: `#/seats`, `/api/config`, `/api/intake`, `/api/dispatch`, `/api/workers`, and `/api/doors` are covered; the rejected inventory's `/central/{central}/workers` and `/seats` routes are excluded.
+The page-level implementation contract and preview map live in `docs/design-home/page-specs.md`. The route boundary is source-backed: `#/seats`, GET `/api/attention`, GET and POST `/api/intake`, GET `/api/board/<board>`, `/api/config`, `/api/dispatch`, `/api/workers`, and `/api/doors` are covered; the rejected inventory's `/central/{central}/workers`, `/central/{central}/seats`, `/seats`, and `/api/config/attention` routes are excluded.

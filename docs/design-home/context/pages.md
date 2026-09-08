@@ -82,11 +82,11 @@ Calls MCP `link_snapshot` tool on first view activation.
 
 ## Surface 2: Fleet Dashboard — Overview (#/)
 
-Entry: `tools/fleet-dashboard/fleet_dashboard.py` line ~5828 (inline HTML constant `HTML`)
+Entry: `tools/fleet-dashboard/fleet_dashboard.py` line 5828 (inline HTML constant `HTML`)
 
 ```
 fleet_dashboard.py
-├── HTML constant (line 5828) — full HTML document with inline <style> and <script>
+├── HTML definition and patch sequence (lines 5828–6427)
 │   ├── <style> — CSS custom properties, layout, components, responsive, print
 │   ├── <body>
 │   │   ├── .app-shell
@@ -97,16 +97,16 @@ fleet_dashboard.py
 │   │   │       ├── #home-view
 │   │   │       ├── #detail-view
 │   │   │       └── dialog#help-overlay
-│   │   └── <script> — full SPA JavaScript
+│   │   └── <script> — SPA JavaScript
 │   │       ├── Helpers (esc, fmt, href builders, matches, filters)
 │   │       ├── State (fleetData, fleetErrors, centralLabels, detailData, etc.)
 │   │       ├── Renderers (renderFleet, renderCentral, renderDetail, ticketView, etc.)
 │   │       ├── API (fetchJson, fetchWithTimeout, loadCentrals, refreshCentral, etc.)
 │   │       ├── Routing (route(), syncRoute())
 │   │       └── Event listeners (hashchange, keyboard, search, theme, density)
-│   └── HTML.replace() patches (lines ~5892-6173) — legacy route overrides, new sections
+│   └── HTML.replace() patches (lines 5892–6427) — legacy route overrides, new sections
 │
-├── Python HTTPHandler class (line ~6435 through ~7507)
+├── Python HTTP handler methods (lines 6580–7284)
 │   ├── do_GET — serves HTML, API endpoints
 │   ├── do_POST — config, intake, worker, door, project APIs
 │   └── _send — response helper

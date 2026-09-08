@@ -14,7 +14,7 @@
 
 | Destination | Draft | Preview | Implementation contract |
 | --- | --- | --- | --- |
-| Home | `3c7bf43a-9ae1-451d-8fbc-97a9468c2fab` v3 | https://p.superdesign.dev/draft/3c7bf43a-9ae1-451d-8fbc-97a9468c2fab | Lead with the next safe human action, then project health, current work, Team, approval, and reviewed result. First-run onboarding must not appear beside populated returning-user data. |
+| Home | `3c7bf43a-9ae1-451d-8fbc-97a9468c2fab` v4 | https://p.superdesign.dev/draft/3c7bf43a-9ae1-451d-8fbc-97a9468c2fab | Lead with the next safe human action, then project health, current work, Team, approval, and reviewed result. First-run onboarding must not appear beside populated returning-user data. |
 | Projects | `69b3340a-b9fd-47ab-9882-79fda80ac431` v2 | https://p.superdesign.dev/draft/69b3340a-b9fd-47ab-9882-79fda80ac431 | Project selection, registry/connection health, stale last-known data, empty project guidance, and supported connect/add-project entry. |
 | Work | `338327db-9531-43a3-ab58-63f20617d7f3` v1 | https://p.superdesign.dev/draft/338327db-9531-43a3-ab58-63f20617d7f3 | Preserve Open, Working, Submitted, Needs attention, Done, Ended, and unknown states; ticket detail progressively exposes timeline, changes, flow, routes, lease, and reviewed handoff. |
 | Team | `274d5b8a-c348-4193-8ffc-6166a899927a` v1 | https://p.superdesign.dev/draft/274d5b8a-c348-4193-8ffc-6166a899927a | Roster and readiness first; show role, tier, project, assignment, idle/stale/retired/duplicate/partial-start states. Worker and seat lifecycle operations stay in advanced Settings. |
@@ -25,8 +25,9 @@
 ## Source-Backed Boundary
 
 - Live dashboard route includes `#/seats`.
-- Live APIs include `/api/config`, `/api/intake`, `/api/dispatch`, `/api/workers`, and `/api/doors`, plus their existing guarded subroutes.
+- Live APIs include GET `/api/config`, GET and POST `/api/intake`, GET and POST `/api/dispatch`, GET and POST `/api/workers`, GET `/api/doors`, GET and POST `/api/attention`, and GET `/api/board/<board>`, plus the other guarded routes listed in `docs/design-home/context/routes.md`.
 - Bare HTTP `/central/{central}/workers` and `/seats` are not source routes. The source-backed hash routes are `#/central/<central>/workers` and `#/seats`.
+- The GET and POST tables in `docs/design-home/context/routes.md` match the complete endpoint sets mechanically extracted from `do_GET()` and `do_POST()` at baseline `c2ebac5de803a0f7a00468ec4d3cdf06e4719096`.
 - Draft controls illustrate information architecture. They do not prove a host API, connector mutation, Team lifecycle mutation, or release operation succeeded.
 
 ## Export Map

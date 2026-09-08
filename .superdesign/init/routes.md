@@ -4,7 +4,7 @@ Source baseline: `c2ebac5de803a0f7a00468ec4d3cdf06e4719096` (origin/main, 5.0.0a
 
 ## Surface 1: Dashboard-UI (Vite + TypeScript SPA)
 
-**Source:** `tools/dashboard-ui/src/dashboard.ts` (1528 lines, 1–1528)
+**Source:** `tools/dashboard-ui/src/dashboard.ts` (1528 lines); selected design-facing ranges 537–636, 648–1214, and 1231–1400
 **Entry:** `tools/dashboard-ui/dashboard-entry.html`
 **Build output:** `packages/personal/resources/dashboard.html` (Vite single-file)
 
@@ -64,15 +64,15 @@ Additional render functions:
 ### PostMessageTransport MCP Apps bridge
 
 The dashboard communicates with the host through `PostMessageTransport` (lines
-~545–636), which wraps `window.postMessage` / `window.addEventListener` for
+545–636), which wraps `window.postMessage` / `window.addEventListener` for
 MCP tool calls. The `structured()` helper (line 545) extracts structured content
 from MCP results. `serializedWithinLimit()` (line 537) validates response size.
 
 ## Surface 2: Fleet Dashboard (inline Python HTML SPA)
 
 **Source:** `tools/fleet-dashboard/fleet_dashboard.py` (7507 lines)
-**HTML constant:** Inline string starting at line ~5828, patched through ~6173
-**HTTP handler:** `BaseHTTPRequestHandler` subclass at ~6435
+**HTML definition:** Inline string and patches at lines 5828–6427
+**HTTP handlers:** `do_GET` at lines 6580–6883; `do_POST` at lines 6885–7284
 
 ### Hash routes (from patched `route()` function)
 
@@ -144,12 +144,13 @@ The `route()` function (line 5859) is progressively patched by hub extensions:
 | `/api/config/seats` | Seat inventory | 6603 |
 | `/api/config/bridge` | Bridge install/upgrade status | 6605 |
 | `/api/config/release` | Release operations status | 6607 |
-| `/api/config/attention` | Attention state | 6609 |
+| `/api/attention` | Attention state | 6609 |
 | `/api/config/registry` | Project registry | 6648 |
 | `/api/doors` | Door inventory | 6665 |
 | `/api/intake` | Intake queues | 6774 |
 | `/api/dispatch` | Dispatch history/timing | 6796 |
 | `/api/workers` | API workers list | 6818 |
+| `/api/board/<board>` | Board detail | 6840 |
 | `/api/config/jobs/<hash>` | Poll async config job | 6591 |
 
 ### POST API endpoints
@@ -172,6 +173,7 @@ The `route()` function (line 5859) is progressively patched by hub extensions:
 | `/api/agents/retire-inert` | Retire inert agents | 7059 |
 | `/api/attention` | Acknowledge/snooze attention | 7067 |
 | `/api/human/resolve` | Resolve human-input request | 7069 |
+| `/api/intake` | Submit or decide intake | 7264 |
 | `/api/doors/copy` | Copy-once door | 7093 |
 | `/api/doors/rotate` | Rotate door | 7104 |
 | `/api/projects/add` | Add project to registry | 7115 |
@@ -191,7 +193,7 @@ limit. Includes `/api/config`, `/api/config/plan`, `/api/config/apply`,
 
 ## Surface 3: Extension (AionUI settings tab)
 
-**Source:** `tools/aionui-extension/` (5 webui files, 360 lines total)
+**Source:** `tools/aionui-extension/` (4 webui files, 360 lines total, plus the 99-line extension manifest)
 
 ### API routes (from `aion-extension.json` webui.apiRoutes)
 

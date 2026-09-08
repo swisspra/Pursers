@@ -31,7 +31,7 @@ The root layout wrapper. Contains header, connection banner, command bar (search
 └── footer.app-footer
 ```
 
-Full CSS (layout-relevant excerpts):
+Representative layout declarations:
 
 ```css
 .app-shell { width: min(1240px, 100%); margin: 0 auto; }
@@ -85,7 +85,7 @@ Full CSS (layout-relevant excerpts):
 
 ## Surface 2: Fleet Dashboard
 
-Source: `tools/fleet-dashboard/fleet_dashboard.py` (7507 lines, inline HTML/CSS/JS, HTML constant at line ~5828 through ~6173, HTTP handler at ~6435–7507). Baseline: `c2ebac5de803a0f7a00468ec4d3cdf06e4719096`.
+Source: `tools/fleet-dashboard/fleet_dashboard.py` (7507 lines). The HTML definition and patches occupy lines 5828–6427; `do_GET` occupies lines 6580–6883 and `do_POST` occupies lines 6885–7284. Baseline: `c2ebac5de803a0f7a00468ec4d3cdf06e4719096`.
 
 ### App Shell with Sidebar
 
@@ -104,7 +104,7 @@ body
 └── (dynamically rendered content)
 ```
 
-Full sidebar CSS:
+Representative sidebar declarations:
 
 ```css
 .app-shell { /* wraps sidebar + main */ }
@@ -128,7 +128,7 @@ main { width: 100%; max-width: 1500px; min-width: 0; margin: auto; padding: var(
 
 ## Surface 3: Extension Join/Settings
 
-Source: `tools/aionui-extension/webui/index.html` + `style.css`
+Source: `tools/aionui-extension/webui/index.html` (33 lines) and `style.css` (66 lines).
 
 ### Extension Layout
 
@@ -142,7 +142,7 @@ body
     └── section#status-card (hidden, dl with dt/dd pairs)
 ```
 
-Full layout CSS:
+Representative layout declarations:
 
 ```css
 main { max-width: 42rem; margin: 0 auto; padding: 2rem; }
