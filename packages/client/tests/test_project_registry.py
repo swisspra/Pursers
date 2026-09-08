@@ -20,6 +20,7 @@ from pursers_client import (
     registry_project_operator_work_dirs,
     registry_project_work_dirs,
     registry_work_dirs,
+    resolve_registry_target,
 )
 
 
@@ -61,6 +62,99 @@ def test_registry_routes_seats_to_fleet_clone_and_retains_operator_checkout() ->
     assert registry_project_operator_work_dirs(parsed)["alpha"] == "/repo/operator"
 
 
+def test_registry_resolves_legacy_path_and_exact_repository_url() -> None:
+    parsed = parse_project_registry(state({
+        "schema_version": 1,
+        "projects": {
+            "Pursers": {
+                "board_id": "pursers",
+                "work_dir": "/repo/Pursers",
+                "fleet_clone_dir": "/fleet/Pursers",
+                "repository_url": "https://example.test/acme/Pursers",
+                "status": "active",
+            },
+        },
+    }))
+
+    legacy = resolve_registry_target(parsed, "pursers", "pursers/tools/seat-kit")
+    repository = resolve_registry_target(
+        parsed, "pursers", "https://example.test/acme/Pursers"
+    )
+
+    assert legacy == repository
+    assert repository == {
+        "project": "Pursers",
+        "board_id": "pursers",
+        "work_dir": "/fleet/Pursers",
+        "operator_work_dir": "/repo/Pursers",
+    }
+
+
+def test_registry_repository_url_is_exact_and_board_scoped() -> None:
+    parsed = parse_project_registry(state({
+        "schema_version": 1,
+        "projects": {
+            "alpha": {
+                "board_id": "shared",
+                "work_dir": "/repo/alpha",
+                "repository_url": "https://example.test/acme/alpha",
+                "status": "active",
+            },
+            "beta": {
+                "board_id": "shared",
+                "work_dir": "/repo/beta",
+                "repository_url": "https://example.test/acme/beta",
+                "status": "active",
+            },
+            "other": {
+                "board_id": "other-board",
+                "work_dir": "/repo/other",
+                "repository_url": "https://example.test/acme/other",
+                "status": "active",
+            },
+        },
+    }))
+
+    assert resolve_registry_target(
+        parsed, "shared", "https://example.test/acme/beta"
+    )["project"] == "beta"
+    with pytest.raises(
+        registry_module.RegistryRoutingError,
+        match="not registered for board 'shared'",
+    ) as unknown:
+        resolve_registry_target(
+            parsed, "shared", "https://example.test/acme/unknown"
+        )
+    assert unknown.value.code == "repository_url_not_registered"
+    with pytest.raises(registry_module.RegistryRoutingError) as cross_board:
+        resolve_registry_target(
+            parsed, "shared", "https://example.test/acme/other"
+        )
+    assert cross_board.value.code == "repository_url_board_mismatch"
+
+
+def test_registry_refuses_ambiguous_legacy_alias_on_shared_board() -> None:
+    parsed = parse_project_registry(state({
+        "schema_version": 1,
+        "projects": {
+            "first": {
+                "board_id": "shared",
+                "work_dir": "/one/common",
+                "status": "active",
+            },
+            "second": {
+                "board_id": "shared",
+                "work_dir": "/two/common",
+                "status": "active",
+            },
+        },
+    }))
+
+    with pytest.raises(registry_module.RegistryRoutingError) as caught:
+        resolve_registry_target(parsed, "shared", "common/task")
+    assert caught.value.code == "project_route_ambiguous"
+
+
 def test_operator_only_project_is_retained_but_excluded_from_fleet_routes() -> None:
     parsed = parse_project_registry(state({
         "schema_version": 1,
@@ -89,6 +183,7 @@ def test_operator_only_project_is_retained_but_excluded_from_fleet_routes() -> N
     {"schema_version": 1, "projects": {"bad": {"board_id": "x", "work_dir": "/repo/x", "work_dir_owner": "human", "status": "active"}}},
     {"schema_version": 1, "projects": {"bad": {"board_id": "x", "work_dir": "/repo/x", "fleet_clone_dir": "relative", "status": "active"}}},
     {"schema_version": 1, "projects": {"bad": {"board_id": "x", "work_dir": "/repo/x", "fleet": "no", "status": "active"}}},
+    {"schema_version": 1, "projects": {"bad": {"board_id": "x", "work_dir": "/repo/x", "repository_url": "http://example.test/x", "status": "active"}}},
 ])
 def test_registry_parser_rejects_invalid_schema(value: object) -> None:
     with pytest.raises(ValueError, match="project_registry"):

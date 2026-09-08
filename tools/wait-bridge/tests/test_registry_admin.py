@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import io
 import json
 import os
@@ -43,7 +44,7 @@ class FakeClient:
         self.value = json.dumps(document)
         self.mismatch_after_write = mismatch_after_write
         self.get_calls = 0
-        self.writes: list[tuple[str, str]] = []
+        self.writes: list[tuple[str, str, str | None]] = []
 
     async def board_state_get(self, key: str | None = None) -> dict[str, Any]:
         self.get_calls += 1
@@ -52,8 +53,10 @@ class FakeClient:
             value = json.dumps(INITIAL)
         return {"state": {"key": key, "value": value}}
 
-    async def board_state_update(self, key: str, value: str) -> dict[str, Any]:
-        self.writes.append((key, value))
+    async def board_state_update(
+        self, key: str, value: str, *, expected_sha256: str | None = None
+    ) -> dict[str, Any]:
+        self.writes.append((key, value, expected_sha256))
         self.value = value
         return {"ok": True}
 
@@ -108,6 +111,10 @@ class RegistryAdminTests(unittest.TestCase):
         )
         self.assertEqual(client.get_calls, 2)
         self.assertEqual(client.writes[0][0], registry_admin.REGISTRY_KEY)
+        self.assertEqual(
+            client.writes[0][2],
+            hashlib.sha256(json.dumps(INITIAL).encode()).hexdigest(),
+        )
 
     def test_add_accepts_fleet_clone_routing_fields(self) -> None:
         client = FakeClient()
@@ -125,7 +132,6 @@ class RegistryAdminTests(unittest.TestCase):
             "--fleet-clone-dir",
             "/fleet/beta",
         )
-
         self.assertEqual(
             client.document()["projects"]["beta"],
             {
@@ -136,6 +142,50 @@ class RegistryAdminTests(unittest.TestCase):
                 "status": "active",
             },
         )
+
+    def test_add_and_set_exact_repository_url(self) -> None:
+        client = FakeClient()
+
+        invoke(
+            client,
+            "add", "beta", "--board-id", "beta-board",
+            "--work-dir", "/operator/beta",
+            "--repository-url", "https://example.test/acme/beta",
+        )
+        self.assertEqual(
+            client.document()["projects"]["beta"]["repository_url"],
+            "https://example.test/acme/beta",
+        )
+
+        invoke(
+            client,
+            "set-repository-url", "beta", "https://example.test/acme/beta-v2",
+        )
+        self.assertEqual(
+            client.document()["projects"]["beta"]["repository_url"],
+            "https://example.test/acme/beta-v2",
+        )
+
+    def test_repository_url_validation_and_same_board_uniqueness(self) -> None:
+        client = FakeClient()
+        with self.assertRaisesRegex(registry_admin.RegistryError, "HTTPS"):
+            invoke(
+                client, "set-repository-url", "alpha", "http://example.test/alpha"
+            )
+        self.assertEqual(client.writes, [])
+
+        duplicate = json.loads(json.dumps(INITIAL))
+        duplicate["projects"]["alpha"]["repository_url"] = (
+            "https://example.test/acme/shared"
+        )
+        duplicate["projects"]["beta"] = {
+            "board_id": "alpha-board",
+            "work_dir": "/synthetic/beta",
+            "repository_url": "https://example.test/acme/shared",
+            "status": "active",
+        }
+        with self.assertRaisesRegex(registry_admin.RegistryError, "same active"):
+            invoke(FakeClient(duplicate), "show")
 
     def test_operator_only_flag_persists_fleet_false(self) -> None:
         client = FakeClient()

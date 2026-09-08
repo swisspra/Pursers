@@ -7,11 +7,13 @@ import argparse
 import asyncio
 import copy
 import difflib
+import hashlib
 import json
 import os
 import sys
 from collections.abc import Callable, Sequence
 from typing import Any, Protocol
+from urllib.parse import urlsplit
 
 from pursers_client import BoardClient
 
@@ -31,7 +33,9 @@ class RegistryError(RuntimeError):
 class RegistryClient(Protocol):
     async def board_state_get(self, key: str | None = None) -> dict[str, Any]: ...
 
-    async def board_state_update(self, key: str, value: str) -> dict[str, Any]: ...
+    async def board_state_update(
+        self, key: str, value: str, *, expected_sha256: str | None = None
+    ) -> dict[str, Any]: ...
 
 
 def _require_clean_string(value: Any, label: str) -> str:
@@ -40,6 +44,25 @@ def _require_clean_string(value: Any, label: str) -> str:
     if any(ord(character) < 0x20 or ord(character) == 0x7F for character in value):
         raise RegistryError(f"{label} must not contain control characters")
     return value
+
+
+def _require_repository_url(value: Any, label: str = "repository_url") -> str:
+    url = _require_clean_string(value, label)
+    parsed = urlsplit(url)
+    if (
+        parsed.scheme != "https"
+        or not parsed.netloc
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+        or parsed.path in {"", "/"}
+    ):
+        raise RegistryError(
+            f"{label} must be a credential-free HTTPS repository URL without "
+            "query or fragment"
+        )
+    return url
 
 
 def validate_registry(document: Any) -> dict[str, Any]:
@@ -59,7 +82,9 @@ def validate_registry(document: Any) -> dict[str, Any]:
     for name, entry in projects.items():
         _require_clean_string(name, "project name")
         required = {"board_id", "work_dir", "status"}
-        optional = {"work_dir_owner", "fleet_clone_dir", "fleet"}
+        optional = {
+            "work_dir_owner", "fleet_clone_dir", "fleet", "repository_url"
+        }
         if (
             not isinstance(entry, dict)
             or not required <= set(entry)
@@ -67,7 +92,8 @@ def validate_registry(document: Any) -> dict[str, Any]:
         ):
             raise RegistryError(
                 f"project {name!r} must contain exactly board_id, work_dir, and "
-                "status plus optional work_dir_owner, fleet_clone_dir, and fleet"
+                "status plus optional work_dir_owner, fleet_clone_dir, fleet, and "
+                "repository_url"
             )
         _require_clean_string(entry["board_id"], f"project {name!r} board_id")
         work_dir = _require_clean_string(entry["work_dir"], f"project {name!r} work_dir")
@@ -94,6 +120,23 @@ def validate_registry(document: Any) -> dict[str, Any]:
                 )
         if "fleet" in entry and type(entry["fleet"]) is not bool:
             raise RegistryError(f"project {name!r} fleet must be boolean")
+        if "repository_url" in entry:
+            _require_repository_url(
+                entry["repository_url"], f"project {name!r} repository_url"
+            )
+
+    routes: dict[tuple[str, str], str] = {}
+    for name, entry in projects.items():
+        repository_url = entry.get("repository_url")
+        if entry["status"] != "active" or repository_url is None:
+            continue
+        route = (entry["board_id"], repository_url)
+        if route in routes:
+            raise RegistryError(
+                f"projects {routes[route]!r} and {name!r} use the same active "
+                "repository_url on one board"
+            )
+        routes[route] = name
 
     return copy.deepcopy(document)
 
@@ -123,12 +166,16 @@ def _render(document: Any) -> str:
 
 
 async def write_and_verify(
-    client: RegistryClient, expected: dict[str, Any]
+    client: RegistryClient,
+    expected: dict[str, Any],
+    *,
+    expected_sha256: str | None = None,
 ) -> dict[str, Any]:
     validated = validate_registry(expected)
     await client.board_state_update(
         REGISTRY_KEY,
         json.dumps(validated, separators=(",", ":"), sort_keys=True),
+        expected_sha256=expected_sha256,
     )
     try:
         actual = await read_registry(client)
@@ -178,6 +225,7 @@ def build_parser() -> argparse.ArgumentParser:
         choices=sorted(VALID_WORK_DIR_OWNERS),
     )
     add.add_argument("--fleet-clone-dir")
+    add.add_argument("--repository-url")
     fleet = add.add_mutually_exclusive_group()
     fleet.add_argument("--fleet", dest="fleet", action="store_true")
     fleet.add_argument("--operator-only", dest="fleet", action="store_false")
@@ -192,11 +240,22 @@ def build_parser() -> argparse.ArgumentParser:
     for command in ("pause", "activate", "remove"):
         action = subparsers.add_parser(command)
         action.add_argument("name")
+    set_repository = subparsers.add_parser(
+        "set-repository-url", help="set exact repository URL routing for a project"
+    )
+    set_repository.add_argument("name")
+    set_repository.add_argument("repository_url")
     return parser
 
 
 async def execute(args: argparse.Namespace, client: RegistryClient) -> None:
-    current = await read_registry(client)
+    current_result = await client.board_state_get(REGISTRY_KEY)
+    current = _registry_from_result(current_result)
+    state = current_result.get("state", {})
+    raw_value = state.get("value") if isinstance(state, dict) else None
+    if not isinstance(raw_value, str):  # _registry_from_result already guards this.
+        raise RegistryError("project_registry state value must be a JSON string")
+    expected_sha256 = hashlib.sha256(raw_value.encode("utf-8")).hexdigest()
     if args.command == "show":
         print(_render(current))
         return
@@ -224,6 +283,10 @@ async def execute(args: argparse.Namespace, client: RegistryClient) -> None:
             if not os.path.isabs(clone_dir):
                 raise RegistryError("fleet_clone_dir must be an absolute path")
             projects[name]["fleet_clone_dir"] = clone_dir
+        if args.repository_url is not None:
+            projects[name]["repository_url"] = _require_repository_url(
+                args.repository_url
+            )
         if args.fleet is not None:
             projects[name]["fleet"] = args.fleet
     else:
@@ -235,16 +298,24 @@ async def execute(args: argparse.Namespace, client: RegistryClient) -> None:
             projects[name]["status"] = "active"
         elif args.command == "remove":
             removed = projects.pop(name)
-            verified = await write_and_verify(client, current)
+            verified = await write_and_verify(
+                client, current, expected_sha256=expected_sha256
+            )
             print("Removed entry (save this JSON to restore it by hand):")
             print(_render({name: removed}))
             print("Verified registry:")
             print(_render(verified))
             return
+        elif args.command == "set-repository-url":
+            projects[name]["repository_url"] = _require_repository_url(
+                args.repository_url
+            )
         else:  # pragma: no cover - argparse prevents this path
             raise RegistryError(f"unsupported command {args.command!r}")
 
-    verified = await write_and_verify(client, current)
+    verified = await write_and_verify(
+        client, current, expected_sha256=expected_sha256
+    )
     print(_render(verified))
 
 
