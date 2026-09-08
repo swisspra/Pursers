@@ -26,7 +26,7 @@
 
 - Live dashboard route includes `#/seats`.
 - Live APIs include `/api/config`, `/api/intake`, `/api/dispatch`, `/api/workers`, and `/api/doors`, plus their existing guarded subroutes.
-- `/central/{central}/workers` and `/seats` are not source routes and must not be implemented from the rejected inventory.
+- Bare HTTP `/central/{central}/workers` and `/seats` are not source routes. The source-backed hash routes are `#/central/<central>/workers` and `#/seats`.
 - Draft controls illustrate information architecture. They do not prove a host API, connector mutation, Team lifecycle mutation, or release operation succeeded.
 
 ## Export Map

@@ -2,9 +2,11 @@
 
 Shared/reusable UI component source for the primary dashboard (dashboard-ui) and the fleet dashboard. Framework: vanilla TypeScript DOM manipulation (dashboard-ui), inline JavaScript template literals (fleet-dashboard), and plain HTML/JS (extension).
 
+Baseline: `c2ebac5de803a0f7a00468ec4d3cdf06e4719096` (origin/main, 5.0.0a25).
+
 ## Dashboard-UI Shared Primitives
 
-Source: `tools/dashboard-ui/src/dashboard.ts`
+Source: `tools/dashboard-ui/src/dashboard.ts` (1528 lines, 1–1528). Baseline: `c2ebac5de803a0f7a00468ec4d3cdf06e4719096`.
 
 ### element() — Generic DOM element factory
 
@@ -132,7 +134,7 @@ function renderHighlight(container: HTMLElement, value: Highlight | null, emptyT
 
 ## Fleet-Dashboard Components
 
-Source: `tools/fleet-dashboard/fleet_dashboard.py` (inline JS, lines ~5828-6200+)
+Source: `tools/fleet-dashboard/fleet_dashboard.py` (7507 lines, inline JS in HTML constant lines ~5828–6173, HTTP handler ~6435–7507). Baseline: `c2ebac5de803a0f7a00468ec4d3cdf06e4719096`.
 
 ### fleet dashboard helper: esc()
 

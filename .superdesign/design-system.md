@@ -58,4 +58,3 @@ Primary navigation: Home, Projects, Work, Team, Approvals, Activity, Settings.
 - Never show bearer tokens, door secrets, raw credentials, or private identifiers.
 - Labels such as Demo, Stale, Read-only, Truncated, Permission denied, and Local must remain explicit.
 - Destructive or high-impact operations require clear scope, consequence, and confirmation.
-
