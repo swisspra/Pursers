@@ -85,6 +85,41 @@
           "entryPoint": "webui/routes.js",
           "description": "Read redacted wait-bridge status.",
           "auth": true
+        },
+        {
+          "path": "/pursers/onboarding/validate",
+          "method": "POST",
+          "entryPoint": "webui/routes.js",
+          "description": "Validate a door without storing it.",
+          "auth": true
+        },
+        {
+          "path": "/pursers/onboarding/connect",
+          "method": "POST",
+          "entryPoint": "webui/routes.js",
+          "description": "Connect or idempotently resume a door-backed seat.",
+          "auth": true
+        },
+        {
+          "path": "/pursers/onboarding/status",
+          "method": "GET",
+          "entryPoint": "webui/routes.js",
+          "description": "Read typed redacted onboarding status.",
+          "auth": true
+        },
+        {
+          "path": "/pursers/onboarding/rotate",
+          "method": "POST",
+          "entryPoint": "webui/routes.js",
+          "description": "Replace an existing stored door and reconnect.",
+          "auth": true
+        },
+        {
+          "path": "/pursers/onboarding/recover",
+          "method": "POST",
+          "entryPoint": "webui/routes.js",
+          "description": "Recover MCP registration from redacted stored state.",
+          "auth": true
         }
       ],
       "staticAssets": [

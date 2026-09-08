@@ -43,3 +43,20 @@ def test_permissions_are_loopback_only_and_moderate() -> None:
         "::1",
     }
     assert manifest["risk"]["level"] == "moderate"
+
+
+def test_onboarding_routes_are_authenticated() -> None:
+    routes = load("aion-extension.json")["contributes"]["webui"]["apiRoutes"]
+    onboarding = {
+        (route["path"], route["method"]): route
+        for route in routes
+        if route["path"].startswith("/pursers/onboarding/")
+    }
+    assert set(onboarding) == {
+        ("/pursers/onboarding/connect", "POST"),
+        ("/pursers/onboarding/recover", "POST"),
+        ("/pursers/onboarding/rotate", "POST"),
+        ("/pursers/onboarding/status", "GET"),
+        ("/pursers/onboarding/validate", "POST"),
+    }
+    assert all(route["auth"] is True for route in onboarding.values())

@@ -30,6 +30,20 @@ owns the private mode-0600 credential store. The extension does not log or
 persist the door. It then registers an environment-free stdio bridge through
 AionUi's local `POST /api/mcp/servers/import` endpoint.
 
+## Backend onboarding contract
+
+`door/adapter.cjs` provides typed `parse`, `validate`, `connect`, `status`,
+`rotate`, and `recover` operations for a future beginner flow. The authenticated
+routes are under `/pursers/onboarding/`; the existing `/pursers/join` and
+`/pursers/status` response shapes remain compatible with the current UI.
+
+Remote Central doors require HTTPS. HTTP doors are accepted only for loopback.
+The adapter forwards a unique seat name and `PURSERS_TIER_MAX` to the shipped
+wait bridge, returns an exact seat fragment for the Team adapter, and never
+dispatches work. A partial MCP import is recoverable without replaying or
+returning the door. See `door/DOOR_ONBOARDING_CONTRACT.md` for result codes,
+idempotency, and current host limitations.
+
 ## AionUi 2.2.1 limitations
 
 - AionUi lists extension-declared MCP servers but does not inject them into
