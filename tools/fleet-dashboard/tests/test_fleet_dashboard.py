@@ -3960,9 +3960,9 @@ def test_dashboard_v2_ia_agents_and_responsive_contract() -> None:
 
     assert 'class="app-shell"' in html
     assert 'aria-label="Primary navigation"' in html
-    assert 'href="#/boards"' in html
-    assert 'href="#/agents"' in html
-    assert 'href="#/operations"' in html
+    assert 'href="#/projects"' in html
+    assert 'href="#/team"' in html
+    assert 'href="#/settings"' in html
     assert "Fleet overview" in html
     assert "Board workspaces" in html
     assert "Unified agent pool" in html
@@ -3978,6 +3978,33 @@ def test_dashboard_v2_ia_agents_and_responsive_contract() -> None:
     assert "overflow-x:hidden" in html
     assert "https://cdn" not in html
     assert "http://cdn" not in html
+
+
+def test_dashboard_uses_warm_guided_home_shell() -> None:
+    html = dashboard.HTML
+
+    for destination in (
+        "home",
+        "projects",
+        "work",
+        "team",
+        "approvals",
+        "activity",
+        "settings",
+    ):
+        assert f'data-nav="{destination}" href="#/{destination}"' in html
+    assert "Your calm work home" in html
+    assert "Workspace context" in html
+    assert "function renderWarmHome()" in html
+    assert "function renderWarmProjects()" in html
+    assert "function renderWarmWork()" in html
+    assert "function renderWarmApprovals()" in html
+    assert "function renderWarmActivity()" in html
+    assert "function renderWarmSettings()" in html
+    assert ".warm-row>div:first-child{display:grid;justify-items:start;gap:3px}" in html
+    assert ".intake-form textarea,.intake-form button,.intake-actions button{min-height:44px" in html
+    assert "https://cdn.tailwindcss.com" not in html
+    assert "https://code.iconify.design" not in html
 
 
 def test_seat_config_manager_plan_apply_backup_restart_and_no_token_leak(
