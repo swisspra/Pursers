@@ -3,7 +3,7 @@
   "name": "pursers",
   "displayName": "Pursers",
   "version": "0.1.0",
-  "description": "Worker and reviewer presets with a local door join screen.",
+  "description": "Guided Pursers project setup, Team controls, recovery, and worker/reviewer presets.",
   "author": "Pursers",
   "engine": {
     "aionui": "^2.2.1"
@@ -70,65 +70,73 @@
         "order": 80
       }
     ],
-    "webui": {
-      "apiRoutes": [
+    "webui": [
+      {
+        "id": "pursers-home",
+        "directory": "webui",
+        "routes": [
         {
           "path": "/pursers/join",
           "method": "POST",
-          "entryPoint": "webui/routes.js",
-          "description": "Store a door and register the wait bridge.",
-          "auth": true
+          "handler": "webui/routes.js"
         },
         {
           "path": "/pursers/status",
           "method": "GET",
-          "entryPoint": "webui/routes.js",
-          "description": "Read redacted wait-bridge status.",
-          "auth": true
+          "handler": "webui/routes.js"
         },
         {
           "path": "/pursers/onboarding/validate",
           "method": "POST",
-          "entryPoint": "webui/routes.js",
-          "description": "Validate a door without storing it.",
-          "auth": true
+          "handler": "webui/routes.js"
         },
         {
           "path": "/pursers/onboarding/connect",
           "method": "POST",
-          "entryPoint": "webui/routes.js",
-          "description": "Connect or idempotently resume a door-backed seat.",
-          "auth": true
+          "handler": "webui/routes.js"
         },
         {
           "path": "/pursers/onboarding/status",
           "method": "GET",
-          "entryPoint": "webui/routes.js",
-          "description": "Read typed redacted onboarding status.",
-          "auth": true
+          "handler": "webui/routes.js"
         },
         {
           "path": "/pursers/onboarding/rotate",
           "method": "POST",
-          "entryPoint": "webui/routes.js",
-          "description": "Replace an existing stored door and reconnect.",
-          "auth": true
+          "handler": "webui/routes.js"
         },
         {
           "path": "/pursers/onboarding/recover",
           "method": "POST",
-          "entryPoint": "webui/routes.js",
-          "description": "Recover MCP registration from redacted stored state.",
-          "auth": true
-        }
-      ],
-      "staticAssets": [
+          "handler": "webui/routes.js"
+        },
         {
-          "urlPrefix": "/pursers/assets",
-          "directory": "webui",
-          "description": "Pursers Join tab assets."
+          "path": "/pursers/team/status",
+          "method": "GET",
+          "handler": "webui/routes.js"
+        },
+        {
+          "path": "/pursers/team/plan",
+          "method": "POST",
+          "handler": "webui/routes.js"
+        },
+        {
+          "path": "/pursers/team/apply",
+          "method": "POST",
+          "handler": "webui/routes.js"
+        },
+        {
+          "path": "/pursers/team/seat/pause",
+          "method": "POST",
+          "handler": "webui/routes.js"
+        },
+        {
+          "path": "/pursers/team/seat/stop",
+          "method": "POST",
+          "handler": "webui/routes.js"
         }
-      ]
-    }
+        ]
+      }
+    ]
   }
 }

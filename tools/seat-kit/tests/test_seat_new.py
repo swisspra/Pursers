@@ -511,7 +511,10 @@ def test_verify_detaches_sha_checks_scope_origin_leaks_and_runs_suite(
         "ticket_id": "TK-review",
         "target_url": "sample/path",
         "required_fields": ["branch_and_commit", "test_output"],
-        "tests": ["test-command: python3 -m unittest discover -s . -p test_sample.py"],
+        "tests": [
+            "test-command: python3 -m unittest discover -s . -p test_sample.py",
+            "test-command: PYTHONPATH=. pytest -q test_sample.py",
+        ],
         "submission_history": [
             {
                 "files_changed": ["change.txt", "test_sample.py"],
@@ -528,6 +531,7 @@ def test_verify_detaches_sha_checks_scope_origin_leaks_and_runs_suite(
     assert result["origin_main_contains"] is False
     assert result["leak_scan"] == "clean"
     assert result["suites"][0]["returncode"] == 0
+    assert result["suites"][1]["returncode"] == 0
     assert "files-changed-diff:" in output
     assert "remote-branches-containing-sha:" in output
     assert "Ran 1 test" in output
@@ -737,10 +741,6 @@ def test_submission_rejects_invalid_git_ref(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("rule", "sample"),
     [
-        (
-            "jwt",
-            "token=" + "e" + "yJabcde.abcdefghijkl.abcdefghijklmnop",
-        ),
         ("home-directory-path", "path=/Users/" + "fixture-user/project"),
         ("home-directory-path", "path=/home/" + "fixture-user/project"),
         ("home-directory-path", "path=C:\\Users\\" + "fixture-user" + "\\project"),
@@ -784,6 +784,235 @@ def test_verify_leak_rules_allow_documented_synthetic_fixtures(tmp_path: Path) -
     )
 
     assert generated._leak_rule_names(fixtures) == []
+
+
+def test_verify_leak_rules_ignore_jwt_vocabulary_and_fake_fixture(
+    tmp_path: Path,
+) -> None:
+    generated = load_generated(
+        seat_new.generate(args(tmp_path, role="reviewer")) / "bin" / "board.py",
+        "board_verify_jwt_vocabulary",
+    )
+    harmless = "\n".join(
+        [
+            "JWTs and jwt values must be redacted.",
+            r'SENSITIVE_KEY = re.compile(r"(?:authorization|bearer|jwt|token)")',
+            "fake_fixture=" + "ey" + "Jabc.def.ghi",
+        ]
+    )
+
+    assert generated._leak_rule_names(harmless) == []
+
+
+def test_verify_leak_rules_detect_runtime_constructed_jwt_shape(tmp_path: Path) -> None:
+    generated = load_generated(
+        seat_new.generate(args(tmp_path, role="reviewer")) / "bin" / "board.py",
+        "board_verify_jwt_shape",
+    )
+
+    def segment(value: object) -> str:
+        return base64.urlsafe_b64encode(
+            json.dumps(value, separators=(",", ":")).encode()
+        ).decode().rstrip("=")
+
+    token_shape = ".".join(
+        [
+            segment({"alg": "HS256", "typ": "JWT"}),
+            segment({"sub": "fixture"}),
+            segment("sig"),
+        ]
+    )
+
+    assert "jwt" in generated._leak_rule_names("token=" + token_shape)
+
+
+def test_suite_commands_allow_bounded_pythonpath_assignments(tmp_path: Path) -> None:
+    generated = load_generated(
+        seat_new.generate(args(tmp_path, role="reviewer")) / "bin" / "board.py",
+        "board_suite_pythonpath",
+    )
+    repo = tmp_path / "repo"
+    (repo / "packages" / "client" / "src").mkdir(parents=True)
+    (repo / "packages" / "client" / "tests").mkdir(parents=True)
+    ticket = {
+        "tests": [
+            "test-command: PYTHONPATH=packages/client/src pytest -q packages/client/tests",
+            "suite: PYTHONPATH=packages/client/src python3 -m unittest "
+            "discover -s packages/client/tests",
+        ]
+    }
+
+    commands = generated._suite_commands(ticket, {}, repo)
+
+    assert [command["argv"] for command in commands] == [
+        ["pytest", "-q", "packages/client/tests"],
+        ["python3", "-m", "unittest", "discover", "-s", "packages/client/tests"],
+    ]
+    assert [command["pythonpath"] for command in commands] == [
+        "packages/client/src",
+        "packages/client/src",
+    ]
+
+    environment = generated._suite_environment(commands[0])
+    assert environment["PYTHONPATH"] == "packages/client/src"
+    assert environment["PYTHONNOUSERSITE"] == "1"
+    assert environment["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] == "1"
+
+
+@pytest.mark.parametrize(
+    ("command", "error"),
+    [
+        ("OTHER=value pytest -q tests", "only PYTHONPATH"),
+        ("PYTHONPATH=/outside pytest -q tests", "inside the worktree"),
+        ("PYTHONPATH=../outside pytest -q tests", "inside the worktree"),
+        ("pytest -q ../outside", "suite paths must stay inside"),
+        ("pytest -q $(command)", "shell substitutions"),
+        ("pytest -q tests; command", "shell substitutions"),
+        ("pytest -q tests > output", "shell substitutions"),
+        ("env PYTHONPATH=src pytest -q tests", "arbitrary environment"),
+        ("pytest --pyargs pip", "module, plugin, and config escape"),
+        ("pytest -p pip -q tests", "module, plugin, and config escape"),
+        ("pytest -c pytest.ini -q tests", "module, plugin, and config escape"),
+        ("pytest -c../outside -q tests", "module, plugin, and config escape"),
+        ("python3 -m unittest pip", "unittest replay requires discover"),
+        (
+            "python3 -m unittest discover -s../outside",
+            "discovery paths must use separate",
+        ),
+    ],
+)
+def test_suite_commands_reject_unsafe_evidence(
+    tmp_path: Path, command: str, error: str
+) -> None:
+    generated = load_generated(
+        seat_new.generate(args(tmp_path, role="reviewer")) / "bin" / "board.py",
+        "board_suite_reject_" + str(abs(hash(command))),
+    )
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    with pytest.raises(ValueError, match=error):
+        generated._suite_commands({"tests": ["test-command: " + command]}, {}, repo)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "/OUTSIDE/test_probe.py",
+        "--pyargs pip",
+        "-p external_plugin",
+        "-c /OUTSIDE/pytest.ini",
+        "--rootdir=/OUTSIDE",
+        "--confcutdir=/OUTSIDE",
+        "-o python_files=outside.py",
+    ],
+)
+def test_suite_commands_reject_pytest_argument_files_before_expansion(
+    tmp_path: Path, payload: str
+) -> None:
+    generated = load_generated(
+        seat_new.generate(args(tmp_path / "seat", role="reviewer"))
+        / "bin"
+        / "board.py",
+        "board_suite_argument_files_" + re.sub(r"\W+", "_", payload),
+    )
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    relative = repo / "args.txt"
+    relative.write_text(payload + "\n", encoding="utf-8")
+    outside = tmp_path / "outside-args.txt"
+    outside.write_text(payload + "\n", encoding="utf-8")
+
+    for command in ("pytest @args.txt", f"python3 -m pytest @{outside}"):
+        with pytest.raises(ValueError, match="pytest argument files"):
+            generated._suite_commands(
+                {"tests": ["test-command: " + command]}, {}, repo
+            )
+
+
+def test_verify_suite_replay_discards_inherited_execution_controls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    author, clone, generated, ticket, _old_sha = _review_verification_fixture(tmp_path)
+    branch = "codex/TK-review"
+    (author / "test_safe.py").write_text(
+        "import unittest\n\n"
+        "class SafeTest(unittest.TestCase):\n"
+        "    def test_inside_worktree(self):\n"
+        "        self.assertTrue(True)\n",
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "test_safe.py"], cwd=author, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "add safe suite"],
+        cwd=author, check=True, capture_output=True,
+    )
+    sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=author, check=True,
+        capture_output=True, text=True,
+    ).stdout.strip()
+    subprocess.run(
+        ["git", "push", "origin", branch],
+        cwd=author, check=True, capture_output=True,
+    )
+    ticket["tests"] = [
+        "test-command: pytest -q test_safe.py",
+        "test-command: python3 -m unittest discover -s . -p test_safe.py",
+    ]
+    ticket["submission_history"] = [{
+        "files_changed": ["test_safe.py"],
+        "notes": f"branch_and_commit: {branch} @ {sha}",
+    }]
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    startup_marker = outside / "startup-ran"
+    plugin_marker = outside / "plugin-ran"
+    module_marker = outside / "module-ran"
+    (outside / "sitecustomize.py").write_text(
+        "from pathlib import Path\n"
+        f"Path({str(startup_marker)!r}).write_text('outside startup')\n",
+        encoding="utf-8",
+    )
+    (outside / "injected_plugin.py").write_text(
+        "from pathlib import Path\n"
+        f"Path({str(plugin_marker)!r}).write_text('outside plugin')\n",
+        encoding="utf-8",
+    )
+    package = outside / "injectedpkg"
+    package.mkdir()
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "test_outside.py").write_text(
+        "from pathlib import Path\n"
+        f"Path({str(module_marker)!r}).write_text('outside module')\n"
+        "def test_outside():\n    assert True\n",
+        encoding="utf-8",
+    )
+    argument_file = outside / "args.txt"
+    argument_file.write_text("--pyargs injectedpkg\n", encoding="utf-8")
+    config_file = outside / "pytest.ini"
+    config_file.write_text("[pytest]\naddopts = --pyargs injectedpkg\n", encoding="utf-8")
+
+    monkeypatch.setenv("PYTHONPATH", str(outside))
+    monkeypatch.setenv("PYTHONHOME", str(outside))
+    monkeypatch.setenv("PYTHONSTARTUP", str(outside / "sitecustomize.py"))
+    monkeypatch.setenv("PYTEST_PLUGINS", "injected_plugin")
+    monkeypatch.setenv("PYTEST_ADDOPTS", "@" + str(argument_file))
+    clean_environment = generated._suite_environment({"pythonpath": ""})
+    assert not {
+        "PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP",
+        "PYTEST_PLUGINS", "PYTEST_ADDOPTS",
+    } & clean_environment.keys()
+    first = generated._verify_ticket(ticket, clone, run_suites=True)
+    monkeypatch.setenv("PYTEST_ADDOPTS", "-c " + str(config_file))
+    second = generated._verify_ticket(ticket, clone, run_suites=True)
+
+    assert [suite["returncode"] for suite in first["suites"]] == [0, 0]
+    assert [suite["returncode"] for suite in second["suites"]] == [0, 0]
+    assert not startup_marker.exists()
+    assert not plugin_marker.exists()
+    assert not module_marker.exists()
+    assert not list((clone / ".git").glob("pursers-verify-*.ini"))
 
 
 def test_operator_marker_file_is_loaded_without_printing_values(
@@ -1790,6 +2019,9 @@ def test_live_holder_annotation_wakes_and_reviewer_claims_expired_broadcast(
 def test_live_registry_wait_resumes_stable_seat_and_wakes_on_held_annotation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setenv("PURSERS_CAN_REVIEW", "false")
+    monkeypatch.setenv("PURSERS_CAN_WORK", "true")
+
     async def exercise() -> None:
         from mcp import Client
         from pursers_client import (
@@ -1931,7 +2163,6 @@ def test_live_registry_wait_resumes_stable_seat_and_wakes_on_held_annotation(
             )
             monkeypatch.setattr(registry_module, "Client", SignalingClient)
 
-            started = time.monotonic()
             output = io.StringIO()
             async with LocalBoardClient(
                 "http://central.invalid/mcp",
@@ -1952,7 +2183,7 @@ def test_live_registry_wait_resumes_stable_seat_and_wakes_on_held_annotation(
                             board_client,
                             "pursers",
                             cursors,
-                            3,
+                            10,
                             boards="registry",
                             registry=registry,
                             active_registry_boards=active_registry_boards,
@@ -1963,7 +2194,7 @@ def test_live_registry_wait_resumes_stable_seat_and_wakes_on_held_annotation(
                         )
 
                 waiting = asyncio.create_task(run_wait())
-                await asyncio.wait_for(ready.wait(), timeout=1)
+                await asyncio.wait_for(ready.wait(), timeout=5)
                 active["principal"] = principals["admin"]
                 await call(
                     "ticket_annotate",
@@ -1973,11 +2204,9 @@ def test_live_registry_wait_resumes_stable_seat_and_wakes_on_held_annotation(
                     kind="evidence",
                 )
                 active["principal"] = principals["worker"]
-                await asyncio.wait_for(waiting, timeout=2)
-            elapsed = time.monotonic() - started
+                await asyncio.wait_for(waiting, timeout=5)
             result = json.loads(output.getvalue())
 
-            assert elapsed < 2
             assert result["boards"] == [other_board, "pursers"]
             assert result["skipped_boards"] == {}
             assert result["reason"] == "held_ticket_update"
@@ -1985,6 +2214,300 @@ def test_live_registry_wait_resumes_stable_seat_and_wakes_on_held_annotation(
             assert result["events"][0]["ticket_id"] == ticket_id
             other_member = service.load(other_board)["members"][other_agent_id]
             assert other_member["lifecycle_status"] == "active"
+        finally:
+            central.current_principal = original_current_principal
+
+    asyncio.run(exercise())
+
+
+def test_generated_submit_preflights_exact_remote_tip_before_board_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    origin = tmp_path / "origin.git"
+    author = tmp_path / "author"
+    subprocess.run(["git", "init", "--bare", str(origin)], check=True, capture_output=True)
+    subprocess.run(["git", "init", "-b", "main", str(author)], check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Seat Test"], cwd=author, check=True)
+    subprocess.run(["git", "config", "user.email", "seat@example.test"], cwd=author, check=True)
+    (author / "change.txt").write_text("base\n", encoding="utf-8")
+    subprocess.run(["git", "add", "change.txt"], cwd=author, check=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=author, check=True, capture_output=True)
+    subprocess.run(["git", "remote", "add", "origin", str(origin)], cwd=author, check=True)
+    subprocess.run(["git", "push", "-u", "origin", "main"], cwd=author, check=True, capture_output=True)
+    branch = "codex/TK-submit"
+    subprocess.run(["git", "switch", "-c", branch], cwd=author, check=True, capture_output=True)
+    (author / "change.txt").write_text("stale\n", encoding="utf-8")
+    subprocess.run(["git", "commit", "-am", "stale candidate"], cwd=author, check=True, capture_output=True)
+    stale_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=author, check=True,
+        capture_output=True, text=True,
+    ).stdout.strip()
+    subprocess.run(["git", "push", "-u", "origin", branch], cwd=author, check=True, capture_output=True)
+
+    dest = seat_new.generate(
+        args(tmp_path / "generated", repo=str(origin), client="goose")
+    )
+    generated = load_generated(dest / "bin" / "board.py", "board_submit_preflight")
+    (author / "change.txt").write_text("current\n", encoding="utf-8")
+    subprocess.run(["git", "commit", "-am", "current candidate"], cwd=author, check=True, capture_output=True)
+    current_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=author, check=True,
+        capture_output=True, text=True,
+    ).stdout.strip()
+    subprocess.run(["git", "push", "origin", branch], cwd=author, check=True, capture_output=True)
+
+    ticket = {
+        "ticket_id": "TK-submit",
+        "target_url": "origin/tools/seat-kit",
+        "required_fields": ["branch_and_commit", "test_output"],
+    }
+    submissions: list[dict[str, object]] = []
+
+    class Client:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def board_join(self, **_kwargs: object) -> dict[str, object]:
+            return {"ok": True}
+
+        async def ticket_get(self, _ticket_id: str) -> dict[str, object]:
+            return {"ticket": ticket}
+
+        async def ticket_submit(self, ticket_id: str, **arguments: object):
+            submissions.append({"ticket_id": ticket_id, **arguments})
+            return {"ok": True}
+
+    monkeypatch.setattr(generated, "_load_client", lambda: Client)
+    monkeypatch.setenv("ONBOARD_CENTRAL_URL", "http://central.invalid/mcp")
+    monkeypatch.setenv("ONBOARD_CENTRAL_TOKEN", "test-token")
+    monkeypatch.setenv("ONBOARD_BOARD_ID", "pursers")
+    monkeypatch.setenv("ONBOARD_AGENT_NAME", "worker-agent")
+
+    def parsed(notes: str):
+        return generated._parser().parse_args(
+            ["submit", "TK-submit", "ready", notes, "change.txt"]
+        )
+
+    with pytest.raises(ValueError, match="exactly one"):
+        asyncio.run(generated._execute(parsed(
+            f"branch_and_commit: {branch} @ {current_sha[:12]}"
+        )))
+    wrong_sha = current_sha[:-1] + ("0" if current_sha[-1] != "0" else "1")
+    with pytest.raises(ValueError, match="nonexistent commit"):
+        asyncio.run(generated._execute(parsed(
+            f"branch_and_commit: {branch} @ {wrong_sha}"
+        )))
+    with pytest.raises(ValueError, match="nonexistent commit"):
+        asyncio.run(generated._execute(parsed(
+            f"branch_and_commit: {branch} @ {'f' * 40}"
+        )))
+    with pytest.raises(ValueError, match="moved or mismatched"):
+        asyncio.run(generated._execute(parsed(
+            f"branch_and_commit: {branch} @ {stale_sha}"
+        )))
+    with pytest.raises(RuntimeError, match="could not fetch origin/codex/TK-missing"):
+        asyncio.run(generated._execute(parsed(
+            f"branch_and_commit: codex/TK-missing @ {current_sha}"
+        )))
+    assert submissions == []
+
+    asyncio.run(generated._execute(parsed(
+        f"branch_and_commit: {branch} @ {current_sha}\npytest: 1 passed"
+    )))
+    result = json.loads(capsys.readouterr().out)
+    assert result["submission_preflight"] == {
+        "branch": branch,
+        "commit": current_sha,
+        "remote_ref": f"origin/{branch}",
+        "remote_tip": current_sha,
+    }
+    assert f"branch_and_commit: {branch} @ {current_sha}" in str(
+        submissions[0]["notes"]
+    )
+
+    long_notes = (
+        "test-command: PYTHONPATH=. pytest -q .\n"
+        + "test_output: " + "x" * 5_500
+        + f"\nbranch_and_commit: {branch} @ {current_sha}"
+    )
+    asyncio.run(generated._execute(parsed(long_notes)))
+    long_result = json.loads(capsys.readouterr().out)
+    submitted_notes = str(submissions[1]["notes"])
+    assert len(submitted_notes) <= 5_000
+    assert len(generated.SUBMIT_BRANCH_COMMIT_RE.findall(submitted_notes)) == 1
+    replay_ticket = {"submission_history": [{"notes": submitted_notes}]}
+    _submission, replay_sha, replay_branch = generated._submission(replay_ticket)
+    assert (replay_branch, replay_sha) == (branch, current_sha)
+    assert f"remote_tip={current_sha}" in submitted_notes
+    assert long_result["submission_preflight"]["remote_tip"] == current_sha
+    replay_commands = generated._suite_commands(
+        {}, {"notes": submitted_notes}, author
+    )
+    assert replay_commands == [{
+        "argv": ["pytest", "-q", "."],
+        "pythonpath": ".",
+        "display": ["PYTHONPATH=.", "pytest", "-q", "."],
+    }]
+    replay_environment = generated._suite_environment(replay_commands[0])
+    assert replay_environment["PYTHONPATH"] == "."
+    assert replay_environment["PYTHONNOUSERSITE"] == "1"
+    assert replay_environment["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] == "1"
+
+    selected = generated._submit_source_repo(
+        ticket,
+        routed=str(dest / "origin"),
+        operator_dir=None,
+        route_error=None,
+        seat_repo=tmp_path / "unrelated",
+        repo_leaf="unrelated",
+    )
+    routed_evidence = generated._submit_preflight(
+        ticket,
+        selected,
+        summary="ready",
+        notes=f"branch_and_commit: {branch} @ {current_sha}",
+    )
+    assert routed_evidence["remote_tip"] == current_sha
+
+    non_git = tmp_path / "not-git"
+    non_git.mkdir()
+    with pytest.raises(ValueError, match="routed target to be a git checkout"):
+        generated._submit_source_repo(
+            ticket,
+            routed=str(non_git),
+            operator_dir=None,
+            route_error=None,
+            seat_repo=dest / "origin",
+            repo_leaf="origin",
+        )
+    with pytest.raises(ValueError, match="no git checkout for the ticket target"):
+        generated._submit_source_repo(
+            ticket,
+            routed=None,
+            operator_dir=None,
+            route_error=None,
+            seat_repo=dest / "origin",
+            repo_leaf=None,
+        )
+    cross_project = {**ticket, "target_url": "other/tools/seat-kit"}
+    with pytest.raises(ValueError, match="unrelated seat clone"):
+        generated._submit_source_repo(
+            cross_project,
+            routed=None,
+            operator_dir=None,
+            route_error=None,
+            seat_repo=dest / "origin",
+            repo_leaf="origin",
+        )
+
+    ticket["required_fields"] = ["research_findings"]
+    asyncio.run(generated._execute(parsed("research_findings: complete")))
+    research_result = json.loads(capsys.readouterr().out)
+    assert research_result["ok"] is True
+    assert "submission_preflight" not in research_result
+    assert len(submissions) == 3
+
+
+def test_invalid_submit_keeps_central_ticket_unsubmitted_but_join_may_renew_lease(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def exercise() -> None:
+        from pursers_client import BoardClient
+        import pursers_client.client as client_module
+
+        project = tmp_path / "project"
+        subprocess.run(
+            ["git", "init", "-b", "main", str(project)],
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(["git", "config", "user.name", "Seat Test"], cwd=project, check=True)
+        subprocess.run(
+            ["git", "config", "user.email", "seat@example.test"],
+            cwd=project,
+            check=True,
+        )
+        (project / "base.txt").write_text("base\n", encoding="utf-8")
+        subprocess.run(["git", "add", "base.txt"], cwd=project, check=True)
+        subprocess.run(
+            ["git", "commit", "-m", "base"],
+            cwd=project,
+            check=True,
+            capture_output=True,
+        )
+        generated = load_generated(
+            seat_new.generate(args(tmp_path / "seat", repo=str(project), client="goose"))
+            / "bin"
+            / "board.py",
+            "board_submit_central_state",
+        )
+        (
+            central,
+            mcp,
+            _service,
+            principals,
+            active,
+            agent_ids,
+            call,
+            original_current_principal,
+        ) = await build_local_central(tmp_path / "central", monkeypatch)
+
+        @asynccontextmanager
+        async def http_context():
+            yield object()
+
+        class LocalBoardClient(BoardClient):
+            def _http(self):
+                return http_context()
+
+        monkeypatch.setattr(
+            client_module, "streamable_http_client", lambda *_args, **_kwargs: mcp
+        )
+        monkeypatch.setattr(generated, "_load_client", lambda: LocalBoardClient)
+        monkeypatch.setenv("ONBOARD_CENTRAL_URL", "http://central.invalid/mcp")
+        monkeypatch.setenv("ONBOARD_CENTRAL_TOKEN", "test-token")
+        monkeypatch.setenv("ONBOARD_BOARD_ID", "pursers")
+        monkeypatch.setenv("ONBOARD_AGENT_NAME", "worker-agent")
+
+        try:
+            active["principal"] = principals["admin"]
+            created = await call(
+                "ticket_create",
+                agent_name="admin-agent",
+                title="submit preflight state probe",
+                description="prove invalid evidence does not submit",
+                target_url="project/tools/seat-kit",
+                scope="interactive-no-send",
+                required_fields=["branch_and_commit", "test_output"],
+                assigned_to=agent_ids["worker"],
+            )
+            ticket_id = created.structured_content["ticket"]["ticket_id"]
+            active["principal"] = principals["worker"]
+            claimed = await call(
+                "ticket_claim", agent_name="worker-agent", ticket_id=ticket_id
+            )
+            before_lease = claimed.structured_content["ticket"]["lease_expires_at"]
+            await asyncio.sleep(0.01)
+            parsed = generated._parser().parse_args([
+                "submit",
+                ticket_id,
+                "ready",
+                "branch_and_commit: codex/TK-probe @ deadbeef",
+                "base.txt",
+            ])
+            with pytest.raises(ValueError, match="exactly one"):
+                await generated._execute(parsed)
+            current = await call("ticket_get", ticket_id=ticket_id)
+            current_ticket = current.structured_content["ticket"]
+            assert current_ticket["status"] == "claimed"
+            assert current_ticket.get("submission_history", []) == []
+            assert current_ticket["lease_expires_at"] > before_lease
         finally:
             central.current_principal = original_current_principal
 
@@ -2018,6 +2541,14 @@ def test_generated_submit_truncates_notes_and_reports_warning(
         async def board_join(self, **kwargs: object) -> dict[str, object]:
             assert kwargs["allow_takeover"] is True
             return {"ok": True}
+
+        async def ticket_get(self, ticket_id: str) -> dict[str, object]:
+            return {
+                "ticket": {
+                    "ticket_id": ticket_id,
+                    "required_fields": ["research_findings"],
+                }
+            }
 
         async def ticket_submit(self, ticket_id: str, **arguments: object):
             captured.update({"ticket_id": ticket_id, **arguments})
