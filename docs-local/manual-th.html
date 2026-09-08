@@ -155,7 +155,7 @@
         <span class="pill">MCP</span>
         <span class="pill">ใช้ข้ามยี่ห้อ Host</span>
         <span class="pill">มีหลักฐานและผู้ review</span>
-        <span class="pill">Push-wait release · 5.0.0a24</span>
+        <span class="pill">Push-wait release · 5.0.0a25</span>
       </div>
     </div>
   </header>
@@ -187,13 +187,13 @@
       <p class="eyebrow" style="color:#2f6f9f">00 · เริ่มใน 5 นาที</p>
       <h2>6 คำสั่งที่ผู้ดูแลใช้บ่อยที่สุด</h2>
       <p>ตัวอย่างใช้ placeholder เท่านั้น ให้ pin ชุด released ทั้งก้อนและเก็บ token นอก repository:</p>
-      <pre><code>python -m pip install "pursers==5.0.0a24"
+      <pre><code>python -m pip install "pursers==5.0.0a25"
 pursers-personal setup --project /PATH/TO/project --session primary
 pursers-personal doctor --project /PATH/TO/project
 python tools/wait-bridge/registry_admin.py show
 python tools/fleet-dashboard/fleet_dashboard.py --token-file /PATH/TO/admin.jwt
 shasum -a 256 -c SHA256SUMS.txt</code></pre>
-      <div class="success"><strong>ผลที่ควรเห็น:</strong> Pursers/Personal 5.0.0a24, Central 0.1.0a28, Client 0.1.0a21, Personal Import 5.0.0a3 และ Wait Bridge 0.1.0a14; doctor ระบุ profile/identity ชัด, registry ผ่าน validation และ dashboard เปิดบน loopback</div>
+      <div class="success"><strong>ผลที่ควรเห็น:</strong> Pursers/Personal 5.0.0a25, Central 0.1.0a29, Client 0.1.0a22, Personal Import 5.0.0a3 และ Wait Bridge 0.1.0a15; doctor ระบุ profile/identity ชัด, registry ผ่าน validation และ dashboard เปิดบน loopback</div>
     </section>
 
     <section id="what">
@@ -247,15 +247,15 @@ shasum -a 256 -c SHA256SUMS.txt</code></pre>
     <section id="install">
       <p class="eyebrow" style="color:#2f6f9f">02 · ติดตั้ง</p>
       <h2>ติดตั้งชุดล่าสุด</h2>
-      <p>ต้องใช้ Python 3.11 ขึ้นไป ชุด released ที่เอกสารนี้อธิบายคือ <code>5.0.0a24</code> และรวม subscription-first push-wait:</p>
+      <p>ต้องใช้ Python 3.11 ขึ้นไป ชุด released ที่เอกสารนี้อธิบายคือ <code>5.0.0a25</code> และรวม subscription-first push-wait:</p>
       <table>
         <thead><tr><th>ส่วนประกอบ</th><th>เวอร์ชัน</th><th>หน้าที่</th></tr></thead>
         <tbody>
-          <tr><td><code>pursers</code> / <code>pursers-personal</code></td><td><code>5.0.0a24</code></td><td>meta installer, Personal facade และ Fleet dashboard</td></tr>
-          <tr><td><code>pursers-central</code></td><td><code>0.1.0a28</code></td><td>บอร์ดกลาง, authorization, state และ journal cues</td></tr>
-          <tr><td><code>pursers-client</code></td><td><code>0.1.0a21</code></td><td>Python client และ subscription driver</td></tr>
+          <tr><td><code>pursers</code> / <code>pursers-personal</code></td><td><code>5.0.0a25</code></td><td>meta installer, Personal facade และ Fleet dashboard</td></tr>
+          <tr><td><code>pursers-central</code></td><td><code>0.1.0a29</code></td><td>บอร์ดกลาง, authorization, state และ journal cues</td></tr>
+          <tr><td><code>pursers-client</code></td><td><code>0.1.0a22</code></td><td>Python client และ subscription driver</td></tr>
           <tr><td><code>pursers-personal-import</code></td><td><code>5.0.0a3</code></td><td>นำข้อมูล v4 แบบ one-way cutover</td></tr>
-          <tr><td><code>pursers-wait-bridge</code></td><td><code>0.1.0a14</code></td><td>รอแบบ subscription-first, multi-board และ registry mode</td></tr>
+          <tr><td><code>pursers-wait-bridge</code></td><td><code>0.1.0a15</code></td><td>รอแบบ subscription-first, multi-board และ registry mode</td></tr>
         </tbody>
       </table>
       <div class="warning"><strong>ตรวจ release ก่อนติดตั้ง:</strong> ใช้ manifest และ checksum ที่ operator อนุมัติ รุ่นบน PyPI เปลี่ยนทับไม่ได้ และไม่ควรผสม component คนละชุด</div>
@@ -264,7 +264,7 @@ shasum -a 256 -c SHA256SUMS.txt</code></pre>
           <h3>ติดตั้งถาวรใน environment</h3>
           <pre><code>python -m pip install pursers
 pursers-personal --version</code></pre>
-          <p><code>pursers</code> เป็น meta-package ที่ติดตั้ง Central, client, Personal app และ import utility ให้ครบ ควรเห็น <code>5.0.0a24</code> สำหรับชุด released นี้</p>
+          <p><code>pursers</code> เป็น meta-package ที่ติดตั้ง Central, client, Personal app และ import utility ให้ครบ ควรเห็น <code>5.0.0a25</code> สำหรับชุด released นี้</p>
         </div>
         <div class="mini">
           <h3>รัน wait bridge แบบ isolated</h3>
@@ -689,7 +689,7 @@ memory_search(
 
     <section id="operations">
       <p class="eyebrow" style="color:#2f6f9f">09 · Operations</p>
-      <h2>จาก a14 ถึงรุ่น 5.0.0a24</h2>
+      <h2>จาก a14 ถึงรุ่น 5.0.0a25</h2>
       <table>
         <thead><tr><th>รุ่น</th><th>สิ่งที่ผู้ดูแลต้องรู้</th></tr></thead>
         <tbody>
@@ -703,7 +703,7 @@ memory_search(
           <tr><td>a21</td><td>live-seat fair dispatch, agent retirement, bounded/compacted catch-up, fleet-clone ownership, seat import, Release &amp; Operations panel และลด tool surface</td></tr>
         </tbody>
       </table>
-      <h3>5.0.0a24 · released</h3>
+      <h3>5.0.0a25 · released</h3>
       <ul>
         <li>Dispatcher re-surface broadcast backlog ทุก <code>PURSERS_BACKLOG_RESURFACE_INTERVAL_S</code> (default 600s), re-offer ตาม <code>broadcast_reoffer_s</code> และไม่ offer ให้ coordinator</li>
         <li>Wait Bridge ต่ออายุ lease เฉพาะเมื่อ stdio session ยังมี model liveness; <code>PURSERS_KEEPALIVE_IDLE_LIMIT_S</code> default เท่ากับ claim TTL สามรอบ, มี <code>lease_keepalive_paused</code> cue และ Needs-attention flag สำหรับ keepalive-only claim</li>
@@ -727,12 +727,12 @@ memory_search(
       <p class="eyebrow" style="color:#2f6f9f">11 · Release</p>
       <h2>ออก tag แล้วตรวจ GitHub Release; publish PyPI เป็นอีก gate</h2>
       <ol>
-        <li>ยืนยัน component versions และ exact dependency pins: Pursers/Personal 5.0.0a24, Central 0.1.0a28, Client 0.1.0a21, Wait Bridge 0.1.0a14 และ Personal Import 5.0.0a3</li>
+        <li>ยืนยัน component versions และ exact dependency pins: Pursers/Personal 5.0.0a25, Central 0.1.0a29, Client 0.1.0a22, Wait Bridge 0.1.0a15 และ Personal Import 5.0.0a3</li>
         <li>สร้าง immutable release plan ใน loopback Release &amp; Operations panel, รัน tests/build และตรวจ component lock กับ <code>SHA256SUMS.txt</code></li>
         <li>สร้างและ push tag ที่อนุมัติ ตรวจ GitHub Actions/GitHub Release จากนั้น publish PyPI ผ่าน Trusted Publishing เป็น gate แยก</li>
         <li>ตรวจ artifact hash, PyPI versions, Central staging และ restart status ก่อน promote seat</li>
       </ol>
-      <div class="warning">รายการข้างต้นอยู่ใน 5.0.0a24 แล้ว ก่อนใช้งานให้ตรวจ component versions, tag, manifest และ artifact ที่อนุมัติให้ตรงกับ release นี้</div>
+      <div class="warning">รายการข้างต้นอยู่ใน 5.0.0a25 แล้ว ก่อนใช้งานให้ตรวจ component versions, tag, manifest และ artifact ที่อนุมัติให้ตรงกับ release นี้</div>
     </section>
 
     <section id="troubleshoot">
@@ -764,7 +764,7 @@ memory_search(
       <p>JWT ยืนยันตัว principal แต่ไม่ได้ทำให้เข้าทุกบอร์ดอัตโนมัติ ผู้ดูแลต้องเพิ่ม principal ด้วย <code>board_member_add</code> หรือออก invite อายุสั้น/ใช้ครั้งเดียวด้วย <code>board_invite</code> แล้วให้ผู้รับ join บอร์ดนั้น ตรวจ role แยกเป็น reader, worker, reviewer หรือ admin ตามงานจริง หาก registry ชี้ไปบอร์ดที่ยังไม่มี membership บอร์ดนั้นจะปรากฏใน <code>skipped_boards</code></p>
 
       <h3>State scrubbing ใน Central a10</h3>
-      <p><code>pursers-central 0.1.0a28</code> scrub ค่าด้วย profile ของบอร์ด; <code>board_state_get</code> คืนค่าที่ผ่านการ scrub ตอนเขียนแล้ว นี่ไม่ใช่เหตุผลให้ใส่ secret ใน <code>project_registry</code>: registry ควรมีเฉพาะ board mapping, work directory และ status</p>
+      <p><code>pursers-central 0.1.0a29</code> scrub ค่าด้วย profile ของบอร์ด; <code>board_state_get</code> คืนค่าที่ผ่านการ scrub ตอนเขียนแล้ว นี่ไม่ใช่เหตุผลให้ใส่ secret ใน <code>project_registry</code>: registry ควรมีเฉพาะ board mapping, work directory และ status</p>
 
       <h3>เช็กลิสต์ก่อนเริ่มรอบงานจริง</h3>
       <table>
@@ -787,7 +787,7 @@ memory_search(
       <h2>คำสั่งและค่าที่ใช้ตรวจอ้างอิง</h2>
       <table>
         <tbody>
-          <tr><td>Released components</td><td>Pursers/Personal 5.0.0a24 · Central 0.1.0a28 · Client 0.1.0a21 · Import 5.0.0a3 · Wait Bridge 0.1.0a14</td></tr>
+          <tr><td>Released components</td><td>Pursers/Personal 5.0.0a25 · Central 0.1.0a29 · Client 0.1.0a22 · Import 5.0.0a3 · Wait Bridge 0.1.0a15</td></tr>
           <tr><td>Worker wait</td><td><code>a2a_wait(boards="registry", wait_for="claimable", since_seq=&lt;cursor_map&gt;)</code></td></tr>
           <tr><td>Reviewer wait</td><td><code>a2a_wait(wait_for="submitted")</code> แล้ว claim review lease ก่อนตรวจ</td></tr>
           <tr><td>Read-only truth</td><td><code>board_status</code>, <code>board_snapshot</code>, <code>ticket_get</code></td></tr>
