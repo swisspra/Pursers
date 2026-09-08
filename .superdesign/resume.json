@@ -23,7 +23,7 @@
       ],
       "fingerprints": {
         ".superdesign/design-system.md": "8bad0f20428b6c4519646352426fe6d11c81322cff40864ce00c03cba88399ab",
-        ".superdesign/context/primary-dashboard-current.md": "57f9992b819b1d2ec38749d63f71c6b2b654225534adae2da3d7a8e436d1e4aa",
+        ".superdesign/context/primary-dashboard-current.md": "af9790b7d97e1b3af3851883ca5fc9d4ee78ce8270fea54ed2378c88327b3b39",
         ".superdesign/init/components.md": "837e5e23a1ec024800c5b2a16e3bbe0b818d2842ea970c9921e1d8680b18d366",
         ".superdesign/init/layouts.md": "6d60e63bec699e4bda0676de41604a8b401e4a696e648a2327d6b67219d75845",
         ".superdesign/init/routes.md": "81171cb907bb08e0f8090a70fbbde2420120b76b1a1d4194c1f5efdb7e0d72f4",
@@ -70,7 +70,7 @@
           "currentVersion": 4
         }
       },
-      "updatedAt": "2026-09-08T11:19:36Z"
+      "updatedAt": "2026-09-08T11:35:09Z"
     },
     "/projects": {
       "targetKind": "new-ui",
@@ -95,7 +95,7 @@
       ],
       "fingerprints": {
         ".superdesign/design-system.md": "8bad0f20428b6c4519646352426fe6d11c81322cff40864ce00c03cba88399ab",
-        ".superdesign/context/primary-dashboard-current.md": "57f9992b819b1d2ec38749d63f71c6b2b654225534adae2da3d7a8e436d1e4aa",
+        ".superdesign/context/primary-dashboard-current.md": "af9790b7d97e1b3af3851883ca5fc9d4ee78ce8270fea54ed2378c88327b3b39",
         ".superdesign/init/components.md": "837e5e23a1ec024800c5b2a16e3bbe0b818d2842ea970c9921e1d8680b18d366",
         ".superdesign/init/layouts.md": "6d60e63bec699e4bda0676de41604a8b401e4a696e648a2327d6b67219d75845",
         ".superdesign/init/routes.md": "81171cb907bb08e0f8090a70fbbde2420120b76b1a1d4194c1f5efdb7e0d72f4",
@@ -131,7 +131,7 @@
           "currentVersion": 2
         }
       },
-      "updatedAt": "2026-09-08T11:19:36Z"
+      "updatedAt": "2026-09-08T11:35:09Z"
     },
     "/work": {
       "targetKind": "new-ui",
@@ -156,7 +156,7 @@
       ],
       "fingerprints": {
         ".superdesign/design-system.md": "8bad0f20428b6c4519646352426fe6d11c81322cff40864ce00c03cba88399ab",
-        ".superdesign/context/primary-dashboard-current.md": "57f9992b819b1d2ec38749d63f71c6b2b654225534adae2da3d7a8e436d1e4aa",
+        ".superdesign/context/primary-dashboard-current.md": "af9790b7d97e1b3af3851883ca5fc9d4ee78ce8270fea54ed2378c88327b3b39",
         ".superdesign/init/components.md": "837e5e23a1ec024800c5b2a16e3bbe0b818d2842ea970c9921e1d8680b18d366",
         ".superdesign/init/layouts.md": "6d60e63bec699e4bda0676de41604a8b401e4a696e648a2327d6b67219d75845",
         ".superdesign/init/routes.md": "81171cb907bb08e0f8090a70fbbde2420120b76b1a1d4194c1f5efdb7e0d72f4",
@@ -192,7 +192,7 @@
           "currentVersion": 1
         }
       },
-      "updatedAt": "2026-09-08T11:19:36Z"
+      "updatedAt": "2026-09-08T11:35:09Z"
     },
     "/team": {
       "targetKind": "new-ui",
@@ -217,7 +217,7 @@
       ],
       "fingerprints": {
         ".superdesign/design-system.md": "8bad0f20428b6c4519646352426fe6d11c81322cff40864ce00c03cba88399ab",
-        ".superdesign/context/primary-dashboard-current.md": "57f9992b819b1d2ec38749d63f71c6b2b654225534adae2da3d7a8e436d1e4aa",
+        ".superdesign/context/primary-dashboard-current.md": "af9790b7d97e1b3af3851883ca5fc9d4ee78ce8270fea54ed2378c88327b3b39",
         ".superdesign/init/components.md": "837e5e23a1ec024800c5b2a16e3bbe0b818d2842ea970c9921e1d8680b18d366",
         ".superdesign/init/layouts.md": "6d60e63bec699e4bda0676de41604a8b401e4a696e648a2327d6b67219d75845",
         ".superdesign/init/routes.md": "81171cb907bb08e0f8090a70fbbde2420120b76b1a1d4194c1f5efdb7e0d72f4",
@@ -253,7 +253,7 @@
           "currentVersion": 1
         }
       },
-      "updatedAt": "2026-09-08T11:19:36Z"
+      "updatedAt": "2026-09-08T11:35:09Z"
     },
     "/approvals": {
       "targetKind": "new-ui",
@@ -278,7 +278,7 @@
       ],
       "fingerprints": {
         ".superdesign/design-system.md": "8bad0f20428b6c4519646352426fe6d11c81322cff40864ce00c03cba88399ab",
-        ".superdesign/context/primary-dashboard-current.md": "57f9992b819b1d2ec38749d63f71c6b2b654225534adae2da3d7a8e436d1e4aa",
+        ".superdesign/context/primary-dashboard-current.md": "af9790b7d97e1b3af3851883ca5fc9d4ee78ce8270fea54ed2378c88327b3b39",
         ".superdesign/init/components.md": "837e5e23a1ec024800c5b2a16e3bbe0b818d2842ea970c9921e1d8680b18d366",
         ".superdesign/init/layouts.md": "6d60e63bec699e4bda0676de41604a8b401e4a696e648a2327d6b67219d75845",
         ".superdesign/init/routes.md": "81171cb907bb08e0f8090a70fbbde2420120b76b1a1d4194c1f5efdb7e0d72f4",
@@ -314,7 +314,7 @@
           "currentVersion": 1
         }
       },
-      "updatedAt": "2026-09-08T11:19:36Z"
+      "updatedAt": "2026-09-08T11:35:09Z"
     },
     "/activity": {
       "targetKind": "new-ui",
@@ -339,7 +339,7 @@
       ],
       "fingerprints": {
         ".superdesign/design-system.md": "8bad0f20428b6c4519646352426fe6d11c81322cff40864ce00c03cba88399ab",
-        ".superdesign/context/primary-dashboard-current.md": "57f9992b819b1d2ec38749d63f71c6b2b654225534adae2da3d7a8e436d1e4aa",
+        ".superdesign/context/primary-dashboard-current.md": "af9790b7d97e1b3af3851883ca5fc9d4ee78ce8270fea54ed2378c88327b3b39",
         ".superdesign/init/components.md": "837e5e23a1ec024800c5b2a16e3bbe0b818d2842ea970c9921e1d8680b18d366",
         ".superdesign/init/layouts.md": "6d60e63bec699e4bda0676de41604a8b401e4a696e648a2327d6b67219d75845",
         ".superdesign/init/routes.md": "81171cb907bb08e0f8090a70fbbde2420120b76b1a1d4194c1f5efdb7e0d72f4",
@@ -375,7 +375,7 @@
           "currentVersion": 2
         }
       },
-      "updatedAt": "2026-09-08T11:19:36Z"
+      "updatedAt": "2026-09-08T11:35:09Z"
     },
     "/settings": {
       "targetKind": "new-ui",
@@ -400,7 +400,7 @@
       ],
       "fingerprints": {
         ".superdesign/design-system.md": "8bad0f20428b6c4519646352426fe6d11c81322cff40864ce00c03cba88399ab",
-        ".superdesign/context/primary-dashboard-current.md": "57f9992b819b1d2ec38749d63f71c6b2b654225534adae2da3d7a8e436d1e4aa",
+        ".superdesign/context/primary-dashboard-current.md": "af9790b7d97e1b3af3851883ca5fc9d4ee78ce8270fea54ed2378c88327b3b39",
         ".superdesign/init/components.md": "837e5e23a1ec024800c5b2a16e3bbe0b818d2842ea970c9921e1d8680b18d366",
         ".superdesign/init/layouts.md": "6d60e63bec699e4bda0676de41604a8b401e4a696e648a2327d6b67219d75845",
         ".superdesign/init/routes.md": "81171cb907bb08e0f8090a70fbbde2420120b76b1a1d4194c1f5efdb7e0d72f4",
@@ -436,7 +436,7 @@
           "currentVersion": 2
         }
       },
-      "updatedAt": "2026-09-08T11:19:36Z"
+      "updatedAt": "2026-09-08T11:35:09Z"
     }
   }
 }
