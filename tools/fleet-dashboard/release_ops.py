@@ -1262,7 +1262,11 @@ class ReleaseOpsManager:
                 ok=True,
                 rollback={"attempted": False},
             )
-            LOGGER.info("ops stage_central succeeded: %s", dest_wheel)
+            # Fixed message: dest_wheel derives from the configured
+            # profile-env location, so env-derived paths must not reach log
+            # sinks (CodeQL py/clear-text-logging-sensitive-data). The wheel
+            # path stays in the scrubbed journal and the returned result.
+            LOGGER.info("ops stage_central succeeded")
             return {
                 "ok": True,
                 "action": "stage_central",

@@ -4664,11 +4664,18 @@ class SeatConfigManager:
             r"C:\\Users\\[REDACTED:WINDOWS_HOME]",
             value,
         )
-        sensitive = re.compile(
-            r"(?im)^(\s*[^:=\n]*(?:token|authorization|secret|password|api[_-]?key|bearer)[^:=\n]*)(\s*[:=]\s*)(.*)$"
+        # Linear-time key/separator/value split. The keyword test runs in
+        # Python instead of nested stars around the alternation, which
+        # backtracked polynomially on repeated whitespace
+        # (CodeQL py/polynomial-redos).
+        sensitive = re.compile(r"(?im)^([^:=\n]*)([:=]\s*)(.*)$")
+        keyword = re.compile(
+            r"(?i)token|authorization|secret|password|api[_-]?key|bearer"
         )
 
         def redact(match: re.Match[str]) -> str:
+            if keyword.search(match.group(1)) is None:
+                return match.group(0)
             key = match.group(1).lower()
             if "file" in key or "path" in key or "env_var" in key:
                 return match.group(0)
