@@ -75,6 +75,7 @@ from seat_config import (  # noqa: I001
 )
 from release_ops import ReleaseOpsManager
 import runtime_environment
+from warm_home import apply_warm_guided_home
 
 
 DEFAULT_URL = "http://127.0.0.1:8766/mcp"
@@ -6425,6 +6426,8 @@ bindSeats = function() {
 </script></body>""",
     1,
 )
+
+HTML = apply_warm_guided_home(HTML)
 
 
 def make_handler(
