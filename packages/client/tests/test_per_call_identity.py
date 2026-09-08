@@ -422,6 +422,7 @@ async def test_review_lease_calls_carry_the_seat_identity(monkeypatch) -> None:
             {
                 "agent_name": "env-default",
                 "include_closed": False,
+                "include_archived": True,
                 "limit": 100,
                 "review_unclaimed_only": True,
                 "status": "submitted",
@@ -892,3 +893,23 @@ async def test_events_early_close_exits_listen_scopes_in_producer_task(
 
     assert len(scope_tasks) == 3
     assert all(entered is exited for entered, exited in scope_tasks)
+
+
+@pytest.mark.anyio
+async def test_ticket_list_include_archived_passthrough(monkeypatch) -> None:
+    """include_archived defaults to transparent archive read-through."""
+    board = client()
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    async def call(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        calls.append((name, arguments))
+        return {"ok": True}
+
+    monkeypatch.setattr(board, "_call", call)
+
+    await board.ticket_list(status="closed")
+    await board.ticket_list(status="closed", include_archived=False)
+
+    assert [name for name, _ in calls] == ["ticket_list", "ticket_list"]
+    assert calls[0][1]["include_archived"] is True
+    assert calls[1][1]["include_archived"] is False

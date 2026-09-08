@@ -116,12 +116,20 @@ def log_runtime_error(
     )
 
 
-def _health_counts(service: Any) -> dict[str, int]:
-    boards = service.store.iter_documents("boards")
-    journals = service.store.iter_documents("journals")
-    heads = [max(0, int(row.get("next_seq", 1)) - 1) for row in journals]
-    return {
-        "board_count": len(boards),
+def _health_counts(service: Any) -> dict[str, Any]:
+    board_sizes = service.store.document_sizes("boards")
+    extractor = getattr(service.store, "document_values", None)
+    if callable(extractor):
+        heads = [
+            max(0, int(value) - 1)
+            for _, value in extractor("journals", "next_seq")
+            if value is not None
+        ]
+    else:
+        journals = service.store.iter_documents("journals")
+        heads = [max(0, int(row.get("next_seq", 1)) - 1) for row in journals]
+    counts: dict[str, Any] = {
+        "board_count": len(board_sizes),
         "journal_head": max(heads, default=0),
         "active_subscription_streams": int(
             getattr(service, "active_stream_count", 0)
@@ -130,6 +138,12 @@ def _health_counts(service: Any) -> dict[str, int]:
             getattr(service, "principal_stream_cap", 0)
         ),
     }
+    board_stats = getattr(service, "board_health_stats", None)
+    if callable(board_stats):
+        # Per-board hot document size (bytes), archived ticket count, and the
+        # trailing 60s document load/save counts for dashboard visibility.
+        counts["boards"] = board_stats()
+    return counts
 
 
 def health_response(

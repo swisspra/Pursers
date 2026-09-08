@@ -2333,8 +2333,11 @@ def client_runtime_info() -> tuple[str, tuple[str, ...]]:
         except (OSError, KeyError, TypeError, tomllib.TOMLDecodeError):
             installed_version = "unknown"
     try:
-        event_parameters = inspect.signature(BoardClient.events).parameters
-    except (TypeError, ValueError):
+        events_fn = getattr(BoardClient, "events", None)
+        event_parameters = (
+            inspect.signature(events_fn).parameters if callable(events_fn) else {}
+        )
+    except (TypeError, ValueError, AttributeError):
         event_parameters = {}
     features = ("events-reconnect",) if "reconnect" in event_parameters else ()
     return installed_version, features

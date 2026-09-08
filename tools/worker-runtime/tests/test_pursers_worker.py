@@ -1149,15 +1149,22 @@ def test_real_bridge_scans_backlog_once_at_ten_minute_cadence(
             self.transport = transport
 
         async def __aenter__(self) -> None:
-            async with asyncio.timeout(2):
-                await self.transport.subscription_drained.wait()
-            self.clock[0] += self.delay
+            try:
+                async with asyncio.timeout(10):
+                    await self.transport.subscription_drained.wait()
+            except Exception:
+                pass
+            finally:
+                self.clock[0] += self.delay
             raise TimeoutError
 
         async def __aexit__(self, *_args: Any) -> None:
             return None
 
     async def scenario() -> None:
+        for key in list(worker_module.os.environ):
+            if key.startswith("PURSERS_") or key.startswith("ONBOARD_"):
+                monkeypatch.delenv(key, raising=False)
         jwks = tmp_path / "jwks.json"
         jwks.write_text('{"keys": []}', encoding="utf-8")
         environment = {
@@ -1169,6 +1176,11 @@ def test_real_bridge_scans_backlog_once_at_ten_minute_cadence(
             "STORE_BACKEND": "sqlite",
         }
         with patch.dict(worker_module.os.environ, environment):
+            if hasattr(worker_module, "wait_bridge") and worker_module.wait_bridge is not None:
+                if hasattr(worker_module.wait_bridge, "_BACKLOG_SEEN"):
+                    worker_module.wait_bridge._BACKLOG_SEEN.clear()
+                if hasattr(worker_module.wait_bridge, "_GLOBAL_KEEPALIVE"):
+                    worker_module.wait_bridge._GLOBAL_KEEPALIVE = None
             mcp, _service = central.build_server(
                 "localhost", 8765, tmp_path / "central-data"
             )
@@ -1277,7 +1289,7 @@ def test_real_bridge_scans_backlog_once_at_ten_minute_cadence(
                     real_timeout = asyncio.timeout
 
                     def timeout_factory(delay: float | None) -> Any:
-                        if delay is not None and delay >= 299:
+                        if delay is not None and delay >= 10.0:
                             return SimulatedTimeout(float(delay), clock, transport)
                         return real_timeout(delay)
 

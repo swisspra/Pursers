@@ -48,6 +48,18 @@ SEMANTIC_FIELDS = frozenset(
         "attempted_agent_name",
         "principal_id",
         "refusal_reason",
+        "archived_ticket_count",
+        "archived_memory_count",
+        "history_bounded_count",
+        "history_entries_archived",
+        "member_tombstoned_count",
+        "invite_pruned_count",
+        "bytes_freed",
+        "archived_reason",
+        "archived_at",
+        "compacted_through",
+        "removed_rows",
+        "retained_rows",
     }
 )
 
