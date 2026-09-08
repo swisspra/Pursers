@@ -116,6 +116,11 @@ BRANCH_RE = re.compile(
 BRANCH_VALUE_RE = re.compile(
     r"[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)+"
 )
+SUBMIT_BRANCH_COMMIT_RE = re.compile(
+    r"(?im)^\s*branch_and_commit:\s*"
+    r"([A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)+)"
+    r"\s*@\s*([0-9a-fA-F]{40})\s*$"
+)
 SYNTHETIC_VALUE_RE = (
     r"(?:placeholder|redacted|example|sample|dummy|synthetic|your)"
     r"(?:[-_](?:access|auth|bearer|credential|key|secret|token|value|here|local))*"
@@ -368,6 +373,86 @@ def _git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProc
         ["git", *args], cwd=repo, check=check, text=True,
         capture_output=True,
     )
+
+
+def _required_field_names(ticket: dict[str, Any]) -> set[str]:
+    required = ticket.get("required_fields", [])
+    if isinstance(required, dict):
+        return {str(name) for name in required}
+    if isinstance(required, (list, tuple, set)):
+        return {str(name) for name in required if isinstance(name, str)}
+    return set()
+
+
+def _submit_preflight(
+    ticket: dict[str, Any], repo: Path, *, summary: str, notes: str
+) -> dict[str, str] | None:
+    if "branch_and_commit" not in _required_field_names(ticket):
+        return None
+    if not (repo / ".git").exists():
+        raise ValueError(
+            "submission preflight requires the routed git seat clone; "
+            "research-only tickets must omit branch_and_commit from required_fields"
+        )
+    evidence = f"{summary}\n{notes}"
+    matches = list(SUBMIT_BRANCH_COMMIT_RE.finditer(evidence))
+    if len(matches) != 1:
+        raise ValueError(
+            "submission preflight requires exactly one "
+            "'branch_and_commit: platform/branch @ <full-40-hex-sha>' line"
+        )
+    branch, submitted_sha = matches[0].groups()
+    submitted_sha = submitted_sha.lower()
+    if subprocess.run(
+        ["git", "check-ref-format", "--branch", branch],
+        check=False, text=True, capture_output=True,
+    ).returncode != 0:
+        raise ValueError(f"submission preflight rejected invalid branch name: {branch}")
+    try:
+        origin = _git(repo, "remote", "get-url", "origin").stdout.strip()
+        if not origin:
+            raise ValueError("submission preflight requires a configured origin remote")
+        _git(
+            repo, "fetch", "--prune", "origin",
+            f"+refs/heads/{branch}:refs/remotes/origin/{branch}",
+        )
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(
+            f"submission preflight could not fetch origin/{branch}; "
+            "confirm the branch was pushed and the configured origin is reachable"
+        ) from exc
+    resolved = _git(
+        repo, "rev-parse", "--verify", f"{submitted_sha}^{{commit}}", check=False
+    )
+    if resolved.returncode != 0:
+        raise ValueError(
+            f"submission preflight rejected nonexistent commit {submitted_sha}; "
+            "copy the full SHA from git rev-parse HEAD"
+        )
+    exact_sha = resolved.stdout.strip().lower()
+    remote_ref = f"refs/remotes/origin/{branch}"
+    remote = _git(repo, "rev-parse", "--verify", f"{remote_ref}^{{commit}}", check=False)
+    if remote.returncode != 0:
+        raise ValueError(
+            f"submission preflight could not resolve origin/{branch}; push the branch first"
+        )
+    remote_tip = remote.stdout.strip().lower()
+    if exact_sha != submitted_sha:
+        raise ValueError(
+            f"submission preflight rejected non-exact commit {submitted_sha}; "
+            f"Git resolved {exact_sha}"
+        )
+    if remote_tip != submitted_sha:
+        raise ValueError(
+            f"submission preflight rejected moved or mismatched origin/{branch}: "
+            f"submitted {submitted_sha}, remote tip {remote_tip}; refresh evidence and retry"
+        )
+    return {
+        "branch": branch,
+        "commit": exact_sha,
+        "remote_ref": f"origin/{branch}",
+        "remote_tip": remote_tip,
+    }
 
 
 def _suite_commands(ticket: dict[str, Any], submission: dict[str, Any]) -> list[list[str]]:
@@ -1169,7 +1254,41 @@ async def _execute(args: argparse.Namespace) -> None:
                     files = [item.strip() for item in args.files_csv.split(",") if item.strip()]
                     if not files:
                         raise ValueError("files-csv must contain at least one path")
-                    notes, truncation = _truncate_submit_notes(args.notes)
+                    ticket_result = await target.ticket_get(args.ticket_id)
+                    ticket = ticket_result.get("ticket", {})
+                    if not isinstance(ticket, dict):
+                        raise ValueError("submission preflight requires a valid ticket response")
+                    routed, operator_dir, route_error = ticket_route(ticket_result)
+                    needs_git = "branch_and_commit" in _required_field_names(ticket)
+                    if needs_git and route_error is not None:
+                        raise ValueError(
+                            "submission preflight could not resolve the routed repository: "
+                            + route_error["message"]
+                        )
+                    if (
+                        needs_git and routed and operator_dir
+                        and Path(routed).resolve() == Path(operator_dir).resolve()
+                    ):
+                        raise RuntimeError("operator checkout is read-only for seats")
+                    source_repo = (
+                        Path(routed)
+                        if routed and (Path(routed) / ".git").exists()
+                        else seat_repo
+                    )
+                    preflight = _submit_preflight(
+                        ticket, source_repo, summary=args.summary, notes=args.notes
+                    )
+                    submit_notes = args.notes
+                    if preflight is not None:
+                        machine_evidence = (
+                            "submission_preflight: "
+                            f"branch={preflight['branch']} "
+                            f"commit={preflight['commit']} "
+                            f"remote_ref={preflight['remote_ref']} "
+                            f"remote_tip={preflight['remote_tip']}"
+                        )
+                        submit_notes = f"{machine_evidence}\n{submit_notes}"
+                    notes, truncation = _truncate_submit_notes(submit_notes)
                     if truncation is not None:
                         print(
                             "board.sh: warning: ticket_submit notes exceeded 5000 "
@@ -1183,6 +1302,8 @@ async def _execute(args: argparse.Namespace) -> None:
                     )
                     if truncation is not None:
                         result["input_truncation"] = {"notes": truncation}
+                    if preflight is not None:
+                        result["submission_preflight"] = preflight
                     emit(result)
                     return
             else:
@@ -1505,9 +1626,9 @@ bin/board.sh wait --since '<cursor-or-json-map>' [--boards registry|home|<id,id>
 2. **UNDERSTAND** -- Use the offer's `ticket_id`, `board_id`, and registered fleet clone `work_dir`; never guess or use the operator checkout.
 3. **CLAIM** -- Claim a ticket offered to this seat. A work broadcast is also claimable only when GET confirms an open ticket with `dispatch_state.state=broadcast` and no live offer; Central resolves the race. Never claim a ticket offered to another seat. If the offer expired, was revoked, or belongs to another seat, go back to WAIT.
 4. **DO** -- Work only in the returned fleet clone (or this seat's own clone). The operator checkout is read-only for seats. Run `bin/board.sh renew <TK> --board <id>` every ~10 minutes.
-5. **SUBMIT** -- `bin/board.sh submit <TK> <summary> <notes> <files-csv> --board <id>`. Notes are capped at 5000 characters; trim test tails to the evidence needed. The helper truncates oversized notes at a line boundary and reports it.
-6. **AWAIT REVIEW** -- Keep the same ticket slot occupied. WAIT, then GET that ticket after a cue. If rejected, follow fix instructions and resubmit; if approved/closed, release the slot.
-7. **RE-ARM** -- Return to WAIT for the next ticket only after approval/closure.
+5. **SUBMIT** -- Push the candidate, put exactly one `branch_and_commit: platform/branch @ <full-40-hex-sha>` line in code-ticket notes, then run `bin/board.sh submit <TK> <summary> <notes> <files-csv> --board <id>`. Preflight verifies the exact remote tip before board mutation and adds machine-derived metadata. Correct any preflight error and retry. Notes are capped at 5000 characters.
+6. **RE-ARM** -- After a successful submit, leave its branch immutable and return immediately to WAIT for the next eligible ticket; do not wait for review.
+7. **RETRY CUES** -- On a later rejection cue, GET the ticket, follow its fix instructions in a fresh candidate branch, resubmit, then re-arm again.
 
 Never poll `bin/board.sh list` in a loop. Polling exists only behind the explicit `wait --poll` fallback. The default wait blocks on Central's subscriptions/listen, using zero model turns except the re-arm."""
     else:
