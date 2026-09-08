@@ -2693,17 +2693,11 @@ def test_single_central_flags_and_response_shape_remain_compatible(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("ONBOARD_CENTRAL_URL", raising=False)
+    monkeypatch.delenv("PURSERS_CENTRAL_URL", raising=False)
+    monkeypatch.setenv("ONBOARD_CENTRAL_TOKEN", "single-secret")
     args = dashboard.parse_args(["--port", "8899"])
     args.token_file = None
-    old = os.environ.get("ONBOARD_CENTRAL_TOKEN")
-    os.environ["ONBOARD_CENTRAL_TOKEN"] = "single-secret"
-    try:
-        configs = dashboard.load_central_configs(args)
-    finally:
-        if old is None:
-            os.environ.pop("ONBOARD_CENTRAL_TOKEN", None)
-        else:
-            os.environ["ONBOARD_CENTRAL_TOKEN"] = old
+    configs = dashboard.load_central_configs(args)
     assert len(configs) == 1
     assert configs[0].label == "default"
     assert configs[0].url == dashboard.DEFAULT_URL
@@ -2713,6 +2707,14 @@ def test_single_central_flags_and_response_shape_remain_compatible(
     assert result["central"] == "only"
     assert result["pool_summary"]["online"] == 1
     assert "boards" in result and "agents" in result
+
+    inherited_url = "https://central.example.test:8766/mcp"
+    monkeypatch.setenv("ONBOARD_CENTRAL_URL", inherited_url)
+    args_inherited = dashboard.parse_args(["--port", "8899"])
+    args_inherited.token_file = None
+    configs_inherited = dashboard.load_central_configs(args_inherited)
+    assert len(configs_inherited) == 1
+    assert configs_inherited[0].url == inherited_url
 
 
 def test_centrals_file_and_tokens_require_0600(tmp_path: Path) -> None:
@@ -3666,6 +3668,31 @@ def test_active_review_runtime_session_fence_invalidates_stale_lifecycle() -> No
     )
 
     assert dashboard._active_review_from_log([started, session_fence]) is None
+
+
+def test_stop_on_never_created_root_is_safe_and_creates_it_on_first_write(
+    tmp_path: Path,
+) -> None:
+    """Idempotent stop must honour the lazy worker-root contract on darwin."""
+    root = tmp_path / "never-created" / "workers"
+    manager = dashboard.WorkerManager(root, platform="darwin")
+    # Construction stays lazy: nothing exists until the first private write.
+    assert not root.exists()
+
+    # Regression: the fence write used to raise FileNotFoundError here because
+    # stop() no longer had a constructor-created root to write into.
+    stopped = manager.stop("worker-one")
+
+    assert stopped == {"ok": True, "name": "worker-one", "running": False}
+    assert root.is_dir()
+    assert stat.S_IMODE(root.stat().st_mode) == 0o700
+    log_path = root / "worker-one.session.log"
+    assert stat.S_IMODE(log_path.stat().st_mode) == 0o600
+    assert json.loads(log_path.read_text().splitlines()[-1]) == {
+        "event": "review_session_reset",
+        "reason": "managed_stopped",
+    }
+    assert not manager._review_state_path("worker-one").exists()
 
 
 def test_worker_provider_test_uses_keychain_without_echoing_secret(
