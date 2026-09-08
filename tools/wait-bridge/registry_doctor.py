@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
+from urllib.parse import urlsplit
 
 from pursers_client import BoardClient
 
@@ -233,6 +234,7 @@ def parse_registry(result: Any) -> dict[str, Any]:
         "work_dir_owner",
         "fleet_clone_dir",
         "fleet",
+        "repository_url",
     }
     for name, raw in projects.items():
         if not isinstance(name, str) or not name.strip() or name != name.strip():
@@ -273,6 +275,26 @@ def parse_registry(result: Any) -> dict[str, Any]:
             raise DoctorError(f"project {name!r} git_repo must be boolean")
         if "fleet" in raw and type(raw["fleet"]) is not bool:
             raise DoctorError(f"project {name!r} fleet must be boolean")
+        repository_url = raw.get("repository_url")
+        if repository_url is not None:
+            parsed_url = urlsplit(repository_url) if isinstance(
+                repository_url, str
+            ) else None
+            if (
+                parsed_url is None
+                or repository_url != repository_url.strip()
+                or parsed_url.scheme != "https"
+                or not parsed_url.netloc
+                or parsed_url.username is not None
+                or parsed_url.password is not None
+                or parsed_url.query
+                or parsed_url.fragment
+                or parsed_url.path in {"", "/"}
+            ):
+                raise DoctorError(
+                    f"project {name!r} repository_url must be a credential-free "
+                    "HTTPS repository URL without query or fragment"
+                )
         normalized["projects"][name] = dict(raw)
         normalized["projects"][name]["integration_ref"] = integration_ref
     return normalized

@@ -70,12 +70,14 @@ from .personal_profile import (
 )
 from .project_registry import (
     PROJECT_REGISTRY_KEY,
+    RegistryRoutingError,
     active_registry_boards,
     parse_project_registry,
     registry_project_work_dirs,
     registry_project_operator_work_dirs,
     registry_operator_work_dirs,
     registry_work_dirs,
+    resolve_registry_target,
     wait_for_boards,
 )
 
@@ -103,6 +105,7 @@ __all__ = [
     "PERSONAL_REVIEW_POLICY",
     "PROFILE_ENV",
     "PROJECT_REGISTRY_KEY",
+    "RegistryRoutingError",
     "PersonalContext",
     "PersonalProfile",
     "PersonalProfileError",
@@ -148,6 +151,7 @@ __all__ = [
     "read_capability",
     "resolve_personal_context",
     "registry_work_dirs",
+    "resolve_registry_target",
     "rotate_personal_capability",
     "select_personal_profile",
     "wait_for_boards",
