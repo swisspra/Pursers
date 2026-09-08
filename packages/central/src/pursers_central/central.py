@@ -7476,6 +7476,8 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                     "assignment state precondition failed: ticket must remain open, "
                     "unclaimed, and at the expected assignee"
                 )
+            assignment_changed = current_assignee != assigned_to_agent_id
+            released: list[dict[str, Any]] = []
             if assigned_to_agent_id is not None:
                 target = document["members"].get(assigned_to_agent_id)
                 if (
@@ -7494,6 +7496,27 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 ticket.pop("assigned_to_kind", None)
             ticket.pop("work_pin_unavailable_cycles", None)
             ticket.pop("work_pin_unavailable_last_at", None)
+            if assignment_changed:
+                for kind in ("work", "review"):
+                    offer = ticket.pop(f"{kind}_offer", None)
+                    if isinstance(offer, Mapping):
+                        released.append(
+                            {
+                                "kind": OFFER_REVOKED,
+                                "ticket_id": ticket_id,
+                                "offer_kind": kind,
+                                "offered_agent_id": offer.get("agent_id"),
+                                "offered_agent_name": offer.get("agent_name"),
+                                "offer_expires_at": offer.get("expires_at"),
+                                "dispatch_reason": "ticket_reassigned",
+                                "recipients": [offer.get("agent_id")],
+                            }
+                        )
+                ticket.pop("dispatch_state", None)
+                ticket["work_offer_expirations"] = 0
+                ticket["work_dispatch_cycle"] = int(
+                    ticket.get("work_dispatch_cycle", 0) or 0
+                ) + 1
             ticket["updated_at"] = iso_at(now)
             ticket["coordinator_assignment"] = {
                 "op_key": safe_key,
@@ -7503,6 +7526,10 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 "assigned_at": iso_at(now),
                 "assigned_by_agent_id": actor["agent_id"],
             }
+            if assignment_changed and ticket.get("parked") is not True:
+                dispatched = dispatch_ticket(document, ticket, now, "work")
+                if dispatched is not None:
+                    released.append(dispatched)
             return {
                 "actor": copy.deepcopy(actor),
                 "ticket": copy.deepcopy(ticket),
@@ -7510,6 +7537,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 "op_key": safe_key,
                 "reason": safe_reason,
                 "replayed": False,
+                "released": released,
                 "recipients": [
                     value
                     for value in (assigned_to_agent_id, current_assignee)
@@ -7525,7 +7553,11 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 "event": None,
                 "event_created": False,
                 "idempotent_replay": True,
+                "dispatch_events": [],
             }
+        dispatch_events = await publish_releases(
+            board_id, changed["released"], principal, ctx
+        )
         uri = resource_uri(board_id, "ticket", ticket_id)
         event, created = await append_once_and_publish(
             board_id,
@@ -7551,6 +7583,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             "event": event,
             "event_created": created,
             "idempotent_replay": changed["replayed"],
+            "dispatch_events": dispatch_events,
         }
 
     @tool()
@@ -8870,6 +8903,20 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             }
             append_bounded_history(document, ticket, "review_history", review_record)
             ticket.pop("review_lease", None)
+            review_offer = ticket.pop("review_offer", None)
+            if isinstance(review_offer, Mapping):
+                released.append(
+                    {
+                        "kind": OFFER_REVOKED,
+                        "ticket_id": ticket_id,
+                        "offer_kind": "review",
+                        "offered_agent_id": review_offer.get("agent_id"),
+                        "offered_agent_name": review_offer.get("agent_name"),
+                        "offer_expires_at": review_offer.get("expires_at"),
+                        "dispatch_reason": "review_verdict",
+                        "recipients": [review_offer.get("agent_id")],
+                    }
+                )
             if retryable_rejection:
                 ticket["last_claimed_by_agent_id"] = ticket.get("claimed_by_agent_id")
                 ticket["last_claimed_by_principal_id"] = ticket.get("claimed_by_principal_id")

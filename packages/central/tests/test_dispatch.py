@@ -1135,12 +1135,33 @@ class DispatchTests(unittest.IsolatedAsyncioTestCase):
             review_claimed.structured_content["ticket"]["dispatch_state"]["state"],
             "review_claimed",
         )
+
+        def restore_stale_review_offer(document: dict[str, Any]) -> None:
+            document["tickets"][ticket_id]["review_offer"] = {
+                "kind": "review",
+                "agent_id": first,
+                "agent_name": first_name,
+                "expires_at": "2099-01-01T00:00:00+00:00",
+                "expires_at_epoch": 4_070_908_800.0,
+            }
+
+        self.service.mutate(
+            "pursers", restore_stale_review_offer, require_generation=False
+        )
         rejected = await self.call(
             "ticket_review", agent_name=first_name, ticket_id=ticket_id,
             verdict="reject", review_notes="needs another pass",
             fix_instructions="adjust contract",
         )
         self.assertEqual(rejected.structured_content["ticket"]["status"], "open")
+        self.assertNotIn("review_offer", rejected.structured_content["ticket"])
+        self.assertIn(
+            OFFER_REVOKED,
+            [
+                event["kind"]
+                for event in rejected.structured_content["release_events"]
+            ],
+        )
         self.principal = self.worker_a
         await self.call("ticket_claim", agent_name="worker-a", ticket_id=ticket_id)
         resubmitted = await self.call(
