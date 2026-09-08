@@ -1,0 +1,8 @@
+<nav aria-label="Dashboard views" class="flex max-w-full gap-1.5 overflow-x-auto p-0.5">
+  <a :href="todayHref" :class="{ 'border-cyan-300/50 bg-cyan-300/10 text-cyan-300': activeItem === 'today' }" class="inline-flex min-h-11 min-w-24 items-center justify-center rounded-xl border border-slate-700 bg-slate-900 px-4 text-sm text-slate-300">Today</a>
+  <a :href="workHref" :class="{ 'border-cyan-300/50 bg-cyan-300/10 text-cyan-300': activeItem === 'work' }" class="inline-flex min-h-11 min-w-24 items-center justify-center rounded-xl border border-slate-700 bg-slate-900 px-4 text-sm text-slate-300">Work</a>
+  <a :href="agentsHref" :class="{ 'border-cyan-300/50 bg-cyan-300/10 text-cyan-300': activeItem === 'agents' }" class="inline-flex min-h-11 min-w-24 items-center justify-center rounded-xl border border-slate-700 bg-slate-900 px-4 text-sm text-slate-300">Agents</a>
+  <a :href="fleetHref" :class="{ 'border-cyan-300/50 bg-cyan-300/10 text-cyan-300': activeItem === 'fleet' }" class="inline-flex min-h-11 min-w-24 items-center justify-center rounded-xl border border-slate-700 bg-slate-900 px-4 text-sm text-slate-300">Fleet</a>
+  <a :href="linksHref" :class="{ 'border-cyan-300/50 bg-cyan-300/10 text-cyan-300': activeItem === 'links' }" class="inline-flex min-h-11 min-w-24 items-center justify-center rounded-xl border border-slate-700 bg-slate-900 px-4 text-sm text-slate-300">Links</a>
+  <a :href="activityHref" :class="{ 'border-cyan-300/50 bg-cyan-300/10 text-cyan-300': activeItem === 'activity' }" class="inline-flex min-h-11 min-w-24 items-center justify-center rounded-xl border border-slate-700 bg-slate-900 px-4 text-sm text-slate-300">Activity</a>
+</nav>
