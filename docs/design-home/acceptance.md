@@ -178,7 +178,10 @@ offers, pending human approvals, and reconnect behavior are cross-cutting cases.
 ## Evidence report
 
 The full test consumes an external JSON report produced during the real browser
-session. Do not commit the report or screenshots. Required top-level fields are:
+session. The report is untrusted input: its labels, receipts, screenshots,
+snapshots, assertions, and host endpoint cannot establish a GUI PASS by
+themselves. Do not commit the report or screenshots. Required top-level fields
+are:
 
 ```json
 {
@@ -235,6 +238,20 @@ against the snapshot and evaluates `equals` or `contains`. Self-declared
 artifact digests are rejected. Screenshot and snapshot descriptors contain
 relative `path` and lowercase `sha256` fields.
 
+After those untrusted artifacts pass structural checks, the verifier must bind
+every observation to one verifier-owned trusted browser session. That observer
+must independently return the exact observation ID, sandbox target, host
+identity, candidate commit, capture time, page URL, screenshot bytes, and live
+accessibility snapshot. The harness compares the capture byte-for-byte with the
+report artifacts and evaluates every assertion again against the observer
+snapshot. A complete caller-generated bundle and a loopback status server with
+self-selected identity strings therefore cannot produce `real_browser_host`.
+This repository does not currently ship a production trusted-browser adapter;
+the public verifier reports `AcceptanceCapabilityUnavailable` and the pytest
+entrypoint reports SKIP until such an adapter is installed. Unit tests use an
+internal fixture observer only to exercise the binding logic; it is not exposed
+by the public verification path and is never release evidence.
+
 Suite receipts bind the exact suite name, command, commit, target, timestamps,
 zero exit code, and hashed output log. The log must contain suite-specific
 success markers, but markers are not execution proof: after artifact validation
@@ -270,5 +287,6 @@ pytest -q tools/aionui-extension/tests/home_acceptance -rs
 extension Node suites, dashboard typecheck/build, repository leak scan, and
 candidate diff check. Release readiness requires: all harness unit checks pass;
 the read-only probe passes against the installed host; every end-to-end step and
-dashboard inventory item has real-browser evidence; and this complete suite set
-passes at the same exact commit. A skip is not release-ready.
+dashboard inventory item is bound to the verifier-owned browser observer; and
+this complete suite set passes at the same exact commit. A report-only result or
+skip is not release-ready.

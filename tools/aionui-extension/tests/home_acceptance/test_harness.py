@@ -3,7 +3,12 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
+import threading
 import zlib
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import replace
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
 
@@ -138,13 +143,16 @@ def _suite_output(name: str) -> str:
 
 
 def _write_report(tmp_path: Path, report: dict[str, object]) -> Path:
+    report_target = report.get("target")
+    target = dict(report_target) if isinstance(report_target, dict) else dict(TARGET)
+    base_url = str(target["base_url"]).rstrip("/")
     host = report.get("host") if isinstance(report.get("host"), dict) else {}
     host_reference = host.get("evidence", "host.json")
     if isinstance(host_reference, str):
         _write_json(tmp_path / host_reference, {
             "schema_version": 1,
             "evidence_kind": "host_identity",
-            "target": dict(TARGET),
+            "target": target,
             "product": "AionUi",
             "version": host.get("version", HOST["version"]),
             "build": host.get("build", HOST["build"]),
@@ -170,7 +178,7 @@ def _write_report(tmp_path: Path, report: dict[str, object]) -> Path:
         _write_json(snapshot, {
             "schema_version": 1,
             "observation_id": identifier,
-            "page_url": "http://127.0.0.1:8765/dashboard",
+            "page_url": f"{base_url}/dashboard",
             "captured_at": CAPTURED_AT,
             "snapshot": {
                 "role": "document",
@@ -186,11 +194,11 @@ def _write_report(tmp_path: Path, report: dict[str, object]) -> Path:
             "schema_version": 1,
             "evidence_kind": "browser_observation",
             "observation_id": identifier,
-            "target": dict(TARGET),
+            "target": target,
             "host": {"version": HOST["version"], "build": HOST["build"]},
             "candidate_commit": CANDIDATE_SHA,
             "captured_at": CAPTURED_AT,
-            "page_url": "http://127.0.0.1:8765/dashboard",
+            "page_url": f"{base_url}/dashboard",
             "screenshot": _descriptor(screenshot, tmp_path),
             "accessibility_snapshot": _descriptor(snapshot, tmp_path),
             "assertions": [
@@ -218,7 +226,7 @@ def _write_report(tmp_path: Path, report: dict[str, object]) -> Path:
             "name": name,
             "command": suite.get("command"),
             "commit": suite.get("commit"),
-            "target": dict(TARGET),
+            "target": target,
             "started_at": CAPTURED_AT,
             "finished_at": "2026-09-08T12:01:00+00:00",
             "exit_code": 0,
@@ -278,12 +286,79 @@ def _validate_report(
         patch.object(harness_module, "probe_host_identity", return_value=dict(HOST)),
         patch.object(harness_module, "_execute_required_suite", return_value=None),
     ):
-        return validate_evidence_report(
+        return harness_module._validate_evidence_report(
             path,
             target,
             capabilities,
             candidate_commit,
+            trusted_browser_observer=_FixtureTrustedBrowserObserver(path.parent),
         )
+
+
+class _FixtureTrustedBrowserObserver:
+    """Unit-test double only; it is never used by the public acceptance path."""
+
+    def __init__(self, root: Path) -> None:
+        self.root = root
+
+    def capture(
+        self, request: harness_module.BrowserObservationRequest
+    ) -> harness_module.TrustedBrowserCapture:
+        prefix = "step" if request.observation_id in SEQUENCE else "item"
+        receipt = json.loads(
+            (
+                self.root
+                / "observations"
+                / f"{prefix}-{_safe_name(request.observation_id)}.json"
+            ).read_text(encoding="utf-8")
+        )
+        snapshot_wrapper = json.loads(
+            (
+                self.root / receipt["accessibility_snapshot"]["path"]
+            ).read_text(encoding="utf-8")
+        )
+        return harness_module.TrustedBrowserCapture(
+            observer_id="unit-test-fixture-observer",
+            observation_id=request.observation_id,
+            target=request.target,
+            host_product="AionUi",
+            host_version=request.host_version,
+            host_build=request.host_build,
+            candidate_commit=request.candidate_commit,
+            captured_at=request.captured_at,
+            page_url=request.page_url,
+            screenshot=(self.root / receipt["screenshot"]["path"]).read_bytes(),
+            snapshot=snapshot_wrapper["snapshot"],
+        )
+
+
+@contextmanager
+def _minimal_status_server() -> Iterator[str]:
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            if self.path != "/pursers/status":
+                self.send_error(404)
+                return
+            body = json.dumps({"ok": True, "host": HOST}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, _format: str, *args: object) -> None:
+            del args
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        host, port = server.server_address[:2]
+        yield f"http://{host}:{port}"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
 
 
 def test_acceptance_sequence_and_current_operator_tiers_are_explicit() -> None:
@@ -440,6 +515,32 @@ def test_synthetic_report_cannot_establish_gui_acceptance(
         )
 
 
+def test_complete_offline_bundle_and_self_selected_status_cannot_pass_without_observer(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("PURSERS_HOME_ACCEPTANCE_MUTATE", MUTATION_OPT_IN)
+    with _minimal_status_server() as base_url:
+        report = _complete_report()
+        report["target"] = {
+            "base_url": base_url,
+            "board_id": "sandbox-home",
+        }
+        path = _write_report(tmp_path, report)
+        with (
+            patch.object(harness_module, "_execute_required_suite", return_value=None),
+            pytest.raises(
+                AcceptanceCapabilityUnavailable,
+                match="trusted browser observer is unavailable",
+            ),
+        ):
+            validate_evidence_report(
+                path,
+                validate_live_target(base_url, "sandbox-home"),
+                RepositoryCapabilities((), (), (), (), ()),
+                CANDIDATE_SHA,
+            )
+
+
 def test_structurally_valid_report_passes_with_trusted_observers(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -455,6 +556,34 @@ def test_structurally_valid_report_passes_with_trusted_observers(
         "inventory_passed": len(REQUIRED_INVENTORY),
         "suites_passed": len(REQUIRED_SUITES),
     }
+
+
+def test_trusted_observer_capture_must_match_report_artifacts(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("PURSERS_HOME_ACCEPTANCE_MUTATE", MUTATION_OPT_IN)
+    path = _write_report(tmp_path, _complete_report())
+    fixture = _FixtureTrustedBrowserObserver(tmp_path)
+
+    class MismatchingObserver:
+        def capture(
+            self, request: harness_module.BrowserObservationRequest
+        ) -> harness_module.TrustedBrowserCapture:
+            capture = fixture.capture(request)
+            return replace(capture, screenshot=capture.screenshot + b"tampered")
+
+    with (
+        patch.object(harness_module, "probe_host_identity", return_value=dict(HOST)),
+        patch.object(harness_module, "_execute_required_suite", return_value=None),
+        pytest.raises(AcceptanceError, match="trusted observer capture"),
+    ):
+        harness_module._validate_evidence_report(
+            path,
+            validate_live_target("http://127.0.0.1:8765", "sandbox-home"),
+            RepositoryCapabilities((), (), (), (), ()),
+            CANDIDATE_SHA,
+            trusted_browser_observer=MismatchingObserver(),
+        )
 
 
 def test_missing_evidence_artifact_is_rejected(
@@ -748,11 +877,12 @@ def test_report_host_identity_must_match_active_loopback_probe(
         patch.object(harness_module, "_execute_required_suite", return_value=None),
         pytest.raises(AcceptanceError, match="active loopback host"),
     ):
-        validate_evidence_report(
+        harness_module._validate_evidence_report(
             path,
             validate_live_target("http://127.0.0.1:8765", "sandbox-home"),
             RepositoryCapabilities((), (), (), (), ()),
             CANDIDATE_SHA,
+            trusted_browser_observer=_FixtureTrustedBrowserObserver(tmp_path),
         )
 
 
@@ -777,11 +907,12 @@ def test_marker_only_suite_receipts_do_not_replace_independent_execution(
             match="independent suite execution failed: repository-python",
         ),
     ):
-        validate_evidence_report(
+        harness_module._validate_evidence_report(
             path,
             validate_live_target("http://127.0.0.1:8765", "sandbox-home"),
             RepositoryCapabilities((), (), (), (), ()),
             CANDIDATE_SHA,
+            trusted_browser_observer=_FixtureTrustedBrowserObserver(tmp_path),
         )
 
 

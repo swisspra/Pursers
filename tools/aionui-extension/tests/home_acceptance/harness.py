@@ -11,7 +11,7 @@ import zlib
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 from urllib.parse import urljoin, urlsplit
 from urllib.error import HTTPError, URLError
 from urllib.request import ProxyHandler, build_opener
@@ -316,6 +316,46 @@ class LiveTarget:
     board_id: str | None = None
 
 
+@dataclass(frozen=True)
+class BrowserObservationRequest:
+    observation_id: str
+    target: LiveTarget
+    host_version: str
+    host_build: str
+    candidate_commit: str
+    captured_at: str
+    page_url: str
+    assertions: tuple[dict[str, Any], ...]
+
+
+@dataclass(frozen=True)
+class TrustedBrowserCapture:
+    observer_id: str
+    observation_id: str
+    target: LiveTarget
+    host_product: str
+    host_version: str
+    host_build: str
+    candidate_commit: str
+    captured_at: str
+    page_url: str
+    screenshot: bytes
+    snapshot: Any
+
+
+@dataclass(frozen=True)
+class _BrowserEvidence:
+    request: BrowserObservationRequest
+    screenshot: bytes
+    snapshot: Any
+    references: tuple[str, str]
+
+
+class _TrustedBrowserObserver(Protocol):
+    def capture(self, request: BrowserObservationRequest) -> TrustedBrowserCapture:
+        """Capture the observation through a verifier-owned browser channel."""
+
+
 def _semantic_capabilities(routes: tuple[str, ...]) -> set[str]:
     lowered = {route.lower() for route in routes}
     capabilities = {"read_only_discovery"}
@@ -460,6 +500,23 @@ def validate_evidence_report(
     capabilities: RepositoryCapabilities,
     candidate_commit: str,
 ) -> dict[str, Any]:
+    return _validate_evidence_report(
+        report_path,
+        target,
+        capabilities,
+        candidate_commit,
+        trusted_browser_observer=None,
+    )
+
+
+def _validate_evidence_report(
+    report_path: Path,
+    target: LiveTarget,
+    capabilities: RepositoryCapabilities,
+    candidate_commit: str,
+    *,
+    trusted_browser_observer: _TrustedBrowserObserver | None,
+) -> dict[str, Any]:
     require_mutation_opt_in(os.environ.get("PURSERS_HOME_ACCEPTANCE_MUTATE"))
     if target.board_id is None:
         raise AcceptanceError("sandbox board is required for mutation evidence")
@@ -583,9 +640,9 @@ def validate_evidence_report(
         host_build,
         candidate_commit,
     )
-    browser_attachment_references: list[str] = []
+    browser_evidence: list[_BrowserEvidence] = []
     for identifier, reference in {**passed_steps, **passed_inventory}.items():
-        browser_attachment_references.extend(_validate_browser_receipt(
+        browser_evidence.append(_validate_browser_receipt(
             evidence_root,
             reference,
             identifier,
@@ -594,6 +651,11 @@ def validate_evidence_report(
             host_build,
             candidate_commit,
         ))
+    browser_attachment_references = [
+        reference
+        for evidence in browser_evidence
+        for reference in evidence.references
+    ]
     if len(browser_attachment_references) != len(set(browser_attachment_references)):
         raise AcceptanceError(
             "each browser observation needs distinct screenshot and snapshot artifacts"
@@ -623,6 +685,9 @@ def validate_evidence_report(
             *suite_output_references,
         ],
         excluded=resolved_report,
+    )
+    _validate_trusted_browser_observations(
+        browser_evidence, trusted_browser_observer
     )
     for suite in suite_rows:
         _execute_required_suite(suite["name"], suite["command"], candidate_commit)
@@ -747,7 +812,7 @@ def _validate_browser_receipt(
     version: str,
     build: str,
     candidate_commit: str,
-) -> list[str]:
+) -> _BrowserEvidence:
     receipt = _load_receipt(evidence_root, reference, "browser observation receipt")
     expected_keys = {
         "schema_version", "evidence_kind", "observation_id", "target", "host",
@@ -825,17 +890,81 @@ def _validate_browser_receipt(
             or len(json.dumps(assertion["expected"])) > 1_000
         ):
             raise AcceptanceError("browser observation assertion is not verifiable")
-        actual = _resolve_snapshot_path(snapshot["snapshot"], assertion["path"])
+    _evaluate_browser_assertions(snapshot["snapshot"], assertions)
+    return _BrowserEvidence(
+        request=BrowserObservationRequest(
+            observation_id=identifier,
+            target=target,
+            host_version=version,
+            host_build=build,
+            candidate_commit=candidate_commit,
+            captured_at=receipt["captured_at"],
+            page_url=receipt["page_url"],
+            assertions=tuple(assertions),
+        ),
+        screenshot=screenshot,
+        snapshot=snapshot["snapshot"],
+        references=(
+            receipt["screenshot"]["path"],
+            receipt["accessibility_snapshot"]["path"],
+        ),
+    )
+
+
+def _validate_trusted_browser_observations(
+    evidence_rows: list[_BrowserEvidence],
+    observer: _TrustedBrowserObserver | None,
+) -> None:
+    if observer is None:
+        raise AcceptanceCapabilityUnavailable(
+            "trusted browser observer is unavailable; report artifacts cannot establish GUI acceptance"
+        )
+    observer_ids: set[str] = set()
+    for evidence in evidence_rows:
+        request = evidence.request
+        capture = observer.capture(request)
+        if not isinstance(capture, TrustedBrowserCapture):
+            raise AcceptanceError("trusted browser observer returned an invalid capture")
+        observer_ids.add(_require_exact_text(capture.observer_id, "browser observer id"))
+        if (
+            capture.observation_id != request.observation_id
+            or capture.target != request.target
+            or capture.host_product != "AionUi"
+            or capture.host_version != request.host_version
+            or capture.host_build != request.host_build
+            or capture.candidate_commit != request.candidate_commit
+            or capture.captured_at != request.captured_at
+            or capture.page_url != request.page_url
+        ):
+            raise AcceptanceError(
+                "trusted browser capture does not bind the report observation"
+            )
+        if capture.screenshot != evidence.screenshot:
+            raise AcceptanceError(
+                "browser screenshot does not match the trusted observer capture"
+            )
+        if capture.snapshot != evidence.snapshot:
+            raise AcceptanceError(
+                "accessibility snapshot does not match the trusted observer capture"
+            )
+        _evaluate_browser_assertions(capture.snapshot, list(request.assertions))
+    if len(observer_ids) != 1:
+        raise AcceptanceError(
+            "all browser observations must come from one trusted observer session"
+        )
+
+
+def _evaluate_browser_assertions(
+    snapshot: Any, assertions: list[dict[str, Any]]
+) -> None:
+    for assertion in assertions:
+        actual = _resolve_snapshot_path(snapshot, assertion["path"])
         if assertion["operator"] == "equals":
             passed = actual == assertion["expected"]
         else:
             passed = isinstance(actual, (str, list)) and assertion["expected"] in actual
         if not passed:
             raise AcceptanceError("browser observation assertion failed against snapshot")
-    return [
-        receipt["screenshot"]["path"],
-        receipt["accessibility_snapshot"]["path"],
-    ]
 
 
 def _validate_suite_receipt(
