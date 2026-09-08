@@ -3,7 +3,7 @@
   "name": "pursers",
   "displayName": "Pursers",
   "version": "0.1.0",
-  "description": "Worker and reviewer presets with a local door join screen.",
+  "description": "Guided Pursers project setup, Team controls, recovery, and worker/reviewer presets.",
   "author": "Pursers",
   "engine": {
     "aionui": "^2.2.1"
@@ -120,13 +120,48 @@
           "entryPoint": "webui/routes.js",
           "description": "Recover MCP registration from redacted stored state.",
           "auth": true
+        },
+        {
+          "path": "/pursers/team/status",
+          "method": "GET",
+          "entryPoint": "webui/routes.js",
+          "description": "Read the current AionUi Team roster and task summary.",
+          "auth": true
+        },
+        {
+          "path": "/pursers/team/plan",
+          "method": "POST",
+          "entryPoint": "webui/routes.js",
+          "description": "Preview an idempotent Team seat plan without mutation.",
+          "auth": true
+        },
+        {
+          "path": "/pursers/team/apply",
+          "method": "POST",
+          "entryPoint": "webui/routes.js",
+          "description": "Apply an explicitly confirmed Team seat plan.",
+          "auth": true
+        },
+        {
+          "path": "/pursers/team/seat/pause",
+          "method": "POST",
+          "entryPoint": "webui/routes.js",
+          "description": "Interrupt one active teammate turn with a checkpoint request.",
+          "auth": true
+        },
+        {
+          "path": "/pursers/team/seat/stop",
+          "method": "POST",
+          "entryPoint": "webui/routes.js",
+          "description": "Request cooperative shutdown of one teammate.",
+          "auth": true
         }
       ],
       "staticAssets": [
         {
           "urlPrefix": "/pursers/assets",
           "directory": "webui",
-          "description": "Pursers Join tab assets."
+          "description": "Pursers Home setup, Team, recovery, and progress assets."
         }
       ]
     }

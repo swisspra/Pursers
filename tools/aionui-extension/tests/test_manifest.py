@@ -60,3 +60,20 @@ def test_onboarding_routes_are_authenticated() -> None:
         ("/pursers/onboarding/validate", "POST"),
     }
     assert all(route["auth"] is True for route in onboarding.values())
+
+
+def test_team_routes_are_authenticated_and_bounded() -> None:
+    routes = load("aion-extension.json")["contributes"]["webui"]["apiRoutes"]
+    team = {
+        (route["path"], route["method"]): route
+        for route in routes
+        if route["path"].startswith("/pursers/team/")
+    }
+    assert set(team) == {
+        ("/pursers/team/status", "GET"),
+        ("/pursers/team/plan", "POST"),
+        ("/pursers/team/apply", "POST"),
+        ("/pursers/team/seat/pause", "POST"),
+        ("/pursers/team/seat/stop", "POST"),
+    }
+    assert all(route["auth"] is True for route in team.values())
