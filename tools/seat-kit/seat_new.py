@@ -61,6 +61,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import inspect
 import json
 import os
@@ -292,7 +293,23 @@ def _operator_marker_patterns() -> tuple[list[re.Pattern[str]], Path]:
 
 
 def _leak_scan(text: str) -> tuple[list[str], int]:
-    rules = [name for name, pattern in LEAK_PATTERNS.items() if pattern.search(text)]
+    rules = [
+        name
+        for name, pattern in LEAK_PATTERNS.items()
+        if name != "jwt" and pattern.search(text)
+    ]
+    for match in LEAK_PATTERNS["jwt"].finditer(text):
+        encoded_header = match.group(0).split(".", 1)[0]
+        try:
+            padding = "=" * (-len(encoded_header) % 4)
+            header = json.loads(
+                base64.urlsafe_b64decode(encoded_header + padding).decode("utf-8")
+            )
+        except (UnicodeDecodeError, ValueError, json.JSONDecodeError):
+            continue
+        if isinstance(header, dict) and isinstance(header.get("alg"), str):
+            rules.append("jwt")
+            break
     operator_patterns, _marker_path = _operator_marker_patterns()
     if any(pattern.search(text) for pattern in operator_patterns):
         rules.append("operator-marker")
@@ -370,7 +387,9 @@ def _git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProc
     )
 
 
-def _suite_commands(ticket: dict[str, Any], submission: dict[str, Any]) -> list[list[str]]:
+def _suite_commands(
+    ticket: dict[str, Any], submission: dict[str, Any], repo: Path
+) -> list[dict[str, Any]]:
     def hint_text(value: Any) -> str:
         if isinstance(value, dict):
             return "\n".join(hint_text(item) for item in value.values())
@@ -387,27 +406,142 @@ def _suite_commands(ticket: dict[str, Any], submission: dict[str, Any]) -> list[
             submission.get("test_hints"), submission.get("test_output"),
         )
     )
-    commands: list[list[str]] = []
+    commands: list[dict[str, Any]] = []
+    seen: set[tuple[str, tuple[str, ...]]] = set()
+    repo_root = repo.resolve()
     for raw in text.splitlines():
         line = raw.strip().removeprefix("-").strip().strip("`")
-        line = re.sub(
-            r"^(?:tests?|test[_ -]?commands?|suites?):\s*", "", line,
+        label = re.match(
+            r"^(?:tests?|test[_ -]?commands?|suites?):\s*", line,
             flags=re.IGNORECASE,
         )
-        if not line or any(token in line for token in (";", "&&", "||", "|", ">", "<")):
+        if label:
+            line = line[label.end():]
+        candidate = bool(label) or bool(
+            re.match(
+                r"^(?:PYTHONPATH=\S+\s+)?"
+                r"(?:pytest|py\.test|python3?\s+-m\s+(?:pytest|unittest))(?:\s|$)",
+                line,
+            )
+        )
+        if not line or not candidate:
             continue
+        if any(
+            token in line
+            for token in ("$", "`", ";", "&&", "||", "|", ">", "<", "&")
+        ):
+            raise ValueError(
+                "unsupported verification suite command: shell substitutions, separators, "
+                "and redirects are not allowed"
+            )
         try:
             parts = shlex.split(line)
-        except ValueError:
-            continue
+        except ValueError as exc:
+            raise ValueError(
+                "unsupported verification suite command: invalid quoting"
+            ) from exc
+        pythonpath = ""
+        if parts and "=" in parts[0]:
+            name, value = parts.pop(0).split("=", 1)
+            if name != "PYTHONPATH":
+                raise ValueError(
+                    "unsupported verification suite command: only PYTHONPATH may be assigned"
+                )
+            entries = value.split(os.pathsep)
+            if not value or any(not entry for entry in entries):
+                raise ValueError(
+                    "unsupported verification suite command: PYTHONPATH entries must be non-empty"
+                )
+            for entry in entries:
+                path = Path(entry)
+                resolved = (repo_root / path).resolve()
+                if path.is_absolute() or not resolved.is_relative_to(repo_root):
+                    raise ValueError(
+                        "unsupported verification suite command: PYTHONPATH must stay "
+                        "inside the worktree"
+                    )
+            pythonpath = value
+        if any(re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", part) for part in parts):
+            raise ValueError(
+                "unsupported verification suite command: arbitrary environment "
+                "assignments are not allowed"
+            )
         allowed = (
             parts[:1] in (["pytest"], ["py.test"])
             or len(parts) >= 3
             and parts[0] in {"python", "python3"}
             and parts[1:3] in (["-m", "pytest"], ["-m", "unittest"])
         )
-        if allowed and parts not in commands:
-            commands.append(parts)
+        if not allowed:
+            raise ValueError(
+                "unsupported verification suite command: expected pytest, py.test, "
+                "or python -m pytest/unittest"
+            )
+        is_pytest = parts[0] in {"pytest", "py.test"} or parts[2] == "pytest"
+        if is_pytest:
+            if any(argument.startswith("@") for argument in parts[1:]):
+                raise ValueError(
+                    "unsupported verification suite command: pytest argument files "
+                    "are not allowed"
+                )
+            escape_options = {
+                "--pyargs", "-p", "-c", "--rootdir", "--confcutdir",
+                "-o", "--override-ini",
+            }
+            for argument in parts[1:]:
+                option = argument.split("=", 1)[0]
+                if option in escape_options or (
+                    any(
+                        argument.startswith(prefix) and argument != prefix
+                        for prefix in ("-p", "-c", "-o")
+                    )
+                ):
+                    raise ValueError(
+                        "unsupported verification suite command: pytest module, plugin, "
+                        "and config escape options are not allowed"
+                    )
+        else:
+            if parts[3:4] != ["discover"]:
+                raise ValueError(
+                    "unsupported verification suite command: unittest replay requires "
+                    "discover with worktree-contained paths"
+                )
+            if any(
+                argument.startswith(prefix) and argument != prefix
+                for argument in parts[4:]
+                for prefix in ("-s", "-t")
+            ):
+                raise ValueError(
+                    "unsupported verification suite command: unittest discovery paths "
+                    "must use separate worktree-contained arguments"
+                )
+        for argument in parts[1:]:
+            path_value = argument.split("=", 1)[-1].split("::", 1)[0]
+            if not path_value or path_value.startswith("-"):
+                continue
+            path = Path(path_value)
+            if (
+                path.is_absolute()
+                or re.match(r"^[A-Za-z]:[\\/]", path_value)
+                or ".." in path.parts
+            ):
+                raise ValueError(
+                    "unsupported verification suite command: suite paths must stay "
+                    "inside the worktree"
+                )
+            resolved = (repo_root / path).resolve()
+            if (repo_root / path).exists() and not resolved.is_relative_to(repo_root):
+                raise ValueError(
+                    "unsupported verification suite command: suite paths must stay "
+                    "inside the worktree"
+                )
+        key = (pythonpath, tuple(parts))
+        if key not in seen:
+            seen.add(key)
+            display = ([f"PYTHONPATH={pythonpath}"] if pythonpath else []) + parts
+            commands.append({
+                "argv": parts, "pythonpath": pythonpath, "display": display,
+            })
     return commands[:8]
 
 
@@ -457,21 +591,30 @@ def _verify_ticket(
     print(leak_line)
     suites: list[dict[str, Any]] = []
     if run_suites:
-        commands = _suite_commands(ticket, submission)
+        commands = _suite_commands(ticket, submission, repo)
         if not commands:
             raise ValueError("no allow-listed pytest/unittest command found in ticket evidence")
         for command in commands:
+            environment = os.environ.copy()
+            if command["pythonpath"]:
+                environment["PYTHONPATH"] = command["pythonpath"]
             completed = subprocess.run(
-                command, cwd=repo, check=False, text=True, capture_output=True
+                command["argv"], cwd=repo, env=environment,
+                check=False, text=True, capture_output=True
             )
             lines = (completed.stdout + completed.stderr).splitlines()
             tail = lines[-8:]
-            print("suite: " + shlex.join(command))
+            display = shlex.join(command["display"])
+            print("suite: " + display)
             for line in tail:
                 print(line)
-            suites.append({"command": command, "returncode": completed.returncode, "tail": tail})
+            suites.append({
+                "command": command["display"],
+                "returncode": completed.returncode,
+                "tail": tail,
+            })
             if completed.returncode != 0:
-                raise ValueError("verification suite failed: " + shlex.join(command))
+                raise ValueError("verification suite failed: " + display)
     failures = []
     if only_actual or only_submitted:
         failures.append("files_changed mismatch")
