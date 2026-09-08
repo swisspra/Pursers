@@ -1,0 +1,22 @@
+{
+  "name": "pursers-dashboard-ui",
+  "version": "1.0.0",
+  "description": "Pursers personal dashboard MCP App UI. Build output is copied into packages/personal/src/pursers_personal/resources/dashboard.html and hash-locked by the component lock.",
+  "scripts": {
+    "build": "vite build && cp dist/dashboard-entry.html dashboard.html",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [],
+  "author": "",
+  "private": true,
+  "license": "UNLICENSED",
+  "type": "module",
+  "dependencies": {
+    "@modelcontextprotocol/ext-apps": "^1.7.5"
+  },
+  "devDependencies": {
+    "typescript": "^7.0.2",
+    "vite": "^8.2.1",
+    "vite-plugin-singlefile": "^2.3.3"
+  }
+}

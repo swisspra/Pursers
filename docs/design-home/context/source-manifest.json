@@ -1,0 +1,250 @@
+{
+  "schemaVersion": 1,
+  "baselineSha": "c2ebac5de803a0f7a00468ec4d3cdf06e4719096",
+  "sourceInventory": [
+    "tools/dashboard-ui/src/dashboard.ts",
+    "tools/dashboard-ui/src/dashboard.css",
+    "tools/dashboard-ui/dashboard-entry.html",
+    "tools/dashboard-ui/vite.config.ts",
+    "tools/dashboard-ui/package.json",
+    "tools/dashboard-ui/tsconfig.json",
+    "tools/fleet-dashboard/fleet_dashboard.py",
+    "tools/aionui-extension/aion-extension.json",
+    "tools/aionui-extension/webui/index.html",
+    "tools/aionui-extension/webui/app.js",
+    "tools/aionui-extension/webui/routes.js",
+    "tools/aionui-extension/webui/style.css",
+    "packages/personal/src/pursers_personal/apps_server.py"
+  ],
+  "literalSources": [
+    {
+      "sourcePath": "tools/dashboard-ui/dashboard-entry.html",
+      "artifactPath": "docs/design-home/context/raw/tools/dashboard-ui/dashboard-entry.html"
+    },
+    {
+      "sourcePath": "tools/dashboard-ui/src/dashboard.css",
+      "artifactPath": "docs/design-home/context/raw/tools/dashboard-ui/src/dashboard.css"
+    },
+    {
+      "sourcePath": "tools/dashboard-ui/vite.config.ts",
+      "artifactPath": "docs/design-home/context/raw/tools/dashboard-ui/vite.config.ts"
+    },
+    {
+      "sourcePath": "tools/dashboard-ui/package.json",
+      "artifactPath": "docs/design-home/context/raw/tools/dashboard-ui/package.json"
+    },
+    {
+      "sourcePath": "tools/dashboard-ui/tsconfig.json",
+      "artifactPath": "docs/design-home/context/raw/tools/dashboard-ui/tsconfig.json"
+    },
+    {
+      "sourcePath": "tools/aionui-extension/aion-extension.json",
+      "artifactPath": "docs/design-home/context/raw/tools/aionui-extension/aion-extension.json"
+    },
+    {
+      "sourcePath": "tools/aionui-extension/webui/index.html",
+      "artifactPath": "docs/design-home/context/raw/tools/aionui-extension/webui/index.html"
+    },
+    {
+      "sourcePath": "tools/aionui-extension/webui/app.js",
+      "artifactPath": "docs/design-home/context/raw/tools/aionui-extension/webui/app.js"
+    },
+    {
+      "sourcePath": "tools/aionui-extension/webui/routes.js",
+      "artifactPath": "docs/design-home/context/raw/tools/aionui-extension/webui/routes.js"
+    },
+    {
+      "sourcePath": "tools/aionui-extension/webui/style.css",
+      "artifactPath": "docs/design-home/context/raw/tools/aionui-extension/webui/style.css"
+    }
+  ],
+  "excerpts": [
+    {
+      "sourcePath": "tools/dashboard-ui/src/dashboard.ts",
+      "artifactPath": "docs/design-home/context/excerpts/dashboard-ts.txt",
+      "ranges": [
+        [
+          537,
+          636
+        ],
+        [
+          648,
+          1214
+        ],
+        [
+          1231,
+          1400
+        ]
+      ]
+    },
+    {
+      "sourcePath": "tools/fleet-dashboard/fleet_dashboard.py",
+      "artifactPath": "docs/design-home/context/excerpts/fleet-dashboard-py.txt",
+      "ranges": [
+        [
+          5828,
+          6427
+        ]
+      ]
+    },
+    {
+      "sourcePath": "packages/personal/src/pursers_personal/apps_server.py",
+      "artifactPath": "docs/design-home/context/excerpts/personal-apps-server-py.txt",
+      "ranges": [
+        [
+          1949,
+          2401
+        ]
+      ]
+    }
+  ],
+  "acceptanceInventoryIds": [
+    "dashboard-ui.logic",
+    "dashboard-ui.styles",
+    "dashboard-ui.shell",
+    "fleet-dashboard.surface",
+    "extension-join.surface",
+    "personal-mcp.surface",
+    "dashboard-ui.state.empty-tickets",
+    "dashboard-ui.state.loading",
+    "dashboard-ui.state.error",
+    "dashboard-ui.state.permission-denied",
+    "dashboard-ui.state.stale",
+    "dashboard-ui.state.search-empty",
+    "fleet-dashboard.state.empty-centrals",
+    "fleet-dashboard.state.loading-board",
+    "fleet-dashboard.state.error-board",
+    "fleet-dashboard.state.offline",
+    "fleet-dashboard.state.bounded",
+    "fleet-dashboard.state.truncated-tickets",
+    "fleet-dashboard.state.edit-paused",
+    "fleet-dashboard.state.empty-workers",
+    "fleet-dashboard.state.empty-agents",
+    "fleet-dashboard.state.routes-unavailable",
+    "extension-join.state.initial",
+    "extension-join.state.joining",
+    "extension-join.state.joined",
+    "extension-join.state.error",
+    "extension-join.state.bridge-missing",
+    "extension-join.state.status-loaded",
+    "extension-join.state.status-empty",
+    "personal-mcp.state.board-empty",
+    "personal-mcp.state.not-onboarded",
+    "personal-mcp.state.ticket-not-found",
+    "personal-mcp.state.memory-empty",
+    "personal-mcp.state.fleet-unavailable",
+    "personal-mcp.state.links-empty"
+  ],
+  "artifactManifest": [
+    {
+      "path": "docs/design-home/check_artifacts.py",
+      "lines": 553,
+      "bytes": 20877
+    },
+    {
+      "path": "docs/design-home/context/components.md",
+      "lines": 223,
+      "bytes": 7548
+    },
+    {
+      "path": "docs/design-home/context/layouts.md",
+      "lines": 152,
+      "bytes": 5729
+    },
+    {
+      "path": "docs/design-home/context/routes.md",
+      "lines": 289,
+      "bytes": 12627
+    },
+    {
+      "path": "docs/design-home/context/theme.md",
+      "lines": 200,
+      "bytes": 7619
+    },
+    {
+      "path": "docs/design-home/context/pages.md",
+      "lines": 158,
+      "bytes": 6473
+    },
+    {
+      "path": "docs/design-home/context/extractable-components.md",
+      "lines": 177,
+      "bytes": 8937
+    },
+    {
+      "path": "docs/design-home/inventory.md",
+      "lines": 159,
+      "bytes": 10073
+    },
+    {
+      "path": "docs/design-home/context/raw/tools/dashboard-ui/dashboard-entry.html",
+      "lines": 145,
+      "bytes": 10312
+    },
+    {
+      "path": "docs/design-home/context/raw/tools/dashboard-ui/src/dashboard.css",
+      "lines": 619,
+      "bytes": 21965
+    },
+    {
+      "path": "docs/design-home/context/raw/tools/dashboard-ui/vite.config.ts",
+      "lines": 11,
+      "bytes": 273
+    },
+    {
+      "path": "docs/design-home/context/raw/tools/dashboard-ui/package.json",
+      "lines": 22,
+      "bytes": 664
+    },
+    {
+      "path": "docs/design-home/context/raw/tools/dashboard-ui/tsconfig.json",
+      "lines": 13,
+      "bytes": 303
+    },
+    {
+      "path": "docs/design-home/context/raw/tools/aionui-extension/aion-extension.json",
+      "lines": 99,
+      "bytes": 2702
+    },
+    {
+      "path": "docs/design-home/context/raw/tools/aionui-extension/webui/index.html",
+      "lines": 33,
+      "bytes": 1211
+    },
+    {
+      "path": "docs/design-home/context/raw/tools/aionui-extension/webui/app.js",
+      "lines": 60,
+      "bytes": 1802
+    },
+    {
+      "path": "docs/design-home/context/raw/tools/aionui-extension/webui/routes.js",
+      "lines": 201,
+      "bytes": 5908
+    },
+    {
+      "path": "docs/design-home/context/raw/tools/aionui-extension/webui/style.css",
+      "lines": 66,
+      "bytes": 861
+    },
+    {
+      "path": "docs/design-home/context/excerpts/dashboard-ts.txt",
+      "lines": 846,
+      "bytes": 36520
+    },
+    {
+      "path": "docs/design-home/context/excerpts/fleet-dashboard-py.txt",
+      "lines": 605,
+      "bytes": 168201
+    },
+    {
+      "path": "docs/design-home/context/excerpts/personal-apps-server-py.txt",
+      "lines": 458,
+      "bytes": 14208
+    }
+  ],
+  "artifactTotal": {
+    "lines": 5089,
+    "bytes": 344813,
+    "excludedPath": "docs/design-home/context/source-manifest.json"
+  }
+}

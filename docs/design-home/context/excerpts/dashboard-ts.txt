@@ -1,0 +1,846 @@
+SOURCE tools/dashboard-ui/src/dashboard.ts
+BASELINE c2ebac5de803a0f7a00468ec4d3cdf06e4719096
+RANGES 537-636,648-1214,1231-1400
+
+===== tools/dashboard-ui/src/dashboard.ts:537-636 =====
+function serializedWithinLimit(value: unknown): boolean {
+  try {
+    return JSON.stringify(value).length <= MAX_SERIALIZED_RESULT_LENGTH;
+  } catch {
+    return false;
+  }
+}
+
+function structured(result: { structuredContent?: unknown; content?: Array<{ type: string; text?: string }> }): unknown {
+  const raw = result.structuredContent;
+  if (raw !== undefined) {
+    if (!serializedWithinLimit(raw)) return null;
+    if (record(raw) && "result" in raw) return raw.result;
+    return raw;
+  }
+  const body = result.content?.find((item) => item.type === "text")?.text;
+  if (!body || body.length > MAX_SERIALIZED_RESULT_LENGTH) return null;
+  try {
+    const decoded: unknown = JSON.parse(body);
+    return record(decoded) && "result" in decoded ? decoded.result : decoded;
+  } catch {
+    return null;
+  }
+}
+
+function element<K extends keyof HTMLElementTagNameMap>(tag: K, className?: string, content?: string): HTMLElementTagNameMap[K] {
+  const item = document.createElement(tag);
+  if (className) item.className = className;
+  if (content !== undefined) item.textContent = content;
+  return item;
+}
+
+function emptyState(title: string, detail: string): HTMLElement {
+  const item = element("div", "empty-state");
+  item.append(element("strong", undefined, title), element("p", undefined, detail));
+  return item;
+}
+
+function pill(label: string, tone?: string): HTMLElement {
+  const item = element("span", "pill", label);
+  if (tone) item.dataset.tone = tone;
+  return item;
+}
+
+function shortTicketId(value: string | null): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  const body = trimmed.startsWith("TK-") ? trimmed.slice(3) : trimmed;
+  return `TK-${body.slice(0, 8)}`;
+}
+
+function agentField(label: string, value: string | null): HTMLElement {
+  const item = pill(`${label} ${value ?? "\u2014"}`);
+  if (value === null) item.dataset.empty = "true";
+  return item;
+}
+
+function toneForStatus(status: string): string {
+  if (["submitted", "reviewing", "in_review", "closed"].includes(status)) return "submitted";
+  if (["claimed", "in_progress", "creating_report", "working"].includes(status)) return "working";
+  if (["rejected", "canceled", "terminated"].includes(status)) return "attention";
+  return "neutral";
+}
+
+function ticketCounts(data: Snapshot): { open: number; working: number; submitted: number; attention: number } {
+  const counts = data.status.ticket_status_counts;
+  const count = (statuses: string[]) => statuses.reduce((sum, status) => sum + (counts[status] ?? data.tickets.filter((ticket) => ticket.status === status).length), 0);
+  return {
+    open: count(["open", "assigned"]),
+    working: count(["claimed", "in_progress", "creating_report"]),
+    submitted: count(["submitted", "reviewing", "in_review"]),
+    attention: count(["rejected"]),
+  };
+}
+
+function formatTime(value: string | null): string {
+  if (!value) return "Time unavailable";
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed)) return "Time unavailable";
+  return new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(parsed);
+}
+
+function leaseText(value: string): string {
+  const seconds = Math.max(0, Math.floor((Date.parse(value) - Date.now()) / 1000));
+  if (!Number.isFinite(seconds) || seconds <= 0) return "lease overdue";
+  if (seconds >= 86_400) return `lease ${Math.ceil(seconds / 86_400)}d`;
+  if (seconds >= 3_600) return `lease ${Math.ceil(seconds / 3_600)}h`;
+  if (seconds >= 60) return `lease ${Math.ceil(seconds / 60)}m`;
+  return `lease ${seconds}s`;
+}
+
+function leaseBadge(value: string | null): HTMLElement | null {
+  if (!value) return null;
+  const item = pill(leaseText(value), "warning");
+  item.classList.add("lease-countdown");
+  item.dataset.leaseExpiresAt = value;
+  return item;
+}
+
+
+===== tools/dashboard-ui/src/dashboard.ts:648-1214 =====
+function renderConnection(data: Snapshot): void {
+  const banner = byId<HTMLElement>("connection-banner");
+  const title = byId<HTMLElement>("connection-title");
+  const detail = byId<HTMLElement>("connection-detail");
+  let tone: string;
+  let titleText: string;
+  let detailText: string;
+  if (data.data_mode === "demo-error") {
+    tone = "error";
+    titleText = "Synthetic connection-error simulation";
+    detailText = "No project state is shown. This fixture previews the read-only outage treatment.";
+  } else if (data.data_mode === "demo") {
+    tone = "demo";
+    titleText = "Demo data — Central unavailable";
+    detailText = "Everything below is synthetic and exists only to preview the local, read-only interface.";
+  } else if (data.data_mode === "stale" || data.stale) {
+    tone = data.feed_error ? "error" : "stale";
+    titleText = "Showing the last known local state";
+    detailText = data.feed_error ? "The local connection is unavailable. Retrying with bounded backoff." : "The activity feed is resynchronizing.";
+  } else {
+    tone = "live";
+    titleText = "Connected to the local board";
+    detailText = "Authorized Central projection; credentials remain outside the View.";
+  }
+  if (banner.dataset.tone !== tone) banner.dataset.tone = tone;
+  setTextIfChanged(title, titleText);
+  setTextIfChanged(detail, detailText);
+}
+
+function renderActivityScope(data: Snapshot): void {
+  const synthetic = data.activity_scope === "synthetic-demo";
+  setTextIfChanged(
+    byId("recent-activity-scope"),
+    synthetic ? "Synthetic preview activity" : "Observed by this MCP process",
+  );
+  setTextIfChanged(
+    byId("activity-scope-copy"),
+    synthetic
+      ? "Synthetic preview events are authored fixtures; they do not represent local MCP-process activity or a complete audit log."
+      : "Activity observed by this local MCP process; it is bounded and not a complete audit log.",
+  );
+}
+
+function activityEmptyDetail(data: Snapshot): string {
+  return data.activity_scope === "synthetic-demo"
+    ? "Synthetic preview events appear here only to demonstrate the interface."
+    : "Events appear after model tools run in this local MCP process.";
+}
+
+function renderHealth(data: Snapshot): void {
+  const card = byId<HTMLElement>("health-title").closest<HTMLElement>(".health-card")!;
+  const title = byId<HTMLElement>("health-title");
+  const detail = byId<HTMLElement>("health-detail");
+  const counts = ticketCounts(data);
+  if (data.data_mode === "demo-error") {
+    card.dataset.tone = "stale";
+    title.textContent = "Simulated connection interruption";
+    detail.textContent = "Synthetic UI state only; this is not a real Central outage.";
+  } else if (data.data_mode === "demo") {
+    card.dataset.tone = "demo";
+    title.textContent = "Demo data";
+    detail.textContent = "Connect the local Central service to see project health.";
+  } else if (data.stale || data.feed_error) {
+    card.dataset.tone = "stale";
+    title.textContent = "Connection interrupted";
+    detail.textContent = "Last-known information remains visible while the dashboard retries.";
+  } else if (counts.attention > 0) {
+    card.dataset.tone = "error";
+    title.textContent = "Needs attention";
+    detail.textContent = `${counts.attention} rejected item${counts.attention === 1 ? "" : "s"} need another pass.`;
+  } else if (counts.submitted > 0) {
+    card.dataset.tone = "live";
+    title.textContent = "Ready for review";
+    detail.textContent = `${counts.submitted} submission${counts.submitted === 1 ? " is" : "s are"} waiting for review.`;
+  } else if (counts.working > 0) {
+    card.dataset.tone = "live";
+    title.textContent = "Work in progress";
+    detail.textContent = `${counts.working} item${counts.working === 1 ? " is" : "s are"} currently being worked.`;
+  } else if (counts.open > 0) {
+    card.dataset.tone = "live";
+    title.textContent = "Work is ready";
+    detail.textContent = `${counts.open} open item${counts.open === 1 ? " is" : "s are"} ready to be claimed.`;
+  } else {
+    card.dataset.tone = "live";
+    title.textContent = "Board is clear";
+    detail.textContent = "No claimed or submitted work needs attention right now.";
+  }
+}
+
+function ticketRow(ticket: Ticket): HTMLElement {
+  const row = element("article", "list-row");
+  const copy = element("div");
+  copy.append(element("h3", undefined, ticket.title), element("p", "muted", ticket.id));
+  const meta = element("div", "meta-row");
+  meta.append(pill(ticket.status, toneForStatus(ticket.status)), pill(ticket.priority));
+  const lease = leaseBadge(ticket.lease_expires_at);
+  if (lease) meta.append(lease);
+  copy.append(meta);
+  row.append(copy);
+  return row;
+}
+
+function renderToday(data: Snapshot): void {
+  const counts = ticketCounts(data);
+  byId("metric-open").textContent = String(counts.open);
+  byId("metric-working").textContent = String(counts.working);
+  byId("metric-submitted").textContent = String(counts.submitted);
+  byId("metric-agents").textContent = String(data.agents_live);
+  renderHealth(data);
+
+  const work = data.tickets.filter((ticket) => !["closed", "canceled", "terminated"].includes(ticket.status)).slice(0, 4);
+  byId("today-work").replaceChildren(...(work.length ? work.map(ticketRow) : [emptyState("No current work", "Open or claimed tickets will appear here.")]));
+
+  const agents = data.agents.filter((agent) => !agent.stale).slice(0, 4).map((agent) => {
+    const row = element("div", "list-row");
+    const copy = element("div");
+    copy.append(element("h3", undefined, agent.name), element("p", "muted", agent.focus ?? `${Math.round(agent.idle_minutes)}m idle`));
+    row.append(copy, pill(agent.status, toneForStatus(agent.status)));
+    return row;
+  });
+  byId("today-agents").replaceChildren(...(agents.length ? agents : [emptyState("No agents yet", "Agents appear after they join this local board.")]));
+
+  renderHighlight(byId("latest-handoff"), data.highlights.latest_handoff, "No handoff yet", "A project handoff will appear after an agent records one.");
+  renderHighlight(byId("important-pinned"), data.highlights.important_pinned, "No decision or warning in the loaded pinned digest", "The bounded pinned digest has no decision, blocker, or warning to show.");
+  renderTimeline(byId("recent-activity"), newestEvents(data.events).slice(0, 5), "No activity observed", activityEmptyDetail(data));
+}
+
+function renderHighlight(container: HTMLElement, value: Highlight | null, emptyTitle: string, emptyDetail: string): void {
+  if (!value) {
+    container.replaceChildren(emptyState(emptyTitle, emptyDetail));
+    return;
+  }
+  const item = element("article", "highlight");
+  item.append(element("span", "highlight-type", value.type), element("h3", undefined, value.title));
+  if (value.summary && value.summary !== value.title) item.append(element("p", "muted", value.summary));
+  const meta = element("div", "meta-row");
+  if (value.author) meta.append(pill(`by ${value.author}`));
+  if (value.created_at) meta.append(pill(formatTime(value.created_at)));
+  item.append(meta);
+  const details = [...value.next_steps, ...value.warnings.map((warning) => `Warning: ${warning}`)];
+  if (details.length) {
+    const items = element("ul");
+    details.forEach((detail) => items.append(element("li", undefined, detail)));
+    item.append(items);
+  }
+  container.replaceChildren(item);
+}
+
+const WORK_GROUPS: Array<{ title: string; statuses: string[] }> = [
+  { title: "Open", statuses: ["open", "assigned"] },
+  { title: "Working", statuses: ["claimed", "in_progress", "creating_report"] },
+  { title: "Submitted", statuses: ["submitted", "reviewing", "in_review"] },
+  { title: "Needs attention", statuses: ["rejected"] },
+  { title: "Done", statuses: ["closed"] },
+  { title: "Ended", statuses: ["canceled", "terminated"] },
+];
+
+function renderWork(data: Snapshot): void {
+  byId("work-total").textContent = `${data.ticket_total || data.tickets.length} total`;
+  const notice = byId("work-notice");
+  notice.replaceChildren();
+  if (data.ticket_truncated) {
+    const item = element("div", "notice");
+    item.dataset.tone = "warning";
+    item.append(element("p", undefined, "This view is showing the first 500 authorized tickets. Counts still reflect the full board."));
+    notice.append(item);
+  }
+  const known = new Set(WORK_GROUPS.flatMap((group) => group.statuses));
+  const groups = [...WORK_GROUPS, { title: "Other", statuses: [...new Set(data.tickets.filter((ticket) => !known.has(ticket.status)).map((ticket) => ticket.status))] }];
+  const rendered = groups.map((group) => {
+    const tickets = data.tickets.filter((ticket) => group.statuses.includes(ticket.status));
+    if (!tickets.length) return null;
+    const section = element("section", "work-group");
+    const heading = element("h3");
+    heading.append(document.createTextNode(group.title), pill(String(tickets.length)));
+    const items = element("div", "work-group-list");
+    tickets.forEach((ticket) => {
+      const card = element("article", "work-card");
+      const copy = element("div");
+      copy.append(element("p", "ticket-id", ticket.id), element("h3", undefined, ticket.title));
+      if (ticket.description) copy.append(element("p", "muted", ticket.description));
+      const meta = element("div", "meta-row");
+      meta.append(pill(ticket.priority), pill(ticket.status, toneForStatus(ticket.status)));
+      if (ticket.assigned_to) meta.append(pill(ticket.assigned_to));
+      const lease = leaseBadge(ticket.lease_expires_at);
+      if (lease) meta.append(lease);
+      if (ticket.abandoned_count) meta.append(pill(`abandoned ×${ticket.abandoned_count}`, "attention"));
+      copy.append(meta);
+      card.append(copy);
+      items.append(card);
+    });
+    section.append(heading, items);
+    return section;
+  }).filter((item): item is HTMLElement => item !== null);
+  byId("work-groups").replaceChildren(...(rendered.length ? rendered : [emptyState("No tickets yet", "Tickets created through agent chat will appear here.")]));
+}
+
+function renderAgents(data: Snapshot): void {
+  byId("agents-total").textContent = `${data.agents_live} live / ${data.agent_total} total`;
+  const notice = byId("agents-notice");
+  notice.replaceChildren();
+  if (data.agent_truncated) {
+    const item = element("div", "notice");
+    item.dataset.tone = "warning";
+    item.append(element("p", undefined, `This View is capped at ${data.agents.length} loaded agents; ${data.agent_total} are visible to the adapter.`));
+    notice.append(item);
+  }
+  const orderedAgents = [...data.agents].sort((left, right) => Number(left.stale) - Number(right.stale));
+  const cards = orderedAgents.map((agent) => {
+    const card = element("article", "agent-card");
+    card.dataset.stale = String(agent.stale);
+    const heading = element("div", "agent-heading");
+    const identity = element("div", "agent-heading");
+    identity.append(element("span", "agent-avatar", agent.name.slice(0, 2).toUpperCase()), element("h3", undefined, agent.name));
+    const states = element("div", "agent-state-badges");
+    states.append(pill(agent.status, toneForStatus(agent.status)));
+    if (agent.stale) states.append(pill("stale"));
+    if (agent.duplicate_name === true) {
+      const marker = pill("duplicate name", "warning");
+      marker.title = "duplicate display name";
+      states.append(marker);
+    }
+    heading.append(identity, states);
+    card.append(heading);
+    if (agent.focus) card.append(element("p", "muted", agent.focus));
+    const meta = element("div", "meta-row");
+    if (agent.role) meta.append(pill(agent.role));
+    if (agent.platform) meta.append(pill(agent.platform));
+    meta.append(agentField("project", agent.project ?? null));
+    meta.append(agentField("ticket", shortTicketId(agent.current_ticket_id ?? agent.current_ticket?.id ?? null)));
+    meta.append(pill(`${Math.round(agent.idle_minutes)}m idle`));
+    card.append(meta);
+    if (agent.duplicate) {
+      const warn = element("div", "notice");
+      warn.dataset.tone = "warning";
+      const msg = agent.suggested_name
+        ? `Duplicate name — join as “${agent.suggested_name}” instead.`
+        : "Duplicate active name — pick a unique agent name.";
+      warn.append(element("p", undefined, msg));
+      card.append(warn);
+    }
+    if (agent.current_ticket) {
+      card.append(element("p", "muted", `Working on ${agent.current_ticket.id}: ${agent.current_ticket.title}`));
+    } else {
+      const owned = data.tickets.filter((ticket) => ticket.claimed_agent_id === agent.id || ticket.assigned_agent_id === agent.id || ticket.assigned_to === agent.name).length;
+      card.append(element("p", "muted", `${owned} linked work item${owned === 1 ? "" : "s"}`));
+    }
+    return card;
+  });
+  byId("agents-grid").replaceChildren(...(cards.length ? cards : [emptyState("No agents yet", "Agents appear after they join this local board.")]));
+}
+
+function fleetValue(value: number | null): string {
+  return value === null ? "—" : String(value);
+}
+
+function tableHeading(label: string): HTMLTableCellElement {
+  const heading = element("th", undefined, label);
+  heading.scope = "col";
+  return heading;
+}
+
+function fleetTable(headers: string[]): { wrapper: HTMLElement; body: HTMLTableSectionElement } {
+  const wrapper = element("div", "fleet-table-wrap");
+  const table = element("table", "fleet-table");
+  const head = element("thead");
+  const row = element("tr");
+  row.append(...headers.map(tableHeading));
+  head.append(row);
+  const body = element("tbody");
+  table.append(head, body);
+  wrapper.append(table);
+  return { wrapper, body };
+}
+
+function renderFleet(data: FleetSnapshot | null): void {
+  const unavailable = fleetUnavailable || data === null;
+  const totals = unavailable ? null : data.totals;
+  byId("fleet-agents").textContent = fleetValue(totals?.agents ?? null);
+  byId("fleet-busy").textContent = fleetValue(totals?.busy ?? null);
+  byId("fleet-available").textContent = fleetValue(totals?.available ?? null);
+  byId("fleet-stale").textContent = fleetValue(totals?.stale ?? null);
+
+  const warning = byId<HTMLElement>("fleet-warning");
+  warning.replaceChildren();
+  const warningText = unavailable
+    ? "Fleet snapshot is unavailable on this server."
+    : data.registry_warning;
+  if (warningText) {
+    const notice = element("div", "notice");
+    notice.dataset.tone = "warning";
+    notice.append(element("p", undefined, warningText));
+    warning.append(notice);
+  }
+
+  const projects = unavailable ? [] : data.projects;
+  const projectContainer = byId<HTMLElement>("fleet-projects");
+  if (!projects.length) {
+    projectContainer.replaceChildren(emptyState(
+      unavailable ? "Fleet data unavailable" : "No registered projects",
+      unavailable ? "This server may not expose the fleet_snapshot tool yet." : "Active and paused registry projects will appear here.",
+    ));
+  } else {
+    const { wrapper, body } = fleetTable(["Name", "Board", "Status", "Open", "Claimed", "Submitted"]);
+    projects.forEach((project) => {
+      const row = element("tr");
+      row.append(
+        element("td", undefined, project.name ?? "—"),
+        element("td", "fleet-mono", project.board_id ?? "—"),
+        element("td", undefined, project.status ?? "—"),
+        element("td", "fleet-number", fleetValue(project.tickets_open)),
+        element("td", "fleet-number", fleetValue(project.tickets_claimed)),
+        element("td", "fleet-number", fleetValue(project.tickets_submitted)),
+      );
+      body.append(row);
+    });
+    projectContainer.replaceChildren(wrapper);
+  }
+
+  const pool = unavailable ? [] : data.pool;
+  const poolContainer = byId<HTMLElement>("fleet-pool");
+  if (!pool.length) {
+    poolContainer.replaceChildren(emptyState(
+      unavailable ? "Agent pool unavailable" : "No pool entries",
+      unavailable ? "Counts and seats remain as em dashes until the tool is available." : "Cross-project worker seats will appear here.",
+    ));
+  } else {
+    const { wrapper, body } = fleetTable(["Agent", "Pool status", "Seats"]);
+    pool.forEach((entry) => {
+      const row = element("tr");
+      row.dataset.stale = String(entry.pool_status === "stale");
+      const identity = element("td");
+      identity.append(
+        element("strong", undefined, entry.agent_name ?? "—"),
+        element("small", "fleet-principal", entry.principal_id ?? "—"),
+      );
+      const status = element("td");
+      status.append(pill(entry.pool_status ?? "—", entry.pool_status === "busy" ? "working" : entry.pool_status === "available" ? "submitted" : undefined));
+      const seats = element("td");
+      const seatList = element("div", "fleet-seats");
+      if (entry.seats.length) {
+        entry.seats.forEach((seat) => {
+          const project = seat.project ?? seat.board_id ?? "—";
+          const ticket = shortTicketId(seat.current_ticket_id) ?? "—";
+          const chip = pill(`${project}:${ticket}`, seat.live === false ? "warning" : undefined);
+          if (seat.board_id) chip.title = `board ${seat.board_id}`;
+          seatList.append(chip);
+        });
+      } else {
+        const empty = pill("—");
+        empty.dataset.empty = "true";
+        seatList.append(empty);
+      }
+      seats.append(seatList);
+      row.append(identity, status, seats);
+      body.append(row);
+    });
+    poolContainer.replaceChildren(wrapper);
+  }
+}
+
+function copyButton(label: string, value: string): HTMLButtonElement {
+  const button = element("button", "copy-button", label) as HTMLButtonElement;
+  button.type = "button";
+  button.dataset.copyValue = value;
+  button.setAttribute("aria-label", `Copy ${value}`);
+  return button;
+}
+
+async function copyValue(value: string): Promise<boolean> {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(value);
+      return true;
+    }
+  } catch {
+    // Fall through to the selection-based copy path for restricted Hosts.
+  }
+  const textarea = element("textarea", "copy-fallback") as HTMLTextAreaElement;
+  textarea.value = value;
+  textarea.setAttribute("readonly", "");
+  document.body.append(textarea);
+  textarea.select();
+  let copied = false;
+  try {
+    copied = document.execCommand("copy");
+  } catch {
+    copied = false;
+  }
+  textarea.remove();
+  return copied;
+}
+
+function renderLinks(data: LinkSnapshot | null): void {
+  const container = byId<HTMLElement>("links-groups");
+  const notice = byId<HTMLElement>("links-notice");
+  const total = byId<HTMLElement>("links-total");
+  notice.replaceChildren();
+  if (linksUnavailable || data === null) {
+    total.textContent = "—";
+    container.replaceChildren(emptyState("Links unavailable", "This server may not expose the bounded link_snapshot tool yet."));
+    return;
+  }
+
+  const synthetic = data.source_tool.startsWith("synthetic-");
+  const authorityLabel = synthetic ? "Synthetic fixture" : "Authoritative";
+  total.textContent = `${data.returned_node_count} memories · ${data.returned_edge_count} links`;
+  byId("links-source").textContent = `${authorityLabel} · ${data.source_tool}`;
+  if (data.truncated) {
+    const warning = element("div", "notice");
+    warning.dataset.tone = "warning";
+    warning.append(element("p", undefined, `Showing ${data.returned_node_count} of ${data.node_count} memories and ${data.returned_edge_count} of ${data.edge_count} links.`));
+    notice.append(warning);
+  }
+
+  const ticketIdsByMemory = new Map<string, string[]>();
+  data.edges.filter((edge) => edge.kind === "ticket").forEach((edge) => {
+    const values = ticketIdsByMemory.get(edge.from) ?? [];
+    if (!values.includes(edge.to)) values.push(edge.to);
+    ticketIdsByMemory.set(edge.from, values);
+  });
+  const groups = new Map<string, LinkNode[]>();
+  data.nodes.forEach((node) => {
+    const tickets = ticketIdsByMemory.get(node.memory_id) ?? ["No ticket"];
+    tickets.forEach((ticket) => {
+      const values = groups.get(ticket) ?? [];
+      values.push(node);
+      groups.set(ticket, values);
+    });
+  });
+
+  const groupCards = [...groups.entries()]
+    .sort(([left], [right]) => left === "No ticket" ? 1 : right === "No ticket" ? -1 : left.localeCompare(right))
+    .map(([ticketId, nodes]) => {
+      const group = element("section", "link-group card");
+      const heading = element("div", "link-group-heading");
+      const headingCopy = element("div");
+      headingCopy.append(element("p", "section-kicker", ticketId === "No ticket" ? "Unlinked to a ticket" : "Ticket"), element("h2", undefined, ticketId));
+      heading.append(headingCopy);
+      if (ticketId !== "No ticket") heading.append(copyButton("Copy ID", ticketId));
+      group.append(heading);
+
+      const memoryList = element("div", "link-memory-list");
+      nodes.forEach((node) => {
+        const row = element("article", "link-memory");
+        const rowHeading = element("div", "link-memory-heading");
+        const title = element("div");
+        title.append(element("h3", undefined, node.title), element("p", "link-id", node.memory_id));
+        rowHeading.append(title, copyButton("Copy memory ID", node.memory_id));
+        row.append(rowHeading);
+        const meta = element("div", "meta-row");
+        meta.append(pill(authorityLabel, synthetic ? "warning" : "submitted"), pill(node.memory_type));
+        if (node.pinned) meta.append(pill("Pinned", "warning"));
+        if (node.created_at) meta.append(pill(formatTime(node.created_at)));
+        row.append(meta);
+
+        const files = data.edges.filter((edge) => edge.from === node.memory_id && edge.kind === "file");
+        const tags = data.edges.filter((edge) => edge.from === node.memory_id && edge.kind === "tag");
+        if (files.length) {
+          const fileList = element("div", "link-values");
+          fileList.append(element("strong", undefined, "Files"));
+          files.forEach((edge) => {
+            const item = element("div", "link-value");
+            item.append(element("code", undefined, edge.to), copyButton("Copy path", edge.to));
+            if (edge.authority === "suggested") item.append(pill("Suggested", "warning"));
+            fileList.append(item);
+          });
+          row.append(fileList);
+        }
+        if (tags.length) {
+          const tagList = element("div", "meta-row");
+          tagList.append(element("strong", undefined, "Tags"));
+          tags.forEach((edge) => tagList.append(pill(`${edge.authority === "suggested" ? "Suggested · " : ""}${edge.to}`, edge.authority === "suggested" ? "warning" : undefined)));
+          row.append(tagList);
+        }
+        memoryList.append(row);
+      });
+      group.append(memoryList);
+      return group;
+    });
+  container.replaceChildren(...(groupCards.length ? groupCards : [emptyState("No explicit links", "Ticket, file, and tag relationships appear when project memories declare them.")]));
+}
+
+function newestEvents(events: BoardEvent[]): BoardEvent[] {
+  return [...events].sort((left, right) => (right.seq ?? -1) - (left.seq ?? -1));
+}
+
+function renderTimeline(container: HTMLElement, events: BoardEvent[], emptyTitle: string, emptyDetail: string): void {
+  const rows = events.map((event) => {
+    const row = element("article", "timeline-item");
+    row.append(element("span", "timeline-seq", event.seq === null ? "—" : `#${event.seq}`));
+    const copy = element("div");
+    copy.append(element("h3", undefined, event.kind.replaceAll("_", " ")), element("p", undefined, event.text));
+    const meta = element("div", "meta-row");
+    if (event.actor_id) meta.append(pill(event.actor_id));
+    if (event.occurred_at) meta.append(element("span", "timeline-time", formatTime(event.occurred_at)));
+    copy.append(meta);
+    row.append(copy);
+    return row;
+  });
+  container.replaceChildren(...(rows.length ? rows : [emptyState(emptyTitle, emptyDetail)]));
+}
+
+function renderActivity(data: Snapshot): void {
+  byId("activity-total").textContent = `${data.events.length} retained`;
+  const notices: HTMLElement[] = [];
+  if (data.resync_notice) {
+    const item = element("div", "notice");
+    item.dataset.tone = "warning";
+    item.append(element("p", undefined, data.resync_notice));
+    notices.push(item);
+  }
+  if (data.dropped_events > 0) {
+    const item = element("div", "notice");
+    item.append(element("p", undefined, `${data.dropped_events} older event${data.dropped_events === 1 ? " was" : "s were"} dropped from this bounded View.`));
+    notices.push(item);
+  }
+  if (data.has_more) {
+    const item = element("div", "notice");
+    item.append(element("p", undefined, "More activity is available and will arrive on the next bounded poll."));
+    notices.push(item);
+  }
+  byId("activity-notice").replaceChildren(...notices);
+  renderTimeline(byId("activity-list"), newestEvents(data.events), "No activity observed", activityEmptyDetail(data));
+}
+
+function sourceFor(data: Snapshot): string {
+  if (data.data_mode === "demo-error") return "Synthetic error simulation · no project data";
+  if (data.data_mode === "demo") return "Synthetic demo · no project data";
+  if (data.data_mode === "stale" || data.stale) return "Last-known local state · reconnecting";
+  return "Live local Central · authorized projection";
+}
+
+function renderActivePanel(data: Snapshot): void {
+  if (activeView === "today") renderToday(data);
+  else if (activeView === "work") renderWork(data);
+  else if (activeView === "agents") renderAgents(data);
+  else if (activeView === "fleet") renderFleet(fleetSnapshot);
+  else if (activeView === "links") renderLinks(linkSnapshot);
+  else renderActivity(data);
+}
+
+function semanticRenderSignature(data: Snapshot): string {
+  return JSON.stringify({ ...data, snapshot_at: null });
+}
+
+function render(data: Snapshot): void {
+  const signature = semanticRenderSignature(data);
+  snapshot = data;
+  if (signature === lastRenderSignature) {
+    updateLeaseCountdowns();
+    return;
+  }
+  lastRenderSignature = signature;
+  document.body.dataset.scenario = data.data_mode;
+  document.body.dataset.renderState = data.data_mode === "demo-error" ? "demo-error" : data.feed_error && data.data_mode !== "demo" ? "error" : data.data_mode;
+  main.setAttribute("aria-busy", "false");
+  byId("name").textContent = data.board.name;
+  byId("board-id").textContent = data.board.id;
+  byId("source").textContent = sourceFor(data);
+  renderConnection(data);
+  renderActivityScope(data);
+  renderActivePanel(data);
+  renderSearch(searchInput.value);
+  updateLeaseCountdowns();
+}
+
+
+===== tools/dashboard-ui/src/dashboard.ts:1231-1400 =====
+function renderSearch(rawQuery: string): void {
+  const panel = byId<HTMLElement>("search-results");
+  const container = byId<HTMLElement>("search-results-list");
+  const counter = byId<HTMLElement>("search-count");
+  const query = rawQuery.trim().toLocaleLowerCase();
+  if (!query) {
+    panel.hidden = true;
+    counter.textContent = "";
+    container.replaceChildren();
+    return;
+  }
+  const focusedKey = document.activeElement instanceof HTMLButtonElement && document.activeElement.classList.contains("search-result")
+    ? document.activeElement.dataset.resultKey ?? null
+    : null;
+  const matches = searchCorpus(snapshot).filter((item) => `${item.kind} ${item.title} ${item.detail}`.toLocaleLowerCase().includes(query));
+  const buckets = new Map<string, SearchHit[]>();
+  matches.forEach((item) => {
+    const bucket = buckets.get(item.kind);
+    if (bucket) bucket.push(item);
+    else buckets.set(item.kind, [item]);
+  });
+  const hits: SearchHit[] = [];
+  while (hits.length < 40 && [...buckets.values()].some((items) => items.length)) {
+    buckets.forEach((items) => {
+      if (hits.length < 40 && items.length) hits.push(items.shift()!);
+    });
+  }
+  panel.hidden = false;
+  counter.textContent = matches.length > hits.length
+    ? `Showing ${hits.length} of ${matches.length} results`
+    : `${matches.length} result${matches.length === 1 ? "" : "s"}`;
+  const rows = hits.map((hit) => {
+    const button = element("button", "search-result") as HTMLButtonElement;
+    button.type = "button";
+    button.dataset.targetView = hit.view;
+    button.dataset.resultKey = `${hit.view}:${hit.kind}:${hit.title}:${hit.detail}`.slice(0, 1_024);
+    button.append(element("small", undefined, hit.kind), element("strong", undefined, hit.title), element("span", undefined, hit.detail));
+    return button;
+  });
+  container.replaceChildren(...(rows.length ? rows : [emptyState("No matching loaded data", "Try a ticket ID, agent name, status, or activity phrase.")]));
+  if (focusedKey) {
+    [...container.querySelectorAll<HTMLButtonElement>(".search-result")]
+      .find((item) => item.dataset.resultKey === focusedKey)
+      ?.focus();
+  }
+}
+
+function selectView(view: ViewName, focusTab = false): void {
+  activeView = view;
+  document.querySelectorAll<HTMLButtonElement>("[role=tab][data-view]").forEach((tab) => {
+    const selected = tab.dataset.view === view;
+    tab.setAttribute("aria-selected", String(selected));
+    tab.tabIndex = selected ? 0 : -1;
+    if (selected) {
+      tab.scrollIntoView({ block: "nearest", inline: "nearest" });
+      if (focusTab) tab.focus();
+    }
+  });
+  document.querySelectorAll<HTMLElement>("[data-panel]").forEach((panel) => {
+    panel.hidden = panel.dataset.panel !== view;
+  });
+  renderActivePanel(snapshot);
+  if (view === "fleet" && connected && fleetUnavailable && !fleetBusy) void refreshFleet();
+  if (view === "links" && connected && linksUnavailable && !linksBusy) void refreshLinks();
+}
+
+function setLoading(loading: boolean, message = "Loading authorized board state"): void {
+  main.setAttribute("aria-busy", String(loading));
+  refreshButton.disabled = loading;
+  if (loading) {
+    document.body.dataset.renderState = "loading";
+    byId("connection-title").textContent = message;
+    byId("connection-detail").textContent = "The local bridge is preparing a read-only snapshot.";
+  }
+}
+
+function failureSnapshot(message: string): Snapshot {
+  return {
+    ...snapshot,
+    data_mode: snapshot.activity_scope === "synthetic-demo" ? "demo-error" : "stale",
+    stale: true,
+    connected: false,
+    feed_error: message,
+  };
+}
+
+async function refreshSnapshot(): Promise<void> {
+  if (!connected) return;
+  setLoading(true);
+  try {
+    const result = await app.callServerTool({ name: "board_snapshot", arguments: {} });
+    const value = decodeSnapshot(structured(result));
+    if (value) render(value);
+    else render(failureSnapshot("Invalid snapshot response"));
+  } catch {
+    render(failureSnapshot("Local bridge request failed"));
+  } finally {
+    setLoading(false);
+  }
+}
+
+function acceptFleetSnapshot(value: FleetSnapshot): void {
+  fleetSnapshot = value;
+  fleetUnavailable = false;
+  if (activeView === "fleet") renderFleet(fleetSnapshot);
+  renderSearch(searchInput.value);
+}
+
+async function refreshFleet(): Promise<void> {
+  if (!connected || fleetBusy) return;
+  fleetBusy = true;
+  try {
+    const result = await app.callServerTool({ name: "fleet_snapshot", arguments: {} });
+    const value = decodeFleetSnapshot(structured(result));
+    if (value) acceptFleetSnapshot(value);
+    else {
+      fleetSnapshot = null;
+      fleetUnavailable = true;
+    }
+  } catch {
+    fleetSnapshot = null;
+    fleetUnavailable = true;
+  } finally {
+    fleetBusy = false;
+    if (activeView === "fleet") renderFleet(fleetSnapshot);
+    renderSearch(searchInput.value);
+  }
+}
+
+function acceptLinkSnapshot(value: LinkSnapshot): void {
+  linkSnapshot = value;
+  linksUnavailable = false;
+  if (activeView === "links") renderLinks(linkSnapshot);
+  renderSearch(searchInput.value);
+}
+
+async function refreshLinks(): Promise<void> {
+  if (!connected || linksBusy) return;
+  linksBusy = true;
+  try {
+    const result = await app.callServerTool({ name: "link_snapshot", arguments: {} });
+    const value = decodeLinkSnapshot(structured(result));
+    if (value) acceptLinkSnapshot(value);
+    else {
+      linkSnapshot = null;
+      linksUnavailable = true;
+    }
+  } catch {
+    linkSnapshot = null;
+    linksUnavailable = true;
+  } finally {
+    linksBusy = false;
+    if (activeView === "links") renderLinks(linkSnapshot);
+    renderSearch(searchInput.value);
+  }
+}
+
+function clearFeedTimer(): void {
+  if (feedTimer !== undefined) window.clearTimeout(feedTimer);
+  feedTimer = undefined;
+}
+
+function scheduleFeed(delayMs = feedDelayMs): void {
+  clearFeedTimer();
+  if (!connected || document.visibilityState === "hidden") return;
+  feedTimer = window.setTimeout(() => {
+    feedTimer = undefined;
+    void refreshFeed();
+  }, delayMs);
+}
