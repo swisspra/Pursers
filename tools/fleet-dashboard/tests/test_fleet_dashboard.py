@@ -3960,9 +3960,9 @@ def test_dashboard_v2_ia_agents_and_responsive_contract() -> None:
 
     assert 'class="app-shell"' in html
     assert 'aria-label="Primary navigation"' in html
-    assert 'href="#/boards"' in html
-    assert 'href="#/agents"' in html
-    assert 'href="#/operations"' in html
+    assert 'href="#/projects"' in html
+    assert 'href="#/team"' in html
+    assert 'href="#/settings"' in html
     assert "Fleet overview" in html
     assert "Board workspaces" in html
     assert "Unified agent pool" in html
@@ -3978,6 +3978,33 @@ def test_dashboard_v2_ia_agents_and_responsive_contract() -> None:
     assert "overflow-x:hidden" in html
     assert "https://cdn" not in html
     assert "http://cdn" not in html
+
+
+def test_dashboard_uses_warm_guided_home_shell() -> None:
+    html = dashboard.HTML
+
+    for destination in (
+        "home",
+        "projects",
+        "work",
+        "team",
+        "approvals",
+        "activity",
+        "settings",
+    ):
+        assert f'data-nav="{destination}" href="#/{destination}"' in html
+    assert "Your calm work home" in html
+    assert "Workspace context" in html
+    assert "function renderWarmHome()" in html
+    assert "function renderWarmProjects()" in html
+    assert "function renderWarmWork()" in html
+    assert "function renderWarmApprovals()" in html
+    assert "function renderWarmActivity()" in html
+    assert "function renderWarmSettings()" in html
+    assert ".warm-row>div:first-child{display:grid;justify-items:start;gap:3px}" in html
+    assert ".intake-form textarea,.intake-form button,.intake-actions button{min-height:44px" in html
+    assert "https://cdn.tailwindcss.com" not in html
+    assert "https://code.iconify.design" not in html
 
 
 def test_seat_config_manager_plan_apply_backup_restart_and_no_token_leak(
@@ -6697,6 +6724,13 @@ def test_add_project_single_action_happy_path_and_idempotent_rerun(tmp_path: Pat
     keys_dir = tmp_path / "keys"
     jwks_path = tmp_path / "jwks.json"
     fake_central = FakeDoorCentral()
+    repository_url = "https://example.invalid/new-svc.git"
+    fake_central.registry_data["projects"]["new-svc"] = {
+        "board_id": "old-board",
+        "work_dir": "/PATH/TO/OLD",
+        "status": "paused",
+        "repository_url": repository_url,
+    }
 
     config = dashboard.Config(
         url="http://127.0.0.1:8766/mcp",
@@ -6779,6 +6813,11 @@ def test_add_project_single_action_happy_path_and_idempotent_rerun(tmp_path: Pat
         assert new_board.dispatch_policy["fallback_broadcast"] is True
         assert new_board.review_policy == "strict"
         assert len(new_board.memberships) == 2  # worker and reviewer doors
+        registry_entry = fake_central.registry_data["projects"]["new-svc"]
+        assert registry_entry["repository_url"] == repository_url
+        assert dashboard.SeatConfigManager._clean_text(
+            f"repository_url={repository_url}"
+        ) == f"repository_url={repository_url}"
 
         # Second call: Idempotent re-run
         req2 = urllib.request.Request(
@@ -7061,27 +7100,13 @@ def test_doors_ui_rendering() -> None:
 
 
 def test_clean_text_redaction_is_linear_time_and_behavior_preserved() -> None:
-    """CodeQL py/polynomial-redos regression: the key/value redaction pass.
-
-    The previous pattern nested stars around the keyword alternation and
-    backtracked polynomially on repeated whitespace (seconds for ~30k
-    spaces). The remediated split must stay linear and produce identical
-    redaction output.
-    """
+    """CodeQL py/polynomial-redos regression: deterministic assignment scan."""
     clean = dashboard.SeatConfigManager._clean_text
 
-    adversarial = "token" + " " * 40_000
-    started = time.monotonic()
-    output = clean(adversarial)
-    elapsed = time.monotonic() - started
-    assert output == adversarial  # no separator on the line: nothing redacted
-    assert elapsed < 5.0  # pre-fix pattern took ~9s at this size
-
-    bigger = "token" + " " * 80_000
-    started = time.monotonic()
-    assert clean(bigger) == bigger
-    elapsed_bigger = time.monotonic() - started
-    assert elapsed_bigger < 5.0  # doubling input stays linear, not quadratic
+    adversarial = ":" + " " * 1_000_000
+    assert clean(adversarial) == adversarial
+    no_delimiter = "token" + " " * 1_000_000
+    assert clean(no_delimiter) == no_delimiter
 
     # Keyword fused into a longer key (no word boundary) is still redacted.
     assert clean("XTOKEN=abc") == "XTOKEN=[REDACTED]"
@@ -7092,9 +7117,23 @@ def test_clean_text_redaction_is_linear_time_and_behavior_preserved() -> None:
     assert clean("  MY SECRET = s3kr1t") == "  MY SECRET = [REDACTED]"
     # Only the first separator splits key/value; the rest stays in the value.
     assert clean("mytoken=a=b") == "mytoken=[REDACTED]"
+    assert clean("api-key:\t value") == "api-key:\t [REDACTED]"
+    assert clean("authorization=\u2003value") == "authorization=\u2003[REDACTED]"
+    assert clean("secret= \t") == "secret= \t[REDACTED]"
     # Lines without a sensitive keyword are untouched.
     assert clean("plain = value") == "plain = value"
     # Multi-line input redacts per line.
     assert clean("alpha=1\nmy bearer: x\nbeta=2") == (
         "alpha=1\nmy bearer: [REDACTED]\nbeta=2"
     )
+    assert clean("token:\nplain=value\nsecret: last") == (
+        "token:[REDACTED]\nplain=value\nsecret: [REDACTED]"
+    )
+    assert clean("token:\r\nplain=x") == "token:[REDACTED]\r\nplain=x"
+    assert clean("plain:\r\nnext=x") == "plain:\r\nnext=x"
+    for ending in (
+        "\r", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029",
+    ):
+        assert clean(f"token:{ending}plain=x") == (
+            f"token:[REDACTED]{ending}plain=x"
+        )

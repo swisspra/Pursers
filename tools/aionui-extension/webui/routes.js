@@ -3,6 +3,7 @@
 const { execFile } = require('node:child_process');
 const { createDoorOnboarding } = require('../door/adapter.cjs');
 const { isLoopbackHostname } = require('../security/loopback.cjs');
+const { createTeamAdapter } = require('../team/adapter.cjs');
 
 const BRIDGE_COMMAND = 'pursers-wait-bridge';
 const INSTALL_HINT =
@@ -63,6 +64,15 @@ function responseStatus(value) {
   return 422;
 }
 
+function teamResponseStatus(value) {
+  if (value.ok) return 200;
+  const code = value.error && value.error.code;
+  if (code === 'permission_denied' || code === 'not_in_team') return 403;
+  if (code === 'runtime_context_missing' || code === 'runtime_auth_failed') return 409;
+  if (code === 'transport_unavailable') return 503;
+  return 422;
+}
+
 async function readBody(request) {
   try {
     const body = await request.json();
@@ -90,6 +100,7 @@ function createHandlers(dependencies = {}) {
       return response.json();
     },
   });
+  const team = createTeamAdapter({ runCli: dependencies.runTeamCli });
 
   async function status() {
     const current = await onboarding.status();
@@ -129,6 +140,24 @@ function createHandlers(dependencies = {}) {
     return jsonResponse(responseStatus(value), value);
   }
 
+  async function teamTyped(request, operation) {
+    const body = request.method === 'GET' ? {} : await readBody(request);
+    if (body === null) {
+      return jsonResponse(400, {
+        ok: false,
+        op: operation,
+        error: { code: 'invalid_json', message: 'Request body must be a JSON object.' },
+      });
+    }
+    let value;
+    if (operation === 'status') value = await team.status({ tasks: true });
+    else if (operation === 'plan') value = await team.plan(body);
+    else if (operation === 'apply') value = await team.apply(body);
+    else if (operation === 'pause') value = await team.pauseSeat(body.slot_id, body.message, body.reason);
+    else value = await team.stopSeat(body.slot_id, body.reason);
+    return jsonResponse(teamResponseStatus(value), value);
+  }
+
   async function handle(request) {
     const url = new URL(request.url);
     if (!loopbackRequest(request)) return jsonResponse(403, { ok: false, error: 'loopback_same_origin_required' });
@@ -143,10 +172,15 @@ function createHandlers(dependencies = {}) {
     if (request.method === 'GET' && url.pathname === '/pursers/onboarding/status') return typed(request, 'status');
     if (request.method === 'POST' && url.pathname === '/pursers/onboarding/rotate') return typed(request, 'rotate');
     if (request.method === 'POST' && url.pathname === '/pursers/onboarding/recover') return typed(request, 'recover');
+    if (request.method === 'GET' && url.pathname === '/pursers/team/status') return teamTyped(request, 'status');
+    if (request.method === 'POST' && url.pathname === '/pursers/team/plan') return teamTyped(request, 'plan');
+    if (request.method === 'POST' && url.pathname === '/pursers/team/apply') return teamTyped(request, 'apply');
+    if (request.method === 'POST' && url.pathname === '/pursers/team/seat/pause') return teamTyped(request, 'pause');
+    if (request.method === 'POST' && url.pathname === '/pursers/team/seat/stop') return teamTyped(request, 'stop');
     return jsonResponse(404, { ok: false, error: 'not_found' });
   }
 
-  return { handle, join, onboarding, status };
+  return { handle, join, onboarding, status, team };
 }
 
 const defaultHandlers = createHandlers();

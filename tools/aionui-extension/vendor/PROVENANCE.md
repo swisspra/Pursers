@@ -3,7 +3,10 @@
 This vendored JSON Schema is the repository's deterministic validation form of
 the extension contract exercised by AionUi 2.2.1 and AionCore 0.2.1. Those
 upstreams did not publish a standalone JSON Schema file at these tags, so the
-snapshot was transcribed from their public manifest examples and loader types.
+snapshot was transcribed from their public manifest examples and exact loader
+types. In particular, `ExtContributes.webui` is an array of `ExtWebui` records
+with `id`, `directory`, and `routes[{path,method,handler}]`; the host does not
+define `apiRoutes`, `staticAssets`, or per-route `auth` manifest fields.
 
 - [AionUi tag `v2.2.1`](https://github.com/iOfficeAI/AionUi/tree/v2.2.1),
   commit `dc47f4a0173ff506b08f13c97b10944d61e422d5`:
