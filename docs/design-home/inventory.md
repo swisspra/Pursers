@@ -6,7 +6,7 @@ Source baseline: `c2ebac5de803a0f7a00468ec4d3cdf06e4719096` (origin/main, 5.0.0a
 
 | # | Surface | Source path | Lines | Build | Live entrypoint |
 | --- | --- | --- | --- | --- | --- |
-| 1 | Dashboard-UI SPA | `tools/dashboard-ui/src/dashboard.ts` | 1528 | Vite single-file | `packages/personal/resources/dashboard.html` |
+| 1 | Dashboard-UI SPA | `tools/dashboard-ui/src/dashboard.ts` | 1528 | Vite single-file | `packages/personal/src/pursers_personal/resources/dashboard.html` |
 | 1 | Dashboard-UI CSS | `tools/dashboard-ui/src/dashboard.css` | 619 | Vite single-file | (bundled into dashboard.html) |
 | 1 | Dashboard-UI entry | `tools/dashboard-ui/dashboard-entry.html` | 145 | Vite single-file | (bundled into dashboard.html) |
 | 2 | Fleet Dashboard | `tools/fleet-dashboard/fleet_dashboard.py` | 7507 | None (inline) | Served by HTTP handler |

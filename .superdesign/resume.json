@@ -26,7 +26,7 @@
         ".superdesign/context/primary-dashboard-current.md": "af9790b7d97e1b3af3851883ca5fc9d4ee78ce8270fea54ed2378c88327b3b39",
         ".superdesign/init/components.md": "837e5e23a1ec024800c5b2a16e3bbe0b818d2842ea970c9921e1d8680b18d366",
         ".superdesign/init/layouts.md": "6d60e63bec699e4bda0676de41604a8b401e4a696e648a2327d6b67219d75845",
-        ".superdesign/init/routes.md": "81171cb907bb08e0f8090a70fbbde2420120b76b1a1d4194c1f5efdb7e0d72f4",
+        ".superdesign/init/routes.md": "8e0bc71e5fcaf687d180db7ba6df39000784b65ce802ac384361fa8a5ebc0e11",
         ".superdesign/init/theme.md": "7e2f7d08f5ba87d203335fb97cd3aa927763489d3fd67ef9524e7d7b77fc88ae",
         ".superdesign/init/pages.md": "c27ecf4b5dae604b3f03dfb09401aa4824b66d6c815a7e38e1bf7ba4b0102afa",
         ".superdesign/init/extractable-components.md": "f19812f9f485883bb431cc5f605e3e64fa055df2070af43acc9dc1b6e7957212",
@@ -70,7 +70,7 @@
           "currentVersion": 4
         }
       },
-      "updatedAt": "2026-09-08T11:35:09Z"
+      "updatedAt": "2026-09-08T12:15:50Z"
     },
     "/projects": {
       "targetKind": "new-ui",
@@ -98,7 +98,7 @@
         ".superdesign/context/primary-dashboard-current.md": "af9790b7d97e1b3af3851883ca5fc9d4ee78ce8270fea54ed2378c88327b3b39",
         ".superdesign/init/components.md": "837e5e23a1ec024800c5b2a16e3bbe0b818d2842ea970c9921e1d8680b18d366",
         ".superdesign/init/layouts.md": "6d60e63bec699e4bda0676de41604a8b401e4a696e648a2327d6b67219d75845",
-        ".superdesign/init/routes.md": "81171cb907bb08e0f8090a70fbbde2420120b76b1a1d4194c1f5efdb7e0d72f4",
+        ".superdesign/init/routes.md": "8e0bc71e5fcaf687d180db7ba6df39000784b65ce802ac384361fa8a5ebc0e11",
         ".superdesign/init/theme.md": "7e2f7d08f5ba87d203335fb97cd3aa927763489d3fd67ef9524e7d7b77fc88ae",
         ".superdesign/init/pages.md": "c27ecf4b5dae604b3f03dfb09401aa4824b66d6c815a7e38e1bf7ba4b0102afa",
         ".superdesign/init/extractable-components.md": "f19812f9f485883bb431cc5f605e3e64fa055df2070af43acc9dc1b6e7957212",
@@ -131,7 +131,7 @@
           "currentVersion": 2
         }
       },
-      "updatedAt": "2026-09-08T11:35:09Z"
+      "updatedAt": "2026-09-08T12:15:50Z"
     },
     "/work": {
       "targetKind": "new-ui",
@@ -159,7 +159,7 @@
         ".superdesign/context/primary-dashboard-current.md": "af9790b7d97e1b3af3851883ca5fc9d4ee78ce8270fea54ed2378c88327b3b39",
         ".superdesign/init/components.md": "837e5e23a1ec024800c5b2a16e3bbe0b818d2842ea970c9921e1d8680b18d366",
         ".superdesign/init/layouts.md": "6d60e63bec699e4bda0676de41604a8b401e4a696e648a2327d6b67219d75845",
-        ".superdesign/init/routes.md": "81171cb907bb08e0f8090a70fbbde2420120b76b1a1d4194c1f5efdb7e0d72f4",
+        ".superdesign/init/routes.md": "8e0bc71e5fcaf687d180db7ba6df39000784b65ce802ac384361fa8a5ebc0e11",
         ".superdesign/init/theme.md": "7e2f7d08f5ba87d203335fb97cd3aa927763489d3fd67ef9524e7d7b77fc88ae",
         ".superdesign/init/pages.md": "c27ecf4b5dae604b3f03dfb09401aa4824b66d6c815a7e38e1bf7ba4b0102afa",
         ".superdesign/init/extractable-components.md": "f19812f9f485883bb431cc5f605e3e64fa055df2070af43acc9dc1b6e7957212",
@@ -192,7 +192,7 @@
           "currentVersion": 1
         }
       },
-      "updatedAt": "2026-09-08T11:35:09Z"
+      "updatedAt": "2026-09-08T12:15:50Z"
     },
     "/team": {
       "targetKind": "new-ui",
@@ -220,7 +220,7 @@
         ".superdesign/context/primary-dashboard-current.md": "af9790b7d97e1b3af3851883ca5fc9d4ee78ce8270fea54ed2378c88327b3b39",
         ".superdesign/init/components.md": "837e5e23a1ec024800c5b2a16e3bbe0b818d2842ea970c9921e1d8680b18d366",
         ".superdesign/init/layouts.md": "6d60e63bec699e4bda0676de41604a8b401e4a696e648a2327d6b67219d75845",
-        ".superdesign/init/routes.md": "81171cb907bb08e0f8090a70fbbde2420120b76b1a1d4194c1f5efdb7e0d72f4",
+        ".superdesign/init/routes.md": "8e0bc71e5fcaf687d180db7ba6df39000784b65ce802ac384361fa8a5ebc0e11",
         ".superdesign/init/theme.md": "7e2f7d08f5ba87d203335fb97cd3aa927763489d3fd67ef9524e7d7b77fc88ae",
         ".superdesign/init/pages.md": "c27ecf4b5dae604b3f03dfb09401aa4824b66d6c815a7e38e1bf7ba4b0102afa",
         ".superdesign/init/extractable-components.md": "f19812f9f485883bb431cc5f605e3e64fa055df2070af43acc9dc1b6e7957212",
@@ -253,7 +253,7 @@
           "currentVersion": 1
         }
       },
-      "updatedAt": "2026-09-08T11:35:09Z"
+      "updatedAt": "2026-09-08T12:15:50Z"
     },
     "/approvals": {
       "targetKind": "new-ui",
@@ -281,7 +281,7 @@
         ".superdesign/context/primary-dashboard-current.md": "af9790b7d97e1b3af3851883ca5fc9d4ee78ce8270fea54ed2378c88327b3b39",
         ".superdesign/init/components.md": "837e5e23a1ec024800c5b2a16e3bbe0b818d2842ea970c9921e1d8680b18d366",
         ".superdesign/init/layouts.md": "6d60e63bec699e4bda0676de41604a8b401e4a696e648a2327d6b67219d75845",
-        ".superdesign/init/routes.md": "81171cb907bb08e0f8090a70fbbde2420120b76b1a1d4194c1f5efdb7e0d72f4",
+        ".superdesign/init/routes.md": "8e0bc71e5fcaf687d180db7ba6df39000784b65ce802ac384361fa8a5ebc0e11",
         ".superdesign/init/theme.md": "7e2f7d08f5ba87d203335fb97cd3aa927763489d3fd67ef9524e7d7b77fc88ae",
         ".superdesign/init/pages.md": "c27ecf4b5dae604b3f03dfb09401aa4824b66d6c815a7e38e1bf7ba4b0102afa",
         ".superdesign/init/extractable-components.md": "f19812f9f485883bb431cc5f605e3e64fa055df2070af43acc9dc1b6e7957212",
@@ -314,7 +314,7 @@
           "currentVersion": 1
         }
       },
-      "updatedAt": "2026-09-08T11:35:09Z"
+      "updatedAt": "2026-09-08T12:15:50Z"
     },
     "/activity": {
       "targetKind": "new-ui",
@@ -342,7 +342,7 @@
         ".superdesign/context/primary-dashboard-current.md": "af9790b7d97e1b3af3851883ca5fc9d4ee78ce8270fea54ed2378c88327b3b39",
         ".superdesign/init/components.md": "837e5e23a1ec024800c5b2a16e3bbe0b818d2842ea970c9921e1d8680b18d366",
         ".superdesign/init/layouts.md": "6d60e63bec699e4bda0676de41604a8b401e4a696e648a2327d6b67219d75845",
-        ".superdesign/init/routes.md": "81171cb907bb08e0f8090a70fbbde2420120b76b1a1d4194c1f5efdb7e0d72f4",
+        ".superdesign/init/routes.md": "8e0bc71e5fcaf687d180db7ba6df39000784b65ce802ac384361fa8a5ebc0e11",
         ".superdesign/init/theme.md": "7e2f7d08f5ba87d203335fb97cd3aa927763489d3fd67ef9524e7d7b77fc88ae",
         ".superdesign/init/pages.md": "c27ecf4b5dae604b3f03dfb09401aa4824b66d6c815a7e38e1bf7ba4b0102afa",
         ".superdesign/init/extractable-components.md": "f19812f9f485883bb431cc5f605e3e64fa055df2070af43acc9dc1b6e7957212",
@@ -375,7 +375,7 @@
           "currentVersion": 2
         }
       },
-      "updatedAt": "2026-09-08T11:35:09Z"
+      "updatedAt": "2026-09-08T12:15:50Z"
     },
     "/settings": {
       "targetKind": "new-ui",
@@ -403,7 +403,7 @@
         ".superdesign/context/primary-dashboard-current.md": "af9790b7d97e1b3af3851883ca5fc9d4ee78ce8270fea54ed2378c88327b3b39",
         ".superdesign/init/components.md": "837e5e23a1ec024800c5b2a16e3bbe0b818d2842ea970c9921e1d8680b18d366",
         ".superdesign/init/layouts.md": "6d60e63bec699e4bda0676de41604a8b401e4a696e648a2327d6b67219d75845",
-        ".superdesign/init/routes.md": "81171cb907bb08e0f8090a70fbbde2420120b76b1a1d4194c1f5efdb7e0d72f4",
+        ".superdesign/init/routes.md": "8e0bc71e5fcaf687d180db7ba6df39000784b65ce802ac384361fa8a5ebc0e11",
         ".superdesign/init/theme.md": "7e2f7d08f5ba87d203335fb97cd3aa927763489d3fd67ef9524e7d7b77fc88ae",
         ".superdesign/init/pages.md": "c27ecf4b5dae604b3f03dfb09401aa4824b66d6c815a7e38e1bf7ba4b0102afa",
         ".superdesign/init/extractable-components.md": "f19812f9f485883bb431cc5f605e3e64fa055df2070af43acc9dc1b6e7957212",
@@ -436,7 +436,7 @@
           "currentVersion": 2
         }
       },
-      "updatedAt": "2026-09-08T11:35:09Z"
+      "updatedAt": "2026-09-08T12:15:50Z"
     }
   }
 }
