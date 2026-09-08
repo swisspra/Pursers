@@ -32,15 +32,15 @@ You need:
    forwarded port. The coordinator is an operator-managed process that manages
    the board, project registry, and seat dispatch.
 3. **A door string** from your coordinator. A door looks like `prs1.…` and
-   connects one worker or reviewer seat to one project. Each Team member needs
-   its own door.
+   connects one or more seats to a project. A single board-role door may
+   record multiple seat names for different Team members.
 4. **Python 3.11 or newer** for building the extension and running the
    wait bridge.
 
 Ask your coordinator for:
 - The Central URL (usually `http://127.0.0.1:8766/mcp` for local setups).
-- One worker door and one reviewer door (or two worker doors if you want
-  separate workers).
+- One worker door and one reviewer door (a single door may support multiple
+  seats depending on the board contract).
 - The project name and whether it is a WORK or PERSONAL trust domain.
 
 ## 1. Install the Pursers extension
@@ -75,7 +75,9 @@ If the bridge is missing, the Join tab reports the install hint.
 
 ## 2. Connect a door
 
-Each Team member connects through its own door.
+Each Team member connects through a door. A single board-role door may
+record multiple seat names, so one door can serve multiple Team members
+depending on the board contract.
 
 **Interactive (AionUI extension):**
 
@@ -123,7 +125,7 @@ A door connects one seat to one project on one board. The door's role
 
 A minimal Team is one worker plus one reviewer. The worker does the work;
 the reviewer checks it independently. You can add more workers for parallel
-capacity, but each needs its own door and workspace.
+capacity, but each member needs a recorded seat name and workspace.
 
 ### Option A: Generate seats with the seat-kit
 
@@ -245,8 +247,9 @@ with a Resume button.
 
 ### Lease renewal
 
-While a worker holds a ticket, it must renew the lease approximately every 10
-minutes:
+While a worker holds a ticket, it must renew the lease approximately every 3
+minutes (per the seat contract; defer to the generated seat AGENTS.md for the
+exact cadence) and before long steps:
 
 ```sh
 bin/board.sh renew <TK-id> --board <board-id>
@@ -372,7 +375,9 @@ state. Reviewed history and results are preserved.
 
 To stop the entire Team:
 1. Stop each member individually through the fleet dashboard.
-2. Alternatively, stop the Central process if you need an immediate halt.
+2. Alternatively, stop the Central process if you need to halt dispatch.
+   Note: stopping Central does not stop active AionUI Team members; each
+   member must be stopped individually through its own lifecycle control.
 3. Reviewed results and ticket history are preserved.
 4. To resume, restart the Central and start each member again.
 
