@@ -141,3 +141,89 @@ test('typed mutation routes refuse non-loopback or cross-origin requests', async
   assert.equal(localhostSubdomain.status, 200);
   assert.equal(ipv6.status, 200);
 });
+
+test('team status returns the real host roster and task list', async () => {
+  const calls = [];
+  const handlers = createHandlers({
+    runTeamCli: async (command, input) => {
+      calls.push({ command, input });
+      if (command[0] === 'members') {
+        return { success: true, data: { members: [{ slot_id: 'slot-1', name: 'worker-1', role: 'teammate' }] } };
+      }
+      return { success: true, data: { tasks: [{ id: 'task-1', subject: 'Ship Home' }] } };
+    },
+  });
+  const response = await handlers.handle(new Request('http://localhost/pursers/team/status'));
+  const payload = await response.json();
+  assert.equal(response.status, 200);
+  assert.deepEqual(payload.members, [{ slot_id: 'slot-1', name: 'worker-1', role: 'teammate' }]);
+  assert.deepEqual(payload.tasks, [{ id: 'task-1', subject: 'Ship Home' }]);
+  assert.deepEqual(calls.map((call) => call.command), [['members'], ['task', 'list']]);
+});
+
+test('team plan is dry-run and live apply requires the adapter confirmation contract', async () => {
+  const calls = [];
+  const runTeamCli = async (command, input) => {
+    calls.push({ command, input });
+    if (command[0] === 'members') {
+      return {
+        success: true,
+        data: { members: [{ slot_id: 'lead-1', name: 'lead', role: 'lead', assistant_id: 'lead-assistant' }] },
+      };
+    }
+    if (command[0] === 'list-assistants') {
+      return { success: true, data: { assistants: [{ assistant_id: 'seat-assistant' }] } };
+    }
+    if (command[0] === 'spawn-agent') {
+      return { success: true, data: { slot_id: 'seat-1' } };
+    }
+    return { success: true, data: {} };
+  };
+  const handlers = createHandlers({ runTeamCli });
+  const spec = {
+    team: { name: 'Demo' },
+    lead: { name: 'lead', assistant_id: 'lead-assistant' },
+    seats: [{ name: 'worker-1', assistant_id: 'seat-assistant', role: 'worker', tier_max: 2, folder: 'worker-1' }],
+    options: { dry_run: true },
+  };
+  const plan = await handlers.handle(new Request('http://localhost/pursers/team/plan', {
+    method: 'POST', body: JSON.stringify(spec),
+  }));
+  assert.equal(plan.status, 200);
+  assert.equal((await plan.json()).dry_run, true);
+  assert.equal(calls.some((call) => call.command[0] === 'spawn-agent'), false);
+
+  spec.options = { confirm: 'apply-live', dry_run: false, send_kickoff: true };
+  const apply = await handlers.handle(new Request('http://localhost/pursers/team/apply', {
+    method: 'POST', body: JSON.stringify(spec),
+  }));
+  const payload = await apply.json();
+  assert.equal(apply.status, 200);
+  assert.equal(payload.dry_run, false);
+  assert.deepEqual(
+    calls.filter((call) => ['spawn-agent', 'send-message'].includes(call.command[0])).map((call) => call.command),
+    [['spawn-agent'], ['send-message']],
+  );
+});
+
+test('seat controls map only to bounded interrupt and cooperative shutdown calls', async () => {
+  const calls = [];
+  const handlers = createHandlers({
+    runTeamCli: async (command, input) => {
+      calls.push({ command, input });
+      return { success: true, data: {} };
+    },
+  });
+  const pause = await handlers.handle(new Request('http://localhost/pursers/team/seat/pause', {
+    method: 'POST', body: JSON.stringify({ slot_id: 'slot-1', message: 'Checkpoint first.', reason: 'operator' }),
+  }));
+  const stop = await handlers.handle(new Request('http://localhost/pursers/team/seat/stop', {
+    method: 'POST', body: JSON.stringify({ slot_id: 'slot-1', reason: 'operator' }),
+  }));
+  assert.equal(pause.status, 200);
+  assert.equal(stop.status, 200);
+  assert.deepEqual(calls, [
+    { command: ['interrupt-agent'], input: { slot_id: 'slot-1', message: 'Checkpoint first.', reason: 'operator' } },
+    { command: ['shutdown-agent'], input: { slot_id: 'slot-1', reason: 'operator' } },
+  ]);
+});

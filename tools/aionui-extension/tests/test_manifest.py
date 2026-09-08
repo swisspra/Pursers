@@ -22,6 +22,8 @@ def test_manifest_contributes_backend_variants_without_mcp_block() -> None:
     manifest = load("aion-extension.json")
     contributes = manifest["contributes"]
     assert "mcpServers" not in contributes
+    assert "apiRoutes" not in json.dumps(contributes)
+    assert "staticAssets" not in json.dumps(contributes)
     variants = {
         (assistant["contextFile"], assistant["presetAgentType"])
         for assistant in contributes["assistants"]
@@ -45,8 +47,12 @@ def test_permissions_are_loopback_only_and_moderate() -> None:
     assert manifest["risk"]["level"] == "moderate"
 
 
-def test_onboarding_routes_are_authenticated() -> None:
-    routes = load("aion-extension.json")["contributes"]["webui"]["apiRoutes"]
+def test_onboarding_routes_use_the_supported_host_shape() -> None:
+    webui = load("aion-extension.json")["contributes"]["webui"]
+    assert len(webui) == 1
+    assert webui[0]["id"] == "pursers-home"
+    assert webui[0]["directory"] == "webui"
+    routes = webui[0]["routes"]
     onboarding = {
         (route["path"], route["method"]): route
         for route in routes
@@ -59,4 +65,21 @@ def test_onboarding_routes_are_authenticated() -> None:
         ("/pursers/onboarding/status", "GET"),
         ("/pursers/onboarding/validate", "POST"),
     }
-    assert all(route["auth"] is True for route in onboarding.values())
+    assert all(route["handler"] == "webui/routes.js" for route in onboarding.values())
+
+
+def test_team_routes_use_the_supported_host_shape_and_are_bounded() -> None:
+    routes = load("aion-extension.json")["contributes"]["webui"][0]["routes"]
+    team = {
+        (route["path"], route["method"]): route
+        for route in routes
+        if route["path"].startswith("/pursers/team/")
+    }
+    assert set(team) == {
+        ("/pursers/team/status", "GET"),
+        ("/pursers/team/plan", "POST"),
+        ("/pursers/team/apply", "POST"),
+        ("/pursers/team/seat/pause", "POST"),
+        ("/pursers/team/seat/stop", "POST"),
+    }
+    assert all(route["handler"] == "webui/routes.js" for route in team.values())
