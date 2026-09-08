@@ -202,6 +202,12 @@ re-arm immediately by passing the complete JSON `new_seq` map to `--since`.
 Use `--boards home` for the legacy one-board/scalar-cursor path; an explicit
 comma-separated list overrides registry selection.
 
+Ticket targets may use the legacy `project-name/path` form or an exact HTTPS
+`repository_url` stored on that project registry entry. URL routing is scoped
+to the ticket's board and never falls back to a board default. Unknown,
+cross-board, ambiguous, missing, and non-git routes fail before claim or review
+work begins.
+
 Worker claims are refused with `operator_checkout_read_only` whenever routing
 would select an operator-owned `work_dir`. Create the project's fleet clone in
 the dashboard Config page first; reviewers continue to verify in temporary

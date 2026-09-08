@@ -95,6 +95,7 @@ from pursers_client import (
     human_form_safety,
     parse_project_registry,
     registry_work_dirs,
+    resolve_registry_target,
 )
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
@@ -1550,9 +1551,29 @@ def _enrich_registry_routes(
     for event in result.get("events", []):
         enriched = dict(event)
         board_id = enriched.get("board_id")
-        work_dir = enriched.get("work_dir") or routed.get(board_id)
+        route_error = None
+        target_url = enriched.get("target_url")
+        if isinstance(board_id, str) and isinstance(target_url, str):
+            try:
+                route = resolve_registry_target(registry, board_id, target_url)
+                work_dir = route["work_dir"]
+            except ValueError as exc:
+                work_dir = None
+                route_error = {
+                    "code": str(getattr(exc, "code", "project_route_invalid")),
+                    "message": str(exc),
+                }
+        else:
+            work_dir = enriched.get("work_dir") or routed.get(board_id)
         if work_dir is not None:
             enriched["work_dir"] = work_dir
+        elif route_error is not None:
+            enriched.pop("work_dir", None)
+            enriched["routing_error"] = route_error
+            if claimable:
+                enriched["claim_refused"] = True
+                enriched["claim_refusal_code"] = route_error["code"]
+                enriched["claim_refusal_reason"] = route_error["message"]
         if (
             claimable
             and isinstance(work_dir, str)
@@ -4365,6 +4386,9 @@ async def _is_relevant(
                 "skills_required": list(ticket.get("skills_required") or []),
             }
     if relevant:
+        target_url = ticket.get("target_url")
+        if isinstance(target_url, str):
+            event["target_url"] = target_url
         event["reason"] = (
             "offer"
             if kind == offered_kind

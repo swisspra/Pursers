@@ -4172,6 +4172,8 @@ class FleetFetcher:
             }
             if isinstance(existing_entry, dict) and "fleet_clone_dir" in existing_entry:
                 new_entry["fleet_clone_dir"] = existing_entry["fleet_clone_dir"]
+            if isinstance(existing_entry, dict) and "repository_url" in existing_entry:
+                new_entry["repository_url"] = existing_entry["repository_url"]
             if integration_ref != "main":
                 new_entry["integration_ref"] = integration_ref
             projects[project_name] = new_entry

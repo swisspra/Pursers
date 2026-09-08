@@ -510,6 +510,7 @@ def _load_client() -> tuple[Any, ...]:
             parse_project_registry,
             registry_project_work_dirs,
             registry_work_dirs,
+            resolve_registry_target,
             wait_for_boards,
         )
     except ImportError as exc:
@@ -525,6 +526,7 @@ def _load_client() -> tuple[Any, ...]:
         parse_project_registry,
         registry_project_work_dirs,
         registry_work_dirs,
+        resolve_registry_target,
         wait_for_boards,
     )
 
@@ -756,6 +758,7 @@ async def _cmd_wait(
     active_registry_boards: Any = None,
     registry_work_dirs: Any = None,
     registry_project_work_dirs: Any = None,
+    registry_target_resolver: Any = None,
     wait_for_boards: Any = None,
     submitted_relevant_kinds: frozenset[str] | None = None,
     dispatch_kinds: frozenset[str] | None = None,
@@ -786,18 +789,25 @@ async def _cmd_wait(
             selected = [item.strip() for item in boards.split(",") if item.strip()]
             if not selected:
                 raise ValueError("--boards must select at least one board")
+        wait_options = {
+            "kinds": selected_kinds,
+            "submitted": submitted,
+            "work_dirs": registry_work_dirs(registry) if registry else {},
+            "project_work_dirs": (
+                registry_project_work_dirs(registry) if registry else {}
+            ),
+            "poll_fallback": poll_fallback,
+            "capabilities": _seat_capabilities(),
+            "allow_takeover": True,
+        }
+        if registry_target_resolver is not None:
+            wait_options["registry"] = registry
         result = await wait_for_boards(
             client,
             selected,
             since,
             timeout_s,
-            kinds=selected_kinds,
-            submitted=submitted,
-            work_dirs=registry_work_dirs(registry) if registry else {},
-            project_work_dirs=registry_project_work_dirs(registry) if registry else {},
-            poll_fallback=poll_fallback,
-            capabilities=_seat_capabilities(),
-            allow_takeover=True,
+            **wait_options,
         )
         _print(result)
         return
@@ -896,6 +906,7 @@ async def _execute(args: argparse.Namespace) -> None:
         BoardClient = loaded
         registry_key = active_boards = parse_registry = None
         project_work_dirs_for_registry = work_dirs_for_registry = wait_many = None
+        target_resolver = None
         submitted_kinds = None
         dispatch_kinds = frozenset()
         supports_capabilities = False
@@ -911,7 +922,22 @@ async def _execute(args: argparse.Namespace) -> None:
             wait_many,
         ) = loaded
         dispatch_kinds = frozenset()
+        target_resolver = None
         supports_capabilities = False
+    elif len(loaded) == 9:
+        (
+            BoardClient,
+            dispatch_kinds,
+            registry_key,
+            submitted_kinds,
+            active_boards,
+            parse_registry,
+            project_work_dirs_for_registry,
+            work_dirs_for_registry,
+            wait_many,
+        ) = loaded
+        supports_capabilities = True
+        target_resolver = None
     else:
         (
             BoardClient,
@@ -922,6 +948,7 @@ async def _execute(args: argparse.Namespace) -> None:
             parse_registry,
             project_work_dirs_for_registry,
             work_dirs_for_registry,
+            target_resolver,
             wait_many,
         ) = loaded
         supports_capabilities = True
@@ -966,6 +993,7 @@ async def _execute(args: argparse.Namespace) -> None:
                 active_registry_boards=active_boards,
                 registry_work_dirs=work_dirs_for_registry,
                 registry_project_work_dirs=project_work_dirs_for_registry,
+                registry_target_resolver=target_resolver,
                 wait_for_boards=wait_many,
                 submitted_relevant_kinds=submitted_kinds,
                 dispatch_kinds=dispatch_kinds,
@@ -1010,8 +1038,35 @@ async def _execute(args: argparse.Namespace) -> None:
                     board_work_dirs[entry["board_id"]] = str(seat_repo)
 
         async def run(target: Any) -> None:
-            def ticket_route(value: dict[str, Any]) -> tuple[str | None, str | None]:
+            def ticket_route(
+                value: dict[str, Any],
+            ) -> tuple[str | None, str | None, dict[str, str] | None]:
                 ticket = value.get("ticket", {})
+                target_url = str(ticket.get("target_url", ""))
+                if target_resolver is not None and registry is not None:
+                    try:
+                        route = target_resolver(registry, target_board, target_url)
+                    except ValueError as exc:
+                        return None, None, {
+                            "code": str(
+                                getattr(exc, "code", "project_route_invalid")
+                            ),
+                            "message": str(exc),
+                        }
+                    routed = route.get("work_dir")
+                    operator_dir = route.get("operator_work_dir")
+                    project_name = str(route.get("project", ""))
+                    aliases = {
+                        project_name.casefold(),
+                        Path(str(operator_dir or routed or "")).name.casefold(),
+                    }
+                    if (
+                        REPO_LEAF
+                        and str(REPO_LEAF).casefold() in aliases
+                        and (seat_repo / ".git").exists()
+                    ):
+                        routed = str(seat_repo)
+                    return routed, operator_dir, None
                 project = str(ticket.get("target_url", "")).split(
                     "/", 1
                 )[0].casefold()
@@ -1022,25 +1077,40 @@ async def _execute(args: argparse.Namespace) -> None:
                     operator_project_dirs.get(
                         project, operator_board_dirs.get(target_board)
                     ),
+                    None,
                 )
 
-            def refuse_operator_checkout(ticket_id: str) -> None:
+            def refuse_route(
+                ticket_id: str, code: str, message: str
+            ) -> None:
                 _print({
                     "ok": False,
                     "board_id": target_board,
                     "ticket_id": ticket_id,
                     "claim_refused": True,
                     "error": {
-                        "code": "operator_checkout_read_only",
-                        "message": "operator checkout is read-only for seats",
+                        "code": code,
+                        "message": message,
                     },
                 })
 
+            def refuse_operator_checkout(ticket_id: str) -> None:
+                refuse_route(
+                    ticket_id,
+                    "operator_checkout_read_only",
+                    "operator checkout is read-only for seats",
+                )
+
             def emit(value: dict[str, Any]) -> None:
-                ticket = value.get("ticket", {})
-                project = str(ticket.get("target_url", "")).split("/", 1)[0].casefold()
-                work_dir = project_work_dirs.get(project, board_work_dirs.get(target_board))
-                _print({**value, "board_id": target_board, "work_dir": work_dir})
+                if isinstance(value.get("ticket"), dict):
+                    work_dir, _operator_dir, route_error = ticket_route(value)
+                else:
+                    work_dir = board_work_dirs.get(target_board)
+                    route_error = None
+                enriched = {**value, "board_id": target_board, "work_dir": work_dir}
+                if route_error is not None:
+                    enriched["routing_error"] = route_error
+                _print(enriched)
 
             if ROLE == "worker":
                 if args.command == "list":
@@ -1061,13 +1131,27 @@ async def _execute(args: argparse.Namespace) -> None:
                     return
                 if args.command == "claim":
                     ticket_result = await target.ticket_get(args.ticket_id)
-                    routed, operator_dir = ticket_route(ticket_result)
+                    routed, operator_dir, route_error = ticket_route(ticket_result)
+                    if route_error is not None:
+                        refuse_route(
+                            args.ticket_id,
+                            route_error["code"],
+                            route_error["message"],
+                        )
+                        return
                     if (
                         routed
                         and operator_dir
                         and Path(routed).resolve() == Path(operator_dir).resolve()
                     ):
                         refuse_operator_checkout(args.ticket_id)
+                        return
+                    if not routed or not (Path(routed) / ".git").exists():
+                        refuse_route(
+                            args.ticket_id,
+                            "routed_repository_unavailable",
+                            "registered fleet repository is missing or is not a git checkout",
+                        )
                         return
                     result = await target.ticket_claim(args.ticket_id)
                     error = result.get("error", {})
@@ -1115,13 +1199,27 @@ async def _execute(args: argparse.Namespace) -> None:
                     return
                 if args.command == "review-claim":
                     ticket_result = await target.ticket_get(args.ticket_id)
-                    routed, operator_dir = ticket_route(ticket_result)
+                    routed, operator_dir, route_error = ticket_route(ticket_result)
+                    if route_error is not None:
+                        refuse_route(
+                            args.ticket_id,
+                            route_error["code"],
+                            route_error["message"],
+                        )
+                        return
                     if (
                         routed
                         and operator_dir
                         and Path(routed).resolve() == Path(operator_dir).resolve()
                     ):
                         refuse_operator_checkout(args.ticket_id)
+                        return
+                    if not routed or not (Path(routed) / ".git").exists():
+                        refuse_route(
+                            args.ticket_id,
+                            "routed_repository_unavailable",
+                            "registered fleet repository is missing or is not a git checkout",
+                        )
                         return
                     result = await target.ticket_review_claim(args.ticket_id)
                     error = result.get("error", {})
@@ -1143,19 +1241,22 @@ async def _execute(args: argparse.Namespace) -> None:
                 if args.command == "verify":
                     result = await target.ticket_get(args.ticket_id)
                     ticket = result.get("ticket", {})
-                    project = str(ticket.get("target_url", "")).split("/", 1)[0].casefold()
-                    routed = project_work_dirs.get(
-                        project, board_work_dirs.get(target_board)
-                    )
-                    operator_dir = operator_project_dirs.get(
-                        project, operator_board_dirs.get(target_board)
-                    )
+                    routed, operator_dir, route_error = ticket_route(result)
+                    if route_error is not None:
+                        raise ValueError(route_error["message"])
                     if (
                         routed
                         and operator_dir
                         and Path(routed).resolve() == Path(operator_dir).resolve()
                     ):
                         raise RuntimeError("operator checkout is read-only for seats")
+                    if (
+                        target_resolver is not None
+                        and (not routed or not (Path(routed) / ".git").exists())
+                    ):
+                        raise ValueError(
+                            "registered fleet repository is missing or is not a git checkout"
+                        )
                     seat_root = Path(__file__).resolve().parents[1]
                     source_repo = (
                         Path(routed)

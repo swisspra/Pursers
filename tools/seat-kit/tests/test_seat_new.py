@@ -588,6 +588,26 @@ def test_routed_verify_uses_and_cleans_reviewer_owned_clone_without_mutation(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     _author, routed, generated, ticket, sha = _review_verification_fixture(tmp_path)
+    from pursers_client import (
+        parse_project_registry,
+        registry_project_work_dirs,
+        registry_work_dirs,
+        resolve_registry_target,
+    )
+
+    ticket["target_url"] = "https://example.test/acme/sample"
+    registry = {
+        "schema_version": 1,
+        "projects": {
+            "sample": {
+                "board_id": "pursers",
+                "work_dir": str(routed),
+                "work_dir_owner": "fleet",
+                "repository_url": ticket["target_url"],
+                "status": "active",
+            }
+        },
+    }
     subprocess.run(
         ["git", "switch", "main"], cwd=routed, check=True, capture_output=True,
     )
@@ -636,7 +656,7 @@ def test_routed_verify_uses_and_cleans_reviewer_owned_clone_without_mutation(
             return {"ok": True}
 
         async def board_state_get(self, *, key):
-            return {"key": key, "value": {"schema_version": 1}}
+            return {"state": {"key": key, "value": json.dumps(registry)}}
 
         async def ticket_get(self, ticket_id):
             assert ticket_id == ticket["ticket_id"]
@@ -644,12 +664,14 @@ def test_routed_verify_uses_and_cleans_reviewer_owned_clone_without_mutation(
 
     generated._load_client = lambda: (
         ReviewClient,
+        frozenset(),
         "project_registry",
         frozenset({"ticket_submitted"}),
         lambda _registry, _home: ["pursers"],
-        lambda _value: {"schema_version": 1},
-        lambda _registry: {"sample": str(routed)},
-        lambda _registry: {"pursers": str(routed)},
+        parse_project_registry,
+        registry_project_work_dirs,
+        registry_work_dirs,
+        resolve_registry_target,
         None,
     )
     monkeypatch.setenv("ONBOARD_CENTRAL_URL", "https://central.example/mcp")
@@ -2169,6 +2191,178 @@ def test_generated_claim_routes_matching_seat_owned_clone(
     result = json.loads(capsys.readouterr().out)
     assert claims == ["TK-safe"]
     assert result["work_dir"] == str(dest / "alpha")
+
+
+@pytest.mark.parametrize(
+    ("target_url", "make_git", "expected_code"),
+    [
+        ("https://example.test/acme/unknown", True, "repository_url_not_registered"),
+        ("https://example.test/acme/alpha", False, "routed_repository_unavailable"),
+    ],
+)
+def test_generated_claim_refuses_invalid_repository_route_before_claim(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    target_url: str,
+    make_git: bool,
+    expected_code: str,
+) -> None:
+    from pursers_client import (
+        parse_project_registry,
+        registry_project_work_dirs,
+        registry_work_dirs,
+        resolve_registry_target,
+    )
+
+    claims: list[str] = []
+    fleet = tmp_path / "fleet-alpha"
+    if make_git:
+        (fleet / ".git").mkdir(parents=True)
+    registry = {
+        "schema_version": 1,
+        "projects": {
+            "alpha": {
+                "board_id": "pursers",
+                "work_dir": "/operator/alpha",
+                "fleet_clone_dir": str(fleet),
+                "repository_url": "https://example.test/acme/alpha",
+                "status": "active",
+            }
+        },
+    }
+
+    class Client:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            self.identity = SimpleNamespace(agent_id="AI-worker")
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def board_join(self, **_kwargs: object) -> dict[str, object]:
+            return {"ok": True}
+
+        async def board_state_get(self, **_kwargs: object) -> dict[str, object]:
+            return {"state": {"value": json.dumps(registry)}}
+
+        async def ticket_get(self, ticket_id: str) -> dict[str, object]:
+            return {"ticket": {"ticket_id": ticket_id, "target_url": target_url}}
+
+        async def ticket_claim(self, ticket_id: str) -> dict[str, object]:
+            claims.append(ticket_id)
+            return {"ok": True}
+
+    dest = seat_new.generate(args(tmp_path / "seat", client="goose"))
+    generated = load_generated(dest / "bin" / "board.py", f"board_{expected_code}")
+    monkeypatch.setattr(
+        generated,
+        "_load_client",
+        lambda: (
+            Client,
+            frozenset(),
+            "project_registry",
+            frozenset(),
+            lambda value, home: [home],
+            parse_project_registry,
+            registry_project_work_dirs,
+            registry_work_dirs,
+            resolve_registry_target,
+            object(),
+        ),
+    )
+    monkeypatch.setenv("ONBOARD_CENTRAL_URL", "http://central.invalid/mcp")
+    monkeypatch.setenv("ONBOARD_CENTRAL_TOKEN", "test-token")
+    monkeypatch.setenv("ONBOARD_BOARD_ID", "pursers")
+    monkeypatch.setenv("ONBOARD_AGENT_NAME", "worker-agent")
+
+    asyncio.run(generated._execute(generated._parser().parse_args(["claim", "TK-route"])))
+
+    result = json.loads(capsys.readouterr().out)
+    assert claims == []
+    assert result["claim_refused"] is True
+    assert result["error"]["code"] == expected_code
+
+
+def test_generated_claim_accepts_exact_registered_repository_url(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from pursers_client import (
+        parse_project_registry,
+        registry_project_work_dirs,
+        registry_work_dirs,
+        resolve_registry_target,
+    )
+
+    claims: list[str] = []
+    fleet = tmp_path / "fleet-alpha"
+    (fleet / ".git").mkdir(parents=True)
+    registry = {
+        "schema_version": 1,
+        "projects": {
+            "alpha": {
+                "board_id": "pursers",
+                "work_dir": "/operator/alpha",
+                "fleet_clone_dir": str(fleet),
+                "repository_url": "https://example.test/acme/alpha",
+                "status": "active",
+            }
+        },
+    }
+
+    class Client:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            self.identity = SimpleNamespace(agent_id="AI-worker")
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def board_join(self, **_kwargs: object) -> dict[str, object]:
+            return {"ok": True}
+
+        async def board_state_get(self, **_kwargs: object) -> dict[str, object]:
+            return {"state": {"value": json.dumps(registry)}}
+
+        async def ticket_get(self, ticket_id: str) -> dict[str, object]:
+            return {"ticket": {
+                "ticket_id": ticket_id,
+                "target_url": "https://example.test/acme/alpha",
+            }}
+
+        async def ticket_claim(self, ticket_id: str) -> dict[str, object]:
+            claims.append(ticket_id)
+            return {"ok": True, "ticket": {
+                "ticket_id": ticket_id,
+                "target_url": "https://example.test/acme/alpha",
+            }}
+
+    dest = seat_new.generate(args(tmp_path / "seat", client="goose"))
+    generated = load_generated(dest / "bin" / "board.py", "board_url_route")
+    monkeypatch.setattr(
+        generated,
+        "_load_client",
+        lambda: (
+            Client, frozenset(), "project_registry", frozenset(),
+            lambda value, home: [home], parse_project_registry,
+            registry_project_work_dirs, registry_work_dirs,
+            resolve_registry_target, object(),
+        ),
+    )
+    monkeypatch.setenv("ONBOARD_CENTRAL_URL", "http://central.invalid/mcp")
+    monkeypatch.setenv("ONBOARD_CENTRAL_TOKEN", "test-token")
+    monkeypatch.setenv("ONBOARD_BOARD_ID", "pursers")
+    monkeypatch.setenv("ONBOARD_AGENT_NAME", "worker-agent")
+
+    asyncio.run(generated._execute(generated._parser().parse_args(["claim", "TK-url"])))
+
+    result = json.loads(capsys.readouterr().out)
+    assert claims == ["TK-url"]
+    assert result["work_dir"] == str(fleet)
 
 
 def test_generated_claim_surfaces_gate_error_once(

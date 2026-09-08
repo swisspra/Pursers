@@ -50,6 +50,7 @@ class FakeBackend:
                     "board_id": "alpha-board",
                     "work_dir": str(work_dir),
                     "work_dir_owner": "fleet",
+                    "repository_url": "https://example.test/acme/alpha",
                     "status": "active",
                 }
             },

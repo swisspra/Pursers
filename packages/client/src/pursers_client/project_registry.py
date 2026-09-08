@@ -8,6 +8,7 @@ import os
 import time
 from pathlib import Path
 from typing import Any, Iterable
+from urllib.parse import urlsplit
 
 from mcp import Client
 from mcp.client.streamable_http import streamable_http_client
@@ -30,6 +31,44 @@ WORK_DIR_OWNERS = frozenset({"operator", "fleet"})
 CATCHUP_PAGE_LIMIT = 100
 MAX_CATCHUP_PAGES_PER_BOARD = 8
 MAX_EVENTS_PER_BOARD = 1
+
+
+class RegistryRoutingError(ValueError):
+    """A safe, actionable failure to resolve a ticket target."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+def _repository_url(value: Any, project_name: str) -> str | None:
+    if value is None:
+        return None
+    if (
+        not isinstance(value, str)
+        or not value
+        or value != value.strip()
+        or any(ord(character) < 0x20 or ord(character) == 0x7F for character in value)
+    ):
+        raise ValueError(
+            f"project_registry project {project_name!r} repository_url must be "
+            "a non-empty, trimmed HTTPS URL"
+        )
+    parsed = urlsplit(value)
+    if (
+        parsed.scheme != "https"
+        or not parsed.netloc
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+        or parsed.path in {"", "/"}
+    ):
+        raise ValueError(
+            f"project_registry project {project_name!r} repository_url must be "
+            "a credential-free HTTPS repository URL without query or fragment"
+        )
+    return value
 
 
 def _held_ticket_update(
@@ -132,6 +171,7 @@ def parse_project_registry(result: dict[str, Any]) -> dict[str, Any]:
             raise ValueError(
                 f"project_registry project {name!r} fleet must be boolean"
             )
+        repository_url = _repository_url(project.get("repository_url"), name)
         normalized[name] = {
             "board_id": board_id,
             "work_dir": work_dir,
@@ -143,7 +183,81 @@ def parse_project_registry(result: dict[str, Any]) -> dict[str, Any]:
             normalized[name]["fleet_clone_dir"] = fleet_clone_dir
         if "fleet" in project:
             normalized[name]["fleet"] = project["fleet"]
+        if repository_url is not None:
+            normalized[name]["repository_url"] = repository_url
     return {"schema_version": PROJECT_REGISTRY_SCHEMA_VERSION, "projects": normalized}
+
+
+def resolve_registry_target(
+    registry: dict[str, Any], board_id: str, target_url: str
+) -> dict[str, str | None]:
+    """Resolve one ticket target within its board, without cross-board fallback."""
+    target = str(target_url)
+    parsed = urlsplit(target)
+    repository_target = bool(parsed.scheme and parsed.netloc)
+    active = [
+        (name, project)
+        for name, project in registry["projects"].items()
+        if project["status"] == "active"
+        and project.get("fleet", True)
+        and project["board_id"] == board_id
+    ]
+    if repository_target:
+        matches = [
+            (name, project)
+            for name, project in active
+            if project.get("repository_url") == target
+        ]
+        if not matches:
+            other_board = any(
+                project["status"] == "active"
+                and project.get("fleet", True)
+                and project.get("repository_url") == target
+                for project in registry["projects"].values()
+            )
+            code = (
+                "repository_url_board_mismatch"
+                if other_board
+                else "repository_url_not_registered"
+            )
+            raise RegistryRoutingError(
+                code,
+                f"target_url repository URL is not registered for board {board_id!r}; "
+                "configure the project's exact project_registry repository_url",
+            )
+    else:
+        project_key = target.split("/", 1)[0].casefold()
+        matches = [
+            (name, project)
+            for name, project in active
+            if project_key
+            in {name.casefold(), Path(project["work_dir"]).name.casefold()}
+        ]
+        if not matches:
+            raise RegistryRoutingError(
+                "project_route_not_registered",
+                f"target_url must begin with a project registered for board {board_id!r}",
+            )
+    if len(matches) != 1:
+        raise RegistryRoutingError(
+            (
+                "repository_url_ambiguous"
+                if repository_target
+                else "project_route_ambiguous"
+            ),
+            f"target_url matches multiple active projects on board {board_id!r}",
+        )
+    name, project = matches[0]
+    return {
+        "project": name,
+        "board_id": board_id,
+        "work_dir": project.get("fleet_clone_dir") or project["work_dir"],
+        "operator_work_dir": (
+            project["work_dir"]
+            if project.get("work_dir_owner", "operator") == "operator"
+            else None
+        ),
+    }
 
 
 def active_registry_boards(registry: dict[str, Any], home_board: str) -> list[str]:
@@ -235,6 +349,7 @@ async def wait_for_boards(
     poll_fallback: bool = False,
     capabilities: dict[str, Any] | None = None,
     allow_takeover: bool = False,
+    registry: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Wait on all authorized board journals in one listen subscription."""
     board_ids = sorted({str(board).strip() for board in boards if str(board).strip()})
@@ -352,8 +467,23 @@ async def wait_for_boards(
                             ticket_result.get("ticket", {}).get("target_url", "")
                         )
                         ticket = ticket_result.get("ticket", {})
-                        project = target.split("/", 1)[0].casefold()
-                        enriched["work_dir"] = project_work_dirs.get(project, work_dir)
+                        if registry is not None:
+                            try:
+                                route = resolve_registry_target(
+                                    registry, board_id, target
+                                )
+                                enriched["work_dir"] = route["work_dir"]
+                            except RegistryRoutingError as exc:
+                                enriched["work_dir"] = None
+                                enriched["routing_error"] = {
+                                    "code": exc.code,
+                                    "message": str(exc),
+                                }
+                        else:
+                            project = target.split("/", 1)[0].casefold()
+                            enriched["work_dir"] = project_work_dirs.get(
+                                project, work_dir
+                            )
                     except BoardClientError:
                         pass
                 kind = event.get("kind")
