@@ -69,10 +69,10 @@ def test_exact_view_lock_and_embedded_external_attestation_boundary() -> None:
     lock_path = root / "src/pursers_personal/resources/component-lock.json"
     payload = view_path.read_bytes()
     lock = json.loads(lock_path.read_text(encoding="utf-8"))
-    expected = "8bf0ed9b25f9bb04f917a54942f9defc7ba868f942b0259acf84571991c99a29"
+    expected = "746c6eccd85afcc38588c8b9e1946ff2c91a7eb8477783c2f0d6bff0f4c6d922"
     assert len(payload) == 404280
     assert hashlib.sha256(payload).hexdigest() == expected
-    assert lock["product_version"] == PRODUCT_VERSION == "5.0.0a24"
+    assert lock["product_version"] == PRODUCT_VERSION == "5.0.0a25"
     assert lock["view"] == {
         "resource": "pursers_personal/resources/dashboard.html",
         "size_bytes": len(payload),
@@ -1953,7 +1953,7 @@ async def test_app_reads_leave_sqlite_domain_journal_and_cursor_unchanged(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    required = {"pursers-central": "0.1.0a28", "pursers-client": "0.1.0a21"}
+    required = {"pursers-central": "0.1.0a29", "pursers-client": "0.1.0a22"}
     for distribution, version in required.items():
         try:
             installed = importlib.metadata.version(distribution)
@@ -1963,8 +1963,22 @@ async def test_app_reads_leave_sqlite_domain_journal_and_cursor_unchanged(
             pytest.skip(f"requires {distribution}=={version}, found {installed}")
     import pursers_personal.artifacts
 
+    use_checkout_client = False
     try:
-        pursers_personal.artifacts.verify_component_artifacts(set(required))
+        verified = pursers_personal.artifacts.verify_component_artifacts(set(required))
+        client_spec = importlib.util.find_spec("pursers_client")
+        assert client_spec is not None and client_spec.origin is not None
+        approved_client = Path(
+            verified["pursers-client"]["members"]["pursers_client/__init__.py"]
+        ).resolve()
+        checkout_client = (
+            Path(__file__).resolve().parents[2]
+            / "client/src/pursers_client/__init__.py"
+        ).resolve()
+        resolved_client = Path(client_spec.origin).resolve()
+        if resolved_client != approved_client:
+            assert resolved_client == checkout_client
+            use_checkout_client = True
     except pursers_personal.artifacts.ArtifactVerificationError as exc:
         if os.environ.get("PURSERS_TEST_ALLOW_PRERELEASE_CENTRAL_DRIFT") != "1":
             pytest.skip(f"locked artifacts not installed: {exc}")
@@ -1976,6 +1990,9 @@ async def test_app_reads_leave_sqlite_domain_journal_and_cursor_unchanged(
             spec = importlib.util.find_spec(package_name)
             assert spec is not None and spec.origin is not None
             assert "site-packages" in Path(spec.origin).resolve().parts
+        use_checkout_client = True
+
+    if use_checkout_client:
         from pursers_client import BoardClient, BoardClientError
 
         monkeypatch.setattr(

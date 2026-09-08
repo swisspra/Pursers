@@ -7,6 +7,71 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [5.0.0a25] - 2026-09-08
+
+This release includes `pursers-central==0.1.0a29`,
+`pursers-client==0.1.0a22`, `pursers-personal-import==5.0.0a3`,
+`pursers-personal==5.0.0a25`, `pursers==5.0.0a25`, and
+`pursers-wait-bridge==0.1.0a15`.
+
+### Package summary
+
+- **Central 0.1.0a29:** adds the archive tier, parsed-document cache,
+  automatic bloat sweeps, bounded inline histories, journal compaction, and
+  health metrics for hot-document size and storage activity.
+- **Client 0.1.0a22:** re-takes stable registry seat names after restart,
+  reuses per-process board identities, rejects all-skipped registry waits, and
+  resyncs from the reset cursor after journal compaction.
+- **Wait Bridge 0.1.0a15:** ships the matching Client 0.1.0a22 dependency so
+  registry-wide waits recover stable seats and compacted cursors correctly.
+- **Personal and meta 5.0.0a25:** ship the matching component pins,
+  documentation, dashboard assets, and regenerated component lock. Personal
+  Import remains at 5.0.0a3.
+- **Seat kit:** follows the Client registry restart and compaction-resync
+  contract for generated seats.
+- **Fleet Dashboard:** adds the per-board Doors panel and one-click Add project
+  flow, requires authoritative admin membership for door actions, and makes
+  dashboard tests hermetic for state roots and process inspection.
+- **Coordinator:** carries the no-hard-pin dispatcher follow-ups with soft
+  preferences, unsafe-identity exclusion, pin clearing, and dead-pin release.
+
+### Added
+
+- Fleet dashboard: add Doors panel (per board x role: copy door string, rotate with new kid, seats on door with last activity) and one-click 'Add project' single action (registry add, board create, door principals, policy defaults, fleet clone) with secret-safe door issuance, same-origin guards, and Cache-Control: no-store.
+
+### Changed
+
+- Central: archive tier keeps the hot board document small — closed/canceled
+  tickets older than `archive_after_days` (default 2) move to per-ticket
+  archive documents with a compact per-board index, and ticket_get,
+  ticket_list, board_snapshot, board_status, briefing, and board_list read
+  through transparently. A one-shot idempotent migration (schema_version 8)
+  upgrades legacy documents on first load; a generated 5.8 MB legacy document
+  shrinks below 100 KB with every archived ticket still readable. Parsed
+  documents are cached per board keyed by the store version, read-only calls
+  never bump the version or rewrite the blob, and inline
+  dispatch/submission/review histories keep the newest
+  `inline_history_limit` (default 50) entries with omitted counts while older
+  entries live in the archive document. New `board_archive_run` admin sweep,
+  an automatic sweep on the reaper timer, `ticket_archived` journal events for
+  board admins, journal compaction to the oldest live consumer cursor with a
+  500-row retention floor, and healthz per-board hot-document size, archived
+  ticket count, and trailing 60s document load/save counters. Client
+  `ticket_list(include_archived=True)` passes through and
+  `KNOWN_EVENT_KINDS` gains `ticket_archived`.
+- Client and seat-kit registry waits now re-take stable seat names after a
+  restart, reuse board identities within a process, fail loudly when every
+  selected board is skipped, and resync after journal compaction instead of
+  waiting blind.
+- fleet-dashboard: hermetic tests (state root override, injectable process
+  lister). Dashboard state resolves through a lazy `PURSERS_STATE_DIR`
+  override, worker directories and lifecycle fences are created only on first
+  private write, and process listing degrades to an explicit unavailable
+  result when inspection is denied.
+- Fleet dashboard door endpoints now require Central's authoritative admin
+  membership projection before reading or mutating door material, and dashboard
+  tests inject temporary worker roots and process probes for hermetic replay.
+
 ## [5.0.0a24] - 2026-09-07
 
 This release includes `pursers-central==0.1.0a28`,
@@ -53,7 +118,6 @@ This release includes `pursers-central==0.1.0a28`,
 
 ### Added
 
-- Fleet dashboard: add Doors panel (per board x role: copy door string, rotate with new kid, seats on door with last activity) and one-click 'Add project' single action (registry add, board create, door principals, policy defaults, fleet clone) with secret-safe door issuance, same-origin guards, and Cache-Control: no-store.
 - Wait bridge: add `pursers-door` to issue, inspect, rotate, and revoke
   per-board worker/reviewer door credentials with RSA-2048 keys, atomic JWKS
   replacement, and one secret-safe `prs1.…` setup string.
@@ -63,24 +127,6 @@ This release includes `pursers-central==0.1.0a28`,
 
 ### Changed
 
-- Central: archive tier keeps the hot board document small — closed/canceled
-  tickets older than `archive_after_days` (default 2) move to per-ticket
-  archive documents with a compact per-board index, and ticket_get,
-  ticket_list, board_snapshot, board_status, briefing, and board_list read
-  through transparently. A one-shot idempotent migration (schema_version 8)
-  upgrades legacy documents on first load; a generated 5.8 MB legacy document
-  shrinks below 100 KB with every archived ticket still readable. Parsed
-  documents are cached per board keyed by the store version, read-only calls
-  never bump the version or rewrite the blob, and inline
-  dispatch/submission/review histories keep the newest
-  `inline_history_limit` (default 50) entries with omitted counts while older
-  entries live in the archive document. New `board_archive_run` admin sweep,
-  an automatic sweep on the reaper timer, `ticket_archived` journal events for
-  board admins, journal compaction to the oldest live consumer cursor with a
-  500-row retention floor, and healthz per-board hot-document size, archived
-  ticket count, and trailing 60s document load/save counters. Client
-  `ticket_list(include_archived=True)` passes through and
-  `KNOWN_EVENT_KINDS` gains `ticket_archived`.
 - Seat-kit and wait-bridge waits now subscribe to holder-targeted ticket
   updates, label offer/holder/broadcast wakes explicitly, and permit workers
   and reviewers to claim only verified dispatch broadcasts when no live offer
@@ -95,15 +141,6 @@ This release includes `pursers-central==0.1.0a28`,
   coordinator-hosted, and capability-implicit identities. Central now accepts
   `assigned_to_agent_id=null` to clear a pin and releases unavailable pins
   after the fallback cycle limit.
-- Client and seat-kit registry waits now re-take stable seat names after a
-  restart, reuse board identities within a process, fail loudly when every
-  selected board is skipped, and resync after journal compaction instead of
-  waiting blind.
-- fleet-dashboard: hermetic tests (state root override, injectable process
-  lister). Dashboard state resolves through a lazy `PURSERS_STATE_DIR`
-  override, worker directories and lifecycle fences are created only on first
-  private write, and process listing degrades to an explicit unavailable
-  result when inspection is denied.
 - Wait-bridge Central traffic now reuses one bounded HTTP pool per process,
   caps concurrent Central connections at four by default, and logs before an
   excess board subscription falls back to polling. Coordinator subscription
@@ -111,9 +148,6 @@ This release includes `pursers-central==0.1.0a28`,
   seconds. Central rejects excess per-principal listen streams at a soft cap
   of 32, reports active stream counts through healthz, and attributes rejected
   coordinator joins by principal prefix, agent name, and requested role.
-- Fleet dashboard door endpoints now require Central's authoritative admin
-  membership projection before reading or mutating door material, and dashboard
-  tests inject temporary worker roots and process probes for hermetic replay.
 - Wait bridge and seat-kit setup now accept one `prs1` door: the bridge stores
   private per-board/per-role credentials, resolves missing runtime environment
   from them, assigns durable collision-safe seat-name suffixes, and provides
