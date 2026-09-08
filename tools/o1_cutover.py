@@ -1491,13 +1491,51 @@ def journal_load(path: Path) -> list[JournalEntry]:
     raw = read_json(path, "activation journal")
     if not isinstance(raw, Mapping):
         raise ConfigError("activation journal: top level must be an object")
+    version = raw.get("schema_version")
+    if isinstance(version, bool) or version != SCHEMA_VERSION:
+        raise ConfigError(
+            "activation journal: unsupported schema_version "
+            f"{version!r} (expected {SCHEMA_VERSION})"
+        )
+    toolkit = raw.get("toolkit")
+    if toolkit != TOOLKIT_IDENTIFIER:
+        raise ConfigError(
+            "activation journal: unsupported toolkit "
+            f"{toolkit!r} (expected {TOOLKIT_IDENTIFIER!r})"
+        )
+    raw_entries = raw.get("entries")
+    if not isinstance(raw_entries, list):
+        raise ConfigError("activation journal: entries must be a list")
     entries: list[JournalEntry] = []
-    for item in raw.get("entries") or []:
+    for index, item in enumerate(raw_entries):
         if not isinstance(item, Mapping):
-            continue
+            raise ConfigError(
+                f"activation journal: entry {index} must be an object"
+            )
+        fields: dict[str, str] = {}
+        for field in ("step_id", "state", "at"):
+            value = item.get(field)
+            if not isinstance(value, str) or not value.strip():
+                raise ConfigError(
+                    f"activation journal: entry {index}.{field} "
+                    "must be a non-empty string"
+                )
+            fields[field] = value
+        raw_targets = item.get("targets")
+        if not isinstance(raw_targets, list):
+            raise ConfigError(
+                f"activation journal: entry {index}.targets must be a list"
+            )
+        targets: list[Mapping[str, Any]] = []
+        for target_index, target in enumerate(raw_targets):
+            if not isinstance(target, Mapping):
+                raise ConfigError(
+                    "activation journal: entry "
+                    f"{index}.targets[{target_index}] must be an object"
+                )
+            targets.append(dict(target))
         entries.append(JournalEntry(
-            str(item.get("step_id")), str(item.get("state")), str(item.get("at")),
-            tuple(dict(t) for t in (item.get("targets") or ()) if isinstance(t, Mapping))))
+            fields["step_id"], fields["state"], fields["at"], tuple(targets)))
     return entries
 
 

@@ -1345,12 +1345,63 @@ def test_rollback_refuses_invalid_step_progression_before_any_write(
     _assert_rollback_state_unchanged(config, live_before, journal_before)
 
 
+@pytest.mark.parametrize(
+    ("corruption", "error"),
+    (
+        ("list-journal", "top level must be an object"),
+        ("scalar-entry", "entry 1 must be an object"),
+        ("list-entry", "entry 0 must be an object"),
+        ("object-entries", "entries must be a list"),
+        ("scalar-entries", "entries must be a list"),
+        ("object-targets", r"entry 0\.targets must be a list"),
+        ("scalar-target", r"entry 0\.targets\[0\] must be an object"),
+        ("wrong-schema", "unsupported schema_version"),
+        ("wrong-toolkit", "unsupported toolkit"),
+    ),
+)
+def test_rollback_refuses_malformed_journal_shape_before_any_write(
+    tmp_path, corruption, error
+):
+    layout = build_layout(tmp_path)
+    config = _prepare_and_backup(layout)
+    evidence = _dry_run_ok(config)
+    cut.run_activate(config, evidence, True)
+    journal = json.loads(config.journal_path.read_text(encoding="utf-8"))
+    if corruption == "list-journal":
+        journal = []
+    elif corruption == "scalar-entry":
+        journal["entries"].insert(1, "malformed-entry")
+    elif corruption == "list-entry":
+        journal["entries"][0] = []
+    elif corruption == "object-entries":
+        journal["entries"] = {"malformed": "entry"}
+    elif corruption == "scalar-entries":
+        journal["entries"] = "malformed-entries"
+    elif corruption == "object-targets":
+        journal["entries"][0]["targets"] = {"malformed": "target"}
+    elif corruption == "scalar-target":
+        journal["entries"][0]["targets"][0] = "malformed-target"
+    elif corruption == "wrong-schema":
+        journal["schema_version"] = cut.SCHEMA_VERSION + 1
+    else:
+        journal["toolkit"] = "unsupported-toolkit/1"
+    cut.write_json_atomic(config.journal_path, journal)
+    live_before, journal_before = _rollback_bytes(config)
+
+    with pytest.raises(cut.ConfigError, match=error):
+        cut.run_rollback(config, True)
+
+    _assert_rollback_state_unchanged(config, live_before, journal_before)
+
+
 def test_rollback_refuses_drift_when_whole_journal_is_absent(tmp_path):
     layout = build_layout(tmp_path)
     config = _prepare_and_backup(layout)
     evidence = _dry_run_ok(config)
     cut.run_activate(config, evidence, True)
-    cut.write_json_atomic(config.journal_path, {"entries": []})
+    journal = json.loads(config.journal_path.read_text(encoding="utf-8"))
+    journal["entries"] = []
+    cut.write_json_atomic(config.journal_path, journal)
     live_before, journal_before = _rollback_bytes(config)
 
     with pytest.raises(cut.GateFailure, match="absent activation step"):

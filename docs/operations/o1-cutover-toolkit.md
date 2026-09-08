@@ -178,7 +178,10 @@ step must then contain exactly one canonical journal target for each configured
 swap, including its matching backup reference, pre-activation hash, staged
 hash, and mode. Missing, duplicate, extra, malformed, or mismatched target
 metadata refuses rollback before any restore or journal write. The toolkit then
-validates whole-step progression: recorded activation steps must be an ordered
+requires the journal's schema/toolkit identifiers and `entries`/`targets`
+collections to retain their generated JSON shapes; non-object entries or targets
+are refused rather than discarded. It then validates whole-step progression:
+recorded activation steps must be an ordered
 prefix of the configured sequence, each step must have exactly one valid
 `started` / optional `done` / optional `rolled_back` progression, and activation
 cannot advance past an incomplete step. A configured step absent from the
