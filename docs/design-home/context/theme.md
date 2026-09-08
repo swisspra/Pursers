@@ -141,11 +141,11 @@ Fixed dark theme (no light mode):
 | Muted | `#cbd5e1` / `#94a3b8` |
 | Section bg | `#1e293b` |
 
-## Part 2 — Raw Source Dumps
+## Part 2 — Raw Source Excerpts
 
-### Dashboard-UI: `dashboard.css` full source
+### Dashboard-UI: `dashboard.css` token source
 
-Source: `tools/dashboard-ui/src/dashboard.css` (lines 1-290). The file is ~290 lines of CSS with `:root` dark defaults, `@media (prefers-color-scheme: light)`, `:root[data-theme="light"]`, `:root[data-theme="dark"]`, responsive breakpoints, accessibility media queries.
+Source: `tools/dashboard-ui/src/dashboard.css` (619 lines). The complete file contains `:root` dark defaults, `@media (prefers-color-scheme: light)`, `:root[data-theme="light"]`, `:root[data-theme="dark"]`, responsive breakpoints, and accessibility media queries. The excerpt below preserves the root token block; pass the full file separately when reproducing the current dashboard.
 
 Key raw `:root` (dark default):
 
