@@ -48,9 +48,11 @@ re-arms with `new_seq` on the next wait call.
 
 ### Re-arm behavior
 
-After timeout (`timed_out=true`), early stream end, or error, the caller
-re-arms by calling `bin/board.sh wait` again with `--since` set to the
-returned `new_seq` map. This is the relentless loop described in AGENTS.md.
+After timeout (`timed_out=true`) or clean early stream end, the response
+map is returned with the cursor advanced to `new_seq`. The caller re-arms
+with `new_seq`. On non-timeout errors, the error propagates and produces
+no `new_seq`; the caller retains and reuses the last successfully returned
+full registry cursor after reporting the sanitized error.
 
 ## Role resolution
 
@@ -87,11 +89,14 @@ cause. The following remain unverified hypotheses:
    `finished`, which may falsify this hypothesis.
 
 2. **Cursor advancement past unprocessed offers:** The `drain()` function
-   (line 460) advances the cursor past irrelevant events. If an offer was
-   deemed irrelevant due to agent_id mismatch or event-kind filter, the
-   cursor advances past it and it won't be re-processed on the next wait.
-   **Evidence needed:** Compare the seat's saved cursor against the offer
-   event seq.
+   (line 460) advances the cursor past events deemed irrelevant by the
+   seat's `agent_id`, selected kinds, and `ticket_is_relevant()` check
+   (which verifies `offered_agent_id == my_agent_id`, `recipient_identities`
+   includes `my_agent_id`, and `dispatch_state` matches the wait mode). If
+   an offer event was deemed irrelevant, the cursor advances past it.
+   **Evidence needed:** Compare the seat's saved cursor, agent_id, selected
+   kinds, and the event's `offered_agent_id`/`recipient_identities` against
+   the contemporaneous `ticket_get` dispatch state.
 
 No other hypotheses are offered for the CLI path. MCP-bridge-specific
 mechanisms (backlog suppression, subscription reconnect) are not
