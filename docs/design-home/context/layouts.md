@@ -2,8 +2,6 @@
 
 Shared layout components that appear on every page or across multiple pages.
 
-Baseline: `c2ebac5de803a0f7a00468ec4d3cdf06e4719096` (origin/main, 5.0.0a25).
-
 ## Surface 1: Dashboard-UI (Personal Board)
 
 Source: `tools/dashboard-ui/src/dashboard.css` + `tools/dashboard-ui/dashboard-entry.html`
@@ -31,7 +29,7 @@ The root layout wrapper. Contains header, connection banner, command bar (search
 └── footer.app-footer
 ```
 
-Representative layout declarations follow. The literal 619-line stylesheet and 145-line HTML shell are preserved at `raw/tools/dashboard-ui/src/dashboard.css` and `raw/tools/dashboard-ui/dashboard-entry.html`.
+Full CSS (layout-relevant excerpts):
 
 ```css
 .app-shell { width: min(1240px, 100%); margin: 0 auto; }
@@ -85,7 +83,7 @@ Representative layout declarations follow. The literal 619-line stylesheet and 1
 
 ## Surface 2: Fleet Dashboard
 
-Source: `tools/fleet-dashboard/fleet_dashboard.py` (7507 lines). The HTML definition and patches occupy lines 5828–6427; `do_GET` occupies lines 6580–6883 and `do_POST` occupies lines 6885–7284. The exact design-facing HTML range is preserved at `excerpts/fleet-dashboard-py.txt`. Baseline: `c2ebac5de803a0f7a00468ec4d3cdf06e4719096`.
+Source: `tools/fleet-dashboard/fleet_dashboard.py` (inline HTML/CSS/JS, line ~5828+)
 
 ### App Shell with Sidebar
 
@@ -104,7 +102,7 @@ body
 └── (dynamically rendered content)
 ```
 
-Representative sidebar declarations:
+Full sidebar CSS:
 
 ```css
 .app-shell { /* wraps sidebar + main */ }
@@ -128,7 +126,7 @@ main { width: 100%; max-width: 1500px; min-width: 0; margin: auto; padding: var(
 
 ## Surface 3: Extension Join/Settings
 
-Source: `tools/aionui-extension/webui/index.html` + `style.css`. Literal copies are under `raw/tools/aionui-extension/webui/`.
+Source: `tools/aionui-extension/webui/index.html` + `style.css`
 
 ### Extension Layout
 
@@ -142,7 +140,7 @@ body
     └── section#status-card (hidden, dl with dt/dd pairs)
 ```
 
-Representative layout declarations:
+Full layout CSS:
 
 ```css
 main { max-width: 42rem; margin: 0 auto; padding: 2rem; }

@@ -2,8 +2,6 @@
 
 Page component dependency trees for each key route/view.
 
-Baseline: `c2ebac5de803a0f7a00468ec4d3cdf06e4719096` (origin/main, 5.0.0a25).
-
 ## Surface 1: Dashboard-UI — Today View (primary page)
 
 Entry: `tools/dashboard-ui/dashboard-entry.html`
@@ -82,11 +80,11 @@ Calls MCP `link_snapshot` tool on first view activation.
 
 ## Surface 2: Fleet Dashboard — Overview (#/)
 
-Entry: `tools/fleet-dashboard/fleet_dashboard.py` line 5828 (inline HTML constant `HTML`)
+Entry: `tools/fleet-dashboard/fleet_dashboard.py` line ~5828 (inline HTML constant `HTML`)
 
 ```
 fleet_dashboard.py
-├── HTML definition and patch sequence (lines 5828–6427) — exact bounded source in excerpts/fleet-dashboard-py.txt
+├── HTML constant (line 5828) — full HTML document with inline <style> and <script>
 │   ├── <style> — CSS custom properties, layout, components, responsive, print
 │   ├── <body>
 │   │   ├── .app-shell
@@ -97,16 +95,16 @@ fleet_dashboard.py
 │   │   │       ├── #home-view
 │   │   │       ├── #detail-view
 │   │   │       └── dialog#help-overlay
-│   │   └── <script> — SPA JavaScript
+│   │   └── <script> — full SPA JavaScript
 │   │       ├── Helpers (esc, fmt, href builders, matches, filters)
 │   │       ├── State (fleetData, fleetErrors, centralLabels, detailData, etc.)
 │   │       ├── Renderers (renderFleet, renderCentral, renderDetail, ticketView, etc.)
 │   │       ├── API (fetchJson, fetchWithTimeout, loadCentrals, refreshCentral, etc.)
 │   │       ├── Routing (route(), syncRoute())
 │   │       └── Event listeners (hashchange, keyboard, search, theme, density)
-│   └── HTML.replace() patches (lines 5892–6427) — legacy route overrides, new sections
+│   └── HTML.replace() patches (lines 5892-6173+) — legacy route overrides, new sections
 │
-├── Python HTTP handler methods (lines 6580–7284)
+├── Python HTTPHandler class (line ~6435+)
 │   ├── do_GET — serves HTML, API endpoints
 │   ├── do_POST — config, intake, worker, door, project APIs
 │   └── _send — response helper
@@ -134,7 +132,7 @@ Renders via `renderAgentsHub()` → agent cards with managed controls, pressure 
 
 Renders via `renderOperationsHub()` → per-central operations cards with config/overhead/route links.
 
-### Fleet Dashboard: Seats (#/seats)
+### Fleet Dashboard: Seats (#/central/{central}/seats or #/config)
 
 Renders via `renderSeats()` → seat inventory table, add/update form, wait bridge status, doctor results, registry coverage, dispatch panels, release ops, import review.
 

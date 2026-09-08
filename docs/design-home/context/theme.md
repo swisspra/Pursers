@@ -141,11 +141,11 @@ Fixed dark theme (no light mode):
 | Muted | `#cbd5e1` / `#94a3b8` |
 | Section bg | `#1e293b` |
 
-## Part 2 — Exact source references
+## Part 2 — Raw Source Dumps
 
-### Dashboard-UI: `dashboard.css`
+### Dashboard-UI: `dashboard.css` full source
 
-Source: `tools/dashboard-ui/src/dashboard.css` (619 lines, 1–619). Baseline: `c2ebac5de803a0f7a00468ec4d3cdf06e4719096`. Its line-exact literal copy is `raw/tools/dashboard-ui/src/dashboard.css`; the block below is only the root-token excerpt.
+Source: `tools/dashboard-ui/src/dashboard.css` (lines 1-290). The file is ~290 lines of CSS with `:root` dark defaults, `@media (prefers-color-scheme: light)`, `:root[data-theme="light"]`, `:root[data-theme="dark"]`, responsive breakpoints, accessibility media queries.
 
 Key raw `:root` (dark default):
 
@@ -187,7 +187,7 @@ Host theme overrides: The dashboard-ui accepts host CSS variables via `applyHost
 
 ### Fleet Dashboard: inline CSS
 
-Source: `tools/fleet-dashboard/fleet_dashboard.py` line 5831. Exact surrounding source is in `excerpts/fleet-dashboard-py.txt`. Root-token excerpt:
+Source: `tools/fleet-dashboard/fleet_dashboard.py` line ~5830. Raw `:root`:
 
 ```css
 :root{color-scheme:dark;--bg:#0b1020;--panel:#151b2d;--panel2:#202942;--line:#29324a;--text:#e7ecf7;--muted:#9aa6bf;--good:#46d39a;--warn:#f4bd55;--bad:#ef6f7d;--accent:#79a8ff;--cell-y:8px;--card-pad:14px;--main-pad:24px}
@@ -195,6 +195,6 @@ Source: `tools/fleet-dashboard/fleet_dashboard.py` line 5831. Exact surrounding 
 :root[data-density="compact"]{--cell-y:4px;--card-pad:10px;--main-pad:16px}
 ```
 
-### Extension: `style.css`
+### Extension: `style.css` full source
 
-Source: `tools/aionui-extension/webui/style.css` (66 lines, fixed dark theme, no CSS custom properties). Its byte-exact literal copy is `raw/tools/aionui-extension/webui/style.css`.
+Source: `tools/aionui-extension/webui/style.css` (~50 lines, fixed dark theme, no CSS custom properties).

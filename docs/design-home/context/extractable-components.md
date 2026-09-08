@@ -2,8 +2,6 @@
 
 Components that appear on multiple pages or define shared UI patterns, suitable for extraction as reusable Superdesign DraftComponent entities.
 
-Baseline: `c2ebac5de803a0f7a00468ec4d3cdf06e4719096` (origin/main, 5.0.0a25).
-
 ## Layout Components (appear on most pages)
 
 ### AppHeader
@@ -24,7 +22,7 @@ Baseline: `c2ebac5de803a0f7a00468ec4d3cdf06e4719096` (origin/main, 5.0.0a25).
 
 ### SidebarNav (Fleet Dashboard)
 
-- Source: `tools/fleet-dashboard/fleet_dashboard.py` line 6090 — `<aside class="sidebar">`
+- Source: `tools/fleet-dashboard/fleet_dashboard.py` line ~6090 — `<aside class="sidebar">`
 - Category: layout
 - Description: Vertical sidebar with brand logo, primary navigation (Overview, Boards, Agents, Operations), and footer text
 - Extractable props: `activeNav` (string, default: "overview")

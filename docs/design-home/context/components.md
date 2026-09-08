@@ -2,11 +2,9 @@
 
 Shared/reusable UI component source for the primary dashboard (dashboard-ui) and the fleet dashboard. Framework: vanilla TypeScript DOM manipulation (dashboard-ui), inline JavaScript template literals (fleet-dashboard), and plain HTML/JS (extension).
 
-Baseline: `c2ebac5de803a0f7a00468ec4d3cdf06e4719096` (origin/main, 5.0.0a25).
-
 ## Dashboard-UI Shared Primitives
 
-Source: `tools/dashboard-ui/src/dashboard.ts` (1528 lines). Exact selected source is in `excerpts/dashboard-ts.txt` at ranges 537–636, 648–1214, and 1231–1400. Baseline: `c2ebac5de803a0f7a00468ec4d3cdf06e4719096`.
+Source: `tools/dashboard-ui/src/dashboard.ts`
 
 ### element() — Generic DOM element factory
 
@@ -134,7 +132,7 @@ function renderHighlight(container: HTMLElement, value: Highlight | null, emptyT
 
 ## Fleet-Dashboard Components
 
-Source: `tools/fleet-dashboard/fleet_dashboard.py` (7507 lines). The exact HTML definition and patch sequence is in `excerpts/fleet-dashboard-py.txt` at lines 5828–6427. Baseline: `c2ebac5de803a0f7a00468ec4d3cdf06e4719096`.
+Source: `tools/fleet-dashboard/fleet_dashboard.py` (inline JS, lines ~5828-6200+)
 
 ### fleet dashboard helper: esc()
 
@@ -162,27 +160,27 @@ function pressureBadge(s){const label=s.pressure==='compact'?'COMPACT':s.pressur
 
 ### fleet dashboard: renderCentral() — Central section renderer
 
-Renders per-central board cards, agent pool, and retire drawer. Source: line 5860 of `fleet_dashboard.py`.
+Renders per-central board cards, agent pool, and retire drawer. Source: lines ~5953-5990 of fleet_dashboard.py.
 
 ### fleet dashboard: ticketView() — Board ticket list
 
-Renders sortable ticket table with expandable detail rows. Source: line 5871.
+Renders sortable ticket table with expandable detail rows. Source: lines ~5900-5930.
 
 ### fleet dashboard: timelineView() — Board timeline
 
-Groups events by day and ticket with expandable rows. Source: line 5872.
+Groups events by day and ticket with expandable rows. Source: lines ~5900-5933.
 
 ### fleet dashboard: flowView() — Ticket flow kanban
 
-4-column flow (Open → Claimed → Submitted → Closed today). Source: line 5875.
+4-column flow (Open → Claimed → Submitted → Closed today). Source: lines ~5940-5942.
 
 ### fleet dashboard: routesView() — Ticket provenance routes
 
-Table of created/executed/submitted/reviewed stages per ticket plus per-seat load. Source: line 5877.
+Table of created/executed/submitted/reviewed stages per ticket plus per-seat load. Source: lines ~5944-5947.
 
 ## Extension Components
 
-Source: `tools/aionui-extension/webui/app.js`. The exact file is preserved at `raw/tools/aionui-extension/webui/app.js`.
+Source: `tools/aionui-extension/webui/app.js`
 
 ### Join form handler
 
