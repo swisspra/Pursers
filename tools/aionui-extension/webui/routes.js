@@ -2,6 +2,7 @@
 
 const { execFile } = require('node:child_process');
 const { createDoorOnboarding } = require('../door/adapter.cjs');
+const { isLoopbackHostname } = require('../security/loopback.cjs');
 
 const BRIDGE_COMMAND = 'pursers-wait-bridge';
 const INSTALL_HINT =
@@ -50,10 +51,8 @@ function forwardedHeaders(request) {
 
 function loopbackRequest(request) {
   const url = new URL(request.url);
-  const hostname = url.hostname.replace(/^\[|\]$/g, '').replace(/\.$/, '').toLowerCase();
-  const loopback = hostname === 'localhost' || hostname.endsWith('.localhost') || hostname === '::1' || hostname.startsWith('127.');
   const origin = request.headers.get('origin');
-  return loopback && (!origin || origin === url.origin);
+  return isLoopbackHostname(url.hostname) && (!origin || origin === url.origin);
 }
 
 function responseStatus(value) {

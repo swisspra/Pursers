@@ -54,6 +54,10 @@ test('validate rejects expired, mismatched and insecure remote doors', () => {
   assert.equal(onboarding.validate({ door: door(), expected_board: 'other' }).code, 'wrong_board');
   assert.equal(onboarding.validate({ door: door(), expected_role: 'reviewer' }).code, 'wrong_role');
   assert.equal(onboarding.validate({ door: door({ url: 'http://central.example/mcp' }) }).code, 'insecure_remote_url');
+  assert.equal(onboarding.validate({ door: door({ url: 'http://127.attacker.example/mcp' }) }).code, 'insecure_remote_url');
+  assert.equal(onboarding.validate({ door: door({ url: 'http://127.42.7.9:8766/mcp' }) }).ok, true);
+  assert.equal(onboarding.validate({ door: door({ url: 'http://worker.localhost:8766/mcp' }) }).ok, true);
+  assert.equal(onboarding.validate({ door: door({ url: 'http://[::1]:8766/mcp' }) }).ok, true);
   assert.equal(onboarding.validate({ door: door(), tier_max: 4 }).code, 'invalid_tier');
   assert.equal(onboarding.validate({ door: door(), folder: '../shared' }).code, 'invalid_folder');
 });
