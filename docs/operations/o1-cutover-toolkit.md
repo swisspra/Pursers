@@ -51,7 +51,10 @@ live configuration path. The operator config, board/membership/seat evidence,
 every staged swap source and every generated output must resolve beneath that
 staging root; symlink-parent escapes are refused. Every activation target must
 resolve beneath `live_root`, never beneath the repository or staging root.
-`backup_root` must be a distinct descendant of the staging root.
+`backup_root` must be a distinct descendant of the staging root. All eight seat
+roots must resolve to distinct canonical directories, and every configured live
+swap target must remain unique after canonicalization across launcher, JWKS,
+credential, door, dependent-config, and seat-managed files.
 `validate_layout` enforces these bounds before prepare, backup, preflight,
 dry-run, activation or rollback can write a byte, and also refuses relative,
 absolute, traversing, backslash-delimited, colliding or symlink-crossing
@@ -130,7 +133,7 @@ refusal, never a pass.
 
 | Gate | Refuses when |
 | --- | --- |
-| `gate_staging` | staging root missing, not `0700`, incomplete, inside the repository, config not `0600`, backup root not a distinct descendant, or an unsafe/colliding rollback identifier |
+| `gate_staging` | staging root missing, not `0700`, incomplete, inside the repository, config not `0600`, backup root not a distinct descendant, aliased canonical seat/live targets, or an unsafe/colliding rollback identifier |
 | `gate_url` | target is not exactly `http://127.0.0.1:8766/mcp`, previous equals target |
 | `gate_artifacts` | a pinned a25 wheel digest differs, staged launcher omits `pursers_central.pursers_central_runtime`, still names `serve_tls`, binds another host/port, profile omits issuer/audience/JWKS or sets a CA override, declared venv interpreter missing, launcher hash preflight mismatch |
 | `gate_backup` | manifest absent, member missing, hash or mode drift, incomplete rollback unit, or any activation target drifted since the backup |

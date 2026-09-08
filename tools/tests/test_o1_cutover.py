@@ -545,6 +545,67 @@ def test_live_target_outside_live_root_is_refused_without_mutation(tmp_path):
     assert outside.read_bytes() == original
 
 
+@pytest.mark.parametrize("category", ["jwks", "credential", "door", "config", "seat"])
+def test_cross_category_live_target_aliases_are_refused(tmp_path, category):
+    layout = build_layout(tmp_path)
+    raw = json.loads(layout.config_path.read_text(encoding="utf-8"))
+    launcher_target = raw["launcher"]["live_profile"]
+    if category == "jwks":
+        raw["jwks"]["live"] = launcher_target
+    elif category == "credential":
+        raw["credentials"][0]["live"] = launcher_target
+    elif category == "door":
+        raw["doors"][0]["live"] = launcher_target
+    elif category == "config":
+        raw["configs"][0]["live"] = launcher_target
+    else:
+        raw["launcher"]["live_profile"] = str(
+            Path(raw["seats"][0]["root"]) / cut.SEAT_WRAPPER)
+    layout.config_path.write_text(json.dumps(raw), encoding="utf-8")
+
+    with pytest.raises(cut.ConfigError, match="unique after canonicalization"):
+        layout.load()
+
+
+def test_two_unique_seat_names_cannot_share_one_root(tmp_path):
+    layout = build_layout(tmp_path)
+    raw = json.loads(layout.config_path.read_text(encoding="utf-8"))
+    assert raw["seats"][0]["name"] != raw["seats"][1]["name"]
+    raw["seats"][1]["root"] = raw["seats"][0]["root"]
+    layout.config_path.write_text(json.dumps(raw), encoding="utf-8")
+
+    with pytest.raises(cut.ConfigError, match="seat roots must be distinct canonical"):
+        layout.load()
+
+
+def test_seat_root_alias_refuses_activation_without_mutation(tmp_path):
+    layout = build_layout(tmp_path)
+    config = _prepare_and_backup(layout)
+    evidence = _dry_run_ok(config)
+
+    aliased_root = layout.live / "seats/01"
+    saved_root = layout.live / "seats/01-saved"
+    aliased_root.rename(saved_root)
+    aliased_root.symlink_to(layout.live / "seats/00", target_is_directory=True)
+    live_before = {
+        path.relative_to(layout.live): path.read_bytes()
+        for path in layout.live.rglob("*") if path.is_file()
+    }
+    journal_before = (
+        config.journal_path.read_bytes() if config.journal_path.exists() else None)
+
+    with pytest.raises(cut.ConfigError, match="seat roots must be distinct canonical"):
+        cut.run_activate(config, evidence, True)
+
+    assert {
+        path.relative_to(layout.live): path.read_bytes()
+        for path in layout.live.rglob("*") if path.is_file()
+    } == live_before
+    assert (
+        config.journal_path.read_bytes() if config.journal_path.exists() else None
+    ) == journal_before
+
+
 def test_preflight_refuses_staged_symlink_parent_without_mutation(tmp_path):
     layout = build_layout(tmp_path)
     config = layout.load()

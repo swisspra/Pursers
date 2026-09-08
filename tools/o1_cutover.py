@@ -1412,10 +1412,22 @@ def validate_layout(config: CutoverConfig) -> None:
     if config.seats_baseline is not None:
         require_child("seat baseline", config.seats_baseline, staging)
 
+    canonical_seat_roots: dict[Path, list[str]] = {}
+    for seat in config.seats:
+        canonical_seat_roots.setdefault(
+            seat.root.resolve(strict=False), []).append(seat.name)
+    for names in canonical_seat_roots.values():
+        if len(names) > 1:
+            problems.append(
+                "seat roots must be distinct canonical directories: "
+                + ", ".join(sorted(names)))
+
+    canonical_live_targets: dict[Path, list[str]] = {}
     for swap in config.swaps():
         require_child(f"staged swap source {swap.identifier}", swap.staged_path, staging)
         require_child(f"live mutation target {swap.identifier}", swap.live_path, live_root)
         resolved_live = swap.live_path.resolve(strict=False)
+        canonical_live_targets.setdefault(resolved_live, []).append(swap.identifier)
         try:
             resolved_live.relative_to(repository)
             problems.append(f"live mutation target {swap.identifier} is inside the repository")
@@ -1426,6 +1438,11 @@ def validate_layout(config: CutoverConfig) -> None:
             problems.append(f"live mutation target {swap.identifier} is inside staging_root")
         except ValueError:
             pass
+    for identifiers in canonical_live_targets.values():
+        if len(identifiers) > 1:
+            problems.append(
+                "live mutation targets must be unique after canonicalization: "
+                + ", ".join(sorted(identifiers)))
     rollback = config.rollback_unit()
     identifiers: list[str] = []
     for identifier, live in rollback:
