@@ -11,7 +11,7 @@ This is the bounded contract for faithfully reproducing the current primary dash
 | `tools/dashboard-ui/src/dashboard.ts` | 1528 | `bce74539deb910fa4c74b735cc3ab61e9a37fb75c4489cffc334cba7dc19fdbb` | Bounded render ranges below |
 | `packages/personal/src/pursers_personal/resources/dashboard.html` | 257 | `746c6eccd85afcc38588c8b9e1946ff2c91a7eb8477783c2f0d6bff0f4c6d922` | Built live MCP Apps entrypoint; not uploaded because it is 404280 bytes |
 
-Dependency snapshot: `codex/TK-f8a62bab8d05-resubmit-1@dfa4fa535bbc9aa665f0d8856971472651659af5`.
+Inventory comparison candidate: `codex/TK-f8a62bab8d05-resubmit-6@10f629af25ff841d9ceafaf377faf7daa598c906`. That candidate was still under review when this canvas context was repaired, so it is not treated as authoritative. The six canvas init files were cross-checked against exact source baseline `c2ebac5de803a0f7a00468ec4d3cdf06e4719096`; the canvas keeps live `#/seats`, GET `/api/attention`, GET and POST `/api/intake`, and the complete documented GET/POST handler sets.
 
 ## Exact render path
 

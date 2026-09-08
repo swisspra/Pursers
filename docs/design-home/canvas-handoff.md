@@ -16,7 +16,7 @@
 | Purpose | Draft | Version | Preview |
 | --- | --- | ---: | --- |
 | Faithful current Personal dashboard baseline | `ee6dcdae-d401-4b66-851a-68ffc2d3a05b` | 1 | https://p.superdesign.dev/draft/ee6dcdae-d401-4b66-851a-68ffc2d3a05b |
-| Direction A: Warm Guided Home | `3c7bf43a-9ae1-451d-8fbc-97a9468c2fab` | 3 | https://p.superdesign.dev/draft/3c7bf43a-9ae1-451d-8fbc-97a9468c2fab |
+| Direction A: Warm Guided Home | `3c7bf43a-9ae1-451d-8fbc-97a9468c2fab` | 4 | https://p.superdesign.dev/draft/3c7bf43a-9ae1-451d-8fbc-97a9468c2fab |
 | Direction B: Calm Project Home | `2bcc013f-c1b0-4fc6-a6f7-a7b8fc62ceb2` | 4 | https://p.superdesign.dev/draft/2bcc013f-c1b0-4fc6-a6f7-a7b8fc62ceb2 |
 | Projects: Warm Guided Home | `69b3340a-b9fd-47ab-9882-79fda80ac431` | 2 | https://p.superdesign.dev/draft/69b3340a-b9fd-47ab-9882-79fda80ac431 |
 | Work: Warm Guided Home | `338327db-9531-43a3-ab58-63f20617d7f3` | 1 | https://p.superdesign.dev/draft/338327db-9531-43a3-ab58-63f20617d7f3 |
@@ -55,7 +55,7 @@ The complete external context bundle contains 11 repo-relative files:
 
 The 404280-byte built dashboard and full 1528-line TypeScript module were deliberately excluded from upload. Their source fingerprints and bounded render contract are recorded in `.superdesign/context/primary-dashboard-current.md`.
 
-Current context source dependency: `codex/TK-f8a62bab8d05-resubmit-3@a3ee22dd67ba8c7d8e8a7b70fe65f5affea59cb3`, refreshed directly from `origin/main@c2ebac5de803a0f7a00468ec4d3cdf06e4719096`. The existing drafts were historically generated from the earlier resubmit-1 bundle. After review, the six init files and their duplicated documentation copies were replaced with the source-current resubmit-3 artifacts, every resume fingerprint was refreshed, and the existing exports were reconciled against the corrected route and page matrices. No claim is made that the historical generation used the refreshed context.
+Current source baseline: `origin/main@c2ebac5de803a0f7a00468ec4d3cdf06e4719096`. Inventory comparison candidate `codex/TK-f8a62bab8d05-resubmit-6@10f629af25ff841d9ceafaf377faf7daa598c906` was still under review during this repair and is not called authoritative. The six init files and their documentation mirrors were checked directly against the baseline. The route matrix now matches the complete mechanically extracted GET and POST handler sets, including live `#/seats`, GET `/api/attention`, GET and POST `/api/intake`, and GET `/api/board/<board>`. Existing drafts were historically generated from the earlier resubmit-1 bundle; this source-context refresh postdates generation, and no claim is made otherwise.
 
 Approved journey dependency: `codex/TK-1f8315536a3e@8202422c6841b84a6aeab64f6722e93805a3c86a`.
 
@@ -84,7 +84,7 @@ No repository logo/image asset exists for these surfaces. The canvas therefore p
 - Direction A implements the approved next-action Home; Direction B implements the approved project Home while keeping WORK and PERSONAL isolated.
 - Direction A was refined after QA removed a contradictory first-run prompt from a populated returning-user state.
 - Direction B was refined after QA removed mobile clipping and changed the unsupported `Open in agent chat` control to `View work details`.
-- Post-review context validation confirms all six `.superdesign/init/*.md` files match their `docs/design-home/context/*.md` mirrors. Five pairs preserve resubmit-3 exactly; `pages.md` includes the narrow source-backed correction from the stale central-scoped Seats heading to live `#/seats`. Every resume target fingerprints the current 11-file bundle.
+- Context validation confirms all six `.superdesign/init/*.md` files match their `docs/design-home/context/*.md` mirrors. The route matrix matches the exact baseline handler sets, `pages.md` retains the live `#/seats` route, and every resume target fingerprints the current 11-file bundle.
 
 ## Limitations and Next Step
 
