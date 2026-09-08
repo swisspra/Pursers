@@ -1,0 +1,74 @@
+{
+  "schemaVersion": 1,
+  "targets": {
+    "/home": {
+      "targetKind": "existing-ui",
+      "projectId": "c48769c8-8664-4e23-8490-f7af271a5849",
+      "baselineDraftId": "ee6dcdae-d401-4b66-851a-68ffc2d3a05b",
+      "activeDraftId": "ee6dcdae-d401-4b66-851a-68ffc2d3a05b",
+      "designSystemPath": ".superdesign/design-system.md",
+      "referenceIds": [],
+      "contextFiles": [
+        ".superdesign/design-system.md",
+        ".superdesign/context/primary-dashboard-current.md",
+        ".superdesign/init/components.md",
+        ".superdesign/init/layouts.md",
+        ".superdesign/init/routes.md",
+        ".superdesign/init/theme.md",
+        ".superdesign/init/pages.md",
+        ".superdesign/init/extractable-components.md",
+        "tools/dashboard-ui/dashboard-entry.html",
+        "tools/dashboard-ui/src/dashboard.css"
+      ],
+      "fingerprints": {
+        ".superdesign/design-system.md": "8e9c8016a9ddd87838774198244227031a858454a79c32c84a603aa71ce4f0f0",
+        ".superdesign/context/primary-dashboard-current.md": "114c3c480f526da066c29754d5ee0568827693bc91ca68aa81f66c8286f1d7ef",
+        ".superdesign/init/components.md": "c8bbdd5725f667f4c3ef5c9b350e8fe435f72308e7bb2059165969fe75100402",
+        ".superdesign/init/layouts.md": "73f283c0e13f59c1f7f8b560a54a7b6acb3a7e98dc270bdc5f9a225864efd3a4",
+        ".superdesign/init/routes.md": "50ef4b34b9a68c7b93cdd37411b2b8c3de1de471da340e5af35c0fda5b0dce8a",
+        ".superdesign/init/theme.md": "1eabdd6725ddbabaa6a219babfa3db9400c2d461ab1a59a40af49c603ce299b8",
+        ".superdesign/init/pages.md": "abeaee8e05b8453c5dea813f300f84807f10bb3455d4ddfdb79f817d952f7d2c",
+        ".superdesign/init/extractable-components.md": "f1094aa1e9287495c98bdb80f9a3ab06bdb3879f3d81ba2859e49f8d2ad147aa",
+        "tools/dashboard-ui/dashboard-entry.html": "cb640ae68837d02d3d0eb2843c4c31e9c8d563351264d0c3a7c68699e16500e7",
+        "tools/dashboard-ui/src/dashboard.css": "9d3b71edd4e0149337da441e769deeddb44c87d058d94455e3921ce0907f0fbd"
+      },
+      "components": [
+        {
+          "name": "PersonalAppHeader",
+          "id": "109147bc-4b43-4031-9369-4da243983f86",
+          "sourcePath": ".superdesign/components/personal-app-header.html"
+        },
+        {
+          "name": "PersonalViewTabs",
+          "id": "815d3747-4206-44a4-a17b-f5198b9198a6",
+          "sourcePath": ".superdesign/components/personal-view-tabs.html"
+        },
+        {
+          "name": "FleetSidebarNav",
+          "id": "907f4715-ac40-4c2b-8de8-e6afb34812f5",
+          "sourcePath": ".superdesign/components/fleet-sidebar-nav.html"
+        }
+      ],
+      "drafts": {
+        "ee6dcdae-d401-4b66-851a-68ffc2d3a05b": {
+          "title": "Current Personal Dashboard — Faithful Baseline",
+          "visualDirection": "faithful current dark Personal Preview",
+          "currentVersion": 1
+        },
+        "3c7bf43a-9ae1-451d-8fbc-97a9468c2fab": {
+          "title": "Direction A — Warm Guided Home",
+          "visualDirection": "warm off-white and teal guided AionUI Home",
+          "parentDraftId": "ee6dcdae-d401-4b66-851a-68ffc2d3a05b",
+          "currentVersion": 3
+        },
+        "2bcc013f-c1b0-4fc6-a6f7-a7b8fc62ceb2": {
+          "title": "Direction B — Calm Focused Workspace",
+          "visualDirection": "cool-gray and cobalt focused AionUI workspace",
+          "parentDraftId": "ee6dcdae-d401-4b66-851a-68ffc2d3a05b",
+          "currentVersion": 3
+        }
+      },
+      "updatedAt": "2026-09-08T07:03:01Z"
+    }
+  }
+}
