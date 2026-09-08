@@ -545,6 +545,43 @@ def _suite_commands(
     return commands[:8]
 
 
+def _suite_environment(command: dict[str, Any]) -> dict[str, str]:
+    """Build a minimal runner environment without inherited execution controls."""
+    environment = {
+        name: value
+        for name in ("PATH", "PATHEXT", "SYSTEMROOT", "WINDIR", "COMSPEC")
+        if (value := os.environ.get(name))
+    }
+    environment.update({
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONNOUSERSITE": "1",
+        "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
+    })
+    if command["pythonpath"]:
+        environment["PYTHONPATH"] = command["pythonpath"]
+    return environment
+
+
+def _suite_argv(
+    command: dict[str, Any], repo: Path, pytest_config: Path | None
+) -> list[str]:
+    """Use the verifier interpreter and a verifier-owned pytest configuration."""
+    submitted = list(command["argv"])
+    is_pytest = submitted[0] in {"pytest", "py.test"} or submitted[2] == "pytest"
+    if not is_pytest:
+        return [sys.executable, "-m", "unittest", *submitted[3:]]
+    if pytest_config is None:
+        raise ValueError("verifier pytest configuration is unavailable")
+    arguments = submitted[1:] if submitted[0] in {"pytest", "py.test"} else submitted[3:]
+    return [
+        sys.executable, "-m", "pytest",
+        "-c", str(pytest_config),
+        "--rootdir", str(repo),
+        "--confcutdir", str(repo),
+        *arguments,
+    ]
+
+
 def _verify_ticket(
     ticket: dict[str, Any], repo: Path, *, run_suites: bool = False
 ) -> dict[str, Any]:
@@ -594,27 +631,45 @@ def _verify_ticket(
         commands = _suite_commands(ticket, submission, repo)
         if not commands:
             raise ValueError("no allow-listed pytest/unittest command found in ticket evidence")
-        for command in commands:
-            environment = os.environ.copy()
-            if command["pythonpath"]:
-                environment["PYTHONPATH"] = command["pythonpath"]
-            completed = subprocess.run(
-                command["argv"], cwd=repo, env=environment,
-                check=False, text=True, capture_output=True
-            )
-            lines = (completed.stdout + completed.stderr).splitlines()
-            tail = lines[-8:]
-            display = shlex.join(command["display"])
-            print("suite: " + display)
-            for line in tail:
-                print(line)
-            suites.append({
-                "command": command["display"],
-                "returncode": completed.returncode,
-                "tail": tail,
-            })
-            if completed.returncode != 0:
-                raise ValueError("verification suite failed: " + display)
+        pytest_config: Path | None = None
+        if any(
+            command["argv"][0] in {"pytest", "py.test"}
+            or command["argv"][2] == "pytest"
+            for command in commands
+        ):
+            git_dir = repo / ".git"
+            if not git_dir.is_dir():
+                raise ValueError("verify suite replay requires a standalone git clone")
+            with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", dir=git_dir,
+                prefix="pursers-verify-", suffix=".ini", delete=False,
+            ) as handle:
+                handle.write("[pytest]\n")
+                pytest_config = Path(handle.name)
+        try:
+            for command in commands:
+                environment = _suite_environment(command)
+                completed = subprocess.run(
+                    _suite_argv(command, repo, pytest_config),
+                    cwd=repo, env=environment,
+                    check=False, text=True, capture_output=True
+                )
+                lines = (completed.stdout + completed.stderr).splitlines()
+                tail = lines[-8:]
+                display = shlex.join(command["display"])
+                print("suite: " + display)
+                for line in tail:
+                    print(line)
+                suites.append({
+                    "command": command["display"],
+                    "returncode": completed.returncode,
+                    "tail": tail,
+                })
+                if completed.returncode != 0:
+                    raise ValueError("verification suite failed: " + display)
+        finally:
+            if pytest_config is not None:
+                pytest_config.unlink(missing_ok=True)
     failures = []
     if only_actual or only_submitted:
         failures.append("files_changed mismatch")

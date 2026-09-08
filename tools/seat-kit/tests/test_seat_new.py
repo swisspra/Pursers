@@ -853,6 +853,11 @@ def test_suite_commands_allow_bounded_pythonpath_assignments(tmp_path: Path) -> 
         "packages/client/src",
     ]
 
+    environment = generated._suite_environment(commands[0])
+    assert environment["PYTHONPATH"] == "packages/client/src"
+    assert environment["PYTHONNOUSERSITE"] == "1"
+    assert environment["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] == "1"
+
 
 @pytest.mark.parametrize(
     ("command", "error"),
@@ -923,6 +928,91 @@ def test_suite_commands_reject_pytest_argument_files_before_expansion(
             generated._suite_commands(
                 {"tests": ["test-command: " + command]}, {}, repo
             )
+
+
+def test_verify_suite_replay_discards_inherited_execution_controls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    author, clone, generated, ticket, _old_sha = _review_verification_fixture(tmp_path)
+    branch = "codex/TK-review"
+    (author / "test_safe.py").write_text(
+        "import unittest\n\n"
+        "class SafeTest(unittest.TestCase):\n"
+        "    def test_inside_worktree(self):\n"
+        "        self.assertTrue(True)\n",
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "test_safe.py"], cwd=author, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "add safe suite"],
+        cwd=author, check=True, capture_output=True,
+    )
+    sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=author, check=True,
+        capture_output=True, text=True,
+    ).stdout.strip()
+    subprocess.run(
+        ["git", "push", "origin", branch],
+        cwd=author, check=True, capture_output=True,
+    )
+    ticket["tests"] = [
+        "test-command: pytest -q test_safe.py",
+        "test-command: python3 -m unittest discover -s . -p test_safe.py",
+    ]
+    ticket["submission_history"] = [{
+        "files_changed": ["test_safe.py"],
+        "notes": f"branch_and_commit: {branch} @ {sha}",
+    }]
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    startup_marker = outside / "startup-ran"
+    plugin_marker = outside / "plugin-ran"
+    module_marker = outside / "module-ran"
+    (outside / "sitecustomize.py").write_text(
+        "from pathlib import Path\n"
+        f"Path({str(startup_marker)!r}).write_text('outside startup')\n",
+        encoding="utf-8",
+    )
+    (outside / "injected_plugin.py").write_text(
+        "from pathlib import Path\n"
+        f"Path({str(plugin_marker)!r}).write_text('outside plugin')\n",
+        encoding="utf-8",
+    )
+    package = outside / "injectedpkg"
+    package.mkdir()
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "test_outside.py").write_text(
+        "from pathlib import Path\n"
+        f"Path({str(module_marker)!r}).write_text('outside module')\n"
+        "def test_outside():\n    assert True\n",
+        encoding="utf-8",
+    )
+    argument_file = outside / "args.txt"
+    argument_file.write_text("--pyargs injectedpkg\n", encoding="utf-8")
+    config_file = outside / "pytest.ini"
+    config_file.write_text("[pytest]\naddopts = --pyargs injectedpkg\n", encoding="utf-8")
+
+    monkeypatch.setenv("PYTHONPATH", str(outside))
+    monkeypatch.setenv("PYTHONHOME", str(outside))
+    monkeypatch.setenv("PYTHONSTARTUP", str(outside / "sitecustomize.py"))
+    monkeypatch.setenv("PYTEST_PLUGINS", "injected_plugin")
+    monkeypatch.setenv("PYTEST_ADDOPTS", "@" + str(argument_file))
+    clean_environment = generated._suite_environment({"pythonpath": ""})
+    assert not {
+        "PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP",
+        "PYTEST_PLUGINS", "PYTEST_ADDOPTS",
+    } & clean_environment.keys()
+    first = generated._verify_ticket(ticket, clone, run_suites=True)
+    monkeypatch.setenv("PYTEST_ADDOPTS", "-c " + str(config_file))
+    second = generated._verify_ticket(ticket, clone, run_suites=True)
+
+    assert [suite["returncode"] for suite in first["suites"]] == [0, 0]
+    assert [suite["returncode"] for suite in second["suites"]] == [0, 0]
+    assert not startup_marker.exists()
+    assert not plugin_marker.exists()
+    assert not module_marker.exists()
+    assert not list((clone / ".git").glob("pursers-verify-*.ini"))
 
 
 def test_operator_marker_file_is_loaded_without_printing_values(

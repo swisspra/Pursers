@@ -141,7 +141,12 @@ assignments, absolute paths, and parent-directory escapes are rejected without
 executing the command. Pytest module, plugin, and configuration escape options
 and every `@argument-file` form are refused before pytest can expand them;
 unittest replay requires `discover`, so submitted dotted modules cannot resolve
-from the host interpreter environment.
+from the host interpreter environment. Replayed suites receive a minimal
+environment: host Python/pytest injection variables are discarded, user-site and
+pytest plugin autoloading are disabled, and only an explicitly parsed bounded
+`PYTHONPATH` is restored. The verifier uses its own interpreter and a temporary
+empty pytest configuration under the detached clone, with root and conftest
+discovery bounded to that clone.
 
 ## HARD-verify checklist
 
