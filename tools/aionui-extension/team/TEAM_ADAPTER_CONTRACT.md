@@ -248,3 +248,25 @@ wiring should consume.
 - Remaining real acceptance (honest report, owned by TK-4f1f01ba50eb / operator GUI):
   live `team_spawn_agent` ack shape, live kickoff delivery, live interrupt/shutdown
   propagation, REST routes, GUI team creation. None of it is claimed from mocks here.
+
+## 10. Shipped implementation status (this ticket)
+
+- `team/adapter.cjs` (CommonJS, zero runtime dependencies beyond `node:child_process`)
+  exports: `createTeamAdapter({ runCli })`, `validateTeamSpec(spec)`,
+  `buildSeatKickoff(spec, seat)`, `buildLeadBrief(spec)`, `defaultRunCli(command,
+  input)`, `OUTCOMES`, `HOST_ERROR_CODES`, `CONTRACT = "agent-facing-team-cli"`,
+  `CONTRACT_SCHEMA_VERSION = 1`.
+- Adapter instance operations: `status({tasks})`, `plan(spec)`, `apply(spec)`,
+  `pauseSeat(slot_id, message, reason?)`, `stopSeat(slot_id, reason?)`,
+  `renameSeat(slot_id, new_name)`, `resetSeatContext(slot_id)`, `removeSeat(slot_id)`,
+  `createTeam()`, `archiveTeam()`, `listAssistants()`,
+  `describeAssistant(assistant_id, locale?)`.
+- Default transport: `execFile(process.env.AIONUI_HELPER_BIN || "aioncore", ["team",
+  ...argv])`, request JSON on stdin, stdout parsed as the host envelope, 30000 ms
+  timeout, 4 MiB max buffer; transport problems collapse to `transport_unavailable`.
+- Tests: `tests/team_adapter.test.cjs` (node:test) — 18 contract tests covering
+  validation, plan diffing, idempotent reconcile, identity-conflict freeze, dry-run
+  default, byte-exact live payloads, kickoff delivery, partial-failure continuation,
+  spawn-ack fallback (`spawn_ack_unparsed`), `runtime_context_missing` propagation,
+  unsupported-surface honesty, pause/stop/rename/reset payloads, status passthrough,
+  and kickoff/lead-brief invariant text. All green; existing suites unaffected.

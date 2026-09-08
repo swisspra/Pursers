@@ -244,3 +244,26 @@ sqlite3 ~/.aionui/aionui-backend.db ".tables"   # plus per-table .schema
 # inside a Team conversation (MCP or "$AIONUI_HELPER_BIN" team ...):
 #   team_members {}, team_list_assistants {}, team_describe_assistant {assistant_id}
 ```
+
+## 9. Exercise log for this ticket (TK-628602eedb90)
+
+Live host calls actually executed while gathering this evidence — all read-only:
+`aioncore --version`, `aioncore capabilities`, `aioncore --data-dir ~/.aionui team
+capabilities`, `aioncore team --help` and per-subcommand `--help`, in-conversation
+`team_members {}`, `team_list_assistants {}`, `team_describe_assistant
+{"assistant_id": "bare:600c6601"}`, read-only `sqlite3` inspection of
+`~/.aionui/aionui-backend.db` (`.tables`, `.schema`, selected `teams` columns), and
+`strings` over the installed binary for route observation. No Team was created,
+spawned into, interrupted, shut down, renamed, archived, or removed; no real user
+Team was started or stopped at any point.
+
+Local validation executed in the ticket worktree (no host interaction):
+
+```
+node --test tools/aionui-extension/tests/team_adapter.test.cjs   # node v24.20.0: tests 18, pass 18, fail 0
+node --test tools/aionui-extension/tests/routes.test.cjs         # pass 3, fail 0 (regression)
+python3 -m pytest tools/aionui-extension/tests -q                # 8 passed
+python3 tools/leak_scan.py tools/aionui-extension/team tools/aionui-extension/tests/team_adapter.test.cjs
+# leak_scan: clean (0 violations)
+git diff --check                                                 # clean
+```
