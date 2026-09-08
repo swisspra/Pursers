@@ -86,7 +86,7 @@ Entry: `tools/fleet-dashboard/fleet_dashboard.py` line 5828 (inline HTML constan
 
 ```
 fleet_dashboard.py
-├── HTML definition and patch sequence (lines 5828–6427)
+├── HTML definition and patch sequence (lines 5828–6427) — exact bounded source in excerpts/fleet-dashboard-py.txt
 │   ├── <style> — CSS custom properties, layout, components, responsive, print
 │   ├── <body>
 │   │   ├── .app-shell

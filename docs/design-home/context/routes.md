@@ -4,9 +4,9 @@ Source baseline: `c2ebac5de803a0f7a00468ec4d3cdf06e4719096` (origin/main, 5.0.0a
 
 ## Surface 1: Dashboard-UI (Vite + TypeScript SPA)
 
-**Source:** `tools/dashboard-ui/src/dashboard.ts` (1528 lines); selected design-facing ranges 537–636, 648–1214, and 1231–1400
+**Source:** `tools/dashboard-ui/src/dashboard.ts` (1528 lines); exact selected ranges 537–636, 648–1214, and 1231–1400 are preserved in `excerpts/dashboard-ts.txt`.
 **Entry:** `tools/dashboard-ui/dashboard-entry.html`
-**Generated build output:** `packages/personal/src/pursers_personal/resources/dashboard.html` (Vite single-file)
+**Generated Vite output:** `packages/personal/src/pursers_personal/resources/dashboard.html` (single-file)
 
 ### Tab views (data-driven, no hash router)
 
@@ -150,7 +150,6 @@ The `route()` function (line 5859) is progressively patched by hub extensions:
 | `/api/intake` | Intake queues | 6774 |
 | `/api/dispatch` | Dispatch history/timing | 6796 |
 | `/api/workers` | API workers list | 6818 |
-| `/api/board/<board>` | Board detail | 6840 |
 | `/api/config/jobs/<hash>` | Poll async config job | 6591 |
 
 ### POST API endpoints
@@ -173,7 +172,7 @@ The `route()` function (line 5859) is progressively patched by hub extensions:
 | `/api/agents/retire-inert` | Retire inert agents | 7059 |
 | `/api/attention` | Acknowledge/snooze attention | 7067 |
 | `/api/human/resolve` | Resolve human-input request | 7069 |
-| `/api/intake` | Submit or decide intake | 7264 |
+| `/api/intake` | Submit/decide intake | 7264 |
 | `/api/doors/copy` | Copy-once door | 7093 |
 | `/api/doors/rotate` | Rotate door | 7104 |
 | `/api/projects/add` | Add project to registry | 7115 |
@@ -258,16 +257,46 @@ AionUI's `POST /api/mcp/servers/import` endpoint (loopback-only).
 | 23 | board_state_get | 2340 | Read board-state values |
 | 24 | board_state_update | 2348 | Update board-state value |
 
-### Tool visibility classification
+### Exact decorator visibility
 
-- **PRIMARY_UI** (4): board_snapshot, board_event_feed, fleet_snapshot, link_snapshot
-- **MODEL/CHAT** (16): board_onboard, board_status, board_catchup, ticket_get,
-  ticket_list, ticket_create, ticket_claim, ticket_submit, ticket_review,
-  lease_renew, ticket_cancel, memory_write, memory_read, memory_search,
-  memory_links, board_state_get
-- **MODEL_ONLY** (4): board_catchup, memory_checkpoint, memory_handoff,
-  memory_unpin (visibility=MODEL_ONLY on decorator)
-- **Public** (2): board_state_get, board_state_update
+This matrix records only each `@apps.tool(..., visibility=...)` argument. It is
+mechanically checked against the immutable baseline and is separate from product
+role or authorization concepts.
+
+| Tool | Decorator visibility |
+| --- | --- |
+| `board_snapshot` | `MODEL_AND_APP` |
+| `fleet_snapshot` | `MODEL_AND_APP` |
+| `link_snapshot` | `APP_ONLY` |
+| `board_event_feed` | `APP_ONLY` |
+| `board_onboard` | `MODEL_ONLY` |
+| `board_status` | `MODEL_ONLY` |
+| `board_catchup` | `MODEL_ONLY` |
+| `ticket_get` | `MODEL_ONLY` |
+| `ticket_list` | `MODEL_ONLY` |
+| `ticket_create` | `MODEL_ONLY` |
+| `ticket_claim` | `MODEL_ONLY` |
+| `ticket_submit` | `MODEL_ONLY` |
+| `ticket_review` | `MODEL_ONLY` |
+| `lease_renew` | `MODEL_ONLY` |
+| `ticket_cancel` | `MODEL_ONLY` |
+| `memory_write` | `MODEL_ONLY` |
+| `memory_read` | `MODEL_ONLY` |
+| `memory_search` | `MODEL_ONLY` |
+| `memory_links` | `MODEL_ONLY` |
+| `memory_checkpoint` | `MODEL_ONLY` |
+| `memory_handoff` | `MODEL_ONLY` |
+| `memory_unpin` | `MODEL_ONLY` |
+| `board_state_get` | `MODEL_ONLY` |
+| `board_state_update` | `MODEL_ONLY` |
+
+Totals: 2 `MODEL_AND_APP`, 2 `APP_ONLY`, and 20 `MODEL_ONLY`.
+
+### Product-role grouping
+
+The four snapshot/feed tools support the primary UI surface. The remaining
+tools provide board, ticket, lease, memory, and board-state command surfaces.
+This product grouping does not redefine decorator visibility or authorization.
 
 ### HTML resource serving
 
@@ -278,13 +307,14 @@ providing the MCP App UI surface for compatible hosts.
 
 | Surface | Build step | Live entrypoint | Duplicates? |
 | --- | --- | --- | --- |
-| Dashboard-UI | Vite single-file build | `packages/personal/src/pursers_personal/resources/dashboard.html` | Generated from `tools/dashboard-ui/src/*` |
+| Dashboard-UI | Vite single-file build | `packages/personal/src/pursers_personal/resources/dashboard.html` | Generated output from dashboard-ui sources |
 | Fleet Dashboard | None (inline HTML in Python) | Served by `fleet_dashboard.py` | Self-contained, no overlap |
 | Extension | None (static files) | `webui/index.html` | Independent |
 | Personal MCP | Serves built dashboard.html | MCP App resource | Consumes dashboard-ui build output |
 
-The dashboard-ui source (`dashboard-entry.html` + `dashboard.ts` + `dashboard.css`)
-builds via Vite single-file to `packages/personal/src/pursers_personal/resources/dashboard.html`.
+The dashboard-ui sources (`dashboard-entry.html` + `dashboard.ts` + `dashboard.css`)
+build via Vite single-file to the generated output
+`packages/personal/src/pursers_personal/resources/dashboard.html`.
 The Personal MCP server serves this built file as an HTML resource. The fleet
 dashboard is self-contained inline HTML with no dependency on dashboard-ui.
 The extension has no build step and no overlap with either.

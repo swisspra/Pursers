@@ -6,7 +6,7 @@ Baseline: `c2ebac5de803a0f7a00468ec4d3cdf06e4719096` (origin/main, 5.0.0a25).
 
 ## Dashboard-UI Shared Primitives
 
-Source: `tools/dashboard-ui/src/dashboard.ts` (1528 lines). The selected design-facing ranges are 537–636, 648–1214, and 1231–1400. Baseline: `c2ebac5de803a0f7a00468ec4d3cdf06e4719096`.
+Source: `tools/dashboard-ui/src/dashboard.ts` (1528 lines). Exact selected source is in `excerpts/dashboard-ts.txt` at ranges 537–636, 648–1214, and 1231–1400. Baseline: `c2ebac5de803a0f7a00468ec4d3cdf06e4719096`.
 
 ### element() — Generic DOM element factory
 
@@ -134,7 +134,7 @@ function renderHighlight(container: HTMLElement, value: Highlight | null, emptyT
 
 ## Fleet-Dashboard Components
 
-Source: `tools/fleet-dashboard/fleet_dashboard.py` (7507 lines). The HTML definition and patch sequence occupies lines 5828–6427; `do_GET` occupies lines 6580–6883 and `do_POST` occupies lines 6885–7284. Baseline: `c2ebac5de803a0f7a00468ec4d3cdf06e4719096`.
+Source: `tools/fleet-dashboard/fleet_dashboard.py` (7507 lines). The exact HTML definition and patch sequence is in `excerpts/fleet-dashboard-py.txt` at lines 5828–6427. Baseline: `c2ebac5de803a0f7a00468ec4d3cdf06e4719096`.
 
 ### fleet dashboard helper: esc()
 
@@ -182,7 +182,7 @@ Table of created/executed/submitted/reviewed stages per ticket plus per-seat loa
 
 ## Extension Components
 
-Source: `tools/aionui-extension/webui/app.js` (60 lines).
+Source: `tools/aionui-extension/webui/app.js`. The exact file is preserved at `raw/tools/aionui-extension/webui/app.js`.
 
 ### Join form handler
 
