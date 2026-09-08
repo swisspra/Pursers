@@ -67,6 +67,15 @@ def test_live_apply_uses_the_exact_confirmed_plan_snapshot() -> None:
     assert "confirm: 'apply-live', dry_run: false" in script
 
 
+def test_same_origin_mcp_import_forwards_aionui_csrf_cookie() -> None:
+    script = read("webui/app.js")
+    assert "document.cookie" in script
+    assert "aionui-csrf-token=" in script
+    assert "headers['x-csrf-token']" in script
+    assert "credentials: 'same-origin'" in script
+    assert "fetch('/api/mcp/servers/import'" in script
+
+
 def test_appending_a_teammate_invalidates_the_confirmed_plan() -> None:
     script = read("webui/app.js")
     add_seat = script.split("function addSeat", 1)[1].split(

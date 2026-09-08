@@ -155,10 +155,18 @@ async function importMcpDefinition(result) {
   if (result.imported !== false) return true;
   if (!result.mcp_definition) return false;
   try {
+    const headers = { 'content-type': 'application/json' };
+    const csrfCookie = document.cookie
+      .split(';')
+      .map((part) => part.trim())
+      .find((part) => part.startsWith('aionui-csrf-token='));
+    if (csrfCookie) {
+      headers['x-csrf-token'] = csrfCookie.slice('aionui-csrf-token='.length);
+    }
     const response = await fetch('/api/mcp/servers/import', {
       method: 'POST',
       credentials: 'same-origin',
-      headers: { 'content-type': 'application/json' },
+      headers,
       body: JSON.stringify({
         servers: [{ ...result.mcp_definition, builtin: false, enabled: true }],
       }),
