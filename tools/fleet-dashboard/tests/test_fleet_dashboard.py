@@ -4001,6 +4001,7 @@ def test_dashboard_uses_warm_guided_home_shell() -> None:
     assert "function renderWarmApprovals()" in html
     assert "function renderWarmActivity()" in html
     assert "function renderWarmSettings()" in html
+    assert ".warm-row>div:first-child{display:grid;justify-items:start;gap:3px}" in html
     assert "https://cdn.tailwindcss.com" not in html
     assert "https://code.iconify.design" not in html
 
