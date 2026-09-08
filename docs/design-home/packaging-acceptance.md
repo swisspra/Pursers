@@ -14,7 +14,7 @@ embedded UI artifacts.
 ### Build command
 
 ```sh
-python tools/aionui-extension/build.py
+python3 tools/aionui-extension/build.py
 ```
 
 Produces `dist/pursers-aionui-0.1.0.zip`. The `--output` flag overrides the
@@ -116,7 +116,7 @@ scans all ZIP contents for:
 
 ### Isolated install acceptance
 
-1. Build the ZIP: `python tools/aionui-extension/build.py`
+1. Build the ZIP: `python3 tools/aionui-extension/build.py`
 2. Install through AionUI Settings → Extensions → Install from file
 3. Verify the "Pursers" settings tab appears
 4. Verify the Join form renders with door input and Join button
@@ -150,11 +150,11 @@ node --test tools/aionui-extension/tests/routes.test.cjs
 
 ```sh
 cd tools/dashboard-ui
-npm install
+npm ci
 npm run build
 ```
 
-The `build` script runs `vite build && cp dist/dashboard-entry.html dashboard.html`.
+The `build` script runs `vite build && cp dist/dashboard-entry.html dashboard.html` (to tools/dashboard-ui/dashboard.html). A separate promotion step copies this to packages/personal/src/pursers_personal/resources/dashboard.html, updates EXPECTED_VIEW_SHA256 and EXPECTED_VIEW_SIZE, regenerates component-lock.json, and updates the exact-view contract test.
 Vite with `vite-plugin-singlefile` inlines all JavaScript and CSS into a single
 HTML file. The output is copied to `dashboard.html` in the dashboard-ui directory.
 
@@ -179,13 +179,13 @@ HTML hash. A mismatch prevents serving a stale or tampered dashboard.
 - `schema_version`: 1
 - `product_version`: 5.0.0a25
 - `build_toolchain`: exact build, setuptools, wheel, packaging, pyproject-hooks versions
-- `components`: per-component version, wheel SHA-256, and member file SHA-256 hashes
+- `components`: two component entries with version, wheel SHA-256, and member file SHA-256 hashes
   - `pursers-central` (0.1.0a29): 15 member files with hashes
   - `pursers-client` (0.1.0a22): member files with hashes
-  - `pursers-personal` (5.0.0a25): member files with hashes
-  - `pursers-personal-import` (5.0.0a3): member files with hashes
-  - `pursers-wait-bridge` (0.1.0a15): member files with hashes
-- `dashboard_html_sha256`: hash of the built dashboard.html
+- `view`: dashboard resource attestation
+  - `resource`: `pursers_personal/resources/dashboard.html`
+  - `size_bytes`: 404280
+  - `sha256`: hash of the built dashboard.html
 
 ### No-source-tree dependencies in dashboard.html
 
@@ -196,6 +196,9 @@ The built `dashboard.html` is a self-contained single-file application:
 - No references to `tools/`, `packages/`, or source-tree paths
 - No external CDN or font URLs
 - The file contains synthetic fallback data for offline preview
+- The Vite single-file bundle may contain a `fetch()` call from the
+  modulepreload bootstrap; this is a build-tool artifact, not a runtime
+  data fetch. The dashboard uses `PostMessageTransport` for all data.
 
 ### Relative URL checks for dashboard.html
 
@@ -244,7 +247,7 @@ rendering, and configuration endpoints.
 
 | Step | Command | Owner | Pass condition |
 | --- | --- | --- | --- |
-| 1. Build ZIP | `python tools/aionui-extension/build.py` | Extension developer | `dist/pursers-aionui-0.1.0.zip` exists |
+| 1. Build ZIP | `python3 tools/aionui-extension/build.py` | Extension developer | `dist/pursers-aionui-0.1.0.zip` exists |
 | 2. Verify ZIP contents | `python3 -m pytest tools/aionui-extension/tests/test_package.py -v` | Extension developer | 3 tests pass |
 | 3. Verify manifest | `python3 -m pytest tools/aionui-extension/tests/test_manifest.py -v` | Extension developer | 3 tests pass |
 | 4. Verify contexts | `python3 -m pytest tools/aionui-extension/tests/test_contexts.py -v` | Extension developer | 1 test passes |
