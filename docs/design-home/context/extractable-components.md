@@ -2,6 +2,8 @@
 
 Components that appear on multiple pages or define shared UI patterns, suitable for extraction as reusable Superdesign DraftComponent entities.
 
+Baseline: `c2ebac5de803a0f7a00468ec4d3cdf06e4719096` (origin/main, 5.0.0a25).
+
 ## Layout Components (appear on most pages)
 
 ### AppHeader
