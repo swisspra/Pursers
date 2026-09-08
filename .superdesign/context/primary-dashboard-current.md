@@ -61,4 +61,3 @@ At 900px the header and hero stack and the Today grid becomes two columns. At 62
 ## Uploaded context boundary
 
 Pass this contract, the six `.superdesign/init/*.md` files, `.superdesign/design-system.md`, the 145-line HTML shell, and the 619-line CSS. Do not upload the 404280-byte built HTML or the full 1528-line TypeScript module.
-

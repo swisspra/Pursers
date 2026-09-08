@@ -1,151 +1,288 @@
-# Routes — Pursers Dashboard Surfaces
+# Routes and feature matrix
 
-Full route/feature coverage matrix across all dashboard surfaces.
+Source baseline: `c2ebac5de803a0f7a00468ec4d3cdf06e4719096` (origin/main, 5.0.0a25).
 
-## Surface 1: Dashboard-UI (Personal Board)
+## Surface 1: Dashboard-UI (Vite + TypeScript SPA)
 
-Source: `tools/dashboard-ui/src/dashboard.ts` — tab-based SPA, no URL routing. Views switched via `selectView()`.
+**Source:** `tools/dashboard-ui/src/dashboard.ts` (1528 lines, 1–1528)
+**Entry:** `tools/dashboard-ui/dashboard-entry.html`
+**Build output:** `packages/personal/resources/dashboard.html` (Vite single-file)
 
-| View | Tab ID | Panel ID | Description | Key Functions |
-|------|--------|----------|-------------|---------------|
-| Today | `tab-today` | `view-today` | Project health, metrics, current work, agents, handoff, pinned note, recent activity | `renderToday()`, `renderHealth()`, `ticketCounts()` |
-| Work | `tab-work` | `view-work` | All tickets grouped by status (Open, Working, Submitted, Needs attention, Done, Ended) | `renderWork()` |
-| Agents | `tab-agents` | `view-agents` | Agent roster with status, role, platform, project, current ticket | `renderAgents()` |
-| Fleet | `tab-fleet` | `view-fleet` | Organization-wide fleet snapshot: projects table + agent pool table | `renderFleet()` |
-| Links | `tab-links` | `view-links` | Ticket/memory/file/tag relationships from memory_links | `renderLinks()` |
-| Activity | `tab-activity` | `view-activity` | Bounded event feed timeline | `renderActivity()`, `renderTimeline()` |
+### Tab views (data-driven, no hash router)
 
-### Search (overlay)
+The dashboard-ui SPA uses a tab-based view switcher, not hash routing. Views are
+selected by clicking tab buttons that call `switchPanel(name)`:
 
-`renderSearch()` — global search across tickets, agents, projects, pool entries, links, events, highlights. Activated by `/` key. Results shown in `#search-results` panel.
+| View | Tab label | Render function | Line range |
+| --- | --- | --- | --- |
+| Today | Today | `renderToday()` | 750–774 |
+| Work | Work | `renderWork()` | 805–844 |
+| Agents | Agents | `renderAgents()` | 845–922 |
+| Fleet | Fleet | `renderFleet()` | 923–1040 |
+| Links | Links | `renderLinks()` | 1041–1134 |
+| Activity | Activity | `renderActivity()` | 1151–1180 |
 
-### Data Refresh Cycle
+Additional render functions:
 
-- `refreshSnapshot()` — calls MCP `board_snapshot` tool
-- `refreshFeed()` — calls MCP `board_event_feed` tool (scheduled timer, exponential backoff on failure)
-- `refreshFleet()` — calls MCP `fleet_snapshot` tool (on demand when Fleet tab selected)
-- `refreshLinks()` — calls MCP `link_snapshot` tool (on demand when Links tab selected)
+| Function | Purpose | Line range |
+| --- | --- | --- |
+| `renderConnection()` | Connection health banner | 648–676 |
+| `renderActivityScope()` | Activity scope toggle | 677–696 |
+| `renderHealth()` | Health metrics strip | 697–749 |
+| `renderHighlight()` | Highlight card | 775–804 |
+| `renderTimeline()` | Timeline event list | 1135–1150 |
+| `renderActivePanel()` | Active panel dispatcher | 1181–1193 |
+| `render()` | Top-level render dispatcher | 1194–1214 |
+| `renderSearch()` | Global search results | 1231–1316 |
 
-## Surface 2: Fleet Dashboard
+### Data refresh functions
 
-Source: `tools/fleet-dashboard/fleet_dashboard.py` — hash-based SPA routing.
+| Function | Purpose | Line range |
+| --- | --- | --- |
+| `refreshSnapshot()` | Fetch board snapshot via MCP | 1317–1338 |
+| `refreshFleet()` | Fetch fleet snapshot | 1339–1366 |
+| `refreshLinks()` | Fetch link snapshot | 1367–1401 |
+| `refreshFeed()` | Fetch event feed with backoff | 1402–1528 |
 
-### Hash Routes
+### Decoders (type-safe parsers)
 
-| Route Pattern | Kind | Description |
-|---------------|------|-------------|
-| `#/` | overview | Fleet overview: health cards per central, needs attention, waiting-for-you |
-| `#/boards` | boards-hub | Board workspace cards with quick links |
-| `#/agents` | agents-hub | Unified agent pool: live workers, API agents, controls, logs |
-| `#/operations` | operations-hub | Operations: config, overhead, routes per central |
-| `#/central/{central}/board/{id}` | board-detail | Board workspace with tabs |
-| `#/central/{central}/board/{id}/tickets` | board-view | Ticket list with expandable detail rows |
-| `#/central/{central}/board/{id}/timeline` | board-view | Event timeline grouped by day and ticket |
-| `#/central/{central}/board/{id}/changes` | board-view | Change summary (created/claimed/submitted/closed/rejected) |
-| `#/central/{central}/board/{id}/flow` | board-view | 4-column flow board (Open → Claimed → Submitted → Closed) |
-| `#/central/{central}/board/{id}/routes` | board-view | Ticket provenance routes + per-seat load |
-| `#/central/{central}/config` | config | Coordinator configuration form |
-| `#/central/{central}/overhead` | overhead | Session context pressure + bridge diagnostics |
-| `#/central/{central}/workers` | workers | API worker management (add, test, start, stop) |
-| `#/central/{central}/seats` | seats | Seat configuration, dispatch policy, doctor, registry |
-| `#/board/{id}` | board-detail | Board detail (default central) |
-| `#/config` | config | Config (default central) |
+| Function | Purpose | Line range |
+| --- | --- | --- |
+| `decodeAgent()` | Parse agent from raw | 280–301 |
+| `decodeTicket()` | Parse ticket from raw | 302–319 |
+| `decodeEvent()` | Parse board event | 320–335 |
+| `decodeHighlight()` | Parse highlight card | 336–349 |
+| `decodeSnapshot()` | Parse full board snapshot | 367–427 |
+| `decodeFleetProject()` | Parse fleet project | 428–439 |
+| `decodeFleetSeat()` | Parse fleet seat | 440–449 |
+| `decodeFleetPoolEntry()` | Parse pool entry | 450–462 |
+| `decodeFleetSnapshot()` | Parse fleet snapshot | 463–485 |
+| `decodeLinkNode()` | Parse link node | 492–502 |
+| `decodeLinkEdge()` | Parse link edge | 503–514 |
+| `decodeLinkSnapshot()` | Parse link snapshot | 515–532 |
 
-### API Routes (GET)
+### PostMessageTransport MCP Apps bridge
 
-| Path | Description |
-|------|-------------|
-| `/` | HTML page (SPA) |
-| `/api/centrals` | Central label list |
-| `/api/fleet?central={label}` | Fleet data per central |
-| `/api/board/{board_id}?central={label}` | Board detail data |
-| `/api/config/seats` | Seat inventory |
-| `/api/config/bridge` | Wait bridge status |
-| `/api/config/release` | Release status |
-| `/api/config/registry` | Registry data |
-| `/api/config/jobs/{hash}` | Job status |
-| `/api/attention` | Attention state |
-| `/api/overhead?central={label}` | Session context pressure |
-| `/api/dispatch?central={label}` | Dispatch policy data |
+The dashboard communicates with the host through `PostMessageTransport` (lines
+~545–636), which wraps `window.postMessage` / `window.addEventListener` for
+MCP tool calls. The `structured()` helper (line 545) extracts structured content
+from MCP results. `serializedWithinLimit()` (line 537) validates response size.
 
-### API Routes (POST, loopback-only for config)
+## Surface 2: Fleet Dashboard (inline Python HTML SPA)
 
-| Path | Description |
-|------|-------------|
-| `/api/config` | Save coordinator config |
-| `/api/intake` | Intake approve/decline |
-| `/api/workers` | Add/update worker |
-| `/api/workers/{name}/{test\|start\|stop\|restart}` | Worker actions |
-| `/api/config/plan` | Config plan preview |
-| `/api/config/suggestions` | Config suggestions |
-| `/api/config/apply` | Apply config changes |
-| `/api/config/prompt` | Generate seat prompt |
-| `/api/config/doctor` | Run doctor checks |
-| `/api/config/import` | Import discovered seats |
-| `/api/config/bridge/install` | Install/upgrade bridge |
-| `/api/config/bridge/upgrade-all` | Upgrade all seats |
-| `/api/config/ops/plan` | Ops action plan |
-| `/api/config/ops` | Execute ops action |
-| `/api/config/registry/clone` | Clone registry project |
-| `/api/dispatch` | Save dispatch policy |
-| `/api/agents/retire` | Retire specific agent |
-| `/api/agents/retire-inert` | Retire inert agents |
-| `/api/attention` | Attention action (ack/snooze) |
-| `/api/human/resolve` | Resolve human request |
-| `/api/doors/copy` | Copy doors |
-| `/api/doors/rotate` | Rotate doors |
-| `/api/projects/add` | Add project |
+**Source:** `tools/fleet-dashboard/fleet_dashboard.py` (7507 lines)
+**HTML constant:** Inline string starting at line ~5828, patched through ~6173
+**HTTP handler:** `BaseHTTPRequestHandler` subclass at ~6435
 
-## Surface 3: Extension Join/Settings
+### Hash routes (from patched `route()` function)
 
-Source: `tools/aionui-extension/aion-extension.json` + `webui/routes.js`
+The `route()` function (line 5859) is progressively patched by hub extensions:
 
-| Route | Method | Description |
-|-------|--------|-------------|
-| `/pursers/join` | POST | Store a door and register the wait bridge as MCP server |
-| `/pursers/status` | GET | Read redacted wait-bridge status |
-| Settings tab: "Pursers" | — | Entry point: `webui/index.html`, positioned after "tools" |
+**Original routes (legacyRouteV1, line 5859):**
 
-## Surface 4: Personal MCP Server Tools
+| Hash pattern | Kind | View |
+| --- | --- | --- |
+| `#/` or no hash | (null) → overview/home | Fleet overview |
+| `#/central/<central>/board/<board>` | board | tickets (default) |
+| `#/central/<central>/board/<board>/tickets` | board | tickets |
+| `#/central/<central>/board/<board>/timeline` | board | timeline |
+| `#/central/<central>/board/<board>/changes` | board | changes |
+| `#/central/<central>/board/<board>/flow` | board | flow |
+| `#/central/<central>/board/<board>/routes` | board | routes |
+| `#/central/<central>/overhead` | overhead | overhead detail |
+| `#/central/<central>/config` | config | coordinator config |
+| `#/board/<board>` | board | tickets (uses defaultCentral) |
+| `#/board/<board>/tickets` | board | tickets |
+| `#/board/<board>/timeline` | board | timeline |
+| `#/board/<board>/changes` | board | changes |
+| `#/board/<board>/flow` | board | flow |
+| `#/board/<board>/routes` | board | routes |
+| `#/config` | config | config (uses defaultCentral) |
 
-Source: `packages/personal/src/pursers_personal/apps_server.py`
+**Hub patch (line 6101, replaces route function):**
 
-| MCP Tool | Visibility | Description |
-|----------|-----------|-------------|
-| `board_snapshot` | MODEL_AND_APP | Current board projection |
-| `fleet_snapshot` | MODEL_AND_APP | Fleet projection across boards |
-| `link_snapshot` | APP_ONLY | Ticket/memory/file/tag links |
-| `board_event_feed` | APP_ONLY | Bounded observed events |
-| `board_onboard` | MODEL_ONLY | Join board + working context |
-| `board_status` | MODEL_ONLY | Board health + workload counts |
-| `board_catchup` | MODEL_ONLY | Bounded Central journal page |
-| `ticket_get` | MODEL_ONLY | Read one ticket by ID |
-| `ticket_list` | MODEL_ONLY | List visible tickets |
-| `ticket_create` | MODEL_ONLY | Create a ticket |
-| `ticket_claim` | MODEL_ONLY | Claim a ticket |
-| `ticket_submit` | MODEL_ONLY | Submit completed work |
-| `ticket_review` | MODEL_ONLY | Record review verdict |
-| `lease_renew` | MODEL_ONLY | Renew ticket lease |
-| `ticket_cancel` | MODEL_ONLY | Cancel a ticket |
-| `memory_write` | MODEL_ONLY | Write project memory |
-| `memory_read` | MODEL_ONLY | Read project memory |
-| `memory_search` | MODEL_ONLY | Search project memory |
-| `memory_links` | MODEL_ONLY | Traverse memory relationships |
-| `memory_checkpoint` | MODEL_ONLY | Record continuation checkpoint |
-| `memory_handoff` | MODEL_ONLY | Record handoff with next steps |
-| `memory_unpin` | MODEL_ONLY | Unpin a memory entry |
-| `board_state_get` | MODEL_ONLY | Read board-state values |
-| `board_state_update` | MODEL_ONLY | Update board-state value |
+| Hash pattern | Kind |
+| --- | --- |
+| `#/boards` | boards (hub overview) |
+| `#/agents` | agents (unified agent pool) |
+| `#/operations` | operations (policy, overhead, routes) |
 
-## Duplicate Frontend Analysis
+**Workers patch (lines 5963–6006, patches route + adds syncWorkersRoute):**
 
-| Source | Built Output | Relationship |
-|--------|-------------|--------------|
-| `tools/dashboard-ui/dashboard-entry.html` + `src/dashboard.ts` + `src/dashboard.css` | `packages/personal/src/pursers_personal/resources/dashboard.html` | Vite single-file build of dashboard-ui source. The built HTML is the **actual live entrypoint** served by the Personal MCP server via `load_dashboard_html()` + `apps.add_html_resource()`. The source files are the development version. |
-| `tools/fleet-dashboard/fleet_dashboard.py` (inline HTML/CSS/JS) | same file | Self-contained; the HTML is generated as a Python string constant and served by `BaseHTTPRequestHandler.do_GET("/")`. No separate build step. |
-| `tools/aionui-extension/webui/*` | same files | Served directly by the AionUI extension host. No build step. |
+| Hash pattern | Kind |
+| --- | --- |
+| `#/central/<central>/workers` | workers (API worker management) |
 
-**Actual live entrypoints:**
-1. Personal dashboard: `packages/personal/src/pursers_personal/resources/dashboard.html` (served as MCP App resource `UI_URI`)
-2. Fleet dashboard: `tools/fleet-dashboard/fleet_dashboard.py` line ~5828 (served at HTTP `/`)
-3. Extension: `tools/aionui-extension/webui/index.html` (served by AionUI at settings tab)
+**Seats patch (line 6149–6152, replaces route function again):**
+
+| Hash pattern | Kind |
+| --- | --- |
+| `#/seats` | seats (seat inventory) |
+
+**Keyboard shortcuts (line 5889, patched at 5905, 5975–5976):**
+
+| Key | Action |
+| --- | --- |
+| `g` then `f` | Go home (`#/`) |
+| `g` then `o` | Go to overhead |
+| `g` then `c` | Go to config |
+| `g` then `w` | Go to workers |
+| `g` then `r` | Go to routes (if on a board) |
+| `/` | Focus search/filter |
+| `?` | Show keyboard help dialog |
+| `Escape` | Close search/help |
+
+### GET API endpoints
+
+| Route | Purpose | Handler line |
+| --- | --- | --- |
+| `/` | Serve HTML page | 6582 |
+| `/api/centrals` | List configured centrals | 6585 |
+| `/api/fleet` | Fleet snapshot (all centrals) | 6639 |
+| `/api/overhead` | Context pressure per agent | 6730 |
+| `/api/config` | Coordinator config read | 6765 |
+| `/api/config/seats` | Seat inventory | 6603 |
+| `/api/config/bridge` | Bridge install/upgrade status | 6605 |
+| `/api/config/release` | Release operations status | 6607 |
+| `/api/config/attention` | Attention state | 6609 |
+| `/api/config/registry` | Project registry | 6648 |
+| `/api/doors` | Door inventory | 6665 |
+| `/api/intake` | Intake queues | 6774 |
+| `/api/dispatch` | Dispatch history/timing | 6796 |
+| `/api/workers` | API workers list | 6818 |
+| `/api/config/jobs/<hash>` | Poll async config job | 6591 |
+
+### POST API endpoints
+
+| Route | Purpose | Handler line |
+| --- | --- | --- |
+| `/api/config/plan` | Preview config changes | 6965 |
+| `/api/config/suggestions` | Config suggestions | 6967 |
+| `/api/config/apply` | Apply config changes | 6969 |
+| `/api/config/prompt` | Render prompt preview | 6973 |
+| `/api/config/doctor` | Run Doctor check | 6975 |
+| `/api/config/import` | Import discovered seats | 6984 |
+| `/api/config/bridge/install` | Install wait bridge | 6988 |
+| `/api/config/bridge/upgrade-all` | Upgrade all bridges | 6992 |
+| `/api/config/ops/plan` | Release ops plan | 6996 |
+| `/api/config/ops` | Release operations execute | 7000 |
+| `/api/config/registry/clone` | Create/fetch registry clone | 7009 |
+| `/api/dispatch` | Dispatch info write | 7032 |
+| `/api/agents/retire` | Retire one agent | 7046 |
+| `/api/agents/retire-inert` | Retire inert agents | 7059 |
+| `/api/attention` | Acknowledge/snooze attention | 7067 |
+| `/api/human/resolve` | Resolve human-input request | 7069 |
+| `/api/doors/copy` | Copy-once door | 7093 |
+| `/api/doors/rotate` | Rotate door | 7104 |
+| `/api/projects/add` | Add project to registry | 7115 |
+| `/api/workers` | Create/update API worker | 7137 |
+| `/api/config` | Update coordinator config | 7161 |
+| `/api/workers/<name>/<action>` | Worker test/start/stop/restart | 6909 |
+
+**Config routes set** (line 6920): routes that accept POST with config body size
+limit. Includes `/api/config`, `/api/config/plan`, `/api/config/apply`,
+`/api/config/suggestions`, `/api/config/prompt`, `/api/config/doctor`,
+`/api/config/import`, `/api/config/bridge/install`,
+`/api/config/bridge/upgrade-all`, `/api/config/ops/plan`, `/api/config/ops`,
+`/api/config/registry/clone`.
+
+**Worker action regex** (line 6909):
+`/api/workers/([a-z0-9-]{2,32})/(test|start|stop|restart)`
+
+## Surface 3: Extension (AionUI settings tab)
+
+**Source:** `tools/aionui-extension/` (5 webui files, 360 lines total)
+
+### API routes (from `aion-extension.json` webui.apiRoutes)
+
+| Route | Method | Handler | Description |
+| --- | --- | --- | --- |
+| `/pursers/join` | POST | `webui/routes.js:join()` | Store door, register wait bridge |
+| `/pursers/status` | GET | `webui/routes.js:status()` | Read redacted wait-bridge status |
+
+### Static assets
+
+| URL prefix | Directory | Description |
+| --- | --- | --- |
+| `/pursers/assets` | `webui/` | Join tab HTML, CSS, JS |
+
+### Extension contribution surface
+
+| Contribution | Entry | Details |
+| --- | --- | --- |
+| Settings tab | `webui/index.html` | "Pursers" tab, order=80, after "tools" |
+| Assistant presets | 4 presets | worker-codex, worker-claude, reviewer-codex, reviewer-claude |
+| API routes | 2 routes | join (POST), status (GET) |
+
+### Bridge commands (from `routes.js`)
+
+The extension calls `pursers-wait-bridge` (BRIDGE_COMMAND, line 6) with:
+- `join <door>` — validates and stores door, onboards seat
+- `status` — reads board, role, key ID, expiry, seat names, push mode
+
+After join, the extension registers the bridge as a stdio MCP server through
+AionUI's `POST /api/mcp/servers/import` endpoint (loopback-only).
+
+## Surface 4: Personal MCP Server
+
+**Source:** `packages/personal/src/pursers_personal/apps_server.py` (2401 lines)
+
+### MCP tools (24 total, `@apps.tool` decorated)
+
+| # | Tool name | Line | Description |
+| --- | --- | --- | --- |
+| 1 | board_snapshot | 1974 | Live board projection |
+| 2 | fleet_snapshot | 1982 | Fleet-wide snapshot |
+| 3 | link_snapshot | 1993 | Memory link graph |
+| 4 | board_event_feed | 2004 | Bounded event feed |
+| 5 | board_onboard | 2015 | Join board, get context |
+| 6 | board_status | 2036 | Board health and counts |
+| 7 | board_catchup | 2044 | Read journal page (touch/ack) |
+| 8 | ticket_get | 2064 | Read one ticket |
+| 9 | ticket_list | 2072 | List tickets with filters |
+| 10 | ticket_create | 2091 | Create a ticket |
+| 11 | ticket_claim | 2126 | Claim a ticket |
+| 12 | ticket_submit | 2134 | Submit completed work |
+| 13 | ticket_review | 2155 | Record review verdict |
+| 14 | lease_renew | 2174 | Renew ticket lease |
+| 15 | ticket_cancel | 2182 | Cancel a ticket |
+| 16 | memory_write | 2192 | Write project memory |
+| 17 | memory_read | 2223 | Read project memory |
+| 18 | memory_search | 2248 | Search project memory |
+| 19 | memory_links | 2263 | Traverse memory relationships |
+| 20 | memory_checkpoint | 2286 | Record continuation checkpoint |
+| 21 | memory_handoff | 2311 | Record handoff with next steps |
+| 22 | memory_unpin | 2330 | Unpin memory entry |
+| 23 | board_state_get | 2340 | Read board-state values |
+| 24 | board_state_update | 2348 | Update board-state value |
+
+### Tool visibility classification
+
+- **PRIMARY_UI** (4): board_snapshot, board_event_feed, fleet_snapshot, link_snapshot
+- **MODEL/CHAT** (16): board_onboard, board_status, board_catchup, ticket_get,
+  ticket_list, ticket_create, ticket_claim, ticket_submit, ticket_review,
+  lease_renew, ticket_cancel, memory_write, memory_read, memory_search,
+  memory_links, board_state_get
+- **MODEL_ONLY** (4): board_catchup, memory_checkpoint, memory_handoff,
+  memory_unpin (visibility=MODEL_ONLY on decorator)
+- **Public** (2): board_state_get, board_state_update
+
+### HTML resource serving
+
+The server also serves the built dashboard HTML as a resource at `UI_URI`,
+providing the MCP App UI surface for compatible hosts.
+
+## Duplicate frontend analysis
+
+| Surface | Build step | Live entrypoint | Duplicates? |
+| --- | --- | --- | --- |
+| Dashboard-UI | Vite single-file build | `packages/personal/resources/dashboard.html` | Source of truth |
+| Fleet Dashboard | None (inline HTML in Python) | Served by `fleet_dashboard.py` | Self-contained, no overlap |
+| Extension | None (static files) | `webui/index.html` | Independent |
+| Personal MCP | Serves built dashboard.html | MCP App resource | Consumes dashboard-ui build output |
+
+The dashboard-ui source (`dashboard-entry.html` + `dashboard.ts` + `dashboard.css`)
+builds via Vite single-file to `packages/personal/resources/dashboard.html`.
+The Personal MCP server serves this built file as an HTML resource. The fleet
+dashboard is self-contained inline HTML with no dependency on dashboard-ui.
+The extension has no build step and no overlap with either.
