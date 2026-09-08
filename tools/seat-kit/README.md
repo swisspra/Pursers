@@ -134,6 +134,12 @@ only when an operator explicitly sets
 `PURSERS_ALLOW_FORCE_APPROVE_WITHOUT_EVIDENCE=1`; its use is appended to the
 review notes. Rejection always requires non-empty fix instructions.
 
+Suite replay accepts `pytest`, `py.test`, or `python[3] -m pytest/unittest`,
+optionally prefixed by one relative, worktree-contained `PYTHONPATH=...`
+assignment. Shell substitutions, separators, redirects, other environment
+assignments, absolute paths, and parent-directory escapes are rejected without
+executing the command.
+
 ## HARD-verify checklist
 
 Before approval:
