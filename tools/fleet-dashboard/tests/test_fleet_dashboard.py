@@ -7061,27 +7061,13 @@ def test_doors_ui_rendering() -> None:
 
 
 def test_clean_text_redaction_is_linear_time_and_behavior_preserved() -> None:
-    """CodeQL py/polynomial-redos regression: the key/value redaction pass.
-
-    The previous pattern nested stars around the keyword alternation and
-    backtracked polynomially on repeated whitespace (seconds for ~30k
-    spaces). The remediated split must stay linear and produce identical
-    redaction output.
-    """
+    """CodeQL py/polynomial-redos regression: deterministic assignment scan."""
     clean = dashboard.SeatConfigManager._clean_text
 
-    adversarial = "token" + " " * 40_000
-    started = time.monotonic()
-    output = clean(adversarial)
-    elapsed = time.monotonic() - started
-    assert output == adversarial  # no separator on the line: nothing redacted
-    assert elapsed < 5.0  # pre-fix pattern took ~9s at this size
-
-    bigger = "token" + " " * 80_000
-    started = time.monotonic()
-    assert clean(bigger) == bigger
-    elapsed_bigger = time.monotonic() - started
-    assert elapsed_bigger < 5.0  # doubling input stays linear, not quadratic
+    adversarial = ":" + " " * 1_000_000
+    assert clean(adversarial) == adversarial
+    no_delimiter = "token" + " " * 1_000_000
+    assert clean(no_delimiter) == no_delimiter
 
     # Keyword fused into a longer key (no word boundary) is still redacted.
     assert clean("XTOKEN=abc") == "XTOKEN=[REDACTED]"
@@ -7092,9 +7078,23 @@ def test_clean_text_redaction_is_linear_time_and_behavior_preserved() -> None:
     assert clean("  MY SECRET = s3kr1t") == "  MY SECRET = [REDACTED]"
     # Only the first separator splits key/value; the rest stays in the value.
     assert clean("mytoken=a=b") == "mytoken=[REDACTED]"
+    assert clean("api-key:\t value") == "api-key:\t [REDACTED]"
+    assert clean("authorization=\u2003value") == "authorization=\u2003[REDACTED]"
+    assert clean("secret= \t") == "secret= \t[REDACTED]"
     # Lines without a sensitive keyword are untouched.
     assert clean("plain = value") == "plain = value"
     # Multi-line input redacts per line.
     assert clean("alpha=1\nmy bearer: x\nbeta=2") == (
         "alpha=1\nmy bearer: [REDACTED]\nbeta=2"
     )
+    assert clean("token:\nplain=value\nsecret: last") == (
+        "token:[REDACTED]\nplain=value\nsecret: [REDACTED]"
+    )
+    assert clean("token:\r\nplain=x") == "token:[REDACTED]\r\nplain=x"
+    assert clean("plain:\r\nnext=x") == "plain:\r\nnext=x"
+    for ending in (
+        "\r", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029",
+    ):
+        assert clean(f"token:{ending}plain=x") == (
+            f"token:[REDACTED]{ending}plain=x"
+        )
