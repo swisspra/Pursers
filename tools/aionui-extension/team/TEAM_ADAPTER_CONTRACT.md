@@ -215,6 +215,13 @@ operation table; the result contract and outcome enum stay unchanged.
   `{ "success": bool, "data": object, "error": object, "meta": { "schema_version": 1 } }`.
   `helperBin` resolves from `AIONUI_HELPER_BIN`, else `aioncore` on `PATH`. No shell
   interpolation anywhere; seat names and prompts travel as JSON on stdin only.
+  Nonzero exit statuses are classified AFTER stdout: a nonempty parsable envelope with
+  a boolean `success` is returned as-is even when the process exits nonzero (the host
+  signals tool-level failures such as `schema_validation_failed` or
+  `runtime_context_missing` with both an envelope and a nonzero exit plus the stable
+  stderr `..._FAILED` line). `transport_unavailable` is produced only when no valid
+  envelope exists (spawn failure, timeout, or empty/non-JSON stdout). stdin EPIPE is
+  non-fatal and never overrides a parsable envelope.
 - MCP transport: the same 13 `team_*` tools with identical schemas (bridge
   `aioncore mcp-team-stdio`); the adapter's `runCli` dependency is injectable so the
   acceptance harness can drive it through either transport or a fake.
@@ -263,10 +270,14 @@ wiring should consume.
   `describeAssistant(assistant_id, locale?)`.
 - Default transport: `execFile(process.env.AIONUI_HELPER_BIN || "aioncore", ["team",
   ...argv])`, request JSON on stdin, stdout parsed as the host envelope, 30000 ms
-  timeout, 4 MiB max buffer; transport problems collapse to `transport_unavailable`.
-- Tests: `tests/team_adapter.test.cjs` (node:test) — 18 contract tests covering
+  timeout, 4 MiB max buffer; stdout is classified before the exit status (a parsable
+  host envelope survives a nonzero exit), and only a missing/unparsable envelope
+  collapses to `transport_unavailable` (`envelopeFromCliOutput`, unit-tested).
+- Tests: `tests/team_adapter.test.cjs` (node:test) — 20 contract tests covering
   validation, plan diffing, idempotent reconcile, identity-conflict freeze, dry-run
   default, byte-exact live payloads, kickoff delivery, partial-failure continuation,
   spawn-ack fallback (`spawn_ack_unparsed`), `runtime_context_missing` propagation,
   unsupported-surface honesty, pause/stop/rename/reset payloads, status passthrough,
-  and kickoff/lead-brief invariant text. All green; existing suites unaffected.
+  kickoff/lead-brief invariant text, plus default-transport behavior against stub
+  executables that exit nonzero with `schema_validation_failed` and
+  `runtime_context_missing` envelopes on stdout. All green; existing suites unaffected.

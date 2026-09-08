@@ -56,6 +56,34 @@ function transportFailure(message) {
 }
 
 /**
+ * Classify one CLI invocation result per the published envelope contract:
+ * a nonempty stdout carrying a parsable envelope (boolean `success`) is the
+ * host's answer even when the exit status is nonzero — the host signals
+ * tool-level failures with both an envelope and a nonzero exit plus the
+ * stable stderr ..._FAILED line. transport_unavailable is used only when no
+ * valid envelope exists.
+ */
+function envelopeFromCliOutput(error, stdout) {
+  const text = typeof stdout === 'string' ? stdout.trim() : '';
+  if (text) {
+    let parsed;
+    try {
+      parsed = JSON.parse(text);
+    } catch (parseError) {
+      return transportFailure(`unparsable envelope: ${parseError.message}`);
+    }
+    if (parsed && typeof parsed === 'object' && typeof parsed.success === 'boolean') {
+      return parsed;
+    }
+    return transportFailure('unparsable envelope: missing boolean success flag');
+  }
+  if (error) {
+    return transportFailure(error.message);
+  }
+  return transportFailure('unparsable envelope: empty stdout');
+}
+
+/**
  * Default CLI transport: `aioncore team <command...>` with a JSON object on
  * stdin and the stdout envelope { success, data, error, meta.schema_version }.
  * AIONUI_HELPER_BIN wins over PATH lookup (documented runtime env).
@@ -77,22 +105,16 @@ function defaultRunCli(command, input) {
         ['team', ...command],
         { encoding: 'utf8', timeout: CLI_TIMEOUT_MS, maxBuffer: 4 * 1024 * 1024 },
         (error, stdout) => {
-          if (error) {
-            finish(transportFailure(error.message));
-            return;
-          }
-          try {
-            finish(JSON.parse(stdout));
-          } catch (parseError) {
-            finish(transportFailure(`unparsable envelope: ${parseError.message}`));
-          }
+          finish(envelopeFromCliOutput(error, stdout));
         },
       );
     } catch (spawnError) {
       finish(transportFailure(spawnError.message));
       return;
     }
-    child.stdin.on('error', () => finish(transportFailure('stdin closed by host')));
+    // stdin EPIPE is non-fatal: the exit callback classifies stdout first and
+    // falls back to transport_unavailable only when no valid envelope exists.
+    child.stdin.on('error', () => {});
     child.stdin.end(JSON.stringify(input || {}));
   });
 }
@@ -548,4 +570,5 @@ module.exports = {
   buildSeatKickoff,
   buildLeadBrief,
   defaultRunCli,
+  envelopeFromCliOutput,
 };

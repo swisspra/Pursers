@@ -2,6 +2,9 @@
 
 const assert = require('node:assert/strict');
 const test = require('node:test');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 const {
   CONTRACT,
   CONTRACT_SCHEMA_VERSION,
@@ -11,6 +14,8 @@ const {
   validateTeamSpec,
   buildSeatKickoff,
   buildLeadBrief,
+  defaultRunCli,
+  envelopeFromCliOutput,
 } = require('../team/adapter.cjs');
 
 const CATALOG = [
@@ -347,4 +352,82 @@ test('kickoff and lead brief carry role, tier, folder and invariants verbatim', 
   const brief = buildLeadBrief(spec);
   assert.ok(brief.includes('monitor-only lead'));
   assert.ok(brief.includes('No automatic elastic scaling'));
+});
+
+function writeStub(dir, name, envelopePayload, exitCode) {
+  const file = path.join(dir, name);
+  fs.writeFileSync(file, [
+    '#!/bin/sh',
+    'cat > /dev/null',
+    "cat <<'AIONCORE_STUB_ENVELOPE'",
+    JSON.stringify(envelopePayload),
+    'AIONCORE_STUB_ENVELOPE',
+    'echo "AIONCORE_TEAM_CLI_FAILED" >&2',
+    `exit ${exitCode}`,
+    '',
+  ].join('\n'), { mode: 0o755 });
+  return file;
+}
+
+test('defaultRunCli keeps host envelopes from nonzero exits (stub executable)', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pursers-team-stub-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const previous = process.env.AIONUI_HELPER_BIN;
+  try {
+    process.env.AIONUI_HELPER_BIN = writeStub(dir, 'stub-schema-validation', {
+      success: false,
+      error: { code: 'schema_validation_failed', message: 'describe-assistant requires assistant_id' },
+      meta: { schema_version: 1 },
+    }, 2);
+    const raw = await defaultRunCli(['describe-assistant'], {});
+    assert.equal(raw.success, false);
+    assert.equal(raw.error.code, 'schema_validation_failed');
+
+    process.env.AIONUI_HELPER_BIN = writeStub(dir, 'stub-runtime-context', {
+      success: false,
+      error: { code: 'runtime_context_missing', message: 'AIONUI_CONVERSATION_ID not set' },
+      meta: { schema_version: 1 },
+    }, 2);
+    const adapter = createTeamAdapter();
+    const described = await adapter.describeAssistant('bare:600c6601');
+    assert.equal(described.ok, false);
+    assert.equal(described.error.code, 'runtime_context_missing');
+    assert.equal(described.error.raw_code, 'runtime_context_missing');
+    const planned = await adapter.plan(makeSpec());
+    assert.equal(planned.ok, false);
+    assert.equal(planned.error.code, 'runtime_context_missing');
+  } finally {
+    if (previous === undefined) delete process.env.AIONUI_HELPER_BIN;
+    else process.env.AIONUI_HELPER_BIN = previous;
+  }
+});
+
+test('envelopeFromCliOutput parses stdout before classifying the exit status', () => {
+  const exitError = Object.assign(new Error('Command failed: exit 2'), { code: 2, killed: false });
+  const withEnvelope = envelopeFromCliOutput(
+    exitError,
+    '{"success": false, "error": {"code": "schema_validation_failed", "message": "x"}, "meta": {"schema_version": 1}}\n',
+  );
+  assert.equal(withEnvelope.success, false);
+  assert.equal(withEnvelope.error.code, 'schema_validation_failed');
+
+  const success = envelopeFromCliOutput(null, '{"success": true, "data": {"members": []}, "meta": {"schema_version": 1}}');
+  assert.equal(success.success, true);
+
+  const garbage = envelopeFromCliOutput(null, 'not json at all');
+  assert.equal(garbage.success, false);
+  assert.equal(garbage.error.code, 'transport_unavailable');
+  assert.ok(garbage.error.message.includes('unparsable envelope'));
+
+  const notAnEnvelope = envelopeFromCliOutput(exitError, '{"ok": true}');
+  assert.equal(notAnEnvelope.error.code, 'transport_unavailable');
+  assert.ok(notAnEnvelope.error.message.includes('missing boolean success flag'));
+
+  const emptyWithError = envelopeFromCliOutput(new Error('spawn aioncore ENOENT'), '');
+  assert.equal(emptyWithError.error.code, 'transport_unavailable');
+  assert.ok(emptyWithError.error.message.includes('ENOENT'));
+
+  const emptyWithoutError = envelopeFromCliOutput(null, '   ');
+  assert.equal(emptyWithoutError.error.code, 'transport_unavailable');
+  assert.ok(emptyWithoutError.error.message.includes('empty stdout'));
 });
