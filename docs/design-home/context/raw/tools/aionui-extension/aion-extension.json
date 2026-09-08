@@ -1,0 +1,99 @@
+{
+  "$schema": "vendor/aion-hub-extension-schema-v0.json",
+  "name": "pursers",
+  "displayName": "Pursers",
+  "version": "0.1.0",
+  "description": "Worker and reviewer presets with a local door join screen.",
+  "author": "Pursers",
+  "engine": {
+    "aionui": "^2.2.1"
+  },
+  "permissions": {
+    "storage": true,
+    "network": {
+      "allowedDomains": [
+        "127.0.0.1",
+        "localhost",
+        "::1"
+      ],
+      "reasoning": "Register the local Pursers wait bridge with the AionUi API."
+    }
+  },
+  "risk": {
+    "level": "moderate",
+    "reasoning": "The extension uses persistent storage and loopback-only network access."
+  },
+  "contributes": {
+    "assistants": [
+      {
+        "id": "pursers-worker-codex",
+        "name": "Pursers Worker (Codex)",
+        "description": "A Pursers worker seat using Codex.",
+        "agentId": "codex",
+        "presetAgentType": "codex",
+        "contextFile": "contexts/worker.md"
+      },
+      {
+        "id": "pursers-worker-claude",
+        "name": "Pursers Worker (Claude)",
+        "description": "A Pursers worker seat using Claude.",
+        "agentId": "claude",
+        "presetAgentType": "claude",
+        "contextFile": "contexts/worker.md"
+      },
+      {
+        "id": "pursers-reviewer-codex",
+        "name": "Pursers Reviewer (Codex)",
+        "description": "A Pursers reviewer seat using Codex.",
+        "agentId": "codex",
+        "presetAgentType": "codex",
+        "contextFile": "contexts/reviewer.md"
+      },
+      {
+        "id": "pursers-reviewer-claude",
+        "name": "Pursers Reviewer (Claude)",
+        "description": "A Pursers reviewer seat using Claude.",
+        "agentId": "claude",
+        "presetAgentType": "claude",
+        "contextFile": "contexts/reviewer.md"
+      }
+    ],
+    "settingsTabs": [
+      {
+        "id": "pursers",
+        "name": "Pursers",
+        "entryPoint": "webui/index.html",
+        "position": {
+          "anchor": "tools",
+          "placement": "after"
+        },
+        "order": 80
+      }
+    ],
+    "webui": {
+      "apiRoutes": [
+        {
+          "path": "/pursers/join",
+          "method": "POST",
+          "entryPoint": "webui/routes.js",
+          "description": "Store a door and register the wait bridge.",
+          "auth": true
+        },
+        {
+          "path": "/pursers/status",
+          "method": "GET",
+          "entryPoint": "webui/routes.js",
+          "description": "Read redacted wait-bridge status.",
+          "auth": true
+        }
+      ],
+      "staticAssets": [
+        {
+          "urlPrefix": "/pursers/assets",
+          "directory": "webui",
+          "description": "Pursers Join tab assets."
+        }
+      ]
+    }
+  }
+}

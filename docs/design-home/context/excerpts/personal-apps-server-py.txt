@@ -1,0 +1,458 @@
+SOURCE packages/personal/src/pursers_personal/apps_server.py
+BASELINE c2ebac5de803a0f7a00468ec4d3cdf06e4719096
+RANGES 1949-2401
+
+===== packages/personal/src/pursers_personal/apps_server.py:1949-2401 =====
+def build_dashboard_server(
+    config: DashboardConfig,
+    *,
+    client_class: type[Any] | None = None,
+    client_error_class: type[BaseException] | None = None,
+    post_join_hook: PostJoinHook | None = None,
+    read_client_factory: ReadClientFactory | None = None,
+) -> tuple[MCPServer, LiveDashboard]:
+    """Build one explicit-profile MCP server without creating global state."""
+    state = LiveDashboard(
+        config,
+        client_class=client_class,
+        client_error_class=client_error_class,
+        post_join_hook=post_join_hook,
+        read_client_factory=read_client_factory,
+    )
+    apps = Apps()
+
+    @asynccontextmanager
+    async def lifespan(_server):
+        try:
+            yield {}
+        finally:
+            await state.stop()
+
+    @apps.tool(
+        resource_uri=UI_URI,
+        description="Get the current authorization-scoped live board projection.",
+        visibility=MODEL_AND_APP,
+    )
+    async def board_snapshot() -> dict[str, Any]:
+        return await state.snapshot()
+
+    @apps.tool(
+        resource_uri=UI_URI,
+        description=(
+            "Get the bounded authorization-scoped fleet projection across active "
+            "project-registry boards."
+        ),
+        visibility=MODEL_AND_APP,
+    )
+    async def fleet_snapshot() -> dict[str, Any]:
+        return await state.fleet()
+
+    @apps.tool(
+        resource_uri=UI_URI,
+        description=(
+            "Get bounded authoritative ticket, memory, file, and tag links "
+            "from the selected board's memory_links projection."
+        ),
+        visibility=APP_ONLY,
+    )
+    async def link_snapshot() -> dict[str, Any]:
+        return await state.links()
+
+    @apps.tool(
+        resource_uri=UI_URI,
+        description=(
+            "Read the in-process subscription-backed projection cache and return "
+            "bounded observed events without polling Central."
+        ),
+        visibility=APP_ONLY,
+    )
+    async def board_event_feed() -> dict[str, Any]:
+        return await state.feed()
+
+    @apps.tool(
+        resource_uri=UI_URI,
+        description="Join the selected personal board and receive its working context.",
+        visibility=MODEL_ONLY,
+    )
+    async def board_onboard(
+        claim_ttl_s: int | None = None,
+        agent_platform: str | None = None,
+        task_focus: str | None = None,
+        token_budget: int = 4_000,
+        ticket_id: str | None = None,
+    ) -> dict[str, Any]:
+        return await state._rpc(
+            "board_onboard",
+            claim_ttl_s=claim_ttl_s,
+            agent_platform=agent_platform,
+            task_focus=task_focus,
+            token_budget=token_budget,
+            ticket_id=ticket_id,
+        )
+
+    @apps.tool(
+        resource_uri=UI_URI,
+        description="Get board health and visible workload counts.",
+        visibility=MODEL_ONLY,
+    )
+    async def board_status() -> dict[str, Any]:
+        return await state._rpc("board_status")
+
+    @apps.tool(
+        resource_uri=UI_URI,
+        description=(
+            "Read a bounded Central journal page for the model. touch=false is the "
+            "default side-effect-free read and ignores ack without updating activity, "
+            "leases, or the durable cursor. With touch=true, ack=false leaves the "
+            "cursor unchanged and ack=true advances it."
+        ),
+        visibility=MODEL_ONLY,
+    )
+    async def board_catchup(
+        cursor: int | None = None,
+        limit: int = 100,
+        ack: bool = True,
+        touch: bool = False,
+    ) -> dict[str, Any]:
+        return await state._rpc(
+            "board_catchup", cursor=cursor, limit=limit, ack=ack, touch=touch
+        )
+
+    @apps.tool(
+        resource_uri=UI_URI,
+        description="Read one visible ticket by ID.",
+        visibility=MODEL_ONLY,
+    )
+    async def ticket_get(ticket_id: str) -> dict[str, Any]:
+        return await state._rpc("ticket_get", ticket_id)
+
+    @apps.tool(
+        resource_uri=UI_URI,
+        description="List visible tickets using bounded filters.",
+        visibility=MODEL_ONLY,
+    )
+    async def ticket_list(
+        status: str | None = None,
+        assigned_to: str | None = None,
+        include_closed: bool = False,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        return await state._rpc(
+            "ticket_list",
+            status=status,
+            assigned_to=assigned_to,
+            include_closed=include_closed,
+            limit=limit,
+        )
+
+    @apps.tool(
+        resource_uri=UI_URI,
+        description="Create a ticket on the selected personal board.",
+        visibility=MODEL_ONLY,
+    )
+    async def ticket_create(
+        title: str,
+        ticket_id: str | None = None,
+        description: str | None = None,
+        scope: str | None = None,
+        required_fields: list[str] | None = None,
+        forbidden: list[str] | None = None,
+        priority: str = "medium",
+        tags: list[str] | None = None,
+        related_files: list[str] | None = None,
+        target_url: str | None = None,
+        assigned_to: str | None = None,
+        unassigned: bool = False,
+    ) -> dict[str, Any]:
+        return await state._rpc(
+            "ticket_create",
+            ticket_id,
+            title,
+            description=description,
+            scope=scope,
+            required_fields=required_fields,
+            forbidden=forbidden,
+            priority=priority,
+            tags=tags,
+            related_files=related_files,
+            target_url=target_url,
+            assigned_to=assigned_to,
+            unassigned=unassigned,
+        )
+
+    @apps.tool(
+        resource_uri=UI_URI,
+        description="Claim one visible ticket for the current agent.",
+        visibility=MODEL_ONLY,
+    )
+    async def ticket_claim(ticket_id: str) -> dict[str, Any]:
+        return await state._rpc("ticket_claim", ticket_id)
+
+    @apps.tool(
+        resource_uri=UI_URI,
+        description="Submit completed work on a claimed ticket.",
+        visibility=MODEL_ONLY,
+    )
+    async def ticket_submit(
+        ticket_id: str,
+        summary: str | None = None,
+        files_changed: list[str] | None = None,
+        notes: str | None = None,
+        stay_active: bool = True,
+    ) -> dict[str, Any]:
+        return await state._rpc(
+            "ticket_submit",
+            ticket_id,
+            summary=summary,
+            files_changed=files_changed,
+            notes=notes,
+            stay_active=stay_active,
+        )
+
+    @apps.tool(
+        resource_uri=UI_URI,
+        description="Record a review verdict for submitted ticket work.",
+        visibility=MODEL_ONLY,
+    )
+    async def ticket_review(
+        ticket_id: str,
+        verdict: str,
+        review_notes: str | None = None,
+        fix_instructions: str | None = None,
+    ) -> dict[str, Any]:
+        return await state._rpc(
+            "ticket_review",
+            ticket_id,
+            verdict,
+            review_notes=review_notes,
+            fix_instructions=fix_instructions,
+        )
+
+    @apps.tool(
+        resource_uri=UI_URI,
+        description="Renew the current agent's ticket lease.",
+        visibility=MODEL_ONLY,
+    )
+    async def lease_renew(ticket_id: str) -> dict[str, Any]:
+        return await state._rpc("lease_renew", ticket_id)
+
+    @apps.tool(
+        resource_uri=UI_URI,
+        description="Cancel a ticket with an optional reason.",
+        visibility=MODEL_ONLY,
+    )
+    async def ticket_cancel(
+        ticket_id: str, reason: str | None = None
+    ) -> dict[str, Any]:
+        return await state._rpc("ticket_cancel", ticket_id, reason=reason)
+
+    @apps.tool(
+        resource_uri=UI_URI,
+        description="Write authorization-scoped project memory.",
+        visibility=MODEL_ONLY,
+    )
+    async def memory_write(
+        title: str,
+        content: str,
+        scope: str,
+        memory_type: str = "context",
+        tags: list[str] | None = None,
+        priority: int = 0,
+        pinned_summary: str | None = None,
+        retracts: str | None = None,
+        related_files: list[str] | None = None,
+        related_tickets: list[str] | None = None,
+    ) -> dict[str, Any]:
+        return await state._rpc(
+            "memory_write",
+            title,
+            content,
+            scope,
+            memory_type=memory_type,
+            tags=tags,
+            priority=priority,
+            pinned_summary=pinned_summary,
+            retracts=retracts,
+            related_files=related_files,
+            related_tickets=related_tickets,
+        )
+
+    @apps.tool(
+        resource_uri=UI_URI,
+        description="Read bounded authorization-scoped project memory.",
+        visibility=MODEL_ONLY,
+    )
+    async def memory_read(
+        memory_type: str | None = None,
+        tag: str | None = None,
+        author: str | None = None,
+        since: str | None = None,
+        since_minutes: int | None = None,
+        pinned_only: bool = False,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        return await state._rpc(
+            "memory_read",
+            memory_type=memory_type,
+            tag=tag,
+            author=author,
+            since=since,
+            since_minutes=since_minutes,
+            pinned_only=pinned_only,
+            limit=limit,
+        )
+
+    @apps.tool(
+        resource_uri=UI_URI,
+        description="Search authorization-scoped project memory.",
+        visibility=MODEL_ONLY,
+    )
+    async def memory_search(
+        query: str,
+        tag: str | None = None,
+        author: str | None = None,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        return await state._rpc(
+            "memory_search", query, tag=tag, author=author, limit=limit
+        )
+
+    @apps.tool(
+        resource_uri=UI_URI,
+        description="Traverse bounded memory relationships.",
+        visibility=MODEL_ONLY,
+    )
+    async def memory_links(
+        memory_id: str | None = None,
+        ticket_id: str | None = None,
+        file: str | None = None,
+        author: str | None = None,
+        depth: int = 2,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        return await state._rpc(
+            "memory_links",
+            memory_id=memory_id,
+            ticket_id=ticket_id,
+            file=file,
+            author=author,
+            depth=depth,
+            limit=limit,
+        )
+
+    @apps.tool(
+        resource_uri=UI_URI,
+        description="Record a compact continuation checkpoint.",
+        visibility=MODEL_ONLY,
+    )
+    async def memory_checkpoint(
+        summary: str,
+        remaining_tasks: list[str] | None = None,
+        files: list[str] | None = None,
+        next_steps: list[str] | None = None,
+        active_branch: str | None = None,
+        blockers: list[str] | None = None,
+        scope: str = "project",
+    ) -> dict[str, Any]:
+        return await state._rpc(
+            "memory_checkpoint",
+            summary,
+            remaining_tasks=remaining_tasks,
+            files=files,
+            next_steps=next_steps,
+            active_branch=active_branch,
+            blockers=blockers,
+            scope=scope,
+        )
+
+    @apps.tool(
+        resource_uri=UI_URI,
+        description="Record a handoff with explicit next steps.",
+        visibility=MODEL_ONLY,
+    )
+    async def memory_handoff(
+        summary: str,
+        next_steps: list[str],
+        files: list[str] | None = None,
+        warnings: list[str] | None = None,
+    ) -> dict[str, Any]:
+        return await state._rpc(
+            "memory_handoff",
+            summary,
+            next_steps,
+            files=files,
+            warnings=warnings,
+        )
+
+    @apps.tool(
+        resource_uri=UI_URI,
+        description="Unpin one memory entry with an optional reason.",
+        visibility=MODEL_ONLY,
+    )
+    async def memory_unpin(
+        memory_id: str, reason: str | None = None
+    ) -> dict[str, Any]:
+        return await state._rpc("memory_unpin", memory_id, reason=reason)
+
+    @apps.tool(
+        resource_uri=UI_URI,
+        description="Read one or all public board-state values.",
+        visibility=MODEL_ONLY,
+    )
+    async def board_state_get(key: str | None = None) -> dict[str, Any]:
+        return await state._rpc("board_state_get", key)
+
+    @apps.tool(
+        resource_uri=UI_URI,
+        description="Update one public board-state value.",
+        visibility=MODEL_ONLY,
+    )
+    async def board_state_update(key: str, value: str) -> dict[str, Any]:
+        return await state._rpc("board_state_update", key, value)
+
+    apps.add_html_resource(
+        UI_URI,
+        load_dashboard_html(),
+        title="On Board Personal",
+        description="Local personal board with a clearly labeled standalone fallback",
+        csp=ResourceCsp(),
+        prefers_border=True,
+    )
+    return (
+        MCPServer(
+            "On Board Personal",
+            version=PRODUCT_VERSION,
+            extensions=[apps],
+            lifespan=lifespan,
+        ),
+        state,
+    )
+
+
+def build_personal_server(
+    profile_path: Path,
+    host_id: str,
+    session: str,
+) -> tuple[MCPServer, LiveDashboard]:
+    """Build a server from one verified profile and derived host/session identity."""
+    client_class, client_error_class = _load_board_client()
+    from .profile import (
+        bootstrap_personal_review_policy,
+        load_personal_profile,
+        resolve_personal_context,
+    )
+
+    profile = load_personal_profile(Path(profile_path))
+    context = resolve_personal_context(profile, host=host_id, session=session)
+    return build_dashboard_server(
+        config_from_personal_context(context),
+        client_class=client_class,
+        client_error_class=client_error_class,
+        post_join_hook=bootstrap_personal_review_policy,
+    )
+
+
+def run_personal_mcp(profile_path: Path, host_id: str, session: str) -> None:
+    """Run the profile-backed personal MCP server over stdio."""
+    server, _state = build_personal_server(profile_path, host_id, session)
+    server.run()
