@@ -33,9 +33,12 @@ Run source discovery first:
 python tools/aionui-extension/tests/home_acceptance/harness.py discover
 ```
 
-The current extension manifest exposes `/pursers/join`, `/pursers/status`, and
-the five `/pursers/onboarding/*` validate, connect, status, rotate, and recover
-routes. Discovery therefore recognizes `door_rotation`. It does not yet expose
+The current authenticated helper exposes `/pursers/join`, `/pursers/status`,
+and the five `/pursers/onboarding/*` validate, connect, status, rotate, and
+recover routes. Source discovery reads these shipped helper routes because
+AionCore 0.2.1 treats `contributes.webui` as a static asset contribution and
+does not execute extension JavaScript route handlers. Discovery therefore
+recognizes `door_rotation`. It does not yet expose
 the Team lifecycle, seat lifecycle, ticket lifecycle, or result-visibility
 contracts required for destructive acceptance. When sibling implementations
 land, update discovery only from their shipped interface contract; do not

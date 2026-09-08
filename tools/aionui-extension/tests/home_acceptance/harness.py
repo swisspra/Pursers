@@ -452,13 +452,22 @@ def discover_repository_capabilities(root: Path = EXTENSION_ROOT) -> RepositoryC
     manifest = json.loads((root / "aion-extension.json").read_text(encoding="utf-8"))
     contributes = manifest.get("contributes", {})
     webui = contributes.get("webui", {})
-    routes = tuple(
-        sorted(
-            route["path"]
-            for route in webui.get("apiRoutes", [])
-            if isinstance(route, dict) and isinstance(route.get("path"), str)
+    api_routes = webui.get("apiRoutes", []) if isinstance(webui, dict) else []
+    routes = {
+        route["path"]
+        for route in api_routes
+        if isinstance(route, dict) and isinstance(route.get("path"), str)
+    }
+    if not routes:
+        helper_routes = root / "webui" / "routes.js"
+        helper_text = helper_routes.read_text(encoding="utf-8") if helper_routes.exists() else ""
+        routes.update(
+            route
+            for route in re.findall(r"url\.pathname === ['\"]([^'\"]+)['\"]", helper_text)
+            if route in {"/pursers/join", "/pursers/status"}
+            or route.startswith("/pursers/onboarding/")
         )
-    )
+    discovered_routes = tuple(sorted(routes))
     assistants = tuple(
         sorted(
             assistant["id"]
@@ -469,10 +478,10 @@ def discover_repository_capabilities(root: Path = EXTENSION_ROOT) -> RepositoryC
     dashboard_entry = root.parent / "dashboard-ui" / "dashboard-entry.html"
     dashboard_text = dashboard_entry.read_text(encoding="utf-8") if dashboard_entry.exists() else ""
     personal_views = tuple(sorted(set(re.findall(r'data-view="([a-z-]+)"', dashboard_text))))
-    capabilities = _semantic_capabilities(routes)
+    capabilities = _semantic_capabilities(discovered_routes)
     missing = tuple(sorted(REQUIRED_MUTATION_CAPABILITIES - capabilities))
     return RepositoryCapabilities(
-        api_routes=routes,
+        api_routes=discovered_routes,
         assistants=assistants,
         personal_views=personal_views,
         capabilities=tuple(sorted(capabilities)),
