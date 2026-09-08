@@ -554,6 +554,266 @@ class DispatchTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(claimed.structured_content["ok"])
 
+    async def test_park_reconciles_persisted_cross_kind_offer_and_capacity(
+        self,
+    ) -> None:
+        worker_a = await self.add_seat(
+            self.worker_a, "worker-a", {"tier_max": 2}
+        )
+        worker_b = await self.add_seat(
+            self.worker_b, "worker-b", {"tier_max": 2}
+        )
+        reviewer = await self.add_seat(
+            self.reviewer_a,
+            "reviewer-a",
+            {"tier_max": 2, "can_work": False, "can_review": True},
+            role="reviewer",
+        )
+        stale = await self.create(prefer_agents=[worker_a])
+        stale_id = stale.structured_content["ticket"]["ticket_id"]
+        queued = await self.create(prefer_agents=[worker_b])
+        queued_id = queued.structured_content["ticket"]["ticket_id"]
+        self.principal = self.worker_b
+        await self.call(
+            "ticket_claim", agent_name="worker-b", ticket_id=queued_id
+        )
+        submitted = await self.call(
+            "ticket_submit", agent_name="worker-b", ticket_id=queued_id,
+            summary="ready for independent review",
+        )
+        self.assertEqual(
+            submitted.structured_content["ticket"]["review_offer"]["agent_id"],
+            reviewer,
+        )
+
+        def persist_cross_kind_offer(document: dict[str, Any]) -> None:
+            stale_ticket = document["tickets"][stale_id]
+            queued_ticket = document["tickets"][queued_id]
+            stale_offer = copy.deepcopy(queued_ticket.pop("review_offer"))
+            stale_offer["ticket_id"] = stale_id
+            stale_ticket["review_offer"] = stale_offer
+            queued_ticket["dispatch_state"] = {
+                "state": "broadcast",
+                "kind": "review",
+                "reason": "offer_limit_reached",
+                "at": central.iso_at(central.time.time()),
+            }
+
+        self.service.mutate(
+            "pursers", persist_cross_kind_offer, require_generation=False
+        )
+        restarted_mcp, restarted_service = central.build_server(
+            "localhost", 8765, self.root / "data"
+        )
+        self.mcp = restarted_mcp
+        self.service = restarted_service
+        before_seq = self.service.journal.read_after("pursers", 0, 1)[
+            "latest_cursor"
+        ]
+
+        self.principal = self.admin
+        parked = await self.call(
+            "ticket_update", agent_name="admin-agent", ticket_id=stale_id,
+            parked=True,
+        )
+        parked_ticket = parked.structured_content["ticket"]
+        self.assertNotIn("work_offer", parked_ticket)
+        self.assertNotIn("review_offer", parked_ticket)
+        release_events = parked.structured_content["dispatch_events"]
+        self.assertEqual(
+            [event["kind"] for event in release_events],
+            [OFFER_REVOKED, REVIEW_OFFERED, OFFER_REVOKED],
+        )
+        self.assertEqual(
+            release_events[0]["dispatch_reason"], "offer_status_mismatch"
+        )
+        queued_ticket = self.service.load("pursers")["tickets"][queued_id]
+        self.assertEqual(queued_ticket["review_offer"]["agent_id"], reviewer)
+
+        events = self.service.journal.read_after(
+            "pursers", before_seq, 100
+        )["events"]
+        park_index = next(
+            index for index, event in enumerate(events)
+            if event["kind"] == TICKET_PARKED
+        )
+        stale_revoke_index = next(
+            index for index, event in enumerate(events)
+            if event["kind"] == OFFER_REVOKED
+            and event.get("ticket_id") == stale_id
+            and event.get("offer_kind") == "review"
+        )
+        self.assertLess(stale_revoke_index, park_index)
+
+        self.principal = self.reviewer_a
+        with self.assertRaisesRegex(ToolError, "ticket is open"):
+            await self.call(
+                "ticket_review_claim", agent_name="reviewer-a",
+                ticket_id=stale_id,
+            )
+        self.principal = self.admin
+        reaped = await self.call("board_reap")
+        self.assertEqual(reaped.structured_content["release_events"], [])
+
+    async def test_valid_review_offer_keeps_capacity_reserved(self) -> None:
+        await self.add_seat(self.worker_a, "worker-a", {"tier_max": 2})
+        reviewer = await self.add_seat(
+            self.reviewer_a,
+            "reviewer-a",
+            {"tier_max": 2, "can_work": False, "can_review": True},
+            role="reviewer",
+        )
+        first = await self.create()
+        first_id = first.structured_content["ticket"]["ticket_id"]
+        self.principal = self.worker_a
+        await self.call(
+            "ticket_claim", agent_name="worker-a", ticket_id=first_id
+        )
+        first_submitted = await self.call(
+            "ticket_submit", agent_name="worker-a", ticket_id=first_id,
+            summary="first review",
+        )
+        first_offer = first_submitted.structured_content["ticket"]["review_offer"]
+        self.assertEqual(first_offer["agent_id"], reviewer)
+
+        second = await self.create()
+        second_id = second.structured_content["ticket"]["ticket_id"]
+        self.principal = self.worker_a
+        await self.call(
+            "ticket_claim", agent_name="worker-a", ticket_id=second_id
+        )
+        second_submitted = await self.call(
+            "ticket_submit", agent_name="worker-a", ticket_id=second_id,
+            summary="second review",
+        )
+        self.assertNotIn("review_offer", second_submitted.structured_content["ticket"])
+
+        self.principal = self.admin
+        reaped = await self.call("board_reap")
+        self.assertEqual(reaped.structured_content["release_events"], [])
+        persisted = self.service.load("pursers")["tickets"]
+        self.assertEqual(persisted[first_id]["review_offer"], first_offer)
+        self.assertNotIn("review_offer", persisted[second_id])
+
+    async def test_reaper_reconciles_ineligible_offer_after_restart(self) -> None:
+        worker_a = await self.add_seat(
+            self.worker_a, "worker-a", {"tier_max": 2}
+        )
+        worker_b = await self.add_seat(
+            self.worker_b, "worker-b", {"tier_max": 2}
+        )
+        created = await self.create(prefer_agents=[worker_a])
+        ticket_id = created.structured_content["ticket"]["ticket_id"]
+
+        def disable_recipient(document: dict[str, Any]) -> None:
+            document["members"][worker_a]["capabilities"]["can_work"] = False
+
+        self.service.mutate(
+            "pursers", disable_recipient, require_generation=False
+        )
+        restarted_mcp, restarted_service = central.build_server(
+            "localhost", 8765, self.root / "data"
+        )
+        self.mcp = restarted_mcp
+        self.service = restarted_service
+
+        self.principal = self.admin
+        reaped = await self.call("board_reap")
+        events = reaped.structured_content["release_events"]
+        self.assertEqual(
+            [event["kind"] for event in events],
+            [OFFER_REVOKED, TICKET_OFFERED],
+        )
+        self.assertEqual(
+            events[0]["dispatch_reason"], "offer_recipient_ineligible"
+        )
+        ticket = self.service.load("pursers")["tickets"][ticket_id]
+        self.assertEqual(ticket["work_offer"]["agent_id"], worker_b)
+
+        self.principal = self.worker_a
+        with self.assertRaisesRegex(
+            ToolError, "ticket is not offered to this seat"
+        ):
+            await self.call(
+                "ticket_claim", agent_name="worker-a", ticket_id=ticket_id
+            )
+
+    async def test_park_revokes_stale_offer_without_touching_review_lease(
+        self,
+    ) -> None:
+        await self.add_seat(self.worker_a, "worker-a", {"tier_max": 2})
+        reviewer_a = await self.add_seat(
+            self.reviewer_a,
+            "reviewer-a",
+            {"tier_max": 2, "can_work": False, "can_review": True},
+            role="reviewer",
+        )
+        reviewer_b = await self.add_seat(
+            self.reviewer_b,
+            "reviewer-b",
+            {"tier_max": 2, "can_work": False, "can_review": True},
+            role="reviewer",
+        )
+        created = await self.create()
+        ticket_id = created.structured_content["ticket"]["ticket_id"]
+        self.principal = self.worker_a
+        await self.call(
+            "ticket_claim", agent_name="worker-a", ticket_id=ticket_id
+        )
+        submitted = await self.call(
+            "ticket_submit", agent_name="worker-a", ticket_id=ticket_id,
+            summary="ready",
+        )
+        offered_reviewer = submitted.structured_content["ticket"]["review_offer"][
+            "agent_id"
+        ]
+        review_principal, review_name = (
+            (self.reviewer_a, "reviewer-a")
+            if offered_reviewer == reviewer_a
+            else (self.reviewer_b, "reviewer-b")
+        )
+        stale_reviewer, stale_name = (
+            (reviewer_b, "reviewer-b")
+            if offered_reviewer == reviewer_a
+            else (reviewer_a, "reviewer-a")
+        )
+        self.principal = review_principal
+        claimed = await self.call(
+            "ticket_review_claim", agent_name=review_name, ticket_id=ticket_id
+        )
+        review_lease = claimed.structured_content["ticket"]["review_lease"]
+
+        def add_stale_offer(document: dict[str, Any]) -> None:
+            document["tickets"][ticket_id]["review_offer"] = {
+                "ticket_id": ticket_id,
+                "kind": "review",
+                "agent_id": stale_reviewer,
+                "agent_name": stale_name,
+                "offered_at": central.iso_at(central.time.time()),
+                "expires_at": "2099-01-01T00:00:00+00:00",
+                "expires_at_epoch": 4_070_908_800.0,
+                "cycle": 0,
+            }
+
+        self.service.mutate(
+            "pursers", add_stale_offer, require_generation=False
+        )
+        self.principal = self.admin
+        parked = await self.call(
+            "ticket_update", agent_name="admin-agent", ticket_id=ticket_id,
+            parked=True,
+        )
+        ticket = parked.structured_content["ticket"]
+        persisted_lease = self.service.load("pursers")["tickets"][ticket_id][
+            "review_lease"
+        ]
+        self.assertEqual(persisted_lease, review_lease)
+        self.assertNotIn("review_offer", ticket)
+        self.assertEqual(
+            parked.structured_content["dispatch_events"][0]["dispatch_reason"],
+            "offer_conflicts_with_review_lease",
+        )
+
     async def test_assigned_offer_and_park_refusals_are_attributed(self) -> None:
         assigned = await self.add_seat(
             self.worker_a, "assigned-worker", {"tier_max": 2}
@@ -1135,12 +1395,51 @@ class DispatchTests(unittest.IsolatedAsyncioTestCase):
             review_claimed.structured_content["ticket"]["dispatch_state"]["state"],
             "review_claimed",
         )
+
+        def restore_stale_review_offer(document: dict[str, Any]) -> None:
+            document["tickets"][ticket_id]["review_offer"] = {
+                "kind": "review",
+                "agent_id": first,
+                "agent_name": first_name,
+                "expires_at": "2099-01-01T00:00:00+00:00",
+                "expires_at_epoch": 4_070_908_800.0,
+            }
+
+        self.service.mutate(
+            "pursers", restore_stale_review_offer, require_generation=False
+        )
         rejected = await self.call(
             "ticket_review", agent_name=first_name, ticket_id=ticket_id,
             verdict="reject", review_notes="needs another pass",
             fix_instructions="adjust contract",
         )
         self.assertEqual(rejected.structured_content["ticket"]["status"], "open")
+        self.assertNotIn("review_offer", rejected.structured_content["ticket"])
+        self.assertIn(
+            OFFER_REVOKED,
+            [
+                event["kind"]
+                for event in rejected.structured_content["release_events"]
+            ],
+        )
+        self.principal = self.admin
+        parked = await self.call(
+            "ticket_update", agent_name="admin-agent", ticket_id=ticket_id,
+            parked=True,
+        )
+        self.assertEqual(parked.structured_content["ticket"]["status"], "open")
+        self.assertNotIn("work_offer", parked.structured_content["ticket"])
+        self.assertNotIn("review_offer", parked.structured_content["ticket"])
+        self.assertEqual(
+            parked.structured_content["park_event"]["kind"], TICKET_PARKED
+        )
+        unparked = await self.call(
+            "ticket_update", agent_name="admin-agent", ticket_id=ticket_id,
+            parked=False,
+        )
+        self.assertEqual(
+            unparked.structured_content["park_event"]["kind"], TICKET_UNPARKED
+        )
         self.principal = self.worker_a
         await self.call("ticket_claim", agent_name="worker-a", ticket_id=ticket_id)
         resubmitted = await self.call(
