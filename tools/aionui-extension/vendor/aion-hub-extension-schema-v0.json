@@ -39,7 +39,10 @@
           "type": "array",
           "items": { "$ref": "#/$defs/settingsTab" }
         },
-        "webui": { "$ref": "#/$defs/webui" },
+        "webui": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/webui" }
+        },
         "mcpServers": { "type": "array", "items": { "type": "object" } },
         "skills": { "type": "array", "items": { "type": "object" } },
         "agents": { "type": "array", "items": { "type": "object" } },
@@ -119,32 +122,19 @@
     },
     "webui": {
       "type": "object",
-      "required": ["apiRoutes", "staticAssets"],
+      "required": ["id", "directory"],
       "properties": {
-        "apiRoutes": {
+        "id": { "type": "string", "minLength": 1 },
+        "directory": { "type": "string", "minLength": 1 },
+        "routes": {
           "type": "array",
           "items": {
             "type": "object",
-            "required": ["path", "entryPoint", "auth"],
+            "required": ["path", "method", "handler"],
             "properties": {
               "path": { "type": "string", "pattern": "^/[a-z0-9-]+/" },
               "method": { "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"] },
-              "entryPoint": { "type": "string", "minLength": 1 },
-              "description": { "type": "string" },
-              "auth": { "type": "boolean" }
-            },
-            "additionalProperties": false
-          }
-        },
-        "staticAssets": {
-          "type": "array",
-          "items": {
-            "type": "object",
-            "required": ["urlPrefix", "directory"],
-            "properties": {
-              "urlPrefix": { "type": "string", "pattern": "^/" },
-              "directory": { "type": "string", "minLength": 1 },
-              "description": { "type": "string" }
+              "handler": { "type": "string", "minLength": 1 }
             },
             "additionalProperties": false
           }
