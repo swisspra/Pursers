@@ -10,12 +10,17 @@ from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
 PACKAGE_FILES = (
     "aion-extension.json",
+    "IMPORT_PROVENANCE.md",
     "README.md",
     "contexts/reviewer.md",
     "contexts/worker.md",
     "door/adapter.cjs",
     "door/DOOR_ONBOARDING_CONTRACT.md",
+    "host/helper.cjs",
+    "host/HELPER_CONTRACT.md",
     "security/loopback.cjs",
+    "team/adapter.cjs",
+    "team/TEAM_ADAPTER_CONTRACT.md",
     "webui/app.js",
     "webui/index.html",
     "webui/routes.js",
