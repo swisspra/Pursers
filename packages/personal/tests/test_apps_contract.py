@@ -69,8 +69,8 @@ def test_exact_view_lock_and_embedded_external_attestation_boundary() -> None:
     lock_path = root / "src/pursers_personal/resources/component-lock.json"
     payload = view_path.read_bytes()
     lock = json.loads(lock_path.read_text(encoding="utf-8"))
-    expected = "746c6eccd85afcc38588c8b9e1946ff2c91a7eb8477783c2f0d6bff0f4c6d922"
-    assert len(payload) == 404280
+    expected = "2b1ea42fde0b8ec4b3b4ea4b755f5b44d725b5d21ea77dbf81e94b9b2bf75c6a"
+    assert len(payload) == 446670
     assert hashlib.sha256(payload).hexdigest() == expected
     assert lock["product_version"] == PRODUCT_VERSION == "5.0.0a25"
     assert lock["view"] == {
@@ -203,6 +203,20 @@ async def test_discovery_envelope_partitions_app_and_model_surfaces(
                 "Copy path",
             ):
                 assert link_marker in html.text
+            for guided_home_marker in (
+                'data-view="home"',
+                'data-view="projects"',
+                'data-view="team"',
+                'data-view="approvals"',
+                'data-view="settings"',
+                'id="next-action-card"',
+                'id="work-detail"',
+                'id="activity-feed-panel"',
+                'id="links-panel"',
+                "Actions stay in agent chat",
+                "Door and bearer values are never rendered",
+            ):
+                assert guided_home_marker in html.text
             assert verified == [None]
 
             model_calls: list[tuple[str, tuple[Any, ...], dict[str, Any]]] = []
