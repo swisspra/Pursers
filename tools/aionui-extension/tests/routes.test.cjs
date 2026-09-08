@@ -130,6 +130,14 @@ test('typed mutation routes refuse non-loopback or cross-origin requests', async
     headers: { origin: 'http://localhost:9999' },
     body: '{}',
   }));
+  const deceptiveDns = await handlers.handle(new Request('http://127.attacker.example/pursers/status'));
+  const validIpv4 = await handlers.handle(new Request('http://127.42.7.9/pursers/status'));
+  const localhostSubdomain = await handlers.handle(new Request('http://worker.localhost/pursers/status'));
+  const ipv6 = await handlers.handle(new Request('http://[::1]/pursers/status'));
   assert.equal(remote.status, 403);
   assert.equal(crossOrigin.status, 403);
+  assert.equal(deceptiveDns.status, 403);
+  assert.equal(validIpv4.status, 200);
+  assert.equal(localhostSubdomain.status, 200);
+  assert.equal(ipv6.status, 200);
 });

@@ -15,6 +15,7 @@ PACKAGE_FILES = (
     "contexts/worker.md",
     "door/adapter.cjs",
     "door/DOOR_ONBOARDING_CONTRACT.md",
+    "security/loopback.cjs",
     "webui/app.js",
     "webui/index.html",
     "webui/routes.js",

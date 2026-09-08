@@ -1,5 +1,7 @@
 'use strict';
 
+const { isLoopbackHostname } = require('../security/loopback.cjs');
+
 const DOOR_PREFIX = 'prs1.';
 const SAFE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/;
 const SAFE_BOARD = /^[A-Za-z0-9._-]{1,80}$/;
@@ -27,11 +29,6 @@ function decodeSegment(value, label) {
     throw new Error(`${label} must be a JSON object`);
   }
   return decoded;
-}
-
-function loopbackHostname(hostname) {
-  const normalized = String(hostname || '').replace(/^\[|\]$/g, '').replace(/\.$/, '').toLowerCase();
-  return normalized === 'localhost' || normalized.endsWith('.localhost') || normalized === '::1' || normalized.startsWith('127.');
 }
 
 function parseDoor(door, nowEpoch = Math.floor(Date.now() / 1000)) {
@@ -62,7 +59,7 @@ function parseDoor(door, nowEpoch = Math.floor(Date.now() / 1000)) {
     if (endpoint.username || endpoint.password || endpoint.hash) {
       return failure(operation, 'invalid_url', 'The Central URL must not contain credentials or a fragment.');
     }
-    const loopback = loopbackHostname(endpoint.hostname);
+    const loopback = isLoopbackHostname(endpoint.hostname);
     if (endpoint.protocol !== 'https:' && !(endpoint.protocol === 'http:' && loopback)) {
       return failure(operation, 'insecure_remote_url', 'Remote Central requires HTTPS; HTTP is accepted only on loopback.');
     }
