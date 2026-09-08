@@ -969,10 +969,15 @@ class BoardClient:
             },
         )
 
-    async def board_state_update(self, key: str, value: str) -> dict[str, Any]:
+    async def board_state_update(
+        self, key: str, value: str, *, expected_sha256: str | None = None
+    ) -> dict[str, Any]:
+        arguments = {"agent_name": self.agent_name, "key": key, "value": value}
+        if expected_sha256 is not None:
+            arguments["expected_sha256"] = expected_sha256
         return await self._call(
             "board_state_update",
-            {"agent_name": self.agent_name, "key": key, "value": value},
+            arguments,
         )
 
     async def board_state_get(self, key: str | None = None) -> dict[str, Any]:

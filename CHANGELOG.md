@@ -7,6 +7,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Changed
+
+- Client and seat kit: project-registry entries may declare an exact,
+  board-scoped HTTPS `repository_url` for ticket routing. Generated seats fail
+  before claim or verification when URL, checkout, board, or operator-ownership
+  routing is unsafe. Registry-admin updates now use compare-and-set writes.
+
 ### Security
 
 - fleet-dashboard: remediated open CodeQL findings. The seat-config text

@@ -127,6 +127,54 @@ class ProjectRegistryTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(result["events"][0]["claim_refused"])
 
+    async def test_registry_route_enrichment_uses_exact_repository_url(self) -> None:
+        registry = {
+            "schema_version": 1,
+            "projects": {
+                "alpha": {
+                    "board_id": "shared",
+                    "work_dir": "/operator/alpha",
+                    "fleet_clone_dir": "/fleet/alpha",
+                    "repository_url": "https://example.test/acme/alpha",
+                    "status": "active",
+                },
+                "beta": {
+                    "board_id": "shared",
+                    "work_dir": "/operator/beta",
+                    "fleet_clone_dir": "/fleet/beta",
+                    "repository_url": "https://example.test/acme/beta",
+                    "status": "active",
+                },
+            },
+        }
+
+        routed = wait_server._enrich_registry_routes(
+            {"events": [{
+                "board_id": "shared",
+                "ticket_id": "TK-beta",
+                "target_url": "https://example.test/acme/beta",
+            }]},
+            registry,
+            claimable=True,
+        )["events"][0]
+        self.assertEqual(routed["work_dir"], "/fleet/beta")
+        self.assertNotIn("claim_refused", routed)
+
+        refused = wait_server._enrich_registry_routes(
+            {"events": [{
+                "board_id": "shared",
+                "ticket_id": "TK-unknown",
+                "target_url": "https://example.test/acme/unknown",
+            }]},
+            registry,
+            claimable=True,
+        )["events"][0]
+        self.assertNotIn("work_dir", refused)
+        self.assertTrue(refused["claim_refused"])
+        self.assertEqual(
+            refused["claim_refusal_code"], "repository_url_not_registered"
+        )
+
     async def test_registry_parse_active_filter_dedupe_and_home_inclusion(self) -> None:
         client = FakeRegistryClient(json.dumps(REGISTRY))
 

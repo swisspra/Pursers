@@ -308,6 +308,7 @@ key `project_registry`. Its value is JSON with this schema:
       "work_dir": "/ABSOLUTE/PATH/TO/PROJECT-A",
       "work_dir_owner": "operator",
       "fleet_clone_dir": "/ABSOLUTE/PATH/TO/PURSERS-FLEET/clones/project-a",
+      "repository_url": "https://example.test/org/project-a",
       "status": "active"
     },
     "project-b": {
@@ -324,7 +325,10 @@ key `project_registry`. Its value is JSON with this schema:
 directly in the same `{schema_version, projects}` shape, so a worker can map a
 claimed ticket's board to its `fleet_clone_dir`. An omitted `work_dir_owner`
 defaults to `operator`; seats must not claim work routed to that checkout until
-a fleet-owned clone is configured.
+a fleet-owned clone is configured. Legacy ticket targets keep the
+`project-name/path` form. A ticket may instead use the exact HTTPS
+`repository_url`; URL targets never fall back to another project or to a board
+default.
 
 ### Registry administration CLI
 
@@ -332,7 +336,9 @@ Use `registry_admin.py` to validate, inspect, and edit the registry without
 calling raw board-state tools. It reads the current document, validates the
 complete schema before any mutation, writes to the home `pursers` board, then
 reads back and compares the stored document. A mismatch exits non-zero and
-prints a diff. The bearer token is read only from `ONBOARD_CENTRAL_TOKEN` and
+prints a diff. Each write includes the SHA-256 of the document that was read,
+so a concurrent registry change aborts instead of being overwritten. The
+bearer token is read only from `ONBOARD_CENTRAL_TOKEN` and
 is never printed.
 
 ```sh
@@ -340,7 +346,10 @@ python tools/wait-bridge/registry_admin.py show
 python tools/wait-bridge/registry_admin.py add project-a \
   --board-id project-a-board --work-dir /ABSOLUTE/PATH/TO/PROJECT-A \
   --work-dir-owner operator \
-  --fleet-clone-dir /ABSOLUTE/PATH/TO/PURSERS-FLEET/clones/project-a
+  --fleet-clone-dir /ABSOLUTE/PATH/TO/PURSERS-FLEET/clones/project-a \
+  --repository-url https://example.test/org/project-a
+python tools/wait-bridge/registry_admin.py set-repository-url project-a \
+  https://example.test/org/project-a
 python tools/wait-bridge/registry_admin.py pause project-a
 python tools/wait-bridge/registry_admin.py activate project-a
 python tools/wait-bridge/registry_admin.py remove project-a
@@ -348,8 +357,10 @@ python tools/wait-bridge/registry_admin.py remove project-a
 
 `add` refuses an existing name unless `--force` is supplied. All mutations
 refuse malformed current state, unknown names, relative work directories, and
-empty board IDs before writing. `remove` prints the removed entry so it can be
-restored by hand. Override the default Central URL with
+empty board IDs before writing. Repository URLs must be credential-free HTTPS
+URLs, and one board cannot register the same active URL twice. Use
+`set-repository-url` to add URL routing without replacing the rest of an entry.
+`remove` prints the removed entry so it can be restored by hand. Override the default Central URL with
 `ONBOARD_CENTRAL_URL` or the global `--central-url` option.
 
 ### Seat administration CLI
