@@ -131,6 +131,25 @@ class CoordinatorWriteTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(joined.is_error)
         return joined.structured_content["agent_id"]
 
+    async def enable_work_dispatch(
+        self,
+        principal: central.Principal,
+        agent_name: str,
+        *,
+        tier_max: int = 2,
+    ) -> None:
+        self.principal = principal
+        result = await self.call(
+            "agent_capabilities_set",
+            agent_name=agent_name,
+            capabilities={
+                "tier_max": tier_max,
+                "can_work": True,
+                "can_review": False,
+            },
+        )
+        self.assertFalse(result.is_error)
+
     async def asyncTearDown(self) -> None:
         central.current_principal = self.original_current_principal
         self.environment.stop()
@@ -312,6 +331,7 @@ class CoordinatorWriteTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(first.structured_content["event_created"])
         self.assertFalse(second.structured_content["event_created"])
         self.assertTrue(second.structured_content["idempotent_replay"])
+        self.assertEqual(second.structured_content["dispatch_events"], [])
         ticket = second.structured_content["ticket"]
         self.assertEqual(ticket["status"], "open")
         self.assertEqual(ticket["assigned_to_agent_id"], self.worker_id)
@@ -383,6 +403,244 @@ class CoordinatorWriteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(event["recipient_identities"], [self.worker_id])
         self.assertIsNone(event["assigned_to_agent_id"])
         self.assertEqual(event["previous_assigned_to_agent_id"], self.worker_id)
+
+    async def test_assignment_revokes_old_offer_and_redispatches_to_target(
+        self,
+    ) -> None:
+        other_worker_id = await self.join_other_worker()
+        await self.enable_work_dispatch(self.worker, "worker-agent")
+        await self.enable_work_dispatch(
+            self.other_worker, "other-worker-agent"
+        )
+        self.principal = self.admin
+        created = await self.call(
+            "ticket_create",
+            agent_name="admin-agent",
+            title="atomic reassignment",
+            description="revoke the old offer and wake the new target",
+            target_url="pursers/packages/central",
+            scope="interactive-no-send",
+            required_fields=["test_output"],
+            prefer_agents=[self.worker_id],
+        )
+        ticket_id = created.structured_content["ticket"]["ticket_id"]
+        self.assertEqual(
+            created.structured_content["ticket"]["work_offer"]["agent_id"],
+            self.worker_id,
+        )
+
+        def add_stale_review_offer(document) -> None:
+            ticket = document["tickets"][ticket_id]
+            review_offer = dict(ticket["work_offer"])
+            review_offer["kind"] = "review"
+            ticket["review_offer"] = review_offer
+
+        self.service.mutate(
+            "pursers", add_stale_review_offer, require_generation=False
+        )
+        before_seq = self.service.journal.read_after("pursers", 0, 1)[
+            "latest_cursor"
+        ]
+
+        self.principal = self.coordinator
+        assigned = await self.call(
+            "ticket_assign",
+            agent_name="coordinator-1",
+            ticket_id=ticket_id,
+            assigned_to_agent_id=other_worker_id,
+            expected_status="open",
+            expected_assigned_to_agent_id=None,
+            coordinator_op_key="atomic-reassignment",
+            reason="move the unclaimed ticket to the eligible target",
+        )
+
+        self.assertFalse(assigned.is_error)
+        ticket = assigned.structured_content["ticket"]
+        self.assertEqual(ticket["assigned_to_agent_id"], other_worker_id)
+        self.assertEqual(ticket["work_offer"]["agent_id"], other_worker_id)
+        self.assertNotIn("review_offer", ticket)
+        self.assertEqual(
+            [
+                event["kind"]
+                for event in assigned.structured_content["dispatch_events"]
+            ],
+            [
+                central.OFFER_REVOKED,
+                central.OFFER_REVOKED,
+                central.TICKET_OFFERED,
+            ],
+        )
+        persisted = self.service.load("pursers")["tickets"][ticket_id]
+        self.assertEqual(persisted["work_offer"]["agent_id"], other_worker_id)
+        self.assertEqual(
+            persisted["dispatch_state"]["agent_id"], other_worker_id
+        )
+        restarted_mcp, restarted_service = central.build_server(
+            "localhost", 8765, self.root / "data"
+        )
+        self.mcp = restarted_mcp
+        self.service = restarted_service
+        reloaded = self.service.load("pursers")["tickets"][ticket_id]
+        self.assertEqual(reloaded["work_offer"]["agent_id"], other_worker_id)
+        self.assertEqual(
+            reloaded["dispatch_state"]["agent_id"], other_worker_id
+        )
+
+        self.principal = self.worker
+        old_catchup = await self.call(
+            "board_catchup",
+            agent_name="worker-agent",
+            cursor=before_seq,
+            ack=False,
+        )
+        self.assertIn(
+            central.OFFER_REVOKED,
+            [event["kind"] for event in old_catchup.structured_content["events"]],
+        )
+        with self.assertRaisesRegex(
+            ToolError, "ticket is not offered to this seat"
+        ):
+            await self.call(
+                "ticket_claim", agent_name="worker-agent", ticket_id=ticket_id
+            )
+
+        self.principal = self.other_worker
+        target_catchup = await self.call(
+            "board_catchup",
+            agent_name="other-worker-agent",
+            cursor=before_seq,
+            ack=False,
+        )
+        target_kinds = [
+            event["kind"] for event in target_catchup.structured_content["events"]
+        ]
+        self.assertIn(central.TICKET_OFFERED, target_kinds)
+        self.assertIn("coordinator_assignment", target_kinds)
+        claimed = await self.call(
+            "ticket_claim", agent_name="other-worker-agent", ticket_id=ticket_id
+        )
+        self.assertFalse(claimed.is_error)
+
+    async def test_assignment_noop_preserves_offer_and_clear_redispatches(
+        self,
+    ) -> None:
+        other_worker_id = await self.join_other_worker()
+        await self.enable_work_dispatch(self.worker, "worker-agent")
+        await self.enable_work_dispatch(
+            self.other_worker, "other-worker-agent"
+        )
+        self.principal = self.admin
+        created = await self.call(
+            "ticket_create",
+            agent_name="admin-agent",
+            title="safe repeated assignment",
+            description="preserve an active offer on assignment no-op",
+            target_url="pursers/packages/central",
+            scope="interactive-no-send",
+            required_fields=["test_output"],
+            prefer_agents=[self.worker_id],
+        )
+        ticket_id = created.structured_content["ticket"]["ticket_id"]
+        self.principal = self.coordinator
+        assigned = await self.call(
+            "ticket_assign",
+            agent_name="coordinator-1",
+            ticket_id=ticket_id,
+            assigned_to_agent_id=other_worker_id,
+            expected_status="open",
+            expected_assigned_to_agent_id=None,
+            coordinator_op_key="assignment-set-target",
+            reason="set the target",
+        )
+        offer = assigned.structured_content["ticket"]["work_offer"]
+
+        repeated = await self.call(
+            "ticket_assign",
+            agent_name="coordinator-1",
+            ticket_id=ticket_id,
+            assigned_to_agent_id=other_worker_id,
+            expected_status="open",
+            expected_assigned_to_agent_id=other_worker_id,
+            coordinator_op_key="assignment-repeat-target",
+            reason="repeat the same target safely",
+        )
+        self.assertEqual(repeated.structured_content["dispatch_events"], [])
+        self.assertEqual(
+            repeated.structured_content["ticket"]["work_offer"], offer
+        )
+
+        cleared = await self.call(
+            "ticket_assign",
+            agent_name="coordinator-1",
+            ticket_id=ticket_id,
+            assigned_to_agent_id=None,
+            expected_status="open",
+            expected_assigned_to_agent_id=other_worker_id,
+            coordinator_op_key="assignment-clear-target",
+            reason="return the ticket to soft dispatch",
+        )
+        cleared_ticket = cleared.structured_content["ticket"]
+        self.assertNotIn("assigned_to_agent_id", cleared_ticket)
+        self.assertEqual(
+            cleared_ticket["work_offer"]["agent_id"], self.worker_id
+        )
+        self.assertEqual(
+            [
+                event["kind"]
+                for event in cleared.structured_content["dispatch_events"]
+            ],
+            [central.OFFER_REVOKED, central.TICKET_OFFERED],
+        )
+
+    async def test_assignment_to_ineligible_target_reports_unassignable(
+        self,
+    ) -> None:
+        other_worker_id = await self.join_other_worker()
+        await self.enable_work_dispatch(self.worker, "worker-agent")
+        await self.enable_work_dispatch(
+            self.other_worker, "other-worker-agent", tier_max=1
+        )
+        self.principal = self.admin
+        created = await self.call(
+            "ticket_create",
+            agent_name="admin-agent",
+            title="ineligible reassignment",
+            description="do not fabricate a target offer",
+            target_url="pursers/packages/central",
+            scope="interactive-no-send",
+            required_fields=["test_output"],
+            prefer_agents=[self.worker_id],
+            tier=2,
+        )
+        ticket_id = created.structured_content["ticket"]["ticket_id"]
+
+        self.principal = self.coordinator
+        assigned = await self.call(
+            "ticket_assign",
+            agent_name="coordinator-1",
+            ticket_id=ticket_id,
+            assigned_to_agent_id=other_worker_id,
+            expected_status="open",
+            expected_assigned_to_agent_id=None,
+            coordinator_op_key="assignment-ineligible-target",
+            reason="exercise target eligibility",
+        )
+
+        ticket = assigned.structured_content["ticket"]
+        self.assertNotIn("work_offer", ticket)
+        self.assertEqual(ticket["dispatch_state"]["state"], "unassignable")
+        self.assertEqual(
+            ticket["dispatch_state"]["reason"], "pinned_seat_unavailable"
+        )
+        self.assertEqual(
+            [
+                event["kind"]
+                for event in assigned.structured_content["dispatch_events"]
+            ],
+            [central.OFFER_REVOKED, "dispatch_unassignable"],
+        )
+        persisted = self.service.load("pursers")["tickets"][ticket_id]
+        self.assertNotIn("work_offer", persisted)
 
     async def test_assignment_requires_admin_membership(self) -> None:
         ticket_id = await self.create_ticket("admin-only assignment")
