@@ -17,6 +17,7 @@
         ".superdesign/init/theme.md",
         ".superdesign/init/pages.md",
         ".superdesign/init/extractable-components.md",
+        "docs/design-home/journeys.md",
         "tools/dashboard-ui/dashboard-entry.html",
         "tools/dashboard-ui/src/dashboard.css"
       ],
@@ -26,9 +27,10 @@
         ".superdesign/init/components.md": "c8bbdd5725f667f4c3ef5c9b350e8fe435f72308e7bb2059165969fe75100402",
         ".superdesign/init/layouts.md": "73f283c0e13f59c1f7f8b560a54a7b6acb3a7e98dc270bdc5f9a225864efd3a4",
         ".superdesign/init/routes.md": "50ef4b34b9a68c7b93cdd37411b2b8c3de1de471da340e5af35c0fda5b0dce8a",
-        ".superdesign/init/theme.md": "1eabdd6725ddbabaa6a219babfa3db9400c2d461ab1a59a40af49c603ce299b8",
+        ".superdesign/init/theme.md": "c0c096c0efc471ab316a928631af2cf2b84f5de9c8c089c96260ce10fc98b394",
         ".superdesign/init/pages.md": "abeaee8e05b8453c5dea813f300f84807f10bb3455d4ddfdb79f817d952f7d2c",
         ".superdesign/init/extractable-components.md": "f1094aa1e9287495c98bdb80f9a3ab06bdb3879f3d81ba2859e49f8d2ad147aa",
+        "docs/design-home/journeys.md": "2062f8089fb64bbe8c4b44505ad7d34c4abb0ead41df837d98070bb449045e3c",
         "tools/dashboard-ui/dashboard-entry.html": "cb640ae68837d02d3d0eb2843c4c31e9c8d563351264d0c3a7c68699e16500e7",
         "tools/dashboard-ui/src/dashboard.css": "9d3b71edd4e0149337da441e769deeddb44c87d058d94455e3921ce0907f0fbd"
       },
@@ -62,13 +64,13 @@
           "currentVersion": 3
         },
         "2bcc013f-c1b0-4fc6-a6f7-a7b8fc62ceb2": {
-          "title": "Direction B — Calm Focused Workspace",
-          "visualDirection": "cool-gray and cobalt focused AionUI workspace",
+          "title": "Direction B — Calm Project Home",
+          "visualDirection": "cool-gray and cobalt multi-project AionUI Home",
           "parentDraftId": "ee6dcdae-d401-4b66-851a-68ffc2d3a05b",
-          "currentVersion": 3
+          "currentVersion": 4
         }
       },
-      "updatedAt": "2026-09-08T07:03:01Z"
+      "updatedAt": "2026-09-08T07:13:38Z"
     }
   }
 }
