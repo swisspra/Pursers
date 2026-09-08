@@ -1,259 +1,148 @@
-# Pursers Dashboard Surface Inventory
+# Dashboard surface inventory
 
-Complete inventory of every rendered surface across the Pursers project, including hidden/admin/detail states, duplicate frontends, and actual live entrypoints.
+Source baseline: `c2ebac5de803a0f7a00468ec4d3cdf06e4719096` (origin/main, 5.0.0a25).
 
-## Surface 1: Dashboard-UI (Personal Board)
+## Surface summary
 
-**Location:** `tools/dashboard-ui/`
+| # | Surface | Source path | Lines | Build | Live entrypoint |
+| --- | --- | --- | --- | --- | --- |
+| 1 | Dashboard-UI SPA | `tools/dashboard-ui/src/dashboard.ts` | 1528 | Vite single-file | `packages/personal/resources/dashboard.html` |
+| 1 | Dashboard-UI CSS | `tools/dashboard-ui/src/dashboard.css` | 619 | Vite single-file | (bundled into dashboard.html) |
+| 1 | Dashboard-UI entry | `tools/dashboard-ui/dashboard-entry.html` | ~30 | Vite single-file | (bundled into dashboard.html) |
+| 2 | Fleet Dashboard | `tools/fleet-dashboard/fleet_dashboard.py` | 7507 | None (inline) | Served by HTTP handler |
+| 3 | Extension Join/Settings | `tools/aionui-extension/webui/` | 360 | None (static) | `webui/index.html` |
+| 4 | Personal MCP Server | `packages/personal/src/pursers_personal/apps_server.py` | 2401 | None | MCP tools + HTML resource |
 
-| File | Lines | Purpose |
-|------|-------|---------|
-| `dashboard-entry.html` | 145 lines | Entry HTML with semantic structure for all 6 views |
-| `src/dashboard.ts` | 1528 lines | Full TypeScript SPA logic: decoding, rendering, refresh, search, host integration |
-| `src/dashboard.css` | 619 lines | Complete CSS with dark/light themes, responsive, accessibility |
-| `package.json` | — | Vite + vite-plugin-singlefile build config |
-| `vite.config.ts` | — | Vite single-file build → `dist/dashboard-entry.html` |
+### Extension file breakdown
 
-**Build output:** `packages/personal/src/pursers_personal/resources/dashboard.html` (single-file, 257 physical lines/404280 bytes, inlined JS+CSS+HTML)
+| File | Lines |
+| --- | --- |
+| `webui/index.html` | 33 |
+| `webui/app.js` | 60 |
+| `webui/routes.js` | 201 |
+| `webui/style.css` | 66 |
+| **Total** | **360** |
 
-**Live entrypoint:** Served by Personal MCP server as `apps.add_html_resource(UI_URI, ...)` with `title="On Board Personal"`, `csp=ResourceCsp()`, `prefers_border=True`.
+## States per surface
 
-**Views:**
+### Surface 1: Dashboard-UI
 
-| View | Elements | States |
-|------|----------|--------|
-| Today | health-card, metrics-grid (4), today-work (4 tickets), today-agents (4), latest-handoff, important-pinned, recent-activity (5 events) | loading, demo, demo-error, stale, live |
-| Work | work-total badge, work-notice (truncation warning), 6 status groups (Open/Working/Submitted/Needs attention/Done/Ended + Other) | empty (no tickets), truncated (500 cap) |
-| Agents | agents-total badge, agents-notice (truncation), agents-grid (auto-fit cards) | empty (no agents), stale (grayscale filter), duplicate-name warning |
-| Fleet | fleet-warning, fleet-metrics (4), projects table (6 cols), pool table (3 cols) | unavailable (tool not exposed), no projects, no pool entries |
-| Links | links-total badge, links-notice (truncation), link-groups (by ticket) | unavailable (tool not exposed), no links, no files/tags, suggested authority |
-| Activity | activity-total badge, activity-notice (resync/dropped/has_more), timeline | empty (no activity), resync_notice, dropped_events, has_more |
+| State | How rendered | Line range |
+| --- | --- | --- |
+| Empty (no tickets) | `renderToday()` with empty highlights | 750–774 |
+| Loading | `main.innerHTML = '<p class="empty">Loading…</p>'` in `render()` | 1194–1214 |
+| Error | `renderConnection()` shows disconnected banner | 648–676 |
+| Permission denied | `decodeSnapshot()` returns null; `render()` shows error | 367–427, 1194–1214 |
+| Stale data | `renderConnection()` shows `data.stale` flag | 648–676 |
+| Search empty | `renderSearch()` shows "No results" | 1231–1316 |
 
-**State machine:**
-- `data-scenario`: `demo` (synthetic), `live` (connected)
-- `data-render-state`: `loading`, `demo`, `demo-error`, `error`, `stale`
-- `data_mode`: `live`, `demo`, `demo-error`, `stale`
-- `connected`: boolean (host bridge connection)
-- `stale`: boolean (cached view)
-- `feed_error`: string|null
+### Surface 2: Fleet Dashboard
 
-**Empty/loading/error/permission states:**
+| State | How rendered | Function |
+| --- | --- | --- |
+| Empty (no centrals) | `renderFleet()` shows skeleton | line 5863 |
+| Loading board | `<p class="empty">Loading board detail…</p>` | `syncRoute()` line 5888 |
+| Error | `<p class="error">Board detail unavailable</p>` | `refreshDetail()` line 5887 |
+| Disconnected | `markConnectionFailure()` shows banner | connection state module |
+| Bounded data | `<span class="status">bounded view</span>` | `renderCentral()` line 5860 |
+| Truncated tickets | `<span class="status">N of M tickets shown</span>` | `renderDetail()` line 5879 |
+| Edit-paused refresh | `#refresh-paused` indicator | `refreshPaused()` line 5861 |
+| Empty workers | `<tr><td colspan="6" class="empty">No API workers configured.</td></tr>` | `renderWorkers()` line 6001 |
+| Empty agents | `<p class="empty">No active agents available.</p>` | `renderAgentsHub()` line 6113 |
+| Bounded routes | `<span class="warning">Routes source unavailable.</span>` | `routesView()` line 5877 |
 
-| State | Desktop | Mobile | Implementation |
-|-------|---------|--------|----------------|
-| Loading | `main[aria-busy="true"]` → opacity 0.72 | same | `setLoading(true)` sets aria-busy, connection-title="Loading authorized board state" |
-| Demo data | connection-banner tone="demo" (warning dot), health-card tone="demo" | same | `renderConnection()` + `renderHealth()` with `data_mode === "demo"` |
-| Demo error | connection-banner tone="error" (danger dot), health-card tone="stale" | same | `data_mode === "demo-error"` — synthetic connection-error simulation |
-| Stale/error | connection-banner tone="stale" or "error", health-card tone="stale" | same | `data.stale` or `data.feed_error` — last-known state remains visible |
-| Live | connection-banner tone="live" (success dot) | same | `data_mode === "live"` && `!data.stale` |
-| Empty (per view) | `emptyState()` — bold title + muted detail text | same | Each view checks for empty data arrays and renders emptyState |
-| Truncation notice | `.notice` with tone="warning" | same | `ticket_truncated`, `agent_truncated`, `data.truncated` |
-| Search no results | `emptyState("No matching loaded data", ...)` | same | `renderSearch()` renders emptyState when no matches |
-| Fleet unavailable | `emptyState("Fleet data unavailable", ...)` | same | `fleetUnavailable` flag when `fleet_snapshot` tool not exposed |
-| Links unavailable | `emptyState("Links unavailable", ...)` | same | `linksUnavailable` flag when `link_snapshot` tool not exposed |
-| Host bridge error | `render(failureSnapshot("Host bridge error"))` | same | `app.onerror` handler |
-| Not connected (pre-connect) | fallback snapshot with demo data | same | `render(fallback)` at module init |
+### Surface 3: Extension
 
-**Responsive breakpoints:**
-- `≤900px`: header stacks vertical, hero-grid → 1 col, today-grid → 2 cols, page padding → 18px
-- `≤620px`: all grids → 1 col, metrics → 2 cols, command-bar kbd hidden, search-count wraps, footer stacks, page padding → 14px
+| State | How rendered | Location |
+| --- | --- | --- |
+| Initial (no door) | Join form with intro text | `index.html` |
+| Joining | `message.textContent = 'Joining…'` | `app.js` line ~30 |
+| Joined | `message.textContent = 'Joined and registered…'` + status card | `app.js` line ~35 |
+| Join failed | `message.textContent = result.install_hint \|\| 'Join failed…'` | `app.js` line ~32 |
+| Bridge missing | `install_hint: INSTALL_HINT` from routes.js | `routes.js` status() |
+| Status loaded | `showStatus()` fills status card fields | `app.js` `showStatus()` |
+| Status empty | Status card hidden (`card.hidden = true`) | `app.js` initial state |
 
-**Accessibility:**
-- Skip link (visible on focus)
-- `aria-busy` on main during loading
-- `role="tablist"` / `role="tab"` / `role="tabpanel"` for view tabs
-- `aria-live="polite"` on connection banner, search count, source text
-- `aria-selected` on active tab
-- Keyboard navigation: Arrow Left/Right, Home, End for tabs; `/` for search focus; Escape to clear search
-- `@media (prefers-reduced-motion: reduce)` disables animations
-- `@media (forced-colors: active)` forces visible borders
-- Min button height 44px
+### Surface 4: Personal MCP Server
 
-## Surface 2: Fleet Dashboard
+| State | How rendered | Tool |
+| --- | --- | --- |
+| Board empty | `board_snapshot` returns 0 tickets/agents | board_snapshot |
+| Not onboarded | `board_onboard` required first | board_onboard |
+| Ticket not found | `ticket_get` returns error | ticket_get |
+| Memory empty | `memory_search` returns empty list | memory_search |
+| Fleet unavailable | `fleet_snapshot` returns error | fleet_snapshot |
+| No links | `link_snapshot` returns empty graph | link_snapshot |
 
-**Location:** `tools/fleet-dashboard/fleet_dashboard.py` (453 KB, single Python file)
+## Logo and assets inventory
 
-**Type:** Python HTTP server (`BaseHTTPRequestHandler`) serving an inline JavaScript SPA.
+| Asset type | Found? | Details |
+| --- | --- | --- |
+| Logo image | No | None found in any surface |
+| Favicon | No | None found |
+| App icon | No | None found |
+| CSS text marks | Yes | Dashboard-UI: `.product-mark` CSS-generated text "OB"; Fleet Dashboard: `.brand-block` text "Pursers"; Extension: `<h1>Pursers</h1>` text |
+| Third-party images | No | None found |
+| Font files | No | System font stack only (`ui-sans-serif, system-ui, -apple-system, sans-serif`) |
 
-**HTML constant:** `HTML = r"""..."""` starting at line ~5828, patched via `HTML.replace()` calls through line ~6173+.
+All visual identity is CSS-generated text, not image assets. No licenses
+required for text marks.
 
-**Layout:** Sidebar (brand, nav: Overview/Boards/Agents/Operations) + main content area
+## Third-party dependencies
 
-**Key JS functions:**
+| Package | Version | License | Used by |
+| --- | --- | --- | --- |
+| `@modelcontextprotocol/ext-apps` | 1.7.5 | MIT | Dashboard-UI (PostMessageTransport) |
+| `@modelcontextprotocol/sdk` | 1.30.0 | MIT | Dashboard-UI (MCP client) |
+| `vite` | 8.2.1 | MIT | Dashboard-UI (build) |
+| `vite-plugin-singlefile` | 2.3.3 | MIT | Dashboard-UI (single-file output) |
+| `mcp` (Python) | 2.1.1 | MIT | Wait bridge, Personal MCP server |
 
-| Function | Lines (approx) | Purpose |
-|----------|----------------|---------|
-| `route()` | ~5950 | Hash route parser |
-| `renderFleet()` | ~5960 | Home view: per-central sections |
-| `renderCentral()` | ~5953 | Per-central: board cards, agent pool, retire drawer |
-| `renderDetail()` | ~5930 | Board detail: tabs + intake + findings + view |
-| `ticketView()` | ~5900 | Sortable ticket table with expandable detail |
-| `timelineView()` | ~5905 | Event timeline grouped by day/ticket |
-| `changesView()` | ~5874 | Change summary metrics (created/claimed/submitted/closed/rejected) |
-| `flowView()` | ~5940 | 4-column flow board |
-| `routesView()` | ~5944 | Ticket provenance + per-seat load |
-| `renderConfig()` | ~5942 | Coordinator config form |
-| `renderOverhead()` | ~5908 | Session context pressure + bridge diagnostics |
-| `renderOverview()` | ~6106 | Fleet overview (hub route) |
-| `renderBoardsHub()` | ~6107 | Board workspace cards (hub route) |
-| `renderAgentsHub()` | ~6113 | Unified agent pool (hub route) |
-| `renderOperationsHub()` | ~6114 | Operations cards (hub route) |
-| `renderSeats()` | ~6213 | Seat config, dispatch, doctor, registry |
-| `renderReleaseOps()` | ~6204 | Release & operations card |
-| `intakePanel()` | ~5934 | New-ask intake form + pending asks |
-| `fleetTable()` (fleet dashboard) | inline | Table builder helper |
-| `pressureBadge()` | inline | Context pressure status badge |
-| `pageHead()` | ~6104 | Page header with kicker/title/copy/action |
+## Total context size
 
-**API endpoints:** See `routes.md` for complete list (20+ GET, 20+ POST routes).
+| Artifact | Lines | Approx size |
+| --- | --- | --- |
+| components.md | ~230 | ~8 KB |
+| layouts.md | ~160 | ~5 KB |
+| routes.md | 288 | ~10 KB |
+| theme.md | ~210 | ~7 KB |
+| pages.md | ~165 | ~5 KB |
+| extractable-components.md | ~185 | ~6 KB |
+| inventory.md (this file) | ~180 | ~6 KB |
+| **Total** | **~1418** | **~47 KB** |
 
-**Empty/loading/error/permission states:**
+## Bounded context bundle for primary dashboard reproduction
 
-| State | Desktop | Mobile | Implementation |
-|-------|---------|--------|----------------|
-| Loading | `<p class="empty">Loading board detail…</p>` | same | `syncRoute()` sets loading placeholder |
-| Central unavailable | `<p class="error">Unavailable: ${error}</p>` | same | `fleetErrors[label]` rendered in central section |
-| Board unavailable | `<p class="error">Board detail unavailable...</p>` | same | `refreshDetail()` catch block |
-| Overhead unavailable | `<p class="error">Overhead unavailable...</p>` | same | `refreshOverhead()` catch block |
-| No tickets match | `<td colspan="4" class="empty">No tickets match the filter.</td>` | same | `ticketView()` empty tbody |
-| No boards match | `<p class="empty">No boards match the filter.</p>` | same | `renderCentral()` empty grid |
-| No agents match | `<p class="empty">No active agents match the filter.</p>` | same | `renderCentral()` empty pool |
-| No timeline events | `<p class="empty">No timeline events match the filter.</p>` | same | `timelineView()` empty groups |
-| Nothing needs attention | `<p class="empty">Nothing needs attention. The fleet is calm.</p>` | same | `renderOverview()` empty attention |
-| No current findings | `<p class="empty">No current findings</p>` | same | `findings()` empty list |
-| Connection error | `#connection-banner` (sticky, warning border) | same | `connectionFailures` set + `updateConnectionState()` |
-| Refresh paused | `#refresh-paused` fixed pill + `#state[data-paused]` | same | `refreshPaused()` — paused when editing forms |
-| Loopback required (POST) | `{"error":"loopback required"}` (403) | same | `do_POST()` config route guard |
-| Central not found | `{"error":"central not found"}` (404) | same | `do_GET()` / `do_POST()` guard |
-| Search no results | `<p class="empty">No results</p>` | same | `renderSearchResults()` empty |
+To reproduce the Dashboard-UI primary surface, include:
 
-**Responsive:** `@media(max-width:800px)` — strips → 2 cols, grids/flow → 1 col, `.hide-small` hidden, agent summary → 2 cols, search → full width
+1. `tools/dashboard-ui/src/dashboard.ts` (1528 lines) — full TypeScript SPA logic
+2. `tools/dashboard-ui/src/dashboard.css` (619 lines) — full CSS with dark/light themes
+3. `tools/dashboard-ui/dashboard-entry.html` (~30 lines) — HTML shell
+4. `tools/dashboard-ui/vite.config.ts` — Vite build config
+5. `tools/dashboard-ui/package.json` — dependency manifest
+6. `tools/dashboard-ui/tsconfig.json` — TypeScript config
 
-## Surface 3: Extension Join/Settings
+For files >900 lines, the artifacts provide:
+- `dashboard.ts` (1528 lines): bounded render/token ranges for each function
+  (see components.md and pages.md for exact line ranges per function)
+- `fleet_dashboard.py` (7507 lines): key HTML constant and HTTP handler ranges
+  (see routes.md for exact route/handler line numbers)
+- `apps_server.py` (2401 lines): tool name, line, and description table
+  (see routes.md for complete tool inventory)
 
-**Location:** `tools/aionui-extension/webui/`
-
-| File | Lines | Purpose |
-|------|-------|---------|
-| `index.html` | ~40 lines | Join form + status card |
-| `app.js` | ~50 lines | Form handler, status fetcher |
-| `routes.js` | ~170 lines | Server-side Node.js route handler |
-| `style.css` | ~50 lines | Fixed dark theme CSS |
-| `aion-extension.json` | ~80 lines | Extension manifest with settingsTab, apiRoutes, staticAssets |
-| `contexts/worker.md` | — | Worker context preset |
-| `contexts/reviewer.md` | — | Reviewer context preset |
-
-**Live entrypoint:** Registered as AionUI settings tab "Pursers" at `webui/index.html`. Served via extension static assets at `/pursers/assets/`.
-
-**States:**
-
-| State | Implementation |
-|-------|----------------|
-| No seats | Status card hidden, shows join form only |
-| Joining | `message.textContent = 'Joining…'` |
-| Join success | `message.textContent = 'Joined and registered...'`, status card shown |
-| Join failure | `message.textContent = result.install_hint \|\| 'Join failed...'` |
-| Bridge not installed | API returns `{"ok":false,"error":"bridge_not_installed","install_hint":...}` → 503 |
-| Join failed | API returns `{"ok":false,"error":"join_failed"}` → 422 |
-| Invalid door | API returns `{"ok":false,"error":"invalid_door"}` → 400 |
-| Invalid JSON | API returns `{"ok":false,"error":"invalid_json"}` → 400 |
-
-## Surface 4: Personal MCP Server
-
-**Location:** `packages/personal/src/pursers_personal/apps_server.py` (~800+ lines)
-
-**Type:** Python MCP server with 24 tools and 1 HTML resource.
-
-**Serves:** `dashboard.html` (built dashboard-ui) via `apps.add_html_resource(UI_URI, load_dashboard_html(), ...)`.
-
-**Backend classes:**
-
-| Class/Module | Purpose |
-|--------------|---------|
-| `LiveDashboard` | Stateful dashboard: projection cache, event subscription, feed, fleet/links |
-| `build_dashboard_server()` | Factory: creates MCPServer + LiveDashboard with all MCP tools |
-| `build_personal_server()` | Factory: loads profile, builds server with review policy |
-| `load_dashboard_html()` | Loads `resources/dashboard.html` |
-
-**Additional source files in `packages/personal/`:**
-
-| File | Purpose |
-|------|---------|
-| `src/pursers_personal/cli.py` | CLI entry point |
-| `src/pursers_personal/profile.py` | Profile loading and context resolution |
-| `src/pursers_personal/integration.py` | Integration helpers |
-| `src/pursers_personal/artifacts.py` | Artifact management |
-| `src/pursers_personal/resources/component-lock.json` | Component lock for build verification |
-
-## Logo / Assets Inventory
-
-| Surface | Logo/Mark | Type | License/Source |
-|---------|-----------|------|----------------|
-| Dashboard-UI | "OB" text in `.product-mark` (CSS-generated, no image) | CSS gradient box with border | Original, no external asset |
-| Fleet Dashboard | "P" text in `.brand-mark` (CSS-generated) | CSS styled span | Original, no external asset |
-| Extension | None | — | — |
-
-**No image assets (SVG, PNG, ICO, JPG, WebP) found in the repository.**
-
-## Third-Party Dependencies
-
-| Package | Version | License | Used By |
-|---------|---------|---------|---------|
-| `@modelcontextprotocol/ext-apps` | 1.7.5 | Apache-2.0, MIT, CC-BY-4.0 | Dashboard-UI (MCP Apps SDK) |
-| `@modelcontextprotocol/sdk` | 1.30.0 | MIT | Dashboard-UI (MCP TypeScript SDK) |
-| `vite` | 8.2.1 | MIT | Dashboard-UI (build tool) |
-| `vite-plugin-singlefile` | 2.3.3 | MIT | Dashboard-UI (build plugin) |
-| `typescript` | 7.0.2 | Apache-2.0 | Dashboard-UI (type checking) |
-
-License file: `packages/personal/LICENSE` (Apache 2.0)
-Third-party notices: `packages/personal/THIRD_PARTY_NOTICES.md`
-Additional licenses: `packages/personal/licenses/EXT_APPS_LICENSE`
-
-## Total Context Size
-
-| Artifact | Lines | Approx KB |
-|----------|-------|-----------|
-| `components.md` | 221 | 7.1 KB |
-| `layouts.md` | 150 | 5.1 KB |
-| `routes.md` | 151 | 8.5 KB |
-| `theme.md` | 200 | 7.5 KB |
-| `pages.md` | 156 | 6.4 KB |
-| `extractable-components.md` | 175 | 8.9 KB |
-| `inventory.md` (this file) | 259 | 15.3 KB |
-| **Total** | **1312** | **58.8 KB** |
-
-## Bounded Context Bundle for Primary Dashboard Reproduction
-
-The primary dashboard is `dashboard-ui` (the personal board view). To reproduce it for Superdesign:
-
-**Required files:**
-1. `tools/dashboard-ui/dashboard-entry.html` — 145 lines (full HTML structure)
-2. `tools/dashboard-ui/src/dashboard.css` — 619 lines (full responsive/theme source)
-3. `.superdesign/context/primary-dashboard-current.md` — bounded render/import contract for the 1528-line `tools/dashboard-ui/src/dashboard.ts`; do not upload the full module
-
-**Context token range references (larger files, ranges only):**
-- `tools/fleet-dashboard/fleet_dashboard.py` — 453502 bytes, 7507 lines. Key ranges:
-  - Lines 5828-5892: HTML document + CSS
-  - Lines 5892-6173: HTML.replace() patches (legacy route + hub extensions)
-  - Line 5859: route() function
-  - Lines 6106-6114: hub renderers (overview, boards, agents, operations)
-  - Line 6537 onward: Python HTTPHandler; `do_GET()` at 6580 and `do_POST()` at 6885
-- `packages/personal/src/pursers_personal/apps_server.py` — 2401 lines. Key symbols:
-  - `LiveDashboard` at line 510: projection, view subscription, event handling
-  - `build_dashboard_server()` at line 1949: MCP tool registration + HTML resource
-  - `build_personal_server()` at line 2375 / `run_personal_mcp()` at line 2398: profile-backed factory
-
-**Git baseline:** origin/main at `c2ebac5` (release: consolidate 5.0.0a25 train)
-
-## Coordinator Materialization Notes
+## Coordinator materialization notes
 
 To materialize `.superdesign/init/` without repeating discovery:
-1. Copy `docs/design-home/context/components.md` → `.superdesign/init/components.md`
-2. Copy `docs/design-home/context/layouts.md` → `.superdesign/init/layouts.md`
-3. Copy `docs/design-home/context/routes.md` → `.superdesign/init/routes.md`
-4. Copy `docs/design-home/context/theme.md` → `.superdesign/init/theme.md`
-5. Copy `docs/design-home/context/pages.md` → `.superdesign/init/pages.md`
-6. Copy `docs/design-home/context/extractable-components.md` → `.superdesign/init/extractable-components.md`
-7. Reference `docs/design-home/inventory.md` for the full surface inventory
 
-All six init artifacts are non-empty and contain actual code, route mappings, theme tokens, and dependency trees.
+1. Copy the 6 files from `docs/design-home/context/` into `.superdesign/init/`:
+   - `components.md`
+   - `layouts.md`
+   - `routes.md`
+   - `theme.md`
+   - `pages.md`
+   - `extractable-components.md`
+2. Reference `docs/design-home/inventory.md` for the surface inventory and
+   state matrix.
+3. The exact branch and commit SHA is in the submission notes.
+4. All file paths, line counts, and route inventories are verified against
+   baseline `c2ebac5de803a0f7a00468ec4d3cdf06e4719096`.

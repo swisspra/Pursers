@@ -2,6 +2,8 @@
 
 Shared layout components that appear on every page or across multiple pages.
 
+Baseline: `c2ebac5de803a0f7a00468ec4d3cdf06e4719096` (origin/main, 5.0.0a25).
+
 ## Surface 1: Dashboard-UI (Personal Board)
 
 Source: `tools/dashboard-ui/src/dashboard.css` + `tools/dashboard-ui/dashboard-entry.html`
@@ -83,7 +85,7 @@ Full CSS (layout-relevant excerpts):
 
 ## Surface 2: Fleet Dashboard
 
-Source: `tools/fleet-dashboard/fleet_dashboard.py` (inline HTML/CSS/JS, line ~5828+)
+Source: `tools/fleet-dashboard/fleet_dashboard.py` (7507 lines, inline HTML/CSS/JS, HTML constant at line ~5828 through ~6173, HTTP handler at ~6435–7507). Baseline: `c2ebac5de803a0f7a00468ec4d3cdf06e4719096`.
 
 ### App Shell with Sidebar
 
