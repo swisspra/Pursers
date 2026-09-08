@@ -133,6 +133,122 @@ def test_registry_repository_url_is_exact_and_board_scoped() -> None:
     assert cross_board.value.code == "repository_url_board_mismatch"
 
 
+@pytest.mark.parametrize("target", ["https://[", "https://", "http://example.test/x"])
+def test_registry_rejects_malformed_repository_target_with_stable_error(
+    target: str,
+) -> None:
+    parsed = parse_project_registry(state({
+        "schema_version": 1,
+        "projects": {
+            "alpha": {
+                "board_id": "shared",
+                "work_dir": "/repo/alpha",
+                "repository_url": "https://example.test/acme/alpha",
+                "status": "active",
+            },
+        },
+    }))
+
+    with pytest.raises(registry_module.RegistryRoutingError) as caught:
+        resolve_registry_target(parsed, "shared", target)
+
+    assert caught.value.code == "target_url_malformed"
+    assert "credential-free HTTPS repository URL" in str(caught.value)
+
+
+def test_registry_wait_isolates_malformed_target_from_other_board() -> None:
+    identities = {"alpha": "AI-alpha", "beta": "AI-beta"}
+    tickets = {
+        "alpha": {
+            "ticket_id": "TK-alpha",
+            "status": "open",
+            "target_url": "https://[",
+            "dispatch_state": {"state": "offered"},
+            "work_offer": {"agent_id": "AI-alpha", "expires_at": "later"},
+        },
+        "beta": {
+            "ticket_id": "TK-beta",
+            "status": "open",
+            "target_url": "beta/task",
+            "dispatch_state": {"state": "offered"},
+            "work_offer": {"agent_id": "AI-beta", "expires_at": "later"},
+        },
+    }
+
+    def result(value: dict) -> SimpleNamespace:
+        return SimpleNamespace(
+            is_error=False, structured_content={"result": value}, content=[]
+        )
+
+    class Raw:
+        async def call_tool(self, name, arguments, **_kwargs):
+            board_id = arguments["board_id"]
+            if name == "board_join":
+                return result({
+                    "agent_id": identities[board_id],
+                    "generation_token": f"gen-{board_id}",
+                })
+            if name == "ticket_get":
+                return result({"ticket": tickets[board_id]})
+            if name == "board_catchup":
+                return result({
+                    "events": [{
+                        "seq": 1,
+                        "kind": "ticket_offered",
+                        "ticket_id": tickets[board_id]["ticket_id"],
+                    }],
+                    "next_cursor": 1,
+                    "has_more": False,
+                })
+            raise AssertionError(name)
+
+    registry = parse_project_registry(state({
+        "schema_version": 1,
+        "projects": {
+            "alpha": {
+                "board_id": "alpha",
+                "work_dir": "/repo/alpha",
+                "repository_url": "https://example.test/acme/alpha",
+                "status": "active",
+            },
+            "beta": {
+                "board_id": "beta",
+                "work_dir": "/repo/beta",
+                "status": "active",
+            },
+        },
+    }))
+    client = SimpleNamespace(
+        board_id="alpha",
+        agent_name="worker-agent",
+        identity=SimpleNamespace(agent_id="AI-alpha"),
+        generation_token="gen-alpha",
+        _client=Raw(),
+    )
+
+    response = asyncio.run(registry_module.wait_for_boards(
+        client,
+        ["alpha", "beta"],
+        {"alpha": 0, "beta": 0},
+        1,
+        kinds=DISPATCH_KINDS,
+        submitted=False,
+        poll_fallback=True,
+        registry=registry,
+    ))
+
+    events = {event["board_id"]: event for event in response["events"]}
+    assert events["alpha"]["routing_error"] == {
+        "code": "target_url_malformed",
+        "message": (
+            "target_url must be a valid legacy project/path or credential-free "
+            "HTTPS repository URL"
+        ),
+    }
+    assert events["alpha"]["work_dir"] is None
+    assert events["beta"]["work_dir"] == "/repo/beta"
+
+
 def test_registry_refuses_ambiguous_legacy_alias_on_shared_board() -> None:
     parsed = parse_project_registry(state({
         "schema_version": 1,

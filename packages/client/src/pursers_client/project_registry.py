@@ -193,8 +193,30 @@ def resolve_registry_target(
 ) -> dict[str, str | None]:
     """Resolve one ticket target within its board, without cross-board fallback."""
     target = str(target_url)
-    parsed = urlsplit(target)
-    repository_target = bool(parsed.scheme and parsed.netloc)
+    try:
+        parsed = urlsplit(target)
+    except ValueError as exc:
+        raise RegistryRoutingError(
+            "target_url_malformed",
+            "target_url must be a valid legacy project/path or credential-free "
+            "HTTPS repository URL",
+        ) from exc
+    repository_target = bool(parsed.scheme or parsed.netloc)
+    if repository_target and (
+        target != target.strip()
+        or parsed.scheme != "https"
+        or not parsed.netloc
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+        or parsed.path in {"", "/"}
+    ):
+        raise RegistryRoutingError(
+            "target_url_malformed",
+            "target_url repository URL must be an exact credential-free HTTPS "
+            "repository URL without query or fragment",
+        )
     active = [
         (name, project)
         for name, project in registry["projects"].items()
