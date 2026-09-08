@@ -144,7 +144,7 @@ The `route()` function (line 5859) is progressively patched by hub extensions:
 | `/api/config/seats` | Seat inventory | 6603 |
 | `/api/config/bridge` | Bridge install/upgrade status | 6605 |
 | `/api/config/release` | Release operations status | 6607 |
-| `/api/config/attention` | Attention state | 6609 |
+| `/api/attention` | Attention state | 6609 |
 | `/api/config/registry` | Project registry | 6648 |
 | `/api/doors` | Door inventory | 6665 |
 | `/api/intake` | Intake queues | 6774 |
@@ -172,6 +172,7 @@ The `route()` function (line 5859) is progressively patched by hub extensions:
 | `/api/agents/retire-inert` | Retire inert agents | 7059 |
 | `/api/attention` | Acknowledge/snooze attention | 7067 |
 | `/api/human/resolve` | Resolve human-input request | 7069 |
+| `/api/intake` | Submit/decide intake | 7264 |
 | `/api/doors/copy` | Copy-once door | 7093 |
 | `/api/doors/rotate` | Rotate door | 7104 |
 | `/api/projects/add` | Add project to registry | 7115 |
