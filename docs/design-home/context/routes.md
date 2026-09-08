@@ -6,7 +6,7 @@ Source baseline: `c2ebac5de803a0f7a00468ec4d3cdf06e4719096` (origin/main, 5.0.0a
 
 **Source:** `tools/dashboard-ui/src/dashboard.ts` (1528 lines); selected design-facing ranges 537–636, 648–1214, and 1231–1400
 **Entry:** `tools/dashboard-ui/dashboard-entry.html`
-**Build output:** `packages/personal/resources/dashboard.html` (Vite single-file)
+**Generated build output:** `packages/personal/src/pursers_personal/resources/dashboard.html` (Vite single-file)
 
 ### Tab views (data-driven, no hash router)
 
@@ -278,13 +278,13 @@ providing the MCP App UI surface for compatible hosts.
 
 | Surface | Build step | Live entrypoint | Duplicates? |
 | --- | --- | --- | --- |
-| Dashboard-UI | Vite single-file build | `packages/personal/resources/dashboard.html` | Source of truth |
+| Dashboard-UI | Vite single-file build | `packages/personal/src/pursers_personal/resources/dashboard.html` | Generated from `tools/dashboard-ui/src/*` |
 | Fleet Dashboard | None (inline HTML in Python) | Served by `fleet_dashboard.py` | Self-contained, no overlap |
 | Extension | None (static files) | `webui/index.html` | Independent |
 | Personal MCP | Serves built dashboard.html | MCP App resource | Consumes dashboard-ui build output |
 
 The dashboard-ui source (`dashboard-entry.html` + `dashboard.ts` + `dashboard.css`)
-builds via Vite single-file to `packages/personal/resources/dashboard.html`.
+builds via Vite single-file to `packages/personal/src/pursers_personal/resources/dashboard.html`.
 The Personal MCP server serves this built file as an HTML resource. The fleet
 dashboard is self-contained inline HTML with no dependency on dashboard-ui.
 The extension has no build step and no overlap with either.
