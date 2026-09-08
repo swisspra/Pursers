@@ -178,10 +178,19 @@ step must then contain exactly one canonical journal target for each configured
 swap, including its matching backup reference, pre-activation hash, staged
 hash, and mode. Missing, duplicate, extra, malformed, or mismatched target
 metadata refuses rollback before any restore or journal write. The toolkit then
-restores in reverse journal order (`steps_needing_rollback`), re-hashes each
-restored file against the recorded pre-activation value, and repeats the
-coherence check on the restored live state. A mixed backup is refused before a
-restore; a non-coherent post-restore check returns failure.
+validates whole-step progression: recorded activation steps must be an ordered
+prefix of the configured sequence, each step must have exactly one valid
+`started` / optional `done` / optional `rolled_back` progression, and activation
+cannot advance past an incomplete step. A configured step absent from the
+journal is accepted only when all of its live targets still match the verified
+backup. This distinguishes a legitimate early interruption from a deleted
+middle/final step after those files changed. Missing, duplicated, reordered, or
+malformed whole-step entries and absent-step live drift all refuse before the
+first restore or journal write. The toolkit then restores active steps in
+reverse order (`steps_needing_rollback`), re-hashes each restored file against
+the recorded pre-activation value, and repeats the coherence check on the
+restored live state. A mixed backup is refused before a restore; a non-coherent
+post-restore check returns failure.
 
 Service restart order stays with the operator, exactly as in the runbook:
 coordinator, dashboard and Teams stop first and the old Central stops last; on

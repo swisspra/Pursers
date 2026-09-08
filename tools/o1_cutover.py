@@ -1531,10 +1531,15 @@ def interrupted_steps(entries: Sequence[JournalEntry]) -> list[str]:
 def steps_needing_rollback(entries: Sequence[JournalEntry]) -> list[str]:
     """Reverse-order list of steps whose replacements must be undone."""
     order: list[str] = []
+    terminal: dict[str, str] = {}
     for entry in entries:
-        if entry.state in ("started", "done") and entry.step_id not in order:
+        if entry.step_id not in order:
             order.append(entry.step_id)
-    return list(reversed(order))
+        terminal[entry.step_id] = entry.state
+    return [
+        step_id for step_id in reversed(order)
+        if terminal.get(step_id) in ("started", "done")
+    ]
 
 
 def validate_rollback_journal(
@@ -1544,14 +1549,112 @@ def validate_rollback_journal(
 ) -> dict[str, list[Mapping[str, Any]]]:
     """Require complete, canonical rollback metadata before the first write."""
     problems: list[str] = []
-    recorded: dict[str, list[Mapping[str, Any]]] = {}
+    configured_order = list(TOOLKIT_ACTIVATION_STEPS)
     expected_steps = set(TOOLKIT_ACTIVATION_STEPS)
+    allowed_states = {"started", "done", "rolled_back"}
+    present_order: list[str] = []
+    states_by_step: dict[str, list[str]] = {}
+    entries_by_step: dict[str, list[JournalEntry]] = {}
+
+    for entry in entries:
+        step_id = entry.step_id
+        if step_id not in expected_steps:
+            problems.append(f"journal step {step_id!r} is not a configured activation step")
+            continue
+        if entry.state not in allowed_states:
+            problems.append(
+                f"journal step {step_id!r} has invalid state {entry.state!r}"
+            )
+            continue
+        if step_id not in states_by_step:
+            present_order.append(step_id)
+            states_by_step[step_id] = []
+            entries_by_step[step_id] = []
+        states_by_step[step_id].append(entry.state)
+        entries_by_step[step_id].append(entry)
+
+    expected_prefix = configured_order[:len(present_order)]
+    if present_order != expected_prefix:
+        problems.append(
+            "journal activation steps are missing or reordered: "
+            f"expected prefix {expected_prefix}, observed {present_order}"
+        )
+
+    valid_progressions = {
+        ("started",),
+        ("started", "done"),
+        ("started", "rolled_back"),
+        ("started", "done", "rolled_back"),
+    }
+    for step_id in present_order:
+        progression = tuple(states_by_step[step_id])
+        if progression not in valid_progressions:
+            problems.append(
+                f"journal step {step_id!r} has invalid state progression {list(progression)}"
+            )
+        baseline_targets = entries_by_step[step_id][0].targets
+        if any(entry.targets != baseline_targets for entry in entries_by_step[step_id][1:]):
+            problems.append(
+                f"journal step {step_id!r} changes target metadata across states"
+            )
+
+    active_sequence = [
+        (entry.step_id, entry.state)
+        for entry in entries
+        if entry.step_id in expected_steps and entry.state in ("started", "done")
+    ]
+    expected_sequence = [
+        (step_id, state)
+        for step_id in present_order
+        for state in states_by_step[step_id]
+        if state in ("started", "done")
+    ]
+    if active_sequence != expected_sequence:
+        problems.append("journal activation entries are interleaved or reordered")
+    for step_id in present_order[:-1]:
+        activation_states = [
+            state for state in states_by_step[step_id]
+            if state in ("started", "done")
+        ]
+        if not activation_states or activation_states[-1] != "done":
+            problems.append(
+                f"journal advances past incomplete activation step {step_id!r}"
+            )
+
+    active_steps = [
+        step_id for step_id in present_order
+        if states_by_step[step_id][-1] in ("started", "done")
+    ]
+    expected_rollback_steps = list(reversed(active_steps))
+    if list(steps) != expected_rollback_steps:
+        problems.append(
+            "rollback step selection does not match journal progression: "
+            f"expected {expected_rollback_steps}, observed {list(steps)}"
+        )
+
+    for step_id in configured_order:
+        terminal = states_by_step.get(step_id, [None])[-1]
+        if terminal not in (None, "rolled_back"):
+            continue
+        state_label = "absent" if terminal is None else "rolled-back"
+        for swap in config.swaps_for_step(step_id):
+            backup = backup_member_path(config.backup_root, swap.identifier)
+            if (
+                not is_regular_file(backup)
+                or not is_regular_file(swap.live_path)
+                or sha256_file(swap.live_path) != sha256_file(backup)
+            ):
+                problems.append(
+                    f"{state_label} activation step {step_id!r} live target "
+                    f"{swap.identifier!r} differs from the verified backup"
+                )
+
     for step_id in steps:
         if step_id not in expected_steps:
             problems.append(f"journal step {step_id!r} is not a configured activation step")
 
     for entry in entries:
-        if entry.state not in ("started", "done"):
+        if entry.state not in allowed_states or entry.step_id not in expected_steps:
             continue
         step_id = entry.step_id
         expected = {swap.identifier: swap for swap in config.swaps_for_step(step_id)}
@@ -1660,7 +1763,11 @@ def validate_rollback_journal(
                 problems.append(
                     f"journal mode for {step_id}/{identifier} is missing or malformed"
                 )
-        recorded[step_id] = targets
+    recorded = {
+        step_id: list(entries_by_step[step_id][0].targets)
+        for step_id in steps
+        if step_id in entries_by_step
+    }
 
     missing_entries = sorted(set(steps) - set(recorded))
     if missing_entries:
@@ -2708,10 +2815,10 @@ def run_rollback(config: CutoverConfig, operator_confirmed: bool) -> dict[str, A
             "rollback", [finding.detail for finding in backup_coherence if not finding.ok])
     journal = journal_load(config.journal_path)
     steps = steps_needing_rollback(journal)
+    recorded = validate_rollback_journal(config, journal, steps)
     if not steps:
         return {"phase": "rollback", "restored": [], "pending_operator_steps": [],
                 "detail": "journal records no toolkit activation to undo"}
-    recorded = validate_rollback_journal(config, journal, steps)
 
     restored: list[dict[str, Any]] = []
     for step_id in steps:

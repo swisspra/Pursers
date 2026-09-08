@@ -1260,6 +1260,105 @@ def test_rollback_refuses_missing_target_in_every_step_entry_before_any_write(tm
     assert config.journal_path.read_bytes() == journal_before
 
 
+def _rollback_bytes(config):
+    swaps = config.swaps()
+    assert len(swaps) == 43
+    return (
+        {swap.identifier: swap.live_path.read_bytes() for swap in swaps},
+        config.journal_path.read_bytes(),
+    )
+
+
+def _assert_rollback_state_unchanged(config, live_before, journal_before):
+    assert {
+        swap.identifier: swap.live_path.read_bytes() for swap in config.swaps()
+    } == live_before
+    assert config.journal_path.read_bytes() == journal_before
+
+
+@pytest.mark.parametrize(
+    "missing_step",
+    ("swap-launcher", "swap-credentials", "swap-seats"),
+)
+def test_rollback_refuses_missing_whole_activation_step_before_any_write(
+    tmp_path, missing_step
+):
+    layout = build_layout(tmp_path)
+    config = _prepare_and_backup(layout)
+    evidence = _dry_run_ok(config)
+    cut.run_activate(config, evidence, True)
+    journal = json.loads(config.journal_path.read_text(encoding="utf-8"))
+    journal["entries"] = [
+        entry for entry in journal["entries"]
+        if entry["step_id"] != missing_step
+    ]
+    cut.write_json_atomic(config.journal_path, journal)
+    live_before, journal_before = _rollback_bytes(config)
+
+    with pytest.raises(
+        cut.GateFailure,
+        match="missing or reordered|absent activation step",
+    ):
+        cut.run_rollback(config, True)
+
+    _assert_rollback_state_unchanged(config, live_before, journal_before)
+
+
+@pytest.mark.parametrize(
+    ("corruption", "error"),
+    (
+        ("duplicate-state", "invalid state progression"),
+        ("reordered", "invalid state progression|interleaved or reordered"),
+        ("malformed-state", "invalid state"),
+        ("advance-after-incomplete", "advances past incomplete"),
+    ),
+)
+def test_rollback_refuses_invalid_step_progression_before_any_write(
+    tmp_path, corruption, error
+):
+    layout = build_layout(tmp_path)
+    config = _prepare_and_backup(layout)
+    evidence = _dry_run_ok(config)
+    cut.run_activate(config, evidence, True)
+    journal = json.loads(config.journal_path.read_text(encoding="utf-8"))
+    entries = journal["entries"]
+    if corruption == "duplicate-state":
+        entries.insert(1, dict(entries[0]))
+    elif corruption == "reordered":
+        entries[0], entries[1] = entries[1], entries[0]
+    elif corruption == "malformed-state":
+        entries[0]["state"] = "complete"
+    else:
+        entries[:] = [
+            entry for entry in entries
+            if not (
+                entry["step_id"] == "swap-jwks"
+                and entry["state"] == "done"
+            )
+        ]
+    cut.write_json_atomic(config.journal_path, journal)
+    live_before, journal_before = _rollback_bytes(config)
+
+    with pytest.raises(cut.GateFailure, match=error):
+        cut.run_rollback(config, True)
+
+    _assert_rollback_state_unchanged(config, live_before, journal_before)
+
+
+def test_rollback_refuses_drift_when_whole_journal_is_absent(tmp_path):
+    layout = build_layout(tmp_path)
+    config = _prepare_and_backup(layout)
+    evidence = _dry_run_ok(config)
+    cut.run_activate(config, evidence, True)
+    cut.write_json_atomic(config.journal_path, {"entries": []})
+    live_before, journal_before = _rollback_bytes(config)
+
+    with pytest.raises(cut.GateFailure, match="absent activation step"):
+        cut.run_rollback(config, True)
+
+    _assert_rollback_state_unchanged(config, live_before, journal_before)
+
+
 @pytest.mark.parametrize(
     ("corruption", "error"),
     [
