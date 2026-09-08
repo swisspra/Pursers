@@ -13,6 +13,8 @@ PACKAGE_FILES = (
     "README.md",
     "contexts/reviewer.md",
     "contexts/worker.md",
+    "door/adapter.cjs",
+    "door/DOOR_ONBOARDING_CONTRACT.md",
     "webui/app.js",
     "webui/index.html",
     "webui/routes.js",
