@@ -1561,7 +1561,7 @@ def test_detail_views_include_filter_routes_mobile_containment_and_escape_calls(
 
 
 def test_multi_central_routes_and_complete_javascript_are_valid() -> None:
-    scripts = re.findall(r"<script>(.*?)</script>", dashboard.HTML, flags=re.DOTALL)
+    scripts = re.findall(r"<script>(.*?)</script>", dashboard.HTML, flags=re.DOTALL | re.IGNORECASE)
     completed = subprocess.run(
         ["node", "--check", "-"],
         input="\n".join(scripts),
@@ -4813,7 +4813,7 @@ def test_config_mutations_reject_cross_origin_text_plain_before_action(
 
 
 def test_agents_hub_defaults_to_active_sorted_status_with_toggle_and_live_work() -> None:
-    script = "\n".join(re.findall(r"<script>(.*?)</script>", dashboard.HTML, re.DOTALL))
+    script = "\n".join(re.findall(r"<script>(.*?)</script>", dashboard.HTML, re.DOTALL | re.IGNORECASE))
     lines = script.splitlines()
 
     def source(prefix: str) -> str:
@@ -4901,7 +4901,7 @@ def test_agents_hub_defaults_to_active_sorted_status_with_toggle_and_live_work()
 
 
 def test_agent_pool_rows_keep_details_and_default_to_active() -> None:
-    script = "\n".join(re.findall(r"<script>(.*?)</script>", dashboard.HTML, re.DOTALL))
+    script = "\n".join(re.findall(r"<script>(.*?)</script>", dashboard.HTML, re.DOTALL | re.IGNORECASE))
     lines = script.splitlines()
 
     def source(prefix: str) -> str:
@@ -7083,3 +7083,43 @@ def test_doors_ui_rendering() -> None:
     assert 'data-door-action="copy"' in html
     assert 'data-door-action="rotate"' in html
     assert 'name="integration_ref"' in html
+
+
+def test_clean_text_redaction_is_linear_time_and_behavior_preserved() -> None:
+    """CodeQL py/polynomial-redos regression: the key/value redaction pass.
+
+    The previous pattern nested stars around the keyword alternation and
+    backtracked polynomially on repeated whitespace (seconds for ~30k
+    spaces). The remediated split must stay linear and produce identical
+    redaction output.
+    """
+    clean = dashboard.SeatConfigManager._clean_text
+
+    adversarial = "token" + " " * 40_000
+    started = time.monotonic()
+    output = clean(adversarial)
+    elapsed = time.monotonic() - started
+    assert output == adversarial  # no separator on the line: nothing redacted
+    assert elapsed < 5.0  # pre-fix pattern took ~9s at this size
+
+    bigger = "token" + " " * 80_000
+    started = time.monotonic()
+    assert clean(bigger) == bigger
+    elapsed_bigger = time.monotonic() - started
+    assert elapsed_bigger < 5.0  # doubling input stays linear, not quadratic
+
+    # Keyword fused into a longer key (no word boundary) is still redacted.
+    assert clean("XTOKEN=abc") == "XTOKEN=[REDACTED]"
+    # file/path/env_var keys remain visible.
+    assert clean("XTOKEN_FILE=abc") == "XTOKEN_FILE=abc"
+    assert clean("secret_path=/srv/x") == "secret_path=/srv/x"
+    # Separator spacing preserved, value replaced.
+    assert clean("  MY SECRET = s3kr1t") == "  MY SECRET = [REDACTED]"
+    # Only the first separator splits key/value; the rest stays in the value.
+    assert clean("mytoken=a=b") == "mytoken=[REDACTED]"
+    # Lines without a sensitive keyword are untouched.
+    assert clean("plain = value") == "plain = value"
+    # Multi-line input redacts per line.
+    assert clean("alpha=1\nmy bearer: x\nbeta=2") == (
+        "alpha=1\nmy bearer: [REDACTED]\nbeta=2"
+    )

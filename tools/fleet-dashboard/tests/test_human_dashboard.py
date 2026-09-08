@@ -258,7 +258,7 @@ def test_aggregate_allows_file_deliverable_form() -> None:
 
 def _run_human_renderer(program_tail: str) -> str:
     scripts = "\n".join(
-        re.findall(r"<script>(.*?)</script>", dashboard.HTML, flags=re.DOTALL)
+        re.findall(r"<script>(.*?)</script>", dashboard.HTML, flags=re.DOTALL | re.IGNORECASE)
     )
     lines = scripts.splitlines()
 

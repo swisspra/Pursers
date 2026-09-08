@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import subprocess
 import sys
 import time
+import urllib.parse
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -152,7 +154,10 @@ def test_release_card_status_and_pypi_checks(tmp_path: Path) -> None:
                 "version": "0.1.0a24",
                 "build": {"wheel_sha256": "abcdef123456"},
             }).encode("utf-8")
-        if "pypi.org" in url:
+        # Hostname-based routing: a bare substring check would also treat
+        # "https://evil.test/?pypi.org" as PyPI
+        # (CodeQL py/incomplete-url-substring-sanitization).
+        if urllib.parse.urlsplit(url).hostname == "pypi.org":
             if "pursers/5.0.0a20" in url or "pursers-central/0.1.0a24" in url:
                 return 200, b'{"info":{"version":"match"}}'
             return 404, b'{"error":"not found"}'
@@ -459,6 +464,82 @@ def test_stage_central_transaction_wheel_copy_pin_update_and_mode_preservation(t
     arbitrary.write_bytes(wheel_content)
     with pytest.raises(TypeError, match="wheel_path"):
         ops.stage_central(wheel_path=arbitrary)  # type: ignore[call-arg]
+
+
+def test_stage_central_success_log_omits_env_derived_wheel_path(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Success log lines must not carry the profile-derived wheel path.
+
+    CodeQL py/clear-text-logging-sensitive-data: dest_wheel derives from the
+    configured profile-env location, so the success LOGGER.info call logged
+    an environment-derived path. The scrubbed journal keeps the detail.
+    """
+    profile = tmp_path / "profile.env"
+    profile.write_text(
+        "CENTRAL_WHEEL=/old/path.whl\nCENTRAL_WHEEL_SHA256=oldsha\n",
+        encoding="utf-8",
+    )
+    profile.chmod(0o600)
+    python = tmp_path / "python"
+    python.write_text("#!/bin/sh\n", encoding="utf-8")
+    python.chmod(0o755)
+
+    source_wheel = tmp_path / "pursers_central-0.1.0a25-py3-none-any.whl"
+    wheel_content = b"fake-wheel-binary-data-log-sink"
+    source_wheel.write_bytes(wheel_content)
+    expected_sha = hashlib.sha256(wheel_content).hexdigest()
+
+    manifest = tmp_path / "release_versions.toml"
+    manifest.write_text(
+        'product = "5.0.0a21"\n[packages]\npursers = "5.0.0a21"\ncentral = "0.1.0a25"\n',
+        encoding="utf-8",
+    )
+    component_lock = tmp_path / "component-lock.json"
+    component_lock.write_text(
+        json.dumps({
+            "components": {
+                "pursers-central": {
+                    "version": "0.1.0a25",
+                    "wheel_sha256": expected_sha,
+                }
+            }
+        }),
+        encoding="utf-8",
+    )
+
+    def mock_runner(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            cmd, 0, stdout="Successfully installed pursers_central\n"
+        )
+
+    state_dir = tmp_path / "state"
+    ops = ReleaseOpsManager(
+        root=tmp_path,
+        manifest_path=manifest,
+        component_lock_path=component_lock,
+        staging_root=tmp_path,
+        profile_env_path=profile,
+        central_venv_python=python,
+        runner=mock_runner,
+        state_dir=state_dir,
+    )
+
+    dest_wheel = tmp_path / "wheels" / source_wheel.name
+    with caplog.at_level(logging.INFO, logger="pursers.fleet.release_ops"):
+        result = ops.stage_central()
+    assert result["ok"] is True
+    assert result["wheel"] == str(dest_wheel)
+
+    logged = "\n".join(record.getMessage() for record in caplog.records)
+    assert "ops stage_central succeeded" in logged
+    # The vulnerable case: env-derived paths reaching the logging sink.
+    assert str(dest_wheel) not in logged
+    assert str(source_wheel) not in logged
+
+    # Operators keep the detail through the scrubbed journal.
+    journal = (state_dir / "config-actions.jsonl").read_text(encoding="utf-8")
+    assert str(dest_wheel) in journal
 
 
 def test_stage_central_refuses_mismatched_wheel_and_hash_mismatch(tmp_path: Path) -> None:
