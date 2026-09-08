@@ -2196,6 +2196,7 @@ def test_generated_claim_routes_matching_seat_owned_clone(
 @pytest.mark.parametrize(
     ("target_url", "make_git", "expected_code"),
     [
+        ("https://[", True, "target_url_malformed"),
         ("https://example.test/acme/unknown", True, "repository_url_not_registered"),
         ("https://example.test/acme/alpha", False, "routed_repository_unavailable"),
     ],
