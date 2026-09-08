@@ -61,6 +61,16 @@ def _observer_command(observer_dir: Path) -> Path:
     return command
 
 
+def _resolve_backend_executable(value: str) -> Path:
+    candidate = Path(value).expanduser()
+    if candidate.is_absolute():
+        return candidate.resolve()
+    discovered = shutil.which(value)
+    if not discovered:
+        raise RunnerError(EXIT_BLOCKED, f"browser backend executable is unavailable: {value}")
+    return Path(discovered).resolve()
+
+
 def _run_observer(argv: list[str], *, stdin_text: str | None = None) -> dict[str, Any]:
     completed = subprocess.run(
         argv,
@@ -97,7 +107,7 @@ def install_observer(args: argparse.Namespace) -> int:
     else:
         backend = {
             "kind": "ego-browser",
-            "command": str(Path(args.ego_browser).expanduser().resolve()),
+            "command": str(_resolve_backend_executable(args.ego_browser)),
             "task_space": args.task_space,
         }
     config_path = destination / "observer.json"

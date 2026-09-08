@@ -365,6 +365,24 @@ def test_install_records_explicit_ego_browser_task_space(
     assert config["backend"]["task_space"] == "17"
 
 
+def test_install_resolves_default_ego_browser_from_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    ego = tmp_path / "ego-browser"
+    ego.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    ego.chmod(0o700)
+    monkeypatch.setattr(runner_module.shutil, "which", lambda value: str(ego))
+    observer_dir = tmp_path / "verifier"
+    assert runner_module.main(
+        ["runner.py", "install-observer", "--dir", str(observer_dir)]
+    ) == 0
+    capsys.readouterr()
+    config = json.loads((observer_dir / "observer.json").read_text(encoding="utf-8"))
+    assert config["backend"]["command"] == str(ego.resolve())
+
+
 @pytest.mark.parametrize(
     "field, value",
     [
