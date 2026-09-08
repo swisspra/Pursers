@@ -7,6 +7,20 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Security
+
+- fleet-dashboard: remediated open CodeQL findings. The seat-config text
+  redactor now splits key/separator/value with a linear-time pattern and
+  checks the sensitive-keyword alternation in Python, removing polynomial
+  backtracking on adversarial whitespace (`py/polynomial-redos`) with
+  redaction output unchanged. `stage_central` success logs no longer emit
+  the environment-derived staged wheel path; the scrubbed journal and
+  result payload still carry it (`py/clear-text-logging-sensitive-data`).
+  Test infrastructure hardened: PyPI mock routing compares the URL hostname
+  instead of a substring (`py/incomplete-url-substring-sanitization`) and
+  script-tag extraction regexes match upper-case tags
+  (`py/bad-tag-filter`).
+
 ## [5.0.0a25] - 2026-09-08
 
 This release includes `pursers-central==0.1.0a29`,
