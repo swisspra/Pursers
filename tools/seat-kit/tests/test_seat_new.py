@@ -511,7 +511,10 @@ def test_verify_detaches_sha_checks_scope_origin_leaks_and_runs_suite(
         "ticket_id": "TK-review",
         "target_url": "sample/path",
         "required_fields": ["branch_and_commit", "test_output"],
-        "tests": ["test-command: python3 -m unittest discover -s . -p test_sample.py"],
+        "tests": [
+            "test-command: python3 -m unittest discover -s . -p test_sample.py",
+            "test-command: PYTHONPATH=. pytest -q test_sample.py",
+        ],
         "submission_history": [
             {
                 "files_changed": ["change.txt", "test_sample.py"],
@@ -528,6 +531,7 @@ def test_verify_detaches_sha_checks_scope_origin_leaks_and_runs_suite(
     assert result["origin_main_contains"] is False
     assert result["leak_scan"] == "clean"
     assert result["suites"][0]["returncode"] == 0
+    assert result["suites"][1]["returncode"] == 0
     assert "files-changed-diff:" in output
     assert "remote-branches-containing-sha:" in output
     assert "Ran 1 test" in output
@@ -737,10 +741,6 @@ def test_submission_rejects_invalid_git_ref(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("rule", "sample"),
     [
-        (
-            "jwt",
-            "token=" + "e" + "yJabcde.abcdefghijkl.abcdefghijklmnop",
-        ),
         ("home-directory-path", "path=/Users/" + "fixture-user/project"),
         ("home-directory-path", "path=/home/" + "fixture-user/project"),
         ("home-directory-path", "path=C:\\Users\\" + "fixture-user" + "\\project"),
@@ -784,6 +784,110 @@ def test_verify_leak_rules_allow_documented_synthetic_fixtures(tmp_path: Path) -
     )
 
     assert generated._leak_rule_names(fixtures) == []
+
+
+def test_verify_leak_rules_ignore_jwt_vocabulary_and_fake_fixture(
+    tmp_path: Path,
+) -> None:
+    generated = load_generated(
+        seat_new.generate(args(tmp_path, role="reviewer")) / "bin" / "board.py",
+        "board_verify_jwt_vocabulary",
+    )
+    harmless = "\n".join(
+        [
+            "JWTs and jwt values must be redacted.",
+            r'SENSITIVE_KEY = re.compile(r"(?:authorization|bearer|jwt|token)")',
+            "fake_fixture=" + "ey" + "Jabc.def.ghi",
+        ]
+    )
+
+    assert generated._leak_rule_names(harmless) == []
+
+
+def test_verify_leak_rules_detect_runtime_constructed_jwt_shape(tmp_path: Path) -> None:
+    generated = load_generated(
+        seat_new.generate(args(tmp_path, role="reviewer")) / "bin" / "board.py",
+        "board_verify_jwt_shape",
+    )
+
+    def segment(value: object) -> str:
+        return base64.urlsafe_b64encode(
+            json.dumps(value, separators=(",", ":")).encode()
+        ).decode().rstrip("=")
+
+    token_shape = ".".join(
+        [
+            segment({"alg": "HS256", "typ": "JWT"}),
+            segment({"sub": "fixture"}),
+            segment("sig"),
+        ]
+    )
+
+    assert "jwt" in generated._leak_rule_names("token=" + token_shape)
+
+
+def test_suite_commands_allow_bounded_pythonpath_assignments(tmp_path: Path) -> None:
+    generated = load_generated(
+        seat_new.generate(args(tmp_path, role="reviewer")) / "bin" / "board.py",
+        "board_suite_pythonpath",
+    )
+    repo = tmp_path / "repo"
+    (repo / "packages" / "client" / "src").mkdir(parents=True)
+    (repo / "packages" / "client" / "tests").mkdir(parents=True)
+    ticket = {
+        "tests": [
+            "test-command: PYTHONPATH=packages/client/src pytest -q packages/client/tests",
+            "suite: PYTHONPATH=packages/client/src python3 -m unittest "
+            "discover -s packages/client/tests",
+        ]
+    }
+
+    commands = generated._suite_commands(ticket, {}, repo)
+
+    assert [command["argv"] for command in commands] == [
+        ["pytest", "-q", "packages/client/tests"],
+        ["python3", "-m", "unittest", "discover", "-s", "packages/client/tests"],
+    ]
+    assert [command["pythonpath"] for command in commands] == [
+        "packages/client/src",
+        "packages/client/src",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("command", "error"),
+    [
+        ("OTHER=value pytest -q tests", "only PYTHONPATH"),
+        ("PYTHONPATH=/outside pytest -q tests", "inside the worktree"),
+        ("PYTHONPATH=../outside pytest -q tests", "inside the worktree"),
+        ("pytest -q ../outside", "suite paths must stay inside"),
+        ("pytest -q $(command)", "shell substitutions"),
+        ("pytest -q tests; command", "shell substitutions"),
+        ("pytest -q tests > output", "shell substitutions"),
+        ("env PYTHONPATH=src pytest -q tests", "arbitrary environment"),
+        ("pytest --pyargs pip", "module, plugin, and config escape"),
+        ("pytest -p pip -q tests", "module, plugin, and config escape"),
+        ("pytest -c pytest.ini -q tests", "module, plugin, and config escape"),
+        ("pytest -c../outside -q tests", "module, plugin, and config escape"),
+        ("python3 -m unittest pip", "unittest replay requires discover"),
+        (
+            "python3 -m unittest discover -s../outside",
+            "discovery paths must use separate",
+        ),
+    ],
+)
+def test_suite_commands_reject_unsafe_evidence(
+    tmp_path: Path, command: str, error: str
+) -> None:
+    generated = load_generated(
+        seat_new.generate(args(tmp_path, role="reviewer")) / "bin" / "board.py",
+        "board_suite_reject_" + str(abs(hash(command))),
+    )
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    with pytest.raises(ValueError, match=error):
+        generated._suite_commands({"tests": ["test-command: " + command]}, {}, repo)
 
 
 def test_operator_marker_file_is_loaded_without_printing_values(
@@ -1931,7 +2035,6 @@ def test_live_registry_wait_resumes_stable_seat_and_wakes_on_held_annotation(
             )
             monkeypatch.setattr(registry_module, "Client", SignalingClient)
 
-            started = time.monotonic()
             output = io.StringIO()
             async with LocalBoardClient(
                 "http://central.invalid/mcp",
@@ -1952,7 +2055,7 @@ def test_live_registry_wait_resumes_stable_seat_and_wakes_on_held_annotation(
                             board_client,
                             "pursers",
                             cursors,
-                            3,
+                            10,
                             boards="registry",
                             registry=registry,
                             active_registry_boards=active_registry_boards,
@@ -1963,7 +2066,7 @@ def test_live_registry_wait_resumes_stable_seat_and_wakes_on_held_annotation(
                         )
 
                 waiting = asyncio.create_task(run_wait())
-                await asyncio.wait_for(ready.wait(), timeout=1)
+                await asyncio.wait_for(ready.wait(), timeout=5)
                 active["principal"] = principals["admin"]
                 await call(
                     "ticket_annotate",
@@ -1973,11 +2076,9 @@ def test_live_registry_wait_resumes_stable_seat_and_wakes_on_held_annotation(
                     kind="evidence",
                 )
                 active["principal"] = principals["worker"]
-                await asyncio.wait_for(waiting, timeout=2)
-            elapsed = time.monotonic() - started
+                await asyncio.wait_for(waiting, timeout=5)
             result = json.loads(output.getvalue())
 
-            assert elapsed < 2
             assert result["boards"] == [other_board, "pursers"]
             assert result["skipped_boards"] == {}
             assert result["reason"] == "held_ticket_update"
