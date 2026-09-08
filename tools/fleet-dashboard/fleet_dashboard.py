@@ -4635,6 +4635,44 @@ class SeatConfigManager:
         return {"schema_version": 1, "overall": overall, "checks": checks}
 
     @staticmethod
+    def _redact_sensitive_assignments(value: str) -> str:
+        redacted: list[str] = []
+        for line in value.split("\n"):
+            colon = line.find(":")
+            equals = line.find("=")
+            delimiters = [index for index in (colon, equals) if index >= 0]
+            if not delimiters:
+                redacted.append(line)
+                continue
+            delimiter = min(delimiters)
+            key = line[:delimiter].casefold()
+            if (
+                not any(
+                    word in key
+                    for word in (
+                        "token",
+                        "authorization",
+                        "secret",
+                        "password",
+                        "apikey",
+                        "api_key",
+                        "api-key",
+                        "bearer",
+                    )
+                )
+                or "file" in key
+                or "path" in key
+                or "env_var" in key
+            ):
+                redacted.append(line)
+                continue
+            separator_end = delimiter + 1
+            while separator_end < len(line) and line[separator_end].isspace():
+                separator_end += 1
+            redacted.append(f"{line[:separator_end]}[REDACTED]")
+        return "\n".join(redacted)
+
+    @staticmethod
     def _clean_text(value: str) -> str:
         value = re.sub(
             r"\b([a-z][a-z0-9+.-]*://[^:\s/@]+):[^@\s/]+@",
@@ -4655,7 +4693,7 @@ class SeatConfigManager:
         )
         value = re.sub(
             r"(?i)\b(token|authorization|secret|password|api[_-]?key)"
-            r"(\s*[:=]\s*)[^\s,;]+",
+            r"([ \t]*[:=][ \t]*)[^\s,;]+",
             r"\1\2[REDACTED]",
             value,
         )
@@ -4666,25 +4704,7 @@ class SeatConfigManager:
             r"C:\\Users\\[REDACTED:WINDOWS_HOME]",
             value,
         )
-        # Linear-time key/separator/value split. The keyword test runs in
-        # Python instead of nested stars around the alternation, which
-        # backtracked polynomially on repeated whitespace
-        # (CodeQL py/polynomial-redos).
-        sensitive = re.compile(r"(?im)^([^:=\n]*)([:=]\s*)(.*)$")
-        keyword = re.compile(
-            r"(?i)token|authorization|secret|password|api[_-]?key|bearer"
-        )
-
-        def redact(match: re.Match[str]) -> str:
-            if keyword.search(match.group(1)) is None:
-                return match.group(0)
-            key = match.group(1).lower()
-            if "file" in key or "path" in key or "env_var" in key:
-                return match.group(0)
-            return f"{match.group(1)}{match.group(2)}[REDACTED]"
-
-        value = sensitive.sub(redact, value)
-        return value
+        return SeatConfigManager._redact_sensitive_assignments(value)
 
     @classmethod
     def _diff(cls, change: Any) -> str:
