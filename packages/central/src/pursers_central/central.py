@@ -80,7 +80,7 @@ from journal import (
     _board_token,
     _require_text,
 )
-from jwt_verifier import JWTTokenVerifier, JWTVerifierConfig
+from jwt_verifier import BOARD_CLAIM, JWTTokenVerifier, JWTVerifierConfig
 from runtime_health import (
     RuntimeDiagnostics,
     create_streamable_http_app,
@@ -397,6 +397,7 @@ class Principal:
     principal_id: str
     canonical: str
     scopes: frozenset[str]
+    bound_board_id: str | None = None
 
 
 def current_principal() -> Principal:
@@ -406,7 +407,25 @@ def current_principal() -> Principal:
     client_id, issuer, subject = principal_components(access)
     canonical = json.dumps([client_id, issuer or "-", subject or "-"], separators=(",", ":"))
     principal_id = "PR-" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-    return Principal(principal_id, canonical, frozenset(access.scopes))
+    claims = access.claims if isinstance(access.claims, Mapping) else {}
+    bound_board_id = claims.get(BOARD_CLAIM)
+    if bound_board_id is not None and (
+        not isinstance(bound_board_id, str) or not ID_RE.fullmatch(bound_board_id)
+    ):
+        raise PermissionError("authenticated principal has an invalid board restriction")
+    return Principal(
+        principal_id, canonical, frozenset(access.scopes), bound_board_id
+    )
+
+
+def require_board_authorization(principal: Principal, board_id: str) -> None:
+    """Enforce a verified bearer board restriction before board state is touched."""
+    if principal.bound_board_id is not None and not hmac.compare_digest(
+        principal.bound_board_id, board_id
+    ):
+        raise PermissionError(
+            "board access denied: token is not authorized for this board"
+        )
 
 
 def require_scope(principal: Principal, scope: str) -> None:
@@ -904,6 +923,15 @@ class CentralBoard:
         token = _board_token(board_id)
         self.board_ids_by_token.setdefault(token, board_id)
         return self.store.path("boards", f"{token}.json")
+
+    def board_exists(self, board_id: str) -> bool:
+        """Check durable existence without materializing a default board."""
+        require_id("board_id", board_id)
+        path = self.store.path("boards", f"{_board_token(board_id)}.json")
+        document_version = getattr(self.store, "document_version", None)
+        if callable(document_version):
+            return document_version(path) is not None
+        return path.exists()
 
     def _import_path(self, board_id: str) -> Path:
         require_id("board_id", board_id)
@@ -2120,7 +2148,9 @@ class CentralBoard:
             and item.get("lifecycle_status", "active") == "active"
         )
 
-    def board_documents_for(self, principal_id: str) -> list[dict[str, Any]]:
+    def board_documents_for(
+        self, principal_id: str, bound_board_id: str | None = None
+    ) -> list[dict[str, Any]]:
         extractor = getattr(self.store, "document_values", None)
         if callable(extractor):
             board_ids = [
@@ -2142,6 +2172,11 @@ class CentralBoard:
                 board_ids.append(discovered["board_id"])
         visible: list[dict[str, Any]] = []
         for discovered_board_id in board_ids:
+            if (
+                bound_board_id is not None
+                and discovered_board_id != bound_board_id
+            ):
+                continue
             document = self.load(str(discovered_board_id))
             try:
                 self.resolve_board_context(document, principal_id)
@@ -2151,7 +2186,7 @@ class CentralBoard:
                 visible.append(document)
         return visible
 
-    def subscription_allowed(self, uri: str, principal_id: str) -> bool:
+    def subscription_allowed(self, uri: str, principal: Principal) -> bool:
         parsed = urlparse(uri)
         if (
             parsed.scheme != "board"
@@ -2163,8 +2198,9 @@ class CentralBoard:
             return False
         try:
             board_id = require_id("board_id", parsed.netloc)
+            require_board_authorization(principal, board_id)
             document = self.load(board_id)
-            self.resolve_board_context(document, principal_id)
+            self.resolve_board_context(document, principal.principal_id)
             if parsed.path == "/agent" or parsed.path.startswith("/agent/"):
                 segments = parsed.path.split("/")
                 if len(segments) != 3 or segments[:2] != ["", "agent"]:
@@ -2173,7 +2209,7 @@ class CentralBoard:
                 member = document.get("members", {}).get(requested_agent_id)
                 return bool(
                     member
-                    and member.get("principal_id") == principal_id
+                    and member.get("principal_id") == principal.principal_id
                 )
             return True
         except (PermissionError, ValueError):
@@ -2237,6 +2273,24 @@ class SubscriptionAuthorization:
                         if isinstance(arguments, Mapping)
                         else None
                     )
+                    principal: Principal | None = None
+                    if isinstance(board_id, str) and ID_RE.fullmatch(board_id):
+                        principal = current_principal()
+                        try:
+                            require_board_authorization(principal, board_id)
+                        except PermissionError as exc:
+                            log_runtime_error(
+                                self.service.diagnostics,
+                                "tool_error",
+                                exc,
+                                include_traceback=False,
+                                tool=str(tool_name or "unknown"),
+                            )
+                            return {
+                                "content": [{"type": "text", "text": str(exc)}],
+                                "isError": True,
+                                "resultType": "complete",
+                            }
                     operation = (
                         self.service.board_operation(board_id)
                         if isinstance(board_id, str) and ID_RE.fullmatch(board_id)
@@ -2248,7 +2302,7 @@ class SubscriptionAuthorization:
                                 board_id is not None
                                 and tool_name not in {"board_join", "board_onboard"}
                             ):
-                                principal = current_principal()
+                                principal = principal or current_principal()
                                 try:
                                     checked_board = require_id("board_id", board_id)
                                     self.service.resolve_board_context(
@@ -2314,7 +2368,7 @@ class SubscriptionAuthorization:
             registered_agents: list[tuple[str, str]] = []
             try:
                 for uri in uris:
-                    if not self.service.subscription_allowed(str(uri), principal.principal_id):
+                    if not self.service.subscription_allowed(str(uri), principal):
                         raise MCPError(INVALID_REQUEST, "subscription denied: principal is not a board member")
                     parsed = urlparse(str(uri))
                     if parsed.scheme == "board" and parsed.netloc and parsed.path.startswith("/agent/"):
@@ -4973,6 +5027,10 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 }
             return None
         if service.is_fresh(document):
+            if principal.bound_board_id is not None:
+                raise PermissionError(
+                    "board access denied: board-bound credentials cannot create boards"
+                )
             membership = create_principal_membership(
                 document,
                 principal.principal_id,
@@ -5763,6 +5821,11 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 "allow_takeover and allow_matching_takeover are mutually exclusive"
             )
         principal = current_principal()
+        require_board_authorization(principal, board_id)
+        if principal.bound_board_id is not None and not service.board_exists(board_id):
+            raise PermissionError(
+                "board access denied: board-bound credentials cannot create boards"
+            )
         selected_renewal_source = normalize_renewal_source(renewal_source)
         try:
             requested_role = (
@@ -5967,6 +6030,11 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         if ticket_id is not None:
             ticket_id = require_id("ticket_id", ticket_id)
         principal = current_principal()
+        require_board_authorization(principal, board_id)
+        if principal.bound_board_id is not None and not service.board_exists(board_id):
+            raise PermissionError(
+                "board access denied: board-bound credentials cannot create boards"
+            )
         role = validate_seat_role(principal, role)
         coordinate_only = role in {"orchestrator", "coordinator"}
         safe_platform = clean_text("agent_platform", agent_platform, max_length=80)
@@ -6126,7 +6194,9 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         principal = current_principal()
         require_scope(principal, "board:read")
         boards: list[dict[str, Any]] = []
-        for document in service.board_documents_for(principal.principal_id):
+        for document in service.board_documents_for(
+            principal.principal_id, principal.bound_board_id
+        ):
             board_id = document["board_id"]
             memberships = service.principal_members(document, principal.principal_id)
             board_membership = service.resolve_board_context(
