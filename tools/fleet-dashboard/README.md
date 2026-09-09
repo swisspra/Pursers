@@ -279,9 +279,37 @@ FLEET_CLONE=/PATH/TO/pursers-fleet-clone
 CANDIDATE_SHA=0123456789abcdef0123456789abcdef01234567
 CANDIDATE_ROOT=/PATH/TO/fleet-dashboard-candidates/$CANDIDATE_SHA
 LIVE_PLIST=/PATH/TO/Library/LaunchAgents/com.pursers.fleet-dashboard.plist
-STAGED_PLIST=/PATH/TO/staging/com.pursers.fleet-dashboard.plist
-BACKUP_PLIST=/PATH/TO/backups/com.pursers.fleet-dashboard.plist.before-$CANDIDATE_SHA
+PRIVATE_PARENT=/PATH/TO/private-fleet-dashboard-staging
+PRIVATE_ROOT=$PRIVATE_PARENT/$CANDIDATE_SHA
+STAGING_DIR=$PRIVATE_ROOT/staging
+BACKUP_DIR=$PRIVATE_ROOT/backups
+STAGED_PLIST=$STAGING_DIR/com.pursers.fleet-dashboard.plist
+BACKUP_PLIST=$BACKUP_DIR/com.pursers.fleet-dashboard.plist.before-$CANDIDATE_SHA
 JOB=gui/$(id -u)/com.pursers.fleet-dashboard
+
+umask 077
+python3 - "$PRIVATE_PARENT" "$PRIVATE_ROOT" "$STAGING_DIR" "$BACKUP_DIR" <<'PY'
+import os
+import stat
+import sys
+
+for directory in sys.argv[1:]:
+    try:
+        os.mkdir(directory, 0o700)
+    except FileExistsError:
+        pass
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(directory, flags)
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+            raise SystemExit("private staging paths must be owned, non-symlink directories")
+        os.fchmod(descriptor, 0o700)
+        if stat.S_IMODE(os.fstat(descriptor).st_mode) != 0o700:
+            raise SystemExit("private staging directories must finish mode 0700")
+    finally:
+        os.close(descriptor)
+PY
 
 git -C "$FLEET_CLONE" fetch origin "$CANDIDATE_SHA"
 git -C "$FLEET_CLONE" worktree add --detach "$CANDIDATE_ROOT" "$CANDIDATE_SHA"
@@ -326,6 +354,13 @@ for destination_path in destination_paths:
         while view:
             view = view[os.write(descriptor, view):]
         os.fsync(descriptor)
+        destination_info = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(destination_info.st_mode)
+            or destination_info.st_nlink != 1
+            or stat.S_IMODE(destination_info.st_mode) != 0o600
+        ):
+            raise SystemExit("staged and backup LaunchAgents must finish as single-link mode-0600 files")
     finally:
         os.close(descriptor)
 PY
@@ -353,6 +388,22 @@ else:
     arguments.extend(["--agent-name", "fleet-dashboard-session-default"])
 with open(path, "wb") as target:
     plistlib.dump(document, target, sort_keys=True)
+PY
+python3 - "$BACKUP_PLIST" "$STAGED_PLIST" <<'PY'
+import os
+import stat
+import sys
+
+for candidate in sys.argv[1:]:
+    info = os.lstat(candidate)
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or stat.S_ISLNK(info.st_mode)
+        or info.st_nlink != 1
+        or stat.S_IMODE(info.st_mode) != 0o600
+        or info.st_uid != os.getuid()
+    ):
+        raise SystemExit("backup and staged LaunchAgents must be owned, single-link mode-0600 files")
 PY
 plutil -lint "$STAGED_PLIST"
 install -m 600 "$STAGED_PLIST" "$LIVE_PLIST"
@@ -392,6 +443,21 @@ SHA from the isolated previous worktree, then repeat the same non-printing
 process-source and endpoint checks above with those previous values.
 
 ```bash
+python3 - "$BACKUP_PLIST" <<'PY'
+import os
+import stat
+import sys
+
+info = os.lstat(sys.argv[1])
+if (
+    not stat.S_ISREG(info.st_mode)
+    or stat.S_ISLNK(info.st_mode)
+    or info.st_nlink != 1
+    or stat.S_IMODE(info.st_mode) != 0o600
+    or info.st_uid != os.getuid()
+):
+    raise SystemExit("backup LaunchAgent must be an owned, single-link mode-0600 file")
+PY
 install -m 600 "$BACKUP_PLIST" "$LIVE_PLIST"
 launchctl bootout "$JOB"
 launchctl bootstrap "gui/$(id -u)" "$LIVE_PLIST"
