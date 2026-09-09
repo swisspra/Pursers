@@ -31,6 +31,30 @@ def test_cli_version_matches_installed_distribution(monkeypatch, capsys) -> None
     assert capsys.readouterr().out.strip() == expected
 
 
+def test_cli_help_does_not_configure_authenticated_runtime(
+    monkeypatch, capsys, tmp_path
+) -> None:
+    state_dir = tmp_path / "state"
+    monkeypatch.delenv("ONBOARD_CENTRAL_TOKEN", raising=False)
+    monkeypatch.delenv("ONBOARD_CENTRAL_TOKEN_FILE", raising=False)
+    monkeypatch.setenv("PURSERS_BRIDGE_STATE_DIR", str(state_dir))
+    monkeypatch.setattr(sys, "argv", ["pursers-wait-bridge", "--help"])
+
+    def unexpected_runtime_call(*_args, **_kwargs) -> None:
+        raise AssertionError("help must not configure or start the runtime")
+
+    monkeypatch.setattr(wait_server, "_configure_runtime", unexpected_runtime_call)
+    monkeypatch.setattr(wait_server.mcp, "run", unexpected_runtime_call)
+
+    wait_server.main()
+
+    captured = capsys.readouterr()
+    assert "usage: pursers-wait-bridge" in captured.out
+    assert "ticket-lifecycle" in captured.out
+    assert "FATAL" not in captured.err
+    assert not state_dir.exists()
+
+
 def test_server_info_uses_runtime_version() -> None:
     assert wait_server.mcp.version == wait_server.VERSION
 
