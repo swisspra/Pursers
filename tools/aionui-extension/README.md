@@ -2,8 +2,9 @@
 
 This extension adds a guided Pursers Home plus Worker and Reviewer presets. Home
 connects one project with a coordinator-issued door, prepares distinct Team
-seats through a dry-run-first plan, reports partial results, and exposes bounded
-pause, stop, recovery, and roster controls.
+seats through a dry-run-first plan, reports bounded submitted results and
+independent review outcomes, and exposes bounded pause, stop, recovery, and
+roster controls.
 
 ## Build and install
 
@@ -47,7 +48,9 @@ captures to the running candidate rather than caller-supplied metadata.
 
 Start the packaged authenticated helper before using Home. It expects
 `pursers-wait-bridge` and the bundled `aioncore` binary at the explicit paths
-supplied on the command line. See `host/HELPER_CONTRACT.md` for the mode-0600
+supplied on the command line. Its read-only result route expects the local Fleet
+dashboard at `http://127.0.0.1:8899` unless `--fleet-url` selects another
+loopback origin. See `host/HELPER_CONTRACT.md` for the mode-0600
 token file, exact AionCore origin, selected board, and isolated bridge-state
 arguments.
 
@@ -63,6 +66,8 @@ arguments.
 5. Preview the Team plan. Starting seats requires a separate confirmation of
    that exact plan; each result is reported independently.
 6. Start a new conversation and pick the matching Worker or Reviewer preset.
+7. Use Submitted results to read summaries, safe branch/commit and file
+   references, and current review outcomes for the selected board.
 
 The helper passes the door directly to `pursers-wait-bridge join`, which owns
 the private mode-0600 credential store. The extension does not log or persist
@@ -100,6 +105,12 @@ agent-facing host contract also cannot create a Team, archive a Team, remove a
 teammate, or resume one. Pursers Home states these boundaries instead of
 simulating them. The dashboard remains the Pursers Personal MCP app entrypoint
 (or `board_snapshot` fallback), not an invented URL.
+
+`GET /pursers/results` is read-only and accepts only optional `ticket_id` and
+`state` filters. It fetches the selected board from the loopback Fleet dashboard,
+removes submission and review notes, bounds rows and file references, and reports
+`missing`, `pending`, `approved`, `rejected`, or `failed` without inferring
+omitted data.
 
 ## AionUi 2.2.1 limitations
 
