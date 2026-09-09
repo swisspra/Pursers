@@ -274,7 +274,14 @@ isolated detached worktree and a staged copy of the existing LaunchAgent. Set
 the variables below to the reviewed candidate and the current deployment paths;
 do not place bearer tokens in the shell command or plist.
 
+Run each block as Bash exactly as shown. `set -euo pipefail` makes validation
+fail closed: no later rewrite, backup overwrite, install, bootout, or bootstrap
+runs after a failed directory, file, SHA, worktree, plist, or mode check. The
+backup is not written until the rewritten staged plist passes `plutil`.
+
 ```bash
+set -euo pipefail
+
 FLEET_CLONE=/PATH/TO/pursers-fleet-clone
 CANDIDATE_SHA=0123456789abcdef0123456789abcdef01234567
 CANDIDATE_ROOT=/PATH/TO/fleet-dashboard-candidates/$CANDIDATE_SHA
@@ -314,62 +321,41 @@ PY
 git -C "$FLEET_CLONE" fetch origin "$CANDIDATE_SHA"
 git -C "$FLEET_CLONE" worktree add --detach "$CANDIDATE_ROOT" "$CANDIDATE_SHA"
 test "$(git -C "$CANDIDATE_ROOT" rev-parse HEAD)" = "$CANDIDATE_SHA"
+plutil -lint "$LIVE_PLIST"
 python3 - "$LIVE_PLIST" "$BACKUP_PLIST" "$STAGED_PLIST" <<'PY'
 import os
 import stat
 import sys
 
 source_path, *destination_paths = sys.argv[1:]
-source_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-source_fd = os.open(source_path, source_flags)
-try:
-    source_info = os.fstat(source_fd)
-    if not stat.S_ISREG(source_info.st_mode):
-        raise SystemExit("live LaunchAgent must be a regular file")
-    chunks = []
-    while chunk := os.read(source_fd, 1024 * 1024):
-        chunks.append(chunk)
-    contents = b"".join(chunks)
-finally:
-    os.close(source_fd)
-
+source_info = os.lstat(source_path)
+if (
+    not stat.S_ISREG(source_info.st_mode)
+    or stat.S_ISLNK(source_info.st_mode)
+    or source_info.st_uid != os.getuid()
+):
+    raise SystemExit("live LaunchAgent must be an owned, non-symlink regular file")
 for destination_path in destination_paths:
-    flags = os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0)
     try:
-        descriptor = os.open(destination_path, flags)
+        info = os.lstat(destination_path)
     except FileNotFoundError:
-        descriptor = os.open(
-            destination_path,
-            flags | os.O_CREAT | os.O_EXCL,
-            0o600,
-        )
-    try:
-        destination_info = os.fstat(descriptor)
-        if not stat.S_ISREG(destination_info.st_mode) or destination_info.st_nlink != 1:
-            raise SystemExit("staged and backup LaunchAgents must be unlinked regular files")
-        # Existing destinations become private before truncation or secret writes.
-        os.fchmod(descriptor, 0o600)
-        os.ftruncate(descriptor, 0)
-        view = memoryview(contents)
-        while view:
-            view = view[os.write(descriptor, view):]
-        os.fsync(descriptor)
-        destination_info = os.fstat(descriptor)
-        if (
-            not stat.S_ISREG(destination_info.st_mode)
-            or destination_info.st_nlink != 1
-            or stat.S_IMODE(destination_info.st_mode) != 0o600
-        ):
-            raise SystemExit("staged and backup LaunchAgents must finish as single-link mode-0600 files")
-    finally:
-        os.close(descriptor)
+        continue
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or stat.S_ISLNK(info.st_mode)
+        or info.st_nlink != 1
+        or info.st_uid != os.getuid()
+    ):
+        raise SystemExit("staged and backup LaunchAgents must be owned, single-link regular files")
 PY
-python3 - "$STAGED_PLIST" "$CANDIDATE_ROOT/tools/fleet-dashboard/fleet_dashboard.py" <<'PY'
+python3 - "$LIVE_PLIST" "$STAGED_PLIST" "$CANDIDATE_ROOT/tools/fleet-dashboard/fleet_dashboard.py" <<'PY'
+import os
 import plistlib
+import stat
 import sys
 
-path, candidate = sys.argv[1:]
-with open(path, "rb") as source:
+source_path, staged_path, candidate = sys.argv[1:]
+with open(source_path, "rb") as source:
     document = plistlib.load(source)
 arguments = document.get("ProgramArguments")
 matches = [
@@ -386,15 +372,63 @@ if "--agent-name" in arguments:
     arguments[index + 1] = "fleet-dashboard-session-default"
 else:
     arguments.extend(["--agent-name", "fleet-dashboard-session-default"])
-with open(path, "wb") as target:
-    plistlib.dump(document, target, sort_keys=True)
+contents = plistlib.dumps(document, sort_keys=True)
+flags = os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0)
+try:
+    descriptor = os.open(staged_path, flags)
+except FileNotFoundError:
+    descriptor = os.open(staged_path, flags | os.O_CREAT | os.O_EXCL, 0o600)
+try:
+    info = os.fstat(descriptor)
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.getuid():
+        raise SystemExit("staged LaunchAgent must be an owned, single-link regular file")
+    os.fchmod(descriptor, 0o600)
+    os.ftruncate(descriptor, 0)
+    view = memoryview(contents)
+    while view:
+        view = view[os.write(descriptor, view):]
+    os.fsync(descriptor)
+finally:
+    os.close(descriptor)
 PY
-python3 - "$BACKUP_PLIST" "$STAGED_PLIST" <<'PY'
+plutil -lint "$STAGED_PLIST"
+python3 - "$LIVE_PLIST" "$BACKUP_PLIST" "$STAGED_PLIST" <<'PY'
 import os
 import stat
 import sys
 
-for candidate in sys.argv[1:]:
+source_path, backup_path, staged_path = sys.argv[1:]
+source_fd = os.open(source_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+try:
+    source_info = os.fstat(source_fd)
+    if not stat.S_ISREG(source_info.st_mode) or source_info.st_uid != os.getuid():
+        raise SystemExit("live LaunchAgent must remain an owned regular file")
+    chunks = []
+    while chunk := os.read(source_fd, 1024 * 1024):
+        chunks.append(chunk)
+    contents = b"".join(chunks)
+finally:
+    os.close(source_fd)
+
+flags = os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0)
+try:
+    descriptor = os.open(backup_path, flags)
+except FileNotFoundError:
+    descriptor = os.open(backup_path, flags | os.O_CREAT | os.O_EXCL, 0o600)
+try:
+    info = os.fstat(descriptor)
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.getuid():
+        raise SystemExit("backup LaunchAgent must be an owned, single-link regular file")
+    os.fchmod(descriptor, 0o600)
+    os.ftruncate(descriptor, 0)
+    view = memoryview(contents)
+    while view:
+        view = view[os.write(descriptor, view):]
+    os.fsync(descriptor)
+finally:
+    os.close(descriptor)
+
+for candidate in (backup_path, staged_path):
     info = os.lstat(candidate)
     if (
         not stat.S_ISREG(info.st_mode)
@@ -405,7 +439,6 @@ for candidate in sys.argv[1:]:
     ):
         raise SystemExit("backup and staged LaunchAgents must be owned, single-link mode-0600 files")
 PY
-plutil -lint "$STAGED_PLIST"
 install -m 600 "$STAGED_PLIST" "$LIVE_PLIST"
 launchctl bootout "$JOB" 2>/dev/null || true
 launchctl bootstrap "gui/$(id -u)" "$LIVE_PLIST"
@@ -415,6 +448,8 @@ Verify the loaded definition, process source, candidate SHA, and endpoints
 without printing the job environment or command line:
 
 ```bash
+set -euo pipefail
+
 EXPECTED_SOURCE="$CANDIDATE_ROOT/tools/fleet-dashboard/fleet_dashboard.py"
 PLIST_SOURCE=$(python3 - "$LIVE_PLIST" <<'PY'
 import plistlib
@@ -443,6 +478,8 @@ SHA from the isolated previous worktree, then repeat the same non-printing
 process-source and endpoint checks above with those previous values.
 
 ```bash
+set -euo pipefail
+
 python3 - "$BACKUP_PLIST" <<'PY'
 import os
 import stat
@@ -458,10 +495,8 @@ if (
 ):
     raise SystemExit("backup LaunchAgent must be an owned, single-link mode-0600 file")
 PY
-install -m 600 "$BACKUP_PLIST" "$LIVE_PLIST"
-launchctl bootout "$JOB"
-launchctl bootstrap "gui/$(id -u)" "$LIVE_PLIST"
-PREVIOUS_SOURCE=$(python3 - "$LIVE_PLIST" <<'PY'
+plutil -lint "$BACKUP_PLIST"
+PREVIOUS_SOURCE=$(python3 - "$BACKUP_PLIST" <<'PY'
 import plistlib
 import sys
 with open(sys.argv[1], "rb") as source:
@@ -475,6 +510,10 @@ PY
 PREVIOUS_ROOT=${PREVIOUS_SOURCE%/tools/fleet-dashboard/fleet_dashboard.py}
 PREVIOUS_SHA=$(git -C "$PREVIOUS_ROOT" rev-parse HEAD)
 test -n "$PREVIOUS_SHA"
+test -f "$PREVIOUS_SOURCE"
+install -m 600 "$BACKUP_PLIST" "$LIVE_PLIST"
+launchctl bootout "$JOB"
+launchctl bootstrap "gui/$(id -u)" "$LIVE_PLIST"
 PID=$(launchctl print "$JOB" | awk '/pid =/{print $3; exit}')
 test -n "$PID"
 PROCESS_COMMAND=$(ps -p "$PID" -o command=)
