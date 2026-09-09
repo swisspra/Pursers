@@ -455,65 +455,6 @@ def _semantic_capabilities(routes: tuple[str, ...]) -> set[str]:
     return capabilities
 
 
-def _standalone_capabilities(root: Path) -> set[str]:
-    """Verify declared cross-surface capabilities against shipped source.
-
-    A declaration alone never satisfies acceptance. Every evidence file must
-    remain inside this repository and contain every exact marker listed for
-    that capability. Missing, malformed, or stale evidence fails closed by
-    leaving the capability unavailable.
-    """
-
-    contract_path = root / "standalone-capabilities.json"
-    try:
-        contract = json.loads(contract_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return set()
-    if (
-        contract.get("schema_version") != 1
-        or contract.get("architecture") != "board-managed-standalone"
-        or not isinstance(contract.get("capabilities"), dict)
-    ):
-        return set()
-    repository_root = root.parents[1].resolve()
-    verified: set[str] = set()
-    for name, declaration in contract["capabilities"].items():
-        if name not in REQUIRED_MUTATION_CAPABILITIES or not isinstance(declaration, dict):
-            continue
-        evidence = declaration.get("evidence")
-        if not isinstance(evidence, list) or not evidence:
-            continue
-        satisfied = True
-        for item in evidence:
-            if not isinstance(item, dict):
-                satisfied = False
-                break
-            relative = item.get("file")
-            markers = item.get("markers")
-            if (
-                not isinstance(relative, str)
-                or not relative
-                or not isinstance(markers, list)
-                or not markers
-                or not all(isinstance(marker, str) and marker for marker in markers)
-            ):
-                satisfied = False
-                break
-            candidate = (repository_root / relative).resolve()
-            try:
-                candidate.relative_to(repository_root)
-                source = candidate.read_text(encoding="utf-8")
-            except (OSError, UnicodeDecodeError, ValueError):
-                satisfied = False
-                break
-            if any(marker not in source for marker in markers):
-                satisfied = False
-                break
-        if satisfied:
-            verified.add(name)
-    return verified
-
-
 def discover_repository_capabilities(root: Path = EXTENSION_ROOT) -> RepositoryCapabilities:
     manifest = json.loads((root / "aion-extension.json").read_text(encoding="utf-8"))
     contributes = manifest.get("contributes", {})
@@ -545,7 +486,6 @@ def discover_repository_capabilities(root: Path = EXTENSION_ROOT) -> RepositoryC
     dashboard_text = dashboard_entry.read_text(encoding="utf-8") if dashboard_entry.exists() else ""
     personal_views = tuple(sorted(set(re.findall(r'data-view="([a-z-]+)"', dashboard_text))))
     capabilities = _semantic_capabilities(discovered_routes)
-    capabilities.update(_standalone_capabilities(root))
     missing = tuple(sorted(REQUIRED_MUTATION_CAPABILITIES - capabilities))
     return RepositoryCapabilities(
         api_routes=discovered_routes,

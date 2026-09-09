@@ -1,10 +1,11 @@
 # Pursers Home acceptance
 
 This document defines the release acceptance boundary for the AionUi extension,
-standalone seat lifecycle, and dashboard parity. It is not proof that a live
-environment completed the flow. The checked-in harness discovers current
-source capabilities, performs only a read-only live status probe by default,
-and requires separate authenticated evidence for every destructive step.
+standalone seat lifecycle, and dashboard parity. It is not proof that AionUi
+currently implements or that a live environment completed the whole flow. The
+checked-in harness discovers current source capabilities, performs only a
+read-only live status probe by default, and requires separate authenticated
+evidence for every destructive step.
 
 ## Safety boundary
 
@@ -38,22 +39,23 @@ and the five `/pursers/onboarding/*` validate, connect, status, rotate, and
 recover routes. Source discovery reads these shipped helper routes because
 AionCore 0.2.1 treats `contributes.webui` as a static asset contribution and
 does not execute extension JavaScript route handlers. Discovery therefore
-recognizes `door_rotation`. The four remaining capabilities use board-managed
-standalone Pursers surfaces rather than native Aion Team Mode. Their exact
-cross-surface contract is `tools/aionui-extension/standalone-capabilities.json`:
+recognizes `door_rotation`. The four remaining capabilities must use
+board-managed standalone Pursers flows rather than native Aion Team Mode.
+Operator-approved scope split `AN-000000000200` assigns their implementation
+and behavioral tests to separate next-train tickets:
 
-| Capability | Shipped executable surface |
-| --- | --- |
-| `team_lifecycle` | Fleet `/api/config/seats`, guarded plan/apply, and `/api/dispatch` for one board-scoped seat group |
-| `seat_lifecycle` | Fleet worker start/stop/restart plus admin-guarded `/api/agents/retire` |
-| `ticket_lifecycle` | Fleet sandbox intake plus role-scoped seat `board.sh` wait/get/claim/renew/submit/verify commands |
-| `result_visibility` | Fleet board detail and Personal `board_snapshot`/`board_event_feed` projections |
+| Capability | Feature ticket | Required product behavior |
+| --- | --- | --- |
+| `team_lifecycle` | `TK-6db356ba00b8` | create, view, update, and remove a persisted board-scoped seat group |
+| `seat_lifecycle` | `TK-08269cf76117` | join, status, and confirmed safe disconnect or retirement |
+| `ticket_lifecycle` | `TK-fc9727be2848` | board-backed creation, progression, and authority-bounded actions |
+| `result_visibility` | `TK-12187737e73f` | submitted artifacts and independent review outcomes |
 
-Discovery does not trust that declaration by itself. It resolves every named
-source file inside the repository and requires every exact marker before a
-capability is reported. A missing, malformed, stale, or outward path leaves the
-capability unavailable. Source verification permits the live test to run; it
-does not establish a browser pass.
+Generic Fleet, seat CLI, and Personal APIs are reusable implementation inputs;
+their existence alone does not satisfy these user-facing capabilities.
+Discovery must remain fail closed until the approved feature interfaces are
+integrated. Source verification only permits the live test to run; it never
+establishes a browser pass.
 
 This matrix uses the independently approved dashboard inventory from
 `TK-f8a62bab8d05` at
@@ -72,8 +74,8 @@ approved at `ff749da633815f0b539b39155ae4d712a4bcdb44` on
 `tools/aionui-extension/door/adapter.cjs`). The legacy Aion Team adapter remains
 a separately reviewed compatibility surface, but it is not evidence for these
 four standalone capabilities and is not used to satisfy their discovery gate.
-This document claims no sibling contract coverage beyond the exact verified
-surfaces above.
+This document claims no sibling contract coverage before those feature inputs
+are independently approved and assembled.
 
 An installed real host can be probed read-only:
 
@@ -97,8 +99,9 @@ same exact step IDs in the evidence report.
 2. `door_connect`: connect the disposable worker and reviewer doors through the
    shipped join UI; verify redacted board, role, seat, push mode, key ID, expiry,
    and environment-free MCP registration. Never capture the door string.
-3. `team_setup`: plan and apply only the disposable board-scoped standalone
-   seat group through Fleet config, then prove idempotent reopen/reload behavior.
+3. `team_setup`: create or select only the disposable board-scoped standalone
+   seat group through the integrated feature interface, then prove idempotent
+   reopen/reload behavior.
 4. `six_workers_two_reviewers`: join six unique work seat identities and two
    unique reviewer identities. Duplicate display name and duplicate principal
    cases must be visible and must not collapse identities.

@@ -88,22 +88,21 @@ idempotency, and current host limitations.
 ## Standalone lifecycle and results
 
 Final acceptance groups seats by Pursers board and uses standalone seat
-processes; it does not depend on native Aion Team Mode. The fail-closed
-`standalone-capabilities.json` contract binds each capability to executable
-source already shipped in this repository:
+processes; it does not depend on native Aion Team Mode. Four user-facing
+capabilities remain separate next-train feature dependencies:
 
-- Fleet guarded seat config/dispatch implements board-scoped group lifecycle.
-- Fleet worker start/stop/restart and admin-guarded retirement implement seat
-  lifecycle without taking over another identity.
-- Fleet sandbox intake plus role-scoped generated `board.sh` commands implement
-  ticket wait, claim, renew, submit, verify, and independent review.
-- Fleet board detail and Personal snapshot/event tools expose reviewed results,
-  actors, transitions, and bounded cursors.
+- `TK-6db356ba00b8`: persisted standalone worker groups.
+- `TK-08269cf76117`: safe standalone seat join/status/disconnect.
+- `TK-fc9727be2848`: board-backed ticket lifecycle and bounded actions.
+- `TK-12187737e73f`: submitted artifacts and independent review outcomes.
 
-The acceptance harness verifies every declared source path and exact marker
-before reporting a capability. The packaged legacy `/pursers/team/` adapter is
-a compatibility surface only; it is not counted as standalone lifecycle proof.
-Source discovery never substitutes for live authenticated browser evidence.
+Existing Fleet, seat CLI, and Personal APIs may be reused by those features,
+but their presence alone is not implementation proof. The acceptance harness
+continues to report the four capabilities unavailable until approved feature
+interfaces and tests are assembled. The packaged legacy `/pursers/team/`
+adapter is compatibility-only and does not count as standalone lifecycle
+proof. Source discovery never substitutes for live authenticated browser
+evidence.
 
 ## AionUi 2.2.1 limitations
 
@@ -119,7 +118,7 @@ Source discovery never substitutes for live authenticated browser evidence.
 - AionUi does not render Pursers MCP elicitation forms. Use the dashboard or the
   coordinator-provided fallback for human-input requests.
 - The settings iframe has no native Team conversation credentials. Final
-  lifecycle acceptance therefore uses the board-managed Fleet and standalone
-  seat surfaces above. Helper and host integration tests still cover
+  lifecycle acceptance therefore depends on the board-managed standalone
+  feature tickets above. Helper and host integration tests still cover
   selected-board status, door validation, origin/token/board failures, package
   discovery, and fail-closed legacy Team fallback.

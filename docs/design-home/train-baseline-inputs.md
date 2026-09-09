@@ -38,12 +38,13 @@ resolve inside the detached worktree. A regression covers
 `--junitxml=link/report.xml` through an outward symlink and proves the external
 report is never created; contained `--junitxml` and `--basetemp` remain usable.
 
-The imported acceptance harness originally reported only extension-local door
-routes. The final successor adds a separate board-managed standalone contract
-that verifies exact Fleet, seat-kit, and Personal source markers for team,
-seat, ticket, and result lifecycle. Native Aion Team routes do not satisfy that
-contract. Source declarations remain distinct from installed-host browser
-evidence.
+The imported acceptance harness reports only executable feature contracts, not
+generic APIs that a future feature could reuse. Operator decision
+`AN-000000000200` split result, seat, ticket, and standalone-group lifecycle
+into four independently reviewed feature tickets. Until those inputs are
+assembled, discovery reports the four capabilities unavailable. Native Aion
+Team routes do not satisfy this contract, and source declarations remain
+distinct from installed-host browser evidence.
 
 `train-baseline-files.sha256` hashes all imported paths plus this provenance
 document. It deliberately excludes only itself; its own hash is reported in

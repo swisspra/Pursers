@@ -179,12 +179,12 @@ Against the installed authenticated AionUi host on `http://127.0.0.1:57210`:
 - observer transport is ready after that exact candidate installation
 
 The real browser channel is proven by the observer run recorded with the
-integrated candidate. Full acceptance resolves the sibling lifecycle/result
-capabilities through the verified board-managed standalone Fleet, seat CLI,
-and Personal surfaces; fallback UI, mock routes, and the legacy native-Team
-adapter do not count as host execution. The supported host transport is tracked
-by TK-23f86d56ff99. Final integrated real-host acceptance remains a separate
-release gate.
+integrated candidate. Until the four operator-split lifecycle/result feature
+tickets are assembled, full acceptance reports those capabilities unavailable;
+generic Fleet, seat CLI, or Personal APIs, fallback UI, mock routes, and the
+legacy native-Team adapter do not count as host execution. The supported host
+transport is tracked by TK-23f86d56ff99. Final integrated real-host acceptance
+remains a separate release gate.
 
 The focused trust-boundary suite also proves that a requested arbitrary
 40-hex SHA or syntactically valid sandbox board cannot relabel a different

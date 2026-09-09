@@ -460,55 +460,7 @@ def test_repository_discovery_reports_current_read_only_contracts() -> None:
     }
     assert "read_only_discovery" in capabilities.capabilities
     assert "door_rotation" in capabilities.capabilities
-    assert set(capabilities.capabilities) >= {
-        "result_visibility",
-        "seat_lifecycle",
-        "team_lifecycle",
-        "ticket_lifecycle",
-    }
-    assert capabilities.missing_mutation_capabilities == ()
-
-
-def test_standalone_capability_contract_requires_every_shipped_marker(tmp_path: Path) -> None:
-    root = tmp_path / "tools" / "aionui-extension"
-    root.mkdir(parents=True)
-    surface = tmp_path / "surface.py"
-    surface.write_text("route-one\nroute-two\n", encoding="utf-8")
-    contract = {
-        "schema_version": 1,
-        "architecture": "board-managed-standalone",
-        "capabilities": {
-            "result_visibility": {
-                "evidence": [{"file": "surface.py", "markers": ["route-one", "route-two"]}]
-            }
-        },
-    }
-    (root / "standalone-capabilities.json").write_text(
-        json.dumps(contract), encoding="utf-8"
-    )
-    assert harness_module._standalone_capabilities(root) == {"result_visibility"}
-    surface.write_text("route-one\n", encoding="utf-8")
-    assert harness_module._standalone_capabilities(root) == set()
-
-
-def test_standalone_capability_contract_refuses_outside_repository(tmp_path: Path) -> None:
-    root = tmp_path / "repository" / "tools" / "aionui-extension"
-    root.mkdir(parents=True)
-    outside = tmp_path / "outside.py"
-    outside.write_text("route-one\n", encoding="utf-8")
-    contract = {
-        "schema_version": 1,
-        "architecture": "board-managed-standalone",
-        "capabilities": {
-            "result_visibility": {
-                "evidence": [{"file": "../outside.py", "markers": ["route-one"]}]
-            }
-        },
-    }
-    (root / "standalone-capabilities.json").write_text(
-        json.dumps(contract), encoding="utf-8"
-    )
-    assert harness_module._standalone_capabilities(root) == set()
+    assert capabilities.missing_mutation_capabilities
 
 
 @pytest.mark.parametrize(
@@ -582,7 +534,7 @@ def test_evidence_validation_stops_when_sibling_contracts_are_missing(
         _validate_report(
             report,
             validate_live_target("http://127.0.0.1:8765", "sandbox-home"),
-            RepositoryCapabilities((), (), (), (), ("result_visibility",)),
+            discover_repository_capabilities(),
             CANDIDATE_SHA,
         )
 
