@@ -28,6 +28,10 @@ const ticketForm = $('#ticket-form');
 const ticketMessage = $('#ticket-message');
 const ticketList = $('#ticket-list');
 const ticketEmpty = $('#ticket-empty');
+const groupForm = $('#group-form');
+const groupList = $('#group-list');
+const groupsEmpty = $('#groups-empty');
+const removeGroupDialog = $('#remove-group-dialog');
 
 const state = {
   helper: null,
@@ -37,6 +41,10 @@ const state = {
   plannedSpec: null,
   planCanApply: false,
   pendingStop: null,
+  groupRevision: 0,
+  groups: [],
+  groupAgents: [],
+  pendingGroupRemove: null,
 };
 
 const ERROR_COPY = {
@@ -66,9 +74,11 @@ const ERROR_COPY = {
   schema_validation_failed: 'Check the highlighted Team fields and retry.',
   invalid_json: 'The local host rejected an invalid request. Reload and retry.',
   not_connected: 'Connect a door for this board, then retry.',
-  board_mismatch: 'This helper is pinned to a different board.',
-  conflict: 'The ticket changed. Refresh its persisted state before retrying.',
-  invalid_input: 'Correct the ticket fields and retry.',
+  board_mismatch: 'This action is pinned to a different board. Nothing changed.',
+  member_not_found: 'One selected seat no longer belongs to this board. Refresh and choose again.',
+  group_not_found: 'This group no longer exists. Refresh the list.',
+  conflict: 'Board data changed in another session. Refresh its persisted state before retrying.',
+  invalid_input: 'Correct the highlighted board fields and retry.',
 };
 
 const HELPER_TOKEN_HEADER = 'x-pursers-home-token';
@@ -164,7 +174,7 @@ async function connectHelper(event) {
   showHelper(result);
   setMessage($('#helper-message'), `Connected to the helper for board ${result.board}.`, 'success');
   showGlobal('Local helper connected', `Pursers Home is bound to board ${result.board}. Refreshing redacted status.`, 'info');
-  await Promise.all([loadConnection(), loadTeamStatus(), loadTickets(), loadResults()]);
+  await Promise.all([loadConnection(), loadTeamStatus(), loadGroups(), loadTickets(), loadResults()]);
 }
 
 async function importMcpDefinition(result) {
@@ -551,6 +561,153 @@ async function planTeam(event) {
   planCard.scrollIntoView({ behavior: 'smooth', block: 'center' });
 }
 
+function populateGroupMembers(selectedIds = []) {
+  const selected = new Set(selectedIds);
+  const picker = $('#group-members');
+  picker.replaceChildren(...state.groupAgents.map((agent) => {
+    const label = document.createElement('label');
+    const input = document.createElement('input');
+    input.type = 'checkbox';
+    input.value = agent.agent_id;
+    input.checked = selected.has(agent.agent_id);
+    const text = document.createElement('span');
+    const lifecycle = agent.lifecycle_status && agent.lifecycle_status !== 'active' ? ` · ${agent.lifecycle_status}` : '';
+    text.textContent = `${agent.agent_name} · ${agent.role}${lifecycle}`;
+    label.append(input, text);
+    return label;
+  }));
+}
+
+function resetGroupForm() {
+  $('#group-id').value = '';
+  $('#group-name').value = '';
+  populateGroupMembers();
+  $('#save-group').textContent = 'Create group';
+  $('#cancel-group-edit').hidden = true;
+}
+
+function editGroup(group) {
+  $('#group-id').value = group.group_id;
+  $('#group-name').value = group.name;
+  populateGroupMembers(group.member_agent_ids);
+  $('#save-group').textContent = 'Save group';
+  $('#cancel-group-edit').hidden = false;
+  const missing = (group.members || []).filter((member) => !member.present).length;
+  setMessage($('#group-message'), missing ? `${missing} missing seat will be removed if you save this edit.` : `Editing ${group.name}.`);
+  $('#group-name').focus();
+}
+
+function openGroupRemove(group) {
+  state.pendingGroupRemove = group;
+  $('#remove-group-copy').textContent = `Remove ${group.name}? Only group metadata is removed; all seats, tickets, and history remain.`;
+  removeGroupDialog.showModal();
+}
+
+function makeGroupCard(group) {
+  const card = document.createElement('article');
+  card.className = 'group-card';
+  const heading = document.createElement('div');
+  heading.className = 'card-heading';
+  const title = document.createElement('h3');
+  title.textContent = group.name;
+  const count = document.createElement('span');
+  count.className = 'status-pill neutral';
+  count.textContent = `${group.member_agent_ids.length} seat${group.member_agent_ids.length === 1 ? '' : 's'}`;
+  heading.append(title, count);
+  const members = document.createElement('ul');
+  members.className = 'group-members';
+  for (const member of group.members || []) {
+    const item = document.createElement('li');
+    const label = document.createElement('strong');
+    label.textContent = member.agent_name;
+    const detail = document.createElement('span');
+    detail.textContent = `${member.role} · ${member.present ? member.lifecycle_status : 'missing from board'}`;
+    item.append(label, detail);
+    members.append(item);
+  }
+  const actions = document.createElement('div');
+  actions.className = 'row-actions';
+  const edit = document.createElement('button');
+  edit.type = 'button'; edit.className = 'button button-secondary'; edit.textContent = 'Edit';
+  edit.addEventListener('click', () => editGroup(group));
+  const remove = document.createElement('button');
+  remove.type = 'button'; remove.className = 'button button-danger-quiet'; remove.textContent = 'Remove';
+  remove.addEventListener('click', () => openGroupRemove(group));
+  actions.append(edit, remove);
+  card.append(heading, members, actions);
+  return card;
+}
+
+async function loadGroups() {
+  const { response, result } = await api('/pursers/groups');
+  if (!response?.ok || !result.ok) {
+    state.groups = [];
+    state.groupAgents = [];
+    groupList.replaceChildren();
+    groupsEmpty.hidden = false;
+    setPill($('#groups-pill'), state.helper ? 'Unavailable' : 'Connect helper', 'warning');
+    if (state.helper) setMessage($('#group-message'), messageFor(result, 'Seat groups are unavailable.'), 'error');
+    return result;
+  }
+  state.groupRevision = result.revision;
+  state.groups = Array.isArray(result.groups) ? result.groups : [];
+  state.groupAgents = Array.isArray(result.agents) ? result.agents : [];
+  groupList.replaceChildren(...state.groups.map(makeGroupCard));
+  groupsEmpty.hidden = state.groups.length > 0;
+  setPill($('#groups-pill'), `${state.groups.length} group${state.groups.length === 1 ? '' : 's'}`, 'ready');
+  resetGroupForm();
+  return result;
+}
+
+async function saveGroup(event) {
+  event.preventDefault();
+  if (!groupForm.reportValidity()) return;
+  const memberIds = $$('#group-members input:checked').map((input) => input.value);
+  if (!memberIds.length) {
+    setMessage($('#group-message'), 'Select at least one standalone seat.', 'error');
+    return;
+  }
+  const groupId = $('#group-id').value;
+  const operation = groupId ? 'update' : 'create';
+  const payload = {
+    expected_revision: state.groupRevision,
+    name: $('#group-name').value.trim(),
+    member_agent_ids: memberIds,
+  };
+  if (groupId) payload.group_id = groupId;
+  const button = $('#save-group');
+  setBusy(button, true, groupId ? 'Saving…' : 'Creating…');
+  const { response, result } = await api(`/pursers/groups/${operation}`, { json: payload });
+  setBusy(button, false);
+  if (!response?.ok || !result.ok) {
+    setMessage($('#group-message'), messageFor(result, 'The group was not changed.'), 'error');
+    if (errorCode(result) === 'conflict') await loadGroups();
+    return;
+  }
+  setMessage($('#group-message'), groupId ? 'Group updated.' : 'Group created.', 'success');
+  await loadGroups();
+}
+
+async function removeGroup() {
+  const group = state.pendingGroupRemove;
+  if (!group) return;
+  const button = $('#confirm-remove-group');
+  setBusy(button, true, 'Removing…');
+  const { response, result } = await api('/pursers/groups/remove', {
+    json: { expected_revision: state.groupRevision, group_id: group.group_id },
+  });
+  setBusy(button, false);
+  removeGroupDialog.close();
+  state.pendingGroupRemove = null;
+  if (!response?.ok || !result.ok) {
+    setMessage($('#group-message'), messageFor(result, 'The group was not removed.'), 'error');
+    await loadGroups();
+    return;
+  }
+  setMessage($('#group-message'), 'Group removed. Seats and board history were unchanged.', 'success');
+  await loadGroups();
+}
+
 async function applyTeam() {
   if (!state.plannedSpec || !state.planCanApply || !confirmStart.checked) return;
   const button = startTeam;
@@ -887,7 +1044,7 @@ async function refreshAll() {
   }
   const button = $('#refresh-all');
   setBusy(button, true, 'Refreshing…');
-  await Promise.all([loadConnection(), loadTeamStatus(), loadTickets(), loadResults()]);
+  await Promise.all([loadConnection(), loadTeamStatus(), loadGroups(), loadTickets(), loadResults()]);
   setBusy(button, false);
 }
 
@@ -913,6 +1070,13 @@ ticketForm.addEventListener('submit', createTicket);
 $('#refresh-results').addEventListener('click', loadResults);
 resultState.addEventListener('change', loadResults);
 $('#refresh-all').addEventListener('click', refreshAll);
+$('#refresh-groups').addEventListener('click', loadGroups);
+groupForm.addEventListener('submit', saveGroup);
+$('#cancel-group-edit').addEventListener('click', resetGroupForm);
+$('#confirm-remove-group').addEventListener('click', (event) => {
+  event.preventDefault();
+  removeGroup();
+});
 $('#confirm-stop').addEventListener('click', (event) => {
   event.preventDefault();
   stopSeat();

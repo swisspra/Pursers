@@ -4,7 +4,7 @@ This extension adds a guided Pursers Home plus Worker and Reviewer presets. Home
 connects one project with a coordinator-issued door, prepares distinct Team
 seats through a dry-run-first plan, reports bounded submitted results and
 independent review outcomes, and exposes bounded pause, stop, recovery, roster
-controls, and a board-backed ticket lifecycle.
+controls, standalone seat-group controls, and a board-backed ticket lifecycle.
 
 ## Build and install
 
@@ -63,14 +63,16 @@ arguments.
 2. Confirm that Home shows the helper's exact selected board.
 3. Paste the door supplied by your coordinator, check it, and connect. The input
    is cleared immediately and status only shows redacted metadata.
-4. Open an existing AionUi Team conversation. Enter its exact Team and monitor
+4. Optionally create board-scoped groups for already joined standalone Pursers
+   seats. These groups organize metadata only; they never create or control seats.
+5. Open an existing AionUi Team conversation. Enter its exact Team and monitor
    lead identity plus a unique name, folder, role, and tier ceiling per seat.
-5. Preview the Team plan. Starting seats requires a separate confirmation of
+6. Preview the Team plan. Starting seats requires a separate confirmation of
    that exact plan; each result is reported independently.
-6. Start a new conversation and pick the matching Worker or Reviewer preset.
-7. In Ticket lifecycle, create unassigned board work or refresh its real status.
+7. Start a new conversation and pick the matching Worker or Reviewer preset.
+8. In Ticket lifecycle, create unassigned board work or refresh its real status.
    Home never claims, submits, or reviews tickets on a seat's behalf.
-8. Use Submitted results to read summaries, safe branch/commit and file
+9. Use Submitted results to read summaries, safe branch/commit and file
    references, and current review outcomes for the selected board.
 
 The helper passes the door directly to `pursers-wait-bridge join`, which owns
@@ -97,21 +99,23 @@ idempotency, and current host limitations.
 ## Standalone lifecycle and results
 
 Final acceptance groups seats by Pursers board and uses standalone seat
-processes; it does not depend on native Aion Team Mode. Four user-facing
-capabilities remain separate next-train feature dependencies:
+processes; it does not depend on native Aion Team Mode.
 
-- `TK-6db356ba00b8`: persisted standalone worker groups.
-- `TK-08269cf76117`: safe standalone seat join/status/disconnect.
-- `TK-fc9727be2848`: board-backed ticket lifecycle and bounded actions.
-- `TK-12187737e73f`: submitted artifacts and independent review outcomes.
+The `/pursers/groups` route family is separate from native AionUi Team Mode. It
+stores one CAS-protected `home_seat_groups_v1` document in the selected board,
+supports create/view/update/remove, and preserves missing or retired members in
+the view. Removing a group never removes seats, memberships, tickets, or history.
+See `team_lifecycle/FEATURE_CONTRACT.md` for the persistence and error contract.
 
-Existing Fleet, seat CLI, and Personal APIs may be reused by those features,
-but their presence alone is not implementation proof. The acceptance harness
-continues to report the four capabilities unavailable until approved feature
-interfaces and tests are assembled. The packaged legacy `/pursers/team/`
-adapter is compatibility-only and does not count as standalone lifecycle
-proof. Source discovery never substitutes for live authenticated browser
-evidence.
+The helper's `/pursers/team/` routes use the packaged approved Team adapter.
+Status reads the host roster and task list when supported. Plan is always
+read-only; apply remains dry-run unless the request includes both
+`options.confirm="apply-live"` and `options.dry_run=false`.
+
+Standalone groups, ticket lifecycle, and submitted-result visibility use
+separate board-pinned interfaces. The packaged `/pursers/team/` adapter remains
+compatibility-only and does not substitute for standalone seat lifecycle.
+Source discovery never substitutes for live authenticated browser evidence.
 
 ## Ticket lifecycle
 

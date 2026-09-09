@@ -7,6 +7,7 @@ const { execFile } = require('node:child_process');
 const { createHandlers } = require('../webui/routes.js');
 const { isLoopbackHostname } = require('../security/loopback.cjs');
 const { createTicketLifecycleProcess } = require('../ticket_lifecycle/adapter.cjs');
+const { createTeamLifecycleProcess } = require('../team_lifecycle/adapter.cjs');
 
 const DEFAULT_PORT = 43121;
 const DEFAULT_FLEET_URL = 'http://127.0.0.1:8899';
@@ -250,6 +251,11 @@ function createHelperServer(options) {
     stateDir: options.bridgeStateDir,
     board,
   });
+  const groupProcess = options.groupProcess || createTeamLifecycleProcess({
+    command: options.bridgeCommand || 'pursers-wait-bridge',
+    stateDir: options.bridgeStateDir,
+    board,
+  });
   const fetchResults = options.fetchResults || createFleetResultsFetcher(
     options.fleetUrl || DEFAULT_FLEET_URL,
     options.fetchImpl,
@@ -262,6 +268,7 @@ function createHelperServer(options) {
     runTeamCli,
     runTicketLifecycle: ticketLifecycle.run,
     fetchResults,
+    runTeamLifecycle: groupProcess.run,
     importMcp: async () => ({ success: true, imported: false }),
   });
 
@@ -335,6 +342,7 @@ function createHelperServer(options) {
         await new Promise((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
       }
       await ticketLifecycle.close();
+      await groupProcess.close();
     },
   };
 }

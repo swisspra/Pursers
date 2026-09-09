@@ -23,7 +23,7 @@ def test_package_contains_only_allowlisted_runtime_files(tmp_path: Path) -> None
     archive_path = builder.build(tmp_path / builder.ARCHIVE_NAME)
     with ZipFile(archive_path) as archive:
         assert archive.namelist() == list(builder.PACKAGE_FILES)
-        assert len(archive.namelist()) == 22
+        assert len(archive.namelist()) == 24
         assert "IMPORT_PROVENANCE.md" in archive.namelist()
         assert "host/helper.cjs" in archive.namelist()
         assert "host/HELPER_CONTRACT.md" in archive.namelist()
@@ -33,6 +33,8 @@ def test_package_contains_only_allowlisted_runtime_files(tmp_path: Path) -> None
         assert "team/TEAM_ADAPTER_CONTRACT.md" in archive.namelist()
         assert "ticket_lifecycle/adapter.cjs" in archive.namelist()
         assert "ticket_lifecycle/FEATURE_CONTRACT.md" in archive.namelist()
+        assert "team_lifecycle/adapter.cjs" in archive.namelist()
+        assert "team_lifecycle/FEATURE_CONTRACT.md" in archive.namelist()
         candidate = json.loads(archive.read("webui/candidate.json"))
         expected = subprocess.run(
             ["git", "rev-parse", "HEAD"],
@@ -88,7 +90,9 @@ def test_package_includes_every_relative_runtime_dependency(tmp_path: Path) -> N
         assert "../team/adapter.cjs" in routes
         assert "../ticket_lifecycle/adapter.cjs" in routes
         assert "../result_visibility/adapter.cjs" in routes
+        assert "../team_lifecycle/adapter.cjs" in routes
         helper = archive.read("host/helper.cjs").decode("utf-8")
         assert "../webui/routes.js" in helper
         assert "../security/loopback.cjs" in helper
         assert "../ticket_lifecycle/adapter.cjs" in helper
+        assert "../team_lifecycle/adapter.cjs" in helper

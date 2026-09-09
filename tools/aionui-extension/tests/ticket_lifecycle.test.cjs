@@ -86,7 +86,7 @@ test('helper token and exact origin protect board-pinned ticket creation', async
   const token = 'a'.repeat(64);
   const origin = 'http://127.0.0.1:25808';
   const helper = createHelperServer({
-    board: 'demo', central: 'Local Central', origin, token, port: 0,
+    board: 'demo', central: 'local-central', origin, token, port: 0,
     runBridge: async () => 'push_mode=push\n',
     runTeamCli: async () => ({ success: false, error: { code: 'runtime_context_missing', message: 'Unavailable.' } }),
     ticketLifecycle: {

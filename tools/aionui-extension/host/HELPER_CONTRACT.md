@@ -18,11 +18,14 @@ The helper:
 - caps request bodies at 64 KiB and never returns door values;
 - reads only the selected board from a loopback Fleet dashboard, with a 5-second
   timeout, 512 KiB response cap, no credentials, and no redirects;
-- defers MCP registration to the authenticated same-origin AionCore API; and
-- removes AionUi conversation runtime variables before Team CLI calls.
+- defers MCP registration to the authenticated same-origin AionCore API;
+- removes AionUi conversation runtime variables before Team CLI calls;
 - keeps one persistent board session for ticket reads, unassigned creation, and
-  Central-authorized cancellation; and
-- gives that dedicated actor neither work nor review capability.
+  Central-authorized cancellation;
+- gives that dedicated actor neither work nor review capability;
+- keeps one persistent, inert board actor for standalone group operations;
+- pins group routes to the selected board and uses Central board-state CAS; and
+- closes the group sidecar when the helper stops.
 
 The last rule is deliberate. A settings iframe has no supported Team
 conversation context in AionUi 2.2.1. Team status, plan, apply, pause, and stop
