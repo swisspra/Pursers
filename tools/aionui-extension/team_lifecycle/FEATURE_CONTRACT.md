@@ -22,14 +22,20 @@ The configured board persists one `board_state` value under
 The document contains at most 25 groups and 5,000 UTF-8 characters. A group has
 one stable generated ID, a unique case-insensitive 1-80 character name, and 1-50
 unique agent IDs that currently belong to the configured board. The sidecar
-uses Central's `expected_sha256` precondition for every update and increments
+lists only worker/reviewer identities whose Central capabilities allow work or
+review, so its own inert actor cannot be grouped. It uses Central's
+`expected_sha256` precondition for every update and increments
 the document revision. Concurrent edits fail as `conflict` instead of silently
-overwriting state.
+overwriting state. On first use, the single supported helper instance writes the
+canonical empty revision-0 document if the key is absent; every user edit then
+uses CAS. Starting multiple helpers concurrently before that initialization is
+outside the supported deployment contract because Central has no create-if-absent
+state precondition.
 
 ## Create, view, update, remove
 
-- Create validates current `board_snapshot` membership, stores a new group, and
-  never creates seats or a board.
+- Create requires `expected_revision`, validates current `board_snapshot`
+  membership, stores a new group, and never creates seats or a board.
 - View reads the persisted document plus a fresh bounded board snapshot. Each
   member is projected with its real name, role, lifecycle status, and
   `present`/`missing` state. Missing or retired seats remain visible for recovery.

@@ -5919,6 +5919,11 @@ def main() -> None:
     if "--version" in sys.argv[1:]:
         print(VERSION)
         return
+    if sys.argv[1:] and sys.argv[1] == "team-lifecycle":
+        import team_lifecycle
+
+        team_lifecycle.main(sys.argv[2:])
+        return
     if sys.argv[1:] and sys.argv[1] in {"join", "status", "forget"}:
         args = _door_parser().parse_args(sys.argv[1:])
         try:

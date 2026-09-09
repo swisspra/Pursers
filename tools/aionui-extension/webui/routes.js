@@ -4,6 +4,7 @@ const { execFile } = require('node:child_process');
 const { createDoorOnboarding } = require('../door/adapter.cjs');
 const { isLoopbackHostname } = require('../security/loopback.cjs');
 const { createTeamAdapter } = require('../team/adapter.cjs');
+const { createTeamLifecycleAdapter } = require('../team_lifecycle/adapter.cjs');
 
 const BRIDGE_COMMAND = 'pursers-wait-bridge';
 const INSTALL_HINT =
@@ -75,6 +76,16 @@ function teamResponseStatus(value) {
   return 422;
 }
 
+function groupResponseStatus(value) {
+  if (value.ok) return 200;
+  const code = value.error && value.error.code;
+  if (code === 'permission_denied') return 403;
+  if (code === 'group_not_found') return 404;
+  if (code === 'conflict') return 409;
+  if (code === 'backend_unavailable' || code === 'not_connected') return 503;
+  return 422;
+}
+
 async function readBody(request) {
   try {
     const body = await request.json();
@@ -105,6 +116,9 @@ function createHandlers(dependencies = {}) {
     importMcp,
   });
   const team = createTeamAdapter({ runCli: dependencies.runTeamCli });
+  const groups = dependencies.runTeamLifecycle
+    ? createTeamLifecycleAdapter({ expectedBoard, run: dependencies.runTeamLifecycle })
+    : null;
 
   function scopedStatus(current) {
     if (!current.ok || !expectedBoard) return current;
@@ -175,6 +189,14 @@ function createHandlers(dependencies = {}) {
     return jsonResponse(teamResponseStatus(value), value);
   }
 
+  async function groupTyped(request, operation) {
+    if (!groups) return jsonResponse(503, { ok: false, error: { code: 'not_connected', message: 'Connect a Pursers board first.', retryable: true } });
+    const body = request.method === 'GET' ? {} : await readBody(request);
+    if (body === null) return jsonResponse(400, { ok: false, error: { code: 'invalid_input', message: 'Request body must be a JSON object.', retryable: false } });
+    const value = await groups[operation](body);
+    return jsonResponse(groupResponseStatus(value), value);
+  }
+
   async function handle(request) {
     const url = new URL(request.url);
     if (!loopbackRequest(request, dependencies.allowedOrigin)) return jsonResponse(403, { ok: false, error: 'loopback_same_origin_required' });
@@ -194,10 +216,15 @@ function createHandlers(dependencies = {}) {
     if (request.method === 'POST' && url.pathname === '/pursers/team/apply') return teamTyped(request, 'apply');
     if (request.method === 'POST' && url.pathname === '/pursers/team/seat/pause') return teamTyped(request, 'pause');
     if (request.method === 'POST' && url.pathname === '/pursers/team/seat/stop') return teamTyped(request, 'stop');
+    if (request.method === 'GET' && url.pathname === '/pursers/groups/status') return groupTyped(request, 'status');
+    if (request.method === 'GET' && url.pathname === '/pursers/groups') return groupTyped(request, 'list');
+    if (request.method === 'POST' && url.pathname === '/pursers/groups/create') return groupTyped(request, 'create');
+    if (request.method === 'POST' && url.pathname === '/pursers/groups/update') return groupTyped(request, 'update');
+    if (request.method === 'POST' && url.pathname === '/pursers/groups/remove') return groupTyped(request, 'remove');
     return jsonResponse(404, { ok: false, error: 'not_found' });
   }
 
-  return { handle, join, onboarding, status, team };
+  return { handle, join, onboarding, status, team, groups };
 }
 
 const defaultHandlers = createHandlers();
