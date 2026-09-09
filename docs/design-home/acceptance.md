@@ -35,13 +35,14 @@ python tools/aionui-extension/tests/home_acceptance/harness.py discover
 ```
 
 The current authenticated helper exposes `/pursers/join`, `/pursers/status`,
-and the five `/pursers/onboarding/*` validate, connect, status, rotate, and
-recover routes. Source discovery reads these shipped helper routes because
+the five `/pursers/onboarding/*` validate, connect, status, rotate, and recover
+routes, and the assembled group, ticket, and result route families. Source
+discovery reads these shipped helper routes because
 AionCore 0.2.1 treats `contributes.webui` as a static asset contribution and
 does not execute extension JavaScript route handlers. Discovery therefore
-recognizes `door_rotation`. The four remaining capabilities must use
+recognizes only exact complete route families. These capabilities use
 board-managed standalone Pursers flows rather than native Aion Team Mode.
-Operator-approved scope split `AN-000000000200` assigns their implementation
+Operator-approved scope split `AN-000000000200` assigned their implementation
 and behavioral tests to separate next-train tickets:
 
 | Capability | Feature ticket | Required product behavior |
@@ -53,9 +54,9 @@ and behavioral tests to separate next-train tickets:
 
 Generic Fleet, seat CLI, and Personal APIs are reusable implementation inputs;
 their existence alone does not satisfy these user-facing capabilities.
-Discovery must remain fail closed until the approved feature interfaces are
-integrated. Source verification only permits the live test to run; it never
-establishes a browser pass.
+Discovery remains fail closed for any incomplete feature interface. Source
+verification only permits the live test to run; it never establishes a browser
+pass.
 
 This matrix uses the independently approved dashboard inventory from
 `TK-f8a62bab8d05` at
@@ -74,8 +75,8 @@ approved at `ff749da633815f0b539b39155ae4d712a4bcdb44` on
 `tools/aionui-extension/door/adapter.cjs`). The legacy Aion Team adapter remains
 a separately reviewed compatibility surface, but it is not evidence for these
 four standalone capabilities and is not used to satisfy their discovery gate.
-This document claims no sibling contract coverage before those feature inputs
-are independently approved and assembled.
+This document claims only feature inputs recorded in
+`final-assembly-inputs.md`; final browser coverage remains independently owned.
 
 An installed real host can be probed read-only:
 

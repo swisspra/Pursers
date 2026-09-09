@@ -429,16 +429,32 @@ def test_acceptance_sequence_and_current_operator_tiers_are_explicit() -> None:
     }
 
 
-def test_repository_discovery_reports_current_read_only_contracts() -> None:
+def test_repository_discovery_reports_assembled_contracts() -> None:
     capabilities = discover_repository_capabilities()
     assert capabilities.api_routes == (
+        "/pursers/groups",
+        "/pursers/groups/create",
+        "/pursers/groups/remove",
+        "/pursers/groups/status",
+        "/pursers/groups/update",
         "/pursers/join",
         "/pursers/onboarding/connect",
         "/pursers/onboarding/recover",
         "/pursers/onboarding/rotate",
         "/pursers/onboarding/status",
         "/pursers/onboarding/validate",
+        "/pursers/results",
         "/pursers/status",
+        "/pursers/team/apply",
+        "/pursers/team/plan",
+        "/pursers/team/seat/pause",
+        "/pursers/team/seat/stop",
+        "/pursers/team/status",
+        "/pursers/tickets",
+        "/pursers/tickets/cancel",
+        "/pursers/tickets/create",
+        "/pursers/tickets/get",
+        "/pursers/tickets/status",
     )
     assert set(capabilities.assistants) == {
         "pursers-reviewer-claude",
@@ -460,7 +476,10 @@ def test_repository_discovery_reports_current_read_only_contracts() -> None:
     }
     assert "read_only_discovery" in capabilities.capabilities
     assert "door_rotation" in capabilities.capabilities
-    assert capabilities.missing_mutation_capabilities
+    assert "team_lifecycle" in capabilities.capabilities
+    assert "ticket_lifecycle" in capabilities.capabilities
+    assert "result_visibility" in capabilities.capabilities
+    assert capabilities.missing_mutation_capabilities == ("seat_lifecycle",)
 
 
 @pytest.mark.parametrize(

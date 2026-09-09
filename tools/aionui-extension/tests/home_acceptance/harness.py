@@ -452,6 +452,30 @@ def _semantic_capabilities(routes: tuple[str, ...]) -> set[str]:
         capabilities.add("seat_status")
     if "/pursers/onboarding/rotate" in lowered:
         capabilities.add("door_rotation")
+    if {
+        "/pursers/groups",
+        "/pursers/groups/status",
+        "/pursers/groups/create",
+        "/pursers/groups/update",
+        "/pursers/groups/remove",
+    }.issubset(lowered):
+        capabilities.add("team_lifecycle")
+    if {
+        "/pursers/seat-lifecycle/join",
+        "/pursers/seat-lifecycle/status",
+        "/pursers/seat-lifecycle/disconnect",
+    }.issubset(lowered):
+        capabilities.add("seat_lifecycle")
+    if {
+        "/pursers/tickets",
+        "/pursers/tickets/status",
+        "/pursers/tickets/get",
+        "/pursers/tickets/create",
+        "/pursers/tickets/cancel",
+    }.issubset(lowered):
+        capabilities.add("ticket_lifecycle")
+    if "/pursers/results" in lowered:
+        capabilities.add("result_visibility")
     return capabilities
 
 
@@ -471,8 +495,7 @@ def discover_repository_capabilities(root: Path = EXTENSION_ROOT) -> RepositoryC
         routes.update(
             route
             for route in re.findall(r"url\.pathname === ['\"]([^'\"]+)['\"]", helper_text)
-            if route in {"/pursers/join", "/pursers/status"}
-            or route.startswith("/pursers/onboarding/")
+            if route.startswith("/pursers/")
         )
     discovered_routes = tuple(sorted(routes))
     assistants = tuple(
