@@ -27,6 +27,15 @@ selector mismatch is rejected before `joinSeat` runs. The dependency receives
 `expected_identity` and must verify it before mutation; a different identity is
 a conflict, not a replacement.
 
+`expected_board` and `expected_identity` are adapter-owned fields and are
+rejected if present in caller JSON. A fresh join also rejects caller-supplied
+`agent_id` or `principal_id`. A bound rejoin may supply those two selectors only
+when they equal preserved state; they are not forwarded directly. The adapter
+constructs the dependency request from `board`, `agent_name`, `role`, and the
+allow-listed optional public fields `door`, `tier_max`, `assistant_id`, `model`,
+and `folder`, then adds its own `expected_board` and derived
+`expected_identity`.
+
 ## Trust and isolation
 
 - The authenticated loopback helper supplies all live dependencies. The static
