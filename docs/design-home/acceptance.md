@@ -305,9 +305,25 @@ export PURSERS_HOME_ACCEPTANCE_BOARD=sandbox-home-acceptance
 export PURSERS_HOME_ACCEPTANCE_MUTATE=I_UNDERSTAND_SANDBOX_ONLY
 export PURSERS_HOME_ACCEPTANCE_EVIDENCE=/tmp/pursers-home/evidence.json
 export PURSERS_HOME_ACCEPTANCE_COMMIT=FULL_40_HEX_CANDIDATE_SHA
+export PURSERS_HOME_ACCEPTANCE_TOKEN_FILE=/VERIFIER/OWNED/pursers-home-token
+export PURSERS_HOME_ACCEPTANCE_ORIGIN=http://127.0.0.1:AIONCORE_PORT
 export PURSERS_HOME_BROWSER_OBSERVER=/VERIFIER/OWNED/browser-observer
 pytest -q tools/aionui-extension/tests/home_acceptance -rs
 ```
+
+`PURSERS_HOME_ACCEPTANCE_HOST_URL` is the loopback helper, not AionCore. Under the
+static-only manifest the host serves extension assets but does not execute route
+handlers, so `pursers/status` is answered by `host/helper.cjs`, which fails closed
+unless the request carries both an allowed `Origin` and `x-pursers-home-token`.
+`PURSERS_HOME_ACCEPTANCE_TOKEN_FILE` is the mode-0600 file passed to the helper as
+`--token-file`, and `PURSERS_HOME_ACCEPTANCE_ORIGIN` is the exact AionCore origin
+passed to it as `--origin`. The status probe reads the token from that file and
+never logs it; a file readable by group or other is refused.
+
+Both are optional and are only read together. With either unset the probe stays on
+the historical unauthenticated request, so an unconfigured environment reports the
+capability as unavailable and skips. A wrong token still yields the same skip. Neither
+path can turn a missing capability into a pass.
 
 `REQUIRED_SUITES` covers the repository-wide Python manifest runner, all three
 extension Node suites, dashboard typecheck/build, repository leak scan, and

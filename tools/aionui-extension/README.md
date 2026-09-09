@@ -13,20 +13,43 @@ From the repository root:
 python tools/aionui-extension/build.py
 ```
 
-Install `dist/pursers-aionui-0.1.0.zip` through a managed AionUi Hub entry. For
-an isolated local verification host, unpack it as one extension directory and
-put only that directory's parent in `AIONUI_EXTENSIONS_PATH` before starting
-AionCore. Do not unzip it into an existing AionUi data directory by hand.
+Install `dist/pursers-aionui-0.1.0.zip` through a managed AionUi Hub entry. That
+route is external: AionUi 2.2.1 ships no in-app import for a local ZIP, and this
+repository documents no Hub publishing procedure, so use the isolated local host
+below for verification.
+
+For an isolated local verification host, unpack the ZIP as one extension
+directory, put only that directory's parent in `AIONUI_EXTENSIONS_PATH`, and
+start AionCore with the host application version it must advertise:
+
+```sh
+AIONUI_EXTENSIONS_PATH=/PATH/TO/extensions \
+  /PATH/TO/aioncore --host 127.0.0.1 --port 25999 \
+  --data-dir /PATH/TO/isolated-data --app-version 2.2.1
+```
+
+`--app-version` is required. It defaults to AionCore's own version, which the
+loader compares against the manifest `engines.aionui` range, so a bare AionCore
+filters the extension out with `engine.aionui incompatible ... required=^2.2.1
+actual=0.2.1` and serves nothing. Do not unzip it into an existing AionUi data
+directory by hand.
+
+That host is API-only; it serves no HTML shell and no login page. Assets are
+served, authenticated, under `/api/extensions/pursers/assets/webui/`, and a
+session is obtained by posting `{"username":..., "password":...}` to `/login`.
+The host does not execute extension route handlers, so `pursers/status` comes
+from the packaged helper described in `host/HELPER_CONTRACT.md`, not from this
+origin.
+
 The deterministic build writes `webui/candidate.json` from exact repository
 `HEAD`; the verifier-owned browser observer reads that installed asset to bind
 captures to the running candidate rather than caller-supplied metadata.
 
-The installed AionUi 2.2.1 / AionCore 0.2.1 host serves extension assets but
-does not execute extension JavaScript route handlers. Start the packaged
-authenticated helper before using Home. It expects `pursers-wait-bridge` and
-the bundled `aioncore` binary at the explicit paths supplied on the command
-line. See `host/HELPER_CONTRACT.md` for the mode-0600 token file, exact AionCore
-origin, selected board, and isolated bridge-state arguments.
+Start the packaged authenticated helper before using Home. It expects
+`pursers-wait-bridge` and the bundled `aioncore` binary at the explicit paths
+supplied on the command line. See `host/HELPER_CONTRACT.md` for the mode-0600
+token file, exact AionCore origin, selected board, and isolated bridge-state
+arguments.
 
 ## Set up a project
 

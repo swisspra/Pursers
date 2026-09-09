@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import urljoin, urlsplit
 from urllib.error import HTTPError, URLError
-from urllib.request import ProxyHandler, build_opener
+from urllib.request import ProxyHandler, Request, build_opener
 
 try:
     from . import browser_observer
@@ -536,11 +536,38 @@ def redact(value: Any) -> Any:
     return value
 
 
+def _helper_transport_headers() -> dict[str, str]:
+    """Credentials for the loopback helper transport, when the verifier supplies them.
+
+    Under the static-only manifest the host serves extension assets but does not
+    execute route handlers, so `pursers/status` is answered by the packaged
+    loopback helper, which fails closed without both an exact allowed `Origin`
+    and the `x-pursers-home-token` header. Returning an empty mapping keeps the
+    historical unauthenticated probe behaviour byte for byte, so an unconfigured
+    environment still reports the capability as unavailable rather than passing.
+    """
+
+    token_file = os.environ.get("PURSERS_HOME_ACCEPTANCE_TOKEN_FILE")
+    origin = os.environ.get("PURSERS_HOME_ACCEPTANCE_ORIGIN")
+    if not token_file or not origin:
+        return {}
+    path = Path(token_file)
+    if not path.is_file():
+        raise AcceptanceError("helper token file does not exist")
+    if path.stat().st_mode & 0o077:
+        raise AcceptanceError("helper token file is not mode 0600")
+    token = path.read_text(encoding="utf-8").strip()
+    if not token:
+        raise AcceptanceError("helper token file is empty")
+    return {"Origin": origin, "x-pursers-home-token": token}
+
+
 def _read_extension_status(target: LiveTarget, timeout_s: float) -> dict[str, Any]:
     opener = build_opener(ProxyHandler({}))
     endpoint = urljoin(f"{target.base_url}/", "pursers/status")
+    request = Request(endpoint, headers=_helper_transport_headers())
     try:
-        with opener.open(endpoint, timeout=timeout_s) as response:
+        with opener.open(request, timeout=timeout_s) as response:
             final_target = validate_live_target(
                 response.geturl().rsplit("/pursers/status", 1)[0]
             )
