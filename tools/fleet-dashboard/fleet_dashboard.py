@@ -3128,6 +3128,7 @@ class FleetFetcher:
             board_id,
             agent_name=self.config.agent_name,
             capabilities={"can_work": False, "can_review": False},
+            allow_takeover=True,
         )
 
     async def _boards(self) -> list[tuple[str, str]]:
@@ -7463,7 +7464,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument("--home-board", default=DEFAULT_HOME_BOARD)
-    parser.add_argument("--agent-name", default="fleet-dashboard-viewer")
+    parser.add_argument(
+        "--agent-name",
+        default="fleet-dashboard-viewer",
+        help="Stable dashboard-only identity reclaimed on same-principal restarts",
+    )
     parser.add_argument("--stale-seconds", type=int, default=300)
     parser.add_argument("--cache-seconds", type=float, default=5.0)
     parser.add_argument(

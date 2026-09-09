@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import copy
 import hashlib
 import importlib.util
@@ -991,6 +992,172 @@ def test_fetcher_requests_central_max_snapshot_bounds() -> None:
         "max_bytes": 300_000,
         "include_retired": True,
     }
+
+
+def test_fetcher_real_client_reclaims_stable_read_only_identity() -> None:
+    config = dashboard.Config(
+        url="http://127.0.0.1:8766/mcp",
+        token="test-token",
+        home_board="pursers",
+        agent_name="fleet-dashboard-viewer",
+        stale_seconds=300,
+        cache_seconds=5.0,
+    )
+
+    client = dashboard.FleetFetcher(config)._client("pursers")
+
+    assert isinstance(client, dashboard.BoardClient)
+    assert client.agent_name == "fleet-dashboard-viewer"
+    assert client.allow_takeover is True
+    assert client.capabilities == {"can_work": False, "can_review": False}
+
+
+def test_real_central_rejoin_keeps_one_dashboard_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    jwks_path = tmp_path / "jwks.json"
+    jwks_path.write_text('{"keys": []}', encoding="utf-8")
+    for key, value in {
+        "CENTRAL_AUTH_MODE": "jwt",
+        "CENTRAL_JWT_ISSUER": "https://issuer.example",
+        "CENTRAL_JWT_AUDIENCE": "http://localhost:8765/mcp",
+        "CENTRAL_JWKS_PATH": str(jwks_path),
+        "CENTRAL_ADMISSION": "invite",
+        "STORE_BACKEND": "sqlite",
+    }.items():
+        monkeypatch.setenv(key, value)
+    mcp, _service = central.build_server("localhost", 8765, tmp_path / "central")
+    principal = central.Principal(
+        "PR-dashboard",
+        "dashboard",
+        frozenset({"board:read", "board:write"}),
+    )
+    monkeypatch.setattr(central, "current_principal", lambda: principal)
+    config = dashboard.Config(
+        url="http://localhost:8765/mcp",
+        token="test-token",
+        home_board="pursers",
+        agent_name="fleet-dashboard-viewer",
+        stale_seconds=300,
+        cache_seconds=5.0,
+    )
+    client = dashboard.FleetFetcher(config)._client("pursers")
+    arguments = {
+        "board_id": client.board_id,
+        "agent_name": client.agent_name,
+        "role": client.role,
+        "capabilities": client.capabilities,
+    }
+
+    async def scenario() -> list[dict[str, object]]:
+        previous = await mcp.call_tool("board_join", arguments)
+        recovered = await asyncio.gather(
+            mcp.call_tool(
+                "board_join", {**arguments, "allow_takeover": client.allow_takeover}
+            ),
+            mcp.call_tool(
+                "board_join", {**arguments, "allow_takeover": client.allow_takeover}
+            ),
+        )
+        results = [previous, *recovered]
+        assert not any(result.is_error for result in results)
+        return [result.structured_content for result in results]
+
+    results = asyncio.run(scenario())
+
+    assert len({result["agent_id"] for result in results}) == 1
+    assert [result["member_count"] for result in results] == [1, 1, 1]
+    assert results[-1]["capabilities"]["can_work"] is False
+    assert results[-1]["capabilities"]["can_review"] is False
+
+
+def test_config_api_reuses_dashboard_identity_after_restart_and_concurrently() -> None:
+    class Central:
+        def __init__(self) -> None:
+            self.lock = threading.Lock()
+            self.active = {("pursers", "fleet-dashboard-viewer")}
+            self.join_count = 0
+            self.client_arguments: list[dict[str, object]] = []
+
+        def client_factory(
+            self, _url: str, _token: str, board_id: str, **arguments: object
+        ) -> object:
+            owner = self
+            captured = dict(arguments)
+
+            class Client:
+                async def __aenter__(self) -> Self:
+                    identity = (board_id, str(captured["agent_name"]))
+                    with owner.lock:
+                        if identity in owner.active and not captured.get(
+                            "allow_takeover"
+                        ):
+                            raise dashboard.BoardClientError(
+                                "seat name already active under this principal; "
+                                "choose another name or pass allow_takeover=true"
+                            )
+                        owner.active.add(identity)
+                        owner.join_count += 1
+                        owner.client_arguments.append(captured)
+                    return self
+
+                async def __aexit__(self, *_args: object) -> None:
+                    return None
+
+                async def board_state_get(self, *, key: str) -> dict:
+                    raise dashboard.BoardClientError(f"state key not found: {key}")
+
+            return Client()
+
+    central = Central()
+    config = dashboard.Config(
+        url="http://127.0.0.1:8766/mcp",
+        token="test-token",
+        home_board="pursers",
+        agent_name="fleet-dashboard-viewer",
+        stale_seconds=300,
+        cache_seconds=5.0,
+    )
+    cache = dashboard.DashboardCache(
+        dashboard.FleetFetcher(config, client_factory=central.client_factory), 5.0
+    )
+    server = dashboard.ThreadingHTTPServer(
+        ("127.0.0.1", 0), dashboard.make_handler(cache)
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    url = f"http://127.0.0.1:{server.server_port}/api/config"
+
+    def request_config() -> int:
+        with urllib.request.urlopen(url) as response:
+            json.load(response)
+            return response.status
+
+    try:
+        assert request_config() == 200
+        assert request_config() == 200
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+            assert list(executor.map(lambda _index: request_config(), range(4))) == [
+                200,
+                200,
+                200,
+                200,
+            ]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+    assert central.active == {("pursers", "fleet-dashboard-viewer")}
+    assert central.join_count == 6
+    assert all(
+        arguments == {
+            "agent_name": "fleet-dashboard-viewer",
+            "capabilities": {"can_work": False, "can_review": False},
+            "allow_takeover": True,
+        }
+        for arguments in central.client_arguments
+    )
 
 
 def test_output_rows_and_titles_are_bounded() -> None:
