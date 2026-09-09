@@ -74,6 +74,21 @@ test('join rejects another board before calling a dependency', async () => {
   assert.deepEqual(calls, []);
 });
 
+test('join rejects ok false even when the dependency returns a valid-looking identity', async () => {
+  const { lifecycle, calls } = harness({
+    joinSeat: async (input) => {
+      calls.push(['join', input]);
+      return { ok: false, identity: identity(), rejoined: true };
+    },
+  });
+  const joined = await lifecycle.join({ board: BOARD, agent_name: 'worker-1', role: 'worker' });
+  assert.equal(joined.ok, false);
+  assert.equal(joined.outcome, 'failed');
+  assert.equal(joined.code, 'join_failed');
+  assert.match(joined.recovery, /same seat name/);
+  assert.deepEqual(calls.map(([name]) => name), ['join']);
+});
+
 test('status restores one exact identity and reports recovery guidance', async () => {
   const { lifecycle } = harness();
   const status = await lifecycle.status({ board: BOARD, agent_name: 'worker-1', role: 'worker' });
@@ -82,6 +97,24 @@ test('status restores one exact identity and reports recovery guidance', async (
   assert.equal(status.confirmation, 'retire worker-1 from sandbox-home');
   assert.deepEqual(status.identity, identity());
 });
+
+for (const lifecycleStatus of ['handed_off', 'stale']) {
+  test(`status reports ${lifecycleStatus} without claiming the seat is active`, async () => {
+    const { lifecycle, calls, setAgent } = harness({ initialIdentity: identity() });
+    const row = identity({ lifecycle_status: lifecycleStatus });
+    setAgent(row);
+    const status = await lifecycle.status();
+    assert.equal(status.ok, false);
+    assert.equal(status.outcome, lifecycleStatus);
+    assert.equal(status.code, `seat_${lifecycleStatus}`);
+    assert.equal(status.identity.lifecycle_status, lifecycleStatus);
+    assert.match(status.recovery, /rejoin/i);
+    assert.notEqual(status.outcome, 'active');
+    const disconnected = await lifecycle.disconnect({ confirm: 'retire worker-1 from sandbox-home' });
+    assert.equal(disconnected.outcome, lifecycleStatus);
+    assert.deepEqual(calls.map(([name]) => name), ['status', 'status']);
+  });
+}
 
 test('status fails closed for duplicate or malformed board identity', async () => {
   const duplicate = identity({ agent_id: 'AI-worker-2', principal_id: 'PR-other' });

@@ -51,6 +51,35 @@ function confirmation(identity) {
   return `retire ${identity.agent_name} from ${identity.board}`;
 }
 
+function lifecycleResult(operation, selected) {
+  const fields = {
+    identity: selected.identity,
+    dispatch_status: selected.row.status || 'unknown',
+    lease_expires_at: selected.row.lease_expires_at || null,
+    current_offer: selected.row.current_offer || null,
+    confirmation: confirmation(selected.identity),
+  };
+  if (selected.identity.lifecycle_status === 'handed_off') {
+    return result(operation, 'handed_off', {
+      ...fields,
+      code: 'seat_handed_off',
+      message: 'This seat was handed off and is not active.',
+      retryable: true,
+      recovery: 'Rejoin with the original door and exact seat name, or ask the operator to inspect the handoff.',
+    });
+  }
+  if (selected.identity.lifecycle_status === 'stale') {
+    return result(operation, 'stale', {
+      ...fields,
+      code: 'seat_stale',
+      message: 'This seat is stale and is not active.',
+      retryable: true,
+      recovery: 'Reconnect the helper, then rejoin with the original door and exact seat name.',
+    });
+  }
+  return result(operation, selected.identity.lifecycle_status, fields);
+}
+
 function validateSelector(input, expectedBoard) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) {
     return failure('status', 'invalid_input', 'Seat status requires a JSON object.');
@@ -137,13 +166,7 @@ function createSeatLifecycle(dependencies = {}) {
     }
     const selected = matches[0];
     if (!boundIdentity) boundIdentity = selected.identity;
-    return result(operation, selected.identity.lifecycle_status === 'retired' ? 'retired' : 'active', {
-      identity: selected.identity,
-      dispatch_status: selected.row.status || 'unknown',
-      lease_expires_at: selected.row.lease_expires_at || null,
-      current_offer: selected.row.current_offer || null,
-      confirmation: confirmation(selected.identity),
-    });
+    return lifecycleResult(operation, selected);
   }
 
   async function join(input = {}) {
@@ -156,6 +179,12 @@ function createSeatLifecycle(dependencies = {}) {
     try {
       joined = await dependencies.joinSeat({ ...input, expected_board: expectedBoard });
     } catch (_error) {
+      return failure('join', 'join_failed', 'Central did not accept the seat join.', {
+        retryable: true,
+        recovery: 'Check the door and helper connection, then retry with the same seat name.',
+      });
+    }
+    if (!joined || joined.ok !== true) {
       return failure('join', 'join_failed', 'Central did not accept the seat join.', {
         retryable: true,
         recovery: 'Check the door and helper connection, then retry with the same seat name.',
