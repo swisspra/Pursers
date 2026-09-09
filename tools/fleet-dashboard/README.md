@@ -278,6 +278,9 @@ Run each block as Bash exactly as shown. `set -euo pipefail` makes validation
 fail closed: no later rewrite, backup overwrite, install, bootout, or bootstrap
 runs after a failed directory, file, SHA, worktree, plist, or mode check. The
 backup is not written until the rewritten staged plist passes `plutil`.
+`bootout_if_present` continues past an absent job only when `launchctl print`
+returns its documented missing-service status and message. Every other probe or
+bootout failure remains fatal.
 
 ```bash
 set -euo pipefail
@@ -440,7 +443,26 @@ for candidate in (backup_path, staged_path):
         raise SystemExit("backup and staged LaunchAgents must be owned, single-link mode-0600 files")
 PY
 install -m 600 "$STAGED_PLIST" "$LIVE_PLIST"
-launchctl bootout "$JOB" 2>/dev/null || true
+bootout_if_present() {
+  local job=$1 output status
+  if output=$(launchctl print "$job" 2>&1); then
+    if launchctl bootout "$job"; then
+      return 0
+    else
+      status=$?
+      echo "launchctl bootout failed" >&2
+      return "$status"
+    fi
+  else
+    status=$?
+    if [ "$status" -eq 113 ] && [[ "$output" == *"Could not find service"* ]]; then
+      return 0
+    fi
+    echo "launchctl could not confirm that the job is absent" >&2
+    return "$status"
+  fi
+}
+bootout_if_present "$JOB"
 launchctl bootstrap "gui/$(id -u)" "$LIVE_PLIST"
 ```
 
@@ -512,7 +534,26 @@ PREVIOUS_SHA=$(git -C "$PREVIOUS_ROOT" rev-parse HEAD)
 test -n "$PREVIOUS_SHA"
 test -f "$PREVIOUS_SOURCE"
 install -m 600 "$BACKUP_PLIST" "$LIVE_PLIST"
-launchctl bootout "$JOB"
+bootout_if_present() {
+  local job=$1 output status
+  if output=$(launchctl print "$job" 2>&1); then
+    if launchctl bootout "$job"; then
+      return 0
+    else
+      status=$?
+      echo "launchctl bootout failed" >&2
+      return "$status"
+    fi
+  else
+    status=$?
+    if [ "$status" -eq 113 ] && [[ "$output" == *"Could not find service"* ]]; then
+      return 0
+    fi
+    echo "launchctl could not confirm that the job is absent" >&2
+    return "$status"
+  fi
+}
+bootout_if_present "$JOB"
 launchctl bootstrap "gui/$(id -u)" "$LIVE_PLIST"
 PID=$(launchctl print "$JOB" | awk '/pid =/{print $3; exit}')
 test -n "$PID"
