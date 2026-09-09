@@ -44,19 +44,32 @@ python3 tools/home_acceptance_handoff.py \
 The three observer source files must come from the final independently approved
 integration successor, have its exact reviewed hashes, and share one source
 directory. Never reuse hashes from a rejected or superseded candidate. The
-bridge executable must come from a fresh, exact-source installation. Build and
-install both wheels into a private environment, without consulting an index:
+bridge executable must come from a fresh, exact-source installation. From a
+clean checkout at the final commit, first populate a verified private wheelhouse.
+This online population step builds both local projects from the checkout, resolves
+all binary transitive dependencies (including `mcp==2.1.1`), records every wheel's
+SHA-256, and proves that the resulting wheelhouse installs and runs without an
+index:
 
 ```sh
-uv build --wheel --out-dir /PRIVATE/PATH/home-runtime-wheels packages/client
-uv build --wheel --out-dir /PRIVATE/PATH/home-runtime-wheels tools/wait-bridge
-uv venv --python 3.12 /PRIVATE/PATH/home-runtime
-uv pip install --python /PRIVATE/PATH/home-runtime/bin/python --no-index \
-  --find-links /PRIVATE/PATH/home-runtime-wheels pursers-wait-bridge
+python3 tools/build_home_runtime_wheelhouse.py \
+  --python /ABSOLUTE/PATH/TO/python3.12 \
+  --output /PRIVATE/PATH/home-runtime-wheelhouse
+(cd /PRIVATE/PATH/home-runtime-wheelhouse && shasum -a 256 -c SHA256SUMS)
+/ABSOLUTE/PATH/TO/python3.12 -m venv /PRIVATE/PATH/home-runtime
+/PRIVATE/PATH/home-runtime/bin/python -m pip install \
+  --disable-pip-version-check --no-index \
+  --find-links /PRIVATE/PATH/home-runtime-wheelhouse \
+  pursers-wait-bridge==0.1.0a15
 /PRIVATE/PATH/home-runtime/bin/pursers-wait-bridge ticket-lifecycle --help
 /PRIVATE/PATH/home-runtime/bin/pursers-wait-bridge seat-lifecycle --help
 /PRIVATE/PATH/home-runtime/bin/pursers-wait-bridge team-lifecycle --help
 ```
+
+Keep `SHA256SUMS` and `wheelhouse.json` with the handoff evidence. The builder
+refuses a dirty source checkout, an existing output path, non-Python-3.12
+interpreter, a changed local source wheel, or a wheelhouse that cannot complete
+the strict no-index install and all three lifecycle probes.
 
 The preparer repeats those lifecycle probes with a clean Python import path and
 records the exact bridge binary path, SHA-256, reported version, and verified

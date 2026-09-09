@@ -186,6 +186,104 @@ def test_generated_helper_starts_with_authenticated_board_and_central(tmp_path: 
         process.wait(timeout=5)
 
 
+def test_documented_offline_wheelhouse_runs_lifecycle_and_handoff(tmp_path: Path) -> None:
+    python = shutil.which("python3.12")
+    if python is None:
+        pytest.skip("python3.12 is required")
+    root = Path(__file__).resolve().parents[2]
+    wheelhouse = tmp_path / "wheelhouse"
+    subprocess.run(
+        [
+            python,
+            str(root / "tools" / "build_home_runtime_wheelhouse.py"),
+            "--python",
+            python,
+            "--output",
+            str(wheelhouse),
+            "--allow-dirty",
+        ],
+        check=True,
+        capture_output=True,
+        cwd=root,
+        text=True,
+    )
+    checksums = (wheelhouse / "SHA256SUMS").read_text()
+    assert stat.S_IMODE(wheelhouse.stat().st_mode) == 0o700
+    assert stat.S_IMODE((wheelhouse / "wheelhouse.json").stat().st_mode) == 0o600
+    assert "mcp-2.1.1-py3-none-any.whl" in checksums
+    assert "pursers_client-0.1.0a22-py3-none-any.whl" in checksums
+    assert "pursers_wait_bridge-0.1.0a15-py3-none-any.whl" in checksums
+    subprocess.run(
+        ["shasum", "-a", "256", "-c", "SHA256SUMS"],
+        check=True,
+        capture_output=True,
+        cwd=wheelhouse,
+        text=True,
+    )
+
+    runtime = tmp_path / "runtime"
+    subprocess.run(
+        [python, "-m", "venv", str(runtime)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    runtime_python = runtime / "bin" / "python"
+    absent = subprocess.run(
+        [
+            runtime_python,
+            "-I",
+            "-c",
+            "import importlib.util; assert importlib.util.find_spec('mcp') is None",
+        ],
+        capture_output=True,
+        cwd=tmp_path,
+        text=True,
+    )
+    assert absent.returncode == 0, absent.stderr
+    subprocess.run(
+        [
+            runtime_python,
+            "-m",
+            "pip",
+            "install",
+            "--disable-pip-version-check",
+            "--no-index",
+            "--find-links",
+            str(wheelhouse),
+            "pursers-wait-bridge==0.1.0a15",
+        ],
+        check=True,
+        capture_output=True,
+        cwd=tmp_path,
+        text=True,
+    )
+    bridge = runtime / "bin" / "pursers-wait-bridge"
+    clean_environment = os.environ.copy()
+    clean_environment.pop("PYTHONHOME", None)
+    clean_environment.pop("PYTHONPATH", None)
+    for command in ("ticket-lifecycle", "seat-lifecycle", "team-lifecycle"):
+        helped = subprocess.run(
+            [bridge, command, "--help"],
+            check=True,
+            capture_output=True,
+            cwd=tmp_path,
+            env=clean_environment,
+            text=True,
+        )
+        assert f"pursers-wait-bridge {command}" in helped.stdout
+
+    args = _args(tmp_path)
+    args.bridge_bin = str(bridge)
+    handoff_root = Path(handoff.prepare(args)["handoff"])
+    manifest = json.loads((handoff_root / "handoff.json").read_text())
+    assert manifest["bridge_runtime"]["binary"] == str(bridge.resolve())
+    assert manifest["bridge_runtime"]["version"] == "0.1.0a15"
+    assert manifest["bridge_runtime"]["verified_commands"] == [
+        "ticket-lifecycle", "seat-lifecycle", "team-lifecycle",
+    ]
+
+
 def test_refuses_legacy_bridge_before_output(tmp_path: Path) -> None:
     args = _args(tmp_path)
     args.bridge_bin = str(_file(
