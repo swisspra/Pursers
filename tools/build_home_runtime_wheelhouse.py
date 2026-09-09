@@ -193,6 +193,8 @@ def build(output: Path, python: Path, allow_dirty: bool = False) -> dict[str, ob
 
         _run([str(python), "-m", "venv", str(verifier)])
         verifier_python = verifier / "bin" / "python"
+        exact_client_wheel = wheelhouse / source_wheels[0].name
+        exact_bridge_wheel = wheelhouse / source_wheels[1].name
         _run(
             [
                 str(verifier_python),
@@ -204,7 +206,8 @@ def build(output: Path, python: Path, allow_dirty: bool = False) -> dict[str, ob
                 "--no-index",
                 "--find-links",
                 str(wheelhouse),
-                f"{bridge_name}=={bridge_version}",
+                str(exact_client_wheel),
+                str(exact_bridge_wheel),
             ],
             env=resolver_environment,
         )
@@ -245,7 +248,7 @@ def build(output: Path, python: Path, allow_dirty: bool = False) -> dict[str, ob
             },
             "verification": {
                 "install": "pip --isolated install --no-index --find-links WHEELHOUSE "
-                f"{bridge_name}=={bridge_version}",
+                f"{source_wheels[0].name} {source_wheels[1].name}",
                 "lifecycle_command_tails": command_tails,
             },
             "artifacts": artifacts,

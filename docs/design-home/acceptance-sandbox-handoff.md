@@ -60,7 +60,8 @@ python3 tools/build_home_runtime_wheelhouse.py \
 /PRIVATE/PATH/home-runtime/bin/python -m pip --isolated install \
   --disable-pip-version-check --no-index \
   --find-links /PRIVATE/PATH/home-runtime-wheelhouse \
-  pursers-wait-bridge==0.1.0a15
+  /PRIVATE/PATH/home-runtime-wheelhouse/pursers_client-0.1.0a22-py3-none-any.whl \
+  /PRIVATE/PATH/home-runtime-wheelhouse/pursers_wait_bridge-0.1.0a15-py3-none-any.whl
 /PRIVATE/PATH/home-runtime/bin/pursers-wait-bridge ticket-lifecycle --help
 /PRIVATE/PATH/home-runtime/bin/pursers-wait-bridge seat-lifecycle --help
 /PRIVATE/PATH/home-runtime/bin/pursers-wait-bridge team-lifecycle --help
