@@ -950,7 +950,7 @@ def _parse_capability_bool(name: str) -> bool | None:
     raise ValueError(f"{name} must be true or false")
 
 
-def _seat_capabilities() -> dict[str, Any] | None:
+def _seat_capabilities(role: str | None = None) -> dict[str, Any] | None:
     """Return explicit dispatch capabilities, or None for legacy seats."""
     names = (
         "PURSERS_TIER_MAX",
@@ -960,7 +960,7 @@ def _seat_capabilities() -> dict[str, Any] | None:
         "PURSERS_MODEL",
         "PURSERS_PROVIDER",
     )
-    if not any(os.environ.get(name, "").strip() for name in names):
+    if role is None and not any(os.environ.get(name, "").strip() for name in names):
         return None
     capabilities: dict[str, Any] = {"host": _host_name(), "max_parallel": 1}
     tier = os.environ.get("PURSERS_TIER_MAX", "").strip()
@@ -991,6 +991,13 @@ def _seat_capabilities() -> dict[str, Any] | None:
         value = os.environ.get(env_name, "").strip()
         if value:
             capabilities[field] = value
+    if role is not None:
+        capabilities["can_work"], capabilities["can_review"] = {
+            "worker": (True, False),
+            "reviewer": (False, True),
+            "orchestrator": (False, False),
+            "coordinator": (False, False),
+        }[role]
     return capabilities
 
 
@@ -5855,7 +5862,7 @@ async def _door_join(args: argparse.Namespace) -> None:
         entry["b"],
         agent_name=name,
         role=entry["r"],
-        capabilities=_seat_capabilities(),
+        capabilities=_seat_capabilities(entry["r"]),
         allow_takeover=False,
     )
     async with client:

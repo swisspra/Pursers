@@ -344,6 +344,47 @@ class DoorJoinRealCentralTests(unittest.IsolatedAsyncioTestCase):
         document = self.store.load("door-live")
         self.assertEqual(len(document["members"]), 1)
 
+    async def test_worker_door_overrides_ambient_reviewer_capabilities(self) -> None:
+        def live_client(*args: object, **kwargs: object) -> BoardClient:
+            client = BoardClient(*args, **kwargs)
+            client._http = self._http  # type: ignore[method-assign]
+            return client
+
+        args = argparse.Namespace(
+            door=door(url="http://127.0.0.1:8765/mcp", board="door-worker-role"),
+            name="fresh-worker-under-reviewer",
+            state_dir=str(self.root / "reviewer-state"),
+            allow_remote=False,
+            rotate=False,
+        )
+        output = io.StringIO()
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "PURSERS_CAN_REVIEW": "true",
+                    "PURSERS_CAN_WORK": "false",
+                    "PURSERS_TIER_MAX": "2",
+                },
+            ),
+            patch.object(wait_server, "BoardClient", side_effect=live_client),
+            patch.object(
+                client_module, "streamable_http_client", return_value=self.mcp
+            ),
+            redirect_stdout(output),
+        ):
+            await wait_server._door_join(args)
+
+        rendered = output.getvalue()
+        self.assertIn("push=yes", rendered)
+        self.assertIn("verifier=accepted", rendered)
+        members = self.store.load("door-worker-role")["members"]
+        self.assertEqual(len(members), 1)
+        member = next(iter(members.values()))
+        self.assertEqual(member["role"], "worker")
+        self.assertTrue(member["capabilities"]["can_work"])
+        self.assertFalse(member["capabilities"]["can_review"])
+
 
 if __name__ == "__main__":
     unittest.main()

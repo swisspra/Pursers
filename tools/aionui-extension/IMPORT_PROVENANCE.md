@@ -96,6 +96,15 @@ onboarding call after `BoardClient.__aenter__` has already established the
 same identity, retains `allow_takeover=False`, and adds the live-Central
 regression in `tools/wait-bridge/tests/test_door_join.py`.
 
+The follow-up capability correction remains in `TK-9ecf1634623f`, source
+branch `codex/TK-9ecf1634623f-fix2-worker2`, based on rejected candidate
+`7c09b2f0183067799813d48b91b456ee1d9c2ed5`. Door joins now derive
+`can_work` and `can_review` from the signed door role instead of contradictory
+ambient seat flags, while retaining the original tier, skills, host, model,
+provider, and `allow_takeover=False` boundaries. Its live-Central regression
+sets reviewer capability variables around a worker door and proves one
+worker-valid join with push verification.
+
 Their content hashes are recorded in `INTEGRATION_FILES.sha256`. Adoption
 preserves the approved guidance and provenance but does not itself satisfy the
 ship plan's independent browser, inventory, rotation, O1, or release gates.
