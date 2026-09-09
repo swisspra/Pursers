@@ -192,7 +192,7 @@ def test_documented_offline_wheelhouse_runs_lifecycle_and_handoff(tmp_path: Path
         pytest.skip("python3.12 is required")
     root = Path(__file__).resolve().parents[2]
     wheelhouse = tmp_path / "wheelhouse"
-    subprocess.run(
+    built = subprocess.run(
         [
             python,
             str(root / "tools" / "build_home_runtime_wheelhouse.py"),
@@ -202,11 +202,12 @@ def test_documented_offline_wheelhouse_runs_lifecycle_and_handoff(tmp_path: Path
             str(wheelhouse),
             "--allow-dirty",
         ],
-        check=True,
+        check=False,
         capture_output=True,
         cwd=root,
         text=True,
     )
+    assert built.returncode == 0, built.stderr
     checksums = (wheelhouse / "SHA256SUMS").read_text()
     assert stat.S_IMODE(wheelhouse.stat().st_mode) == 0o700
     assert stat.S_IMODE((wheelhouse / "wheelhouse.json").stat().st_mode) == 0o600
