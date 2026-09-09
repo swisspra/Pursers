@@ -4,25 +4,31 @@
 
 - Release baseline: `c2ebac5de803a0f7a00468ec4d3cdf06e4719096` (`5.0.0a25`).
 - Validated integration source: `9e3b05072e4521c10d0f4390d7ac57ad7421c07a`, which includes the approved foundation and door onboarding/loopback integration.
-- The measurements below are for that integration source. They are not acceptance evidence for pending Dashboard-UI or extension UI branches and must be rerun on the final release-train SHA.
-- This ticket changes only this checklist. It does not bump a version, promote a release, or alter a package.
+- The measurements in section 4 were re-derived on the combined Home candidate built on frozen base `b06ce6627edb62fc588eee541fa568445b709054`, after the static-only plus loopback-helper decision removed the manifest route declarations. They supersede the earlier integration-source numbers and must be rerun on the final release-train SHA.
+- This checklist documents gates. Updating it does not bump a version, promote a release, or alter a package.
 
 ## 2. Packaged surfaces
 
 ### 2.1 AionUI extension ZIP
 
-`tools/aionui-extension/build.py` creates `pursers-aionui-0.1.0.zip`. Its allowlist contains exactly these 12 members:
+`tools/aionui-extension/build.py` creates `pursers-aionui-0.1.0.zip`. Its allowlist contains exactly these 18 members:
 
 | ZIP member | Runtime purpose |
 | --- | --- |
 | `aion-extension.json` | Extension manifest |
+| `IMPORT_PROVENANCE.md` | Provenance of imported runtime sources |
 | `README.md` | Operator documentation |
 | `contexts/reviewer.md` | Reviewer conversation context |
 | `contexts/worker.md` | Worker conversation context |
 | `door/adapter.cjs` | Door validation, connect, rotation, and recovery adapter |
 | `door/DOOR_ONBOARDING_CONTRACT.md` | Shipped adapter contract |
+| `host/helper.cjs` | Loopback helper that serves the onboarding transport |
+| `host/HELPER_CONTRACT.md` | Shipped helper contract |
 | `security/loopback.cjs` | Loopback/origin enforcement |
+| `team/adapter.cjs` | Team status, plan, apply, pause, and stop adapter |
+| `team/TEAM_ADAPTER_CONTRACT.md` | Shipped team adapter contract |
 | `webui/app.js` | Settings-tab client |
+| `webui/candidate.json` | Deterministic candidate commit binding |
 | `webui/index.html` | Settings-tab entry point |
 | `webui/routes.js` | HTTP route entry point |
 | `webui/style.css` | Settings-tab styles |
@@ -30,23 +36,33 @@
 
 Every ZIP member has timestamp `(1980, 1, 1, 0, 0, 0)`, mode `0o100644`, and DEFLATE level 9. Tests build twice and require byte-identical archives.
 
-The current manifest maps these runtime entry points:
+The current manifest declares only static contributions. It no longer declares
+`apiRoutes` or `staticAssets`; `contributes.webui` is a list of packaged bundles.
+HTTP handling is reached through the supported loopback helper transport described
+in `host/HELPER_CONTRACT.md`, because AionCore resolves route metadata without
+executing the declared handlers.
 
-| Declaration | Packaged entry point | Runtime route or mount |
+| Declaration | Packaged entry point | Runtime mount |
 | --- | --- | --- |
-| Settings tab | `webui/index.html` | Pursers settings tab |
-| Static assets | `webui/` | `/pursers/assets` |
-| Join | `webui/routes.js` | `POST /pursers/join` |
-| Legacy status | `webui/routes.js` | `GET /pursers/status` |
-| Validate | `webui/routes.js` | `POST /pursers/onboarding/validate` |
-| Connect | `webui/routes.js` | `POST /pursers/onboarding/connect` |
-| Onboarding status | `webui/routes.js` | `GET /pursers/onboarding/status` |
-| Rotate | `webui/routes.js` | `POST /pursers/onboarding/rotate` |
-| Recover | `webui/routes.js` | `POST /pursers/onboarding/recover` |
+| Settings tab `pursers` | `webui/index.html` | Pursers settings tab |
+| WebUI bundle `pursers-home` | `webui/` | Bundle directory served by the host |
 | Worker context | `contexts/worker.md` | Worker preset context |
 | Reviewer context | `contexts/reviewer.md` | Reviewer preset context |
 
-The packaged `README.md` truthfully contains a documentary reference to `tools/aionui-extension/build.py`. The automated gate allows that documentation reference while proving every runtime member is free of `tools/` and `packages/` source-tree paths. It also resolves every HTML `src`/`href` through the manifest's declared `/pursers/assets` to an actual ZIP member. This is runtime dependency proof, not the false claim that no packaged text mentions a source path.
+The four assistant declarations (`pursers-worker-codex`, `pursers-worker-claude`,
+`pursers-reviewer-codex`, `pursers-reviewer-claude`) bind to those two context files.
+
+| Helper-served route | Handler | Method |
+| --- | --- | --- |
+| `/pursers/join` | `webui/routes.js` via `host/helper.cjs` | POST |
+| `/pursers/status` | `webui/routes.js` via `host/helper.cjs` | GET |
+| `/pursers/onboarding/validate` | `webui/routes.js` via `host/helper.cjs` | POST |
+| `/pursers/onboarding/connect` | `webui/routes.js` via `host/helper.cjs` | POST |
+| `/pursers/onboarding/status` | `webui/routes.js` via `host/helper.cjs` | GET |
+| `/pursers/onboarding/rotate` | `webui/routes.js` via `host/helper.cjs` | POST |
+| `/pursers/onboarding/recover` | `webui/routes.js` via `host/helper.cjs` | POST |
+
+The packaged `README.md` truthfully contains a documentary reference to `tools/aionui-extension/build.py`, and `IMPORT_PROVENANCE.md` plus the three shipped contracts (`door/DOOR_ONBOARDING_CONTRACT.md`, `host/HELPER_CONTRACT.md`, `team/TEAM_ADAPTER_CONTRACT.md`) cite source paths because provenance and contract text is their purpose. The automated gate exempts exactly those five documentation members while proving every remaining member, including `contexts/*.md`, is free of `tools/` and `packages/` source-tree paths. It also resolves every HTML `src`/`href` in the settings-tab entry point to an actual packaged member of the `pursers-home` bundle directory. This is runtime dependency proof, not the false claim that no packaged text mentions a source path.
 
 `webui/routes.js` invokes the separately installed `pursers-wait-bridge`. The ZIP intentionally does not bundle that executable or its Python dependencies. Missing-bridge behavior is covered by the route tests and returns bounded `bridge_not_installed` data without echoing a door.
 
@@ -163,9 +179,17 @@ from zipfile import ZipFile
 path = Path(__import__("os").environ["GATE_ROOT"]) / "pursers-aionui-0.1.0.zip"
 with ZipFile(path) as archive:
     names = archive.namelist()
-    assert len(names) == 12
+    assert len(names) == 18
     member_bytes = sum(item.file_size for item in archive.infolist())
-    runtime_names = [name for name in names if name != "README.md"]
+    documentation = {
+        "README.md",
+        "IMPORT_PROVENANCE.md",
+        "door/DOOR_ONBOARDING_CONTRACT.md",
+        "host/HELPER_CONTRACT.md",
+        "team/TEAM_ADAPTER_CONTRACT.md",
+    }
+    assert documentation <= set(names)
+    runtime_names = [name for name in names if name not in documentation]
     runtime_text = "\n".join(
         archive.read(name).decode("utf-8", errors="replace")
         for name in runtime_names
@@ -179,23 +203,27 @@ with ZipFile(path) as archive:
     assert len(tabs) == 1
     entry = tabs[0]["entryPoint"]
     assert entry in names
-    for route in manifest["contributes"]["webui"]["apiRoutes"]:
-        assert route["entryPoint"] in names
+    assert "apiRoutes" not in json.dumps(manifest["contributes"]["webui"])
+    bundles = manifest["contributes"]["webui"]
+    assert len(bundles) == 1
+    directory = bundles[0]["directory"].rstrip("/")
     html = archive.read(entry).decode("utf-8")
-    references = re.findall(r"(?:src|href)=[\"']([^\"']+)[\"']", html)
-    static = manifest["contributes"]["webui"]["staticAssets"]
-    assert len(static) == 1
-    prefix = static[0]["urlPrefix"].rstrip("/")
-    directory = static[0]["directory"].rstrip("/")
-    assert all(reference.startswith(prefix + "/") for reference in references)
+    references = [
+        reference
+        for reference in re.findall(r"(?:src|href)=[\"']([^\"']+)[\"']", html)
+        if reference.startswith("./")
+    ]
+    assert references
     assert all(
-        f"{directory}/{reference.removeprefix(prefix + '/')}" in names
+        f"{directory}/{reference.removeprefix('./')}" in names
         for reference in references
     )
+    assert "host/helper.cjs" in names
+    assert "webui/candidate.json" in names
 print(
     f"PASS extension ZIP: {len(path.read_bytes())} archive bytes, "
-    f"{member_bytes} uncompressed member bytes, 12 members, "
-    "runtime source-tree independent, declared asset URLs resolve"
+    f"{member_bytes} uncompressed member bytes, {len(names)} members, "
+    "runtime source-tree independent, bundle-relative asset URLs resolve"
 )
 PY
 
@@ -211,27 +239,29 @@ No cleanup command is part of the recipe. Each execution creates new paths and p
 
 ## 4. Executed evidence
 
-The canonical block passed end-to-end in a fresh detached checkout at `9e3b05072e4521c10d0f4390d7ac57ad7421c07a` on 2026-09-08 UTC. The final successful run created a new randomized `/tmp/pursers-packaging-gate.*` root and used only its `venv/bin/python` for Python gates.
+The canonical block passed end-to-end on 2026-09-09 UTC on branch `codex/TK-0a395c726efd`, at checkpoint commit `14354f0b6e8edb9c116bc3673c16d2db5b865e68`, frozen base `b06ce6627edb62fc588eee541fa568445b709054`. It was run from the ticket worktree rather than a fresh detached checkout, and must be rerun on the final release-train SHA. The run created a new randomized `/tmp/pursers-packaging-gate.*` root and used only its `venv/bin/python` for Python gates. `TMPDIR` was pointed at a directory whose group matches the session group; on macOS `/private/tmp` has group `wheel`, and `test_release_ops.py` asserts that a written profile keeps the caller's gid.
 
 | Gate | Exact result |
 | --- | --- |
-| Extension Python suite | `9 passed in 0.67s`: `test_contexts.py` 1, `test_manifest.py` 4, `test_package.py` 3, `test_routes.py` 1 |
-| Legacy route Node suite | `pass 6`, `fail 0` |
+| Extension Python suite | `90 passed, 2 skipped in 32.25s`; both skips are `tests/home_acceptance/test_live_host.py` (no host URL, no verifier-owned browser observer) and are not counted as passes |
+| Route Node suite | `pass 10`, `fail 0` |
 | Door adapter Node suite | `pass 8`, `fail 0` |
 | Team adapter Node suite | `pass 20`, `fail 0` |
-| Dashboard dependency install | 120 packages, 0 vulnerabilities |
-| Dashboard typecheck/build | `tsc --noEmit` passed; 148 modules transformed; generated resource 404.28 kB |
-| Exact-view contract | `1 passed, 136 deselected in 0.99s` |
+| Dashboard dependency install | 120 packages added, 121 audited; 1 moderate severity vulnerability reported by `npm ci` |
+| Dashboard typecheck/build | `tsc --noEmit` passed; 148 modules transformed; generated resource 446.71 kB |
+| Exact-view contract | `1 passed, 137 deselected in 0.89s` |
 | Installed component verification | `PASS component verification: ['pursers-central', 'pursers-client']` |
-| Dashboard bytes | SHA-256 `746c6eccd85afcc38588c8b9e1946ff2c91a7eb8477783c2f0d6bff0f4c6d922`; 404280 bytes; generated, promoted, and lock values match |
+| Dashboard bytes | SHA-256 `e8ac595fa78f54bbc0f4b19332bd08c50d75614603bd03f573161a3d715278b2`; 446717 bytes; generated, promoted, and lock values match |
 | Dashboard external resources | `PASS dashboard resources: self-contained HTML` |
-| Extension ZIP | 16256 archive bytes; 44919 uncompressed member bytes; 12 members |
-| ZIP runtime/path proof | Runtime members have no source-tree path dependency; all declared entries exist; `/pursers/assets/*` references resolve to packaged `webui/*` members |
-| Fleet release-ops suite | `21 passed in 0.12s` |
+| Extension ZIP | 52736 archive bytes; 164760 uncompressed member bytes; 18 members |
+| ZIP runtime/path proof | Five documentation members are exempt by name; every other member, including `contexts/*.md`, has no `tools/` or `packages/` path; the settings tab entry exists; the webui contribution declares no `apiRoutes`; bundle-relative `./` references resolve to packaged `webui/*` members |
+| Fleet release-ops suite | `21 passed in 0.69s` |
 | Leak scans | Extension and Fleet: `clean (0 violations)` |
-| Checkout integrity | `git diff --check` passed; `git status --short` produced no output after regeneration, proving generated resource and lock match tracked integration bytes |
+| Checkout integrity | `git diff --check` passed. `git status --short` was clean at the stated SHA. Lock regeneration was separately verified reproducible: `tools/regenerate_component_lock.py` left `component-lock.json` byte-identical |
 
-The archive size is the compressed ZIP byte count. The uncompressed-member size is the sum of the 12 `ZipInfo.file_size` values; these are intentionally distinct metrics.
+The archive size is the compressed ZIP byte count. The uncompressed-member size is the sum of the 18 `ZipInfo.file_size` values; these are intentionally distinct metrics.
+
+The compressed size is commit-bound and the uncompressed size is not. `webui/candidate.json` carries the exact `HEAD` SHA, always 40 hex characters, so a later commit leaves the uncompressed total unchanged while the compressed total moves by a byte or two as that SHA compresses differently. A documentation commit made after this gate run therefore shifts the archive byte count without changing the package contents. Treat the archive byte count as evidence for the stated SHA only, and re-derive it on the final release-train SHA rather than reconciling it commit by commit.
 
 ## 5. Release gate ownership
 

@@ -5157,20 +5157,42 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         *, allow_workflow_side_effects: bool = True,
         lease_renewal_source: str = "model",
         allow_takeover: bool = False,
+        allow_matching_takeover: bool = False,
     ) -> dict[str, Any]:
         membership = service.resolve_board_context(document, principal.principal_id)
         identity_id = agent_id(document["board_id"], principal.principal_id, agent_name)
         existing = document["members"].get(identity_id)
-        if (
+        active_collision = (
             existing is not None
             and existing.get("lifecycle_status", "active") == "active"
             and (member_last_activity_epoch(existing) or 0)
             > now - board_stale_after_days(document) * 86_400
-            and not allow_takeover
+        )
+        matching_takeover = bool(
+            existing is not None
+            and allow_matching_takeover
+            and capabilities is not None
+            and agent_platform is not None
+            and task_focus is not None
+            and existing.get("role") == role
+            and existing.get("capabilities_explicit") is True
+            and member_capabilities(existing)
+            == normalized_capabilities(capabilities, role=role)
+            and existing.get("agent_platform") == agent_platform
+            and existing.get("task_focus") == task_focus
+        )
+        matching_guard_refused = bool(
+            allow_matching_takeover and existing is not None and not matching_takeover
+        )
+        if matching_guard_refused or (
+            active_collision and not allow_takeover and not matching_takeover
         ):
             reason = (
-                "seat name already active under this principal; choose another name "
-                "or pass allow_takeover=true"
+                "seat name already active under this principal; matching takeover "
+                "refused because role, capabilities, or ownership markers differ"
+                if matching_guard_refused
+                else "seat name already active under this principal; choose another "
+                "name or pass allow_takeover=true"
             )
             return {
                 "collision": {
@@ -5723,6 +5745,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         capabilities: dict[str, Any] | None = None,
         renewal_source: str | None = None,
         allow_takeover: bool = False,
+        allow_matching_takeover: bool = False,
     ) -> dict[str, Any]:
         """Join one explicit board under the verified bearer principal."""
         board_id = require_id("board_id", board_id)
@@ -5733,6 +5756,12 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             )
         if type(allow_takeover) is not bool:
             raise ValueError("allow_takeover must be a boolean")
+        if type(allow_matching_takeover) is not bool:
+            raise ValueError("allow_matching_takeover must be a boolean")
+        if allow_takeover and allow_matching_takeover:
+            raise ValueError(
+                "allow_takeover and allow_matching_takeover are mutually exclusive"
+            )
         principal = current_principal()
         selected_renewal_source = normalize_renewal_source(renewal_source)
         try:
@@ -5757,6 +5786,13 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             )
         safe_platform = clean_text("agent_platform", agent_platform, max_length=80)
         safe_focus = clean_text("task_focus", task_focus, max_length=500)
+        if allow_matching_takeover and (
+            capabilities is None or safe_platform is None or safe_focus is None
+        ):
+            raise ValueError(
+                "allow_matching_takeover requires explicit capabilities, "
+                "agent_platform, and task_focus"
+            )
         if invite_token is not None and (
             not isinstance(invite_token, str)
             or not invite_token.strip()
@@ -5803,6 +5839,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 allow_workflow_side_effects=not coordinate_only,
                 lease_renewal_source=selected_renewal_source,
                 allow_takeover=allow_takeover,
+                allow_matching_takeover=allow_matching_takeover,
             )
             if "collision" in joined:
                 return joined
@@ -5907,6 +5944,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         role: str = "worker",
         capabilities: dict[str, Any] | None = None,
         allow_takeover: bool = False,
+        allow_matching_takeover: bool = False,
     ) -> dict[str, Any]:
         """Join or reactivate an identity and return a compact bounded board briefing."""
         board_id = require_id("board_id", board_id)
@@ -5919,6 +5957,12 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             raise ValueError("token_budget must be between 256 and 50000")
         if type(allow_takeover) is not bool:
             raise ValueError("allow_takeover must be a boolean")
+        if type(allow_matching_takeover) is not bool:
+            raise ValueError("allow_matching_takeover must be a boolean")
+        if allow_takeover and allow_matching_takeover:
+            raise ValueError(
+                "allow_takeover and allow_matching_takeover are mutually exclusive"
+            )
         validate_snapshot_bounds(snapshot_limit, snapshot_max_bytes)
         if ticket_id is not None:
             ticket_id = require_id("ticket_id", ticket_id)
@@ -5927,6 +5971,13 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         coordinate_only = role in {"orchestrator", "coordinator"}
         safe_platform = clean_text("agent_platform", agent_platform, max_length=80)
         safe_focus = clean_text("task_focus", task_focus, max_length=500)
+        if allow_matching_takeover and (
+            capabilities is None or safe_platform is None or safe_focus is None
+        ):
+            raise ValueError(
+                "allow_matching_takeover requires explicit capabilities, "
+                "agent_platform, and task_focus"
+            )
 
         def onboard(document: dict[str, Any]) -> dict[str, Any]:
             now = time.time()
@@ -5946,6 +5997,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 safe_platform, safe_focus, role, capabilities,
                 allow_workflow_side_effects=not coordinate_only,
                 allow_takeover=allow_takeover,
+                allow_matching_takeover=allow_matching_takeover,
             )
             if "collision" in joined:
                 return joined
