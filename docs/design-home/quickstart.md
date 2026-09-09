@@ -28,7 +28,7 @@ results as one stream.
 Ask your operator for:
 
 1. The exact verified Pursers Home package approved for your environment.
-2. The helper URL and one-time local access token.
+2. The helper URL and its local access token for that helper session.
 3. The project board name and whether it belongs to WORK or PERSONAL.
 4. A worker door or reviewer door for each role you need.
 5. A unique seat name for every standalone seat.
@@ -66,13 +66,18 @@ board. Your operator must start that helper before you connect a door.
 In the Home helper section:
 
 1. Enter the loopback helper URL supplied by your operator.
-2. Enter the one-time local access token.
+2. Enter the local access token for that helper session.
 3. Choose **Connect helper**.
 4. Confirm **Helper status** shows the expected board and a connected state.
 
-The helper URL and token remain in page memory only. Enter them again after a
-reload. Home must reject a wrong origin, token, host, or board; do not work
-around those errors by weakening browser or helper security.
+The helper URL and token remain in page memory only, so enter them again after
+a reload. The token is not single-use: the same value stays valid for the life
+of that helper session, and a reload asks you for the same current token rather
+than a new one. It changes only when your operator restarts the helper against
+a different token file. Treat it as a session credential, keep it out of shared
+notes and screenshots, and ask your operator to restart the helper with a fresh
+token if it is ever exposed. Home must reject a wrong origin, token, host, or
+board; do not work around those errors by weakening browser or helper security.
 
 If the helper does not connect, stop here and use [Helper recovery](#helper-recovery).
 
@@ -353,13 +358,23 @@ origin must be loopback, and the bridge-state directory must not be shared with
 another trust domain. Never place tokens, doors, private paths, or personal
 hostnames in screenshots, commits, or ticket notes.
 
-For headless diagnosis, the wait bridge supports explicit door operations:
+For headless diagnosis, the wait bridge supports explicit door operations.
+Every one of them must target the same isolated bridge-state directory the
+helper was started with. Without it the bridge falls back to the user-wide
+store, so `status` reports on the wrong trust domain and `join` or a rotation
+writes into it:
 
 ```sh
-pursers-wait-bridge join '<DOOR>'
-pursers-wait-bridge status
-pursers-wait-bridge join --rotate '<REPLACEMENT_DOOR>'
+export PURSERS_BRIDGE_STATE_DIR=/PATH/TO/isolated-bridge-state
+pursers-wait-bridge join --state-dir /PATH/TO/isolated-bridge-state '<DOOR>'
+pursers-wait-bridge status --state-dir /PATH/TO/isolated-bridge-state
+pursers-wait-bridge join --state-dir /PATH/TO/isolated-bridge-state --rotate '<REPLACEMENT_DOOR>'
 ```
+
+The exported variable sets the default for the whole block, and the explicit
+`--state-dir` on each command keeps the target unambiguous if you copy a single
+line out of it. Use the same path you passed to `--bridge-state-dir` above,
+never a WORK path under a PERSONAL helper or the reverse.
 
 These are troubleshooting tools, not the preferred beginner flow. A worker's
 seat-local `bin/board.sh` is likewise reserved for its governed work loop.
@@ -380,8 +395,8 @@ seat-local `bin/board.sh` is likewise reserved for its governed work loop.
 
 ## Accepted implementation inputs
 
-This guide records the exact accepted component and assembly candidate SHAs
-from the Home train:
+This guide records the exact independently accepted component SHAs from the Home
+train:
 
 | Capability | Accepted SHA |
 | --- | --- |
@@ -391,9 +406,32 @@ from the Home train:
 | Standalone groups | `20bb6bc5c54ad7b233dfc790a48d3bea335a92da` |
 | Standalone seat lifecycle | `557fbc8af9362031dee6f18db84e3c604f4d133f` |
 | Fleet session and deployment input | `e229dcb08879666475c532fd7296f4c5a2d9167b` |
-| Candidate assembly (TK-a3f0627d27db) | `a0b4810b32ccbfc3465a43781c51514fc157367b` |
 
-Package binding and candidate facts (AN243):
-- Candidate package build: 26 members, deterministic archive SHA-256 `02406e234766ed2d2417d4f2198155a0dad819a8361479da2f68f333dc327a5f`.
-- Observed host build: signed AionUi 2.2.1 with bundled AionCore 0.2.1.
-- Browser acceptance: verifier-owned observer validation under TK-a3f0627d27db remains required before final merge.
+## Assembly and package facts are not yet accepted
+
+There is no independently approved final assembly for this guide to cite. The
+assembly candidate `a0b4810b32ccbfc3465a43781c51514fc157367b` under
+TK-a3f0627d27db was submitted and then rejected on independent review, and it
+is claimed for correction, so it is not an accepted input and its package
+figures are not confirmed candidate facts. Its reported build of 26 members with
+archive SHA-256
+`02406e234766ed2d2417d4f2198155a0dad819a8361479da2f68f333dc327a5f` and its
+reported host pairing of signed AionUi 2.2.1 with bundled AionCore 0.2.1 are
+recorded here only as the worker's unverified report, for traceability.
+
+Treat the operator's own receipt for the artifact you actually installed as
+authoritative, not the figures above. Ask for the exact package SHA-256 or
+release receipt of your installed candidate and match it against what Home
+displays, as described in [Before you start](#before-you-start).
+
+Two gates therefore remain open before this guide is final:
+
+- An independently approved assembly successor, with its verified artifact
+  receipt, owned by TK-a3f0627d27db.
+- Authenticated browser observations of the real flow, including final labels,
+  capabilities, and recovery behavior, captured by that ticket's independent
+  verifier and not by source reading, mock tests, or screenshots.
+
+Until both land, the step labels and capability claims in this guide are drawn
+from reviewed component contracts and current source, not from an observed
+browser run.
