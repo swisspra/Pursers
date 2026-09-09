@@ -50,7 +50,9 @@ Start the packaged authenticated helper before using Home. It expects
 `pursers-wait-bridge` and the bundled `aioncore` binary at the explicit paths
 supplied on the command line. Its read-only result route expects the local Fleet
 dashboard at `http://127.0.0.1:8899` unless `--fleet-url` selects another
-loopback origin. See `host/HELPER_CONTRACT.md` for the mode-0600
+loopback origin. `--central` is required so duplicate board IDs across WORK and
+PERSONAL cannot fall back to Fleet's default domain. See
+`host/HELPER_CONTRACT.md` for the mode-0600
 token file, exact AionCore origin, selected board, and isolated bridge-state
 arguments.
 
@@ -107,7 +109,7 @@ simulating them. The dashboard remains the Pursers Personal MCP app entrypoint
 (or `board_snapshot` fallback), not an invented URL.
 
 `GET /pursers/results` is read-only and accepts only optional `ticket_id` and
-`state` filters. It fetches the selected board from the loopback Fleet dashboard,
+`state` filters. It fetches the selected Central-and-board pair from the loopback Fleet dashboard,
 removes submission and review notes, bounds rows and file references, and reports
 `missing`, `pending`, `approved`, `rejected`, or `failed` without inferring
 omitted data.

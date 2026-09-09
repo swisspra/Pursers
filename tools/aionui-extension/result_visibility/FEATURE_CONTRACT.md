@@ -15,10 +15,12 @@ as explicit states rather than synthetic successes.
 
 ## Trust and bounds
 
-- The authenticated Home helper pins the board; browser input cannot select a
-  different board or Central.
-- The helper reads only the loopback Fleet board-detail endpoint and forwards
-  no Home token, door, cookie, or Central credential.
+- The authenticated Home helper pins an explicit Central label and board;
+  browser input cannot select either identity, and both must match the Fleet
+  response.
+- The helper reads only the explicit `?central=<label>` loopback Fleet
+  board-detail endpoint and forwards no Home token, door, cookie, or Central
+  credential.
 - Fleet projects only allow-listed, bounded result fields from persisted board
   state. Submission notes and review notes are never returned.
 - Branch/commit and changed-file references must be safe relative identifiers;

@@ -13,6 +13,7 @@ const MAX_BODY_BYTES = 64 * 1024;
 const MAX_FLEET_BODY_BYTES = 512 * 1024;
 const TOKEN_HEADER = 'x-pursers-home-token';
 const SAFE_BOARD = /^[A-Za-z0-9._-]{1,80}$/;
+const SAFE_CENTRAL = /^[A-Za-z0-9._-]{1,80}$/;
 const RUNTIME_ENV = [
   'AIONUI_BASE_URL',
   'AIONUI_USER_ID',
@@ -140,13 +141,14 @@ function createTeamRunner(command) {
 function createFleetResultsFetcher(baseUrl, fetchImpl = globalThis.fetch) {
   const origin = normalizeLoopbackOrigin(baseUrl, '--fleet-url');
   if (typeof fetchImpl !== 'function') fail('Fleet result fetch is unavailable');
-  return async (board) => {
+  return async (board, central) => {
     if (!SAFE_BOARD.test(board || '')) fail('result board must be a safe identifier');
+    if (!SAFE_CENTRAL.test(central || '')) fail('result Central must be a safe label');
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 5000);
     try {
       const response = await fetchImpl(
-        `${origin}/api/board/${encodeURIComponent(board)}`,
+        `${origin}/api/board/${encodeURIComponent(board)}?central=${encodeURIComponent(central)}`,
         {
           method: 'GET',
           cache: 'no-store',
@@ -157,9 +159,28 @@ function createFleetResultsFetcher(baseUrl, fetchImpl = globalThis.fetch) {
         },
       );
       if (!response.ok) throw new Error('Fleet board detail is unavailable');
-      const bytes = Buffer.from(await response.arrayBuffer());
-      if (bytes.length > MAX_FLEET_BODY_BYTES) throw new Error('Fleet board detail is too large');
-      return JSON.parse(bytes.toString('utf8'));
+      const declared = response.headers.get('content-length');
+      if (/^[0-9]+$/.test(declared || '') && Number(declared) > MAX_FLEET_BODY_BYTES) {
+        controller.abort();
+        await response.body?.cancel().catch(() => {});
+        throw new Error('Fleet board detail is too large');
+      }
+      if (!response.body) throw new Error('Fleet board detail has no body');
+      const reader = response.body.getReader();
+      const chunks = [];
+      let size = 0;
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        size += value.byteLength;
+        if (size > MAX_FLEET_BODY_BYTES) {
+          controller.abort();
+          await reader.cancel().catch(() => {});
+          throw new Error('Fleet board detail is too large');
+        }
+        chunks.push(Buffer.from(value));
+      }
+      return JSON.parse(Buffer.concat(chunks, size).toString('utf8'));
     } finally {
       clearTimeout(timeout);
     }
@@ -213,6 +234,8 @@ function json(response, status, body, origin) {
 function createHelperServer(options) {
   const board = String(options.board || '');
   if (!SAFE_BOARD.test(board)) fail('board must be a safe 1-80 character identifier');
+  const central = String(options.central || '');
+  if (!SAFE_CENTRAL.test(central)) fail('central must be a safe 1-80 character label');
   const origin = normalizeOrigin(options.origin);
   const token = String(options.token || '');
   if (token.length < 32 || token.length > 512 || /\s/.test(token)) fail('token must contain 32-512 characters without whitespace');
@@ -228,6 +251,7 @@ function createHelperServer(options) {
   const handlers = createHandlers({
     allowedOrigin: origin,
     expectedBoard: board,
+    expectedCentral: central,
     runBridge,
     runTeamCli,
     fetchResults,
@@ -260,6 +284,7 @@ function createHelperServer(options) {
       json(response, 200, {
         ok: true,
         board,
+        central,
         transport: 'authenticated_loopback_helper',
         host_route_handlers: false,
         team_context: 'unavailable_from_settings_tab',
@@ -313,7 +338,7 @@ function parseArgs(argv) {
     if (!name?.startsWith('--') || value === undefined) fail('arguments must be --name value pairs');
     values[name.slice(2)] = value;
   }
-  for (const required of ['board', 'origin', 'token-file', 'bridge-state-dir']) {
+  for (const required of ['board', 'central', 'origin', 'token-file', 'bridge-state-dir']) {
     if (!values[required]) fail(`--${required} is required`);
   }
   return values;
@@ -324,6 +349,7 @@ async function main() {
   const token = readTokenFile(args['token-file']);
   const helper = createHelperServer({
     board: args.board,
+    central: args.central,
     origin: args.origin,
     token,
     host: args.host || '127.0.0.1',
@@ -335,7 +361,7 @@ async function main() {
     coreVersion: args['core-version'] || 'unknown',
   });
   const address = await helper.start();
-  process.stdout.write(`${JSON.stringify({ ok: true, host: address.address, port: address.port, board: args.board, origin: normalizeOrigin(args.origin) })}\n`);
+  process.stdout.write(`${JSON.stringify({ ok: true, host: address.address, port: address.port, board: args.board, central: args.central, origin: normalizeOrigin(args.origin) })}\n`);
   const stop = async () => {
     await helper.close();
     process.exit(0);
@@ -348,6 +374,7 @@ module.exports = {
   DEFAULT_PORT,
   DEFAULT_FLEET_URL,
   MAX_BODY_BYTES,
+  MAX_FLEET_BODY_BYTES,
   TOKEN_HEADER,
   bridgeArguments,
   createFleetResultsFetcher,

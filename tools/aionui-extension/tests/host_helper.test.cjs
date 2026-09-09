@@ -30,6 +30,7 @@ async function runningHelper(overrides = {}) {
   const teamCalls = [];
   const helper = createHelperServer({
     board: 'sandbox-home',
+    central: 'work',
     origin: ORIGIN,
     token: TOKEN,
     port: 0,
@@ -68,6 +69,7 @@ test('helper authenticates one exact origin and exposes selected-board status on
     assert.deepEqual(await metadata.json(), {
       ok: true,
       board: 'sandbox-home',
+      central: 'work',
       transport: 'authenticated_loopback_helper',
       host_route_handlers: false,
       team_context: 'unavailable_from_settings_tab',
@@ -176,6 +178,7 @@ test('token files and helper arguments are bounded', () => {
   assert.throws(() => readTokenFile(tokenFile), /group or other users/);
   assert.equal(normalizeOrigin('http://127.0.0.1:25808'), ORIGIN);
   assert.throws(() => normalizeOrigin('http://127.attacker.example:25808'), /loopback/);
+  assert.throws(() => createHelperServer({ board: 'sandbox-home' }), /central/);
   assert.deepEqual(bridgeArguments(['status'], '/isolated/state'), ['status', '--state-dir', '/isolated/state']);
   assert.deepEqual(
     bridgeArguments(['join', '--name', 'worker-1', 'door-value'], '/isolated/state'),

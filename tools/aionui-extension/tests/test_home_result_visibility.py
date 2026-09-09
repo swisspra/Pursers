@@ -43,6 +43,8 @@ def test_result_states_and_recovery_copy_are_explicit() -> None:
     assert "backend_unavailable" in script
     assert "Start the local Fleet dashboard and retry." in script
     assert "No matching results" in script
+    assert "data-helper-field=\"central\"" in html
+    assert "expectedCentral" in read("webui/routes.js")
 
 
 def test_result_runtime_files_are_in_the_deterministic_allowlist() -> None:

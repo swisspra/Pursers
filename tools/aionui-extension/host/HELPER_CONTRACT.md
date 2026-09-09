@@ -12,6 +12,8 @@ The helper:
 - requires `x-pursers-home-token` on every non-preflight request;
 - reads the token from a regular mode-0600 file and never prints it;
 - binds every onboarding request and status response to one configured board;
+- binds result reads to one explicit Central label plus board, and requires both
+  identities in the Fleet response;
 - uses a separately selected wait-bridge state directory;
 - caps request bodies at 64 KiB and never returns door values;
 - reads only the selected board from a loopback Fleet dashboard, with a 5-second
@@ -34,6 +36,7 @@ umask 077
 openssl rand -hex 32 > /PATH/TO/pursers-home-token
 node host/helper.cjs \
   --board sandbox-example \
+  --central work \
   --origin http://127.0.0.1:25808 \
   --token-file /PATH/TO/pursers-home-token \
   --bridge-state-dir /PATH/TO/isolated-bridge-state \
@@ -47,7 +50,8 @@ Paste the helper URL and token into Pursers Home. Both remain in page memory
 only and must be entered again after a reload. A wrong origin, token, or board
 fails closed. For normal use, select the actual connected board; isolated
 verification must use a synthetic `sandbox-*` board and separate state path.
-`GET /pursers/results` is the only result route. It is read-only, board-pinned,
+`GET /pursers/results` is the only result route. It is read-only,
+Central-and-board-pinned,
 and returns the allow-listed projection defined in
 `result_visibility/FEATURE_CONTRACT.md`; it never returns submission or review
 notes.

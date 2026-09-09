@@ -97,6 +97,7 @@ function createHandlers(dependencies = {}) {
   const invokeBridge = dependencies.runBridge || runBridge;
   const fetchImpl = dependencies.fetchImpl || globalThis.fetch;
   const expectedBoard = dependencies.expectedBoard || null;
+  const expectedCentral = dependencies.expectedCentral || null;
   const importMcp = dependencies.importMcp || (async (server, context) => {
     const request = context.request;
     const endpoint = new URL('/api/mcp/servers/import', new URL(request.url).origin);
@@ -114,9 +115,10 @@ function createHandlers(dependencies = {}) {
     importMcp,
   });
   const team = createTeamAdapter({ runCli: dependencies.runTeamCli });
-  const results = expectedBoard
+  const results = expectedBoard && expectedCentral
     ? createResultVisibility({
       expectedBoard,
+      expectedCentral,
       fetchBoard: dependencies.fetchResults || (async () => {
         throw new Error('result backend unavailable');
       }),
