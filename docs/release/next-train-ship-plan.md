@@ -17,12 +17,20 @@ The final integrator must record these values before changing versions:
   rotation/reconnect, and final guide alignment.
 - `QUICKSTART_SHA=909e897e960cc68139a043e2494aa4f6600b47ce`, approved through
   `TK-f50ed337bfd3`.
-- `SECURITY_RECEIPT_SHA`: independently approved unique receipt successor from
-  `TK-caecfe4f5ad1`, including exact-SHA CodeQL and CI results.
+- `SECURITY_RECEIPT_SHA=d2ea1237f50f06193eb03ad32fead93ab197b349`, approved
+  through `TK-caecfe4f5ad1`; its final receipt is
+  `docs/security/next-train-codeql-receipt.md`.
 - `O1_TOOLKIT_SHA=10f29f122dbc6975f5f272b7315d9fd58eebc3ab`, approved through
   `TK-eeb3ac4fba84`.
 - `INTEGRATED_SOURCE_SHA`: one reviewed source commit containing exactly those
   approved inputs, before release-only version edits.
+
+Before any release command, require the blob at
+`INTEGRATED_SOURCE_SHA:docs/security/next-train-codeql-receipt.md` to equal the
+same path at `SECURITY_RECEIPT_SHA`; a missing path or byte difference blocks
+the train. This adopted receipt does not replace fresh exact-SHA CodeQL evidence:
+generate new candidate evidence after integration and version edits, then new
+exact-main evidence after the reviewed candidate reaches `main`.
 
 Observed changes between `v5.0.0a25` and the current assembly candidate affect
 Central, Client, Personal/Home, and wait-bridge. `packages/import` is unchanged.
