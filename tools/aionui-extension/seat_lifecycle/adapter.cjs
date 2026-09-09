@@ -5,6 +5,7 @@ const SAFE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/;
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/;
 const ROLES = new Set(['worker', 'reviewer']);
 const LIFECYCLES = new Set(['active', 'handed_off', 'retired', 'stale', 'unknown']);
+const JOIN_PUBLIC_FIELDS = ['door', 'tier_max', 'assistant_id', 'model', 'folder'];
 
 function result(operation, outcome, fields = {}) {
   return {
@@ -97,6 +98,10 @@ function expectedJoinIdentity(identity) {
     agent_name: identity.agent_name,
     role: identity.role,
   };
+}
+
+function hasOwn(value, field) {
+  return Object.prototype.hasOwnProperty.call(value, field);
 }
 
 function validateSelector(input, expectedBoard) {
@@ -194,6 +199,16 @@ function createSeatLifecycle(dependencies = {}) {
     if (!SAFE_NAME.test(input.agent_name || '') || !ROLES.has(input.role)) {
       return failure('join', 'identity_required', 'Join requires the exact seat name and role.');
     }
+    if (hasOwn(input, 'expected_board') || hasOwn(input, 'expected_identity')) {
+      return failure('join', 'reserved_identity_selector', 'Internal identity selectors cannot be supplied by the caller.', {
+        recovery: 'Remove expected_board and expected_identity, then retry with the visible board, seat name, and role.',
+      });
+    }
+    if (!boundIdentity && (hasOwn(input, 'agent_id') || hasOwn(input, 'principal_id'))) {
+      return failure('join', 'reserved_identity_selector', 'A fresh join cannot select an agent ID or principal ID.', {
+        recovery: 'Remove agent_id and principal_id. Central assigns identity during a fresh join.',
+      });
+    }
     if (boundIdentity) {
       const conflicts = input.agent_name !== boundIdentity.agent_name
         || input.role !== boundIdentity.role
@@ -205,7 +220,15 @@ function createSeatLifecycle(dependencies = {}) {
         });
       }
     }
-    const joinInput = { ...input, expected_board: expectedBoard };
+    const joinInput = {
+      board: expectedBoard,
+      agent_name: input.agent_name,
+      role: input.role,
+      expected_board: expectedBoard,
+    };
+    for (const field of JOIN_PUBLIC_FIELDS) {
+      if (hasOwn(input, field)) joinInput[field] = input[field];
+    }
     if (boundIdentity) joinInput.expected_identity = expectedJoinIdentity(boundIdentity);
     let joined;
     try {

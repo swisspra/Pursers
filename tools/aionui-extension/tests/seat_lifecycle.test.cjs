@@ -59,6 +59,7 @@ test('join preserves and verifies the exact Central identity', async () => {
     agent_name: 'worker-1',
     role: 'worker',
     door: 'secret-not-returned',
+    untrusted_extra: 'not-forwarded',
   });
 
   assert.equal(joined.ok, true);
@@ -66,6 +67,13 @@ test('join preserves and verifies the exact Central identity', async () => {
   assert.deepEqual(joined.identity, identity());
   assert.equal(JSON.stringify(joined).includes('secret-not-returned'), false);
   assert.deepEqual(calls.map(([name]) => name), ['join', 'status']);
+  assert.deepEqual(calls[0][1], {
+    board: BOARD,
+    agent_name: 'worker-1',
+    role: 'worker',
+    expected_board: BOARD,
+    door: 'secret-not-returned',
+  });
   assert.deepEqual(calls[1][1], { board: BOARD, include_retired: true });
 });
 
@@ -78,7 +86,13 @@ test('join rejects another board before calling a dependency', async () => {
 
 test('bound rejoin supplies the exact preserved identity to the dependency', async () => {
   const { lifecycle, calls } = harness({ initialIdentity: identity() });
-  const joined = await lifecycle.join({ board: BOARD, agent_name: 'worker-1', role: 'worker' });
+  const joined = await lifecycle.join({
+    board: BOARD,
+    agent_name: 'worker-1',
+    role: 'worker',
+    agent_id: 'AI-worker-1',
+    principal_id: 'PR-worker',
+  });
   assert.equal(joined.ok, true);
   assert.deepEqual(calls[0], ['join', {
     board: BOARD,
@@ -94,6 +108,39 @@ test('bound rejoin supplies the exact preserved identity to the dependency', asy
     },
   }]);
 });
+
+for (const [field, value] of [
+  ['expected_board', BOARD],
+  ['expected_identity', { agent_id: 'AI-attacker', principal_id: 'PR-attacker' }],
+  ['agent_id', 'AI-attacker'],
+  ['principal_id', 'PR-attacker'],
+]) {
+  test(`fresh join rejects caller trust selector ${field} before mutation`, async () => {
+    const { lifecycle, calls } = harness();
+    const joined = await lifecycle.join({
+      board: BOARD,
+      agent_name: 'worker-1',
+      role: 'worker',
+      [field]: value,
+    });
+    assert.equal(joined.code, 'reserved_identity_selector');
+    assert.deepEqual(calls, []);
+  });
+}
+
+for (const field of ['expected_board', 'expected_identity']) {
+  test(`bound rejoin rejects caller internal selector ${field} before mutation`, async () => {
+    const { lifecycle, calls } = harness({ initialIdentity: identity() });
+    const joined = await lifecycle.join({
+      board: BOARD,
+      agent_name: 'worker-1',
+      role: 'worker',
+      [field]: field === 'expected_board' ? BOARD : identity(),
+    });
+    assert.equal(joined.code, 'reserved_identity_selector');
+    assert.deepEqual(calls, []);
+  });
+}
 
 for (const [field, value] of [
   ['board', 'other-board'],
@@ -295,6 +342,7 @@ test('assembly contract assigns exact authenticated routes and dependency interf
     'POST /pursers/seat-lifecycle/disconnect',
     'x-pursers-home-token',
     'expected_identity',
+    '`expected_board` and `expected_identity` are adapter-owned fields',
     'readBoard({ board, include_retired: true })',
     'retireSelf({ board, agent_name })',
     'forgetDoor({ board, role })',
