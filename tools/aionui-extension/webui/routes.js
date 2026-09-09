@@ -7,6 +7,7 @@ const { createTeamAdapter } = require('../team/adapter.cjs');
 const { createTicketLifecycleAdapter } = require('../ticket_lifecycle/adapter.cjs');
 const { createResultVisibility } = require('../result_visibility/adapter.cjs');
 const { createTeamLifecycleAdapter } = require('../team_lifecycle/adapter.cjs');
+const { createSeatLifecycle } = require('../seat_lifecycle/adapter.cjs');
 
 const BRIDGE_COMMAND = 'pursers-wait-bridge';
 const INSTALL_HINT =
@@ -107,6 +108,15 @@ function groupResponseStatus(value) {
   return 422;
 }
 
+function seatResponseStatus(value) {
+  if (value.ok) return 200;
+  if (['invalid_input', 'invalid_agent_name', 'invalid_role', 'reserved_identity_selector', 'wrong_board'].includes(value.code)) return 400;
+  if (['identity_conflict', 'identity_mismatch', 'active_lease'].includes(value.code)) return 409;
+  if (['board_unavailable', 'join_failed', 'retirement_failed', 'not_connected'].includes(value.code)) return 503;
+  if (['invalid_board_response', 'invalid_join_response', 'invalid_retirement_response'].includes(value.code)) return 502;
+  return 422;
+}
+
 async function readBody(request) {
   try {
     const body = await request.json();
@@ -152,6 +162,9 @@ function createHandlers(dependencies = {}) {
     : { read: async () => ({ ok: false, code: 'backend_unavailable', retryable: true }) };
   const groups = dependencies.runTeamLifecycle
     ? createTeamLifecycleAdapter({ expectedBoard, run: dependencies.runTeamLifecycle })
+    : null;
+  const seatLifecycle = expectedBoard && dependencies.seatLifecycleDependencies
+    ? createSeatLifecycle({ expectedBoard, ...dependencies.seatLifecycleDependencies })
     : null;
 
   function scopedStatus(current) {
@@ -245,6 +258,25 @@ function createHandlers(dependencies = {}) {
     return jsonResponse(groupResponseStatus(value), value);
   }
 
+  async function seatTyped(request, operation, url) {
+    if (!seatLifecycle) return jsonResponse(503, {
+      ok: false, operation, outcome: 'failed', code: 'not_connected',
+      message: 'Connect the authenticated loopback helper first.', retryable: true,
+    });
+    const body = request.method === 'GET'
+      ? Object.fromEntries(['agent_name', 'role'].flatMap((name) => {
+        const value = url.searchParams.get(name);
+        return value === null ? [] : [[name, value]];
+      }))
+      : await readBody(request);
+    if (body === null) return jsonResponse(400, {
+      ok: false, operation, outcome: 'failed', code: 'invalid_input',
+      message: 'Request body must be a JSON object.', retryable: false,
+    });
+    const value = await seatLifecycle[operation](body);
+    return jsonResponse(seatResponseStatus(value), value);
+  }
+
   async function handle(request) {
     const url = new URL(request.url);
     if (!loopbackRequest(request, dependencies.allowedOrigin)) return jsonResponse(403, { ok: false, error: 'loopback_same_origin_required' });
@@ -269,6 +301,9 @@ function createHandlers(dependencies = {}) {
     if (request.method === 'POST' && url.pathname === '/pursers/tickets/get') return ticketTyped(request, 'get');
     if (request.method === 'POST' && url.pathname === '/pursers/tickets/create') return ticketTyped(request, 'create');
     if (request.method === 'POST' && url.pathname === '/pursers/tickets/cancel') return ticketTyped(request, 'cancel');
+    if (request.method === 'POST' && url.pathname === '/pursers/seat-lifecycle/join') return seatTyped(request, 'join', url);
+    if (request.method === 'GET' && url.pathname === '/pursers/seat-lifecycle/status') return seatTyped(request, 'status', url);
+    if (request.method === 'POST' && url.pathname === '/pursers/seat-lifecycle/disconnect') return seatTyped(request, 'disconnect', url);
     if (request.method === 'GET' && url.pathname === '/pursers/results') {
       const value = await results.read({
         ticketId: url.searchParams.get('ticket_id'),
@@ -284,7 +319,7 @@ function createHandlers(dependencies = {}) {
     return jsonResponse(404, { ok: false, error: 'not_found' });
   }
 
-  return { groups, handle, join, onboarding, results, status, team, tickets };
+  return { groups, handle, join, onboarding, results, seatLifecycle, status, team, tickets };
 }
 
 const defaultHandlers = createHandlers();

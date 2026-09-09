@@ -32,6 +32,9 @@ const groupForm = $('#group-form');
 const groupList = $('#group-list');
 const groupsEmpty = $('#groups-empty');
 const removeGroupDialog = $('#remove-group-dialog');
+const seatLifecycleForm = $('#seat-lifecycle-form');
+const seatLifecycleMessage = $('#seat-lifecycle-message');
+const seatRetireConfirmation = $('#seat-retire-confirmation');
 
 const state = {
   helper: null,
@@ -45,6 +48,8 @@ const state = {
   groups: [],
   groupAgents: [],
   pendingGroupRemove: null,
+  seatIdentity: null,
+  seatConfirmation: '',
 };
 
 const ERROR_COPY = {
@@ -79,6 +84,12 @@ const ERROR_COPY = {
   group_not_found: 'This group no longer exists. Refresh the list.',
   conflict: 'Board data changed in another session. Refresh its persisted state before retrying.',
   invalid_input: 'Correct the highlighted board fields and retry.',
+  identity_mismatch: 'The preserved seat identity no longer matches Central. Nothing changed.',
+  active_lease: 'Finish or release the active assignment before retiring this seat.',
+  confirmation_required: 'Type the exact retirement confirmation shown for this identity.',
+  seat_handed_off: 'This seat was handed off. Rejoin the exact same identity or ask the operator to inspect it.',
+  seat_stale: 'This seat is stale. Reconnect and rejoin the exact same identity.',
+  seat_unknown: 'Central reports an unknown lifecycle. Refresh before taking action.',
 };
 
 const HELPER_TOKEN_HEADER = 'x-pursers-home-token';
@@ -174,7 +185,7 @@ async function connectHelper(event) {
   showHelper(result);
   setMessage($('#helper-message'), `Connected to the helper for board ${result.board}.`, 'success');
   showGlobal('Local helper connected', `Pursers Home is bound to board ${result.board}. Refreshing redacted status.`, 'info');
-  await Promise.all([loadConnection(), loadTeamStatus(), loadGroups(), loadTickets(), loadResults()]);
+  await Promise.all([loadConnection(), loadSeatLifecycle(), loadTeamStatus(), loadGroups(), loadTickets(), loadResults()]);
 }
 
 async function importMcpDefinition(result) {
@@ -1044,11 +1055,98 @@ async function refreshAll() {
   }
   const button = $('#refresh-all');
   setBusy(button, true, 'Refreshing…');
-  await Promise.all([loadConnection(), loadTeamStatus(), loadGroups(), loadTickets(), loadResults()]);
+  await Promise.all([loadConnection(), loadSeatLifecycle(), loadTeamStatus(), loadGroups(), loadTickets(), loadResults()]);
   setBusy(button, false);
 }
 
+function renderSeatLifecycle(result) {
+  const identity = result && result.identity;
+  if (identity) {
+    state.seatIdentity = identity;
+    $('#lifecycle-name').value = identity.agent_name;
+    $('#lifecycle-role').value = identity.role;
+  }
+  const values = {
+    board: identity?.board,
+    agent_name: identity?.agent_name,
+    role: identity?.role,
+    lifecycle_status: identity?.lifecycle_status || result?.outcome,
+    dispatch_status: result?.dispatch_status,
+    lease_expires_at: result?.lease_expires_at,
+  };
+  for (const [field, value] of Object.entries(values)) {
+    $(`[data-seat-field="${field}"]`).textContent = value || '—';
+  }
+  const tone = result?.ok ? 'ready' : (result?.retryable ? 'warning' : 'error');
+  setPill($('#seat-lifecycle-pill'), result?.outcome || 'Unavailable', tone);
+  state.seatConfirmation = result?.confirmation || '';
+  seatRetireConfirmation.value = '';
+  seatRetireConfirmation.disabled = !state.seatConfirmation;
+  $('#seat-confirmation-help').textContent = state.seatConfirmation
+    ? `Type exactly: ${state.seatConfirmation}`
+    : 'Refresh an exact identity first.';
+  $('#disconnect-seat').disabled = true;
+  $('#seat-recovery').textContent = result?.recovery || result?.message || 'Live Central state loaded.';
+}
+
+async function loadSeatLifecycle() {
+  if (!state.helper) return;
+  const query = new URLSearchParams();
+  const name = $('#lifecycle-name').value.trim();
+  const role = $('#lifecycle-role').value;
+  if (name) {
+    query.set('agent_name', name);
+    query.set('role', role);
+  }
+  const { response, result } = await api(`/pursers/seat-lifecycle/status${query.size ? `?${query}` : ''}`);
+  renderSeatLifecycle(result);
+  setMessage(seatLifecycleMessage, response?.ok ? 'Live seat status refreshed.' : messageFor(result, 'Seat status is unavailable.'), response?.ok ? 'success' : 'error');
+}
+
+async function joinSeatLifecycle(event) {
+  event.preventDefault();
+  if (!seatLifecycleForm.reportValidity()) return;
+  const door = $('#lifecycle-door').value.trim();
+  $('#lifecycle-door').value = '';
+  const button = $('#join-seat-lifecycle');
+  setBusy(button, true, 'Joining…');
+  const payload = {
+    board: state.helper.board,
+    door,
+    agent_name: $('#lifecycle-name').value.trim(),
+    role: $('#lifecycle-role').value,
+    tier_max: Number($('#lifecycle-tier').value),
+    folder: $('#lifecycle-folder').value.trim(),
+  };
+  const assistant = $('#lifecycle-assistant').value.trim();
+  const model = $('#lifecycle-model').value.trim();
+  if (assistant) payload.assistant_id = assistant;
+  if (model) payload.model = model;
+  const { response, result } = await api('/pursers/seat-lifecycle/join', { json: payload });
+  setBusy(button, false);
+  renderSeatLifecycle(result);
+  setMessage(seatLifecycleMessage, response?.ok ? 'Standalone seat joined and verified.' : messageFor(result, 'Seat join failed.'), response?.ok ? 'success' : 'error');
+}
+
+async function disconnectSeatLifecycle() {
+  const button = $('#disconnect-seat');
+  setBusy(button, true, 'Retiring…');
+  const { response, result } = await api('/pursers/seat-lifecycle/disconnect', { json: {
+    board: state.helper.board,
+    confirm: seatRetireConfirmation.value,
+  } });
+  setBusy(button, false);
+  renderSeatLifecycle(result);
+  setMessage(seatLifecycleMessage, response?.ok ? 'Seat retired and local door removed.' : messageFor(result, 'Seat disconnect failed.'), response?.ok ? 'success' : 'error');
+}
+
 helperForm.addEventListener('submit', connectHelper);
+seatLifecycleForm.addEventListener('submit', joinSeatLifecycle);
+$('#refresh-seat-lifecycle').addEventListener('click', loadSeatLifecycle);
+seatRetireConfirmation.addEventListener('input', () => {
+  $('#disconnect-seat').disabled = seatRetireConfirmation.value !== state.seatConfirmation;
+});
+$('#disconnect-seat').addEventListener('click', disconnectSeatLifecycle);
 connectionForm.addEventListener('submit', (event) => {
   event.preventDefault();
   submitDoor('connect', $('#connect-door'));

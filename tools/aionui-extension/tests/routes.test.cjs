@@ -262,3 +262,31 @@ test('helper mode defers MCP import and binds onboarding to one board', async ()
     transport: { type: 'stdio', command: 'pursers-wait-bridge', args: [], env: {} },
   });
 });
+
+test('standalone seat routes preserve exact identity and map lifecycle outcomes', async () => {
+  let current = {
+    board: 'sandbox-home', agent_id: 'AI-worker-1', principal_id: 'PR-worker',
+    agent_name: 'worker-1', role: 'worker', lifecycle_status: 'active',
+  };
+  const calls = [];
+  const handlers = createHandlers({
+    expectedBoard: 'sandbox-home',
+    seatLifecycleDependencies: {
+      joinSeat: async (input) => { calls.push(['join', input]); return { ok: true, identity: current, rejoined: false }; },
+      readBoard: async (input) => { calls.push(['read', input]); return { ok: true, board_id: 'sandbox-home', agents: [{ ...current, status: 'idle', lease_expires_at: null }] }; },
+      retireSelf: async (input) => { calls.push(['retire', input]); current = { ...current, lifecycle_status: 'retired' }; return { ok: true, board_id: 'sandbox-home', agent: current }; },
+      forgetDoor: async (input) => { calls.push(['forget', input]); return { ok: true, ...input }; },
+    },
+  });
+  const joined = await handlers.handle(new Request('http://localhost/pursers/seat-lifecycle/join', {
+    method: 'POST', body: JSON.stringify({ board: 'sandbox-home', door: 'not-returned', agent_name: 'worker-1', role: 'worker', tier_max: 2 }),
+  }));
+  assert.equal(joined.status, 200);
+  assert.equal(JSON.stringify(await joined.json()).includes('not-returned'), false);
+  const disconnected = await handlers.handle(new Request('http://localhost/pursers/seat-lifecycle/disconnect', {
+    method: 'POST', body: JSON.stringify({ board: 'sandbox-home', confirm: 'retire worker-1 from sandbox-home' }),
+  }));
+  assert.equal(disconnected.status, 200);
+  assert.equal((await disconnected.json()).outcome, 'disconnected');
+  assert.deepEqual(calls.map(([name]) => name), ['join', 'read', 'read', 'retire', 'read', 'forget']);
+});

@@ -24,8 +24,10 @@ The helper:
   Central-authorized cancellation;
 - gives that dedicated actor neither work nor review capability;
 - keeps one persistent, inert board actor for standalone group operations;
-- pins group routes to the selected board and uses Central board-state CAS; and
-- closes the group sidecar when the helper stops.
+- pins group routes to the selected board and uses Central board-state CAS;
+- runs standalone seat join, live status, exact-identity retirement, and local
+  door removal through a separate board-pinned sidecar; and
+- closes all ticket, group, and seat sidecars when the helper stops.
 
 The last rule is deliberate. A settings iframe has no supported Team
 conversation context in AionUi 2.2.1. Team status, plan, apply, pause, and stop
@@ -39,6 +41,13 @@ Ticket routes are `/pursers/tickets`, `/pursers/tickets/status`,
 `/pursers/tickets/cancel`. They are pinned to `--board` and inherit the exact
 Origin, helper token, body-size, and no-store controls above. No claim, submit,
 or review route exists. The helper closes its ticket sidecar during shutdown.
+
+Standalone seat routes are `/pursers/seat-lifecycle/join`,
+`/pursers/seat-lifecycle/status`, and `/pursers/seat-lifecycle/disconnect`.
+They share the helper's exact Origin, token, board, size, and no-store boundary.
+Retirement requires an exact live identity preflight, the displayed typed
+confirmation, and no active lease. Local door state is removed only after
+Central read-back reports that same identity as retired.
 
 Start the helper after obtaining the AionCore origin used by the installed
 settings iframe:

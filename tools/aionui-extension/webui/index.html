@@ -24,6 +24,7 @@
         <nav>
           <a class="nav-link active" href="#home"><span aria-hidden="true">⌂</span> Home</a>
           <a class="nav-link" href="#connection"><span aria-hidden="true">⌁</span> Connection</a>
+          <a class="nav-link" href="#seat-lifecycle"><span aria-hidden="true">◉</span> Seat</a>
           <a class="nav-link" href="#team"><span aria-hidden="true">◎</span> Team</a>
           <a class="nav-link" href="#progress"><span aria-hidden="true">↗</span> Progress</a>
           <a class="nav-link" href="#tickets"><span aria-hidden="true">□</span> Tickets</a>
@@ -154,6 +155,42 @@
               </dl>
               <div class="card-actions"><button class="button button-secondary" id="recover-seat" type="button" disabled>Recover registration</button></div>
               <p class="support-copy">Recovery reuses stored redacted metadata. It never asks for or replays the door.</p>
+            </article>
+          </div>
+        </section>
+
+        <section class="section-block" id="seat-lifecycle" aria-labelledby="seat-lifecycle-title">
+          <div class="section-heading">
+            <div><p class="eyebrow">Standalone board seat</p><h2 id="seat-lifecycle-title">Seat lifecycle</h2><p>Join, inspect, or cooperatively retire one exact Pursers identity. Live Central state is authoritative.</p></div>
+            <button class="button button-quiet" id="refresh-seat-lifecycle" type="button">Refresh seat</button>
+          </div>
+          <div class="two-column">
+            <form class="card form-card" id="seat-lifecycle-form">
+              <label class="field field-wide" for="lifecycle-door">Door string<span>Used only for join and cleared immediately.</span><input id="lifecycle-door" type="password" autocomplete="new-password" spellcheck="false" required></label>
+              <label class="field" for="lifecycle-name">Seat name<input id="lifecycle-name" pattern="[A-Za-z0-9][A-Za-z0-9._\-]{0,79}" required></label>
+              <label class="field" for="lifecycle-role">Role<select id="lifecycle-role"><option value="worker">Worker</option><option value="reviewer">Reviewer</option></select></label>
+              <label class="field" for="lifecycle-tier">Tier ceiling<select id="lifecycle-tier"><option value="1">Tier 1</option><option value="2" selected>Tier 2</option><option value="3">Tier 3</option></select></label>
+              <label class="field" for="lifecycle-folder">Workspace focus<input id="lifecycle-folder" value="standalone-seat" required></label>
+              <details class="advanced-fields field-wide"><summary>Assistant and model details</summary><div class="form-grid">
+                <label class="field" for="lifecycle-assistant">Assistant ID<input id="lifecycle-assistant" placeholder="Use configured default"></label>
+                <label class="field" for="lifecycle-model">Model override<input id="lifecycle-model" placeholder="Use preset default"></label>
+              </div></details>
+              <div class="form-actions field-wide"><button class="button button-primary" id="join-seat-lifecycle" type="submit">Join standalone seat</button></div>
+              <p class="form-message field-wide" id="seat-lifecycle-message" role="status" aria-live="polite"></p>
+            </form>
+            <article class="card status-card" aria-labelledby="seat-lifecycle-status-title">
+              <div class="card-heading"><div><p class="eyebrow">Central identity</p><h3 id="seat-lifecycle-status-title">Live seat status</h3></div><span class="status-pill neutral" id="seat-lifecycle-pill">Not loaded</span></div>
+              <dl class="detail-list">
+                <div><dt>Board</dt><dd data-seat-field="board">—</dd></div>
+                <div><dt>Seat</dt><dd data-seat-field="agent_name">—</dd></div>
+                <div><dt>Role</dt><dd data-seat-field="role">—</dd></div>
+                <div><dt>Lifecycle</dt><dd data-seat-field="lifecycle_status">—</dd></div>
+                <div><dt>Dispatch</dt><dd data-seat-field="dispatch_status">—</dd></div>
+                <div><dt>Lease expires</dt><dd data-seat-field="lease_expires_at">—</dd></div>
+              </dl>
+              <label class="field" for="seat-retire-confirmation">Retirement confirmation<span id="seat-confirmation-help">Refresh an exact identity first.</span><input id="seat-retire-confirmation" autocomplete="off" disabled></label>
+              <div class="card-actions"><button class="button button-danger-quiet" id="disconnect-seat" type="button" disabled>Retire and disconnect</button></div>
+              <p class="support-copy" id="seat-recovery" aria-live="polite">No lifecycle action has run.</p>
             </article>
           </div>
         </section>

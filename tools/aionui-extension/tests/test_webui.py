@@ -40,6 +40,7 @@ def test_door_field_and_client_keep_secret_out_of_persistent_ui() -> None:
     assert 'type="password"' in door_tag.group(0)
     assert 'autocomplete="new-password"' in door_tag.group(0)
     assert "doorInput.value = '';" in script
+    assert "$('#lifecycle-door').value = '';" in script
     assert "helperTokenInput.value = '';" in script
     assert "x-pursers-home-token" in script
     assert "credentials = 'omit'" in script
@@ -90,7 +91,7 @@ def test_assets_are_packaged_and_do_not_load_remote_dependencies() -> None:
     css = read("webui/style.css")
     urls = re.findall(r'(?:src|href)="([^"]+)"', html)
     assert set(urls).issubset({
-        "#main-content", "#home", "#connection", "#team", "#progress", "#tickets", "#advanced",
+        "#main-content", "#home", "#connection", "#seat-lifecycle", "#team", "#progress", "#tickets", "#advanced",
         "./style.css", "./app.js", "data:", "data:,",
     })
     assert "http://" not in html.replace("http://127.0.0.1:43121", "")

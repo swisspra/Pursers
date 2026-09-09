@@ -1,5 +1,8 @@
 'use strict';
 
+const readline = require('node:readline');
+const { spawn } = require('node:child_process');
+
 const SAFE_BOARD = /^[A-Za-z0-9._-]{1,80}$/;
 const SAFE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/;
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/;
@@ -349,9 +352,82 @@ function createSeatLifecycle(dependencies = {}) {
   return { disconnect, join, status };
 }
 
+function createSeatLifecycleProcess(options) {
+  const command = options.command || 'pursers-wait-bridge';
+  const args = ['seat-lifecycle', '--state-dir', options.stateDir, '--board', options.board];
+  let child;
+  let lines;
+  let nextId = 1;
+  const pending = new Map();
+
+  function rejectAll() {
+    const error = Object.assign(new Error('seat lifecycle backend unavailable'), { code: 'backend_unavailable' });
+    for (const entry of pending.values()) {
+      clearTimeout(entry.timer);
+      entry.reject(error);
+    }
+    pending.clear();
+  }
+
+  function ensureChild() {
+    if (child && !child.killed) return;
+    const env = { ...process.env };
+    for (const name of [
+      'AIONUI_BASE_URL', 'AIONUI_USER_ID', 'AIONUI_CONVERSATION_ID', 'AIONUI_RUNTIME_TOKEN',
+      'ONBOARD_CENTRAL_TOKEN', 'ONBOARD_CENTRAL_TOKEN_FILE', 'ONBOARD_CENTRAL_URL',
+      'ONBOARD_BOARD_ID', 'ONBOARD_AGENT_NAME',
+    ]) delete env[name];
+    child = spawn(command, args, { stdio: ['pipe', 'pipe', 'ignore'], env });
+    lines = readline.createInterface({ input: child.stdout });
+    lines.on('line', (line) => {
+      let value;
+      try { value = JSON.parse(line); } catch (_error) { return; }
+      const entry = pending.get(value.id);
+      if (!entry) return;
+      pending.delete(value.id);
+      clearTimeout(entry.timer);
+      entry.resolve(value.result);
+    });
+    child.once('error', rejectAll);
+    child.once('exit', () => { rejectAll(); child = undefined; });
+  }
+
+  function run(operation, payload) {
+    ensureChild();
+    const id = nextId++;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        pending.delete(id);
+        reject(Object.assign(new Error('seat lifecycle backend timed out'), { code: 'backend_unavailable' }));
+      }, options.timeoutMs || 15000);
+      pending.set(id, { resolve, reject, timer });
+      child.stdin.write(`${JSON.stringify({ id, operation, payload })}\n`, (error) => {
+        if (!error) return;
+        clearTimeout(timer);
+        pending.delete(id);
+        reject(Object.assign(error, { code: 'backend_unavailable' }));
+      });
+    });
+  }
+
+  async function close() {
+    if (!child) return;
+    const selected = child;
+    child = undefined;
+    selected.stdin.end();
+    await new Promise((resolve) => {
+      const timer = setTimeout(() => { selected.kill('SIGTERM'); resolve(); }, 2000);
+      selected.once('exit', () => { clearTimeout(timer); resolve(); });
+    });
+  }
+
+  return { run, close };
+}
+
 module.exports = {
   confirmation,
   createSeatLifecycle,
+  createSeatLifecycleProcess,
   safeIdentity,
   sameIdentity,
 };

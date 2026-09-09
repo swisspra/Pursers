@@ -63,16 +63,18 @@ arguments.
 2. Confirm that Home shows the helper's exact selected board.
 3. Paste the door supplied by your coordinator, check it, and connect. The input
    is cleared immediately and status only shows redacted metadata.
-4. Optionally create board-scoped groups for already joined standalone Pursers
+4. Use Seat lifecycle to join and verify the exact standalone identity. Safe
+   disconnect requires the displayed confirmation and no active lease.
+5. Optionally create board-scoped groups for already joined standalone Pursers
    seats. These groups organize metadata only; they never create or control seats.
-5. Open an existing AionUi Team conversation. Enter its exact Team and monitor
+6. Open an existing AionUi Team conversation. Enter its exact Team and monitor
    lead identity plus a unique name, folder, role, and tier ceiling per seat.
-6. Preview the Team plan. Starting seats requires a separate confirmation of
+7. Preview the Team plan. Starting seats requires a separate confirmation of
    that exact plan; each result is reported independently.
-7. Start a new conversation and pick the matching Worker or Reviewer preset.
-8. In Ticket lifecycle, create unassigned board work or refresh its real status.
+8. Start a new conversation and pick the matching Worker or Reviewer preset.
+9. In Ticket lifecycle, create unassigned board work or refresh its real status.
    Home never claims, submits, or reviews tickets on a seat's behalf.
-9. Use Submitted results to read summaries, safe branch/commit and file
+10. Use Submitted results to read summaries, safe branch/commit and file
    references, and current review outcomes for the selected board.
 
 The helper passes the door directly to `pursers-wait-bridge join`, which owns

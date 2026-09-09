@@ -444,6 +444,9 @@ def test_repository_discovery_reports_assembled_contracts() -> None:
         "/pursers/onboarding/status",
         "/pursers/onboarding/validate",
         "/pursers/results",
+        "/pursers/seat-lifecycle/disconnect",
+        "/pursers/seat-lifecycle/join",
+        "/pursers/seat-lifecycle/status",
         "/pursers/status",
         "/pursers/team/apply",
         "/pursers/team/plan",
@@ -479,7 +482,8 @@ def test_repository_discovery_reports_assembled_contracts() -> None:
     assert "team_lifecycle" in capabilities.capabilities
     assert "ticket_lifecycle" in capabilities.capabilities
     assert "result_visibility" in capabilities.capabilities
-    assert capabilities.missing_mutation_capabilities == ("seat_lifecycle",)
+    assert "seat_lifecycle" in capabilities.capabilities
+    assert capabilities.missing_mutation_capabilities == ()
 
 
 @pytest.mark.parametrize(
@@ -542,14 +546,14 @@ def test_redaction_removes_sensitive_keys_and_values() -> None:
     }
 
 
-def test_evidence_validation_stops_when_sibling_contracts_are_missing(
+def test_evidence_validation_reaches_schema_after_all_sibling_contracts_exist(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     monkeypatch.setenv("PURSERS_HOME_ACCEPTANCE_MUTATE", MUTATION_OPT_IN)
     report = tmp_path / "evidence.json"
     report.write_text("{}", encoding="utf-8")
-    with pytest.raises(AcceptanceError, match="sibling interface capabilities unavailable"):
+    with pytest.raises(AcceptanceError, match="evidence schema_version must be 1"):
         _validate_report(
             report,
             validate_live_target("http://127.0.0.1:8765", "sandbox-home"),

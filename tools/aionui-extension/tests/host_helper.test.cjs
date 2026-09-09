@@ -169,6 +169,50 @@ test('helper returns a bounded error for an oversized request body', async () =>
   }
 });
 
+test('helper authenticates standalone lifecycle and supplies retirement trust internally', async () => {
+  const calls = [];
+  let current = {
+    board: 'sandbox-home', agent_id: 'AI-worker-1', principal_id: 'PR-worker',
+    agent_name: 'worker-1', role: 'worker', lifecycle_status: 'active', status: 'idle', lease_expires_at: null,
+  };
+  const seatProcess = {
+    async run(operation, payload) {
+      calls.push([operation, payload]);
+      if (operation === 'join') return { ok: true, identity: current, rejoined: false };
+      if (operation === 'read') return { ok: true, board_id: 'sandbox-home', agents: [current] };
+      if (operation === 'retire') {
+        current = { ...current, lifecycle_status: 'retired' };
+        return { ok: true, board_id: 'sandbox-home', agent: current };
+      }
+      return { ok: true, board: 'sandbox-home', role: 'worker' };
+    },
+    async close() {},
+  };
+  const { helper, baseUrl } = await runningHelper({ seatProcess });
+  try {
+    const denied = await fetch(`${baseUrl}/pursers/seat-lifecycle/status`, { headers: authHeaders('b'.repeat(64)) });
+    assert.equal(denied.status, 401);
+    const joined = await fetch(`${baseUrl}/pursers/seat-lifecycle/join`, {
+      method: 'POST', headers: { ...authHeaders(), 'content-type': 'application/json' },
+      body: JSON.stringify({ board: 'sandbox-home', door: 'not-returned', agent_name: 'worker-1', role: 'worker' }),
+    });
+    assert.equal(joined.status, 200);
+    const retired = await fetch(`${baseUrl}/pursers/seat-lifecycle/disconnect`, {
+      method: 'POST', headers: { ...authHeaders(), 'content-type': 'application/json' },
+      body: JSON.stringify({ board: 'sandbox-home', confirm: 'retire worker-1 from sandbox-home' }),
+    });
+    assert.equal(retired.status, 200);
+    const retire = calls.find(([operation]) => operation === 'retire');
+    assert.deepEqual(retire[1].expected_identity, {
+      board: 'sandbox-home', agent_id: 'AI-worker-1', principal_id: 'PR-worker',
+      agent_name: 'worker-1', role: 'worker',
+    });
+    assert.equal(JSON.stringify(await retired.json()).includes('not-returned'), false);
+  } finally {
+    await helper.close();
+  }
+});
+
 test('token files and helper arguments are bounded', () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'pursers-home-helper-'));
   const tokenFile = path.join(directory, 'token');

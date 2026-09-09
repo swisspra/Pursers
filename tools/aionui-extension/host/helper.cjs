@@ -8,6 +8,7 @@ const { createHandlers } = require('../webui/routes.js');
 const { isLoopbackHostname } = require('../security/loopback.cjs');
 const { createTicketLifecycleProcess } = require('../ticket_lifecycle/adapter.cjs');
 const { createTeamLifecycleProcess } = require('../team_lifecycle/adapter.cjs');
+const { createSeatLifecycleProcess } = require('../seat_lifecycle/adapter.cjs');
 
 const DEFAULT_PORT = 43121;
 const DEFAULT_FLEET_URL = 'http://127.0.0.1:8899';
@@ -256,6 +257,12 @@ function createHelperServer(options) {
     stateDir: options.bridgeStateDir,
     board,
   });
+  const seatProcess = options.seatProcess || createSeatLifecycleProcess({
+    command: options.bridgeCommand || 'pursers-wait-bridge',
+    stateDir: options.bridgeStateDir,
+    board,
+  });
+  let lastSeatAgents = [];
   const fetchResults = options.fetchResults || createFleetResultsFetcher(
     options.fleetUrl || DEFAULT_FLEET_URL,
     options.fetchImpl,
@@ -269,6 +276,34 @@ function createHelperServer(options) {
     runTicketLifecycle: ticketLifecycle.run,
     fetchResults,
     runTeamLifecycle: groupProcess.run,
+    seatLifecycleDependencies: {
+      joinSeat: (input) => seatProcess.run('join', input),
+      readBoard: async (input) => {
+        const value = await seatProcess.run('read', input);
+        if (!value || value.ok !== true) {
+          throw Object.assign(new Error('seat lifecycle board read unavailable'), { code: value?.code || 'backend_unavailable' });
+        }
+        lastSeatAgents = value && Array.isArray(value.agents) ? value.agents : [];
+        return value;
+      },
+      retireSelf: ({ board: selectedBoard, agent_name: agentName }) => {
+        const matches = lastSeatAgents.filter((row) => row.agent_name === agentName);
+        if (matches.length !== 1) return Promise.resolve({ ok: false, code: 'identity_mismatch' });
+        const row = matches[0];
+        return seatProcess.run('retire', {
+          board: selectedBoard,
+          agent_name: agentName,
+          expected_identity: {
+            board: selectedBoard,
+            agent_id: row.agent_id,
+            principal_id: row.principal_id,
+            agent_name: row.agent_name,
+            role: row.role,
+          },
+        });
+      },
+      forgetDoor: (input) => seatProcess.run('forget', input),
+    },
     importMcp: async () => ({ success: true, imported: false }),
   });
 
@@ -343,6 +378,7 @@ function createHelperServer(options) {
       }
       await ticketLifecycle.close();
       await groupProcess.close();
+      await seatProcess.close();
     },
   };
 }

@@ -57,11 +57,13 @@ coordinator-approved cumulative inputs:
   ancestors after declared base `d0dd3822acd92337355464ba5b9db81dde7a6ccd`;
 - standalone groups `20bb6bc5c54ad7b233dfc790a48d3bea335a92da`; and
 - Fleet persistent sessions and deployment `e229dcb08879666475c532fd7296f4c5a2d9167b`,
-  including all four ancestors after frozen main.
+  including all four ancestors after frozen main; and
+- standalone seat lifecycle `557fbc8af9362031dee6f18db84e3c604f4d133f`,
+  including its four ancestors after the declared base.
 
 Shared helper, routes, UI, package, and wait-bridge files preserve the union of
 the approved behaviors. Result reads retain the explicit Central-and-board pin;
-ticket and group operations retain separate inert sidecars; the Fleet input
+ticket, group, and seat operations retain separate board-pinned sidecars; the Fleet input
 retains matching-only read-only takeover and fail-closed deployment and
 rollback. Exact integration conflicts and remaining inputs are mapped in
 `docs/design-home/final-assembly-inputs.md`.

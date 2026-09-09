@@ -29,6 +29,8 @@ PACKAGE_FILES = (
     "ticket_lifecycle/FEATURE_CONTRACT.md",
     "team_lifecycle/adapter.cjs",
     "team_lifecycle/FEATURE_CONTRACT.md",
+    "seat_lifecycle/adapter.cjs",
+    "seat_lifecycle/FEATURE_CONTRACT.md",
     "webui/app.js",
     "webui/candidate.json",
     "webui/index.html",
