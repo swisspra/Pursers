@@ -1,0 +1,184 @@
+'use strict';
+
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const test = require('node:test');
+const {
+  MAX_BODY_BYTES,
+  TOKEN_HEADER,
+  bridgeArguments,
+  createHelperServer,
+  normalizeOrigin,
+  readTokenFile,
+} = require('../host/helper.cjs');
+
+const ORIGIN = 'http://127.0.0.1:25808';
+const TOKEN = 'a'.repeat(64);
+
+function segment(value) {
+  return Buffer.from(JSON.stringify(value)).toString('base64url');
+}
+
+function door(board) {
+  const token = `${segment({ alg: 'RS256', kid: 'synthetic-key' })}.${segment({ exp: 2000000000 })}.synthetic-signature`;
+  return `prs1.${segment({ u: 'http://127.0.0.1:8766/mcp', b: board, r: 'worker', t: token })}`;
+}
+
+async function runningHelper(overrides = {}) {
+  const teamCalls = [];
+  const helper = createHelperServer({
+    board: 'sandbox-home',
+    origin: ORIGIN,
+    token: TOKEN,
+    port: 0,
+    coreVersion: '0.2.1',
+    runBridge: async (args) => {
+      assert.deepEqual(args, ['status']);
+      return [
+        'push_mode=push',
+        'board=sandbox-home role=worker kid=synthetic-key exp=2000000000 seat_names_used=worker-1',
+        'board=other-board role=reviewer kid=other-key exp=2000000001 seat_names_used=reviewer-1',
+      ].join('\n');
+    },
+    runTeamCli: async (command) => {
+      teamCalls.push(command);
+      return {
+        success: false,
+        error: { code: 'runtime_context_missing', message: 'Team runtime context is unavailable.' },
+        meta: { schema_version: 1 },
+      };
+    },
+    ...overrides,
+  });
+  const address = await helper.start();
+  return { helper, teamCalls, baseUrl: `http://127.0.0.1:${address.port}` };
+}
+
+function authHeaders(token = TOKEN, origin = ORIGIN) {
+  return { origin, [TOKEN_HEADER]: token };
+}
+
+test('helper authenticates one exact origin and exposes selected-board status only', async () => {
+  const { helper, baseUrl } = await runningHelper();
+  try {
+    const metadata = await fetch(`${baseUrl}/pursers/helper/status`, { headers: authHeaders() });
+    assert.equal(metadata.status, 200);
+    assert.deepEqual(await metadata.json(), {
+      ok: true,
+      board: 'sandbox-home',
+      transport: 'authenticated_loopback_helper',
+      host_route_handlers: false,
+      team_context: 'unavailable_from_settings_tab',
+      core_version: '0.2.1',
+    });
+
+    const status = await fetch(`${baseUrl}/pursers/onboarding/status`, { headers: authHeaders() });
+    assert.equal(status.status, 200);
+    assert.deepEqual(await status.json(), {
+      ok: true,
+      operation: 'status',
+      outcome: 'ready',
+      push_mode: 'push',
+      seats: [{
+        board: 'sandbox-home',
+        role: 'worker',
+        kid: 'synthetic-key',
+        exp: 2000000000,
+        seat_names: ['worker-1'],
+      }],
+    });
+
+    const wrongToken = await fetch(`${baseUrl}/pursers/helper/status`, { headers: authHeaders('b'.repeat(64)) });
+    assert.equal(wrongToken.status, 401);
+    assert.equal(JSON.stringify(await wrongToken.json()).includes(TOKEN), false);
+
+    const wrongOrigin = await fetch(`${baseUrl}/pursers/helper/status`, { headers: authHeaders(TOKEN, 'http://localhost:25808') });
+    assert.equal(wrongOrigin.status, 403);
+    assert.equal(wrongOrigin.headers.get('access-control-allow-origin'), null);
+  } finally {
+    await helper.close();
+  }
+});
+
+test('helper handles CORS preflight and refuses a door for another board', async () => {
+  const { helper, baseUrl } = await runningHelper();
+  try {
+    const preflight = await fetch(`${baseUrl}/pursers/onboarding/validate`, {
+      method: 'OPTIONS',
+      headers: {
+        origin: ORIGIN,
+        'access-control-request-method': 'POST',
+        'access-control-request-headers': `content-type,${TOKEN_HEADER}`,
+      },
+    });
+    assert.equal(preflight.status, 204);
+    assert.equal(preflight.headers.get('access-control-allow-origin'), ORIGIN);
+
+    const response = await fetch(`${baseUrl}/pursers/onboarding/validate`, {
+      method: 'POST',
+      headers: { ...authHeaders(), 'content-type': 'application/json' },
+      body: JSON.stringify({ door: door('other-board'), expected_role: 'worker' }),
+    });
+    const payload = await response.json();
+    assert.equal(response.status, 422);
+    assert.equal(payload.code, 'wrong_board');
+    assert.equal(JSON.stringify(payload).includes(door('other-board')), false);
+  } finally {
+    await helper.close();
+  }
+});
+
+test('helper keeps Team apply closed when the settings page has no runtime context', async () => {
+  const { helper, teamCalls, baseUrl } = await runningHelper();
+  try {
+    const response = await fetch(`${baseUrl}/pursers/team/apply`, {
+      method: 'POST',
+      headers: { ...authHeaders(), 'content-type': 'application/json' },
+      body: JSON.stringify({
+        team: { name: 'Sandbox' },
+        lead: { name: 'lead', assistant_id: 'lead-assistant' },
+        seats: [{ name: 'worker-1', assistant_id: 'worker-assistant', role: 'worker', tier_max: 2, folder: 'worker-1' }],
+        options: { confirm: 'apply-live', dry_run: false, send_kickoff: true },
+      }),
+    });
+    const payload = await response.json();
+    assert.equal(response.status, 409);
+    assert.equal(payload.error.code, 'runtime_context_missing');
+    assert.deepEqual(teamCalls, [['members']]);
+  } finally {
+    await helper.close();
+  }
+});
+
+test('helper returns a bounded error for an oversized request body', async () => {
+  const { helper, baseUrl } = await runningHelper();
+  try {
+    const response = await fetch(`${baseUrl}/pursers/onboarding/validate`, {
+      method: 'POST',
+      headers: { ...authHeaders(), 'content-type': 'application/json' },
+      body: JSON.stringify({ value: 'x'.repeat(MAX_BODY_BYTES + 1) }),
+    });
+    assert.equal(response.status, 413);
+    assert.deepEqual(await response.json(), { ok: false, error: 'request_too_large' });
+  } finally {
+    await helper.close();
+  }
+});
+
+test('token files and helper arguments are bounded', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'pursers-home-helper-'));
+  const tokenFile = path.join(directory, 'token');
+  fs.writeFileSync(tokenFile, `${TOKEN}\n`, { mode: 0o600 });
+  assert.equal(readTokenFile(tokenFile), TOKEN);
+  fs.chmodSync(tokenFile, 0o644);
+  assert.throws(() => readTokenFile(tokenFile), /group or other users/);
+  assert.equal(normalizeOrigin('http://127.0.0.1:25808'), ORIGIN);
+  assert.throws(() => normalizeOrigin('http://127.attacker.example:25808'), /loopback/);
+  assert.deepEqual(bridgeArguments(['status'], '/isolated/state'), ['status', '--state-dir', '/isolated/state']);
+  assert.deepEqual(
+    bridgeArguments(['join', '--name', 'worker-1', 'door-value'], '/isolated/state'),
+    ['join', '--name', 'worker-1', '--state-dir', '/isolated/state', 'door-value'],
+  );
+});
