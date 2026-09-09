@@ -20,8 +20,9 @@ retain ownership of approval. Every displayed state is returned by `ticket_list`
 `ticket_get`, `ticket_create`, or `ticket_cancel` on the configured board.
 
 The loopback helper keeps one board session open while it runs. Its dedicated
-actor advertises `can_work=false` and `can_review=false`; it cannot receive work
-or review dispatch. The stored door principal and Central remain the authority.
+actor sends only the supported `can_work=false` and `can_review=false`
+capabilities; it cannot receive work or review dispatch. Central records
+capability explicitness itself. The stored door principal and Central remain the authority.
 The browser never receives the door token or Central URL.
 
 Requests require the existing exact Origin and helper-token checks. The helper
@@ -39,6 +40,7 @@ This feature owns:
 - `tests/test_ticket_lifecycle.py`
 - `tools/wait-bridge/ticket_lifecycle.py`
 - `tools/wait-bridge/tests/test_ticket_lifecycle_service.py`
+- `tools/wait-bridge/tests/test_ticket_lifecycle_real_central.py`
 
 The minimal integration surface is:
 

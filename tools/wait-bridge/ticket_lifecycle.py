@@ -14,10 +14,6 @@ from pursers_client import BoardClient, BoardClientError
 CAPABILITIES = {
     "can_work": False,
     "can_review": False,
-    "capabilities_explicit": True,
-    "platform": "aionui-home",
-    "skills": [],
-    "tier_max": 1,
 }
 
 
@@ -90,13 +86,22 @@ def _entry(state_dir: str, board: str) -> dict[str, Any]:
     return sorted(candidates, key=lambda entry: entry["r"] != "worker")[0]
 
 
-async def _serve(args: argparse.Namespace, client_factory: Callable[..., Any] = BoardClient) -> None:
-    entry = _entry(args.state_dir, args.board)
-    client = client_factory(
-        entry["u"], entry["t"], args.board,
+def create_sidecar_client(
+    entry: dict[str, Any],
+    board: str,
+    client_factory: Callable[..., Any] = BoardClient,
+) -> Any:
+    """Build the persistent actor using only Central-supported capabilities."""
+    return client_factory(
+        entry["u"], entry["t"], board,
         agent_name=f"pursers-home-ticket-lifecycle-{entry['r']}",
         role=entry["r"], capabilities=CAPABILITIES, allow_takeover=True,
     )
+
+
+async def _serve(args: argparse.Namespace, client_factory: Callable[..., Any] = BoardClient) -> None:
+    entry = _entry(args.state_dir, args.board)
+    client = create_sidecar_client(entry, args.board, client_factory)
     async with client:
         service = TicketLifecycleService(client, args.board)
         while True:
