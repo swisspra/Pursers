@@ -20,6 +20,9 @@ const confirmStart = $('#confirm-start');
 const startTeam = $('#start-team');
 const rosterList = $('#roster-list');
 const rosterEmpty = $('#roster-empty');
+const submissionList = $('#submission-list');
+const resultsEmpty = $('#results-empty');
+const resultState = $('#result-state');
 const stopDialog = $('#stop-dialog');
 const ticketForm = $('#ticket-form');
 const ticketMessage = $('#ticket-message');
@@ -55,12 +58,15 @@ const ERROR_COPY = {
   permission_denied: 'This action requires the Team lead. Nothing changed.',
   not_in_team: 'This conversation is not part of an AionUi Team.',
   transport_unavailable: 'The authenticated local helper is unavailable. Nothing changed.',
+  backend_unavailable: 'Board data is unavailable. Start or reconnect the local helper and Fleet dashboard, then retry.',
+  invalid_backend_response: 'The board result source returned an invalid response. Nothing was displayed.',
+  invalid_result_state: 'Choose one of the available result states.',
+  ticket_not_found: 'That ticket is not present in the bounded board response. Refresh and retry.',
+  invalid_response: 'The local helper returned an invalid response. Nothing was displayed.',
   schema_validation_failed: 'Check the highlighted Team fields and retry.',
   invalid_json: 'The local host rejected an invalid request. Reload and retry.',
   not_connected: 'Connect a door for this board, then retry.',
   board_mismatch: 'This helper is pinned to a different board.',
-  backend_unavailable: 'The board connection is unavailable. Restart or reconnect the helper, then retry.',
-  ticket_not_found: 'That ticket is no longer present. Refresh the list.',
   conflict: 'The ticket changed. Refresh its persisted state before retrying.',
   invalid_input: 'Correct the ticket fields and retry.',
 };
@@ -158,7 +164,7 @@ async function connectHelper(event) {
   showHelper(result);
   setMessage($('#helper-message'), `Connected to the helper for board ${result.board}.`, 'success');
   showGlobal('Local helper connected', `Pursers Home is bound to board ${result.board}. Refreshing redacted status.`, 'info');
-  await Promise.all([loadConnection(), loadTeamStatus(), loadTickets()]);
+  await Promise.all([loadConnection(), loadTeamStatus(), loadTickets(), loadResults()]);
 }
 
 async function importMcpDefinition(result) {
@@ -628,6 +634,109 @@ async function loadTeamStatus() {
   return result;
 }
 
+const RESULT_LABELS = {
+  missing: 'Missing submission',
+  pending: 'Pending review',
+  approved: 'Approved',
+  rejected: 'Rejected',
+  failed: 'Failed',
+};
+
+function makeResultRow(item) {
+  const article = document.createElement('article');
+  article.className = 'submission-row';
+  const heading = document.createElement('div');
+  heading.className = 'submission-heading';
+  const identity = document.createElement('div');
+  const ticket = document.createElement('strong');
+  ticket.textContent = `${item.ticket_id} · ${item.title}`;
+  const metadata = document.createElement('p');
+  metadata.textContent = item.submitted_at ? `Submitted ${item.submitted_at}` : 'No submitted work is available.';
+  identity.append(ticket, metadata);
+  const pill = document.createElement('span');
+  pill.className = `status-pill ${item.result_state}`;
+  pill.textContent = RESULT_LABELS[item.result_state] || item.result_state;
+  heading.append(identity, pill);
+  article.append(heading);
+
+  if (item.submission?.summary) {
+    const summary = document.createElement('p');
+    summary.className = 'submission-summary';
+    summary.textContent = item.submission.summary;
+    article.append(summary);
+  }
+  if (item.submission?.branch && item.submission?.commit) {
+    const revision = document.createElement('p');
+    revision.className = 'submission-revision';
+    const label = document.createElement('span');
+    label.textContent = 'Revision ';
+    const code = document.createElement('code');
+    code.textContent = `${item.submission.branch} @ ${item.submission.commit}`;
+    revision.append(label, code);
+    article.append(revision);
+  }
+  const files = Array.isArray(item.submission?.files_changed) ? item.submission.files_changed : [];
+  if (files.length) {
+    const label = document.createElement('p');
+    label.className = 'artifact-label';
+    label.textContent = `Artifact references (${files.length})`;
+    const list = document.createElement('ul');
+    list.className = 'artifact-list';
+    for (const file of files) {
+      const row = document.createElement('li');
+      const code = document.createElement('code');
+      code.textContent = file;
+      row.append(code);
+      list.append(row);
+    }
+    if (item.submission.files_omitted > 0) {
+      const row = document.createElement('li');
+      row.textContent = `${item.submission.files_omitted} additional references omitted by the bounded response.`;
+      list.append(row);
+    }
+    article.append(label, list);
+  }
+  const review = document.createElement('p');
+  review.className = 'review-outcome';
+  if (item.review?.verdict) {
+    const reviewer = item.review.reviewer || 'unnamed reviewer';
+    const independence = item.review.independent ? 'independent review' : 'independence not established';
+    review.textContent = `Review: ${item.review.verdict} by ${reviewer} · ${independence}${item.review.reviewed_at ? ` · ${item.review.reviewed_at}` : ''}`;
+  } else {
+    review.textContent = item.result_state === 'missing' ? 'Review: unavailable without a submission.' : 'Review: pending.';
+  }
+  article.append(review);
+  return article;
+}
+
+async function loadResults() {
+  const button = $('#refresh-results');
+  setBusy(button, true, 'Refreshing…');
+  const query = resultState.value ? `?state=${encodeURIComponent(resultState.value)}` : '';
+  const { response, result } = await api(`/pursers/results${query}`);
+  setBusy(button, false);
+  if (!response?.ok || !result.ok || !Array.isArray(result.results)) {
+    submissionList.replaceChildren();
+    resultsEmpty.hidden = false;
+    resultsEmpty.querySelector('h3').textContent = 'Results unavailable';
+    resultsEmpty.querySelector('p').textContent = messageFor(result, 'Board results could not be read.');
+    setMessage($('#results-message'), messageFor(result, 'Board results could not be read.'), 'error');
+    setPill($('#results-pill'), 'Unavailable', 'warning');
+    return result;
+  }
+  submissionList.replaceChildren(...result.results.map(makeResultRow));
+  resultsEmpty.hidden = result.results.length > 0;
+  if (!result.results.length) {
+    resultsEmpty.querySelector('h3').textContent = 'No matching results';
+    resultsEmpty.querySelector('p').textContent = 'No ticket in the bounded board response matches this state.';
+  }
+  const omitted = Number.isInteger(result.omitted) ? result.omitted : 0;
+  const suffix = omitted > 0 ? `; ${omitted} omitted by the response bound` : '';
+  setMessage($('#results-message'), `${result.results.length} result${result.results.length === 1 ? '' : 's'} shown${suffix}.`);
+  setPill($('#results-pill'), `${result.results.length} shown`, result.results.length ? 'ready' : 'neutral');
+  return result;
+}
+
 async function pauseSeat(slotId, button) {
   setBusy(button, true, 'Pausing…');
   const { response, result } = await api('/pursers/team/seat/pause', {
@@ -778,7 +887,7 @@ async function refreshAll() {
   }
   const button = $('#refresh-all');
   setBusy(button, true, 'Refreshing…');
-  await Promise.all([loadConnection(), loadTeamStatus(), loadTickets()]);
+  await Promise.all([loadConnection(), loadTeamStatus(), loadTickets(), loadResults()]);
   setBusy(button, false);
 }
 
@@ -801,6 +910,8 @@ $('#refresh-team').addEventListener('click', loadTeamStatus);
 $('#refresh-roster').addEventListener('click', loadTeamStatus);
 $('#refresh-tickets').addEventListener('click', loadTickets);
 ticketForm.addEventListener('submit', createTicket);
+$('#refresh-results').addEventListener('click', loadResults);
+resultState.addEventListener('change', loadResults);
 $('#refresh-all').addEventListener('click', refreshAll);
 $('#confirm-stop').addEventListener('click', (event) => {
   event.preventDefault();

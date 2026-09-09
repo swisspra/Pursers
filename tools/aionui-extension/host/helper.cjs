@@ -9,7 +9,9 @@ const { isLoopbackHostname } = require('../security/loopback.cjs');
 const { createTicketLifecycleProcess } = require('../ticket_lifecycle/adapter.cjs');
 
 const DEFAULT_PORT = 43121;
+const DEFAULT_FLEET_URL = 'http://127.0.0.1:8899';
 const MAX_BODY_BYTES = 64 * 1024;
+const MAX_FLEET_BODY_BYTES = 512 * 1024;
 const TOKEN_HEADER = 'x-pursers-home-token';
 const SAFE_BOARD = /^[A-Za-z0-9._-]{1,80}$/;
 const RUNTIME_ENV = [
@@ -31,20 +33,24 @@ function parseInteger(value, label, minimum, maximum) {
   return parsed;
 }
 
-function normalizeOrigin(value) {
+function normalizeLoopbackOrigin(value, label) {
   let url;
   try {
     url = new URL(value);
   } catch (_error) {
-    fail('--origin must be an absolute loopback HTTP origin');
+    fail(`${label} must be an absolute loopback HTTP origin`);
   }
   if (url.protocol !== 'http:' || !isLoopbackHostname(url.hostname)) {
-    fail('--origin must use HTTP on a loopback hostname');
+    fail(`${label} must use HTTP on a loopback hostname`);
   }
   if (url.username || url.password || url.pathname !== '/' || url.search || url.hash) {
-    fail('--origin must not include credentials, a path, a query, or a fragment');
+    fail(`${label} must not include credentials, a path, a query, or a fragment`);
   }
   return url.origin;
+}
+
+function normalizeOrigin(value) {
+  return normalizeLoopbackOrigin(value, '--origin');
 }
 
 function readTokenFile(tokenFile) {
@@ -132,6 +138,35 @@ function createTeamRunner(command) {
   });
 }
 
+function createFleetResultsFetcher(baseUrl, fetchImpl = globalThis.fetch) {
+  const origin = normalizeLoopbackOrigin(baseUrl, '--fleet-url');
+  if (typeof fetchImpl !== 'function') fail('Fleet result fetch is unavailable');
+  return async (board) => {
+    if (!SAFE_BOARD.test(board || '')) fail('result board must be a safe identifier');
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+    try {
+      const response = await fetchImpl(
+        `${origin}/api/board/${encodeURIComponent(board)}`,
+        {
+          method: 'GET',
+          cache: 'no-store',
+          credentials: 'omit',
+          redirect: 'error',
+          signal: controller.signal,
+          headers: { accept: 'application/json' },
+        },
+      );
+      if (!response.ok) throw new Error('Fleet board detail is unavailable');
+      const bytes = Buffer.from(await response.arrayBuffer());
+      if (bytes.length > MAX_FLEET_BODY_BYTES) throw new Error('Fleet board detail is too large');
+      return JSON.parse(bytes.toString('utf8'));
+    } finally {
+      clearTimeout(timeout);
+    }
+  };
+}
+
 function readBody(request) {
   return new Promise((resolve, reject) => {
     const chunks = [];
@@ -192,12 +227,17 @@ function createHelperServer(options) {
     stateDir: options.bridgeStateDir,
     board,
   });
+  const fetchResults = options.fetchResults || createFleetResultsFetcher(
+    options.fleetUrl || DEFAULT_FLEET_URL,
+    options.fetchImpl,
+  );
   const handlers = createHandlers({
     allowedOrigin: origin,
     expectedBoard: board,
     runBridge,
     runTeamCli,
     runTicketLifecycle: ticketLifecycle.run,
+    fetchResults,
     importMcp: async () => ({ success: true, imported: false }),
   });
 
@@ -300,6 +340,7 @@ async function main() {
     bridgeCommand: args['bridge-bin'] || 'pursers-wait-bridge',
     bridgeStateDir: args['bridge-state-dir'],
     aioncoreCommand: args['aioncore-bin'] || 'aioncore',
+    fleetUrl: args['fleet-url'] || DEFAULT_FLEET_URL,
     coreVersion: args['core-version'] || 'unknown',
   });
   const address = await helper.start();
@@ -314,9 +355,11 @@ async function main() {
 
 module.exports = {
   DEFAULT_PORT,
+  DEFAULT_FLEET_URL,
   MAX_BODY_BYTES,
   TOKEN_HEADER,
   bridgeArguments,
+  createFleetResultsFetcher,
   createHelperServer,
   normalizeOrigin,
   readTokenFile,

@@ -20,6 +20,8 @@ PACKAGE_FILES = (
     "door/DOOR_ONBOARDING_CONTRACT.md",
     "host/helper.cjs",
     "host/HELPER_CONTRACT.md",
+    "result_visibility/adapter.cjs",
+    "result_visibility/FEATURE_CONTRACT.md",
     "security/loopback.cjs",
     "team/adapter.cjs",
     "team/TEAM_ADAPTER_CONTRACT.md",

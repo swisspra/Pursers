@@ -76,6 +76,7 @@ from seat_config import (  # noqa: I001
 from release_ops import ReleaseOpsManager
 import runtime_environment
 from warm_home import apply_warm_guided_home
+from result_visibility import project_ticket_result
 
 
 DEFAULT_URL = "http://127.0.0.1:8766/mcp"
@@ -2152,6 +2153,7 @@ def _detail_ticket(ticket: dict[str, Any]) -> dict[str, Any]:
             MAX_SUBMISSION_CHARS,
         )
         or None,
+        "result": project_ticket_result(ticket),
         "review_label": _clip(ticket.get("review_label"), MAX_LABEL_CHARS) or None,
         "annotations": annotations,
         "annotation_count": max(

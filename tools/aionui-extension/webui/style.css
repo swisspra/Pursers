@@ -546,6 +546,7 @@ main {
 
 .status-pill.ready,
 .status-pill.ok,
+.status-pill.approved,
 .status-pill.connected,
 .status-pill.recovered,
 .status-pill.rotated,
@@ -555,6 +556,8 @@ main {
 }
 
 .status-pill.warning,
+.status-pill.pending,
+.status-pill.missing,
 .status-pill.dry_run,
 .status-pill.unsupported_by_host {
   background: var(--amber-soft);
@@ -562,6 +565,7 @@ main {
 }
 
 .status-pill.failed,
+.status-pill.rejected,
 .status-pill.identity_conflict,
 .status-pill.error {
   background: var(--rose-soft);
@@ -892,6 +896,62 @@ input:invalid:not(:placeholder-shown) {
   margin-top: 1rem;
 }
 
+.results-card {
+  margin-top: 1rem;
+}
+
+.results-heading { align-items: flex-start; }
+.results-heading p { max-width: 720px; margin-bottom: 0; }
+
+.results-controls {
+  display: flex;
+  align-items: end;
+  gap: 0.8rem;
+  margin: 1rem 0 0.5rem;
+}
+
+.results-controls .field { width: min(280px, 100%); }
+.submission-list { display: grid; gap: 0.75rem; }
+
+.submission-row {
+  padding: 1rem;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: var(--surface-muted);
+}
+
+.submission-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.submission-heading strong,
+.submission-revision code,
+.artifact-list code { overflow-wrap: anywhere; }
+
+.submission-heading p,
+.submission-summary,
+.submission-revision,
+.artifact-label,
+.review-outcome {
+  margin: 0.35rem 0 0;
+  font-size: 0.8rem;
+}
+
+.artifact-label { color: var(--ink); font-weight: 700; }
+
+.artifact-list {
+  display: grid;
+  gap: 0.2rem;
+  margin: 0.35rem 0 0;
+  padding-left: 1.25rem;
+  font-size: 0.75rem;
+}
+
+.review-outcome { color: var(--ink); font-weight: 650; }
+
 .dashboard-card p {
   max-width: 760px;
   margin-bottom: 0;
@@ -979,7 +1039,9 @@ dialog::backdrop {
   .topbar,
   .section-heading,
   .member-heading,
-  .dashboard-card {
+  .dashboard-card,
+  .submission-heading,
+  .results-controls {
     display: grid;
     gap: 0.8rem;
   }

@@ -27,6 +27,8 @@ def test_package_contains_only_allowlisted_runtime_files(tmp_path: Path) -> None
         assert "IMPORT_PROVENANCE.md" in archive.namelist()
         assert "host/helper.cjs" in archive.namelist()
         assert "host/HELPER_CONTRACT.md" in archive.namelist()
+        assert "result_visibility/adapter.cjs" in archive.namelist()
+        assert "result_visibility/FEATURE_CONTRACT.md" in archive.namelist()
         assert "team/adapter.cjs" in archive.namelist()
         assert "team/TEAM_ADAPTER_CONTRACT.md" in archive.namelist()
         assert "ticket_lifecycle/adapter.cjs" in archive.namelist()
@@ -85,6 +87,7 @@ def test_package_includes_every_relative_runtime_dependency(tmp_path: Path) -> N
         assert "../security/loopback.cjs" in routes
         assert "../team/adapter.cjs" in routes
         assert "../ticket_lifecycle/adapter.cjs" in routes
+        assert "../result_visibility/adapter.cjs" in routes
         helper = archive.read("host/helper.cjs").decode("utf-8")
         assert "../webui/routes.js" in helper
         assert "../security/loopback.cjs" in helper

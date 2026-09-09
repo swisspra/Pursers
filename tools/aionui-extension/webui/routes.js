@@ -5,6 +5,7 @@ const { createDoorOnboarding } = require('../door/adapter.cjs');
 const { isLoopbackHostname } = require('../security/loopback.cjs');
 const { createTeamAdapter } = require('../team/adapter.cjs');
 const { createTicketLifecycleAdapter } = require('../ticket_lifecycle/adapter.cjs');
+const { createResultVisibility } = require('../result_visibility/adapter.cjs');
 
 const BRIDGE_COMMAND = 'pursers-wait-bridge';
 const INSTALL_HINT =
@@ -87,6 +88,14 @@ function ticketResponseStatus(value) {
   return 502;
 }
 
+function resultsResponseStatus(value) {
+  if (value.ok) return 200;
+  if (value.code === 'invalid_ticket_id' || value.code === 'invalid_result_state') return 400;
+  if (value.code === 'ticket_not_found') return 404;
+  if (value.code === 'backend_unavailable') return 503;
+  return 502;
+}
+
 async function readBody(request) {
   try {
     const body = await request.json();
@@ -120,6 +129,14 @@ function createHandlers(dependencies = {}) {
   const tickets = dependencies.runTicketLifecycle && expectedBoard
     ? createTicketLifecycleAdapter({ run: dependencies.runTicketLifecycle, expectedBoard })
     : null;
+  const results = expectedBoard
+    ? createResultVisibility({
+      expectedBoard,
+      fetchBoard: dependencies.fetchResults || (async () => {
+        throw new Error('result backend unavailable');
+      }),
+    })
+    : { read: async () => ({ ok: false, code: 'backend_unavailable', retryable: true }) };
 
   function scopedStatus(current) {
     if (!current.ok || !expectedBoard) return current;
@@ -228,10 +245,17 @@ function createHandlers(dependencies = {}) {
     if (request.method === 'POST' && url.pathname === '/pursers/tickets/get') return ticketTyped(request, 'get');
     if (request.method === 'POST' && url.pathname === '/pursers/tickets/create') return ticketTyped(request, 'create');
     if (request.method === 'POST' && url.pathname === '/pursers/tickets/cancel') return ticketTyped(request, 'cancel');
+    if (request.method === 'GET' && url.pathname === '/pursers/results') {
+      const value = await results.read({
+        ticketId: url.searchParams.get('ticket_id'),
+        state: url.searchParams.get('state'),
+      });
+      return jsonResponse(resultsResponseStatus(value), value);
+    }
     return jsonResponse(404, { ok: false, error: 'not_found' });
   }
 
-  return { handle, join, onboarding, status, team, tickets };
+  return { handle, join, onboarding, results, status, team, tickets };
 }
 
 const defaultHandlers = createHandlers();

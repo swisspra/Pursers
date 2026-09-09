@@ -14,6 +14,8 @@ The helper:
 - binds every onboarding request and status response to one configured board;
 - uses a separately selected wait-bridge state directory;
 - caps request bodies at 64 KiB and never returns door values;
+- reads only the selected board from a loopback Fleet dashboard, with a 5-second
+  timeout, 512 KiB response cap, no credentials, and no redirects;
 - defers MCP registration to the authenticated same-origin AionCore API; and
 - removes AionUi conversation runtime variables before Team CLI calls.
 - keeps one persistent board session for ticket reads, unassigned creation, and
@@ -46,6 +48,7 @@ node host/helper.cjs \
   --bridge-state-dir /PATH/TO/isolated-bridge-state \
   --bridge-bin /PATH/TO/pursers-wait-bridge \
   --aioncore-bin /PATH/TO/aioncore \
+  --fleet-url http://127.0.0.1:8899 \
   --core-version 0.2.1
 ```
 
@@ -53,3 +56,7 @@ Paste the helper URL and token into Pursers Home. Both remain in page memory
 only and must be entered again after a reload. A wrong origin, token, or board
 fails closed. For normal use, select the actual connected board; isolated
 verification must use a synthetic `sandbox-*` board and separate state path.
+`GET /pursers/results` is the only result route. It is read-only, board-pinned,
+and returns the allow-listed projection defined in
+`result_visibility/FEATURE_CONTRACT.md`; it never returns submission or review
+notes.

@@ -201,6 +201,28 @@
             <div class="empty-state" id="roster-empty"><span aria-hidden="true">◎</span><h3>No Team context yet</h3><p>Open this extension from an existing AionUi Team conversation to read its roster.</p></div>
             <div class="roster-list" id="roster-list"></div>
           </div>
+          <div class="card results-card" aria-labelledby="results-title">
+            <div class="card-heading results-heading">
+              <div><p class="eyebrow">Board evidence</p><h3 id="results-title">Submitted results</h3><p>Read-only work summaries, bounded artifact references, and independent review outcomes for this board.</p></div>
+              <span class="status-pill neutral" id="results-pill">Not loaded</span>
+            </div>
+            <div class="results-controls">
+              <label class="field" for="result-state">Result state
+                <select id="result-state" name="result_state">
+                  <option value="">All states</option>
+                  <option value="pending">Pending review</option>
+                  <option value="approved">Approved</option>
+                  <option value="rejected">Rejected</option>
+                  <option value="failed">Failed</option>
+                  <option value="missing">Missing submission</option>
+                </select>
+              </label>
+              <button class="button button-secondary" id="refresh-results" type="button">Refresh results</button>
+            </div>
+            <p class="form-message" id="results-message" role="status" aria-live="polite"></p>
+            <div class="empty-state" id="results-empty"><span aria-hidden="true">↗</span><h3>No results loaded</h3><p>Connect the local helper to read the selected board.</p></div>
+            <div class="submission-list" id="submission-list" aria-live="polite"></div>
+          </div>
           <div class="card dashboard-card">
             <div><p class="eyebrow">Follow board work</p><h3>Open the Pursers dashboard</h3><p>The dashboard is supplied by the Pursers Personal MCP app. Open it from Tools in the same AionUi conversation. If the host does not expose the app, ask the Team to run <code>board_snapshot</code>; this page does not invent a navigation route.</p></div>
             <span class="status-pill neutral">Host entrypoint</span>

@@ -32,7 +32,7 @@ Feature-owned:
 - `tools/aionui-extension/result_visibility/adapter.cjs`
 - `tools/aionui-extension/result_visibility/FEATURE_CONTRACT.md`
 - `tools/aionui-extension/tests/result_visibility.test.cjs`
-- `tools/aionui-extension/tests/test_result_visibility.py`
+- `tools/aionui-extension/tests/test_home_result_visibility.py`
 - `tools/fleet-dashboard/result_visibility.py`
 - `tools/fleet-dashboard/tests/test_result_visibility.py`
 
@@ -45,6 +45,7 @@ Shared integration points, changed only to register or render the feature:
 - `tools/aionui-extension/webui/index.html`
 - `tools/aionui-extension/webui/app.js`
 - `tools/aionui-extension/webui/style.css`
+- `tools/aionui-extension/tests/test_package.py`
 - `tools/fleet-dashboard/fleet_dashboard.py`
 
 The integration owner resolves shared-file overlap after independent component
