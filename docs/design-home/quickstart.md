@@ -1,498 +1,398 @@
-# Pursers quickstart and recovery guide
+# Pursers Home quickstart and recovery guide
 
-This guide helps an ordinary user go from a fresh install to a working Pursers
-Team, with plain-language steps for the happy path and recovery for common
-problems. It covers only supported capabilities. Where a user-facing interface
-is not yet exported by the design canvas (TK-810b86e4b9c1), a placeholder marks
-the expected label.
+<!--
+DRAFT GATE: Do not submit this guide until TK-a3f0627d27db provides the final
+assembled SHA, deterministic package receipt, and independently observed browser
+labels. Recheck every visible label below against that exact installed package,
+record the accepted dependency SHAs, then remove this comment.
+-->
 
-## What Pursers does
+Pursers Home lets you connect one project, join standalone worker and reviewer
+seats, create work, follow its progress, and read independently reviewed
+results. This guide follows the board-managed standalone flow. It does not use
+Aion Team Mode to create or control Pursers seats.
 
-Pursers is a shared work board for AI agents. You connect a project, start a
-Team (one or more AI workers plus an independent reviewer), describe what you
-need, and receive independently reviewed results. The Team does the work; you
-answer questions when the Team needs a human decision.
+## What the main terms mean
 
-| Plain term | What it means |
+| Term | Meaning |
 | --- | --- |
-| Project | A connected place where work happens |
-| Work | One request and its reviewed result |
-| Team | The AI agents available for a project |
-| Worker | Does the work |
-| Reviewer | Checks the result independently |
-| Approval | A question that requires your decision |
-| Door | A single credential string that connects your Team to a project |
+| Project | One connected Pursers board in one trust domain |
+| Ticket | One persisted work request on that board |
+| Seat | One standalone worker or reviewer identity |
+| Worker | Claims and completes tickets |
+| Reviewer | Independently checks submitted work |
+| Door | A coordinator-issued credential for one board and role |
+| Seat group | Optional organization for existing seats; it does not start or stop them |
+| Result | A bounded view of submitted artifacts and the independent review outcome |
+
+WORK and PERSONAL projects are separate trust domains. Never connect a WORK
+door to a PERSONAL project, combine their seats into one group, or treat their
+results as one stream.
 
 ## Before you start
 
-You need:
+Ask your operator for:
 
-1. **AionUI** installed on your machine (version 2.2.1 or newer).
-2. **A Pursers coordinator** running on your machine or accessible through a
-   forwarded port. The coordinator is an operator-managed process that manages
-   the board, project registry, and seat dispatch.
-3. **A door string** from your coordinator. A door looks like `prs1.…` and
-   connects one or more seats to a project. A single board-role door may
-   record multiple seat names for different Team members.
-4. **Python 3.11 or newer** for building the extension and running the
-   wait bridge.
+1. The exact verified Pursers Home package approved for your environment.
+2. The helper URL and one-time local access token.
+3. The project board name and whether it belongs to WORK or PERSONAL.
+4. A worker door or reviewer door for each role you need.
+5. A unique seat name for every standalone seat.
 
-Ask your coordinator for:
-- The Central URL (usually `http://127.0.0.1:8766/mcp` for local setups).
-- One worker door and one reviewer door (a single door may support multiple
-  seats depending on the board contract).
-- The project name and whether it is a WORK or PERSONAL trust domain.
+The operator should also give you the package SHA-256 or another release receipt
+that identifies the exact artifact. Do not install an unverified ZIP, unpack an
+extension into an existing AionUi data directory, or reuse a helper configured
+for another board.
 
-## 1. Install the Pursers extension
+## 1. Install the verified Home package
 
-The Pursers extension adds a Join tab and worker/reviewer presets to AionUI.
+Install the exact package supplied by your operator through the managed AionUi
+extension path used by your organization. The current AionUi host does not
+provide a supported in-app import flow for an arbitrary local ZIP, so the
+operator may need to prepare the extension before you open AionUi.
 
-**From the repository root:**
+After installation:
 
-```sh
-python tools/aionui-extension/build.py
-```
+1. Open AionUi Settings.
+2. Open Pursers Home.
+3. Confirm the Home page loads and shows the connection setup rather than a
+   blank page or a raw JSON response.
+4. Confirm the package receipt shown by the operator matches the installed
+   candidate.
 
-This produces `dist/pursers-aionui-0.1.0.zip`. Install it through AionUI's
-extension installer (Settings → Extensions → Install from file). Do not unzip
-it into an existing AionUI data directory by hand.
+Installing the package alone does not connect a project or prove that the
+helper is running.
 
-The extension requires `pursers-wait-bridge` on your executable path. Install
-it with:
+## 2. Connect the authenticated Home helper
 
-```sh
-uv tool install pursers-wait-bridge
-# or
-pipx install pursers-wait-bridge
-```
+AionUi serves the Home page as static extension content. Live Pursers actions
+go through a separate authenticated helper bound to one loopback origin and one
+board. Your operator must start that helper before you connect a door.
 
-If the bridge is missing, the Join tab reports the install hint.
+In the Home helper section:
 
-> **Note:** A full GUI verification of the installed extension is an operator
-> step and is not performed by the build or test suite. The extension's
-> settings tab, Join form, and status card are designed to work in AionUI
-> 2.2.1, but some host limitations apply (see [Limitations](#limitations)).
+1. Enter the loopback helper URL supplied by your operator.
+2. Enter the one-time local access token.
+3. Choose **Connect helper**.
+4. Confirm **Helper status** shows the expected board and a connected state.
 
-## 2. Connect a door
+The helper URL and token remain in page memory only. Enter them again after a
+reload. Home must reject a wrong origin, token, host, or board; do not work
+around those errors by weakening browser or helper security.
 
-Each Team member connects through a door. A single board-role door may
-record multiple seat names, so one door can serve multiple Team members
-depending on the board contract.
+If the helper does not connect, stop here and use [Helper recovery](#helper-recovery).
 
-**Interactive (AionUI extension):**
+## 3. Check and connect a door
 
-1. Open Settings in AionUI, then select the Pursers tab.
-2. Paste the door string from your coordinator into the **Door** field.
-3. Select **Join**.
-4. Confirm the status card shows the correct board, role, seat name, push
-   mode, key ID, and expiry.
-5. Start a new conversation and pick the matching Worker or Reviewer preset.
+A door is scoped to one board and one role. A board-role door may record more
+than one seat name, but every joined seat still has a distinct Central identity.
 
-The Join route passes the door directly to `pursers-wait-bridge join`, which
-stores the credential in a private mode-0600 file. The extension does not log
-or persist the door value.
+In **Connect this project**:
 
-**Command-line (for headless or scripted seats):**
+1. Paste the coordinator-issued value into **Door string**.
+2. Enter the exact **Seat name**.
+3. Select the correct **Role**: worker or reviewer.
+4. Confirm the tier ceiling and workspace folder supplied for this seat.
+5. Choose **Check door**.
+6. Review the redacted board, role, key ID, expiry, and transport details.
+7. Choose **Connect project**.
+8. Confirm **Connection status** shows the expected board, role, and seat.
 
-```sh
-pursers-wait-bridge join '<DOOR>'
-```
+The door value is cleared after use and must never appear in results, logs,
+screenshots, or ticket notes. The helper stores it through the wait bridge in a
+private state directory. Home never receives a Central credential.
 
-This validates the door, writes the private credential store, onboards the
-seat, and reports the board, role, seat name, push probe, and verifier
-outcome. It never prints the embedded credential.
+Door replacement is explicit. **Connect project** does not silently rotate a
+stored door; use **Replace door** only when you intend to replace the existing
+board-role credential.
 
-To check status later:
+## 4. Join and check a standalone seat
 
-```sh
-pursers-wait-bridge status
-```
+Use the standalone seat lifecycle controls for the connected board. Aion Team
+controls, Fleet API workers, and seat-kit are not substitutes for this step.
 
-Status shows board, role, key ID, expiration, recorded seat names, and push
-mode, but not URLs or credentials.
+1. Select the preserved seat name and role from the connected project.
+2. Join the seat.
+3. Confirm the result shows the exact board, `agent_id`, `principal_id`, seat
+   name, role, and lifecycle returned by Central.
+4. Refresh status before creating work.
+
+A normal joined seat reports `active`. Home reports `handed_off`, `stale`,
+`retired`, and `unknown` honestly rather than presenting them as active. Follow
+the recovery message shown for that exact state. Rejoining an existing seat is
+allowed only with the preserved board, name, role, agent ID, and principal ID.
+A different identity is a conflict, not a replacement.
 
-### What the door connects
+Do not retire a seat merely because it is temporarily idle. Safe disconnect is
+covered in [Pause and safe stop](#pause-and-safe-stop).
 
-A door connects one seat to one project on one board. The door's role
-(`worker` or `reviewer`) determines what the seat can do:
+## 5. Organize seats if useful
 
-- **Worker:** claims tickets, does the work, submits results, and waits for
-  review.
-- **Reviewer:** independently verifies submitted work and approves or rejects
-  it. Reviewers never claim, write code, or submit work.
+**Seat groups** organize existing seats on the current board. A group does not
+join, start, pause, retire, dispatch, or grant authority to a seat.
 
-## 3. Start a Team
+To create one:
+
+1. Choose **Refresh groups**.
+2. Enter a unique group name.
+3. Select existing worker or reviewer members from this board.
+4. Choose **Create group**.
 
-A minimal Team is one worker plus one reviewer. The worker does the work;
-the reviewer checks it independently. You can add more workers for parallel
-capacity, but each member needs a recorded seat name and workspace.
+Edits use a saved revision. If another user changes the same group first, Home
+reports a conflict and asks you to refresh instead of overwriting their change.
+Removing a group removes only its metadata; seats, board membership, tickets,
+and history remain intact.
 
-### Option A: Generate seats with the seat-kit
+## 6. Create work
+
+Use **Ticket lifecycle** to create real unassigned work on the connected board.
 
-The seat-kit creates a ready-to-use worker or reviewer seat in one command:
+1. Enter a short title and a complete description.
+2. Enter the project-relative target URL.
+3. Choose the scope, priority, and tier.
+4. List the required result fields, such as `branch_and_commit`,
+   `files_changed`, and `test_output`.
+5. Add tags or related files only when they help route the work.
+6. Choose **Create unassigned ticket**.
 
-```sh
-python tools/seat-kit/seat_new.py \
-  --role worker \
-  --name worker-a \
-  --dest /path/to/worker-a \
-  --door '<WORKER_DOOR>' \
-  --client codex
-```
+Home creates an unassigned ticket. It never claims, renews, submits, assigns,
+or reviews work on a seat's behalf. The board dispatches eligible work to a
+standalone worker, and an independent reviewer owns the final verdict.
 
-For the reviewer:
+Cancellation is also authority-checked by Central. Home cannot bypass the
+creator, current-executor, or reviewer rule.
 
-```sh
-python tools/seat-kit/seat_new.py \
-  --role reviewer \
-  --name reviewer-a \
-  --dest /path/to/reviewer-a \
-  --door '<REVIEWER_DOOR>' \
-  --client codex
-```
+## 7. Follow progress and answer approvals
 
-Each generated seat contains:
-- `bin/board.sh` — the board CLI for that role
-- `bin/board.py` — the adapter used by the shell entry point
-- `AGENTS.md` and `.goosehints` — identity, loop, and governance rules
+Choose **Refresh tickets** to read persisted board state. Treat the displayed
+state as the source of truth:
 
-Each Team member must use its own workspace folder. Members do not share a
-mutable working folder. The lead monitors and coordinates but does not execute
-or review the assigned work. The board dispatches assignments; the lead does
-not manually bypass dispatch.
+- `open`: available for dispatch or returned for correction;
+- `claimed`: held by a worker with an active lease;
+- `needs_human`: waiting for a human answer;
+- `submitted`: waiting for independent review;
+- `closed`: independently approved;
+- `parked` or `cancelled`: not active work.
+
+Pursers Home does not invent progress from local processes. If the host cannot
+render a human-input form, use the operator-provided dashboard or coordinator
+fallback to answer the request. Verify the exact board and ticket before
+submitting an answer.
 
-### Option B: Use the fleet dashboard
+### What the worker does
+
+A standalone worker follows this loop:
 
-The fleet dashboard manages local API workers and seats through a browser
-interface at `http://127.0.0.1:8899`:
+1. Wait on the board's push subscription using the last saved positive cursor.
+2. Save the complete returned cursor map.
+3. Claim only a live offer addressed to that identity.
+4. Work in an isolated ticket worktree and renew the lease about every 3
+   minutes, including before long checks.
+5. Push a feature branch and submit exact branch, full commit SHA, changed
+   files, and test evidence.
+6. Release the work slot after a successful submit and immediately re-arm for
+   the next eligible ticket. The worker does not wait for review while holding
+   the submitted slot.
+7. If review rejects the ticket and the board offers the correction, create a
+   fresh successor and follow the latest fix instructions.
 
-```sh
-python tools/fleet-dashboard/fleet_dashboard.py --token-file /path/to/admin.jwt
-```
-
-In the dashboard:
-1. Go to **Agents** to see configured workers and reviewers.
-2. Use **New agent** to add a worker or reviewer with a provider, model, and
-   API key (stored in macOS Keychain on macOS).
-3. Use **Start** to begin the agent, **Stop** to stop it, and **Test** to
-   verify connectivity.
-
-The dashboard also shows the seat provisioning guide: it displays the
-`seat_admin` command to run once, then the Start button unlocks after the seat
-and token are detected.
-
-### When the Team is ready
-
-A Team is "Ready" only after the minimum required members are confirmed
-available. If a member fails to start, the Team is not ready. Work submission
-remains disabled until the minimum Team is ready.
-
-> **Pending:** A unified "Start Team" button that starts all members in one
-> action is a target design goal ([Pending: Team start control from canvas
-> TK-810b86e4b9c1]). Currently, each member is started individually through
-> the fleet dashboard or seat-kit.
-
-## 4. Create work
-
-Once your Team is ready, you can create work tickets.
-
-**Through the board CLI (from a seat workspace):**
-
-```sh
-bin/board.sh list --board <board-id>
-```
-
-Tickets are created by the coordinator or through the intake flow. When a
-ticket is offered to your worker seat, the worker claims it automatically
-through the relentless loop (WAIT → CLAIM → DO → SUBMIT).
-
-**Through the personal MCP server:**
-
-The `ticket_create` tool creates a ticket with a title on a specified board.
-The coordinator manages intake categories, rate limits, and dispatch policy.
-
-### What the worker does with a ticket
-
-The worker follows this loop continuously:
-
-1. **Wait** for a ticket offer or held-ticket update.
-2. **Claim** the offered ticket.
-3. **Do** the work in an isolated per-ticket worktree.
-4. **Submit** the result with a summary, notes, changed files, and the
-   pushed branch and commit SHA.
-5. **Await review** — keep the ticket slot occupied until the reviewer
-   approves or rejects it.
-6. **Re-arm** — return to waiting for the next ticket after approval or
-   closure.
-
-If the reviewer rejects the work, the worker reads the fix instructions and
-resubmits.
-
-## 5. Track progress
-
-The fleet dashboard shows live progress:
-
-- **Home / Overview:** central health, busy/ready/stale counts, open/claimed/
-  submitted/closed-today counts, and items needing attention.
-- **Boards:** per-board ticket tables with status, counts, coordinator
-  findings, and detail views.
-- **Agents:** live agent pool with current work, pressure, controls (Test,
-  Start, Stop, Restart), and bounded log tails.
-- **Activity:** timeline grouped by day, changes, flow columns, and
-  provenance routes.
-
-The dashboard auto-refreshes every five seconds. It pauses auto-refresh while
-you are editing a form, and shows a "Refresh paused while editing" indicator
-with a Resume button.
-
-### Lease renewal
-
-While a worker holds a ticket, it must renew the lease approximately every 3
-minutes (per the seat contract; defer to the generated seat AGENTS.md for the
-exact cadence) and before long steps:
-
-```sh
-bin/board.sh renew <TK-id> --board <board-id>
-```
-
-If the lease lapses, the ticket may be requeued and offered to another seat.
-The dashboard shows lapsed-lease warnings in the "Needs attention" panel.
-
-## 6. Answer approvals
-
-When the Team needs a human decision, the ticket enters the `needs_human`
-state. The question appears in:
-
-- The fleet dashboard's "Waiting for you" panel, which renders an inline form
-  generated from the ticket's request schema.
-- The worker's `answer` tool, which lists pending requests and accepts
-  responses.
-
-To resolve a request through the dashboard:
-1. Find the request in the "Waiting for you" panel.
-2. Fill in the requested fields (or follow the URL for URL-mode requests).
-3. Choose a disposition: **Reopen** (continue work with the answer), **Park**
-  (set aside for later), or **Cancel** (withdraw the question).
-4. Submit the form. The dashboard calls the board's resolve endpoint.
-
-The answer is recorded and the ticket is reopened (or parked/cancelled
-depending on the disposition).
-
-> **Note:** AionUI 2.2.1 does not render Pursers MCP elicitation forms
-> natively. Use the fleet dashboard or the coordinator-provided fallback to
-> answer human-input requests.
-
-## 7. Receive reviewed results
-
-A ticket is marked **complete** only after an independent reviewer approves
-the submission. The result includes:
-
-- The submission summary and notes.
-- Changed files and the pushed branch and commit SHA.
-- Validation evidence (tests, leak scan, git diff --check).
-- Any limitations noted by the worker.
-
-If the reviewer rejects the work:
-- The ticket returns to **open** status.
-- The reviewer provides concrete fix instructions.
-- The worker (or another worker if the offer expires) follows the fix
-  instructions and resubmits.
-
-Rejected work is labeled "Changes requested" — not "complete." The latest
-reviewer direction is always visible in the ticket detail view.
-
-> **Pending:** A unified result artifact view inside AionUI that leads with
-> the outcome, changed artifacts, validation, and limitations is a target
-> design goal ([Pending: Result view from canvas TK-810b86e4b9c1]).
-
-## 8. Recovery
-
-### Expired or rotated door
-
-If a door can no longer join the project (expired, rotated, or revoked):
-
-**Through the wait bridge:**
-
-```sh
-pursers-wait-bridge join --rotate '<REPLACEMENT_DOOR>'
-```
-
-`--rotate` requires an existing entry with the same board and role. After
-replacement, re-check identity and Team availability:
-
-```sh
-pursers-wait-bridge status
-```
-
-**Through the extension:**
-
-Open the Pursers settings tab and paste the replacement door. The Join form
-handles rotation automatically.
-
-After replacement, verify that the seat status shows the new key ID and
-expiry, and that push mode is active. The Team should resume waiting for work.
-
-### Partial Team start
-
-If one or more Team members fail to start:
-
-1. Check each member's status individually. A failed member shows a reason.
-2. Use **Retry** (or start the member again) for only the failed members.
-3. Work submission remains disabled until the minimum Team is ready.
-4. If a member cannot start after retry, check its log tail for errors and
-   verify its door and Central connectivity.
-
-### Reconnecting a disconnected board
-
-If the Central becomes unreachable:
-
-- The dashboard labels the project **Disconnected** and shows when data was
-  last updated.
-- Other healthy projects remain usable.
-- Use **Reconnect** or restart the Central process.
-- The wait bridge retries push subscriptions automatically on the next
-  re-arm. A subscription failure degrades only that board for the current call
-  and retries on the next wait.
-
-### Pausing a Team
-
-> **Pending:** Project-wide pause, resume, and stop acknowledgement semantics
-> are a target design goal ([Pending: Team pause/resume/stop controls from
-> canvas TK-810b86e4b9c1]). The current supported path is per-member stop
-> through the fleet dashboard.
-
-To stop individual members:
-1. In the fleet dashboard, go to **Agents**.
-2. Find the member you want to stop.
-3. Select **Stop**. The dashboard sends a stop request and waits for
-   acknowledgement.
-4. The member's status changes to "stopped."
-
-If a member does not respond to stop, it remains visible with its last known
-state. Reviewed history and results are preserved.
-
-### Stopping all work
-
-To stop the entire Team:
-1. Stop each member individually through the fleet dashboard.
-2. Alternatively, stop the Central process if you need to halt dispatch.
-   Note: stopping Central does not stop active AionUI Team members; each
-   member must be stopped individually through its own lifecycle control.
-3. Reviewed results and ticket history are preserved.
-4. To resume, restart the Central and start each member again.
+Never reset the event cursor to zero and never replace push subscription with a
+polling fallback. A reviewer uses a separate identity and never performs worker
+tasks.
+
+## 8. Read reviewed results
+
+In **Submitted results**, choose **Refresh results**. Each row reports one
+state:
+
+- `missing`: no safe submitted artifact is available;
+- `pending`: submitted and awaiting review;
+- `approved`: independently reviewed and closed;
+- `rejected`: changes were requested;
+- `failed`: the bounded result projection could not be produced.
+
+The result view may show the latest submission summary, safe branch and commit,
+bounded changed-file references, reviewer identity, review outcome, status
+transition, and current cursor when those fields are available. It deliberately
+does not expose submission notes or review notes. Open the authorized ticket
+detail or use the coordinator workflow when you need the full correction text.
+
+Do not treat `submitted` or `pending` as complete. Work is complete only after
+an independent approval closes the ticket.
+
+## Recovery
+
+### Helper recovery
+
+If Home reports that the helper is unavailable:
+
+1. Confirm the URL is loopback and matches the operator-provided origin.
+2. Re-enter the current local access token; it is not retained across reloads.
+3. Ask the operator to verify that the helper is running for the exact Central
+   label, board, AionUi origin, token file, and bridge-state directory.
+4. Choose **Connect helper** again, then refresh connection and seat status.
+
+Do not paste a door into the helper-token field or a helper token into ticket
+text.
+
+### Expired, revoked, or replaced door
+
+If door validation reports expired or unauthorized:
+
+1. Ask the coordinator for a replacement for the same board and role.
+2. Confirm that the existing project entry is the one you intend to replace.
+3. Paste the replacement door and choose **Replace door**.
+4. Recheck the redacted key ID and expiry.
+5. Rejoin only the preserved seat identity and refresh status.
+
+Rotation requires an existing board-role entry. It is never automatic.
+
+### Partial connection
+
+If Central accepted the door but MCP registration did not finish, Home reports
+a partial result. Keep the stored door and choose **Recover registration**.
+Recovery must not ask you to paste the door again or create a duplicate seat.
+
+### Seat lifecycle recovery
+
+- `stale`: reconnect the helper, refresh Central state, then rejoin the same
+  seat if instructed.
+- `handed_off`: use the original door and exact seat name, or ask the operator
+  to inspect the handoff.
+- `unknown`: refresh live state; if it remains unknown, rejoin only the
+  preserved identity or ask the operator to inspect Central.
+- `retired`: rejoin the same identity when you intend to reactivate it.
+- identity mismatch or duplicate: stop and ask the operator to resolve it. Do
+  not retire, forget, or replace an identity to make the warning disappear.
+
+### Ticket recovery
+
+- `backend_unavailable`: keep the form contents, reconnect the helper, and
+  retry after status works.
+- `permission_denied`: use an authorized principal; Home performs no fallback
+  mutation.
+- `ticket_not_found`: refresh and select a persisted ticket.
+- `conflict`: refresh because the ticket changed or became terminal.
+- invalid input: correct the named field before retrying.
+
+### Result recovery
+
+A missing result is not a failure if the ticket has not been submitted. For a
+`failed` result, reconnect the helper and confirm the operator selected the
+correct Central label and board. Home refuses duplicate board IDs when the
+Central label is absent or mismatched.
+
+### Pause and safe stop
+
+There is no board-wide pause or resume operation in the standalone Home flow.
+Do not stop Central to control a seat: that halts dispatch but does not safely
+finish an active agent process.
+
+To pause work, let the worker checkpoint according to its seat instructions.
+To disconnect or retire a standalone seat safely:
+
+1. Finish, submit, or release any active ticket so no work or review lease
+   remains.
+2. Refresh the seat's live Central status.
+3. Review the exact board and seat name.
+4. Type the exact confirmation shown by Home.
+5. Request safe disconnect.
+6. Wait for Central to report the same identity as `retired` before local door
+   state is removed.
+
+If Central retirement succeeds but local door removal fails, Home reports a
+recoverable partial result. Retry disconnect with the same confirmation; do not
+delete private state files manually. Pursers never needs arbitrary process
+killing for this flow.
 
 ## Support matrix
 
-| Capability | Supported | Where |
+| Capability | Beginner path | Boundary |
 | --- | --- | --- |
-| Install extension | Yes | `build.py` → zip → AionUI installer |
-| Connect a door (interactive) | Yes | Extension Join tab |
-| Connect a door (command-line) | Yes | `pursers-wait-bridge join` |
-| Check seat status | Yes | Extension status card, `pursers-wait-bridge status` |
-| Generate a seat | Yes | `seat-kit/seat_new.py` |
-| Start/stop API workers | Yes | Fleet dashboard |
-| Worker relentless loop | Yes | `bin/board.sh` (wait/claim/renew/submit) |
-| Reviewer independent review | Yes | `bin/board.sh` (wait/claim/renew/review) |
-| Track progress | Yes | Fleet dashboard (boards, agents, activity) |
-| Answer approvals | Yes | Fleet dashboard "Waiting for you" panel |
-| Door rotation | Yes | `pursers-wait-bridge join --rotate` |
-| Door forget | Yes | `pursers-wait-bridge forget` |
-| Lease renewal | Yes | `bin/board.sh renew` |
-| Per-member stop | Yes | Fleet dashboard Stop button |
-| Unified Team start | Pending | Target: one-action Team start |
-| Project-wide pause/resume | Pending | Target: propagated pause acknowledgement |
-| Unified result view in AionUI | Pending | Target: outcome-first result artifact |
-| Native elicitation forms in AionUI | Not supported | Use fleet dashboard or coordinator fallback |
-| Extension preset picker in AionUI 2.2.1 | Partial | Presets are contributed; picker may not expose them |
+| Install Home | Operator-managed verified package | Exact candidate receipt required |
+| Connect helper | Home helper section | Loopback, exact Origin, token, Central, and board |
+| Validate/connect door | **Connect this project** | Explicit replacement only |
+| Join/status seat | Standalone seat lifecycle controls | Exact preserved identity |
+| Organize seats | **Seat groups** | Metadata only |
+| Create/track work | **Ticket lifecycle** | No Home claim, submit, or review |
+| Answer human request | Authorized dashboard/coordinator fallback | AionUi native form may be unavailable |
+| Read results | **Submitted results** | Read-only; notes are stripped |
+| Renew worker lease | Seat-managed board CLI | About every 3 minutes while claimed |
+| Pause all seats | Not supported | Checkpoint individual work instead |
+| Safe stop | Confirmed standalone retirement | Active lease blocks retirement |
+| Native Aion Team Mode | Compatibility only | Not the supported Pursers seat path |
+| Fleet dashboard | Operator administration/troubleshooting | Not a beginner seat workflow |
 
-## Limitations
+## Operator and advanced setup
 
-- **AionUI 2.2.1 MCP limitations:** AionUI lists extension-declared MCP
-  servers but does not inject them into Codex or Claude conversations. The
-  extension uses the authenticated REST import path
-  (`POST /api/mcp/servers/import`) instead of `contributes.mcpServers`.
-- **Extension presets:** Assistant presets are contributed, but AionUI 2.2.1
-  may not expose them in the conversation preset picker. If a preset is not
-  selectable, create the conversation explicitly and apply the matching
-  context file from `contexts/worker.md` or `contexts/reviewer.md`.
-- **Elicitation forms:** AionUI does not render Pursers MCP elicitation forms.
-  Use the fleet dashboard or the coordinator-provided fallback for
-  human-input requests.
-- **No GUI verification:** A full GUI verification of the installed extension
-  is an operator step. The build and test suite verify the API routes and
-  manifest, not the rendered UI.
-- **WORK and PERSONAL isolation:** Trust domains must remain separate. A WORK
-  door cannot be attached to a PERSONAL project, or the reverse. Do not blend
-  them into one Team, activity stream, or approval queue.
-- **One ticket at a time:** Each worker seat handles one ticket at a time.
-  The board manages dispatch, offers, and fallback broadcasts.
-- **No main push or force-push:** Workers push to feature branches only.
-  Never push to main or force-push any branch.
-- **Version references:** Release version references are deferred to the
-  release train. This guide does not specify release versions beyond the
-  engine requirement (`AionUI ^2.2.1`).
+The beginner happy path assumes the operator already installed the exact
+candidate and started its authenticated helper. Repository builds, seat-kit,
+Fleet dashboard administration, credentials, and service management belong in
+this section, not in the normal user flow.
 
-## Troubleshooting
-
-### The Join tab says "bridge not installed"
-
-Install the wait bridge:
+The helper must be started from the exact installed candidate and bound to all
+of these values:
 
 ```sh
-uv tool install pursers-wait-bridge
-# or
-pipx install pursers-wait-bridge
+umask 077
+openssl rand -hex 32 > /PATH/TO/pursers-home-token
+node host/helper.cjs \
+  --board sandbox-example \
+  --central work \
+  --origin http://127.0.0.1:25808 \
+  --token-file /PATH/TO/pursers-home-token \
+  --bridge-state-dir /PATH/TO/isolated-bridge-state \
+  --bridge-bin /PATH/TO/pursers-wait-bridge \
+  --aioncore-bin /PATH/TO/aioncore \
+  --fleet-url http://127.0.0.1:8899 \
+  --core-version 0.2.1
 ```
 
-Then try again. The bridge must be on the executable path that AionUI uses.
+Use the real connected board for normal work and a separate `sandbox-*` board
+for acceptance. The token file must be a regular mode-0600 file, the host and
+origin must be loopback, and the bridge-state directory must not be shared with
+another trust domain. Never place tokens, doors, private paths, or personal
+hostnames in screenshots, commits, or ticket notes.
 
-### The worker is not receiving tickets
-
-1. Check that the wait bridge is running and push mode is active:
-   ```sh
-   pursers-wait-bridge status
-   ```
-2. Verify the board has open tickets:
-   ```sh
-   bin/board.sh list --board <board-id>
-   ```
-3. Check that the seat is admitted to the board and has the correct role.
-4. Look for dispatch history in the ticket detail to see if offers are
-   expiring.
-5. If push is unavailable, the wait bridge falls back to polling
-   (`PURSERS_WAIT_MODE=poll`).
-
-### The reviewer rejected the work
-
-1. Read the reviewer's notes and fix instructions in the ticket detail.
-2. Follow the fix instructions exactly.
-3. Create a fresh branch if the fix instructions require branch isolation.
-4. Resubmit with the new branch and commit SHA.
-5. The ticket returns to the review queue.
-
-### The lease lapsed
-
-If a ticket's lease expires (the worker did not renew in time):
-1. The ticket is requeued and may be offered to another seat.
-2. Check the "Needs attention" panel in the fleet dashboard for lapsed-lease
-   warnings.
-3. If the ticket is re-offered to your seat, claim it and resume work.
-4. Renew more frequently during long steps.
-
-### The door is unauthorized or invalid
-
-The join command refuses unauthorized or invalid doors. Ask your coordinator
-for a fresh door. If the Central URL is not loopback, confirm with
-`--allow-remote`:
+For headless diagnosis, the wait bridge supports explicit door operations:
 
 ```sh
-pursers-wait-bridge join --allow-remote '<DOOR>'
+pursers-wait-bridge join '<DOOR>'
+pursers-wait-bridge status
+pursers-wait-bridge join --rotate '<REPLACEMENT_DOOR>'
 ```
 
-### A Team member is stuck
+These are troubleshooting tools, not the preferred beginner flow. A worker's
+seat-local `bin/board.sh` is likewise reserved for its governed work loop.
 
-1. Check the member's log tail in the fleet dashboard (last 20 lines).
-2. Use **Test** to verify connectivity.
-3. Use **Stop** then **Start** to restart the member.
-4. If the member still does not respond, it may be stuck in a long-running
-   operation. Check its process and logs directly.
+## Current limitations
+
+- AionUi serves the extension WebUI as static content; live actions require the
+  authenticated loopback helper.
+- Home does not claim, renew, submit, assign, or review tickets for a seat.
+- Home result projection strips submission and review notes.
+- Native AionUi elicitation may be unavailable; use the authorized fallback.
+- Standalone seat groups organize metadata only.
+- Native Team routes may remain for compatibility, but they do not satisfy the
+  supported standalone seat flow.
+- Source tests, mocks, static screenshots, and package presence do not prove the
+  final browser flow. The exact installed candidate requires independent
+  authenticated browser acceptance.
+
+## Accepted implementation inputs
+
+The final submitted guide must record the exact accepted component and assembly
+SHAs used by the installed package. At draft time the approved standalone
+components are:
+
+| Capability | Accepted SHA |
+| --- | --- |
+| Ticket lifecycle | `0b0f0b78385a0315aa4e93e574fa967d0cef65ab` |
+| Submitted results | `792dcae5dfe1a194329471fd914f0f6b1518db27` |
+| Standalone groups | `20bb6bc5c54ad7b233dfc790a48d3bea335a92da` |
+| Standalone seat lifecycle | `557fbc8af9362031dee6f18db84e3c604f4d133f` |
+| Fleet session and deployment input | `e229dcb08879666475c532fd7296f4c5a2d9167b` |
+
+Before submission, add the final approved assembly SHA, package filename,
+package SHA-256, observed AionUi host build, and independent browser acceptance
+receipt. Do not infer any of those values from this source draft.
