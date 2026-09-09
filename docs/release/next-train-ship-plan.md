@@ -137,6 +137,42 @@ python3 -m py_compile tools/release_train.py tools/release_versions.py \
 (cd tools/dashboard-ui && npm ci && npm run typecheck && npm run build && npm audit --omit=optional)
 node --test tools/aionui-extension/tests/*.test.cjs
 git diff --check v5.0.0a25..RELEASE_CANDIDATE_SHA
+
+: "${RELEASE_CANDIDATE_SHA:?set the exact release candidate SHA}"
+: "${RELEASE_CANDIDATE_REF:?set refs/pull/NUMBER/head for the reviewed candidate}"
+case "$RELEASE_CANDIDATE_REF" in
+  refs/pull/*/head) ;;
+  *) echo "RELEASE_CANDIDATE_REF must be refs/pull/NUMBER/head" >&2; exit 1 ;;
+esac
+CANDIDATE_CODEQL_ANALYSES="$(
+  gh api --method GET --paginate \
+    repos/swisspra/Pursers/code-scanning/analyses \
+    -f ref="$RELEASE_CANDIDATE_REF" -f per_page=100 | jq -cs 'add'
+)"
+jq -e --arg sha "$RELEASE_CANDIDATE_SHA" \
+  --arg ref "$RELEASE_CANDIDATE_REF" '
+  ([.[] | select(.commit_sha == $sha and .ref == $ref)]
+    | sort_by(.category, .created_at)
+    | group_by(.category)
+    | map(last)) as $exact
+  | (($exact | length) == 3)
+    and (($exact | map(.category) | sort) ==
+      ["/language:actions", "/language:javascript-typescript", "/language:python"])
+    and all($exact[];
+      .tool.name == "CodeQL" and
+      .rules_count > 0 and
+      .results_count == 0 and
+      .error == "" and
+      .warning == "")
+' <<<"$CANDIDATE_CODEQL_ANALYSES"
+for selector in "$RELEASE_CANDIDATE_REF" "$RELEASE_CANDIDATE_SHA"; do
+  CANDIDATE_CODEQL_ALERTS="$(
+    gh api --method GET --paginate \
+      repos/swisspra/Pursers/code-scanning/alerts \
+      -f state=open -f ref="$selector" -f per_page=100 | jq -cs 'add'
+  )"
+  jq -e 'length == 0' <<<"$CANDIDATE_CODEQL_ALERTS"
+done
 ```
 
 Build all six wheels and the AionUI package twice in separate clean directories
@@ -173,7 +209,7 @@ def receipt(raw):
                 "compressed_size": info.compress_size,
                 "sha256": sha256(data),
             })
-        candidate = json.loads(archive.read("candidate.json"))
+        candidate = json.loads(archive.read("webui/candidate.json"))
     return {
         "filename": path.name,
         "size": len(payload),
@@ -246,6 +282,37 @@ jq -e --arg sha "$RELEASE_CANDIDATE_SHA" '
   ([.jobs[] | select(.name == "python-tests" and .conclusion == "success")] | length == 1) and
   ([.jobs[] | select(.name == "dashboard-ui-typecheck" and .conclusion == "success")] | length == 1)
 ' <<<"$CI_JSON"
+
+git fetch origin main
+RELEASE_MAIN_SHA="$(git rev-parse refs/remotes/origin/main)"
+test "$RELEASE_MAIN_SHA" = "$RELEASE_CANDIDATE_SHA"
+RELEASE_MAIN_REF=refs/heads/main
+MAIN_CODEQL_ANALYSES="$(
+  gh api --method GET --paginate \
+    repos/swisspra/Pursers/code-scanning/analyses \
+    -f ref="$RELEASE_MAIN_REF" -f per_page=100 | jq -cs 'add'
+)"
+jq -e --arg sha "$RELEASE_MAIN_SHA" --arg ref "$RELEASE_MAIN_REF" '
+  ([.[] | select(.commit_sha == $sha and .ref == $ref)]
+    | sort_by(.category, .created_at)
+    | group_by(.category)
+    | map(last)) as $exact
+  | (($exact | length) == 3)
+    and (($exact | map(.category) | sort) ==
+      ["/language:actions", "/language:javascript-typescript", "/language:python"])
+    and all($exact[];
+      .tool.name == "CodeQL" and
+      .rules_count > 0 and
+      .results_count == 0 and
+      .error == "" and
+      .warning == "")
+' <<<"$MAIN_CODEQL_ANALYSES"
+MAIN_CODEQL_ALERTS="$(
+  gh api --method GET --paginate \
+    repos/swisspra/Pursers/code-scanning/alerts \
+    -f state=open -f ref="$RELEASE_MAIN_REF" -f per_page=100 | jq -cs 'add'
+)"
+jq -e 'length == 0' <<<"$MAIN_CODEQL_ALERTS"
 
 git tag -s v5.0.0a26 "$RELEASE_CANDIDATE_SHA"
 git push origin v5.0.0a26
