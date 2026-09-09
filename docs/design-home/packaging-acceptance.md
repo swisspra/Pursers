@@ -11,7 +11,7 @@
 
 ### 2.1 AionUI extension ZIP
 
-`tools/aionui-extension/build.py` creates `pursers-aionui-0.1.0.zip`. Its allowlist contains exactly these 18 members:
+`tools/aionui-extension/build.py` creates `pursers-aionui-0.1.0.zip`. Its allowlist contains exactly these 26 members:
 
 | ZIP member | Runtime purpose |
 | --- | --- |
@@ -24,9 +24,17 @@
 | `door/DOOR_ONBOARDING_CONTRACT.md` | Shipped adapter contract |
 | `host/helper.cjs` | Loopback helper that serves the onboarding transport |
 | `host/HELPER_CONTRACT.md` | Shipped helper contract |
+| `result_visibility/adapter.cjs` | Result visibility adapter |
+| `result_visibility/FEATURE_CONTRACT.md` | Shipped result visibility contract |
 | `security/loopback.cjs` | Loopback/origin enforcement |
+| `seat_lifecycle/adapter.cjs` | Seat lifecycle adapter |
+| `seat_lifecycle/FEATURE_CONTRACT.md` | Shipped seat lifecycle contract |
 | `team/adapter.cjs` | Team status, plan, apply, pause, and stop adapter |
 | `team/TEAM_ADAPTER_CONTRACT.md` | Shipped team adapter contract |
+| `team_lifecycle/adapter.cjs` | Standalone group lifecycle adapter |
+| `team_lifecycle/FEATURE_CONTRACT.md` | Shipped standalone group lifecycle contract |
+| `ticket_lifecycle/adapter.cjs` | Ticket lifecycle adapter |
+| `ticket_lifecycle/FEATURE_CONTRACT.md` | Shipped ticket lifecycle contract |
 | `webui/app.js` | Settings-tab client |
 | `webui/candidate.json` | Deterministic candidate commit binding |
 | `webui/index.html` | Settings-tab entry point |
@@ -62,7 +70,16 @@ The four assistant declarations (`pursers-worker-codex`, `pursers-worker-claude`
 | `/pursers/onboarding/rotate` | `webui/routes.js` via `host/helper.cjs` | POST |
 | `/pursers/onboarding/recover` | `webui/routes.js` via `host/helper.cjs` | POST |
 
-The packaged `README.md` truthfully contains a documentary reference to `tools/aionui-extension/build.py`, and `IMPORT_PROVENANCE.md` plus the three shipped contracts (`door/DOOR_ONBOARDING_CONTRACT.md`, `host/HELPER_CONTRACT.md`, `team/TEAM_ADAPTER_CONTRACT.md`) cite source paths because provenance and contract text is their purpose. The automated gate exempts exactly those five documentation members while proving every remaining member, including `contexts/*.md`, is free of `tools/` and `packages/` source-tree paths. It also resolves every HTML `src`/`href` in the settings-tab entry point to an actual packaged member of the `pursers-home` bundle directory. This is runtime dependency proof, not the false claim that no packaged text mentions a source path.
+The packaged `README.md` truthfully contains a documentary reference to
+`tools/aionui-extension/build.py`. `IMPORT_PROVENANCE.md` and the seven shipped
+contracts cite source paths because provenance and contract text is their
+purpose. The WebUI markup also shows `tools/aionui-extension` as a harmless
+example for the user-entered `related_files` field. The automated gate exempts
+exactly those nine documentation members and that display-only entry point
+while proving every executable runtime member and `contexts/*.md` are free of
+`tools/` and `packages/` source-tree dependencies. It separately resolves every
+HTML `src`/`href` in the settings-tab entry point to an actual packaged member
+of the `pursers-home` bundle directory.
 
 `webui/routes.js` invokes the separately installed `pursers-wait-bridge`. The ZIP intentionally does not bundle that executable or its Python dependencies. Missing-bridge behavior is covered by the route tests and returns bounded `bridge_not_installed` data without echoing a door.
 
@@ -179,14 +196,19 @@ from zipfile import ZipFile
 path = Path(__import__("os").environ["GATE_ROOT"]) / "pursers-aionui-0.1.0.zip"
 with ZipFile(path) as archive:
     names = archive.namelist()
-    assert len(names) == 18
+    assert len(names) == 26
     member_bytes = sum(item.file_size for item in archive.infolist())
     documentation = {
         "README.md",
         "IMPORT_PROVENANCE.md",
         "door/DOOR_ONBOARDING_CONTRACT.md",
         "host/HELPER_CONTRACT.md",
+        "result_visibility/FEATURE_CONTRACT.md",
+        "seat_lifecycle/FEATURE_CONTRACT.md",
         "team/TEAM_ADAPTER_CONTRACT.md",
+        "team_lifecycle/FEATURE_CONTRACT.md",
+        "ticket_lifecycle/FEATURE_CONTRACT.md",
+        "webui/index.html",
     }
     assert documentation <= set(names)
     runtime_names = [name for name in names if name not in documentation]
