@@ -16,6 +16,9 @@ The helper:
 - caps request bodies at 64 KiB and never returns door values;
 - defers MCP registration to the authenticated same-origin AionCore API; and
 - removes AionUi conversation runtime variables before Team CLI calls.
+- keeps one persistent board session for ticket reads, unassigned creation, and
+  Central-authorized cancellation; and
+- gives that dedicated actor neither work nor review capability.
 
 The last rule is deliberate. A settings iframe has no supported Team
 conversation context in AionUi 2.2.1. Team status, plan, apply, pause, and stop
@@ -23,6 +26,12 @@ therefore return the host's `runtime_context_missing` response. Home presents
 the actionable fallback—open or create the Team in AionUi and use its native
 Team controls—without treating local validation or a mock roster as host
 execution.
+
+Ticket routes are `/pursers/tickets`, `/pursers/tickets/status`,
+`/pursers/tickets/get`, `/pursers/tickets/create`, and
+`/pursers/tickets/cancel`. They are pinned to `--board` and inherit the exact
+Origin, helper token, body-size, and no-store controls above. No claim, submit,
+or review route exists. The helper closes its ticket sidecar during shutdown.
 
 Start the helper after obtaining the AionCore origin used by the installed
 settings iframe:

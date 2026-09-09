@@ -4,6 +4,7 @@ const { execFile } = require('node:child_process');
 const { createDoorOnboarding } = require('../door/adapter.cjs');
 const { isLoopbackHostname } = require('../security/loopback.cjs');
 const { createTeamAdapter } = require('../team/adapter.cjs');
+const { createTicketLifecycleAdapter } = require('../ticket_lifecycle/adapter.cjs');
 
 const BRIDGE_COMMAND = 'pursers-wait-bridge';
 const INSTALL_HINT =
@@ -75,6 +76,17 @@ function teamResponseStatus(value) {
   return 422;
 }
 
+function ticketResponseStatus(value) {
+  if (value.ok) return 200;
+  const code = value.error && value.error.code;
+  if (code === 'permission_denied') return 403;
+  if (code === 'ticket_not_found') return 404;
+  if (code === 'conflict') return 409;
+  if (code === 'backend_unavailable' || code === 'not_connected') return 503;
+  if (code === 'board_mismatch' || code === 'invalid_input') return 422;
+  return 502;
+}
+
 async function readBody(request) {
   try {
     const body = await request.json();
@@ -105,6 +117,9 @@ function createHandlers(dependencies = {}) {
     importMcp,
   });
   const team = createTeamAdapter({ runCli: dependencies.runTeamCli });
+  const tickets = dependencies.runTicketLifecycle && expectedBoard
+    ? createTicketLifecycleAdapter({ run: dependencies.runTicketLifecycle, expectedBoard })
+    : null;
 
   function scopedStatus(current) {
     if (!current.ok || !expectedBoard) return current;
@@ -175,6 +190,20 @@ function createHandlers(dependencies = {}) {
     return jsonResponse(teamResponseStatus(value), value);
   }
 
+  async function ticketTyped(request, operation) {
+    if (!tickets) return jsonResponse(503, {
+      ok: false,
+      error: { code: 'not_connected', message: 'Connect the authenticated loopback helper first.', retryable: true },
+    });
+    const body = request.method === 'GET' ? {} : await readBody(request);
+    if (body === null) return jsonResponse(400, {
+      ok: false,
+      error: { code: 'invalid_input', message: 'Request body must be a JSON object.', retryable: false },
+    });
+    const value = await tickets[operation](body);
+    return jsonResponse(ticketResponseStatus(value), value);
+  }
+
   async function handle(request) {
     const url = new URL(request.url);
     if (!loopbackRequest(request, dependencies.allowedOrigin)) return jsonResponse(403, { ok: false, error: 'loopback_same_origin_required' });
@@ -194,10 +223,15 @@ function createHandlers(dependencies = {}) {
     if (request.method === 'POST' && url.pathname === '/pursers/team/apply') return teamTyped(request, 'apply');
     if (request.method === 'POST' && url.pathname === '/pursers/team/seat/pause') return teamTyped(request, 'pause');
     if (request.method === 'POST' && url.pathname === '/pursers/team/seat/stop') return teamTyped(request, 'stop');
+    if (request.method === 'GET' && url.pathname === '/pursers/tickets/status') return ticketTyped(request, 'status');
+    if (request.method === 'GET' && url.pathname === '/pursers/tickets') return ticketTyped(request, 'list');
+    if (request.method === 'POST' && url.pathname === '/pursers/tickets/get') return ticketTyped(request, 'get');
+    if (request.method === 'POST' && url.pathname === '/pursers/tickets/create') return ticketTyped(request, 'create');
+    if (request.method === 'POST' && url.pathname === '/pursers/tickets/cancel') return ticketTyped(request, 'cancel');
     return jsonResponse(404, { ok: false, error: 'not_found' });
   }
 
-  return { handle, join, onboarding, status, team };
+  return { handle, join, onboarding, status, team, tickets };
 }
 
 const defaultHandlers = createHandlers();

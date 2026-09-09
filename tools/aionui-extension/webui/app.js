@@ -21,6 +21,10 @@ const startTeam = $('#start-team');
 const rosterList = $('#roster-list');
 const rosterEmpty = $('#roster-empty');
 const stopDialog = $('#stop-dialog');
+const ticketForm = $('#ticket-form');
+const ticketMessage = $('#ticket-message');
+const ticketList = $('#ticket-list');
+const ticketEmpty = $('#ticket-empty');
 
 const state = {
   helper: null,
@@ -53,6 +57,12 @@ const ERROR_COPY = {
   transport_unavailable: 'The authenticated local helper is unavailable. Nothing changed.',
   schema_validation_failed: 'Check the highlighted Team fields and retry.',
   invalid_json: 'The local host rejected an invalid request. Reload and retry.',
+  not_connected: 'Connect a door for this board, then retry.',
+  board_mismatch: 'This helper is pinned to a different board.',
+  backend_unavailable: 'The board connection is unavailable. Restart or reconnect the helper, then retry.',
+  ticket_not_found: 'That ticket is no longer present. Refresh the list.',
+  conflict: 'The ticket changed. Refresh its persisted state before retrying.',
+  invalid_input: 'Correct the ticket fields and retry.',
 };
 
 const HELPER_TOKEN_HEADER = 'x-pursers-home-token';
@@ -148,7 +158,7 @@ async function connectHelper(event) {
   showHelper(result);
   setMessage($('#helper-message'), `Connected to the helper for board ${result.board}.`, 'success');
   showGlobal('Local helper connected', `Pursers Home is bound to board ${result.board}. Refreshing redacted status.`, 'info');
-  await Promise.all([loadConnection(), loadTeamStatus()]);
+  await Promise.all([loadConnection(), loadTeamStatus(), loadTickets()]);
 }
 
 async function importMcpDefinition(result) {
@@ -659,6 +669,108 @@ async function stopSeat() {
   await loadTeamStatus();
 }
 
+function splitTicketList(value) {
+  return value.split(/[,\n]/).map((item) => item.trim()).filter(Boolean);
+}
+
+function ticketPayload() {
+  const payload = {
+    title: $('#ticket-title').value.trim(),
+    description: $('#ticket-description').value.trim(),
+    target_url: $('#ticket-target').value.trim(),
+    scope: $('#ticket-scope').value,
+    priority: $('#ticket-priority').value,
+    tier: Number($('#ticket-tier').value),
+    required_fields: splitTicketList($('#ticket-required').value),
+  };
+  for (const [id, key] of [['ticket-tags', 'tags'], ['ticket-files', 'related_files'], ['ticket-forbidden', 'forbidden']]) {
+    const items = splitTicketList($(`#${id}`).value);
+    if (items.length) payload[key] = items;
+  }
+  return payload;
+}
+
+function ticketTone(status) {
+  if (status === 'closed') return 'ready';
+  if (['canceled', 'terminated', 'rejected'].includes(status)) return 'error';
+  if (['submitted', 'reviewing', 'in_review'].includes(status)) return 'warning';
+  return 'neutral';
+}
+
+function makeTicketRow(ticket) {
+  const row = document.createElement('article');
+  row.className = 'ticket-row';
+  row.tabIndex = 0;
+  row.setAttribute('aria-label', `${ticket.ticket_id || 'Ticket'}: ${ticket.title || 'Untitled'}, ${ticket.status || 'unknown'}`);
+  const heading = document.createElement('strong');
+  heading.textContent = ticket.title || 'Untitled ticket';
+  const id = document.createElement('code');
+  id.textContent = ticket.ticket_id || 'Unknown ID';
+  const status = document.createElement('span');
+  setPill(status, ticket.status || 'unknown', ticketTone(ticket.status));
+  const detail = document.createElement('p');
+  detail.textContent = [ticket.priority, ticket.assigned_to ? `assigned to ${ticket.assigned_to}` : 'unassigned', ticket.created_by ? `created by ${ticket.created_by}` : null].filter(Boolean).join(' · ');
+  const actions = document.createElement('div');
+  actions.className = 'row-actions';
+  if (!['closed', 'canceled', 'terminated'].includes(ticket.status)) {
+    const cancel = document.createElement('button');
+    cancel.type = 'button';
+    cancel.className = 'button button-danger-quiet';
+    cancel.textContent = 'Cancel ticket';
+    cancel.addEventListener('click', () => cancelTicket(ticket, cancel));
+    actions.append(cancel);
+  }
+  row.append(heading, id, status, detail, actions);
+  return row;
+}
+
+async function loadTickets() {
+  const { response, result } = await api('/pursers/tickets');
+  if (!response?.ok || !result.ok) {
+    ticketList.replaceChildren();
+    ticketEmpty.hidden = false;
+    setPill($('#ticket-pill'), 'Needs attention', 'warning');
+    setMessage(ticketMessage, messageFor(result, 'Tickets could not be loaded.'), 'error');
+    return;
+  }
+  const tickets = Array.isArray(result.tickets) ? result.tickets : [];
+  ticketList.replaceChildren(...tickets.map(makeTicketRow));
+  ticketEmpty.hidden = tickets.length > 0;
+  setPill($('#ticket-pill'), `${tickets.length} persisted`, tickets.length ? 'ready' : 'neutral');
+}
+
+async function createTicket(event) {
+  event.preventDefault();
+  if (!ticketForm.reportValidity()) return;
+  const button = $('#create-ticket');
+  setBusy(button, true, 'Creating…');
+  const { response, result } = await api('/pursers/tickets/create', { json: ticketPayload() });
+  setBusy(button, false);
+  if (!response?.ok || !result.ok) {
+    setMessage(ticketMessage, messageFor(result, 'Ticket creation failed. Nothing was synthesized.'), 'error');
+    return;
+  }
+  setMessage(ticketMessage, `Created ${result.ticket.ticket_id} as unassigned board work.`, 'success');
+  ticketForm.reset();
+  $('#ticket-required').value = 'branch_and_commit\nfiles_changed\ntest_output';
+  await loadTickets();
+}
+
+async function cancelTicket(ticket, button) {
+  if (!window.confirm(`Cancel ${ticket.ticket_id}? Central will verify your authority.`)) return;
+  setBusy(button, true, 'Canceling…');
+  const { response, result } = await api('/pursers/tickets/cancel', {
+    json: { ticket_id: ticket.ticket_id, reason: 'Canceled by an authorized operator from Pursers Home.' },
+  });
+  setBusy(button, false);
+  if (!response?.ok || !result.ok) {
+    setMessage(ticketMessage, messageFor(result, 'Central refused cancellation. Nothing changed.'), 'error');
+    return;
+  }
+  setMessage(ticketMessage, `${ticket.ticket_id} is canceled in persisted board state.`, 'success');
+  await loadTickets();
+}
+
 async function refreshAll() {
   if (!state.helper) {
     showGlobal('Connect the local helper first', 'Use the exact helper URL and access token. Neither value is persisted.', 'warning');
@@ -666,7 +778,7 @@ async function refreshAll() {
   }
   const button = $('#refresh-all');
   setBusy(button, true, 'Refreshing…');
-  await Promise.all([loadConnection(), loadTeamStatus()]);
+  await Promise.all([loadConnection(), loadTeamStatus(), loadTickets()]);
   setBusy(button, false);
 }
 
@@ -687,6 +799,8 @@ confirmStart.addEventListener('change', () => {
 startTeam.addEventListener('click', applyTeam);
 $('#refresh-team').addEventListener('click', loadTeamStatus);
 $('#refresh-roster').addEventListener('click', loadTeamStatus);
+$('#refresh-tickets').addEventListener('click', loadTickets);
+ticketForm.addEventListener('submit', createTicket);
 $('#refresh-all').addEventListener('click', refreshAll);
 $('#confirm-stop').addEventListener('click', (event) => {
   event.preventDefault();

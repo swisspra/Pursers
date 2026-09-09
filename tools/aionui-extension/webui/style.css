@@ -40,7 +40,13 @@ body {
 body,
 button,
 input,
-select {
+select,
+textarea {
+  font: inherit;
+}
+
+textarea {
+  resize: vertical;
   font: inherit;
 }
 
@@ -767,14 +773,16 @@ input:invalid:not(:placeholder-shown) {
 }
 
 .result-list,
-.roster-list {
+.roster-list,
+.ticket-list {
   display: grid;
   gap: 0.65rem;
   margin: 1rem 0;
 }
 
 .result-row,
-.roster-row {
+.roster-row,
+.ticket-row {
   display: grid;
   grid-template-columns: minmax(130px, 0.7fr) minmax(120px, auto) minmax(0, 1.6fr) auto;
   align-items: center;
@@ -786,15 +794,38 @@ input:invalid:not(:placeholder-shown) {
 }
 
 .result-row strong,
-.roster-row strong {
+.roster-row strong,
+.ticket-row strong {
   overflow-wrap: anywhere;
   font-size: 0.83rem;
 }
 
 .result-row p,
-.roster-row p {
+.roster-row p,
+.ticket-row p {
   margin: 0;
   font-size: 0.75rem;
+}
+
+.ticket-row {
+  display: grid;
+  grid-template-columns: minmax(140px, 1.2fr) auto auto;
+  gap: 0.55rem 0.8rem;
+  align-items: center;
+  padding: 0.8rem;
+  border: 1px solid var(--line);
+  border-radius: 13px;
+  background: #faf8f3;
+}
+
+.ticket-row p,
+.ticket-row .row-actions {
+  grid-column: 1 / -1;
+}
+
+.ticket-row:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 2px;
 }
 
 .row-actions {
@@ -984,7 +1015,8 @@ dialog::backdrop {
   }
 
   .result-row,
-  .roster-row {
+  .roster-row,
+  .ticket-row {
     grid-template-columns: 1fr;
   }
 

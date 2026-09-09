@@ -23,6 +23,8 @@ PACKAGE_FILES = (
     "security/loopback.cjs",
     "team/adapter.cjs",
     "team/TEAM_ADAPTER_CONTRACT.md",
+    "ticket_lifecycle/adapter.cjs",
+    "ticket_lifecycle/FEATURE_CONTRACT.md",
     "webui/app.js",
     "webui/candidate.json",
     "webui/index.html",
