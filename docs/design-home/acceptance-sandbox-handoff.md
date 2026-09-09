@@ -50,12 +50,23 @@ notarization, expected CDHash, and that AionCore is inside the signed bundle.
 It restricts `--identity-mode` to `webui` or `aionpro`, records the selected
 mode in `handoff.json`, and passes it explicitly to AionCore so the verifier's
 signed-listener identity check cannot silently fall back to an unsigned mode.
+For `aionpro`, first create a new sandbox-only bootstrap secret file outside
+the repository and candidate checkout, owned by the current operator and mode
+`0600`, then add
+`--aionpro-bootstrap-secret-file /PRIVATE/PATH/aionpro-bootstrap-secret`.
+The preparer refuses a missing, symlinked, incorrectly owned, or incorrectly
+permissioned file before creating the handoff. `webui` refuses that option.
+At launch, `start-aioncore.sh` unsets any ambient
+`AIONCORE_BOOTSTRAP_SECRET`; its private launcher rechecks the explicit file
+and supplies its value only to AionCore. The value is never placed in scripts,
+metadata, command lines, or output. `handoff.json` records only the file path,
+source action, requirement state, and `value_recorded: false`.
 It then installs the exact ZIP into an isolated extension directory. The output
 directory and subdirectories are mode `0700`; metadata, assertions,
 and the random helper token are mode `0600`. The token value is never printed
 or copied into metadata. Run `start-aioncore.sh` and `start-helper.sh` in
-separate terminals. The former sets only the isolated extension/data paths; the
-latter binds the approved helper to the
+separate terminals. The former sets only the isolated extension/data paths and,
+for `aionpro`, the validated sandbox-only bootstrap secret; the latter binds the approved helper to the
 selected sandbox board and exact loopback origin. `reviewer-commands.sh`
 installs the verifier-owned observer, runs doctor, capture, validation, and the
 live host gate. The independent verifier must replace each empty assertion

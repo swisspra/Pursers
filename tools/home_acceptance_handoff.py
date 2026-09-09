@@ -26,6 +26,62 @@ OBSERVATIONS = (
     "pause_resume_stop", "clean_reconnect_after_rotation",
 )
 
+AIONCORE_LAUNCHER = """#!/usr/bin/env python3
+import os
+import stat
+import sys
+
+
+def fail(message: str) -> None:
+    print(f"AIONPRO_BOOTSTRAP_SECRET_INVALID: {message}", file=sys.stderr)
+    raise SystemExit(2)
+
+
+if len(sys.argv) < 4:
+    fail("launcher arguments are incomplete")
+identity_mode, secret_path = sys.argv[1:3]
+command = sys.argv[3:]
+environment = os.environ.copy()
+environment.pop("AIONCORE_BOOTSTRAP_SECRET", None)
+if identity_mode == "aionpro":
+    if secret_path == "-":
+        fail("an explicit sandbox secret file is required")
+    try:
+        supplied = os.lstat(secret_path)
+        if stat.S_ISLNK(supplied.st_mode):
+            fail("secret file must not be a symlink")
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(secret_path, flags)
+    except OSError as error:
+        fail(f"cannot open secret file: {error.strerror or error.__class__.__name__}")
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            fail("secret file must be regular")
+        if info.st_uid != os.geteuid():
+            fail("secret file must be owned by the current operator")
+        if stat.S_IMODE(info.st_mode) != 0o600:
+            fail("secret file mode must be exactly 0600")
+        raw = os.read(descriptor, 4097)
+    finally:
+        os.close(descriptor)
+    if not raw or len(raw) > 4096:
+        fail("secret must contain 1 to 4096 bytes")
+    value = raw[:-1] if raw.endswith(b"\\n") else raw
+    if not value or b"\\n" in value or b"\\r" in value or b"\\0" in value:
+        fail("secret must be one non-empty line")
+    try:
+        environment["AIONCORE_BOOTSTRAP_SECRET"] = value.decode("utf-8")
+    except UnicodeDecodeError:
+        fail("secret must be UTF-8")
+elif identity_mode == "webui":
+    if secret_path != "-":
+        fail("webui mode must not receive an AionPro secret file")
+else:
+    fail("identity mode must be webui or aionpro")
+os.execve(command[0], command, environment)
+"""
+
 
 class HandoffError(ValueError):
     pass
@@ -68,6 +124,28 @@ def _regular(path: Path, label: str, *, executable: bool = False) -> Path:
     if executable and not os.access(path, os.X_OK):
         raise HandoffError(f"{label} must be executable: {path}")
     return path.resolve()
+
+
+def _private_secret(path: str) -> Path:
+    supplied = _supplied(path, "AionPro bootstrap secret file")
+    resolved = _regular(supplied, "AionPro bootstrap secret file")
+    info = supplied.lstat()
+    if info.st_uid != os.geteuid():
+        raise HandoffError("AionPro bootstrap secret file must be owned by the current operator")
+    if stat.S_IMODE(info.st_mode) != 0o600:
+        raise HandoffError("AionPro bootstrap secret file mode must be exactly 0600")
+    with supplied.open("rb") as stream:
+        raw = stream.read(4097)
+    if not raw or len(raw) > 4096:
+        raise HandoffError("AionPro bootstrap secret must contain 1 to 4096 bytes")
+    value = raw[:-1] if raw.endswith(b"\n") else raw
+    if not value or b"\n" in value or b"\r" in value or b"\0" in value:
+        raise HandoffError("AionPro bootstrap secret must be one non-empty line")
+    try:
+        value.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise HandoffError("AionPro bootstrap secret must be UTF-8") from error
+    return resolved
 
 
 def _inside(path: Path, parent: Path) -> bool:
@@ -208,6 +286,15 @@ def prepare(args: argparse.Namespace) -> dict[str, object]:
         raise HandoffError("board must start with sandbox- or test-")
     if args.identity_mode not in {"webui", "aionpro"}:
         raise HandoffError("identity mode must be webui or aionpro")
+    secret_argument = getattr(args, "aionpro_bootstrap_secret_file", None)
+    if args.identity_mode == "aionpro":
+        if not secret_argument:
+            raise HandoffError("aionpro identity mode requires --aionpro-bootstrap-secret-file")
+        aionpro_secret = _private_secret(secret_argument)
+    else:
+        if secret_argument:
+            raise HandoffError("--aionpro-bootstrap-secret-file is valid only with aionpro identity mode")
+        aionpro_secret = None
     origin = _validate_origin(args.origin)
     if not args.page_path.startswith("/api/extensions/") or ".." in Path(args.page_path).parts:
         raise HandoffError("page path must be an absolute AionUi extension asset path")
@@ -284,9 +371,13 @@ def prepare(args: argparse.Namespace) -> dict[str, object]:
         assertion_paths[observation] = root / f"{observation}.assertions.json"
         _write(assertion_paths[observation], "[]\n", 0o600)
 
+    launcher = root / "launch-aioncore.py"
+    _write(launcher, AIONCORE_LAUNCHER, 0o700)
     runner = str(observer_runner)
     report = evidence_dir / "home-acceptance.json"
-    core_command = [str(aioncore), "--host", urlsplit(origin).hostname or "127.0.0.1",
+    core_command = [sys.executable, str(launcher), args.identity_mode,
+                    str(aionpro_secret) if aionpro_secret else "-", str(aioncore),
+                    "--host", urlsplit(origin).hostname or "127.0.0.1",
                     "--port", str(urlsplit(origin).port), "--data-dir", str(core_data),
                     "--app-version", args.host_version, "--identity-mode", args.identity_mode]
     helper_command = [
@@ -350,7 +441,9 @@ def prepare(args: argparse.Namespace) -> dict[str, object]:
         "done\n"
     )
     _write(root / "start-aioncore.sh", start_text(
-        core_command, "aioncore.pid", "export AIONUI_EXTENSIONS_PATH=" + shlex.quote(str(extensions)) + "\n"
+        core_command, "aioncore.pid",
+        "unset AIONCORE_BOOTSTRAP_SECRET\n"
+        "export AIONUI_EXTENSIONS_PATH=" + shlex.quote(str(extensions)) + "\n",
     ), 0o700)
     _write(root / "start-helper.sh", start_text(helper_command, "helper.pid"), 0o700)
     _write(root / "reviewer-commands.sh", reviewer_text, 0o700)
@@ -378,7 +471,16 @@ def prepare(args: argparse.Namespace) -> dict[str, object]:
             "status": "required",
             "action": "Sign in or pair the isolated AionUi sandbox and issue its sandbox-only door to the independent verifier.",
         },
-        "secrets": {"helper_token": str(token), "value_recorded": False},
+        "secrets": {
+            "helper_token": str(token),
+            "value_recorded": False,
+            "aionpro_bootstrap_secret": {
+                "required": args.identity_mode == "aionpro",
+                "source": "explicit-private-file" if aionpro_secret else "not-used",
+                "path": str(aionpro_secret) if aionpro_secret else None,
+                "value_recorded": False,
+            },
+        },
         "missing_capabilities": ["result_visibility", "seat_lifecycle", "team_lifecycle", "ticket_lifecycle"],
     }
     _write(root / "handoff.json", json.dumps(manifest, indent=2, sort_keys=True) + "\n", 0o600)
@@ -412,6 +514,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--codesign", default="/usr/bin/codesign")
     parser.add_argument("--host-version", default="2.2.1")
     parser.add_argument("--identity-mode", choices=("webui", "aionpro"), required=True)
+    parser.add_argument("--aionpro-bootstrap-secret-file")
     parser.add_argument("--runtime-commit", required=True)
     parser.add_argument("--core-version", default="0.2.1")
     parser.add_argument("--task-space", default="pursers-home-acceptance")
