@@ -8,6 +8,7 @@ const {
   normalizeTicket,
 } = require('../result_visibility/adapter.cjs');
 const {
+  MAX_FLEET_BODY_BYTES,
   TOKEN_HEADER,
   createFleetResultsFetcher,
   createHelperServer,
@@ -15,6 +16,7 @@ const {
 
 const ORIGIN = 'http://127.0.0.1:25808';
 const TOKEN = 'a'.repeat(64);
+const CENTRAL = 'work';
 
 function ticket(id, state = 'pending') {
   return {
@@ -45,7 +47,9 @@ function ticket(id, state = 'pending') {
 test('lists bounded persisted result states for the pinned board', async () => {
   const feature = createResultVisibility({
     expectedBoard: 'sandbox-home',
-    fetchBoard: async (board) => ({
+    expectedCentral: CENTRAL,
+    fetchBoard: async (board, central) => ({
+      central,
       board: { board_id: board },
       generated_at: '2030-01-01T12:00:00+00:00',
       tickets: [ticket('TK-pending'), ticket('TK-approved', 'approved')],
@@ -63,7 +67,9 @@ test('lists bounded persisted result states for the pinned board', async () => {
 test('filters one ticket and reports honest missing state', async () => {
   const feature = createResultVisibility({
     expectedBoard: 'sandbox-home',
+    expectedCentral: CENTRAL,
     fetchBoard: async () => ({
+      central: CENTRAL,
       board: { board_id: 'sandbox-home' },
       tickets: [ticket('TK-one', 'missing')],
     }),
@@ -79,10 +85,12 @@ test('filters one ticket and reports honest missing state', async () => {
 test('refuses wrong board and maps backend failure without leaking detail', async () => {
   const wrongBoard = createResultVisibility({
     expectedBoard: 'sandbox-home',
-    fetchBoard: async () => ({ board: { board_id: 'production' }, tickets: [] }),
+    expectedCentral: CENTRAL,
+    fetchBoard: async () => ({ central: CENTRAL, board: { board_id: 'production' }, tickets: [] }),
   });
   const failed = createResultVisibility({
     expectedBoard: 'sandbox-home',
+    expectedCentral: CENTRAL,
     fetchBoard: async () => {
       throw new Error('secret backend detail');
     },
@@ -102,9 +110,10 @@ test('rejects invalid filters before calling the backend', async () => {
   let calls = 0;
   const feature = createResultVisibility({
     expectedBoard: 'sandbox-home',
+    expectedCentral: CENTRAL,
     fetchBoard: async () => {
       calls += 1;
-      return { board: { board_id: 'sandbox-home' }, tickets: [] };
+      return { central: CENTRAL, board: { board_id: 'sandbox-home' }, tickets: [] };
     },
   });
 
@@ -127,7 +136,9 @@ test('bounds rows and strips unsafe artifact fields', async () => {
   const rows = Array.from({ length: MAX_RESULTS + 5 }, (_, index) => ticket(`TK-${index}`));
   const feature = createResultVisibility({
     expectedBoard: 'sandbox-home',
+    expectedCentral: CENTRAL,
     fetchBoard: async () => ({
+      central: CENTRAL,
       board: { board_id: 'sandbox-home' },
       tickets: [unsafe, ...rows],
     }),
@@ -148,14 +159,15 @@ test('authenticated helper exposes only the configured board results', async () 
   let calls = 0;
   const helper = createHelperServer({
     board: 'sandbox-home',
+    central: CENTRAL,
     origin: ORIGIN,
     token: TOKEN,
     port: 0,
     runBridge: async () => '',
     runTeamCli: async () => ({ success: false }),
-    fetchResults: async (board) => {
+    fetchResults: async (board, central) => {
       calls += 1;
-      return { board: { board_id: board }, tickets: [ticket('TK-one')] };
+      return { central, board: { board_id: board }, tickets: [ticket('TK-one')] };
     },
   });
   const address = await helper.start();
@@ -195,12 +207,89 @@ test('Fleet fetcher is loopback-only and forwards no credentials', async () => {
     },
   );
 
-  await fetchBoard('sandbox-home');
-  assert.equal(calls[0].url, 'http://127.0.0.1:8899/api/board/sandbox-home');
+  await fetchBoard('sandbox-home', CENTRAL);
+  assert.equal(calls[0].url, 'http://127.0.0.1:8899/api/board/sandbox-home?central=work');
   assert.deepEqual(calls[0].options.headers, { accept: 'application/json' });
   assert.equal(calls[0].options.credentials, 'omit');
   assert.throws(
     () => createFleetResultsFetcher('https://fleet.example'),
     /loopback/,
   );
+});
+
+test('Central and board are both pinned when duplicate board IDs exist', async () => {
+  const domains = {
+    work: { central: 'work', board: { board_id: 'shared' }, tickets: [ticket('TK-work')] },
+    personal: { central: 'personal', board: { board_id: 'shared' }, tickets: [ticket('TK-personal')] },
+  };
+  const feature = createResultVisibility({
+    expectedBoard: 'shared',
+    expectedCentral: 'personal',
+    fetchBoard: async (board, central) => {
+      assert.equal(board, 'shared');
+      return domains[central];
+    },
+  });
+
+  const value = await feature.read();
+  assert.equal(value.central, 'personal');
+  assert.deepEqual(value.results.map((item) => item.ticket_id), ['TK-personal']);
+
+  const wrongDomain = createResultVisibility({
+    expectedBoard: 'shared',
+    expectedCentral: 'personal',
+    fetchBoard: async () => domains.work,
+  });
+  const missingDomain = createResultVisibility({
+    expectedBoard: 'shared',
+    expectedCentral: 'personal',
+    fetchBoard: async () => ({ board: { board_id: 'shared' }, tickets: [] }),
+  });
+  assert.equal((await wrongDomain.read()).code, 'invalid_backend_response');
+  assert.equal((await missingDomain.read()).code, 'invalid_backend_response');
+});
+
+test('Fleet fetcher cancels an oversized stream despite absent or false length', async () => {
+  for (const declared of [null, '0']) {
+    let reads = 0;
+    let cancelled = false;
+    const fetchBoard = createFleetResultsFetcher('http://127.0.0.1:8899', async () => ({
+      ok: true,
+      headers: new Headers(declared === null ? {} : { 'content-length': declared }),
+      body: {
+        getReader() {
+          return {
+            async read() {
+              reads += 1;
+              return { done: false, value: new Uint8Array(reads === 1 ? MAX_FLEET_BODY_BYTES : 1) };
+            },
+            async cancel() { cancelled = true; },
+          };
+        },
+      },
+    }));
+
+    await assert.rejects(fetchBoard('shared', 'work'), /too large/);
+    assert.equal(reads, 2);
+    assert.equal(cancelled, true);
+  }
+});
+
+test('Fleet fetcher cancels declared oversized bodies before reading', async () => {
+  let reads = 0;
+  let cancelled = false;
+  const fetchBoard = createFleetResultsFetcher('http://127.0.0.1:8899', async () => ({
+    ok: true,
+    headers: new Headers({ 'content-length': String(MAX_FLEET_BODY_BYTES + 1) }),
+    body: {
+      async cancel() { cancelled = true; },
+      getReader() {
+        return { async read() { reads += 1; return { done: true }; } };
+      },
+    },
+  }));
+
+  await assert.rejects(fetchBoard('shared', 'work'), /too large/);
+  assert.equal(reads, 0);
+  assert.equal(cancelled, true);
 });

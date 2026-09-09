@@ -1,6 +1,7 @@
 'use strict';
 
 const SAFE_BOARD = /^[A-Za-z0-9._-]{1,80}$/;
+const SAFE_CENTRAL = /^[A-Za-z0-9._-]{1,80}$/;
 const SAFE_TICKET = /^[A-Za-z0-9._-]{1,120}$/;
 const SAFE_BRANCH = /^[A-Za-z0-9._/-]{1,200}$/;
 const FULL_SHA = /^[0-9a-f]{40}$/;
@@ -65,8 +66,9 @@ function normalizeTicket(ticket) {
   };
 }
 
-function createResultVisibility({ expectedBoard, fetchBoard }) {
+function createResultVisibility({ expectedBoard, expectedCentral, fetchBoard }) {
   if (!SAFE_BOARD.test(expectedBoard || '')) throw new Error('expectedBoard must be a safe board identifier');
+  if (!SAFE_CENTRAL.test(expectedCentral || '')) throw new Error('expectedCentral must be a safe Central label');
   if (typeof fetchBoard !== 'function') throw new Error('fetchBoard is required');
 
   async function read({ ticketId = null, state = null } = {}) {
@@ -78,13 +80,14 @@ function createResultVisibility({ expectedBoard, fetchBoard }) {
     }
     let raw;
     try {
-      raw = await fetchBoard(expectedBoard);
+      raw = await fetchBoard(expectedBoard, expectedCentral);
     } catch (_error) {
       return { ok: false, code: 'backend_unavailable', retryable: true };
     }
     if (
       !raw
       || typeof raw !== 'object'
+      || raw.central !== expectedCentral
       || raw.board?.board_id !== expectedBoard
       || !Array.isArray(raw.tickets)
     ) {
@@ -94,7 +97,7 @@ function createResultVisibility({ expectedBoard, fetchBoard }) {
     if (ticketId !== null) {
       const result = normalized.find((item) => item.ticket_id === ticketId);
       return result
-        ? { ok: true, board: expectedBoard, result }
+        ? { ok: true, central: expectedCentral, board: expectedBoard, result }
         : { ok: false, code: 'ticket_not_found', retryable: false };
     }
     const filtered = state === null
@@ -103,6 +106,7 @@ function createResultVisibility({ expectedBoard, fetchBoard }) {
     const results = filtered.slice(0, MAX_RESULTS);
     return {
       ok: true,
+      central: expectedCentral,
       board: expectedBoard,
       generated_at: text(raw.generated_at, 40),
       results,

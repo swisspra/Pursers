@@ -129,7 +129,7 @@ function loopbackHelperOrigin(value) {
 }
 
 function showHelper(status) {
-  for (const field of ['board', 'transport', 'core_version', 'team_context']) {
+  for (const field of ['board', 'central', 'transport', 'core_version', 'team_context']) {
     $(`[data-helper-field="${field}"]`).textContent = String(status[field] || '—').replaceAll('_', ' ');
   }
   setPill($('#helper-pill'), `Connected · ${status.board}`, 'ready');
