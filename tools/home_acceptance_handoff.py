@@ -20,6 +20,7 @@ import zipfile
 
 FULL_SHA = __import__("re").compile(r"[0-9a-f]{40}")
 SAFE_BOARD = __import__("re").compile(r"(?:sandbox|test)-[a-z0-9][a-z0-9._-]*")
+SAFE_CENTRAL = __import__("re").compile(r"[A-Za-z0-9._-]{1,80}")
 OBSERVATIONS = (
     "fresh_install", "door_connect", "team_setup", "six_workers_two_reviewers",
     "ticket_offer_claim", "ticket_submit_independent_review", "result_visible",
@@ -198,6 +199,50 @@ def _validate_origin(value: str) -> str:
     return value.rstrip("/")
 
 
+def _verify_bridge_runtime(bridge: Path) -> dict[str, object]:
+    environment = os.environ.copy()
+    environment.pop("PYTHONHOME", None)
+    environment.pop("PYTHONPATH", None)
+
+    def probe(arguments: list[str]) -> str:
+        try:
+            result = subprocess.run(
+                [str(bridge), *arguments],
+                capture_output=True,
+                check=False,
+                cwd=bridge.parent,
+                env=environment,
+                stdin=subprocess.DEVNULL,
+                text=True,
+                timeout=10,
+            )
+        except subprocess.TimeoutExpired as error:
+            raise HandoffError(
+                f"bridge runtime probe timed out: {' '.join(arguments)}"
+            ) from error
+        output = (result.stdout + "\n" + result.stderr).strip()
+        if result.returncode:
+            raise HandoffError(
+                f"bridge runtime probe failed: {' '.join(arguments)}"
+            )
+        return output
+
+    version = probe(["--version"])
+    if not version or "\n" in version or len(version) > 80:
+        raise HandoffError("bridge runtime returned an invalid version")
+    commands = ("ticket-lifecycle", "seat-lifecycle", "team-lifecycle")
+    for command in commands:
+        help_output = probe([command, "--help"])
+        if f"pursers-wait-bridge {command}" not in help_output:
+            raise HandoffError(f"bridge runtime lacks {command}")
+    return {
+        "binary": str(bridge),
+        "sha256": _sha256(bridge),
+        "version": version,
+        "verified_commands": list(commands),
+    }
+
+
 def _candidate_zip_commit(path: Path) -> str:
     try:
         with zipfile.ZipFile(path) as archive:
@@ -284,6 +329,8 @@ def prepare(args: argparse.Namespace) -> dict[str, object]:
         raise HandoffError("runtime commit must be a full lowercase 40-character SHA")
     if not SAFE_BOARD.fullmatch(args.board):
         raise HandoffError("board must start with sandbox- or test-")
+    if not SAFE_CENTRAL.fullmatch(args.central):
+        raise HandoffError("central must be a safe 1-80 character label")
     if args.identity_mode not in {"webui", "aionpro"}:
         raise HandoffError("identity mode must be webui or aionpro")
     secret_argument = getattr(args, "aionpro_bootstrap_secret_file", None)
@@ -329,6 +376,7 @@ def prepare(args: argparse.Namespace) -> dict[str, object]:
         raise HandoffError("helper SHA-256 does not match approved runtime provenance")
     node = _regular(_supplied(args.node, "node"), "node", executable=True)
     bridge = _regular(_supplied(args.bridge_bin, "bridge binary"), "bridge binary", executable=True)
+    bridge_runtime = _verify_bridge_runtime(bridge)
     aioncore = _regular(_supplied(args.aioncore_bin, "AionCore binary"), "AionCore binary", executable=True)
     ego_browser = _regular(
         _supplied(args.ego_browser, "ego-browser binary"), "ego-browser binary", executable=True
@@ -381,7 +429,8 @@ def prepare(args: argparse.Namespace) -> dict[str, object]:
                     "--port", str(urlsplit(origin).port), "--data-dir", str(core_data),
                     "--app-version", args.host_version, "--identity-mode", args.identity_mode]
     helper_command = [
-        str(node), str(helper), "--board", args.board, "--origin", origin,
+        str(node), str(helper), "--board", args.board, "--central", args.central,
+        "--origin", origin, "--port", str(args.helper_port),
         "--token-file", str(token), "--bridge-state-dir", str(bridge_state),
         "--bridge-bin", str(bridge), "--aioncore-bin", str(aioncore),
         "--core-version", args.core_version,
@@ -435,7 +484,7 @@ def prepare(args: argparse.Namespace) -> dict[str, object]:
         "  [ -f \"$pid_file\" ] || continue\n"
         "  pid=$(cat \"$pid_file\")\n"
         "  case \"$pid\" in (*[!0-9]*|'') exit 1;; esac\n"
-        "  command=$(ps -p \"$pid\" -o command=)\n"
+        "  command=$(ps -ww -p \"$pid\" -o command=)\n"
         "  case \"$command\" in (*\"$root\"*) kill \"$pid\";; (*) echo \"refusing unrelated pid $pid\" >&2; exit 1;; esac\n"
         "  rm \"$pid_file\"\n"
         "done\n"
@@ -452,10 +501,12 @@ def prepare(args: argparse.Namespace) -> dict[str, object]:
     manifest = {
         "schema_version": 1,
         "board": args.board,
+        "central": args.central,
         "origin": origin,
         "page": page,
         "candidate": {"commit": args.commit, "zip": str(package), "zip_sha256": _sha256(package)},
         "approved_runtime": {"commit": args.runtime_commit},
+        "bridge_runtime": bridge_runtime,
         "installed_extension": str(installed),
         "approved_observer": {
             "runner": str(observer_runner), "runner_sha256": args.observer_sha256,
@@ -494,7 +545,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--candidate-zip", required=True)
     parser.add_argument("--sandbox-root", required=True)
     parser.add_argument("--board", required=True)
+    parser.add_argument("--central", required=True)
     parser.add_argument("--origin", required=True)
+    parser.add_argument("--helper-port", type=int, choices=range(0, 65536), default=43121)
     parser.add_argument("--page-path", default="/api/extensions/pursers/assets/webui/index.html")
     parser.add_argument("--observer-runner", required=True)
     parser.add_argument("--observer-sha256", required=True)

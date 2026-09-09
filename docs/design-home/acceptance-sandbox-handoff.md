@@ -20,6 +20,7 @@ python3 tools/home_acceptance_handoff.py \
   --candidate-zip /PATH/TO/pursers-aionui-0.1.0.zip \
   --sandbox-root /PRIVATE/PATH/home-acceptance-handoff \
   --board sandbox-home-acceptance \
+  --central work \
   --origin http://127.0.0.1:25808 \
   --observer-runner /PATH/TO/APPROVED/OBSERVER/runner.py \
   --observer-sha256 FINAL_TRUSTED_RUNNER_SHA256 \
@@ -43,6 +44,24 @@ python3 tools/home_acceptance_handoff.py \
 The three observer source files must come from the final independently approved
 integration successor, have its exact reviewed hashes, and share one source
 directory. Never reuse hashes from a rejected or superseded candidate. The
+bridge executable must come from a fresh, exact-source installation. Build and
+install both wheels into a private environment, without consulting an index:
+
+```sh
+uv build --wheel --out-dir /PRIVATE/PATH/home-runtime-wheels packages/client
+uv build --wheel --out-dir /PRIVATE/PATH/home-runtime-wheels tools/wait-bridge
+uv venv --python 3.12 /PRIVATE/PATH/home-runtime
+uv pip install --python /PRIVATE/PATH/home-runtime/bin/python --no-index \
+  --find-links /PRIVATE/PATH/home-runtime-wheels pursers-wait-bridge
+/PRIVATE/PATH/home-runtime/bin/pursers-wait-bridge ticket-lifecycle --help
+/PRIVATE/PATH/home-runtime/bin/pursers-wait-bridge seat-lifecycle --help
+/PRIVATE/PATH/home-runtime/bin/pursers-wait-bridge team-lifecycle --help
+```
+
+The preparer repeats those lifecycle probes with a clean Python import path and
+records the exact bridge binary path, SHA-256, reported version, and verified
+commands in `handoff.json`. A legacy bridge fails before the output directory
+is created. The
 preparer does not create `--observer-install-dir`; the
 independent verifier creates it by running `reviewer-commands.sh`. The preparer
 verifies the AionUi bundle identifier, version, Developer ID,
@@ -67,7 +86,7 @@ and the random helper token are mode `0600`. The token value is never printed
 or copied into metadata. Run `start-aioncore.sh` and `start-helper.sh` in
 separate terminals. The former sets only the isolated extension/data paths and,
 for `aionpro`, the validated sandbox-only bootstrap secret; the latter binds the approved helper to the
-selected sandbox board and exact loopback origin. `reviewer-commands.sh`
+selected sandbox board, Central label, and exact loopback origin. `reviewer-commands.sh`
 installs the verifier-owned observer, runs doctor, capture, validation, and the
 live host gate. The independent verifier must replace each empty assertion
 list and capture all nine required observations; absent lifecycle capabilities

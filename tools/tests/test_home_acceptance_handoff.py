@@ -5,8 +5,11 @@ import json
 import os
 from pathlib import Path
 import plistlib
+import select
+import shutil
 import stat
 import subprocess
+import urllib.request
 import zipfile
 
 import pytest
@@ -51,10 +54,16 @@ def _args(tmp_path: Path):
         b"#!/bin/sh\ncase \"$1\" in (-dvvv) printf '%s\\n' 'Identifier=com.aionui.app' 'TeamIdentifier=52JQX2HUSC' 'Authority=Developer ID Application: AionUi Inc. (52JQX2HUSC)' 'Notarization Ticket=stapled' 'CDHash=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';; esac\n",
         executable=True,
     )
+    bridge = _file(
+        tmp_path / "bridge",
+        b"#!/bin/sh\ncase \"$1\" in\n  --version) echo 0.1.0a15;;\n  ticket-lifecycle|seat-lifecycle|team-lifecycle) test \"$2\" = --help && echo \"usage: pursers-wait-bridge $1\";;\n  *) exit 9;;\nesac\n",
+        executable=True,
+    )
     values = {
         "candidate_checkout": str(checkout), "commit": commit, "candidate_zip": str(package),
         "sandbox_root": str(tmp_path / "handoff"), "board": "sandbox-home-acceptance",
-        "origin": "http://127.0.0.1:25808", "page_path": "/api/extensions/pursers/assets/webui/index.html",
+        "central": "work", "origin": "http://127.0.0.1:25808", "helper_port": 0,
+        "page_path": "/api/extensions/pursers/assets/webui/index.html",
         "observer_runner": str(observer),
         "observer_sha256": hashlib.sha256(b"runner").hexdigest(),
         "observer_backend": str(backend), "observer_backend_sha256": hashlib.sha256(b"observer").hexdigest(),
@@ -62,7 +71,7 @@ def _args(tmp_path: Path):
         "observer_install_dir": str(tmp_path / "reviewer-owned-observer"),
         "helper": str(_file(tmp_path / "helper.cjs")), "helper_sha256": hashlib.sha256(b"x").hexdigest(),
         "node": str(_file(tmp_path / "node", executable=True)),
-        "bridge_bin": str(_file(tmp_path / "bridge", executable=True)),
+        "bridge_bin": str(bridge),
         "aioncore_bin": str(core),
         "ego_browser": str(_file(tmp_path / "ego-browser", executable=True)),
         "host_bundle": str(host), "host_cdhash": "b" * 40, "codesign": str(codesign),
@@ -90,6 +99,13 @@ def test_prepare_writes_private_reproducible_handoff(tmp_path: Path, capsys) -> 
     assert len(token) == 64
     assert token not in json.dumps(manifest)
     assert manifest["candidate"]["commit"] == args.commit
+    assert manifest["central"] == "work"
+    assert manifest["bridge_runtime"]["verified_commands"] == [
+        "ticket-lifecycle", "seat-lifecycle", "team-lifecycle",
+    ]
+    helper_start = (root / "start-helper.sh").read_text()
+    assert "--central \\\n  work" in helper_start
+    assert 'ps -ww -p "$pid" -o command=' in (root / "cleanup.sh").read_text()
     assert manifest["signed_host"]["identity_mode"] == "webui"
     core_start = (root / "start-aioncore.sh").read_text()
     assert "unset AIONCORE_BOOTSTRAP_SECRET" in core_start
@@ -120,6 +136,66 @@ def test_refuses_non_sandbox_board(tmp_path: Path, board: str) -> None:
     args.board = board
     with pytest.raises(handoff.HandoffError, match="board"):
         handoff.prepare(args)
+
+
+@pytest.mark.parametrize("central", ["", "work central", "/work", "a" * 81])
+def test_refuses_unsafe_central(tmp_path: Path, central: str) -> None:
+    args = _args(tmp_path)
+    args.central = central
+    with pytest.raises(handoff.HandoffError, match="central"):
+        handoff.prepare(args)
+    assert not Path(args.sandbox_root).exists()
+
+
+def test_generated_helper_starts_with_authenticated_board_and_central(tmp_path: Path) -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is required")
+    args = _args(tmp_path)
+    args.node = str(Path(node).resolve())
+    helper = Path(handoff.__file__).parent / "aionui-extension" / "host" / "helper.cjs"
+    args.helper = str(helper)
+    args.helper_sha256 = hashlib.sha256(helper.read_bytes()).hexdigest()
+    root = Path(handoff.prepare(args)["handoff"])
+    process = subprocess.Popen(
+        [str(root / "start-helper.sh")],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert process.stdout is not None
+        ready, _, _ = select.select([process.stdout], [], [], 10)
+        assert ready, process.stderr.read() if process.poll() is not None and process.stderr else "helper timed out"
+        started = json.loads(process.stdout.readline())
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{started['port']}/pursers/helper/status",
+            headers={
+                "Origin": args.origin,
+                "x-pursers-home-token": (root / "helper-token").read_text().strip(),
+            },
+        )
+        with urllib.request.urlopen(request, timeout=5) as response:
+            status_payload = json.load(response)
+        assert status_payload["ok"] is True
+        assert status_payload["board"] == args.board
+        assert status_payload["central"] == args.central
+    finally:
+        if process.poll() is None:
+            subprocess.run([str(root / "cleanup.sh")], check=True, timeout=5)
+        process.wait(timeout=5)
+
+
+def test_refuses_legacy_bridge_before_output(tmp_path: Path) -> None:
+    args = _args(tmp_path)
+    args.bridge_bin = str(_file(
+        tmp_path / "legacy-bridge",
+        b"#!/bin/sh\ncase \"$1\" in --version) echo 0.1.0a15;; *) echo legacy-server;; esac\n",
+        executable=True,
+    ))
+    with pytest.raises(handoff.HandoffError, match="ticket-lifecycle"):
+        handoff.prepare(args)
+    assert not Path(args.sandbox_root).exists()
 
 
 def test_refuses_non_loopback_origin(tmp_path: Path) -> None:
