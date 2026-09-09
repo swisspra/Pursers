@@ -58,7 +58,7 @@ const ERROR_COPY = {
   permission_denied: 'This action requires the Team lead. Nothing changed.',
   not_in_team: 'This conversation is not part of an AionUi Team.',
   transport_unavailable: 'The authenticated local helper is unavailable. Nothing changed.',
-  backend_unavailable: 'Board data is unavailable. Start or reconnect the local helper and Fleet dashboard, then retry.',
+  backend_unavailable: 'Board data is unavailable. Start the local Fleet dashboard and retry. If ticket actions also fail, restart or reconnect the local helper.',
   invalid_backend_response: 'The board result source returned an invalid response. Nothing was displayed.',
   invalid_result_state: 'Choose one of the available result states.',
   ticket_not_found: 'That ticket is not present in the bounded board response. Refresh and retry.',
