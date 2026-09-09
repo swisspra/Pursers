@@ -45,18 +45,14 @@ candidate and frozen-main test blobs are identical Git blob
 test values, not credentials.
 
 Alert `#10` was independently approved in `TK-3887c4b0a7c9` at exact commit
-`770f27fcabd4b3333faec692668d1e88661f2afe`. The ticket's accepted evidence
-records SHA-256
+`770f27fcabd4b3333faec692668d1e88661f2afe`. A separate independent
+reconstruction selected the accepted and assembled implementation and regression
+source fragments, confirmed that each pair was byte-identical, and produced SHA-256
 `00c86397b81f0fe24b3524eaf9639c3b72b48ff8404a6d196c9901e1012b38f1` for
 the remediated function and SHA-256
 `856252584c1814eee4078b0a248aaf1629048b3cee491eaa699ef548bac90d55` for
-the million-character and line-ending regression. The accepted and assembled
-source fragments are byte-identical. An independent AST-node extraction also
-matches between the two commits: SHA-256
-`e0d36992ceeeee42127f157c145033d905fd3b64ad844c346555937ce08699cf` for
-the function body and SHA-256
-`d207d9d3f03fbfbdd22e782ad05a6a1b20d8f0f0f78a4eb58f1630ff54ab1da3` for
-the regression test.
+the million-character and line-ending regression. These reconstructed hashes are
+not fields from the `TK-3887c4b0a7c9` submission or review evidence.
 
 ## Focused checks
 
