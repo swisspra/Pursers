@@ -1,6 +1,8 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
 const test = require('node:test');
 const { createSeatLifecycle } = require('../seat_lifecycle/adapter.cjs');
 
@@ -74,6 +76,42 @@ test('join rejects another board before calling a dependency', async () => {
   assert.deepEqual(calls, []);
 });
 
+test('bound rejoin supplies the exact preserved identity to the dependency', async () => {
+  const { lifecycle, calls } = harness({ initialIdentity: identity() });
+  const joined = await lifecycle.join({ board: BOARD, agent_name: 'worker-1', role: 'worker' });
+  assert.equal(joined.ok, true);
+  assert.deepEqual(calls[0], ['join', {
+    board: BOARD,
+    agent_name: 'worker-1',
+    role: 'worker',
+    expected_board: BOARD,
+    expected_identity: {
+      board: BOARD,
+      agent_id: 'AI-worker-1',
+      principal_id: 'PR-worker',
+      agent_name: 'worker-1',
+      role: 'worker',
+    },
+  }]);
+});
+
+for (const [field, value] of [
+  ['board', 'other-board'],
+  ['agent_name', 'worker-2'],
+  ['role', 'reviewer'],
+  ['agent_id', 'AI-worker-2'],
+  ['principal_id', 'PR-other'],
+]) {
+  test(`bound rejoin rejects a different ${field} before any dependency mutation`, async () => {
+    const { lifecycle, calls } = harness({ initialIdentity: identity() });
+    const input = { board: BOARD, agent_name: 'worker-1', role: 'worker', [field]: value };
+    const joined = await lifecycle.join(input);
+    assert.equal(joined.ok, false);
+    assert.ok(['wrong_board', 'identity_mismatch'].includes(joined.code));
+    assert.deepEqual(calls, []);
+  });
+}
+
 test('join rejects ok false even when the dependency returns a valid-looking identity', async () => {
   const { lifecycle, calls } = harness({
     joinSeat: async (input) => {
@@ -113,6 +151,37 @@ for (const lifecycleStatus of ['handed_off', 'stale']) {
     const disconnected = await lifecycle.disconnect({ confirm: 'retire worker-1 from sandbox-home' });
     assert.equal(disconnected.outcome, lifecycleStatus);
     assert.deepEqual(calls.map(([name]) => name), ['status', 'status']);
+  });
+}
+
+test('status reports literal unknown as a bounded non-active lifecycle', async () => {
+  const { lifecycle, calls, setAgent } = harness();
+  setAgent(identity({ lifecycle_status: 'unknown' }));
+  const status = await lifecycle.status({ board: BOARD, agent_name: 'worker-1', role: 'worker' });
+  assert.equal(status.ok, false);
+  assert.equal(status.outcome, 'unknown');
+  assert.equal(status.code, 'seat_unknown');
+  assert.equal(status.retryable, true);
+  assert.match(status.recovery, /rejoin/i);
+  const disconnected = await lifecycle.disconnect({ confirm: 'retire worker-1 from sandbox-home' });
+  assert.equal(disconnected.code, 'seat_unknown');
+  assert.deepEqual(calls.map(([name]) => name), ['status', 'status']);
+});
+
+for (const [label, lifecycleStatus] of [['missing', undefined], ['malformed', 'mystery']]) {
+  test(`status rejects ${label} dependency lifecycle data rather than classifying it unknown`, async () => {
+    const row = identity();
+    if (lifecycleStatus === undefined) delete row.lifecycle_status;
+    else row.lifecycle_status = lifecycleStatus;
+    const { lifecycle } = harness({
+      initialIdentity: identity(),
+      readBoard: async () => ({ ok: true, board_id: BOARD, agents: [row] }),
+    });
+    const status = await lifecycle.status();
+    assert.equal(status.ok, false);
+    assert.equal(status.outcome, 'failed');
+    assert.equal(status.code, 'invalid_board_response');
+    assert.notEqual(status.code, 'seat_unknown');
   });
 }
 
@@ -215,4 +284,20 @@ test('disconnect reports a recoverable partial result if local forget fails', as
 test('constructor rejects missing dependencies and cross-board initial identity', () => {
   assert.throws(() => createSeatLifecycle({ expectedBoard: BOARD }), /joinSeat dependency/);
   assert.throws(() => harness({ initialIdentity: identity({ board: 'other-board' }) }), /another board/);
+});
+
+test('assembly contract assigns exact authenticated routes and dependency interfaces', () => {
+  const contract = fs.readFileSync(path.join(__dirname, '../seat_lifecycle/FEATURE_CONTRACT.md'), 'utf8');
+  for (const required of [
+    'TK-a3f0627d27db',
+    'POST /pursers/seat-lifecycle/join',
+    'GET /pursers/seat-lifecycle/status',
+    'POST /pursers/seat-lifecycle/disconnect',
+    'x-pursers-home-token',
+    'expected_identity',
+    'readBoard({ board, include_retired: true })',
+    'retireSelf({ board, agent_name })',
+    'forgetDoor({ board, role })',
+    'confirmation-required or non-active lifecycle results to 422',
+  ]) assert.ok(contract.includes(required), `missing assembly contract: ${required}`);
 });

@@ -4,7 +4,7 @@ const SAFE_BOARD = /^[A-Za-z0-9._-]{1,80}$/;
 const SAFE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/;
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/;
 const ROLES = new Set(['worker', 'reviewer']);
-const LIFECYCLES = new Set(['active', 'handed_off', 'retired', 'stale']);
+const LIFECYCLES = new Set(['active', 'handed_off', 'retired', 'stale', 'unknown']);
 
 function result(operation, outcome, fields = {}) {
   return {
@@ -77,7 +77,26 @@ function lifecycleResult(operation, selected) {
       recovery: 'Reconnect the helper, then rejoin with the original door and exact seat name.',
     });
   }
+  if (selected.identity.lifecycle_status === 'unknown') {
+    return result(operation, 'unknown', {
+      ...fields,
+      code: 'seat_unknown',
+      message: 'Central reports an unknown lifecycle for this seat; it is not treated as active.',
+      retryable: true,
+      recovery: 'Refresh live status, then rejoin with the original door and exact seat name if the lifecycle remains unknown.',
+    });
+  }
   return result(operation, selected.identity.lifecycle_status, fields);
+}
+
+function expectedJoinIdentity(identity) {
+  return {
+    board: identity.board,
+    agent_id: identity.agent_id,
+    principal_id: identity.principal_id,
+    agent_name: identity.agent_name,
+    role: identity.role,
+  };
 }
 
 function validateSelector(input, expectedBoard) {
@@ -175,9 +194,22 @@ function createSeatLifecycle(dependencies = {}) {
     if (!SAFE_NAME.test(input.agent_name || '') || !ROLES.has(input.role)) {
       return failure('join', 'identity_required', 'Join requires the exact seat name and role.');
     }
+    if (boundIdentity) {
+      const conflicts = input.agent_name !== boundIdentity.agent_name
+        || input.role !== boundIdentity.role
+        || (input.agent_id !== undefined && input.agent_id !== boundIdentity.agent_id)
+        || (input.principal_id !== undefined && input.principal_id !== boundIdentity.principal_id);
+      if (conflicts) {
+        return failure('join', 'identity_mismatch', 'The join selector does not match the preserved seat identity.', {
+          recovery: 'Use the original board, seat name, role, agent ID, and principal ID; never replace the preserved identity.',
+        });
+      }
+    }
+    const joinInput = { ...input, expected_board: expectedBoard };
+    if (boundIdentity) joinInput.expected_identity = expectedJoinIdentity(boundIdentity);
     let joined;
     try {
-      joined = await dependencies.joinSeat({ ...input, expected_board: expectedBoard });
+      joined = await dependencies.joinSeat(joinInput);
     } catch (_error) {
       return failure('join', 'join_failed', 'Central did not accept the seat join.', {
         retryable: true,
