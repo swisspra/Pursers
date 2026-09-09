@@ -6,6 +6,7 @@ const http = require('node:http');
 const { execFile } = require('node:child_process');
 const { createHandlers } = require('../webui/routes.js');
 const { isLoopbackHostname } = require('../security/loopback.cjs');
+const { createTeamLifecycleProcess } = require('../team_lifecycle/adapter.cjs');
 
 const DEFAULT_PORT = 43121;
 const MAX_BODY_BYTES = 64 * 1024;
@@ -186,11 +187,17 @@ function createHelperServer(options) {
   const port = options.port === undefined ? DEFAULT_PORT : parseInteger(options.port, 'port', 0, 65535);
   const runBridge = options.runBridge || createBridgeRunner(options.bridgeCommand || 'pursers-wait-bridge', options.bridgeStateDir);
   const runTeamCli = options.runTeamCli || createTeamRunner(options.aioncoreCommand || 'aioncore');
+  const groupProcess = options.groupProcess || createTeamLifecycleProcess({
+    command: options.bridgeCommand || 'pursers-wait-bridge',
+    stateDir: options.bridgeStateDir,
+    board,
+  });
   const handlers = createHandlers({
     allowedOrigin: origin,
     expectedBoard: board,
     runBridge,
     runTeamCli,
+    runTeamLifecycle: groupProcess.run,
     importMcp: async () => ({ success: true, imported: false }),
   });
 
@@ -259,6 +266,7 @@ function createHelperServer(options) {
       return server.address();
     },
     async close() {
+      await groupProcess.close();
       if (!server.listening) return;
       await new Promise((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
     },

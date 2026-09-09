@@ -14,8 +14,11 @@ The helper:
 - binds every onboarding request and status response to one configured board;
 - uses a separately selected wait-bridge state directory;
 - caps request bodies at 64 KiB and never returns door values;
-- defers MCP registration to the authenticated same-origin AionCore API; and
-- removes AionUi conversation runtime variables before Team CLI calls.
+- defers MCP registration to the authenticated same-origin AionCore API;
+- removes AionUi conversation runtime variables before Team CLI calls;
+- keeps one persistent, inert board actor for standalone group operations;
+- pins group routes to the selected board and uses Central board-state CAS; and
+- closes the group sidecar when the helper stops.
 
 The last rule is deliberate. A settings iframe has no supported Team
 conversation context in AionUi 2.2.1. Team status, plan, apply, pause, and stop

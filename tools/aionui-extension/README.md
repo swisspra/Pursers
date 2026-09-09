@@ -3,7 +3,7 @@
 This extension adds a guided Pursers Home plus Worker and Reviewer presets. Home
 connects one project with a coordinator-issued door, prepares distinct Team
 seats through a dry-run-first plan, reports partial results, and exposes bounded
-pause, stop, recovery, and roster controls.
+pause, stop, recovery, roster, and standalone seat-group controls.
 
 ## Build and install
 
@@ -58,11 +58,13 @@ arguments.
 2. Confirm that Home shows the helper's exact selected board.
 3. Paste the door supplied by your coordinator, check it, and connect. The input
    is cleared immediately and status only shows redacted metadata.
-4. Open an existing AionUi Team conversation. Enter its exact Team and monitor
+4. Optionally create board-scoped groups for already joined standalone Pursers
+   seats. These groups organize metadata only; they never create or control seats.
+5. Open an existing AionUi Team conversation. Enter its exact Team and monitor
    lead identity plus a unique name, folder, role, and tier ceiling per seat.
-5. Preview the Team plan. Starting seats requires a separate confirmation of
+6. Preview the Team plan. Starting seats requires a separate confirmation of
    that exact plan; each result is reported independently.
-6. Start a new conversation and pick the matching Worker or Reviewer preset.
+7. Start a new conversation and pick the matching Worker or Reviewer preset.
 
 The helper passes the door directly to `pursers-wait-bridge join`, which owns
 the private mode-0600 credential store. The extension does not log or persist
@@ -86,6 +88,12 @@ returning the door. See `door/DOOR_ONBOARDING_CONTRACT.md` for result codes,
 idempotency, and current host limitations.
 
 ## Team controls
+
+The `/pursers/groups` route family is separate from native AionUi Team Mode. It
+stores one CAS-protected `home_seat_groups_v1` document in the selected board,
+supports create/view/update/remove, and preserves missing or retired members in
+the view. Removing a group never removes seats, memberships, tickets, or history.
+See `team_lifecycle/FEATURE_CONTRACT.md` for the persistence and error contract.
 
 The helper's `/pursers/team/` routes use the packaged approved Team adapter.
 Status reads the host roster and task list when supported. Plan is always

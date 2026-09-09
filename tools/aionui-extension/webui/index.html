@@ -156,6 +156,37 @@
           </div>
         </section>
 
+        <section class="section-block" id="groups" aria-labelledby="groups-title">
+          <div class="section-heading">
+            <div><p class="eyebrow">Standalone organization</p><h2 id="groups-title">Seat groups</h2><p>Organize existing Pursers seats on this board. Groups do not create, start, stop, or dispatch seats.</p></div>
+            <button class="button button-quiet" id="refresh-groups" type="button">Refresh groups</button>
+          </div>
+          <div class="two-column">
+            <form class="card form-card" id="group-form">
+              <input id="group-id" type="hidden">
+              <label class="field field-wide" for="group-name">Group name
+                <span>Unique on this board, up to 80 characters.</span>
+                <input id="group-name" maxlength="80" required autocomplete="off">
+              </label>
+              <fieldset class="field field-wide group-member-field">
+                <legend>Standalone seats</legend>
+                <span>Select one or more current or retired board seats.</span>
+                <div id="group-members" class="group-member-picker"></div>
+              </fieldset>
+              <div class="form-actions field-wide">
+                <button class="button button-primary" id="save-group" type="submit">Create group</button>
+                <button class="button button-quiet" id="cancel-group-edit" type="button" hidden>Cancel edit</button>
+              </div>
+              <p class="form-message field-wide" id="group-message" role="status" aria-live="polite"></p>
+            </form>
+            <div class="card roster-card">
+              <div class="card-heading"><div><p class="eyebrow">Board metadata</p><h3>Saved groups</h3></div><span class="status-pill neutral" id="groups-pill">Not loaded</span></div>
+              <div class="empty-state" id="groups-empty"><span aria-hidden="true">◫</span><h3>No seat groups yet</h3><p>Create one after connecting the local helper.</p></div>
+              <div class="group-list" id="group-list"></div>
+            </div>
+          </div>
+        </section>
+
         <section class="section-block" id="team" aria-labelledby="team-title">
           <div class="section-heading">
             <div><p class="eyebrow">2 · Team and seats</p><h2 id="team-title">Prepare a Team</h2><p>Plan first. Starting members requires an explicit second confirmation and reports every seat separately.</p></div>
@@ -235,6 +266,14 @@
         <p class="eyebrow">Confirm scope</p><h2>Stop this teammate?</h2>
         <p id="stop-copy">This requests cooperative shutdown. It does not delete history or close board work.</p>
         <div class="form-actions"><button class="button button-quiet" value="cancel">Keep running</button><button class="button button-danger" id="confirm-stop" value="confirm">Request stop</button></div>
+      </form>
+    </dialog>
+
+    <dialog id="remove-group-dialog">
+      <form method="dialog" class="dialog-card">
+        <p class="eyebrow">Confirm metadata removal</p><h2>Remove this seat group?</h2>
+        <p id="remove-group-copy">Only the group is removed. Seats, board membership, tickets, and history remain unchanged.</p>
+        <div class="form-actions"><button class="button button-quiet" value="cancel">Keep group</button><button class="button button-danger" id="confirm-remove-group" value="confirm">Remove group</button></div>
       </form>
     </dialog>
 
