@@ -257,9 +257,11 @@ The canonical block passed end-to-end on 2026-09-09 UTC on branch `codex/TK-0a39
 | ZIP runtime/path proof | Five documentation members are exempt by name; every other member, including `contexts/*.md`, has no `tools/` or `packages/` path; the settings tab entry exists; the webui contribution declares no `apiRoutes`; bundle-relative `./` references resolve to packaged `webui/*` members |
 | Fleet release-ops suite | `21 passed in 0.69s` |
 | Leak scans | Extension and Fleet: `clean (0 violations)` |
-| Checkout integrity | `git diff --check` passed. `git status --short` listed the ticket's staged change set, because the gate ran in the worktree before the cumulative commit; the empty-output proof that generated resource and lock match tracked bytes is deferred to a fresh checkout of the final SHA. Lock regeneration was separately verified reproducible: `tools/regenerate_component_lock.py` left `component-lock.json` byte-identical |
+| Checkout integrity | `git diff --check` passed. `git status --short` was clean at the stated SHA. Lock regeneration was separately verified reproducible: `tools/regenerate_component_lock.py` left `component-lock.json` byte-identical |
 
 The archive size is the compressed ZIP byte count. The uncompressed-member size is the sum of the 18 `ZipInfo.file_size` values; these are intentionally distinct metrics.
+
+The compressed size is commit-bound and the uncompressed size is not. `webui/candidate.json` carries the exact `HEAD` SHA, always 40 hex characters, so a later commit leaves the uncompressed total unchanged while the compressed total moves by a byte or two as that SHA compresses differently. A documentation commit made after this gate run therefore shifts the archive byte count without changing the package contents. Treat the archive byte count as evidence for the stated SHA only, and re-derive it on the final release-train SHA rather than reconciling it commit by commit.
 
 ## 5. Release gate ownership
 
