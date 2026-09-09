@@ -105,6 +105,18 @@ provider, and `allow_takeover=False` boundaries. Its live-Central regression
 sets reviewer capability variables around a worker door and proves one
 worker-valid join with push verification.
 
+The final authorization correction comes from independently approved
+`TK-5e5fb30a2a14`, source branch `codex/TK-5e5fb30a2a14-worker1`, commit
+`42ab9e6e72e3fbb0ea5da6e511c225c1711c97f1`, based on the complete
+post-assembly candidate `8f96f78847631c9d5a28903553f2ecc9332c610f`. Central now enforces the
+signed `pursers_board` claim or trusted JWKS door binding before admission and
+all board-bearing reads, writes, lists, and subscriptions. The same approved
+input preserves explicit legacy compatibility for unbound operator keys and
+adds issuer-side board-bound door generation plus rotation coverage. Runtime
+credential issuance and independent rotation proof remain owned by the
+isolated sandbox issuer; no signing authority or secret material is imported
+into this source tree.
+
 Their content hashes are recorded in `INTEGRATION_FILES.sha256`. Adoption
 preserves the approved guidance and provenance but does not itself satisfy the
 ship plan's independent browser, inventory, rotation, O1, or release gates.
