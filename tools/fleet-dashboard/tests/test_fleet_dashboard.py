@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import copy
 import hashlib
 import importlib.util
@@ -991,6 +992,301 @@ def test_fetcher_requests_central_max_snapshot_bounds() -> None:
         "max_bytes": 300_000,
         "include_retired": True,
     }
+
+
+def test_fetcher_real_client_uses_reserved_read_only_session_identity() -> None:
+    config = dashboard.Config(
+        url="http://127.0.0.1:8766/mcp",
+        token="test-token",
+        home_board="pursers",
+        agent_name="fleet-dashboard-session-default",
+        stale_seconds=300,
+        cache_seconds=5.0,
+    )
+
+    client = dashboard.FleetFetcher(config)._client("pursers")
+
+    assert isinstance(client, dashboard._FleetClientProxy)
+    assert client.agent_name == "fleet-dashboard-session-default"
+    assert client.role == "worker"
+    assert client.allow_takeover is False
+    assert client.allow_matching_takeover is True
+    assert client.capabilities == {"can_work": False, "can_review": False}
+    assert client.agent_platform == "pursers-fleet-dashboard"
+    assert client.task_focus == "dashboard-session-owner-v1"
+
+
+def test_real_central_matching_takeover_protects_worker_and_reviewer_identities(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    jwks_path = tmp_path / "jwks.json"
+    jwks_path.write_text('{"keys": []}', encoding="utf-8")
+    for key, value in {
+        "CENTRAL_AUTH_MODE": "jwt",
+        "CENTRAL_JWT_ISSUER": "https://issuer.example",
+        "CENTRAL_JWT_AUDIENCE": "http://localhost:8765/mcp",
+        "CENTRAL_JWKS_PATH": str(jwks_path),
+        "CENTRAL_ADMISSION": "invite",
+        "STORE_BACKEND": "sqlite",
+    }.items():
+        monkeypatch.setenv(key, value)
+    mcp, service = central.build_server("localhost", 8765, tmp_path / "central")
+    principal = central.Principal(
+        "PR-dashboard",
+        "dashboard",
+        frozenset({"board:read", "board:write", "board:review"}),
+    )
+    monkeypatch.setattr(central, "current_principal", lambda: principal)
+    dashboard_arguments = {
+        "board_id": "pursers",
+        "agent_name": "fleet-dashboard-session-default",
+        "role": "worker",
+        "capabilities": {"can_work": False, "can_review": False},
+        "agent_platform": "pursers-fleet-dashboard",
+        "task_focus": "dashboard-session-owner-v1",
+    }
+
+    async def scenario() -> tuple[object, object, object]:
+        first = await mcp.call_tool("board_join", dashboard_arguments)
+        restart = await mcp.call_tool(
+            "board_join",
+            {**dashboard_arguments, "allow_matching_takeover": True},
+        )
+        dashboard_id = central.agent_id(
+            "pursers", principal.principal_id, "fleet-dashboard-session-default"
+        )
+
+        def make_dashboard_stale(document: dict[str, object]) -> None:
+            document["members"][dashboard_id]["last_activity_at"] = central.iso_at(
+                time.time() - 4 * 86_400
+            )
+
+        service.mutate("pursers", make_dashboard_stale, require_generation=False)
+        stale_recovery = await mcp.call_tool(
+            "board_join",
+            {**dashboard_arguments, "allow_matching_takeover": True},
+        )
+        worker = await mcp.call_tool(
+            "board_join",
+            {
+                "board_id": "pursers",
+                "agent_name": "worker-seat",
+                "role": "worker",
+                "capabilities": {"can_work": True, "can_review": False},
+                "agent_platform": "codex",
+                "task_focus": "ticket-work",
+            },
+        )
+        reviewer = await mcp.call_tool(
+            "board_join",
+            {
+                "board_id": "pursers",
+                "agent_name": "reviewer-seat",
+                "role": "reviewer",
+                "capabilities": {"can_work": False, "can_review": True},
+                "agent_platform": "codex",
+                "task_focus": "ticket-review",
+            },
+        )
+        assert not any(
+            result.is_error
+            for result in (first, restart, stale_recovery, worker, reviewer)
+        )
+        async def refused(name: str) -> BaseException | None:
+            try:
+                await mcp.call_tool(
+                    "board_join",
+                    {
+                        **dashboard_arguments,
+                        "agent_name": name,
+                        "allow_matching_takeover": True,
+                    },
+                )
+            except BaseException as exc:
+                return exc
+            return None
+
+        worker_collision, reviewer_collision = await asyncio.gather(
+            refused("worker-seat"), refused("reviewer-seat")
+        )
+        return restart, worker_collision, reviewer_collision
+
+    restart, worker_collision, reviewer_collision = asyncio.run(scenario())
+
+    assert restart.is_error is False
+    assert "seat name already active" in str(worker_collision)
+    assert "seat name already active" in str(reviewer_collision)
+    document = service.load("pursers")
+    worker = document["members"][
+        central.agent_id("pursers", principal.principal_id, "worker-seat")
+    ]
+    reviewer = document["members"][
+        central.agent_id("pursers", principal.principal_id, "reviewer-seat")
+    ]
+    assert worker["role"] == "worker"
+    assert worker["capabilities"]["can_work"] is True
+    assert worker["agent_platform"] == "codex"
+    assert reviewer["role"] == "reviewer"
+    assert reviewer["capabilities"]["can_review"] is True
+    assert reviewer["agent_platform"] == "codex"
+
+
+def test_config_api_reuses_dashboard_identity_after_restart_and_concurrently() -> None:
+    class Central:
+        def __init__(self) -> None:
+            self.lock = threading.Lock()
+            self.active: dict[tuple[str, str], dict[str, object]] = {}
+            self.join_count = 0
+            self.close_count = 0
+            self.client_arguments: list[dict[str, object]] = []
+
+        def client_factory(
+            self, _url: str, _token: str, board_id: str, **arguments: object
+        ) -> object:
+            owner = self
+            captured = dict(arguments)
+
+            class Client:
+                async def __aenter__(self) -> Self:
+                    identity = (board_id, str(captured["agent_name"]))
+                    with owner.lock:
+                        expected = {
+                            key: captured[key]
+                            for key in (
+                                "role",
+                                "capabilities",
+                                "agent_platform",
+                                "task_focus",
+                            )
+                        }
+                        existing = owner.active.get(identity)
+                        if existing is not None and (
+                            not captured.get("allow_matching_takeover")
+                            or existing != expected
+                        ):
+                            raise dashboard.BoardClientError("unsafe identity collision")
+                        owner.active[identity] = expected
+                        owner.join_count += 1
+                        owner.client_arguments.append(captured)
+                    return self
+
+                async def __aexit__(self, *_args: object) -> None:
+                    with owner.lock:
+                        owner.close_count += 1
+
+                async def board_state_get(self, *, key: str) -> dict:
+                    raise dashboard.BoardClientError(f"state key not found: {key}")
+
+            return Client()
+
+    central = Central()
+    config = dashboard.Config(
+        url="http://127.0.0.1:8766/mcp",
+        token="test-token",
+        home_board="pursers",
+        agent_name="fleet-dashboard-session-default",
+        stale_seconds=300,
+        cache_seconds=5.0,
+    )
+    def run_server(request_count: int) -> None:
+        cache = dashboard.DashboardCache(
+            dashboard.FleetFetcher(config, client_factory=central.client_factory), 5.0
+        )
+        server = dashboard.ThreadingHTTPServer(
+            ("127.0.0.1", 0), dashboard.make_handler(cache)
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        url = f"http://127.0.0.1:{server.server_port}/api/config"
+
+        def request_config() -> int:
+            with urllib.request.urlopen(url) as response:
+                json.load(response)
+                return response.status
+
+        try:
+            assert request_config() == 200
+            with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+                assert list(
+                    executor.map(lambda _index: request_config(), range(request_count))
+                ) == [200] * request_count
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
+            cache.close()
+
+    run_server(4)
+    run_server(1)
+
+    assert set(central.active) == {
+        ("pursers", "fleet-dashboard-session-default")
+    }
+    assert central.join_count == 2
+    assert central.close_count == 2
+    assert all(
+        arguments == {
+            "agent_name": "fleet-dashboard-session-default",
+            "role": "worker",
+            "capabilities": {"can_work": False, "can_review": False},
+            "agent_platform": "pursers-fleet-dashboard",
+            "task_focus": "dashboard-session-owner-v1",
+            "allow_matching_takeover": True,
+        }
+        for arguments in central.client_arguments
+    )
+
+
+def test_fetcher_reconnects_once_after_transport_failure() -> None:
+    class Central:
+        def __init__(self) -> None:
+            self.joins = 0
+            self.closes = 0
+
+        def client_factory(self, *_args: object, **_kwargs: object) -> object:
+            owner = self
+            owner.joins += 1
+            generation = owner.joins
+
+            class Client:
+                async def __aenter__(self) -> Self:
+                    return self
+
+                async def __aexit__(self, *_args: object) -> None:
+                    owner.closes += 1
+
+                async def board_state_get(self, *, key: str) -> dict:
+                    assert key == "project_registry"
+                    if generation == 1:
+                        raise ConnectionError("connection closed")
+                    return {
+                        "state": {
+                            "value": json.dumps(
+                                {"schema_version": 1, "projects": {}}
+                            )
+                        }
+                    }
+
+            return Client()
+
+    central = Central()
+    config = dashboard.Config(
+        url="http://127.0.0.1:8766/mcp",
+        token="test-token",
+        home_board="pursers",
+        agent_name="fleet-dashboard-session-default",
+        stale_seconds=300,
+        cache_seconds=5.0,
+    )
+    fetcher = dashboard.FleetFetcher(config, client_factory=central.client_factory)
+    try:
+        result = asyncio.run(fetcher.fetch_project_registry())
+    finally:
+        fetcher.close()
+
+    assert result["registry"] == {"schema_version": 1, "projects": {}}
+    assert central.joins == 2
+    assert central.closes == 2
 
 
 def test_output_rows_and_titles_are_bounded() -> None:
@@ -2715,6 +3011,12 @@ def test_single_central_flags_and_response_shape_remain_compatible(
     configs_inherited = dashboard.load_central_configs(args_inherited)
     assert len(configs_inherited) == 1
     assert configs_inherited[0].url == inherited_url
+
+
+@pytest.mark.parametrize("name", ["worker-seat", "reviewer-seat", "fleet-dashboard-viewer"])
+def test_cli_refuses_names_outside_dashboard_session_namespace(name: str) -> None:
+    with pytest.raises(SystemExit):
+        dashboard.parse_args(["--agent-name", name])
 
 
 def test_centrals_file_and_tokens_require_0600(tmp_path: Path) -> None:
