@@ -5859,10 +5859,9 @@ async def _door_join(args: argparse.Namespace) -> None:
         allow_takeover=False,
     )
     async with client:
-        onboarded = await client.board_onboard(
-            role=entry["r"], capabilities=_seat_capabilities(), allow_takeover=False
-        )
-        push = await _probe_join_push(client, entry["b"], onboarded["agent_id"])
+        if client.identity is None:
+            raise RuntimeError("Central join did not return an identity")
+        push = await _probe_join_push(client, entry["b"], client.identity.agent_id)
     print(f"board={entry['b']}")
     print(f"role={entry['r']}")
     print(f"seat_name={name}")

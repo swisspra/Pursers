@@ -9,17 +9,22 @@ import stat
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import asynccontextmanager, redirect_stderr, redirect_stdout
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import ANY, AsyncMock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 CLIENT_SRC = ROOT.parents[1] / "packages" / "client" / "src"
+CENTRAL_SRC = ROOT.parents[1] / "packages" / "central" / "src" / "pursers_central"
+sys.path.insert(0, str(CENTRAL_SRC))
 sys.path.insert(0, str(CLIENT_SRC))
 sys.path.insert(0, str(ROOT))
 os.environ.setdefault("ONBOARD_CENTRAL_TOKEN", "TOKEN_PLACEHOLDER")
 
+import central  # noqa: E402
 import door_state  # noqa: E402
+import pursers_client.client as client_module  # noqa: E402
+from pursers_client import BoardClient, JoinedIdentity  # noqa: E402
 import pursers_wait_server as wait_server  # noqa: E402
 
 
@@ -147,22 +152,21 @@ class DoorStateTests(unittest.TestCase):
 
 
 class DoorCommandTests(unittest.IsolatedAsyncioTestCase):
-    async def test_join_never_enables_takeover_after_successful_enter(self) -> None:
+    async def test_join_uses_entered_identity_without_duplicate_onboard(self) -> None:
         calls: dict[str, dict[str, object]] = {}
 
         class RecordingClient:
             def __init__(self, *_args: object, **kwargs: object) -> None:
                 calls["init"] = kwargs
+                self.identity = JoinedIdentity(
+                    "sandbox", "AI-test", "PR-test", "worker-fixed-1", "worker"
+                )
 
             async def __aenter__(self) -> object:
                 return self
 
             async def __aexit__(self, *_args: object) -> None:
                 return None
-
-            async def board_onboard(self, **kwargs: object) -> dict[str, str]:
-                calls["onboard"] = kwargs
-                return {"agent_id": "AI-test"}
 
         with tempfile.TemporaryDirectory() as raw:
             args = argparse.Namespace(
@@ -174,12 +178,16 @@ class DoorCommandTests(unittest.IsolatedAsyncioTestCase):
             )
             with (
                 patch.object(wait_server, "BoardClient", RecordingClient),
+                patch.object(
+                    wait_server, "_probe_join_push", AsyncMock(return_value=True)
+                ) as probe,
                 redirect_stdout(io.StringIO()),
             ):
                 await wait_server._door_join(args)
 
         self.assertIs(calls["init"]["allow_takeover"], False)
-        self.assertIs(calls["onboard"]["allow_takeover"], False)
+        self.assertNotIn("onboard", calls)
+        probe.assert_awaited_once_with(ANY, "sandbox", "AI-test")
 
     async def test_join_surfaces_central_collision_verbatim(self) -> None:
         class RefusingClient:
@@ -267,6 +275,74 @@ class DoorCommandTests(unittest.IsolatedAsyncioTestCase):
                     wait_server.BASE_AGENT_NAME,
                     wait_server.AGENT_NAME,
                 ) = original
+
+
+class DoorJoinRealCentralTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory(dir=ROOT)
+        self.root = Path(self.temporary.name)
+        jwks = self.root / "jwks.json"
+        jwks.write_text('{"keys": []}', encoding="utf-8")
+        self.environment = patch.dict(
+            os.environ,
+            {
+                "CENTRAL_AUTH_MODE": "jwt",
+                "CENTRAL_JWT_ISSUER": "https://issuer.example",
+                "CENTRAL_JWT_AUDIENCE": "http://localhost:8765/mcp",
+                "CENTRAL_JWKS_PATH": str(jwks),
+                "CENTRAL_ADMISSION": "invite",
+                "STORE_BACKEND": "sqlite",
+            },
+        )
+        self.environment.start()
+        self.mcp, self.store = central.build_server(
+            "localhost", 8765, self.root / "data"
+        )
+        scopes = frozenset({"board:read", "board:write", "board:review"})
+        self.principal = central.Principal(
+            "PR-door-owner", "door-owner", scopes
+        )
+        self.original_current_principal = central.current_principal
+        central.current_principal = lambda: self.principal
+
+    async def asyncTearDown(self) -> None:
+        central.current_principal = self.original_current_principal
+        self.environment.stop()
+        self.temporary.cleanup()
+
+    @asynccontextmanager
+    async def _http(self):
+        yield object()
+
+    async def test_fresh_join_completes_once_with_push_verification(self) -> None:
+        def live_client(*args: object, **kwargs: object) -> BoardClient:
+            client = BoardClient(*args, **kwargs)
+            client._http = self._http  # type: ignore[method-assign]
+            return client
+
+        args = argparse.Namespace(
+            door=door(url="http://127.0.0.1:8765/mcp", board="door-live"),
+            name="fresh-door-worker",
+            state_dir=str(self.root / "state"),
+            allow_remote=False,
+            rotate=False,
+        )
+        output = io.StringIO()
+        with (
+            patch.object(wait_server, "BoardClient", side_effect=live_client),
+            patch.object(
+                client_module, "streamable_http_client", return_value=self.mcp
+            ),
+            redirect_stdout(output),
+        ):
+            await wait_server._door_join(args)
+
+        rendered = output.getvalue()
+        self.assertIn("seat_name=fresh-door-worker", rendered)
+        self.assertIn("push=yes", rendered)
+        self.assertIn("verifier=accepted", rendered)
+        document = self.store.load("door-live")
+        self.assertEqual(len(document["members"]), 1)
 
 
 if __name__ == "__main__":
