@@ -103,10 +103,10 @@ def _validate_origin(value: str) -> str:
 def _candidate_zip_commit(path: Path) -> str:
     try:
         with zipfile.ZipFile(path) as archive:
-            names = [name for name in archive.namelist() if name.endswith("webui/candidate.json")]
-            if len(names) != 1:
-                raise HandoffError("candidate ZIP must contain exactly one webui/candidate.json")
-            payload = json.loads(archive.read(names[0]))
+            names = archive.namelist()
+            if names.count("webui/candidate.json") != 1:
+                raise HandoffError("candidate ZIP must contain exactly one root webui/candidate.json")
+            payload = json.loads(archive.read("webui/candidate.json"))
     except (zipfile.BadZipFile, KeyError, json.JSONDecodeError) as error:
         raise HandoffError(f"candidate ZIP is invalid: {error}") from error
     value = payload.get("candidate_commit") if isinstance(payload, dict) else None

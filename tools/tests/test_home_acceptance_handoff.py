@@ -124,6 +124,17 @@ def test_refuses_zip_bound_to_different_commit(tmp_path: Path) -> None:
         handoff.prepare(args)
 
 
+def test_refuses_nested_candidate_identity(tmp_path: Path) -> None:
+    args = _args(tmp_path)
+    with zipfile.ZipFile(args.candidate_zip, "w") as archive:
+        archive.writestr(
+            "prefix/webui/candidate.json",
+            json.dumps({"candidate_commit": args.commit}),
+        )
+    with pytest.raises(handoff.HandoffError, match="root webui/candidate.json"):
+        handoff.prepare(args)
+
+
 def test_refuses_sandbox_inside_candidate(tmp_path: Path) -> None:
     args = _args(tmp_path)
     args.sandbox_root = str(Path(args.candidate_checkout) / "private")
