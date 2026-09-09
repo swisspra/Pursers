@@ -114,7 +114,17 @@ Use `review-claim` before verification, `renew` every ~5 minutes, and
 push-wait without polling.
 
 `submit` keeps the worker active for review/retry. Include the model used and
-real verification output in the notes required by the ticket.
+real verification output in the notes required by the ticket. For code tickets
+whose `required_fields` include `branch_and_commit`, notes must contain exactly
+one `branch_and_commit: platform/branch @ <full-40-hex-sha>` line. The seat
+fetches that branch from its configured `origin`, verifies the SHA is an exact
+commit and the current remote tip, then canonicalizes the submitted
+`branch_and_commit` line and adds the matching machine-derived remote tip before
+notes truncation. A missing/non-Git route or malformed, nonexistent, stale, or
+mismatched SHA fails before `ticket_submit`, so correct the route or evidence
+and retry. The submit mutation does not run, but the invocation's normal
+`board_join` may renew an already-held lease. Explicit research-only tickets
+without that required field retain the no-Git submit path.
 
 Reviewer `verify` fetches and detaches the submitted SHA, compares the commit
 stat and paths with `files_changed`, reports every remote branch containing the
@@ -133,6 +143,23 @@ a full 40-hex SHA, a recognizable test tail, `leak-scan: clean|N matches`, and
 only when an operator explicitly sets
 `PURSERS_ALLOW_FORCE_APPROVE_WITHOUT_EVIDENCE=1`; its use is appended to the
 review notes. Rejection always requires non-empty fix instructions.
+
+Suite replay accepts `pytest`, `py.test`, or `python[3] -m pytest/unittest`,
+optionally prefixed by one relative, worktree-contained `PYTHONPATH=...`
+assignment. Shell substitutions, separators, redirects, other environment
+assignments, absolute paths, and parent-directory escapes are rejected without
+executing the command. Pytest options are explicitly allow-listed. Positional,
+`--junitxml`, `--basetemp`, ignore, and deselection paths are resolved even when
+the final leaf does not exist, so an outward symlink ancestor is refused before
+pytest can write. Pytest module, plugin, and configuration escape options and
+every `@argument-file` form are refused before pytest can expand them;
+unittest replay requires `discover`, so submitted dotted modules cannot resolve
+from the host interpreter environment. Replayed suites receive a minimal
+environment: host Python/pytest injection variables are discarded, user-site and
+pytest plugin autoloading are disabled, and only an explicitly parsed bounded
+`PYTHONPATH` is restored. The verifier uses its own interpreter and a temporary
+empty pytest configuration under the detached clone, with root and conftest
+discovery bounded to that clone.
 
 ## HARD-verify checklist
 
@@ -242,11 +269,14 @@ The generated `AGENTS.md` and `.goosehints` contain the relentless loop:
 2. **CLAIM** — `bin/board.sh claim <TK>`.
 3. **UNDERSTAND** — `bin/board.sh get <TK>`.
 4. **DO** — Work. Renew every ~10 min with `bin/board.sh renew <TK>`.
-5. **SUBMIT** — `bin/board.sh submit <TK> <summary> <notes> <files-csv>`.
-6. **AWAIT REVIEW** — Keep the ticket slot occupied; on rejection, fix and
-   resubmit the same ticket.
-7. **RE-ARM** — Only after approval/closure, wait for the next ticket. On a
-   timeout, re-arm with the returned cursor.
+5. **SUBMIT** — Push the candidate branch, copy the exact output of
+   `git rev-parse HEAD` into `branch_and_commit`, then run
+   `bin/board.sh submit <TK> <summary> <notes> <files-csv>`. If preflight
+   reports a moved remote tip, refresh the SHA evidence before retrying.
+6. **RE-ARM** — After a successful submit, leave its branch immutable and
+   immediately wait for the next eligible ticket; do not wait for review.
+7. **RETRY CUES** — On a later rejection cue, get the ticket, follow its fix
+   instructions in a fresh candidate branch, resubmit, then re-arm again.
 
 **Never** poll `bin/board.sh list` in a loop. The wait verb blocks on Central's
 subscriptions/listen, using zero model turns except the re-arm.
