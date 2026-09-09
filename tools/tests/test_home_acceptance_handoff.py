@@ -314,6 +314,20 @@ def test_documented_offline_wheelhouse_runs_lifecycle_and_handoff(tmp_path: Path
     clean_environment = os.environ.copy()
     clean_environment.pop("PYTHONHOME", None)
     clean_environment.pop("PYTHONPATH", None)
+    clean_environment.pop("ONBOARD_CENTRAL_TOKEN", None)
+    clean_environment.pop("ONBOARD_CENTRAL_TOKEN_FILE", None)
+    clean_environment["PURSERS_BRIDGE_STATE_DIR"] = str(tmp_path / "empty-state")
+    root_help = subprocess.run(
+        [bridge, "--help"],
+        check=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=clean_environment,
+        text=True,
+        timeout=10,
+    )
+    assert root_help.stdout.startswith("usage: pursers-wait-bridge")
+    assert "FATAL:" not in root_help.stdout + root_help.stderr
     for command in ("ticket-lifecycle", "seat-lifecycle", "team-lifecycle"):
         helped = subprocess.run(
             [bridge, command, "--help"],

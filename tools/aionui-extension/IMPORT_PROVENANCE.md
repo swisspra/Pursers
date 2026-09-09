@@ -68,6 +68,26 @@ retains matching-only read-only takeover and fail-closed deployment and
 rollback. Exact integration conflicts and remaining inputs are mapped in
 `docs/design-home/final-assembly-inputs.md`.
 
+The final gate documents are adopted byte-for-byte from their independently
+approved tips:
+
+- Quickstart `docs/design-home/quickstart.md` from recovery ticket
+  `TK-f50ed337bfd3`, source branch `codex/TK-cadfa2b8b33f-resubmit-3`, commit
+  `909e897e960cc68139a043e2494aa4f6600b47ce`;
+- security receipt `docs/security/next-train-codeql-receipt.md` from
+  `TK-caecfe4f5ad1`, source branch
+  `codex/TK-caecfe4f5ad1-receipt-fix1-worker3`, commit
+  `d2ea1237f50f06193eb03ad32fead93ab197b349`, with receipt ancestry
+  `ec83f276d653c84adead8964dd2d8f949f426c82` then
+  `ad55c14a38e28fe49253d974d96d1771141a7607`; and
+- ship plan `docs/release/next-train-ship-plan.md` from `TK-8cfd30eabb7a`,
+  source branch `codex/TK-8cfd30eabb7a-resubmit-3-worker1`, commit
+  `85e11843e2993385b0a79e3039895759df10b29e`.
+
+Their content hashes are recorded in `INTEGRATION_FILES.sha256`. Adoption
+preserves the approved guidance and provenance but does not itself satisfy the
+ship plan's independent browser, inventory, rotation, O1, or release gates.
+
 `INTEGRATION_FILES.sha256` records every cumulative changed path relative to
 the frozen main, excluding only the checksum manifest itself. The submission
 must declare the exact cumulative diff and ancestry so verifier manifest

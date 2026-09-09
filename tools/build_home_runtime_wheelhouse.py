@@ -242,6 +242,12 @@ def build(output: Path, python: Path, allow_dirty: bool = False) -> dict[str, ob
         clean_environment = os.environ.copy()
         clean_environment.pop("PYTHONHOME", None)
         clean_environment.pop("PYTHONPATH", None)
+        clean_environment.pop("ONBOARD_CENTRAL_TOKEN", None)
+        clean_environment.pop("ONBOARD_CENTRAL_TOKEN_FILE", None)
+        clean_environment["PURSERS_BRIDGE_STATE_DIR"] = str(temp / "empty-state")
+        root_help = _run([str(bridge), "--help"], cwd=temp, env=clean_environment)
+        if "usage: pursers-wait-bridge" not in root_help.stdout or root_help.stderr:
+            raise WheelhouseError("credential-free bridge root help is invalid")
         command_tails: dict[str, str] = {}
         for command in LIFECYCLE_COMMANDS:
             result = _run(
@@ -282,6 +288,7 @@ def build(output: Path, python: Path, allow_dirty: bool = False) -> dict[str, ob
                     "pip check",
                 ],
                 "lifecycle_command_tails": command_tails,
+                "root_help": "usage: pursers-wait-bridge",
             },
             "artifacts": artifacts,
         }
