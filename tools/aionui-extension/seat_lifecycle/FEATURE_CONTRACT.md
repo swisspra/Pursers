@@ -14,14 +14,18 @@ Mode, kill processes, or infer board state from local files.
 Every dependency result must explicitly report `ok: true`; a valid-looking
 identity never overrides a failed join result. Status returns the exact Central
 lifecycle as `outcome`: `active` and `retired` are successful reads, while
-`handed_off` and `stale` are non-active results with distinct codes and bounded
-same-identity rejoin guidance.
+`handed_off`, `stale`, and literal Central `unknown` are non-active results with
+distinct codes and bounded same-identity rejoin guidance. Missing or malformed
+lifecycle data is instead an `invalid_board_response`; it is never coerced to
+`unknown` or `active`.
 
 `disconnect` means cooperative retirement of the current seat. It must never
 retire another identity. Active work or review leases remain Central-owned
 blockers and are shown as recoverable errors. Rejoining with the same board,
-principal, and agent name reactivates the identity; a different identity is a
-conflict, not a replacement.
+principal, agent ID, agent name, and role may reactivate the identity. A bound
+selector mismatch is rejected before `joinSeat` runs. The dependency receives
+`expected_identity` and must verify it before mutation; a different identity is
+a conflict, not a replacement.
 
 ## Trust and isolation
 
@@ -46,7 +50,36 @@ This ticket owns:
 - `seat_lifecycle/adapter.cjs`
 - `tests/seat_lifecycle.test.cjs`
 
-The integration owner pairs the reviewed component into shared files:
+Assembly ticket `TK-a3f0627d27db` pairs the reviewed component into shared
+files. It must implement this executable interface:
+
+- `POST /pursers/seat-lifecycle/join` passes the JSON object to `join(input)`.
+- `GET /pursers/seat-lifecycle/status` maps `agent_name` and `role` query values
+  to `status(input)`; once identity is bound both values may be omitted.
+- `POST /pursers/seat-lifecycle/disconnect` passes JSON `{ board, confirm }` to
+  `disconnect(input)`.
+- `host/helper.cjs` authenticates every route with its existing exact Origin,
+  loopback-host, and `x-pursers-home-token` checks before dispatch. The adapter
+  is constructed with that helper's exact configured board; route input cannot
+  select another board. Tokens and doors are never returned to the page.
+- `joinSeat(input)` receives `expected_board` and, for a rejoin, an
+  `expected_identity` object containing exact `board`, `agent_id`,
+  `principal_id`, `agent_name`, and `role`. It must compare these fields to the
+  rejoin target before mutation and return `{ ok, identity, rejoined }`.
+- `readBoard({ board, include_retired: true })` returns
+  `{ ok, board_id, agents }`; `retireSelf({ board, agent_name })` returns
+  `{ ok, board_id, agent }`; `forgetDoor({ board, role })` returns
+  `{ ok, board, role }`. Every result is validated again by the adapter.
+- Routes return the adapter result body unchanged. Map success to HTTP 200;
+  malformed JSON/selectors to 400; helper auth/origin failures to 401/403;
+  identity conflicts, mismatches, and active leases to 409; unavailable
+  dependencies to 503; inconsistent dependency/read-back results to 502; and
+  confirmation-required or non-active lifecycle results to 422. The Home UI
+  renders `message`, `recovery`, `retryable`, and `confirmation`, requires the
+  user to type the exact confirmation before disconnect, and never infers
+  success from HTTP status alone.
+
+The assembly ticket owns these shared pairing points:
 
 - `host/helper.cjs`: provide authenticated `joinSeat`, `readBoard`,
   `retireSelf`, and `forgetDoor` dependencies.
