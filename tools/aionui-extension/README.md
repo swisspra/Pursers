@@ -3,7 +3,7 @@
 This extension adds a guided Pursers Home plus Worker and Reviewer presets. Home
 connects one project with a coordinator-issued door, prepares distinct Team
 seats through a dry-run-first plan, reports partial results, and exposes bounded
-pause, stop, recovery, and roster controls.
+pause, stop, recovery, roster controls, and a board-backed ticket lifecycle.
 
 ## Build and install
 
@@ -63,6 +63,8 @@ arguments.
 5. Preview the Team plan. Starting seats requires a separate confirmation of
    that exact plan; each result is reported independently.
 6. Start a new conversation and pick the matching Worker or Reviewer preset.
+7. In Ticket lifecycle, create unassigned board work or refresh its real status.
+   Home never claims, submits, or reviews tickets on a seat's behalf.
 
 The helper passes the door directly to `pursers-wait-bridge join`, which owns
 the private mode-0600 credential store. The extension does not log or persist
@@ -100,6 +102,21 @@ agent-facing host contract also cannot create a Team, archive a Team, remove a
 teammate, or resume one. Pursers Home states these boundaries instead of
 simulating them. The dashboard remains the Pursers Personal MCP app entrypoint
 (or `board_snapshot` fallback), not an invented URL.
+
+## Ticket lifecycle
+
+The helper keeps one persistent `pursers-wait-bridge ticket-lifecycle` sidecar
+for its configured board. The sidecar reads the private door store and joins as
+a dedicated actor with `can_work=false` and `can_review=false`; credentials and
+the Central URL never enter the browser. Use a wait-bridge build containing
+`ticket_lifecycle.py` with this extension candidate.
+
+Home supports list, get, generated-ID create, and cancel. Create always sets
+`unassigned=true`. Cancel is not a UI authorization shortcut: Central permits it
+only for the creator principal, current executor, or an authorized reviewer.
+There are deliberately no Home routes for claim, renew, submit, review-claim,
+review, assignment, or client-authored status changes. See
+`ticket_lifecycle/FEATURE_CONTRACT.md` for the role and recovery contract.
 
 ## AionUi 2.2.1 limitations
 

@@ -35,9 +35,10 @@ This feature owns:
 
 - `ticket_lifecycle/FEATURE_CONTRACT.md`
 - `ticket_lifecycle/adapter.cjs`
-- `ticket_lifecycle/service.py`
 - `tests/ticket_lifecycle.test.cjs`
 - `tests/test_ticket_lifecycle.py`
+- `tools/wait-bridge/ticket_lifecycle.py`
+- `tools/wait-bridge/tests/test_ticket_lifecycle_service.py`
 
 The minimal integration surface is:
 
@@ -45,7 +46,7 @@ The minimal integration surface is:
 - `webui/routes.js`: board-pinned lifecycle routes only
 - `webui/index.html`, `webui/app.js`, `webui/style.css`: one accessible lifecycle section
 - `build.py`, `README.md`, and package hashes: include and document the owned files
-- `tools/wait-bridge/pursers_wait_server.py` and `pyproject.toml`: one persistent
+- `tools/wait-bridge/pursers_wait_server.py` and `tools/wait-bridge/pyproject.toml`: one persistent
   `ticket-lifecycle` sidecar entry point; no observer, listener, or shell rewrite
 
 No home-acceptance observer/harness, Team adapter, door adapter, worker/reviewer

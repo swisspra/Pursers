@@ -90,7 +90,7 @@ def test_assets_are_packaged_and_do_not_load_remote_dependencies() -> None:
     css = read("webui/style.css")
     urls = re.findall(r'(?:src|href)="([^"]+)"', html)
     assert set(urls).issubset({
-        "#main-content", "#home", "#connection", "#team", "#progress", "#advanced",
+        "#main-content", "#home", "#connection", "#team", "#progress", "#tickets", "#advanced",
         "./style.css", "./app.js", "data:", "data:,",
     })
     assert "http://" not in html.replace("http://127.0.0.1:43121", "")
