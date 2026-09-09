@@ -67,6 +67,7 @@ def _args(tmp_path: Path):
         "ego_browser": str(_file(tmp_path / "ego-browser", executable=True)),
         "host_bundle": str(host), "host_cdhash": "b" * 40, "codesign": str(codesign),
         "host_version": "2.2.1", "identity_mode": "webui",
+        "aionpro_bootstrap_secret_file": None,
         "runtime_commit": RUNTIME_SHA, "core_version": "0.2.1",
         "task_space": "acceptance-test",
     }
@@ -80,9 +81,10 @@ def test_prepare_writes_private_reproducible_handoff(tmp_path: Path, capsys) -> 
     assert stat.S_IMODE(root.stat().st_mode) == 0o700
     for name in ("helper-token", "fresh_install.assertions.json", "handoff.json"):
         assert stat.S_IMODE((root / name).stat().st_mode) == 0o600
-    for name in ("start-aioncore.sh", "start-helper.sh", "reviewer-commands.sh", "cleanup.sh"):
+    for name in ("launch-aioncore.py", "start-aioncore.sh", "start-helper.sh", "reviewer-commands.sh", "cleanup.sh"):
         assert stat.S_IMODE((root / name).stat().st_mode) == 0o700
-        subprocess.run(["sh", "-n", str(root / name)], check=True)
+        if name.endswith(".sh"):
+            subprocess.run(["sh", "-n", str(root / name)], check=True)
     manifest = json.loads((root / "handoff.json").read_text())
     token = (root / "helper-token").read_text().strip()
     assert len(token) == 64
@@ -90,7 +92,14 @@ def test_prepare_writes_private_reproducible_handoff(tmp_path: Path, capsys) -> 
     assert manifest["candidate"]["commit"] == args.commit
     assert manifest["signed_host"]["identity_mode"] == "webui"
     core_start = (root / "start-aioncore.sh").read_text()
+    assert "unset AIONCORE_BOOTSTRAP_SECRET" in core_start
     assert core_start.splitlines()[-2:] == ["  --identity-mode \\", "  webui"]
+    assert manifest["secrets"]["aionpro_bootstrap_secret"] == {
+        "path": None,
+        "required": False,
+        "source": "not-used",
+        "value_recorded": False,
+    }
     commands = (root / "reviewer-commands.sh").read_text()
     assert "install-observer" in commands
     assert "doctor" in commands
@@ -128,16 +137,106 @@ def test_refuses_unsupported_identity_mode(tmp_path: Path, identity_mode: str) -
         handoff.prepare(args)
 
 
-def test_writes_supported_aionpro_identity_mode_exactly(tmp_path: Path) -> None:
+def test_refuses_aionpro_without_explicit_secret_before_output(tmp_path: Path, monkeypatch) -> None:
     args = _args(tmp_path)
     args.identity_mode = "aionpro"
+    monkeypatch.setenv("AIONCORE_BOOTSTRAP_SECRET", "ambient-secret-must-not-count")
+    with pytest.raises(handoff.HandoffError, match="requires --aionpro-bootstrap-secret-file"):
+        handoff.prepare(args)
+    assert not Path(args.sandbox_root).exists()
+
+
+def test_refuses_non_private_aionpro_secret_before_output(tmp_path: Path) -> None:
+    args = _args(tmp_path)
+    args.identity_mode = "aionpro"
+    secret = _file(tmp_path / "aionpro-secret", b"sandbox-only-secret")
+    secret.chmod(0o640)
+    args.aionpro_bootstrap_secret_file = str(secret)
+    with pytest.raises(handoff.HandoffError, match="exactly 0600"):
+        handoff.prepare(args)
+    assert not Path(args.sandbox_root).exists()
+
+
+def test_refuses_symlinked_aionpro_secret_before_output(tmp_path: Path) -> None:
+    args = _args(tmp_path)
+    args.identity_mode = "aionpro"
+    secret = _file(tmp_path / "aionpro-secret", b"sandbox-only-secret")
+    link = tmp_path / "aionpro-secret-link"
+    link.symlink_to(secret)
+    args.aionpro_bootstrap_secret_file = str(link)
+    with pytest.raises(handoff.HandoffError, match="symlink"):
+        handoff.prepare(args)
+    assert not Path(args.sandbox_root).exists()
+
+
+def test_webui_refuses_aionpro_secret_file(tmp_path: Path) -> None:
+    args = _args(tmp_path)
+    args.aionpro_bootstrap_secret_file = str(
+        _file(tmp_path / "aionpro-secret", b"sandbox-only-secret")
+    )
+    with pytest.raises(handoff.HandoffError, match="valid only with aionpro"):
+        handoff.prepare(args)
+    assert not Path(args.sandbox_root).exists()
+
+
+def test_aionpro_runtime_uses_explicit_secret_not_ambient(tmp_path: Path) -> None:
+    args = _args(tmp_path)
+    args.identity_mode = "aionpro"
+    secret_value = "sandbox-only-test-secret-42"
+    secret = _file(tmp_path / "aionpro-secret", (secret_value + "\n").encode())
+    args.aionpro_bootstrap_secret_file = str(secret)
+    _file(
+        Path(args.aioncore_bin),
+        (
+            "#!/bin/sh\n"
+            f"test \"$AIONCORE_BOOTSTRAP_SECRET\" = {secret_value!r} || exit 9\n"
+            "printf '%s\\n' aionpro-ready\n"
+        ).encode(),
+        executable=True,
+    )
     root = Path(handoff.prepare(args)["handoff"])
     manifest = json.loads((root / "handoff.json").read_text())
     assert manifest["signed_host"]["identity_mode"] == "aionpro"
-    assert (root / "start-aioncore.sh").read_text().splitlines()[-2:] == [
+    start_text = (root / "start-aioncore.sh").read_text()
+    launcher_text = (root / "launch-aioncore.py").read_text()
+    assert start_text.splitlines()[-2:] == [
         "  --identity-mode \\",
         "  aionpro",
     ]
+    result = subprocess.run(
+        [str(root / "start-aioncore.sh")],
+        capture_output=True,
+        check=False,
+        env={**os.environ, "AIONCORE_BOOTSTRAP_SECRET": "ambient-secret-must-not-count"},
+        text=True,
+    )
+    assert result.returncode == 0
+    assert result.stdout == "aionpro-ready\n"
+    exposed = start_text + launcher_text + json.dumps(manifest) + result.stdout + result.stderr
+    assert secret_value not in exposed
+    assert "ambient-secret-must-not-count" not in exposed
+    assert manifest["secrets"]["aionpro_bootstrap_secret"] == {
+        "path": str(secret),
+        "required": True,
+        "source": "explicit-private-file",
+        "value_recorded": False,
+    }
+
+
+def test_aionpro_runtime_rechecks_secret_permissions(tmp_path: Path) -> None:
+    args = _args(tmp_path)
+    args.identity_mode = "aionpro"
+    secret_value = "sandbox-only-test-secret-42"
+    secret = _file(tmp_path / "aionpro-secret", secret_value.encode())
+    args.aionpro_bootstrap_secret_file = str(secret)
+    root = Path(handoff.prepare(args)["handoff"])
+    secret.chmod(0o640)
+    result = subprocess.run(
+        [str(root / "start-aioncore.sh")], capture_output=True, check=False, text=True
+    )
+    assert result.returncode == 2
+    assert "mode must be exactly 0600" in result.stderr
+    assert secret_value not in result.stderr
 
 
 def test_refuses_zip_bound_to_different_commit(tmp_path: Path) -> None:
