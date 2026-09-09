@@ -108,14 +108,19 @@ board-role credential.
 
 ## 4. Join and check a standalone seat
 
-Use the standalone seat lifecycle controls for the connected board. Aion Team
+Open **Seat**, then use **Seat lifecycle** for the connected board. Aion Team
 controls, Fleet API workers, and seat-kit are not substitutes for this step.
 
-1. Select the preserved seat name and role from the connected project.
-2. Join the seat.
-3. Confirm the result shows the exact board, `agent_id`, `principal_id`, seat
-   name, role, and lifecycle returned by Central.
-4. Refresh status before creating work.
+1. Paste the door into **Door string**. It is used only for this join and is
+   cleared immediately.
+2. Enter the exact **Seat name**, choose **Role** and **Tier ceiling**, and
+   confirm **Workspace focus**.
+3. Open **Assistant and model details** only when your operator supplied an
+   explicit override.
+4. Choose **Join standalone seat**.
+5. Confirm **Live seat status** shows the expected board, seat, role,
+   lifecycle, dispatch state, and lease expiry.
+6. Choose **Refresh seat** before creating work.
 
 A normal joined seat reports `active`. Home reports `handed_off`, `stale`,
 `retired`, and `unknown` honestly rather than presenting them as active. Follow
@@ -294,9 +299,9 @@ To disconnect or retire a standalone seat safely:
 1. Finish, submit, or release any active ticket so no work or review lease
    remains.
 2. Refresh the seat's live Central status.
-3. Review the exact board and seat name.
-4. Type the exact confirmation shown by Home.
-5. Request safe disconnect.
+3. Review the exact board and seat name in **Live seat status**.
+4. Type the exact value shown under **Retirement confirmation**.
+5. Choose **Retire and disconnect**.
 6. Wait for Central to report the same identity as `retired` before local door
    state is removed.
 
