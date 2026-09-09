@@ -292,7 +292,7 @@ faa60203ee6a1857636322def8e5f3c92510c87983cbcd07d2ebd68b9e7d3611
       --token-file /PATH/TO/dashboard-admin.jwt \
       --doors-keys-dir /PATH/TO/target-jwt/door-keys \
       --jwks-path /PATH/TO/target-jwt/jwks.json \
-      --home-board pursers --agent-name '<DASHBOARD_NAME>'
+      --home-board pursers --agent-name fleet-dashboard-session-default
     ```
 
     Append each existing coordinator policy flag unchanged. Produce and review

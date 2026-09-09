@@ -244,6 +244,125 @@ The server refuses non-loopback binding. It never returns tokens to the browser
 or writes them to logs. Central TLS verification follows
 `pursers_client.BoardClient` behavior.
 
+The dashboard uses one persistent, serialized Central session per board. Its
+identity must be in the reserved `fleet-dashboard-session-*` namespace and has
+explicit `can_work=false` and `can_review=false` capabilities. A restart may
+reclaim that identity only when Central confirms that its role, capabilities,
+platform, and ownership marker all match. A collision with a worker, reviewer,
+or differently marked identity is refused instead of being taken over.
+The dashboard and Central must therefore be deployed from the same approved
+candidate or a later release that includes the matching-takeover contract.
+
+### Coordinator-only exact-SHA deployment and rollback
+
+Do not deploy from a dirty operator checkout. The coordinator should prepare an
+isolated detached worktree and a staged copy of the existing LaunchAgent. Set
+the variables below to the reviewed candidate and the current deployment paths;
+do not place bearer tokens in the shell command or plist.
+
+```bash
+FLEET_CLONE=/PATH/TO/pursers-fleet-clone
+CANDIDATE_SHA=0123456789abcdef0123456789abcdef01234567
+CANDIDATE_ROOT=/PATH/TO/fleet-dashboard-candidates/$CANDIDATE_SHA
+LIVE_PLIST=/PATH/TO/Library/LaunchAgents/com.pursers.fleet-dashboard.plist
+STAGED_PLIST=/PATH/TO/staging/com.pursers.fleet-dashboard.plist
+BACKUP_PLIST=/PATH/TO/backups/com.pursers.fleet-dashboard.plist.before-$CANDIDATE_SHA
+JOB=gui/$(id -u)/com.pursers.fleet-dashboard
+
+git -C "$FLEET_CLONE" fetch origin "$CANDIDATE_SHA"
+git -C "$FLEET_CLONE" worktree add --detach "$CANDIDATE_ROOT" "$CANDIDATE_SHA"
+test "$(git -C "$CANDIDATE_ROOT" rev-parse HEAD)" = "$CANDIDATE_SHA"
+cp -p "$LIVE_PLIST" "$BACKUP_PLIST"
+cp -p "$LIVE_PLIST" "$STAGED_PLIST"
+python3 - "$STAGED_PLIST" "$CANDIDATE_ROOT/tools/fleet-dashboard/fleet_dashboard.py" <<'PY'
+import plistlib
+import sys
+
+path, candidate = sys.argv[1:]
+with open(path, "rb") as source:
+    document = plistlib.load(source)
+arguments = document.get("ProgramArguments")
+matches = [
+    index for index, value in enumerate(arguments or [])
+    if isinstance(value, str) and value.endswith("tools/fleet-dashboard/fleet_dashboard.py")
+]
+if len(matches) != 1:
+    raise SystemExit("LaunchAgent must contain exactly one fleet_dashboard.py argument")
+arguments[matches[0]] = candidate
+if "--agent-name" in arguments:
+    index = arguments.index("--agent-name")
+    if index + 1 >= len(arguments):
+        raise SystemExit("--agent-name is missing its value")
+    arguments[index + 1] = "fleet-dashboard-session-default"
+else:
+    arguments.extend(["--agent-name", "fleet-dashboard-session-default"])
+with open(path, "wb") as target:
+    plistlib.dump(document, target, sort_keys=True)
+PY
+plutil -lint "$STAGED_PLIST"
+install -m 600 "$STAGED_PLIST" "$LIVE_PLIST"
+launchctl bootout "$JOB" 2>/dev/null || true
+launchctl bootstrap "gui/$(id -u)" "$LIVE_PLIST"
+```
+
+Verify the loaded definition, process source, candidate SHA, and endpoints
+without printing the job environment or command line:
+
+```bash
+EXPECTED_SOURCE="$CANDIDATE_ROOT/tools/fleet-dashboard/fleet_dashboard.py"
+PLIST_SOURCE=$(python3 - "$LIVE_PLIST" <<'PY'
+import plistlib
+import sys
+with open(sys.argv[1], "rb") as source:
+    arguments = plistlib.load(source)["ProgramArguments"]
+matches = [value for value in arguments if isinstance(value, str) and value.endswith("tools/fleet-dashboard/fleet_dashboard.py")]
+if len(matches) != 1:
+    raise SystemExit(1)
+print(matches[0])
+PY
+)
+test "$PLIST_SOURCE" = "$EXPECTED_SOURCE"
+test "$(git -C "$CANDIDATE_ROOT" rev-parse HEAD)" = "$CANDIDATE_SHA"
+PID=$(launchctl print "$JOB" | awk '/pid =/{print $3; exit}')
+test -n "$PID"
+PROCESS_COMMAND=$(ps -p "$PID" -o command=)
+case "$PROCESS_COMMAND" in *"$EXPECTED_SOURCE"*) ;; *) exit 1 ;; esac
+for path in / /api/fleet /api/config /api/config/registry /api/attention; do
+  curl --fail --silent --show-error --output /dev/null "http://127.0.0.1:8899$path"
+done
+```
+
+Rollback restores the saved definition and reloads it. Resolve its source and
+SHA from the isolated previous worktree, then repeat the same non-printing
+process-source and endpoint checks above with those previous values.
+
+```bash
+install -m 600 "$BACKUP_PLIST" "$LIVE_PLIST"
+launchctl bootout "$JOB"
+launchctl bootstrap "gui/$(id -u)" "$LIVE_PLIST"
+PREVIOUS_SOURCE=$(python3 - "$LIVE_PLIST" <<'PY'
+import plistlib
+import sys
+with open(sys.argv[1], "rb") as source:
+    arguments = plistlib.load(source)["ProgramArguments"]
+matches = [value for value in arguments if isinstance(value, str) and value.endswith("tools/fleet-dashboard/fleet_dashboard.py")]
+if len(matches) != 1:
+    raise SystemExit(1)
+print(matches[0])
+PY
+)
+PREVIOUS_ROOT=${PREVIOUS_SOURCE%/tools/fleet-dashboard/fleet_dashboard.py}
+PREVIOUS_SHA=$(git -C "$PREVIOUS_ROOT" rev-parse HEAD)
+test -n "$PREVIOUS_SHA"
+PID=$(launchctl print "$JOB" | awk '/pid =/{print $3; exit}')
+test -n "$PID"
+PROCESS_COMMAND=$(ps -p "$PID" -o command=)
+case "$PROCESS_COMMAND" in *"$PREVIOUS_SOURCE"*) ;; *) exit 1 ;; esac
+for path in / /api/fleet /api/config /api/config/registry /api/attention; do
+  curl --fail --silent --show-error --output /dev/null "http://127.0.0.1:8899$path"
+done
+```
+
 ### Multiple central instances
 
 Use one viewer process for several independent trust domains with `--centrals`:
