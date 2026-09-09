@@ -191,6 +191,25 @@ def test_documented_offline_wheelhouse_runs_lifecycle_and_handoff(tmp_path: Path
     if python is None:
         pytest.skip("python3.12 is required")
     root = Path(__file__).resolve().parents[2]
+    ambient_wheels = tmp_path / "ambient-wheels"
+    ambient_wheels.mkdir()
+    with zipfile.ZipFile(
+        ambient_wheels / "pursers_client-0.1.0a22-py3-none-any.whl", "w"
+    ) as archive:
+        archive.writestr(
+            "pursers_client-0.1.0a22.dist-info/METADATA",
+            "Metadata-Version: 2.1\nName: pursers-client\nVersion: 0.1.0a22\n",
+        )
+        archive.writestr(
+            "pursers_client-0.1.0a22.dist-info/WHEEL",
+            "Wheel-Version: 1.0\nGenerator: acceptance-test\nRoot-Is-Purelib: true\nTag: py3-none-any\n",
+        )
+        archive.writestr("pursers_client-0.1.0a22.dist-info/RECORD", "")
+    contaminated_environment = {
+        **os.environ,
+        "PIP_FIND_LINKS": str(ambient_wheels),
+        "UV_FIND_LINKS": str(ambient_wheels),
+    }
     wheelhouse = tmp_path / "wheelhouse"
     built = subprocess.run(
         [
@@ -205,6 +224,7 @@ def test_documented_offline_wheelhouse_runs_lifecycle_and_handoff(tmp_path: Path
         check=False,
         capture_output=True,
         cwd=root,
+        env=contaminated_environment,
         text=True,
     )
     assert built.returncode == 0, built.stderr
@@ -247,6 +267,7 @@ def test_documented_offline_wheelhouse_runs_lifecycle_and_handoff(tmp_path: Path
             runtime_python,
             "-m",
             "pip",
+            "--isolated",
             "install",
             "--disable-pip-version-check",
             "--no-index",
@@ -257,6 +278,7 @@ def test_documented_offline_wheelhouse_runs_lifecycle_and_handoff(tmp_path: Path
         check=True,
         capture_output=True,
         cwd=tmp_path,
+        env=contaminated_environment,
         text=True,
     )
     bridge = runtime / "bin" / "pursers-wait-bridge"

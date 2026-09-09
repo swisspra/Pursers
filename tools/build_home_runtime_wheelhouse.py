@@ -117,6 +117,8 @@ def build(output: Path, python: Path, allow_dirty: bool = False) -> dict[str, ob
         wheelhouse.mkdir()
         wheelhouse.chmod(0o700)
         build_environment = {**os.environ, "UV_PYTHON": str(python)}
+        build_environment.pop("PIP_FIND_LINKS", None)
+        build_environment.pop("UV_FIND_LINKS", None)
         for project in (CLIENT_PROJECT, BRIDGE_PROJECT):
             _run(
                 [uv, "build", "--wheel", "--out-dir", str(dist), str(project)],
@@ -135,6 +137,7 @@ def build(output: Path, python: Path, allow_dirty: bool = False) -> dict[str, ob
                 str(resolver_python),
                 "-m",
                 "pip",
+                "--isolated",
                 "download",
                 "--disable-pip-version-check",
                 "--retries",
@@ -159,6 +162,7 @@ def build(output: Path, python: Path, allow_dirty: bool = False) -> dict[str, ob
                 str(verifier_python),
                 "-m",
                 "pip",
+                "--isolated",
                 "install",
                 "--disable-pip-version-check",
                 "--no-index",
@@ -203,7 +207,7 @@ def build(output: Path, python: Path, allow_dirty: bool = False) -> dict[str, ob
                 bridge_name: bridge_version,
             },
             "verification": {
-                "install": "pip install --no-index --find-links WHEELHOUSE "
+                "install": "pip --isolated install --no-index --find-links WHEELHOUSE "
                 f"{bridge_name}=={bridge_version}",
                 "lifecycle_command_tails": command_tails,
             },

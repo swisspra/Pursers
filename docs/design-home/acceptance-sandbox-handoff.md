@@ -57,7 +57,7 @@ python3 tools/build_home_runtime_wheelhouse.py \
   --output /PRIVATE/PATH/home-runtime-wheelhouse
 (cd /PRIVATE/PATH/home-runtime-wheelhouse && shasum -a 256 -c SHA256SUMS)
 /ABSOLUTE/PATH/TO/python3.12 -m venv /PRIVATE/PATH/home-runtime
-/PRIVATE/PATH/home-runtime/bin/python -m pip install \
+/PRIVATE/PATH/home-runtime/bin/python -m pip --isolated install \
   --disable-pip-version-check --no-index \
   --find-links /PRIVATE/PATH/home-runtime-wheelhouse \
   pursers-wait-bridge==0.1.0a15
@@ -69,7 +69,9 @@ python3 tools/build_home_runtime_wheelhouse.py \
 Keep `SHA256SUMS` and `wheelhouse.json` with the handoff evidence. The builder
 refuses a dirty source checkout, an existing output path, non-Python-3.12
 interpreter, a changed local source wheel, or a wheelhouse that cannot complete
-the strict no-index install and all three lifecycle probes.
+the isolated, strict no-index install and all three lifecycle probes. Pip's
+isolated mode prevents ambient index or find-links configuration from substituting
+another wheel with the same project name and version.
 
 The preparer repeats those lifecycle probes with a clean Python import path and
 records the exact bridge binary path, SHA-256, reported version, and verified
