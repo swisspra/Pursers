@@ -239,23 +239,23 @@ No cleanup command is part of the recipe. Each execution creates new paths and p
 
 ## 4. Executed evidence
 
-The canonical block passed end-to-end on 2026-09-09 UTC on branch `codex/TK-0a395c726efd`, frozen base `b06ce6627edb62fc588eee541fa568445b709054`, with the combined candidate change set staged but not yet committed. It was therefore run from the ticket worktree, not from a fresh detached checkout, and must be rerun on the final release-train SHA. The run created a new randomized `/tmp/pursers-packaging-gate.*` root and used only its `venv/bin/python` for Python gates. `TMPDIR` was pointed at a directory whose group matches the session group; on macOS `/private/tmp` has group `wheel`, and `test_release_ops.py` asserts that a written profile keeps the caller's gid.
+The canonical block passed end-to-end on 2026-09-09 UTC on branch `codex/TK-0a395c726efd`, at checkpoint commit `14354f0b6e8edb9c116bc3673c16d2db5b865e68`, frozen base `b06ce6627edb62fc588eee541fa568445b709054`. It was run from the ticket worktree rather than a fresh detached checkout, and must be rerun on the final release-train SHA. The run created a new randomized `/tmp/pursers-packaging-gate.*` root and used only its `venv/bin/python` for Python gates. `TMPDIR` was pointed at a directory whose group matches the session group; on macOS `/private/tmp` has group `wheel`, and `test_release_ops.py` asserts that a written profile keeps the caller's gid.
 
 | Gate | Exact result |
 | --- | --- |
-| Extension Python suite | `90 passed, 2 skipped in 31.77s`; both skips are `tests/home_acceptance/test_live_host.py` (no host URL, no verifier-owned browser observer) and are not counted as passes |
+| Extension Python suite | `90 passed, 2 skipped in 32.25s`; both skips are `tests/home_acceptance/test_live_host.py` (no host URL, no verifier-owned browser observer) and are not counted as passes |
 | Route Node suite | `pass 10`, `fail 0` |
 | Door adapter Node suite | `pass 8`, `fail 0` |
 | Team adapter Node suite | `pass 20`, `fail 0` |
 | Dashboard dependency install | 120 packages added, 121 audited; 1 moderate severity vulnerability reported by `npm ci` |
 | Dashboard typecheck/build | `tsc --noEmit` passed; 148 modules transformed; generated resource 446.71 kB |
-| Exact-view contract | `1 passed, 137 deselected in 0.81s` |
+| Exact-view contract | `1 passed, 137 deselected in 0.89s` |
 | Installed component verification | `PASS component verification: ['pursers-central', 'pursers-client']` |
 | Dashboard bytes | SHA-256 `e8ac595fa78f54bbc0f4b19332bd08c50d75614603bd03f573161a3d715278b2`; 446717 bytes; generated, promoted, and lock values match |
 | Dashboard external resources | `PASS dashboard resources: self-contained HTML` |
-| Extension ZIP | 52320 archive bytes; 163815 uncompressed member bytes; 18 members |
+| Extension ZIP | 52736 archive bytes; 164760 uncompressed member bytes; 18 members |
 | ZIP runtime/path proof | Five documentation members are exempt by name; every other member, including `contexts/*.md`, has no `tools/` or `packages/` path; the settings tab entry exists; the webui contribution declares no `apiRoutes`; bundle-relative `./` references resolve to packaged `webui/*` members |
-| Fleet release-ops suite | `21 passed in 0.86s` |
+| Fleet release-ops suite | `21 passed in 0.69s` |
 | Leak scans | Extension and Fleet: `clean (0 violations)` |
 | Checkout integrity | `git diff --check` passed. `git status --short` listed the ticket's staged change set, because the gate ran in the worktree before the cumulative commit; the empty-output proof that generated resource and lock match tracked bytes is deferred to a fresh checkout of the final SHA. Lock regeneration was separately verified reproducible: `tools/regenerate_component_lock.py` left `component-lock.json` byte-identical |
 

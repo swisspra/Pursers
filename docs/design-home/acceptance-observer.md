@@ -135,14 +135,30 @@ observations in one report must share a single `observer_id`.
 
 Exit 7 and 8 are reported as `blocked`, never as pass and never as skip.
 
+## Read-only probe against the combined candidate, 2026-09-09
+
+Checkpoint commit `14354f0b6e8edb9c116bc3673c16d2db5b865e68`, isolated AionCore
+started with `--app-version 2.2.1` and an isolated data directory, packaged
+loopback helper bound to board `sandbox-home-acceptance`.
+
+- the authenticated asset route returned the installed
+  `webui/candidate.json`, and its `candidate_commit` equals the checkpoint SHA,
+  so the running host is serving this candidate and not an earlier one
+- `test_real_host_read_only_capability_probe`: `1 passed`
+- three negative controls, all against the same live host: unset environment
+  skips with the original capability-unavailable message, a wrong token skips
+  identically, and a token file readable by group or other fails
+- `test_real_browser_host_acceptance_evidence`: still skipped, no
+  verifier-owned observer. This remains **blocked**, never a pass
+
 ## Observed runtime state, 2026-09-08 (earlier candidate)
 
 The bullets in this section were recorded on 2026-09-08 against an earlier
 candidate, before the five approved Home inputs were combined. They are retained
-as prior evidence and are **not** evidence for the combined candidate. The
-combined candidate on branch `codex/TK-0a395c726efd` has not yet been observed in
-an authenticated isolated browser; its exact checkpoint SHA and the pending
-observer run are recorded in the ticket submission. No PASS is claimed for it.
+as prior evidence and are **not** evidence for the combined candidate. For the
+combined candidate, only the read-only probe recorded in the section above has
+been executed; it has still not been observed in an authenticated isolated
+browser, and no PASS is claimed for that channel.
 
 Against the installed authenticated AionUi host on `http://127.0.0.1:57210`:
 
