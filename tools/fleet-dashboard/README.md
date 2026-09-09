@@ -244,6 +244,326 @@ The server refuses non-loopback binding. It never returns tokens to the browser
 or writes them to logs. Central TLS verification follows
 `pursers_client.BoardClient` behavior.
 
+The dashboard uses one persistent, serialized Central session per board. Its
+identity must be in the reserved `fleet-dashboard-session-*` namespace and has
+explicit `can_work=false` and `can_review=false` capabilities. A restart may
+reclaim that identity only when Central confirms that its role, capabilities,
+platform, and ownership marker all match. A collision with a worker, reviewer,
+or differently marked identity is refused instead of being taken over.
+The dashboard and Central must therefore be deployed from the same approved
+candidate or a later release that includes the matching-takeover contract.
+
+Run the focused identity/session regression with these exact pytest node IDs
+(the two parametrized functions expand to five cases, for ten cases total):
+
+```bash
+python3 -m pytest -q \
+  packages/client/tests/test_per_call_identity.py::test_takeover_and_memory_identity_are_forwarded \
+  packages/client/tests/test_per_call_identity.py::test_context_startup_forwards_explicit_takeover_policy \
+  tools/fleet-dashboard/tests/test_fleet_dashboard.py::test_fetcher_real_client_uses_reserved_read_only_session_identity \
+  tools/fleet-dashboard/tests/test_fleet_dashboard.py::test_real_central_matching_takeover_protects_worker_and_reviewer_identities \
+  tools/fleet-dashboard/tests/test_fleet_dashboard.py::test_config_api_reuses_dashboard_identity_after_restart_and_concurrently \
+  tools/fleet-dashboard/tests/test_fleet_dashboard.py::test_fetcher_reconnects_once_after_transport_failure \
+  tools/fleet-dashboard/tests/test_fleet_dashboard.py::test_cli_refuses_names_outside_dashboard_session_namespace
+```
+
+### Coordinator-only exact-SHA deployment and rollback
+
+Do not deploy from a dirty operator checkout. The coordinator should prepare an
+isolated detached worktree and a staged copy of the existing LaunchAgent. Set
+the variables below to the reviewed candidate and the current deployment paths;
+do not place bearer tokens in the shell command or plist.
+
+Run each block as Bash exactly as shown. `set -euo pipefail` makes validation
+fail closed: no later rewrite, backup overwrite, install, bootout, or bootstrap
+runs after a failed directory, file, SHA, worktree, plist, or mode check. The
+backup is not written until the rewritten staged plist passes `plutil`.
+`bootout_if_present` continues past an absent job only when `launchctl print`
+returns its documented missing-service status and message. Every other probe or
+bootout failure remains fatal.
+
+```bash
+set -euo pipefail
+
+FLEET_CLONE=/PATH/TO/pursers-fleet-clone
+CANDIDATE_SHA=0123456789abcdef0123456789abcdef01234567
+CANDIDATE_ROOT=/PATH/TO/fleet-dashboard-candidates/$CANDIDATE_SHA
+LIVE_PLIST=/PATH/TO/Library/LaunchAgents/com.pursers.fleet-dashboard.plist
+PRIVATE_PARENT=/PATH/TO/private-fleet-dashboard-staging
+PRIVATE_ROOT=$PRIVATE_PARENT/$CANDIDATE_SHA
+STAGING_DIR=$PRIVATE_ROOT/staging
+BACKUP_DIR=$PRIVATE_ROOT/backups
+STAGED_PLIST=$STAGING_DIR/com.pursers.fleet-dashboard.plist
+BACKUP_PLIST=$BACKUP_DIR/com.pursers.fleet-dashboard.plist.before-$CANDIDATE_SHA
+JOB=gui/$(id -u)/com.pursers.fleet-dashboard
+
+umask 077
+python3 - "$PRIVATE_PARENT" "$PRIVATE_ROOT" "$STAGING_DIR" "$BACKUP_DIR" <<'PY'
+import os
+import stat
+import sys
+
+for directory in sys.argv[1:]:
+    try:
+        os.mkdir(directory, 0o700)
+    except FileExistsError:
+        pass
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(directory, flags)
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+            raise SystemExit("private staging paths must be owned, non-symlink directories")
+        os.fchmod(descriptor, 0o700)
+        if stat.S_IMODE(os.fstat(descriptor).st_mode) != 0o700:
+            raise SystemExit("private staging directories must finish mode 0700")
+    finally:
+        os.close(descriptor)
+PY
+
+git -C "$FLEET_CLONE" fetch origin "$CANDIDATE_SHA"
+git -C "$FLEET_CLONE" worktree add --detach "$CANDIDATE_ROOT" "$CANDIDATE_SHA"
+test "$(git -C "$CANDIDATE_ROOT" rev-parse HEAD)" = "$CANDIDATE_SHA"
+plutil -lint "$LIVE_PLIST"
+python3 - "$LIVE_PLIST" "$BACKUP_PLIST" "$STAGED_PLIST" <<'PY'
+import os
+import stat
+import sys
+
+source_path, *destination_paths = sys.argv[1:]
+source_info = os.lstat(source_path)
+if (
+    not stat.S_ISREG(source_info.st_mode)
+    or stat.S_ISLNK(source_info.st_mode)
+    or source_info.st_uid != os.getuid()
+):
+    raise SystemExit("live LaunchAgent must be an owned, non-symlink regular file")
+for destination_path in destination_paths:
+    try:
+        info = os.lstat(destination_path)
+    except FileNotFoundError:
+        continue
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or stat.S_ISLNK(info.st_mode)
+        or info.st_nlink != 1
+        or info.st_uid != os.getuid()
+    ):
+        raise SystemExit("staged and backup LaunchAgents must be owned, single-link regular files")
+PY
+python3 - "$LIVE_PLIST" "$STAGED_PLIST" "$CANDIDATE_ROOT/tools/fleet-dashboard/fleet_dashboard.py" <<'PY'
+import os
+import plistlib
+import stat
+import sys
+
+source_path, staged_path, candidate = sys.argv[1:]
+with open(source_path, "rb") as source:
+    document = plistlib.load(source)
+arguments = document.get("ProgramArguments")
+matches = [
+    index for index, value in enumerate(arguments or [])
+    if isinstance(value, str) and value.endswith("tools/fleet-dashboard/fleet_dashboard.py")
+]
+if len(matches) != 1:
+    raise SystemExit("LaunchAgent must contain exactly one fleet_dashboard.py argument")
+arguments[matches[0]] = candidate
+if "--agent-name" in arguments:
+    index = arguments.index("--agent-name")
+    if index + 1 >= len(arguments):
+        raise SystemExit("--agent-name is missing its value")
+    arguments[index + 1] = "fleet-dashboard-session-default"
+else:
+    arguments.extend(["--agent-name", "fleet-dashboard-session-default"])
+contents = plistlib.dumps(document, sort_keys=True)
+flags = os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0)
+try:
+    descriptor = os.open(staged_path, flags)
+except FileNotFoundError:
+    descriptor = os.open(staged_path, flags | os.O_CREAT | os.O_EXCL, 0o600)
+try:
+    info = os.fstat(descriptor)
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.getuid():
+        raise SystemExit("staged LaunchAgent must be an owned, single-link regular file")
+    os.fchmod(descriptor, 0o600)
+    os.ftruncate(descriptor, 0)
+    view = memoryview(contents)
+    while view:
+        view = view[os.write(descriptor, view):]
+    os.fsync(descriptor)
+finally:
+    os.close(descriptor)
+PY
+plutil -lint "$STAGED_PLIST"
+python3 - "$LIVE_PLIST" "$BACKUP_PLIST" "$STAGED_PLIST" <<'PY'
+import os
+import stat
+import sys
+
+source_path, backup_path, staged_path = sys.argv[1:]
+source_fd = os.open(source_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+try:
+    source_info = os.fstat(source_fd)
+    if not stat.S_ISREG(source_info.st_mode) or source_info.st_uid != os.getuid():
+        raise SystemExit("live LaunchAgent must remain an owned regular file")
+    chunks = []
+    while chunk := os.read(source_fd, 1024 * 1024):
+        chunks.append(chunk)
+    contents = b"".join(chunks)
+finally:
+    os.close(source_fd)
+
+flags = os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0)
+try:
+    descriptor = os.open(backup_path, flags)
+except FileNotFoundError:
+    descriptor = os.open(backup_path, flags | os.O_CREAT | os.O_EXCL, 0o600)
+try:
+    info = os.fstat(descriptor)
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.getuid():
+        raise SystemExit("backup LaunchAgent must be an owned, single-link regular file")
+    os.fchmod(descriptor, 0o600)
+    os.ftruncate(descriptor, 0)
+    view = memoryview(contents)
+    while view:
+        view = view[os.write(descriptor, view):]
+    os.fsync(descriptor)
+finally:
+    os.close(descriptor)
+
+for candidate in (backup_path, staged_path):
+    info = os.lstat(candidate)
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or stat.S_ISLNK(info.st_mode)
+        or info.st_nlink != 1
+        or stat.S_IMODE(info.st_mode) != 0o600
+        or info.st_uid != os.getuid()
+    ):
+        raise SystemExit("backup and staged LaunchAgents must be owned, single-link mode-0600 files")
+PY
+install -m 600 "$STAGED_PLIST" "$LIVE_PLIST"
+bootout_if_present() {
+  local job=$1 output status
+  if output=$(launchctl print "$job" 2>&1); then
+    if launchctl bootout "$job"; then
+      return 0
+    else
+      status=$?
+      echo "launchctl bootout failed" >&2
+      return "$status"
+    fi
+  else
+    status=$?
+    if [ "$status" -eq 113 ] && [[ "$output" == *"Could not find service"* ]]; then
+      return 0
+    fi
+    echo "launchctl could not confirm that the job is absent" >&2
+    return "$status"
+  fi
+}
+bootout_if_present "$JOB"
+launchctl bootstrap "gui/$(id -u)" "$LIVE_PLIST"
+```
+
+Verify the loaded definition, process source, candidate SHA, and endpoints
+without printing the job environment or command line:
+
+```bash
+set -euo pipefail
+
+EXPECTED_SOURCE="$CANDIDATE_ROOT/tools/fleet-dashboard/fleet_dashboard.py"
+PLIST_SOURCE=$(python3 - "$LIVE_PLIST" <<'PY'
+import plistlib
+import sys
+with open(sys.argv[1], "rb") as source:
+    arguments = plistlib.load(source)["ProgramArguments"]
+matches = [value for value in arguments if isinstance(value, str) and value.endswith("tools/fleet-dashboard/fleet_dashboard.py")]
+if len(matches) != 1:
+    raise SystemExit(1)
+print(matches[0])
+PY
+)
+test "$PLIST_SOURCE" = "$EXPECTED_SOURCE"
+test "$(git -C "$CANDIDATE_ROOT" rev-parse HEAD)" = "$CANDIDATE_SHA"
+PID=$(launchctl print "$JOB" | awk '/pid =/{print $3; exit}')
+test -n "$PID"
+PROCESS_COMMAND=$(ps -p "$PID" -o command=)
+case "$PROCESS_COMMAND" in *"$EXPECTED_SOURCE"*) ;; *) exit 1 ;; esac
+for path in / /api/fleet /api/config /api/config/registry /api/attention; do
+  curl --fail --silent --show-error --output /dev/null "http://127.0.0.1:8899$path"
+done
+```
+
+Rollback restores the saved definition and reloads it. Resolve its source and
+SHA from the isolated previous worktree, then repeat the same non-printing
+process-source and endpoint checks above with those previous values.
+
+```bash
+set -euo pipefail
+
+python3 - "$BACKUP_PLIST" <<'PY'
+import os
+import stat
+import sys
+
+info = os.lstat(sys.argv[1])
+if (
+    not stat.S_ISREG(info.st_mode)
+    or stat.S_ISLNK(info.st_mode)
+    or info.st_nlink != 1
+    or stat.S_IMODE(info.st_mode) != 0o600
+    or info.st_uid != os.getuid()
+):
+    raise SystemExit("backup LaunchAgent must be an owned, single-link mode-0600 file")
+PY
+plutil -lint "$BACKUP_PLIST"
+PREVIOUS_SOURCE=$(python3 - "$BACKUP_PLIST" <<'PY'
+import plistlib
+import sys
+with open(sys.argv[1], "rb") as source:
+    arguments = plistlib.load(source)["ProgramArguments"]
+matches = [value for value in arguments if isinstance(value, str) and value.endswith("tools/fleet-dashboard/fleet_dashboard.py")]
+if len(matches) != 1:
+    raise SystemExit(1)
+print(matches[0])
+PY
+)
+PREVIOUS_ROOT=${PREVIOUS_SOURCE%/tools/fleet-dashboard/fleet_dashboard.py}
+PREVIOUS_SHA=$(git -C "$PREVIOUS_ROOT" rev-parse HEAD)
+test -n "$PREVIOUS_SHA"
+test -f "$PREVIOUS_SOURCE"
+install -m 600 "$BACKUP_PLIST" "$LIVE_PLIST"
+bootout_if_present() {
+  local job=$1 output status
+  if output=$(launchctl print "$job" 2>&1); then
+    if launchctl bootout "$job"; then
+      return 0
+    else
+      status=$?
+      echo "launchctl bootout failed" >&2
+      return "$status"
+    fi
+  else
+    status=$?
+    if [ "$status" -eq 113 ] && [[ "$output" == *"Could not find service"* ]]; then
+      return 0
+    fi
+    echo "launchctl could not confirm that the job is absent" >&2
+    return "$status"
+  fi
+}
+bootout_if_present "$JOB"
+launchctl bootstrap "gui/$(id -u)" "$LIVE_PLIST"
+PID=$(launchctl print "$JOB" | awk '/pid =/{print $3; exit}')
+test -n "$PID"
+PROCESS_COMMAND=$(ps -p "$PID" -o command=)
+case "$PROCESS_COMMAND" in *"$PREVIOUS_SOURCE"*) ;; *) exit 1 ;; esac
+for path in / /api/fleet /api/config /api/config/registry /api/attention; do
+  curl --fail --silent --show-error --output /dev/null "http://127.0.0.1:8899$path"
+done
+```
+
 ### Multiple central instances
 
 Use one viewer process for several independent trust domains with `--centrals`:
