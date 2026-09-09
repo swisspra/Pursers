@@ -38,12 +38,12 @@ resolve inside the detached worktree. A regression covers
 `--junitxml=link/report.xml` through an outward symlink and proves the external
 report is never created; contained `--junitxml` and `--basetemp` remain usable.
 
-The acceptance harness originally read an older `contributes.webui.apiRoutes`
-shape. The approved extension uses AionCore's `contributes.webui[].routes`
-shape, so discovery now reads that exact schema and reports all declared door
-and Team routes. The semantic gate remains conservative: partial Team and seat
-route families do not satisfy complete lifecycle capability, and source route
-declarations remain distinct from installed-host execution evidence.
+The imported acceptance harness originally reported only extension-local door
+routes. The final successor adds a separate board-managed standalone contract
+that verifies exact Fleet, seat-kit, and Personal source markers for team,
+seat, ticket, and result lifecycle. Native Aion Team routes do not satisfy that
+contract. Source declarations remain distinct from installed-host browser
+evidence.
 
 `train-baseline-files.sha256` hashes all imported paths plus this provenance
 document. It deliberately excludes only itself; its own hash is reported in

@@ -85,21 +85,25 @@ dispatches work. A partial MCP import is recoverable without replaying or
 returning the door. See `door/DOOR_ONBOARDING_CONTRACT.md` for result codes,
 idempotency, and current host limitations.
 
-## Team controls
+## Standalone lifecycle and results
 
-The helper's `/pursers/team/` routes use the packaged approved Team adapter.
-Status reads the host roster and task list when supported. Plan is always
-read-only; apply remains dry-run unless the request includes both
-`options.confirm="apply-live"` and `options.dry_run=false`.
+Final acceptance groups seats by Pursers board and uses standalone seat
+processes; it does not depend on native Aion Team Mode. The fail-closed
+`standalone-capabilities.json` contract binds each capability to executable
+source already shipped in this repository:
 
-The settings iframe has no supported conversation runtime context. The helper
-removes any inherited runtime credentials, so Team operations fail closed with
-`runtime_context_missing`; Home directs the operator to the native AionUi Team
-surface and never enables confirmation from a synthetic plan. The supported
-agent-facing host contract also cannot create a Team, archive a Team, remove a
-teammate, or resume one. Pursers Home states these boundaries instead of
-simulating them. The dashboard remains the Pursers Personal MCP app entrypoint
-(or `board_snapshot` fallback), not an invented URL.
+- Fleet guarded seat config/dispatch implements board-scoped group lifecycle.
+- Fleet worker start/stop/restart and admin-guarded retirement implement seat
+  lifecycle without taking over another identity.
+- Fleet sandbox intake plus role-scoped generated `board.sh` commands implement
+  ticket wait, claim, renew, submit, verify, and independent review.
+- Fleet board detail and Personal snapshot/event tools expose reviewed results,
+  actors, transitions, and bounded cursors.
+
+The acceptance harness verifies every declared source path and exact marker
+before reporting a capability. The packaged legacy `/pursers/team/` adapter is
+a compatibility surface only; it is not counted as standalone lifecycle proof.
+Source discovery never substitutes for live authenticated browser evidence.
 
 ## AionUi 2.2.1 limitations
 
@@ -114,7 +118,8 @@ simulating them. The dashboard remains the Pursers Personal MCP app entrypoint
   the conversation explicitly and apply the matching context file.
 - AionUi does not render Pursers MCP elicitation forms. Use the dashboard or the
   coordinator-provided fallback for human-input requests.
-- Team lifecycle remains in the native AionUi Team surface because the settings
-  iframe has no conversation runtime credentials. Helper and host integration
-  tests cover selected-board status, door validation, origin/token/board
-  failures, package discovery, and the truthful Team fallback.
+- The settings iframe has no native Team conversation credentials. Final
+  lifecycle acceptance therefore uses the board-managed Fleet and standalone
+  seat surfaces above. Helper and host integration tests still cover
+  selected-board status, door validation, origin/token/board failures, package
+  discovery, and fail-closed legacy Team fallback.
