@@ -140,20 +140,75 @@ git diff --check v5.0.0a25..RELEASE_CANDIDATE_SHA
 ```
 
 Build all six wheels and the AionUI package twice in separate clean directories
-with the same toolchain and `SOURCE_DATE_EPOCH`. Sorted filenames, member lists,
-sizes, and SHA-256 maps must be identical. Verify installed-wheel imports in a
-second empty venv with `PYTHONPATH` unset, including `pursers_central.central`,
-`pursers_client`, `pursers_personal`, and `pursers_wait_server`. Execute the
-installed `pursers-wait-bridge --help` and the exact clean-install lifecycle
-probe approved by the assembly reviewer. The Home package receipt must contain
-`candidate_commit=RELEASE_CANDIDATE_SHA` and match its recorded archive and
-runtime hashes.
+with the same toolchain and `SOURCE_DATE_EPOCH`. The AionUI gate is executable:
 
-The independent assembly verifier then installs that exact package and repeats
+```sh
+export RELEASE_CANDIDATE_SHA
+AION_ARCHIVE="$(python3 -c 'import json; print("pursers-aionui-" + json.load(open("tools/aionui-extension/aion-extension.json"))["version"] + ".zip")')"
+AION_BUILD_A="$(mktemp -d)"
+AION_BUILD_B="$(mktemp -d)"
+python3 tools/aionui-extension/build.py --output "$AION_BUILD_A/$AION_ARCHIVE"
+python3 tools/aionui-extension/build.py --output "$AION_BUILD_B/$AION_ARCHIVE"
+python3 - "$AION_BUILD_A/$AION_ARCHIVE" "$AION_BUILD_B/$AION_ARCHIVE" \
+  "$RELEASE_CANDIDATE_SHA" /PATH/TO/evidence/aionui-receipt.json <<'PY'
+import hashlib
+import json
+import sys
+import zipfile
+from pathlib import Path
+
+def sha256(data):
+    return hashlib.sha256(data).hexdigest()
+
+def receipt(raw):
+    path = Path(raw)
+    payload = path.read_bytes()
+    with zipfile.ZipFile(path) as archive:
+        members = []
+        for info in sorted(archive.infolist(), key=lambda item: item.filename):
+            data = archive.read(info.filename)
+            members.append({
+                "name": info.filename,
+                "size": info.file_size,
+                "compressed_size": info.compress_size,
+                "sha256": sha256(data),
+            })
+        candidate = json.loads(archive.read("candidate.json"))
+    return {
+        "filename": path.name,
+        "size": len(payload),
+        "sha256": sha256(payload),
+        "candidate_commit": candidate["candidate_commit"],
+        "members": members,
+    }
+
+left = receipt(sys.argv[1])
+right = receipt(sys.argv[2])
+expected_sha = sys.argv[3]
+if left != right:
+    raise SystemExit("AionUI deterministic receipt mismatch")
+if left["candidate_commit"] != expected_sha:
+    raise SystemExit("AionUI candidate_commit mismatch")
+Path(sys.argv[4]).write_text(json.dumps(left, indent=2, sort_keys=True) + "\n")
+print(json.dumps(left, sort_keys=True))
+PY
+```
+
+The equality covers archive filename, archive size and SHA-256, plus every
+member name, uncompressed size, compressed size, and SHA-256. Verify installed
+wheel imports in a second empty venv with `PYTHONPATH` unset, including
+`pursers_central.central`, `pursers_client`, `pursers_personal`, and
+`pursers_wait_server`. Execute the installed `pursers-wait-bridge --help` and
+the exact clean-install lifecycle probe approved by the assembly reviewer.
+
+Hash `/PATH/TO/evidence/aionui-receipt.json`. The independent assembly verifier
+must record `RELEASE_CANDIDATE_SHA`, archive SHA-256, and receipt SHA-256 in the
+browser evidence before installing that exact archive and repeating
 all nine authenticated browser observations, full capability inventory,
 explicit rotation/reconnect, recovery states, and line-by-line alignment with
 Quickstart `909e897e960cc68139a043e2494aa4f6600b47ce`. Earlier observations from a
-pre-bump SHA do not bind this candidate.
+pre-bump SHA do not bind this candidate. Acceptance requires equality among
+the build receipt, installed archive, browser record, and candidate commit.
 
 Require exact-candidate CI and CodeQL checks. Preserve the approved Security
 receipt, rerun dependency checks, and require zero unresolved candidate alerts.
@@ -173,12 +228,26 @@ Require the push-triggered exact-main CI and CodeQL runs to report
 tag and verify it locally and remotely:
 
 ```sh
-gh run list --commit RELEASE_CANDIDATE_SHA --workflow ci.yml \
-  --json databaseId,headSha,status,conclusion
-gh run view CI_RUN_ID --json headSha,status,conclusion,jobs
-gh run watch CI_RUN_ID --exit-status
+CI_LIST="$(gh run list --workflow ci.yml --branch main --event push \
+  --commit "$RELEASE_CANDIDATE_SHA" \
+  --json databaseId,event,headBranch,headSha,status,conclusion)"
+CI_RUN_ID="$(jq -er --arg sha "$RELEASE_CANDIDATE_SHA" \
+  '[.[] | select(.event == "push" and .headBranch == "main" and .headSha == $sha)] | if length == 1 then .[0].databaseId else error("expected one exact-main push CI run") end' \
+  <<<"$CI_LIST")"
+gh run watch "$CI_RUN_ID" --exit-status
+CI_JSON="$(gh run view "$CI_RUN_ID" \
+  --json event,headBranch,headSha,status,conclusion,jobs)"
+jq -e --arg sha "$RELEASE_CANDIDATE_SHA" '
+  .event == "push" and
+  .headBranch == "main" and
+  .headSha == $sha and
+  .status == "completed" and
+  .conclusion == "success" and
+  ([.jobs[] | select(.name == "python-tests" and .conclusion == "success")] | length == 1) and
+  ([.jobs[] | select(.name == "dashboard-ui-typecheck" and .conclusion == "success")] | length == 1)
+' <<<"$CI_JSON"
 
-git tag -s v5.0.0a26 RELEASE_CANDIDATE_SHA
+git tag -s v5.0.0a26 "$RELEASE_CANDIDATE_SHA"
 git push origin v5.0.0a26
 git rev-parse v5.0.0a26^{}
 git ls-remote origin refs/tags/v5.0.0a26 refs/tags/v5.0.0a26^{}
@@ -197,10 +266,29 @@ python3 tools/verify_publish_wheels.py --wheel-dir /PATH/TO/release-a26
 
 The downloaded wheel hashes must equal the candidate build hashes. Run PyPI
 Trusted Publishing from the tag ref, not a moving default branch, and verify
-the workflow run `headSha` equals `RELEASE_CANDIDATE_SHA`:
+the dispatch run and both publish jobs bind the signed tag SHA:
 
 ```sh
 gh workflow run publish-pypi.yml --ref v5.0.0a26
+PUBLISH_LIST="$(gh run list --workflow publish-pypi.yml \
+  --branch v5.0.0a26 --event workflow_dispatch \
+  --commit "$RELEASE_CANDIDATE_SHA" \
+  --json databaseId,event,headBranch,headSha,status,conclusion)"
+PUBLISH_RUN_ID="$(jq -er --arg sha "$RELEASE_CANDIDATE_SHA" \
+  '[.[] | select(.event == "workflow_dispatch" and .headBranch == "v5.0.0a26" and .headSha == $sha)] | if length == 1 then .[0].databaseId else error("expected one exact-tag PyPI run") end' \
+  <<<"$PUBLISH_LIST")"
+gh run watch "$PUBLISH_RUN_ID" --exit-status
+PUBLISH_JSON="$(gh run view "$PUBLISH_RUN_ID" \
+  --json event,headBranch,headSha,status,conclusion,jobs)"
+jq -e --arg sha "$RELEASE_CANDIDATE_SHA" '
+  .event == "workflow_dispatch" and
+  .headBranch == "v5.0.0a26" and
+  .headSha == $sha and
+  .status == "completed" and
+  .conclusion == "success" and
+  ([.jobs[] | select(.name == "publish-main" and .conclusion == "success")] | length == 1) and
+  ([.jobs[] | select(.name == "publish-wait-bridge" and .conclusion == "success")] | length == 1)
+' <<<"$PUBLISH_JSON"
 ```
 
 After both publish jobs pass, query PyPI for the exact six expected versions,
