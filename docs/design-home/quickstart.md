@@ -28,7 +28,7 @@ results as one stream.
 Ask your operator for:
 
 1. The exact verified Pursers Home package approved for your environment.
-2. The helper URL and one-time local access token.
+2. The helper URL and current per-helper local access token.
 3. The project board name and whether it belongs to WORK or PERSONAL.
 4. A worker door or reviewer door for each role you need.
 5. A unique seat name for every standalone seat.
@@ -66,7 +66,7 @@ board. Your operator must start that helper before you connect a door.
 In the Home helper section:
 
 1. Enter the loopback helper URL supplied by your operator.
-2. Enter the one-time local access token.
+2. Enter the current local access token for that helper session.
 3. Choose **Connect helper**.
 4. Confirm **Helper status** shows the expected board and a connected state.
 
@@ -356,9 +356,12 @@ hostnames in screenshots, commits, or ticket notes.
 For headless diagnosis, the wait bridge supports explicit door operations:
 
 ```sh
-pursers-wait-bridge join '<DOOR>'
-pursers-wait-bridge status
-pursers-wait-bridge join --rotate '<REPLACEMENT_DOOR>'
+pursers-wait-bridge join '<DOOR>' \
+  --state-dir /PATH/TO/isolated-bridge-state
+pursers-wait-bridge status \
+  --state-dir /PATH/TO/isolated-bridge-state
+pursers-wait-bridge join --rotate '<REPLACEMENT_DOOR>' \
+  --state-dir /PATH/TO/isolated-bridge-state
 ```
 
 These are troubleshooting tools, not the preferred beginner flow. A worker's
@@ -378,12 +381,13 @@ seat-local `bin/board.sh` is likewise reserved for its governed work loop.
   final browser flow. The exact installed candidate requires independent
   authenticated browser acceptance.
 
-## Accepted implementation inputs
+## Reviewed inputs and pending final evidence
 
-This guide records the exact accepted component and assembly candidate SHAs
-from the Home train:
+This guide records the exact accepted component SHAs from the Home train. The
+corrected assembly is listed separately as a pending candidate; it is not an
+accepted release or browser result.
 
-| Capability | Accepted SHA |
+| Capability | Status and SHA |
 | --- | --- |
 | Home baseline | `c7c9a2ed2923a0c8bc4b2c4fce51491fa9dfe96a` |
 | Ticket lifecycle | `0b0f0b78385a0315aa4e93e574fa967d0cef65ab` |
@@ -391,9 +395,19 @@ from the Home train:
 | Standalone groups | `20bb6bc5c54ad7b233dfc790a48d3bea335a92da` |
 | Standalone seat lifecycle | `557fbc8af9362031dee6f18db84e3c604f4d133f` |
 | Fleet session and deployment input | `e229dcb08879666475c532fd7296f4c5a2d9167b` |
-| Candidate assembly (TK-a3f0627d27db) | `a0b4810b32ccbfc3465a43781c51514fc157367b` |
+| Corrected assembly candidate (TK-a3f0627d27db) | Pending independent review: `15394de3c7df666d59ac3566ca4519ee9d2a879d` |
 
-Package binding and candidate facts (AN243):
-- Candidate package build: 26 members, deterministic archive SHA-256 `02406e234766ed2d2417d4f2198155a0dad819a8361479da2f68f333dc327a5f`.
-- Observed host build: signed AionUi 2.2.1 with bundled AionCore 0.2.1.
-- Browser acceptance: verifier-owned observer validation under TK-a3f0627d27db remains required before final merge.
+Worker-side receipts for the corrected candidate are pending independent
+confirmation: two deterministic builds contained 26 members and produced
+archive SHA-256
+`38057e619f449a4aa6acce7e49a06f1ce6fd2d8e2470be1316fd645efa9a6c26`.
+These numbers identify a candidate artifact; they are not a release receipt or
+browser PASS.
+
+Before this guide can be accepted, the independent reviewer for
+TK-a3f0627d27db must bind the authenticated observer and browser session to
+that exact assembly SHA, complete all nine required observations and the full
+capability inventory, and record the actual labels and recovery behavior. The
+guide must then be reconciled with that review evidence. Earlier doctor or
+browser evidence for `a0b4810b32ccbfc3465a43781c51514fc157367b` does not
+prove the corrected candidate.
