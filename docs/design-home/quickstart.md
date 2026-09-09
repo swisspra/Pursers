@@ -409,15 +409,16 @@ train:
 
 ## Assembly and package facts are not yet accepted
 
-There is no independently approved final assembly for this guide to cite. The
-assembly candidate `a0b4810b32ccbfc3465a43781c51514fc157367b` under
-TK-a3f0627d27db was submitted and then rejected on independent review, and it
-is claimed for correction, so it is not an accepted input and its package
-figures are not confirmed candidate facts. Its reported build of 26 members with
-archive SHA-256
+There is no independently approved final assembly for this guide to cite. Two
+assembly candidates have been submitted under TK-a3f0627d27db and both were
+rejected on independent review: first `a0b4810b32ccbfc3465a43781c51514fc157367b`,
+then its successor `3f16f0595f0dad56b4d1b104a59c261b1ae93ca6`, which is now
+claimed for correction. Neither is an accepted input, and neither one's package
+figures are confirmed candidate facts. The first candidate's reported build of
+26 members with archive SHA-256
 `02406e234766ed2d2417d4f2198155a0dad819a8361479da2f68f333dc327a5f` and its
 reported host pairing of signed AionUi 2.2.1 with bundled AionCore 0.2.1 are
-recorded here only as the worker's unverified report, for traceability.
+recorded here only as that worker's unverified report, for traceability.
 
 Treat the operator's own receipt for the artifact you actually installed as
 authoritative, not the figures above. Ask for the exact package SHA-256 or
