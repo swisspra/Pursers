@@ -9,7 +9,8 @@ import {
 import "./dashboard.css";
 
 type DataMode = "live" | "stale" | "demo" | "demo-error";
-type ViewName = "today" | "work" | "agents" | "fleet" | "links" | "activity";
+type ViewName = "home" | "projects" | "work" | "team" | "approvals" | "activity" | "settings";
+type ActivitySubview = "feed" | "links";
 type Agent = {
   id: string | null;
   name: string;
@@ -262,7 +263,13 @@ let connected = false;
 let feedBusy = false;
 let feedTimer: number | undefined;
 let feedDelayMs = BASE_FEED_DELAY_MS;
-let activeView: ViewName = "today";
+let activeView: ViewName = "home";
+let activitySubview: ActivitySubview = "feed";
+let selectedTicketId: string | null = null;
+let projectFilter = "all";
+let activityActorFilter = "all";
+let activityTypeFilter = "all";
+let activityTextFilter = "";
 let lastRenderSignature = "";
 
 const record = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
@@ -695,10 +702,14 @@ function activityEmptyDetail(data: Snapshot): string {
 }
 
 function renderHealth(data: Snapshot): void {
-  const card = byId<HTMLElement>("health-title").closest<HTMLElement>(".health-card")!;
+  const card = byId<HTMLElement>("health-card");
   const title = byId<HTMLElement>("health-title");
   const detail = byId<HTMLElement>("health-detail");
+  const mode = byId<HTMLElement>("health-mode");
+  const icon = byId<HTMLElement>("health-icon");
   const counts = ticketCounts(data);
+  mode.textContent = data.data_mode === "demo" || data.data_mode === "demo-error" ? "DEMO" : data.stale ? "STALE" : "LIVE";
+  mode.dataset.tone = data.data_mode === "demo" || data.data_mode === "demo-error" ? "demo" : data.stale ? "warning" : "submitted";
   if (data.data_mode === "demo-error") {
     card.dataset.tone = "stale";
     title.textContent = "Simulated connection interruption";
@@ -732,6 +743,7 @@ function renderHealth(data: Snapshot): void {
     title.textContent = "Board is clear";
     detail.textContent = "No claimed or submitted work needs attention right now.";
   }
+  icon.dataset.tone = card.dataset.tone;
 }
 
 function ticketRow(ticket: Ticket): HTMLElement {
@@ -751,12 +763,11 @@ function renderToday(data: Snapshot): void {
   const counts = ticketCounts(data);
   byId("metric-open").textContent = String(counts.open);
   byId("metric-working").textContent = String(counts.working);
-  byId("metric-submitted").textContent = String(counts.submitted);
-  byId("metric-agents").textContent = String(data.agents_live);
+  byId("metric-submitted").textContent = String(counts.submitted + counts.attention);
   renderHealth(data);
 
   const work = data.tickets.filter((ticket) => !["closed", "canceled", "terminated"].includes(ticket.status)).slice(0, 4);
-  byId("today-work").replaceChildren(...(work.length ? work.map(ticketRow) : [emptyState("No current work", "Open or claimed tickets will appear here.")]));
+  byId("home-work").replaceChildren(...(work.length ? work.map(ticketRow) : [emptyState("No current work", "Open or claimed tickets will appear here.")]));
 
   const agents = data.agents.filter((agent) => !agent.stale).slice(0, 4).map((agent) => {
     const row = element("div", "list-row");
@@ -765,7 +776,47 @@ function renderToday(data: Snapshot): void {
     row.append(copy, pill(agent.status, toneForStatus(agent.status)));
     return row;
   });
-  byId("today-agents").replaceChildren(...(agents.length ? agents : [emptyState("No agents yet", "Agents appear after they join this local board.")]));
+  byId("home-team").replaceChildren(...(agents.length ? agents : [emptyState("No teammates yet", "Teammates appear after they join this local board.")]));
+
+  const waiting = data.tickets.filter((ticket) => ["submitted", "reviewing", "in_review", "rejected"].includes(ticket.status));
+  const next = waiting[0];
+  byId("home-approval-count").textContent = `${waiting.length} request${waiting.length === 1 ? "" : "s"}`;
+  byId("home-approval").replaceChildren(next
+    ? ticketRow(next)
+    : emptyState("Nothing needs your judgment", "Reviewed results and decision requests will appear here."));
+
+  const nextTitle = byId("next-action-title");
+  const nextDetail = byId("next-action-detail");
+  const nextButton = byId<HTMLButtonElement>("next-action-button");
+  const firstRun = byId<HTMLElement>("home-first-run");
+  const hasRealData = data.data_mode !== "demo" && (data.ticket_total > 0 || data.agent_total > 0);
+  firstRun.hidden = hasRealData || data.data_mode === "stale";
+  if (!firstRun.hidden) {
+    byId("first-run-detail").textContent = "This synthetic preview shows the shape of a calm, read-only work home.";
+    const steps = ["Connect a local door in the Host settings.", "Describe one outcome in agent chat.", "Return here to follow bounded progress."];
+    byId("first-run-steps").replaceChildren(...steps.map((step) => element("li", undefined, step)));
+  }
+  if (counts.attention > 0) {
+    nextTitle.textContent = "Review work that needs another pass";
+    nextDetail.textContent = `${counts.attention} item${counts.attention === 1 ? "" : "s"} came back with feedback.`;
+    nextButton.textContent = "View approvals";
+    nextButton.dataset.goView = "approvals";
+  } else if (counts.submitted > 0) {
+    nextTitle.textContent = "Independent review is the next step";
+    nextDetail.textContent = `${counts.submitted} submission${counts.submitted === 1 ? " is" : "s are"} ready for review in agent chat.`;
+    nextButton.textContent = "View approvals";
+    nextButton.dataset.goView = "approvals";
+  } else if (counts.open > 0) {
+    nextTitle.textContent = "Work is ready to be picked up";
+    nextDetail.textContent = `${counts.open} open item${counts.open === 1 ? "" : "s"} can be claimed by an eligible teammate.`;
+    nextButton.textContent = "View work";
+    nextButton.dataset.goView = "work";
+  } else {
+    nextTitle.textContent = counts.working > 0 ? "Your Team is handling the work" : "Start with one clear outcome";
+    nextDetail.textContent = counts.working > 0 ? "No intervention is needed right now." : "Describe the result you want in agent chat.";
+    nextButton.textContent = counts.working > 0 ? "View work" : "See Team readiness";
+    nextButton.dataset.goView = counts.working > 0 ? "work" : "team";
+  }
 
   renderHighlight(byId("latest-handoff"), data.highlights.latest_handoff, "No handoff yet", "A project handoff will appear after an agent records one.");
   renderHighlight(byId("important-pinned"), data.highlights.important_pinned, "No decision or warning in the loaded pinned digest", "The bounded pinned digest has no decision, blocker, or warning to show.");
@@ -823,6 +874,11 @@ function renderWork(data: Snapshot): void {
     const items = element("div", "work-group-list");
     tickets.forEach((ticket) => {
       const card = element("article", "work-card");
+      card.tabIndex = 0;
+      card.setAttribute("role", "button");
+      card.setAttribute("aria-label", `Open ${ticket.id}: ${ticket.title}`);
+      card.dataset.ticketId = ticket.id;
+      card.dataset.selected = String(ticket.id === selectedTicketId);
       const copy = element("div");
       copy.append(element("p", "ticket-id", ticket.id), element("h3", undefined, ticket.title));
       if (ticket.description) copy.append(element("p", "muted", ticket.description));
@@ -840,6 +896,38 @@ function renderWork(data: Snapshot): void {
     return section;
   }).filter((item): item is HTMLElement => item !== null);
   byId("work-groups").replaceChildren(...(rendered.length ? rendered : [emptyState("No tickets yet", "Tickets created through agent chat will appear here.")]));
+  renderTicketDetail(data);
+}
+
+function renderTicketDetail(data: Snapshot): void {
+  const panel = byId<HTMLElement>("work-detail");
+  const ticket = data.tickets.find((item) => item.id === selectedTicketId);
+  if (!ticket) {
+    panel.hidden = true;
+    selectedTicketId = null;
+    return;
+  }
+  panel.hidden = false;
+  byId("detail-title").textContent = `${ticket.id} · ${ticket.title}`;
+  const body = element("div", "stack-list");
+  body.append(element("p", undefined, ticket.description || "No description was provided."));
+  const meta = element("div", "meta-row");
+  meta.append(pill(ticket.status, toneForStatus(ticket.status)), pill(ticket.priority));
+  if (ticket.assigned_to) meta.append(pill(`owner ${ticket.assigned_to}`));
+  const lease = leaseBadge(ticket.lease_expires_at);
+  if (lease) meta.append(lease);
+  body.append(meta, element("p", "card-foot", "Board actions remain in agent chat; this detail is read-only."));
+  byId("detail-body").replaceChildren(body);
+  renderTimeline(byId("detail-timeline"), newestEvents(data.events).filter((event) => event.ticket_id === ticket.id), "No loaded timeline", "Related bounded events appear here.");
+  const changes = data.events.filter((event) => event.ticket_id === ticket.id && (event.status_from || event.status_to));
+  byId("detail-changes").replaceChildren(...(changes.length
+    ? changes.map((event) => element("p", "muted", `${event.status_from ?? "—"} → ${event.status_to ?? "—"}`))
+    : [emptyState("No loaded changes", "Status transitions appear when retained by the bounded feed.")]));
+  const related = linkSnapshot?.edges.filter((edge) => edge.kind === "ticket" && edge.to === ticket.id) ?? [];
+  byId("detail-links").replaceChildren(...(related.length
+    ? related.map((edge) => pill(edge.from))
+    : [emptyState("No explicit relationships", "Only authoritative loaded links are shown.")]));
+  byId("detail-routes").replaceChildren(emptyState("Routes are not exposed here", "Use agent chat for routing and dispatch details."));
 }
 
 function renderAgents(data: Snapshot): void {
@@ -895,6 +983,22 @@ function renderAgents(data: Snapshot): void {
     return card;
   });
   byId("agents-grid").replaceChildren(...(cards.length ? cards : [emptyState("No agents yet", "Agents appear after they join this local board.")]));
+  const working = data.agents.filter((agent) => !agent.stale && ["working", "busy", "claimed", "in_progress"].includes(agent.status)).length;
+  const available = data.agents.filter((agent) => !agent.stale).length - working;
+  byId("team-health").replaceChildren(
+    pill(`${working} working`, "working"),
+    pill(`${Math.max(0, available)} available`, "submitted"),
+    pill(`${data.agents.filter((agent) => agent.stale).length} stale`),
+  );
+  byId("team-model").replaceChildren(
+    emptyState("One folder per teammate", "Seats keep work isolated while sharing the same authorized board."),
+    emptyState("Monitor-only lead", "The lead observes coordination; it does not take worker tickets."),
+    emptyState("Board-led dispatch", "Eligibility and routing come from the board, not this View."),
+  );
+  byId("team-start").replaceChildren(emptyState(
+    data.agents_live ? "Team activity is visible" : "No live teammate detected",
+    "Start and recovery actions remain in the Host or agent chat.",
+  ));
 }
 
 function fleetValue(value: number | null): string {
@@ -940,7 +1044,15 @@ function renderFleet(data: FleetSnapshot | null): void {
     warning.append(notice);
   }
 
-  const projects = unavailable ? [] : data.projects;
+  const projects = unavailable ? [] : data.projects.filter((project) => {
+    if (projectFilter === "all") return true;
+    if (projectFilter === "other") return !["active", "paused"].includes(project.status ?? "");
+    return project.status === projectFilter;
+  });
+  byId("fleet-total").textContent = unavailable ? "Unavailable" : `${data.projects.length} project${data.projects.length === 1 ? "" : "s"}`;
+  const navCount = byId<HTMLElement>("nav-count-projects");
+  navCount.textContent = unavailable ? "" : String(data.projects.length);
+  navCount.hidden = unavailable || data.projects.length === 0;
   const projectContainer = byId<HTMLElement>("fleet-projects");
   if (!projects.length) {
     projectContainer.replaceChildren(emptyState(
@@ -964,6 +1076,7 @@ function renderFleet(data: FleetSnapshot | null): void {
     projectContainer.replaceChildren(wrapper);
   }
 
+  byId<HTMLElement>("projects-empty-card").hidden = unavailable || data.projects.length > 0;
   const pool = unavailable ? [] : data.pool;
   const poolContainer = byId<HTMLElement>("fleet-pool");
   if (!pool.length) {
@@ -1149,7 +1262,28 @@ function renderTimeline(container: HTMLElement, events: BoardEvent[], emptyTitle
 }
 
 function renderActivity(data: Snapshot): void {
+  const actors = [...new Set(data.events.map((event) => event.actor_id).filter((value): value is string => Boolean(value)))].sort();
+  const kinds = [...new Set(data.events.map((event) => event.kind))].sort();
+  const syncOptions = (id: string, values: string[], selected: string, label: string) => {
+    const select = byId<HTMLSelectElement>(id);
+    select.replaceChildren(element("option", undefined, label), ...values.map((value) => element("option", undefined, value)));
+    select.options[0].value = "all";
+    [...select.options].slice(1).forEach((option) => { option.value = option.textContent ?? ""; });
+    select.value = selected;
+  };
+  syncOptions("actor-filter", actors, activityActorFilter, "All actors");
+  syncOptions("type-filter", kinds, activityTypeFilter, "All types");
+  const query = activityTextFilter.trim().toLocaleLowerCase();
+  const filtered = newestEvents(data.events).filter((event) =>
+    (activityActorFilter === "all" || event.actor_id === activityActorFilter)
+    && (activityTypeFilter === "all" || event.kind === activityTypeFilter)
+    && (!query || `${event.text} ${event.ticket_id ?? ""} ${event.memory_id ?? ""}`.toLocaleLowerCase().includes(query)));
   byId("activity-total").textContent = `${data.events.length} retained`;
+  byId("filter-count").textContent = filtered.length === data.events.length ? "No filter applied." : `${filtered.length} of ${data.events.length} loaded events`;
+  byId("activity-scope").replaceChildren(emptyState(
+    data.activity_scope === "synthetic-demo" ? "Synthetic preview" : "Observed by this MCP process",
+    data.activity_scope === "synthetic-demo" ? "Authored fixtures only; not project data." : "Bounded local activity, not a complete audit log.",
+  ));
   const notices: HTMLElement[] = [];
   if (data.resync_notice) {
     const item = element("div", "notice");
@@ -1168,7 +1302,58 @@ function renderActivity(data: Snapshot): void {
     notices.push(item);
   }
   byId("activity-notice").replaceChildren(...notices);
-  renderTimeline(byId("activity-list"), newestEvents(data.events), "No activity observed", activityEmptyDetail(data));
+  renderTimeline(byId("activity-list"), filtered, "No matching activity", activityEmptyDetail(data));
+  byId<HTMLButtonElement>("load-more-btn").hidden = !data.has_more;
+}
+
+function renderApprovals(data: Snapshot): void {
+  const review = data.tickets.filter((ticket) => ["submitted", "reviewing", "in_review"].includes(ticket.status));
+  const attention = data.tickets.filter((ticket) => ticket.status === "rejected" || ticket.abandoned_count > 0);
+  const total = review.length + attention.length;
+  byId("approvals-total").textContent = `${total} waiting`;
+  const nav = byId<HTMLElement>("nav-count-approvals");
+  nav.textContent = String(total);
+  nav.hidden = total === 0;
+  byId("approvals-notice").replaceChildren(emptyState("Read-only approval queue", "Approve, reject, and guarded operations stay in agent chat."));
+  byId("approvals-next").replaceChildren(total
+    ? ticketRow(attention[0] ?? review[0])
+    : emptyState("No decision is waiting", "New review or attention requests will appear here."));
+  byId("approvals-review").replaceChildren(...(review.length ? review.map(ticketRow) : [emptyState("Nothing ready for review", "Submitted work appears here.")]));
+  byId("approvals-attention").replaceChildren(...(attention.length ? attention.map(ticketRow) : [emptyState("No work needs another pass", "Rejected or abandoned work appears here.")]));
+  renderHighlight(byId("approvals-decisions"), data.highlights.important_pinned, "No loaded human decision", "The bounded pinned digest has no decision to show.");
+  byId("approvals-intake").replaceChildren(emptyState("No intake control in this View", "Describe or confirm intake in agent chat."));
+  byId("approvals-guarded").replaceChildren(emptyState("Guarded actions are unavailable", "This View has read-only app capabilities and cannot mutate the board."));
+  byId("approvals-state").replaceChildren(emptyState(
+    data.stale || data.feed_error ? "Last-known state remains visible" : "Connection is current",
+    data.stale || data.feed_error ? "Retry preserves loaded data without presenting it as live." : "Refresh and bounded feed updates are active.",
+  ));
+}
+
+function settingsRow(title: string, detail: string, tone?: string): HTMLElement {
+  const row = element("div", "list-row");
+  const copy = element("div");
+  copy.append(element("strong", undefined, title), element("p", "muted", detail));
+  row.append(copy, pill(tone ?? "Read-only", tone === "Connected" ? "submitted" : undefined));
+  return row;
+}
+
+function renderSettings(data: Snapshot): void {
+  byId("settings-summary-title").textContent = data.connected && !data.stale ? "Your project is connected" : "Connection needs attention";
+  byId("settings-summary").replaceChildren(
+    pill(data.connected && !data.stale ? "Connected" : "Last known", data.connected && !data.stale ? "submitted" : "warning"),
+    pill("Read-only"), pill("Bounded data"),
+  );
+  byId("settings-connections").replaceChildren(settingsRow(data.board.name, data.board.id, data.connected ? "Connected" : "Last known"));
+  byId("settings-connection-details").replaceChildren(element("p", "muted", sourceFor(data)));
+  byId("settings-seats").replaceChildren(settingsRow("Visible teammates", `${data.agents_live} live / ${data.agent_total} total`));
+  byId("settings-dispatch").replaceChildren(settingsRow("Board-led dispatch", "Routing and eligibility are controlled by Central."));
+  byId("settings-dispatch-details").replaceChildren(element("p", "muted", "No dispatch mutation capability is exposed to this MCP App."));
+  byId("settings-workers").replaceChildren(settingsRow("Local workers", "Connection checks are observational only."));
+  byId("settings-doors").replaceChildren(settingsRow("Door values hidden", "Credentials never enter rendered state."));
+  byId("settings-diagnostics").replaceChildren(settingsRow("Snapshot mode", `${data.data_mode} · ${data.events.length} retained events`));
+  byId("settings-diagnostics-details").replaceChildren(element("p", "muted", `Scrub profile: ${data.status.scrub_profile ?? "not reported"}. Cursor: ${data.event_cursor ?? "not available"}.`));
+  byId("settings-release").replaceChildren(settingsRow("Release operations unavailable", "Use an authorized operator workflow outside this View."));
+  byId("settings-appearance").replaceChildren(settingsRow("Host-managed appearance", "Theme, fonts, safe areas, reduced motion, and forced colors follow Host or system settings."));
 }
 
 function sourceFor(data: Snapshot): string {
@@ -1179,12 +1364,16 @@ function sourceFor(data: Snapshot): string {
 }
 
 function renderActivePanel(data: Snapshot): void {
-  if (activeView === "today") renderToday(data);
+  if (activeView === "home") renderToday(data);
   else if (activeView === "work") renderWork(data);
-  else if (activeView === "agents") renderAgents(data);
-  else if (activeView === "fleet") renderFleet(fleetSnapshot);
-  else if (activeView === "links") renderLinks(linkSnapshot);
-  else renderActivity(data);
+  else if (activeView === "team") renderAgents(data);
+  else if (activeView === "projects") renderFleet(fleetSnapshot);
+  else if (activeView === "approvals") renderApprovals(data);
+  else if (activeView === "settings") renderSettings(data);
+  else {
+    renderActivity(data);
+    if (activitySubview === "links") renderLinks(linkSnapshot);
+  }
 }
 
 function semanticRenderSignature(data: Snapshot): string {
@@ -1205,6 +1394,11 @@ function render(data: Snapshot): void {
   byId("name").textContent = data.board.name;
   byId("board-id").textContent = data.board.id;
   byId("source").textContent = sourceFor(data);
+  const counts = ticketCounts(data);
+  const workCount = counts.open + counts.working + counts.submitted + counts.attention;
+  const workNav = byId<HTMLElement>("nav-count-work");
+  workNav.textContent = String(workCount);
+  workNav.hidden = workCount === 0;
   renderConnection(data);
   renderActivityScope(data);
   renderActivePanel(data);
@@ -1215,16 +1409,16 @@ function render(data: Snapshot): void {
 function searchCorpus(data: Snapshot): SearchHit[] {
   const hits: SearchHit[] = [];
   data.tickets.forEach((ticket) => hits.push({ view: "work", kind: "Ticket", title: `${ticket.id} · ${ticket.title}`, detail: `${ticket.status} ${ticket.priority} ${ticket.description} ${ticket.assigned_to ?? ""} ${ticket.assigned_agent_id ?? ""}` }));
-  data.agents.forEach((agent) => hits.push({ view: "agents", kind: "Agent", title: agent.name, detail: `${agent.status} ${agent.role ?? ""} ${agent.focus ?? ""} ${agent.platform ?? ""}` }));
-  fleetSnapshot?.projects.forEach((project) => hits.push({ view: "fleet", kind: "Project", title: project.name ?? "—", detail: `${project.board_id ?? ""} ${project.status ?? ""}` }));
-  fleetSnapshot?.pool.forEach((entry) => hits.push({ view: "fleet", kind: "Pool", title: entry.agent_name ?? "—", detail: `${entry.pool_status ?? ""} ${entry.principal_id ?? ""} ${entry.seats.map((seat) => `${seat.project ?? seat.board_id ?? ""} ${seat.current_ticket_id ?? ""}`).join(" ")}` }));
+  data.agents.forEach((agent) => hits.push({ view: "team", kind: "Agent", title: agent.name, detail: `${agent.status} ${agent.role ?? ""} ${agent.focus ?? ""} ${agent.platform ?? ""}` }));
+  fleetSnapshot?.projects.forEach((project) => hits.push({ view: "projects", kind: "Project", title: project.name ?? "—", detail: `${project.board_id ?? ""} ${project.status ?? ""}` }));
+  fleetSnapshot?.pool.forEach((entry) => hits.push({ view: "team", kind: "Pool", title: entry.agent_name ?? "—", detail: `${entry.pool_status ?? ""} ${entry.principal_id ?? ""} ${entry.seats.map((seat) => `${seat.project ?? seat.board_id ?? ""} ${seat.current_ticket_id ?? ""}`).join(" ")}` }));
   linkSnapshot?.nodes.forEach((node) => {
     const linked = linkSnapshot?.edges.filter((edge) => edge.from === node.memory_id).map((edge) => edge.to).join(" ") ?? "";
-    hits.push({ view: "links", kind: "Link", title: `${node.memory_id} · ${node.title}`, detail: `${node.memory_type} ${linked}` });
+    hits.push({ view: "activity", kind: "Link", title: `${node.memory_id} · ${node.title}`, detail: `${node.memory_type} ${linked}` });
   });
   data.events.forEach((event) => hits.push({ view: "activity", kind: "Activity", title: event.text, detail: `${event.kind} ${event.actor_id ?? ""} ${event.ticket_id ?? ""} ${event.memory_id ?? ""} ${event.status_from ?? ""} ${event.status_to ?? ""}` }));
   const highlights = [data.highlights.latest_handoff, data.highlights.important_pinned].filter((item): item is Highlight => item !== null);
-  highlights.forEach((item) => hits.push({ view: "today", kind: item.type, title: item.title, detail: `${item.summary} ${item.author ?? ""} ${item.next_steps.join(" ")} ${item.warnings.join(" ")}` }));
+  highlights.forEach((item) => hits.push({ view: "home", kind: item.type, title: item.title, detail: `${item.summary} ${item.author ?? ""} ${item.next_steps.join(" ")} ${item.warnings.join(" ")}` }));
   return hits;
 }
 
@@ -1263,6 +1457,7 @@ function renderSearch(rawQuery: string): void {
     const button = element("button", "search-result") as HTMLButtonElement;
     button.type = "button";
     button.dataset.targetView = hit.view;
+    if (hit.kind === "Link") button.dataset.targetSubview = "links";
     button.dataset.resultKey = `${hit.view}:${hit.kind}:${hit.title}:${hit.detail}`.slice(0, 1_024);
     button.append(element("small", undefined, hit.kind), element("strong", undefined, hit.title), element("span", undefined, hit.detail));
     return button;
@@ -1290,8 +1485,8 @@ function selectView(view: ViewName, focusTab = false): void {
     panel.hidden = panel.dataset.panel !== view;
   });
   renderActivePanel(snapshot);
-  if (view === "fleet" && connected && fleetUnavailable && !fleetBusy) void refreshFleet();
-  if (view === "links" && connected && linksUnavailable && !linksBusy) void refreshLinks();
+  if (view === "projects" && connected && fleetUnavailable && !fleetBusy) void refreshFleet();
+  if (view === "activity" && activitySubview === "links" && connected && linksUnavailable && !linksBusy) void refreshLinks();
 }
 
 function setLoading(loading: boolean, message = "Loading authorized board state"): void {
@@ -1332,7 +1527,7 @@ async function refreshSnapshot(): Promise<void> {
 function acceptFleetSnapshot(value: FleetSnapshot): void {
   fleetSnapshot = value;
   fleetUnavailable = false;
-  if (activeView === "fleet") renderFleet(fleetSnapshot);
+  if (activeView === "projects") renderFleet(fleetSnapshot);
   renderSearch(searchInput.value);
 }
 
@@ -1352,7 +1547,7 @@ async function refreshFleet(): Promise<void> {
     fleetUnavailable = true;
   } finally {
     fleetBusy = false;
-    if (activeView === "fleet") renderFleet(fleetSnapshot);
+    if (activeView === "projects") renderFleet(fleetSnapshot);
     renderSearch(searchInput.value);
   }
 }
@@ -1360,7 +1555,7 @@ async function refreshFleet(): Promise<void> {
 function acceptLinkSnapshot(value: LinkSnapshot): void {
   linkSnapshot = value;
   linksUnavailable = false;
-  if (activeView === "links") renderLinks(linkSnapshot);
+  if (activeView === "activity" && activitySubview === "links") renderLinks(linkSnapshot);
   renderSearch(searchInput.value);
 }
 
@@ -1380,7 +1575,7 @@ async function refreshLinks(): Promise<void> {
     linksUnavailable = true;
   } finally {
     linksBusy = false;
-    if (activeView === "links") renderLinks(linkSnapshot);
+    if (activeView === "activity" && activitySubview === "links") renderLinks(linkSnapshot);
     renderSearch(searchInput.value);
   }
 }
@@ -1439,11 +1634,12 @@ function applyHostContext(context: McpUiHostContext): void {
 document.querySelectorAll<HTMLButtonElement>("[role=tab][data-view]").forEach((tab) => {
   tab.addEventListener("click", () => selectView(tab.dataset.view as ViewName));
   tab.addEventListener("keydown", (event) => {
-    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+    if (!["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
     event.preventDefault();
-    const order: ViewName[] = ["today", "work", "agents", "fleet", "links", "activity"];
+    const order: ViewName[] = ["home", "projects", "work", "team", "approvals", "activity", "settings"];
     const current = order.indexOf(activeView);
-    const next = event.key === "Home" ? 0 : event.key === "End" ? order.length - 1 : (current + (event.key === "ArrowRight" ? 1 : -1) + order.length) % order.length;
+    const movesForward = event.key === "ArrowDown" || event.key === "ArrowRight";
+    const next = event.key === "Home" ? 0 : event.key === "End" ? order.length - 1 : (current + (movesForward ? 1 : -1) + order.length) % order.length;
     selectView(order[next], true);
   });
 });
@@ -1454,10 +1650,91 @@ byId("search-results-list").addEventListener("click", (event) => {
   if (!button) return;
   searchInput.value = "";
   renderSearch("");
+  if (button.dataset.targetSubview === "links") selectActivitySubview("links", false);
   selectView(button.dataset.targetView as ViewName, true);
 });
 searchInput.addEventListener("input", () => renderSearch(searchInput.value));
 refreshButton.addEventListener("click", () => void Promise.all([refreshSnapshot(), refreshFleet(), refreshLinks()]));
+byId("search-button").addEventListener("click", () => searchInput.focus());
+byId("work-groups").addEventListener("click", (event) => {
+  const card = (event.target as HTMLElement).closest<HTMLElement>("[data-ticket-id]");
+  if (!card) return;
+  selectedTicketId = card.dataset.ticketId ?? null;
+  renderWork(snapshot);
+  byId("work-detail").scrollIntoView({ block: "nearest" });
+});
+byId("work-groups").addEventListener("keydown", (event) => {
+  if (event.key !== "Enter" && event.key !== " ") return;
+  const card = (event.target as HTMLElement).closest<HTMLElement>("[data-ticket-id]");
+  if (!card) return;
+  event.preventDefault();
+  selectedTicketId = card.dataset.ticketId ?? null;
+  renderWork(snapshot);
+  byId("detail-close").focus();
+});
+byId("detail-close").addEventListener("click", () => {
+  selectedTicketId = null;
+  renderWork(snapshot);
+  byId("work-groups").querySelector<HTMLElement>("[data-ticket-id]")?.focus();
+});
+byId<HTMLSelectElement>("project-filter").addEventListener("change", (event) => {
+  projectFilter = (event.target as HTMLSelectElement).value;
+  renderFleet(fleetSnapshot);
+});
+const applyActivityFilters = () => {
+  activityActorFilter = byId<HTMLSelectElement>("actor-filter").value;
+  activityTypeFilter = byId<HTMLSelectElement>("type-filter").value;
+  activityTextFilter = byId<HTMLInputElement>("activity-search").value;
+  renderActivity(snapshot);
+};
+byId("actor-filter").addEventListener("change", applyActivityFilters);
+byId("type-filter").addEventListener("change", applyActivityFilters);
+byId("activity-search").addEventListener("input", applyActivityFilters);
+byId("clear-filters-btn").addEventListener("click", () => {
+  activityActorFilter = "all";
+  activityTypeFilter = "all";
+  activityTextFilter = "";
+  byId<HTMLInputElement>("activity-search").value = "";
+  renderActivity(snapshot);
+});
+byId("resync-btn").addEventListener("click", () => void refreshFeed());
+byId("load-more-btn").addEventListener("click", () => void refreshFeed());
+function selectActivitySubview(view: ActivitySubview, focusTab = false): void {
+  activitySubview = view;
+  document.querySelectorAll<HTMLButtonElement>("[data-subview]").forEach((item) => {
+    const selected = item.dataset.subview === activitySubview;
+    item.setAttribute("aria-selected", String(selected));
+    item.tabIndex = selected ? 0 : -1;
+    if (selected && focusTab) item.focus();
+  });
+  document.querySelectorAll<HTMLElement>("[data-subpanel]").forEach((panel) => { panel.hidden = panel.dataset.subpanel !== activitySubview; });
+  if (activitySubview === "links") {
+    renderLinks(linkSnapshot);
+    if (connected && linksUnavailable && !linksBusy) void refreshLinks();
+  }
+}
+document.querySelectorAll<HTMLButtonElement>("[data-subview]").forEach((tab) => {
+  tab.addEventListener("click", () => selectActivitySubview(tab.dataset.subview as ActivitySubview));
+  tab.addEventListener("keydown", (event) => {
+    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+    event.preventDefault();
+    const order: ActivitySubview[] = ["feed", "links"];
+    const current = order.indexOf(activitySubview);
+    const next = event.key === "Home" ? 0 : event.key === "End" ? order.length - 1 : (current + (event.key === "ArrowRight" ? 1 : -1) + order.length) % order.length;
+    selectActivitySubview(order[next], true);
+  });
+});
+const setHelp = (open: boolean) => {
+  byId<HTMLElement>("help-panel").hidden = !open;
+  document.querySelectorAll<HTMLButtonElement>("[data-help-toggle]").forEach((button) => button.setAttribute("aria-expanded", String(open)));
+  if (open) byId("help-close").focus();
+};
+document.querySelectorAll<HTMLButtonElement>("[data-help-toggle]").forEach((button) => button.addEventListener("click", () => setHelp(Boolean(byId<HTMLElement>("help-panel").hidden))));
+byId("help-close").addEventListener("click", () => { setHelp(false); byId("help-button").focus(); });
+byId("worker-test-btn").addEventListener("click", () => {
+  byId("action-announcer").textContent = "Refreshing read-only connection diagnostics.";
+  void refreshSnapshot();
+});
 byId("links-groups").addEventListener("click", (event) => {
   const button = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-copy-value]");
   if (!button) return;
