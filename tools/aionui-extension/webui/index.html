@@ -26,6 +26,7 @@
           <a class="nav-link" href="#connection"><span aria-hidden="true">⌁</span> Connection</a>
           <a class="nav-link" href="#team"><span aria-hidden="true">◎</span> Team</a>
           <a class="nav-link" href="#progress"><span aria-hidden="true">↗</span> Progress</a>
+          <a class="nav-link" href="#tickets"><span aria-hidden="true">□</span> Tickets</a>
           <a class="nav-link" href="#advanced"><span aria-hidden="true">⚙</span> Advanced</a>
         </nav>
         <div class="sidebar-note">
@@ -203,6 +204,38 @@
           <div class="card dashboard-card">
             <div><p class="eyebrow">Follow board work</p><h3>Open the Pursers dashboard</h3><p>The dashboard is supplied by the Pursers Personal MCP app. Open it from Tools in the same AionUi conversation. If the host does not expose the app, ask the Team to run <code>board_snapshot</code>; this page does not invent a navigation route.</p></div>
             <span class="status-pill neutral">Host entrypoint</span>
+          </div>
+        </section>
+
+        <section class="section-block" id="tickets" aria-labelledby="tickets-title">
+          <div class="section-heading">
+            <div><p class="eyebrow">Board-backed work</p><h2 id="tickets-title">Ticket lifecycle</h2><p>Create unassigned work and follow persisted board status. Workers claim and submit elsewhere; independent reviewers approve.</p></div>
+            <button class="button button-quiet" id="refresh-tickets" type="button">Refresh tickets</button>
+          </div>
+          <div class="two-column ticket-layout">
+            <form class="card form-card" id="ticket-form">
+              <label class="field field-wide" for="ticket-title">Title<span>Short description shown in dispatch.</span><input id="ticket-title" maxlength="200" required></label>
+              <label class="field field-wide" for="ticket-description">Description<textarea id="ticket-description" maxlength="5000" rows="5" required></textarea></label>
+              <label class="field field-wide" for="ticket-target">Target URL<span>Include the project slug as the first path segment.</span><input id="ticket-target" maxlength="500" placeholder="project/feature" required></label>
+              <label class="field" for="ticket-scope">Scope<select id="ticket-scope"><option>interactive-no-send</option><option>READ-ONLY</option><option>interactive</option></select></label>
+              <label class="field" for="ticket-priority">Priority<select id="ticket-priority"><option>low</option><option selected>medium</option><option>high</option><option>critical</option></select></label>
+              <label class="field" for="ticket-tier">Tier<select id="ticket-tier"><option>1</option><option selected>2</option><option>3</option></select></label>
+              <label class="field field-wide" for="ticket-required">Required fields<span>One per line or comma-separated.</span><textarea id="ticket-required" rows="3" required>branch_and_commit
+files_changed
+test_output</textarea></label>
+              <details class="advanced-fields field-wide"><summary>Optional routing details</summary><div class="form-grid">
+                <label class="field" for="ticket-tags">Tags<input id="ticket-tags" placeholder="home, feature"></label>
+                <label class="field" for="ticket-files">Related files<input id="ticket-files" placeholder="tools/aionui-extension"></label>
+                <label class="field field-wide" for="ticket-forbidden">Forbidden actions<input id="ticket-forbidden" placeholder="No release"></label>
+              </div></details>
+              <div class="form-actions field-wide"><button class="button button-primary" id="create-ticket" type="submit">Create unassigned ticket</button></div>
+              <p class="form-message field-wide" id="ticket-message" role="status" aria-live="polite"></p>
+            </form>
+            <div class="card ticket-card" aria-labelledby="ticket-list-title">
+              <div class="card-heading"><div><p class="eyebrow">Persisted board state</p><h3 id="ticket-list-title">Recent tickets</h3></div><span class="status-pill neutral" id="ticket-pill">Not loaded</span></div>
+              <div class="empty-state" id="ticket-empty"><span aria-hidden="true">□</span><h3>No tickets loaded</h3><p>Connect the helper, then refresh.</p></div>
+              <div class="ticket-list" id="ticket-list" aria-live="polite"></div>
+            </div>
           </div>
         </section>
 
