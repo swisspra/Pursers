@@ -11,6 +11,12 @@ Mode, kill processes, or infer board state from local files.
 | `status(input)` | A fresh Central board read with retired seats included | Returns only the exact configured board and exact preserved identity. Missing or mismatched identity fails closed. |
 | `disconnect(input)` | Central self-retirement followed by verified Central read-back | Requires the exact confirmation string. Local door removal happens only after Central reports the identity retired. |
 
+Every dependency result must explicitly report `ok: true`; a valid-looking
+identity never overrides a failed join result. Status returns the exact Central
+lifecycle as `outcome`: `active` and `retired` are successful reads, while
+`handed_off` and `stale` are non-active results with distinct codes and bounded
+same-identity rejoin guidance.
+
 `disconnect` means cooperative retirement of the current seat. It must never
 retire another identity. Active work or review leases remain Central-owned
 blockers and are shown as recoverable errors. Rejoining with the same board,
