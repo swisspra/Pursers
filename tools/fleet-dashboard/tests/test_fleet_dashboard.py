@@ -7,7 +7,9 @@ import hashlib
 import importlib.util
 import json
 import os
+import plistlib
 import re
+import shlex
 import stat
 import subprocess
 import sys
@@ -7460,58 +7462,402 @@ def test_deployment_runbook_validates_before_mutation() -> None:
     assert deploy.index("source_path, backup_path, staged_path") < deploy.index('install -m 600 "$STAGED_PLIST" "$LIVE_PLIST"')
     assert rollback.index('plutil -lint "$BACKUP_PLIST"') < rollback.index("PREVIOUS_SOURCE=$(")
     assert rollback.index("PREVIOUS_SOURCE=$(") < rollback.index('install -m 600 "$BACKUP_PLIST" "$LIVE_PLIST"')
+    for block in (deploy, rollback):
+        assert "bootout_if_present" in block
+        assert 'launchctl bootout "$JOB"' not in block
+        assert "|| true" not in block
+
+
+def _write_executable(path: Path, contents: str) -> None:
+    path.write_text(contents, encoding="utf-8")
+    path.chmod(0o755)
+
+
+def _deployment_fixture(tmp_path: Path) -> tuple[str, str, str, dict[str, str], dict[str, Path]]:
+    deploy, verify, rollback = _deployment_runbook_blocks()
+    candidate_sha = "1" * 40
+    fleet_clone = tmp_path / "fleet-clone"
+    candidate_root = tmp_path / "candidate"
+    live_plist = tmp_path / "live.plist"
+    private_parent = tmp_path / "private"
+    previous_root = tmp_path / "previous"
+    previous_source = previous_root / "tools/fleet-dashboard/fleet_dashboard.py"
+    previous_source.parent.mkdir(parents=True)
+    previous_source.write_text("# fixture\n", encoding="utf-8")
+    fleet_clone.mkdir()
+    with live_plist.open("wb") as stream:
+        plistlib.dump({"ProgramArguments": [sys.executable, str(previous_source)]}, stream)
+
+    replacements = {
+        "FLEET_CLONE": fleet_clone,
+        "CANDIDATE_SHA": candidate_sha,
+        "CANDIDATE_ROOT": candidate_root,
+        "LIVE_PLIST": live_plist,
+        "PRIVATE_PARENT": private_parent,
+    }
+    for name, value in replacements.items():
+        deploy = re.sub(
+            rf"^{name}=.*$",
+            f"{name}={shlex.quote(str(value))}",
+            deploy,
+            count=1,
+            flags=re.MULTILINE,
+        )
+
+    mock_bin = tmp_path / "bin"
+    mock_bin.mkdir()
+    log = tmp_path / "mock.log"
+    state = tmp_path / "launch.state"
+    source = tmp_path / "loaded.source"
+    state.write_text("loaded\n", encoding="utf-8")
+    source.write_text(str(previous_source), encoding="utf-8")
+
+    _write_executable(
+        mock_bin / "git",
+        """#!/bin/bash
+echo "git $*" >> "$MOCK_LOG"
+if [[ "$*" == *" fetch "* && "${MOCK_FAIL:-}" == git_fetch ]]; then exit 71; fi
+if [[ "$*" == *" worktree add --detach "* ]]; then
+  if [[ "${MOCK_FAIL:-}" == worktree_add ]]; then exit 72; fi
+  root="${@: -2:1}"
+  mkdir -p "$root/tools/fleet-dashboard"
+  printf '# fixture\n' > "$root/tools/fleet-dashboard/fleet_dashboard.py"
+fi
+if [[ "$*" == *" rev-parse HEAD"* ]]; then
+  printf '%s\n' "${MOCK_GIT_SHA_OUTPUT:-$MOCK_CANDIDATE_SHA}"
+fi
+""",
+    )
+    _write_executable(
+        mock_bin / "plutil",
+        """#!/bin/bash
+echo "plutil $*" >> "$MOCK_LOG"
+case "${MOCK_FAIL:-}:$2" in
+  live_lint:"$MOCK_LIVE_PLIST"|staged_lint:"$MOCK_STAGED_PLIST"|backup_lint:"$MOCK_BACKUP_PLIST") exit 73 ;;
+esac
+exit 0
+""",
+    )
+    _write_executable(
+        mock_bin / "install",
+        """#!/bin/bash
+echo "install $*" >> "$MOCK_LOG"
+if [[ "${MOCK_FAIL:-}" == install ]]; then exit 74; fi
+source="${@: -2:1}"
+destination="${@: -1}"
+cp "$source" "$destination"
+chmod 600 "$destination"
+""",
+    )
+    _write_executable(
+        mock_bin / "launchctl",
+        """#!/bin/bash
+echo "launchctl $*" >> "$MOCK_LOG"
+case "$1" in
+  print)
+    state=$(tr -d '\n' < "$MOCK_LAUNCH_STATE")
+    if [[ "$state" == loaded ]]; then printf 'pid = 4242\n'; exit 0; fi
+    if [[ "$state" == absent ]]; then echo 'Could not find service' >&2; exit 113; fi
+    echo 'launchctl probe failed' >&2; exit 77
+    ;;
+  bootout)
+    if [[ "${MOCK_FAIL:-}" == bootout ]]; then exit 77; fi
+    printf 'absent\n' > "$MOCK_LAUNCH_STATE"
+    ;;
+  bootstrap)
+    if [[ "${MOCK_FAIL:-}" == bootstrap ]]; then exit 78; fi
+    "$MOCK_PYTHON" -c 'import plistlib,sys; d=plistlib.load(open(sys.argv[1], "rb")); print(next(v for v in d["ProgramArguments"] if isinstance(v,str) and v.endswith("fleet_dashboard.py")))' "$3" > "$MOCK_LOADED_SOURCE"
+    printf 'loaded\n' > "$MOCK_LAUNCH_STATE"
+    ;;
+  *) exit 79 ;;
+esac
+""",
+    )
+    _write_executable(
+        mock_bin / "ps",
+        """#!/bin/bash
+echo "ps $*" >> "$MOCK_LOG"
+if [[ "${MOCK_FAIL:-}" == ps ]]; then exit 80; fi
+printf 'python %s\n' "$(cat "$MOCK_LOADED_SOURCE")"
+""",
+    )
+    _write_executable(
+        mock_bin / "curl",
+        """#!/bin/bash
+echo "curl $*" >> "$MOCK_LOG"
+if [[ "${MOCK_FAIL:-}" == curl ]]; then exit 81; fi
+""",
+    )
+
+    private_root = private_parent / candidate_sha
+    paths = {
+        "candidate_root": candidate_root,
+        "live_plist": live_plist,
+        "private_parent": private_parent,
+        "staged_plist": private_root / "staging/com.pursers.fleet-dashboard.plist",
+        "backup_plist": private_root / f"backups/com.pursers.fleet-dashboard.plist.before-{candidate_sha}",
+        "log": log,
+        "state": state,
+        "source": source,
+        "previous_source": previous_source,
+    }
+    env = {
+        **os.environ,
+        "PATH": f"{mock_bin}{os.pathsep}{os.environ['PATH']}",
+        "MOCK_LOG": str(log),
+        "MOCK_LAUNCH_STATE": str(state),
+        "MOCK_LOADED_SOURCE": str(source),
+        "MOCK_PYTHON": sys.executable,
+        "MOCK_CANDIDATE_SHA": candidate_sha,
+        "MOCK_LIVE_PLIST": str(live_plist),
+        "MOCK_STAGED_PLIST": str(paths["staged_plist"]),
+        "MOCK_BACKUP_PLIST": str(paths["backup_plist"]),
+    }
+    rollback_prelude = "\n".join(
+        (
+            f"BACKUP_PLIST={shlex.quote(str(paths['backup_plist']))}",
+            f"LIVE_PLIST={shlex.quote(str(live_plist))}",
+            f"JOB=gui/$(id -u)/com.pursers.fleet-dashboard",
+        )
+    )
+    return deploy, verify, f"{rollback_prelude}\n{rollback}", env, paths
+
+
+@pytest.mark.parametrize("initial_state, expects_bootout", (("loaded", True), ("absent", False)))
+def test_deployment_runbook_actual_deploy_and_verify_blocks_succeed(
+    tmp_path: Path, initial_state: str, expects_bootout: bool
+) -> None:
+    deploy, verify, _, env, paths = _deployment_fixture(tmp_path)
+    paths["state"].write_text(f"{initial_state}\n", encoding="utf-8")
+
+    result = subprocess.run(
+        ["bash", "-c", f"{deploy}\n{verify}"], env=env, check=False,
+        capture_output=True, text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    log = paths["log"].read_text(encoding="utf-8")
+    assert ("launchctl bootout" in log) is expects_bootout
+    assert "launchctl bootstrap" in log
+    assert log.count("curl ") == 5
+    assert paths["live_plist"].stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.parametrize(
+    "state, failure, expected_status",
+    (("probe_fault", "", 77), ("loaded", "bootout", 77)),
+)
+def test_deployment_runbook_actual_deploy_bootout_fault_never_bootstraps(
+    tmp_path: Path, state: str, failure: str, expected_status: int
+) -> None:
+    deploy, _, _, env, paths = _deployment_fixture(tmp_path)
+    paths["state"].write_text(f"{state}\n", encoding="utf-8")
+    if failure:
+        env["MOCK_FAIL"] = failure
+
+    result = subprocess.run(
+        ["bash", "-c", deploy], env=env, check=False, capture_output=True, text=True
+    )
+
+    assert result.returncode == expected_status
+    log = paths["log"].read_text(encoding="utf-8")
+    assert "install " in log
+    assert "launchctl bootstrap" not in log
+
+
+@pytest.mark.parametrize("rollback_state, expects_bootout", (("loaded", True), ("absent", False)))
+def test_deployment_runbook_actual_rollback_recovers_loaded_or_confirmed_absent_job(
+    tmp_path: Path, rollback_state: str, expects_bootout: bool
+) -> None:
+    deploy, _, rollback, env, paths = _deployment_fixture(tmp_path)
+    deployed = subprocess.run(
+        ["bash", "-c", deploy], env=env, check=False, capture_output=True, text=True
+    )
+    assert deployed.returncode == 0, deployed.stderr
+    paths["state"].write_text(f"{rollback_state}\n", encoding="utf-8")
+    paths["log"].write_text("", encoding="utf-8")
+
+    result = subprocess.run(
+        ["bash", "-c", rollback], env=env, check=False, capture_output=True, text=True
+    )
+
+    assert result.returncode == 0, result.stderr
+    log = paths["log"].read_text(encoding="utf-8")
+    assert ("launchctl bootout" in log) is expects_bootout
+    assert "launchctl bootstrap" in log
+    assert log.count("curl ") == 5
+    assert paths["source"].read_text(encoding="utf-8").strip() == str(paths["previous_source"])
+
+
+@pytest.mark.parametrize("state, failure", (("probe_fault", ""), ("loaded", "bootout")))
+def test_deployment_runbook_actual_rollback_bootout_fault_never_bootstraps(
+    tmp_path: Path, state: str, failure: str
+) -> None:
+    deploy, _, rollback, env, paths = _deployment_fixture(tmp_path)
+    deployed = subprocess.run(
+        ["bash", "-c", deploy], env=env, check=False, capture_output=True, text=True
+    )
+    assert deployed.returncode == 0, deployed.stderr
+    paths["state"].write_text(f"{state}\n", encoding="utf-8")
+    paths["log"].write_text("", encoding="utf-8")
+    if failure:
+        env["MOCK_FAIL"] = failure
+
+    result = subprocess.run(
+        ["bash", "-c", rollback], env=env, check=False, capture_output=True, text=True
+    )
+
+    assert result.returncode == 77
+    log = paths["log"].read_text(encoding="utf-8")
+    assert "install " in log
+    assert "launchctl bootstrap" not in log
+    assert "curl " not in log
 
 
 @pytest.mark.parametrize(
     "failure",
-    ("directory_symlink", "file_symlink", "hardlink", "wrong_sha", "invalid_plist"),
+    (
+        "directory_symlink", "git_fetch", "worktree_add", "wrong_sha",
+        "live_lint", "rewrite", "destination_symlink", "destination_hardlink",
+        "staged_lint",
+    ),
 )
-def test_deployment_runbook_failure_stops_all_later_mutations(tmp_path: Path, failure: str) -> None:
-    deploy = _deployment_runbook_blocks()[0]
-    prologue = deploy.splitlines()[0]
-    assert prologue == "set -euo pipefail"
+def test_deployment_runbook_actual_deploy_validation_failures_stop_before_install(
+    tmp_path: Path, failure: str
+) -> None:
+    deploy, _, _, env, paths = _deployment_fixture(tmp_path)
+    if failure == "directory_symlink":
+        paths["private_parent"].symlink_to(tmp_path)
+    elif failure == "wrong_sha":
+        env["MOCK_GIT_SHA_OUTPUT"] = "2" * 40
+    elif failure == "rewrite":
+        with paths["live_plist"].open("wb") as stream:
+            plistlib.dump({"ProgramArguments": [sys.executable, "wrong-script.py"]}, stream)
+    elif failure in {"destination_symlink", "destination_hardlink"}:
+        paths["staged_plist"].parent.mkdir(parents=True, mode=0o700)
+        paths["backup_plist"].parent.mkdir(mode=0o700)
+        if failure == "destination_symlink":
+            paths["staged_plist"].symlink_to(paths["live_plist"])
+        else:
+            os.link(paths["live_plist"], paths["backup_plist"])
+    else:
+        env["MOCK_FAIL"] = failure
 
-    regular = tmp_path / "regular"
-    regular.write_text("fixture", encoding="utf-8")
-    injected = tmp_path / "injected"
-    if failure in {"directory_symlink", "file_symlink"}:
-        injected.symlink_to(tmp_path if failure == "directory_symlink" else regular)
-    elif failure == "hardlink":
-        os.link(regular, injected)
-    elif failure == "invalid_plist":
-        injected.write_text("not a plist", encoding="utf-8")
-
-    validator = tmp_path / "validator.py"
-    validator.write_text(
-        "import os, plistlib, stat, sys\n"
-        "failure, path = sys.argv[1], sys.argv[2]\n"
-        "if failure == 'wrong_sha':\n"
-        "    raise SystemExit(1)\n"
-        "info = os.lstat(path)\n"
-        "if failure == 'directory_symlink':\n"
-        "    flags = os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0) | getattr(os, 'O_NOFOLLOW', 0)\n"
-        "    os.open(path, flags)\n"
-        "elif failure in {'file_symlink', 'hardlink'}:\n"
-        "    if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode) or info.st_nlink != 1:\n"
-        "        raise SystemExit(1)\n"
-        "elif failure == 'invalid_plist':\n"
-        "    with open(path, 'rb') as source:\n"
-        "        plistlib.load(source)\n",
-        encoding="utf-8",
+    result = subprocess.run(
+        ["bash", "-c", deploy], env=env, check=False, capture_output=True, text=True
     )
-    marker_dir = tmp_path / "mutations"
-    marker_dir.mkdir()
-    script = "\n".join(
+
+    assert result.returncode != 0
+    log = paths["log"].read_text(encoding="utf-8") if paths["log"].exists() else ""
+    assert "install " not in log
+    assert "launchctl bootout" not in log
+    assert "launchctl bootstrap" not in log
+    if failure == "staged_lint":
+        assert not paths["backup_plist"].exists()
+
+
+@pytest.mark.parametrize(
+    "failure",
+    ("backup_symlink", "backup_mode", "backup_lint", "previous_source_parse", "previous_source_missing", "install"),
+)
+def test_deployment_runbook_actual_rollback_validation_failures_stop_before_service_mutation(
+    tmp_path: Path, failure: str
+) -> None:
+    deploy, _, rollback, env, paths = _deployment_fixture(tmp_path)
+    deployed = subprocess.run(
+        ["bash", "-c", deploy], env=env, check=False, capture_output=True, text=True
+    )
+    assert deployed.returncode == 0, deployed.stderr
+    if failure == "backup_symlink":
+        paths["backup_plist"].unlink()
+        paths["backup_plist"].symlink_to(paths["live_plist"])
+    elif failure == "backup_mode":
+        paths["backup_plist"].chmod(0o644)
+    elif failure == "previous_source_parse":
+        with paths["backup_plist"].open("wb") as stream:
+            plistlib.dump({"ProgramArguments": [sys.executable, "wrong-script.py"]}, stream)
+        paths["backup_plist"].chmod(0o600)
+    elif failure == "previous_source_missing":
+        missing = tmp_path / "missing/tools/fleet-dashboard/fleet_dashboard.py"
+        with paths["backup_plist"].open("wb") as stream:
+            plistlib.dump({"ProgramArguments": [sys.executable, str(missing)]}, stream)
+        paths["backup_plist"].chmod(0o600)
+    else:
+        env["MOCK_FAIL"] = failure
+    paths["log"].write_text("", encoding="utf-8")
+
+    result = subprocess.run(
+        ["bash", "-c", rollback], env=env, check=False, capture_output=True, text=True
+    )
+
+    assert result.returncode != 0
+    log = paths["log"].read_text(encoding="utf-8")
+    assert "launchctl bootout" not in log
+    assert "launchctl bootstrap" not in log
+    assert "curl " not in log
+    if failure != "install":
+        assert "install " not in log
+
+
+@pytest.mark.parametrize(
+    "phase, failure, expected_status",
+    (("deploy", "install", 74), ("deploy", "bootstrap", 78), ("rollback", "bootstrap", 78)),
+)
+def test_deployment_runbook_actual_service_failures_propagate(
+    tmp_path: Path, phase: str, failure: str, expected_status: int
+) -> None:
+    deploy, _, rollback, env, paths = _deployment_fixture(tmp_path)
+    if phase == "rollback":
+        deployed = subprocess.run(
+            ["bash", "-c", deploy], env=env, check=False, capture_output=True, text=True
+        )
+        assert deployed.returncode == 0, deployed.stderr
+        paths["log"].write_text("", encoding="utf-8")
+    env["MOCK_FAIL"] = failure
+
+    result = subprocess.run(
+        ["bash", "-c", deploy if phase == "deploy" else rollback], env=env,
+        check=False, capture_output=True, text=True,
+    )
+
+    assert result.returncode == expected_status
+    log = paths["log"].read_text(encoding="utf-8")
+    assert "curl " not in log
+
+
+@pytest.mark.parametrize("failure", ("probe_pipeline", "ps_substitution", "curl"))
+def test_deployment_runbook_actual_verify_pipeline_and_substitution_fail_closed(
+    tmp_path: Path, failure: str
+) -> None:
+    deploy, verify, _, env, paths = _deployment_fixture(tmp_path)
+    deployed = subprocess.run(
+        ["bash", "-c", deploy], env=env, check=False, capture_output=True, text=True
+    )
+    assert deployed.returncode == 0, deployed.stderr
+    paths["log"].write_text("", encoding="utf-8")
+    if failure == "probe_pipeline":
+        paths["state"].write_text("probe_fault\n", encoding="utf-8")
+    elif failure == "ps_substitution":
+        env["MOCK_FAIL"] = "ps"
+    else:
+        env["MOCK_FAIL"] = "curl"
+
+    prelude = "\n".join(
         (
-            prologue,
-            f'python3 "{validator}" "{failure}" "{injected}"',
-            f'touch "{marker_dir / "rewrite"}"',
-            f'touch "{marker_dir / "backup-overwrite"}"',
-            f'touch "{marker_dir / "install"}"',
-            f'touch "{marker_dir / "bootout"}"',
-            f'touch "{marker_dir / "bootstrap"}"',
+            f"CANDIDATE_ROOT={shlex.quote(str(paths['candidate_root']))}",
+            f"CANDIDATE_SHA={'1' * 40}",
+            f"LIVE_PLIST={shlex.quote(str(paths['live_plist']))}",
+            "JOB=gui/$(id -u)/com.pursers.fleet-dashboard",
         )
     )
-    result = subprocess.run(["bash", "-c", script], check=False, capture_output=True, text=True)
+    result = subprocess.run(
+        ["bash", "-c", f"{prelude}\n{verify}"], env=env, check=False,
+        capture_output=True, text=True,
+    )
+
     assert result.returncode != 0
-    assert list(marker_dir.iterdir()) == []
+    log = paths["log"].read_text(encoding="utf-8")
+    if failure == "probe_pipeline":
+        assert "ps " not in log and "curl " not in log
+    elif failure == "ps_substitution":
+        assert "curl " not in log
