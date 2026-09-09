@@ -7,6 +7,26 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added
+
+- Home acceptance: concrete verifier-owned browser observer
+  (`tools/aionui-extension/tests/home_acceptance/browser_observer.py`) and a
+  reproducible runner (`runner.py`) with `install-observer`, `doctor`,
+  `capture`, and `validate`. The observer records real browser screenshots and
+  accessibility trees plus live host identity. It derives the running candidate
+  SHA from the installed deterministic extension manifest, and from the
+  authenticated same-origin status contract when it exposes one, plus the
+  selected board from rendered Home UI, all through a verifier-created CDP
+  isolated world, so page-owned `fetch` or `querySelector` overrides cannot
+  forge those bindings. It binds host identity from that same-origin status
+  contract, falling back to the signed live AionUi listener when the contract is
+  unavailable, and compares the observed candidate SHA and board with the
+  request before writing a capture, then replays only its own
+  captures for `harness.validate_evidence_report`, so report-authored
+  artifacts, fixtures, or a local HTTP response cannot forge GUI acceptance.
+  Unavailable host identity or browser channel is reported as blocked, never as
+  pass or skip. Documented in `docs/design-home/acceptance-observer.md`.
+
 ### Changed
 
 - Client and seat kit: project-registry entries may declare an exact,
