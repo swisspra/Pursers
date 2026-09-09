@@ -5793,7 +5793,10 @@ async def _wait_for_work(
 
 
 def _door_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="pursers-wait-bridge")
+    parser = argparse.ArgumentParser(
+        prog="pursers-wait-bridge",
+        description="Run the Pursers MCP wait bridge or manage its local seat.",
+    )
     commands = parser.add_subparsers(dest="command", required=True)
     join = commands.add_parser("join", help="store a door and onboard a seat")
     join.add_argument("door")
@@ -5807,6 +5810,11 @@ def _door_parser() -> argparse.ArgumentParser:
     forget.add_argument("--board", required=True)
     forget.add_argument("--role", required=True, choices=sorted(door_state.SEAT_ROLES))
     forget.add_argument("--state-dir")
+    commands.add_parser(
+        "ticket-lifecycle", help="run the ticket lifecycle sidecar"
+    )
+    commands.add_parser("seat-lifecycle", help="run the seat lifecycle sidecar")
+    commands.add_parser("team-lifecycle", help="run the team lifecycle sidecar")
     return parser
 
 
@@ -5918,6 +5926,9 @@ def _configure_runtime() -> None:
 def main() -> None:
     if "--version" in sys.argv[1:]:
         print(VERSION)
+        return
+    if sys.argv[1:] in (["-h"], ["--help"]):
+        _door_parser().print_help()
         return
     if sys.argv[1:] and sys.argv[1] == "ticket-lifecycle":
         from ticket_lifecycle import main as ticket_lifecycle_main
