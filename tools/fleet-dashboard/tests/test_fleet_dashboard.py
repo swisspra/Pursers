@@ -7439,3 +7439,79 @@ def test_clean_text_redaction_is_linear_time_and_behavior_preserved() -> None:
         assert clean(f"token:{ending}plain=x") == (
             f"token:[REDACTED]{ending}plain=x"
         )
+
+
+def _deployment_runbook_blocks() -> list[str]:
+    readme = (MODULE_PATH.parent / "README.md").read_text(encoding="utf-8")
+    section = readme.split("### Coordinator-only exact-SHA deployment and rollback", 1)[1]
+    section = section.split("### Multiple central instances", 1)[0]
+    return re.findall(r"```bash\n(.*?)\n```", section, flags=re.DOTALL)
+
+
+def test_deployment_runbook_validates_before_mutation() -> None:
+    deploy, verify, rollback = _deployment_runbook_blocks()
+    for block in (deploy, verify, rollback):
+        assert block.splitlines()[0] == "set -euo pipefail"
+
+    assert deploy.index('test "$(git -C "$CANDIDATE_ROOT" rev-parse HEAD)" = "$CANDIDATE_SHA"') < deploy.index('plutil -lint "$LIVE_PLIST"')
+    assert deploy.index('plutil -lint "$LIVE_PLIST"') < deploy.index("source_path, *destination_paths")
+    assert deploy.index("source_path, *destination_paths") < deploy.index("os.ftruncate(descriptor, 0)")
+    assert deploy.index('plutil -lint "$STAGED_PLIST"') < deploy.index("source_path, backup_path, staged_path")
+    assert deploy.index("source_path, backup_path, staged_path") < deploy.index('install -m 600 "$STAGED_PLIST" "$LIVE_PLIST"')
+    assert rollback.index('plutil -lint "$BACKUP_PLIST"') < rollback.index("PREVIOUS_SOURCE=$(")
+    assert rollback.index("PREVIOUS_SOURCE=$(") < rollback.index('install -m 600 "$BACKUP_PLIST" "$LIVE_PLIST"')
+
+
+@pytest.mark.parametrize(
+    "failure",
+    ("directory_symlink", "file_symlink", "hardlink", "wrong_sha", "invalid_plist"),
+)
+def test_deployment_runbook_failure_stops_all_later_mutations(tmp_path: Path, failure: str) -> None:
+    deploy = _deployment_runbook_blocks()[0]
+    prologue = deploy.splitlines()[0]
+    assert prologue == "set -euo pipefail"
+
+    regular = tmp_path / "regular"
+    regular.write_text("fixture", encoding="utf-8")
+    injected = tmp_path / "injected"
+    if failure in {"directory_symlink", "file_symlink"}:
+        injected.symlink_to(tmp_path if failure == "directory_symlink" else regular)
+    elif failure == "hardlink":
+        os.link(regular, injected)
+    elif failure == "invalid_plist":
+        injected.write_text("not a plist", encoding="utf-8")
+
+    validator = tmp_path / "validator.py"
+    validator.write_text(
+        "import os, plistlib, stat, sys\n"
+        "failure, path = sys.argv[1], sys.argv[2]\n"
+        "if failure == 'wrong_sha':\n"
+        "    raise SystemExit(1)\n"
+        "info = os.lstat(path)\n"
+        "if failure == 'directory_symlink':\n"
+        "    flags = os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0) | getattr(os, 'O_NOFOLLOW', 0)\n"
+        "    os.open(path, flags)\n"
+        "elif failure in {'file_symlink', 'hardlink'}:\n"
+        "    if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode) or info.st_nlink != 1:\n"
+        "        raise SystemExit(1)\n"
+        "elif failure == 'invalid_plist':\n"
+        "    with open(path, 'rb') as source:\n"
+        "        plistlib.load(source)\n",
+        encoding="utf-8",
+    )
+    marker_dir = tmp_path / "mutations"
+    marker_dir.mkdir()
+    script = "\n".join(
+        (
+            prologue,
+            f'python3 "{validator}" "{failure}" "{injected}"',
+            f'touch "{marker_dir / "rewrite"}"',
+            f'touch "{marker_dir / "backup-overwrite"}"',
+            f'touch "{marker_dir / "install"}"',
+            f'touch "{marker_dir / "bootout"}"',
+            f'touch "{marker_dir / "bootstrap"}"',
+        )
+    )
+    result = subprocess.run(["bash", "-c", script], check=False, capture_output=True, text=True)
+    assert result.returncode != 0
+    assert list(marker_dir.iterdir()) == []
