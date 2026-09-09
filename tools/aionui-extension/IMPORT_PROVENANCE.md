@@ -71,6 +71,11 @@ rollback. Exact integration conflicts and remaining inputs are mapped in
 The final gate documents are adopted byte-for-byte from their independently
 approved tips:
 
+- credential-free bridge help from `TK-3d56743e40b2`, source branch
+  `codex/TK-3d56743e40b2`, commit
+  `41d9ee914a7f02b4e59480ee68610978b36e25b2`, for the exact paths
+  `tools/wait-bridge/pursers_wait_server.py` and
+  `tools/wait-bridge/tests/test_version.py`;
 - Quickstart `docs/design-home/quickstart.md` from recovery ticket
   `TK-f50ed337bfd3`, source branch `codex/TK-cadfa2b8b33f-resubmit-3`, commit
   `909e897e960cc68139a043e2494aa4f6600b47ce`;
