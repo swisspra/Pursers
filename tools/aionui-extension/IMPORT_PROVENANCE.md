@@ -48,7 +48,25 @@ manifest and signed live-listener identity proof because the supported AionCore
 non-mechanical contract change receive fresh review; no observer-ticket
 approval is asserted.
 
+The final train assembles on approved Home baseline
+`c7c9a2ed2923a0c8bc4b2c4fce51491fa9dfe96a`. It imports these
+coordinator-approved cumulative inputs:
+
+- ticket lifecycle `0b0f0b78385a0315aa4e93e574fa967d0cef65ab`;
+- submitted results `792dcae5dfe1a194329471fd914f0f6b1518db27`, including its two
+  ancestors after declared base `d0dd3822acd92337355464ba5b9db81dde7a6ccd`;
+- standalone groups `20bb6bc5c54ad7b233dfc790a48d3bea335a92da`; and
+- Fleet persistent sessions and deployment `e229dcb08879666475c532fd7296f4c5a2d9167b`,
+  including all four ancestors after frozen main.
+
+Shared helper, routes, UI, package, and wait-bridge files preserve the union of
+the approved behaviors. Result reads retain the explicit Central-and-board pin;
+ticket and group operations retain separate inert sidecars; the Fleet input
+retains matching-only read-only takeover and fail-closed deployment and
+rollback. Exact integration conflicts and remaining inputs are mapped in
+`docs/design-home/final-assembly-inputs.md`.
+
 `INTEGRATION_FILES.sha256` records every cumulative changed path relative to
 the frozen main, excluding only the checksum manifest itself. The submission
-must declare the exact single-commit diff so verifier manifest comparison and
-cumulative provenance describe the same tree.
+must declare the exact cumulative diff and ancestry so verifier manifest
+comparison and cumulative provenance describe the same tree.
