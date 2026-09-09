@@ -62,6 +62,11 @@ python3 tools/build_home_runtime_wheelhouse.py \
   --find-links /PRIVATE/PATH/home-runtime-wheelhouse \
   /PRIVATE/PATH/home-runtime-wheelhouse/pursers_client-0.1.0a22-py3-none-any.whl \
   /PRIVATE/PATH/home-runtime-wheelhouse/pursers_wait_bridge-0.1.0a15-py3-none-any.whl
+/PRIVATE/PATH/home-runtime/bin/python -m pip --isolated install \
+  --disable-pip-version-check --no-index --no-deps --force-reinstall \
+  /PRIVATE/PATH/home-runtime-wheelhouse/pursers_client-0.1.0a22-py3-none-any.whl \
+  /PRIVATE/PATH/home-runtime-wheelhouse/pursers_wait_bridge-0.1.0a15-py3-none-any.whl
+/PRIVATE/PATH/home-runtime/bin/python -m pip check
 /PRIVATE/PATH/home-runtime/bin/pursers-wait-bridge ticket-lifecycle --help
 /PRIVATE/PATH/home-runtime/bin/pursers-wait-bridge seat-lifecycle --help
 /PRIVATE/PATH/home-runtime/bin/pursers-wait-bridge team-lifecycle --help
@@ -72,7 +77,9 @@ refuses a dirty source checkout, an existing output path, non-Python-3.12
 interpreter, a changed local source wheel, or a wheelhouse that cannot complete
 the isolated, strict no-index install and all three lifecycle probes. Pip's
 isolated mode prevents ambient index or find-links configuration from substituting
-another wheel with the same project name and version.
+another wheel with the same project name and version. The no-dependency reinstall
+makes the exact two local wheel paths authoritative after dependency resolution;
+`pip check` then proves the offline environment is complete.
 
 The preparer repeats those lifecycle probes with a clean Python import path and
 records the exact bridge binary path, SHA-256, reported version, and verified

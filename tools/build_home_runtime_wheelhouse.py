@@ -211,6 +211,33 @@ def build(output: Path, python: Path, allow_dirty: bool = False) -> dict[str, ob
             ],
             env=resolver_environment,
         )
+        _run(
+            [
+                str(verifier_python),
+                "-m",
+                "pip",
+                "--isolated",
+                "install",
+                "--disable-pip-version-check",
+                "--no-index",
+                "--no-deps",
+                "--force-reinstall",
+                str(exact_client_wheel),
+                str(exact_bridge_wheel),
+            ],
+            env=resolver_environment,
+        )
+        _run([str(verifier_python), "-m", "pip", "check"], env=resolver_environment)
+        _run(
+            [
+                str(verifier_python),
+                "-I",
+                "-c",
+                "import pursers_client, pursers_wait_server",
+            ],
+            cwd=temp,
+            env=resolver_environment,
+        )
         bridge = verifier / "bin" / "pursers-wait-bridge"
         clean_environment = os.environ.copy()
         clean_environment.pop("PYTHONHOME", None)
@@ -247,8 +274,13 @@ def build(output: Path, python: Path, allow_dirty: bool = False) -> dict[str, ob
                 bridge_name: bridge_version,
             },
             "verification": {
-                "install": "pip --isolated install --no-index --find-links WHEELHOUSE "
-                f"{source_wheels[0].name} {source_wheels[1].name}",
+                "install": [
+                    "pip --isolated install --no-index --find-links WHEELHOUSE "
+                    f"{source_wheels[0].name} {source_wheels[1].name}",
+                    "pip --isolated install --no-index --no-deps --force-reinstall "
+                    f"{source_wheels[0].name} {source_wheels[1].name}",
+                    "pip check",
+                ],
                 "lifecycle_command_tails": command_tails,
             },
             "artifacts": artifacts,

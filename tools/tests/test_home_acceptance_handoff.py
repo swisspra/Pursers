@@ -282,6 +282,34 @@ def test_documented_offline_wheelhouse_runs_lifecycle_and_handoff(tmp_path: Path
         env=contaminated_environment,
         text=True,
     )
+    subprocess.run(
+        [
+            runtime_python,
+            "-m",
+            "pip",
+            "--isolated",
+            "install",
+            "--disable-pip-version-check",
+            "--no-index",
+            "--no-deps",
+            "--force-reinstall",
+            str(wheelhouse / "pursers_client-0.1.0a22-py3-none-any.whl"),
+            str(wheelhouse / "pursers_wait_bridge-0.1.0a15-py3-none-any.whl"),
+        ],
+        check=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=contaminated_environment,
+        text=True,
+    )
+    subprocess.run(
+        [runtime_python, "-m", "pip", "check"],
+        check=True,
+        capture_output=True,
+        cwd=tmp_path,
+        env=contaminated_environment,
+        text=True,
+    )
     bridge = runtime / "bin" / "pursers-wait-bridge"
     clean_environment = os.environ.copy()
     clean_environment.pop("PYTHONHOME", None)
