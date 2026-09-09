@@ -89,6 +89,13 @@ approved tips:
   source branch `codex/TK-8cfd30eabb7a-resubmit-3-worker1`, commit
   `85e11843e2993385b0a79e3039895759df10b29e`.
 
+The post-assembly door-join correction comes from `TK-9ecf1634623f`, source
+branch `codex/TK-9ecf1634623f-fix1-worker3`, implementation commit
+`23ebf2b2d820a27d96032281522aa114a761aca5`. It removes the duplicate
+onboarding call after `BoardClient.__aenter__` has already established the
+same identity, retains `allow_takeover=False`, and adds the live-Central
+regression in `tools/wait-bridge/tests/test_door_join.py`.
+
 Their content hashes are recorded in `INTEGRATION_FILES.sha256`. Adoption
 preserves the approved guidance and provenance but does not itself satisfy the
 ship plan's independent browser, inventory, rotation, O1, or release gates.
