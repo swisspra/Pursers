@@ -75,6 +75,8 @@ from seat_config import (  # noqa: I001
 )
 from release_ops import ReleaseOpsManager
 import runtime_environment
+from warm_home import apply_warm_guided_home
+from result_visibility import project_ticket_result
 
 
 DEFAULT_URL = "http://127.0.0.1:8766/mcp"
@@ -177,6 +179,12 @@ def _default_config_state_dir() -> Path:
 
 BOARD_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,80}$")
 CENTRAL_LABEL_RE = re.compile(r"^[A-Za-z0-9._-]{1,80}$")
+DASHBOARD_AGENT_NAME_RE = re.compile(
+    r"^fleet-dashboard-session-[a-z0-9][a-z0-9-]{0,39}$"
+)
+DASHBOARD_AGENT_PLATFORM = "pursers-fleet-dashboard"
+DASHBOARD_TASK_FOCUS = "dashboard-session-owner-v1"
+DASHBOARD_CAPABILITIES = {"can_work": False, "can_review": False}
 ACTIVE_CLAIM_STATES = frozenset({"claimed", "in_progress", "creating_report"})
 SUBMITTED_STATES = frozenset({"submitted", "reviewing", "in_review"})
 TERMINAL_STATES = frozenset({"closed", "rejected", "canceled", "terminated"})
@@ -2151,6 +2159,7 @@ def _detail_ticket(ticket: dict[str, Any]) -> dict[str, Any]:
             MAX_SUBMISSION_CHARS,
         )
         or None,
+        "result": project_ticket_result(ticket),
         "review_label": _clip(ticket.get("review_label"), MAX_LABEL_CHARS) or None,
         "annotations": annotations,
         "annotation_count": max(
@@ -3107,6 +3116,176 @@ async def _client_call(client: Any, name: str, arguments: dict[str, Any]) -> Any
     raise AttributeError(f"Client {type(client).__name__} does not support {name}")
 
 
+class _FleetAsyncRuntime:
+    """One process-wide event loop for bounded persistent Central sessions."""
+
+    def __init__(self) -> None:
+        self.loop = asyncio.new_event_loop()
+        self.ready = threading.Event()
+        self.thread = threading.Thread(
+            target=self._run,
+            name="fleet-dashboard-central-sessions",
+            daemon=True,
+        )
+        self.thread.start()
+        self.ready.wait()
+
+    def _run(self) -> None:
+        asyncio.set_event_loop(self.loop)
+        self.ready.set()
+        self.loop.run_forever()
+
+    def submit(self, awaitable: Any) -> Any:
+        return asyncio.run_coroutine_threadsafe(awaitable, self.loop)
+
+
+_FLEET_RUNTIME: _FleetAsyncRuntime | None = None
+_FLEET_RUNTIME_LOCK = threading.Lock()
+
+
+def _fleet_runtime() -> _FleetAsyncRuntime:
+    global _FLEET_RUNTIME
+    with _FLEET_RUNTIME_LOCK:
+        if _FLEET_RUNTIME is None:
+            _FLEET_RUNTIME = _FleetAsyncRuntime()
+        return _FLEET_RUNTIME
+
+
+@dataclass
+class _FleetBoardSession:
+    manager: Any
+    client: Any
+    lock: asyncio.Lock
+
+
+def _reconnectable_client_error(exc: BaseException) -> bool:
+    if isinstance(exc, (ConnectionError, EOFError, TimeoutError)):
+        return True
+    if isinstance(exc, BoardClientError):
+        return False
+    message = str(exc).casefold()
+    return any(
+        marker in message
+        for marker in (
+            "connection closed",
+            "client is closed",
+            "server disconnected",
+            "session terminated",
+            "stream ended",
+        )
+    )
+
+
+class _FleetClientPool:
+    """Keep one serialized BoardClient session per board and reconnect once."""
+
+    def __init__(self, config: Config, client_factory: Callable[..., Any]) -> None:
+        self.config = config
+        self.client_factory = client_factory
+        self._sessions: dict[str, _FleetBoardSession] = {}
+        self._lock: asyncio.Lock | None = None
+        self._closed = False
+
+    def options(self) -> dict[str, Any]:
+        return {
+            "agent_name": self.config.agent_name,
+            "role": "worker",
+            "capabilities": dict(DASHBOARD_CAPABILITIES),
+            "agent_platform": DASHBOARD_AGENT_PLATFORM,
+            "task_focus": DASHBOARD_TASK_FOCUS,
+            "allow_matching_takeover": True,
+        }
+
+    async def _session(self, board_id: str) -> _FleetBoardSession:
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+        async with self._lock:
+            if self._closed:
+                raise RuntimeError("fleet dashboard Central session pool is closed")
+            session = self._sessions.get(board_id)
+            if session is not None:
+                return session
+            manager = self.client_factory(
+                self.config.url,
+                self.config.token,
+                board_id,
+                **self.options(),
+            )
+            client = await manager.__aenter__()
+            session = _FleetBoardSession(manager, client, asyncio.Lock())
+            self._sessions[board_id] = session
+            return session
+
+    async def _drop(
+        self, board_id: str, expected: _FleetBoardSession | None = None
+    ) -> None:
+        if self._lock is None:
+            return
+        async with self._lock:
+            session = self._sessions.get(board_id)
+            if session is None or (expected is not None and session is not expected):
+                return
+            self._sessions.pop(board_id, None)
+        await session.manager.__aexit__(None, None, None)
+
+    async def call(
+        self, board_id: str, method_name: str, args: tuple[Any, ...], kwargs: dict[str, Any]
+    ) -> Any:
+        session = await self._session(board_id)
+        async with session.lock:
+            try:
+                return await getattr(session.client, method_name)(*args, **kwargs)
+            except BaseException as exc:
+                if not _reconnectable_client_error(exc):
+                    raise
+                await self._drop(board_id, session)
+        replacement = await self._session(board_id)
+        async with replacement.lock:
+            return await getattr(replacement.client, method_name)(*args, **kwargs)
+
+    async def _close(self) -> None:
+        if self._lock is None:
+            self._closed = True
+            return
+        async with self._lock:
+            self._closed = True
+            sessions = list(self._sessions.values())
+            self._sessions.clear()
+        for session in sessions:
+            await session.manager.__aexit__(None, None, None)
+
+    def close(self) -> None:
+        _fleet_runtime().submit(self._close()).result(timeout=15)
+
+
+class _FleetClientProxy:
+    def __init__(self, pool: _FleetClientPool, board_id: str) -> None:
+        self.pool = pool
+        self.board_id = board_id
+        self.agent_name = pool.config.agent_name
+        self.role = "worker"
+        self.capabilities = dict(DASHBOARD_CAPABILITIES)
+        self.agent_platform = DASHBOARD_AGENT_PLATFORM
+        self.task_focus = DASHBOARD_TASK_FOCUS
+        self.allow_takeover = False
+        self.allow_matching_takeover = True
+
+    async def __aenter__(self) -> _FleetClientProxy:
+        return self
+
+    async def __aexit__(self, *_args: Any) -> None:
+        return None
+
+    def __getattr__(self, method_name: str) -> Callable[..., Awaitable[Any]]:
+        async def forwarded(*args: Any, **kwargs: Any) -> Any:
+            future = _fleet_runtime().submit(
+                self.pool.call(self.board_id, method_name, args, kwargs)
+            )
+            return await asyncio.wrap_future(future)
+
+        return forwarded
+
+
 class FleetFetcher:
     def __init__(
         self,
@@ -3120,15 +3299,13 @@ class FleetFetcher:
         self._intake_write_lock = threading.Lock()
         self._intake_submissions: dict[str, list[tuple[str, datetime]]] = {}
         self._board_work_dirs: dict[str, str | None] = {}
+        self._client_pool = _FleetClientPool(config, client_factory)
 
     def _client(self, board_id: str) -> Any:
-        return self.client_factory(
-            self.config.url,
-            self.config.token,
-            board_id,
-            agent_name=self.config.agent_name,
-            capabilities={"can_work": False, "can_review": False},
-        )
+        return _FleetClientProxy(self._client_pool, board_id)
+
+    def close(self) -> None:
+        self._client_pool.close()
 
     async def _boards(self) -> list[tuple[str, str]]:
         async with self._client(self.config.home_board) as client:
@@ -4635,6 +4812,56 @@ class SeatConfigManager:
         return {"schema_version": 1, "overall": overall, "checks": checks}
 
     @staticmethod
+    def _redact_sensitive_assignments(value: str) -> str:
+        redacted: list[str] = []
+        line_endings = (
+            "\r\n", "\n", "\r", "\v", "\f", "\x1c", "\x1d", "\x1e",
+            "\x85", "\u2028", "\u2029",
+        )
+        for line in value.splitlines(keepends=True):
+            ending = next(
+                (candidate for candidate in line_endings if line.endswith(candidate)),
+                "",
+            )
+            content = line[:-len(ending)] if ending else line
+            colon = content.find(":")
+            equals = content.find("=")
+            delimiters = [index for index in (colon, equals) if index >= 0]
+            if not delimiters:
+                redacted.append(line)
+                continue
+            delimiter = min(delimiters)
+            key = content[:delimiter].casefold()
+            if (
+                not any(
+                    word in key
+                    for word in (
+                        "token",
+                        "authorization",
+                        "secret",
+                        "password",
+                        "apikey",
+                        "api_key",
+                        "api-key",
+                        "bearer",
+                    )
+                )
+                or "file" in key
+                or "path" in key
+                or "env_var" in key
+            ):
+                redacted.append(line)
+                continue
+            separator_end = delimiter + 1
+            while (
+                separator_end < len(content)
+                and content[separator_end].isspace()
+            ):
+                separator_end += 1
+            redacted.append(f"{content[:separator_end]}[REDACTED]{ending}")
+        return "".join(redacted)
+
+    @staticmethod
     def _clean_text(value: str) -> str:
         value = re.sub(
             r"\b([a-z][a-z0-9+.-]*://[^:\s/@]+):[^@\s/]+@",
@@ -4655,7 +4882,7 @@ class SeatConfigManager:
         )
         value = re.sub(
             r"(?i)\b(token|authorization|secret|password|api[_-]?key)"
-            r"(\s*[:=]\s*)[^\s,;]+",
+            r"([ \t]*[:=][ \t]*)[^\s,;]+",
             r"\1\2[REDACTED]",
             value,
         )
@@ -4666,25 +4893,7 @@ class SeatConfigManager:
             r"C:\\Users\\[REDACTED:WINDOWS_HOME]",
             value,
         )
-        # Linear-time key/separator/value split. The keyword test runs in
-        # Python instead of nested stars around the alternation, which
-        # backtracked polynomially on repeated whitespace
-        # (CodeQL py/polynomial-redos).
-        sensitive = re.compile(r"(?im)^([^:=\n]*)([:=]\s*)(.*)$")
-        keyword = re.compile(
-            r"(?i)token|authorization|secret|password|api[_-]?key|bearer"
-        )
-
-        def redact(match: re.Match[str]) -> str:
-            if keyword.search(match.group(1)) is None:
-                return match.group(0)
-            key = match.group(1).lower()
-            if "file" in key or "path" in key or "env_var" in key:
-                return match.group(0)
-            return f"{match.group(1)}{match.group(2)}[REDACTED]"
-
-        value = sensitive.sub(redact, value)
-        return value
+        return SeatConfigManager._redact_sensitive_assignments(value)
 
     @classmethod
     def _diff(cls, change: Any) -> str:
@@ -5613,6 +5822,10 @@ class DashboardCache:
         self._detail_lock = threading.Lock()
         self._details: dict[tuple[str, str], TimedCache] = {}
 
+    def close(self) -> None:
+        for fetcher in self.fetchers.values():
+            fetcher.close()
+
     def labels(self) -> list[str]:
         return list(self.fetchers)
 
@@ -6434,6 +6647,8 @@ bindSeats = function() {
 </script></body>""",
     1,
 )
+
+HTML = apply_warm_guided_home(HTML)
 
 
 def make_handler(
@@ -7463,7 +7678,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument("--home-board", default=DEFAULT_HOME_BOARD)
-    parser.add_argument("--agent-name", default="fleet-dashboard-viewer")
+    parser.add_argument(
+        "--agent-name",
+        default="fleet-dashboard-session-default",
+        help="Reserved dashboard session identity (fleet-dashboard-session-*)",
+    )
     parser.add_argument("--stale-seconds", type=int, default=300)
     parser.add_argument("--cache-seconds", type=float, default=5.0)
     parser.add_argument(
@@ -7485,6 +7704,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("--port must be between 1 and 65535")
     if args.stale_seconds < 1 or args.cache_seconds <= 0:
         parser.error("stale and cache intervals must be positive")
+    if not DASHBOARD_AGENT_NAME_RE.fullmatch(args.agent_name):
+        parser.error(
+            "--agent-name must use the reserved fleet-dashboard-session-* namespace"
+        )
     return args
 
 
@@ -7510,6 +7733,7 @@ def main(argv: list[str] | None = None) -> None:
         pass
     finally:
         server.server_close()
+        cache.close()
 
 
 if __name__ == "__main__":

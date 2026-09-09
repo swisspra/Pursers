@@ -148,6 +148,9 @@ class BoardClient:
         claim_ttl_s: int | None = None,
         capabilities: dict[str, Any] | None = None,
         allow_takeover: bool = False,
+        allow_matching_takeover: bool = False,
+        agent_platform: str | None = None,
+        task_focus: str | None = None,
         max_connections: int = DEFAULT_MAX_CONNECTIONS,
         http_client: httpx2.AsyncClient | None = None,
     ):
@@ -166,6 +169,9 @@ class BoardClient:
         self.claim_ttl_s = claim_ttl_s
         self.capabilities = capabilities
         self.allow_takeover = allow_takeover
+        self.allow_matching_takeover = allow_matching_takeover
+        self.agent_platform = agent_platform
+        self.task_focus = task_focus
         if (
             isinstance(max_connections, bool)
             or not isinstance(max_connections, int)
@@ -229,8 +235,11 @@ class BoardClient:
             )
             await self.board_join(
                 self.claim_ttl_s,
+                agent_platform=self.agent_platform,
+                task_focus=self.task_focus,
                 capabilities=self.capabilities,
                 allow_takeover=self.allow_takeover,
+                allow_matching_takeover=self.allow_matching_takeover,
             )
         except BaseException:
             await self._close_transport()
@@ -351,6 +360,7 @@ class BoardClient:
         role: str | None = None,
         capabilities: dict[str, Any] | None = None,
         allow_takeover: bool = False,
+        allow_matching_takeover: bool = False,
     ) -> dict[str, Any]:
         selected_name = self.agent_name if agent_name is None else agent_name
         arguments: dict[str, Any] = {"agent_name": selected_name}
@@ -370,6 +380,8 @@ class BoardClient:
             arguments["capabilities"] = caps
         if allow_takeover:
             arguments["allow_takeover"] = True
+        if allow_matching_takeover:
+            arguments["allow_matching_takeover"] = True
         joined = await (
             self._call_refresh("board_join", arguments)
             if agent_name is None
@@ -399,6 +411,7 @@ class BoardClient:
         role: str | None = None,
         capabilities: dict[str, Any] | None = None,
         allow_takeover: bool = False,
+        allow_matching_takeover: bool = False,
     ) -> dict[str, Any]:
         arguments: dict[str, Any] = {
             "agent_name": self.agent_name,
@@ -422,6 +435,8 @@ class BoardClient:
         arguments.update({key: value for key, value in optional.items() if value is not None})
         if allow_takeover:
             arguments["allow_takeover"] = True
+        if allow_matching_takeover:
+            arguments["allow_matching_takeover"] = True
         result = await self._call_refresh("board_onboard", arguments)
         self.identity = JoinedIdentity(
             result["board_id"],
