@@ -10,6 +10,7 @@ and resolved semantically on the baseline rather than by replacing shared files.
 | Ticket lifecycle | `0b0f0b78385a0315aa4e93e574fa967d0cef65ab` | `/pursers/tickets`, `/pursers/tickets/status`, `/pursers/tickets/get`, `/pursers/tickets/create`, `/pursers/tickets/cancel` |
 | Submitted results | `792dcae5dfe1a194329471fd914f0f6b1518db27` and its two ancestors after the declared base | read-only `/pursers/results`; explicit Central and board pin |
 | Standalone groups | `20bb6bc5c54ad7b233dfc790a48d3bea335a92da` | `/pursers/groups`, `/pursers/groups/status`, `/pursers/groups/create`, `/pursers/groups/update`, `/pursers/groups/remove` |
+| Fleet persistent session and deployment | `e229dcb08879666475c532fd7296f4c5a2d9167b` and all four ancestors after frozen main `b06ce6627edb62fc588eee541fa568445b709054` | matching-only read-only dashboard takeover plus fail-closed deploy, verify, and rollback runbooks |
 
 The shared helper owns separate ticket and group sidecars. Both are closed on
 helper shutdown. Result reads use the loopback Fleet endpoint with no browser or
@@ -23,16 +24,12 @@ adapters and contracts. Shared `helper.cjs`, `routes.js`, `app.js`, styles,
 documentation, package allow-list, and wait-bridge entry points retain all three
 interfaces. Native Aion Team routes remain compatibility-only.
 
-Two required inputs remain gated on coordinator approval:
+One required input remains gated on coordinator approval:
 
 - `TK-08269cf76117`: standalone seat join, truthful lifecycle status, and safe
   disconnect or retirement. Final assembly owns its helper, routes, UI, and
   package wiring after an approved executable interface and SHA are recorded.
-- `TK-a8802d838910`: Fleet persistent read-only session and fail-closed
-  deployment/rollback input. Only its coordinator-approved cumulative SHA may
-  be imported.
-
-After both inputs are approved, regenerate the cumulative integration manifest,
+After the seat input is approved, regenerate the cumulative integration manifest,
 build the exact-SHA deterministic package, and run all repository, security,
 leak, and rollback gates. The independent reviewer alone installs the observer,
 owns the authenticated browser session, and captures the nine required final
