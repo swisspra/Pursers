@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import tempfile
 import tomllib
+import zipfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -64,6 +65,14 @@ def _single_wheel(directory: Path, name: str, version: str) -> Path:
     return matches[0]
 
 
+def _verify_wheel_members(wheel: Path, required: tuple[str, ...]) -> None:
+    with zipfile.ZipFile(wheel) as archive:
+        members = set(archive.namelist())
+    missing = sorted(set(required) - members)
+    if missing:
+        raise WheelhouseError(f"{wheel.name} is missing package members: {', '.join(missing)}")
+
+
 def _python_details(python: Path) -> dict[str, str]:
     result = _run(
         [
@@ -110,16 +119,29 @@ def build(output: Path, python: Path, allow_dirty: bool = False) -> dict[str, ob
     with tempfile.TemporaryDirectory(prefix=".home-wheelhouse-", dir=output.parent) as raw_temp:
         temp = Path(raw_temp)
         dist = temp / "source-wheels"
+        projects = temp / "projects"
         wheelhouse = temp / "wheelhouse"
         resolver = temp / "resolver"
         verifier = temp / "verifier"
         dist.mkdir()
+        projects.mkdir()
         wheelhouse.mkdir()
         wheelhouse.chmod(0o700)
         build_environment = {**os.environ, "UV_PYTHON": str(python)}
         build_environment.pop("PIP_FIND_LINKS", None)
         build_environment.pop("UV_FIND_LINKS", None)
+        staged_projects = []
         for project in (CLIENT_PROJECT, BRIDGE_PROJECT):
+            staged_project = projects / project.name
+            shutil.copytree(
+                project,
+                staged_project,
+                ignore=shutil.ignore_patterns(
+                    "*.egg-info", ".pytest_cache", "__pycache__", "build", "dist"
+                ),
+            )
+            staged_projects.append(staged_project)
+        for project in staged_projects:
             _run(
                 [uv, "build", "--wheel", "--out-dir", str(dist), str(project)],
                 cwd=ROOT,
@@ -129,9 +151,22 @@ def build(output: Path, python: Path, allow_dirty: bool = False) -> dict[str, ob
             _single_wheel(dist, client_name, client_version),
             _single_wheel(dist, bridge_name, bridge_version),
         )
+        _verify_wheel_members(source_wheels[0], ("pursers_client/__init__.py",))
+        _verify_wheel_members(
+            source_wheels[1],
+            (
+                "pursers_wait_server.py",
+                "ticket_lifecycle.py",
+                "seat_lifecycle.py",
+                "team_lifecycle.py",
+            ),
+        )
 
         _run([str(python), "-m", "venv", str(resolver)])
         resolver_python = resolver / "bin" / "python"
+        resolver_environment = os.environ.copy()
+        resolver_environment.pop("PIP_FIND_LINKS", None)
+        resolver_environment.pop("UV_FIND_LINKS", None)
         _run(
             [
                 str(resolver_python),
@@ -148,7 +183,8 @@ def build(output: Path, python: Path, allow_dirty: bool = False) -> dict[str, ob
                 str(wheelhouse),
                 "--only-binary=:all:",
                 *(str(wheel) for wheel in source_wheels),
-            ]
+            ],
+            env=resolver_environment,
         )
         for source_wheel in source_wheels:
             copied_wheel = wheelhouse / source_wheel.name
@@ -169,7 +205,8 @@ def build(output: Path, python: Path, allow_dirty: bool = False) -> dict[str, ob
                 "--find-links",
                 str(wheelhouse),
                 f"{bridge_name}=={bridge_version}",
-            ]
+            ],
+            env=resolver_environment,
         )
         bridge = verifier / "bin" / "pursers-wait-bridge"
         clean_environment = os.environ.copy()
