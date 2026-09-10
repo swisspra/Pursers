@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import base64
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -37,17 +38,21 @@ FULL_SHA = re.compile(r"[0-9a-f]{40}")
 SHA256 = re.compile(r"[0-9a-f]{64}")
 SEMVER = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?")
 BUILD_ID = re.compile(r"[0-9A-Za-z][0-9A-Za-z._+-]{5,127}")
-SEQUENCE = (
-    "fresh_install",
-    "door_connect",
-    "team_setup",
-    "five_workers_three_reviewers",
-    "ticket_offer_claim",
-    "ticket_submit_independent_review",
-    "result_visible",
-    "pause_resume_stop",
-    "clean_reconnect_after_rotation",
-)
+def _load_acceptance_contract() -> dict[str, Any]:
+    checker_path = REPOSITORY_ROOT / "docs/design-home/check_artifacts.py"
+    spec = importlib.util.spec_from_file_location("pursers_design_home_checker", checker_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("design-home acceptance authority is unavailable")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.load_acceptance_contract()
+
+
+_ACCEPTANCE_CONTRACT = _load_acceptance_contract()
+SEQUENCE = _ACCEPTANCE_CONTRACT["sequence"]
+REQUIRED_INVENTORY = frozenset(_ACCEPTANCE_CONTRACT["inventory"])
+REQUIRED_FINAL_GATES = _ACCEPTANCE_CONTRACT["final_gates"]
+REQUIRED_FACTS = _ACCEPTANCE_CONTRACT["facts"]
 CURRENT_OPERATOR_TIERS = {
     "goose_worker": 1,
     "codex_worker": 2,
@@ -70,7 +75,7 @@ SURFACE_IDENTITY_SOURCES = frozenset(
         "signed-aionui-webui-listener",
         "signed-aionui-aionpro-listener",
         "verifier-pinned-process-artifact",
-        "verifier-pinned-signed-aionui-artifact",
+        "verifier-pinned-personal-mcp-runtime",
     }
 )
 REQUIRED_MUTATION_CAPABILITIES = frozenset(
@@ -81,207 +86,6 @@ REQUIRED_MUTATION_CAPABILITIES = frozenset(
         "seat_lifecycle",
         "ticket_lifecycle",
         "result_visibility",
-    }
-)
-REQUIRED_INVENTORY = frozenset(
-    {
-        # Exact surface/state IDs from approved inventory TK-f8a62bab8d05.
-        "dashboard-ui.logic",
-        "dashboard-ui.styles",
-        "dashboard-ui.shell",
-        "fleet-dashboard.surface",
-        "extension-join.surface",
-        "personal-mcp.surface",
-        "dashboard-ui.state.empty-tickets",
-        "dashboard-ui.state.loading",
-        "dashboard-ui.state.error",
-        "dashboard-ui.state.permission-denied",
-        "dashboard-ui.state.stale",
-        "dashboard-ui.state.search-empty",
-        "fleet-dashboard.state.empty-centrals",
-        "fleet-dashboard.state.loading-board",
-        "fleet-dashboard.state.error-board",
-        "fleet-dashboard.state.offline",
-        "fleet-dashboard.state.bounded",
-        "fleet-dashboard.state.truncated-tickets",
-        "fleet-dashboard.state.edit-paused",
-        "fleet-dashboard.state.empty-workers",
-        "fleet-dashboard.state.empty-agents",
-        "fleet-dashboard.state.routes-unavailable",
-        "extension-join.state.initial",
-        "extension-join.state.joining",
-        "extension-join.state.joined",
-        "extension-join.state.error",
-        "extension-join.state.bridge-missing",
-        "extension-join.state.status-loaded",
-        "extension-join.state.status-empty",
-        "personal-mcp.state.board-empty",
-        "personal-mcp.state.not-onboarded",
-        "personal-mcp.state.ticket-not-found",
-        "personal-mcp.state.memory-empty",
-        "personal-mcp.state.fleet-unavailable",
-        "personal-mcp.state.links-empty",
-        # Independently observable extension items.
-        "extension.settings-navigation",
-        "extension.join-form",
-        "extension.join-progress",
-        "extension.bounded-errors",
-        "extension.redacted-status-card",
-        "extension.worker-preset-codex",
-        "extension.worker-preset-claude",
-        "extension.reviewer-preset-codex",
-        "extension.reviewer-preset-claude",
-        "extension.environment-free-mcp-registration",
-        "extension.idempotent-reconnect",
-        # Personal dashboard shell and Today items.
-        "personal.connection-banner",
-        "personal.board-identity",
-        "personal.data-provenance",
-        "personal.health",
-        "personal.refresh",
-        "personal.theme",
-        "personal.keyboard-tabs",
-        "personal.search-results",
-        "personal.search-no-results",
-        "personal.today-status-metrics",
-        "personal.today-current-work",
-        "personal.today-active-agents",
-        "personal.today-latest-handoff",
-        "personal.today-important-pinned-note",
-        "personal.today-recent-activity",
-        # Personal Work items.
-        "personal.work-total",
-        "personal.work-status-groups",
-        "personal.work-ownership",
-        "personal.work-priority",
-        "personal.work-lease",
-        "personal.work-rejection",
-        "personal.work-abandonment",
-        "personal.work-review-readiness",
-        "personal.work-no-ticket",
-        # Personal Agents items.
-        "personal.agents-total-live",
-        "personal.agents-role",
-        "personal.agents-platform",
-        "personal.agents-focus",
-        "personal.agents-current-ticket",
-        "personal.agents-idle-lease",
-        "personal.agents-duplicate-name",
-        "personal.agents-duplicate-identity",
-        "personal.agents-stale",
-        "personal.agents-empty",
-        # Personal Fleet, Links, Activity, and MCP data-source items.
-        "personal.fleet-online-busy-available-stale",
-        "personal.fleet-registry-warning",
-        "personal.fleet-projects",
-        "personal.fleet-project-ticket-counts",
-        "personal.fleet-shared-pool",
-        "personal.fleet-project-seats",
-        "personal.fleet-truncation",
-        "personal.fleet-unavailable",
-        "personal.fleet-empty",
-        "personal.links-source-label",
-        "personal.links-node-edge-totals",
-        "personal.links-edge-types",
-        "personal.links-pinned",
-        "personal.links-truncation",
-        "personal.links-unavailable",
-        "personal.links-empty",
-        "personal.activity-scope",
-        "personal.activity-bounded-feed",
-        "personal.activity-cursor",
-        "personal.activity-dropped-events",
-        "personal.activity-has-more-resync",
-        "personal.activity-stale",
-        "personal.activity-error",
-        "personal.activity-offline",
-        "personal.activity-empty",
-        "personal.source-board-snapshot",
-        "personal.source-fleet-snapshot",
-        "personal.source-link-snapshot",
-        "personal.source-board-event-feed",
-        # Fleet dashboard shell, hubs, and board-detail items.
-        "fleet.central-availability-isolation",
-        "fleet.updated-state",
-        "fleet.search-results",
-        "fleet.search-no-results",
-        "fleet.theme",
-        "fleet.density",
-        "fleet.keyboard-help",
-        "fleet.refresh-pause-resume",
-        "fleet.pool-online",
-        "fleet.pool-busy",
-        "fleet.pool-available",
-        "fleet.pool-stale",
-        "fleet.board-cards",
-        "fleet.ticket-counts",
-        "fleet.active-ticket-rows",
-        "fleet.agent-pool",
-        "fleet.agent-current-claims",
-        "fleet.agent-duplicate-names",
-        "fleet.agent-retired-stale-drawer",
-        "fleet.board-detail-metadata",
-        "fleet.board-detail-activity",
-        "fleet.board-detail-truncation",
-        "fleet.hub-overview",
-        "fleet.hub-boards",
-        "fleet.hub-agents",
-        "fleet.hub-operations",
-        "fleet.tab-tickets",
-        "fleet.tab-timeline",
-        "fleet.tab-changes",
-        "fleet.tab-flow",
-        "fleet.tab-routes",
-        "fleet.default-central-aliases",
-        "fleet.unknown-route-recovery",
-        "fleet.protocol-overhead",
-        "fleet.coordinator-configuration",
-        "fleet.worker-management",
-        "fleet.intake",
-        "fleet.findings",
-        # Fleet configuration, doors, project, release, and operation items.
-        "fleet.config-seat-inventory",
-        "fleet.config-discovery-import-conflicts",
-        "fleet.config-add-update-preview",
-        "fleet.config-exact-diff-confirmation",
-        "fleet.config-bridge-versions",
-        "fleet.config-doctor",
-        "fleet.config-tier-skill-role-capabilities",
-        "fleet.config-current-offers",
-        "fleet.config-dispatch-policy-gaps-history",
-        "fleet.config-registry-worktrees",
-        "fleet.doors-project-rows",
-        "fleet.doors-key-id",
-        "fleet.doors-expiry",
-        "fleet.doors-connected-seats",
-        "fleet.doors-copy",
-        "fleet.doors-rotation-warning",
-        "fleet.doors-disabled",
-        "fleet.doors-unconfigured",
-        "fleet.doors-error",
-        "fleet.doors-secret-free-output",
-        "fleet.add-project-registry",
-        "fleet.add-project-board",
-        "fleet.add-project-principals",
-        "fleet.add-project-policy",
-        "fleet.add-project-clone-steps",
-        "fleet.add-project-idempotent-rerun",
-        "fleet.add-project-one-time-doors",
-        "fleet.add-project-partial-failure",
-        "fleet.add-project-authorization-error",
-        "fleet.release-manifest",
-        "fleet.release-tag",
-        "fleet.release-ci",
-        "fleet.release-pypi",
-        "fleet.release-github",
-        "fleet.release-central",
-        "fleet.release-restart-checklist",
-        "fleet.release-immutable-confirmation-plan",
-        "fleet.operations-job-progress",
-        "fleet.operations-job-result",
-        "fleet.operations-rollback-failure",
-        "fleet.operations-disabled-controls",
-        "fleet.operations-unavailable-services",
     }
 )
 REQUIRED_SUITES = {
@@ -561,6 +365,9 @@ def validate_live_target(base_url: str, board_id: str | None = None) -> LiveTarg
 
 
 def _surface_for_identifier(identifier: str) -> str:
+    fact = REQUIRED_FACTS.get(identifier)
+    if isinstance(fact, dict) and fact.get("surface") in SURFACE_IDS:
+        return str(fact["surface"])
     if identifier.startswith(("fleet.", "fleet-dashboard.")):
         return "fleet"
     # docs/design-home/inventory.md binds the built dashboard-ui assets to the
@@ -658,7 +465,7 @@ def _validate_surface_bindings(
         )
     expected_sources = {
         "fleet": "verifier-pinned-process-artifact",
-        "personal": "verifier-pinned-signed-aionui-artifact",
+        "personal": "verifier-pinned-personal-mcp-runtime",
     }
     for surface_id, expected_source in expected_sources.items():
         if bindings[surface_id]["runtime"]["identity_source"] != expected_source:
@@ -948,6 +755,14 @@ def _validate_evidence_report(
             "dashboard inventory does not match the authoritative set: "
             f"missing={sorted(missing_inventory)}, unexpected={sorted(unexpected_inventory)}"
         )
+    final_gates = report.get("final_gates")
+    if not isinstance(final_gates, list):
+        raise AcceptanceError("explicit final acceptance gates are required")
+    passed_final_gates = _passed_evidence_items(final_gates, "final acceptance gate")
+    if tuple(passed_final_gates) != tuple(REQUIRED_FINAL_GATES):
+        raise AcceptanceError(
+            "final gates must prove exact Quickstart, Fleet 503 recovery, and O1 rollback"
+        )
     suites = report.get("suites")
     if not isinstance(suites, list) or not suites:
         raise AcceptanceError("existing suite evidence is required")
@@ -992,6 +807,7 @@ def _validate_evidence_report(
         host_reference,
         *passed_steps.values(),
         *passed_inventory.values(),
+        *passed_final_gates.values(),
         *suite_references,
     ]
     if len(primary_references) != len(set(primary_references)):
@@ -1005,7 +821,9 @@ def _validate_evidence_report(
         candidate_commit,
     )
     browser_evidence: list[_BrowserEvidence] = []
-    for identifier, reference in {**passed_steps, **passed_inventory}.items():
+    for identifier, reference in {
+        **passed_steps, **passed_inventory, **passed_final_gates
+    }.items():
         surface_id = _surface_for_identifier(identifier)
         browser_evidence.append(_validate_browser_receipt(
             evidence_root,
@@ -1027,17 +845,19 @@ def _validate_evidence_report(
         raise AcceptanceError(
             "each browser observation needs distinct screenshot and snapshot artifacts"
         )
-    browser_digests = [
+    screenshot_digests = [hashlib.sha256(evidence.screenshot).hexdigest() for evidence in browser_evidence]
+    snapshot_digests = [
         hashlib.sha256(
-            _resolve_evidence_file(
-                evidence_root, reference, "browser observation artifact"
-            ).read_bytes()
+            json.dumps(evidence.snapshot, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()
-        for reference in browser_attachment_references
+        for evidence in browser_evidence
     ]
-    if len(browser_digests) != len(set(browser_digests)):
+    if (
+        len(screenshot_digests) != len(set(screenshot_digests))
+        or len(snapshot_digests) != len(set(snapshot_digests))
+    ):
         raise AcceptanceError(
-            "each browser observation needs unique substantive screenshot and snapshot evidence"
+            "each browser observation needs unique underlying screenshot and accessibility state"
         )
     suite_output_references: list[str] = []
     for suite in suite_rows:
@@ -1068,6 +888,7 @@ def _validate_evidence_report(
         "candidate_commit": candidate_commit,
         "steps_passed": len(passed_steps),
         "inventory_passed": len(passed_inventory),
+        "final_gates_passed": len(passed_final_gates),
         "suites_passed": len(suites),
     }
 
@@ -1285,12 +1106,17 @@ def _validate_browser_receipt(
             or set(assertion) != {"name", "path", "operator", "expected"}
             or not isinstance(assertion["name"], str)
             or not assertion["name"].strip()
-            or assertion["operator"] not in {"equals", "contains"}
+            or assertion["operator"] not in {"equals", "contains", "ax_name_contains"}
             or not isinstance(assertion["path"], list)
             or not assertion["path"]
             or len(json.dumps(assertion["expected"])) > 1_000
         ):
             raise AcceptanceError("browser observation assertion is not verifiable")
+    required_assertion = REQUIRED_FACTS.get(identifier, {}).get("predicate")
+    if assertions != [required_assertion]:
+        raise AcceptanceError(
+            f"browser observation {identifier} does not prove its canonical required fact"
+        )
     _evaluate_browser_assertions(snapshot["snapshot"], assertions)
     return _BrowserEvidence(
         request=BrowserObservationRequest(
@@ -1367,8 +1193,16 @@ def _evaluate_browser_assertions(
         actual = _resolve_snapshot_path(snapshot, assertion["path"])
         if assertion["operator"] == "equals":
             passed = actual == assertion["expected"]
-        else:
+        elif assertion["operator"] == "contains":
             passed = isinstance(actual, (str, list)) and assertion["expected"] in actual
+        else:
+            passed = isinstance(actual, list) and any(
+                isinstance(node, dict)
+                and node.get("ignored") is not True
+                and isinstance(node.get("name"), str)
+                and assertion["expected"].casefold() in node["name"].casefold()
+                for node in actual
+            )
         if not passed:
             raise AcceptanceError("browser observation assertion failed against snapshot")
 

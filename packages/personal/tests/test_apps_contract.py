@@ -441,6 +441,75 @@ def test_run_entrypoint_builds_then_runs(monkeypatch: pytest.MonkeyPatch) -> Non
     assert calls == [(profile_path, "codex", "session"), "run"]
 
 
+def test_acceptance_runtime_receipt_binds_exact_process_source_and_board(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    commit = "a" * 40
+    source = Path(apps_server.__file__).resolve()
+    monkeypatch.setattr(
+        apps_server.subprocess,
+        "check_output",
+        lambda command, **_kwargs: commit + "\n" if command[-2:] == ["rev-parse", "HEAD"] else "",
+    )
+    receipt = tmp_path / "private" / "runtime.json"
+    state = SimpleNamespace(config=SimpleNamespace(board_id="sandbox-personal"))
+    apps_server._write_acceptance_runtime_receipt(
+        receipt,
+        state=state,
+        candidate_source=source,
+        candidate_commit=commit,
+        board_id="sandbox-personal",
+    )
+    value = json.loads(receipt.read_text())
+    assert value["product"] == "Pursers Personal"
+    assert value["version"] == PRODUCT_VERSION
+    assert value["build"] == hashlib.sha256(source.read_bytes()).hexdigest()
+    assert value["candidate_commit"] == commit
+    assert value["board_id"] == "sandbox-personal"
+    assert value["pid"] == os.getpid()
+    assert receipt.stat().st_mode & 0o077 == 0
+
+
+def test_acceptance_runtime_receipt_rejects_wrong_profile_board(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    commit = "b" * 40
+    monkeypatch.setattr(
+        apps_server.subprocess,
+        "check_output",
+        lambda command, **_kwargs: commit + "\n" if command[-2:] == ["rev-parse", "HEAD"] else "",
+    )
+    with pytest.raises(ValueError, match="sandbox profile"):
+        apps_server._write_acceptance_runtime_receipt(
+            tmp_path / "runtime.json",
+            state=SimpleNamespace(config=SimpleNamespace(board_id="sandbox-a")),
+            candidate_source=Path(apps_server.__file__),
+            candidate_commit=commit,
+            board_id="sandbox-b",
+        )
+
+
+def test_acceptance_runtime_receipt_refuses_public_directory(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    commit = "c" * 40
+    monkeypatch.setattr(
+        apps_server.subprocess,
+        "check_output",
+        lambda command, **_kwargs: commit + "\n" if command[-2:] == ["rev-parse", "HEAD"] else "",
+    )
+    public = tmp_path / "public"
+    public.mkdir(mode=0o755)
+    with pytest.raises(ValueError, match="private and outside"):
+        apps_server._write_acceptance_runtime_receipt(
+            public / "runtime.json",
+            state=SimpleNamespace(config=SimpleNamespace(board_id="sandbox-personal")),
+            candidate_source=Path(apps_server.__file__),
+            candidate_commit=commit,
+            board_id="sandbox-personal",
+        )
+
+
 @pytest.mark.anyio
 async def test_rpc_envelope_preserves_kwargs() -> None:
     state = LiveDashboard(

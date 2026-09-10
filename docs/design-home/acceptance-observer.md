@@ -22,8 +22,12 @@ drive it.
 |---|---|
 | screenshot bytes, accessibility tree, observed page URL, selected board, `captured_at`, `observer_id` | observer only, from the authenticated real browser/UI channel |
 | running extension candidate SHA | observer only, fetched by that browser from the installed `candidate.json` and from the same-origin host status route, both inside a verifier-created CDP isolated world; when both answer they must agree |
-| surface product / version / build | observer only: signed AionUi listener for AionUi, verifier-pinned listener process plus exact clean-checkout artifact for Fleet, signed AionUi plus verifier-pinned Personal artifact for Personal |
-| observation id, expected origin / sandbox board / candidate commit, assertions | caller (runner request), accepted only when they equal the independently observed values |
+| surface product / version / build | observer only: signed AionUi listener for AionUi; verifier-pinned listener process plus exact clean-checkout artifact for Fleet; signed AionUi page bytes plus a live exact-source Personal MCP stdio process and process-authored private receipt for Personal |
+| observation id, expected origin / sandbox board / candidate commit | caller (runner request), accepted only when they equal the independently observed values |
+| assertions | canonical `acceptance-facts.json` declarations validated by `check_artifacts.py`; runner rejects generic or relabelled predicates before capture |
+
+Accessibility predicates inspect only non-ignored AX nodes. Hidden panels cannot
+satisfy a required visible-state fact.
 
 The observer answers replay requests only from captures it recorded itself, so
 caller-authored metadata, hand-made screenshots, fixtures, or a successful local
@@ -71,7 +75,7 @@ python3 tools/aionui-extension/tests/home_acceptance/runner.py doctor \
   --target http://127.0.0.1:25808 \
   --probe-browser http://127.0.0.1:25808/
 
-# 3. expand the verifier-authored manifest into all 198 concrete capture commands
+# 3. expand 198 core observations plus three additional final gates
 python3 tools/aionui-extension/tests/home_acceptance/runner.py prepare \
   --observer /PATH/TO/verifier-observer \
   --evidence /PATH/TO/evidence \
@@ -99,7 +103,10 @@ The observation manifest has exact top-level fields `schema_version`,
 `vertex_ai/gemini-3.8-flash` Goose workers at tier 1, three `sol-high-fast`
 Codex workers and three `sol-high-fast` Codex reviewers at tier 2, plus an
 explicit optional Opus row whose count is zero unless enabled. `prepare` copies
-this into `capture-plan.json`; `assemble` preserves it in the report.
+this into `capture-plan.json`; `assemble` preserves it in the report. The 198
+core observations remain mandatory. The runner additionally requires
+`final.quickstart-candidate-flow`, `final.fleet-503-recovery`, and
+`final.o1-readiness-rollback`, producing 201 concrete captures.
 
 `harness.py verify-evidence --browser-observer /PATH/TO/verifier-observer/browser_observer.py`
 remains the equivalent single-source-of-truth entrypoint; `runner.py validate`
@@ -129,12 +136,15 @@ origin, so serving or labelling it as AionUi would erase actual-product provenan
 {"schema_version":1,"candidate_commit":"FULL_SHA","surfaces":{
   "aionui":{"adapter":"signed-aionui","target":{"base_url":"http://127.0.0.1:18822","board_id":"sandbox-home"}},
   "fleet":{"adapter":"pinned-process-artifact","target":{"base_url":"http://127.0.0.1:18821","board_id":"sandbox-home"},"artifact":"tools/fleet-dashboard/fleet_dashboard.py"},
-  "personal":{"adapter":"pinned-signed-aionui-artifact","target":{"base_url":"http://127.0.0.1:18822","board_id":"sandbox-home"},"artifact":"packages/personal/src/pursers_personal/resources/dashboard.html"}
+  "personal":{"adapter":"pinned-signed-aionui-personal-mcp","target":{"base_url":"http://127.0.0.1:18822","board_id":"sandbox-home"},"artifact":"packages/personal/src/pursers_personal/resources/dashboard.html","runtime":{"artifact":"packages/personal/src/pursers_personal/apps_server.py","pid_file":"/PATH/TO/verifier-runtime/personal.pid","receipt":"/PATH/TO/verifier-runtime/personal-runtime.json"}}
 }}
 ```
 
-For Personal, the isolated browser also hashes the fetched page bytes; they must
-equal the installer-pinned tracked artifact. For Fleet, the observer requires one
+For Personal, the isolated browser hashes the fetched page bytes and the observer
+also requires one live `pursers_personal.cli mcp` process whose exact command,
+candidate source, sandbox board, PID and private process-authored runtime receipt
+match the clean verifier checkout. A stale or unrelated MCP process is rejected.
+For Fleet, the observer requires one
 listener and proves its process command executes the pinned dashboard artifact.
 
 ## Evidence directory layout
@@ -143,7 +153,7 @@ listener and proves its process command executes the pinned dashboard artifact.
 /PATH/TO/evidence/
   report.json                     the evidence report the harness validates
   host-identity-<surface>.json    independently observed surface identity receipt
-  capture-plan.json               exact 198-command expansion
+  capture-plan.json               exact 201-command expansion (198 core + 3 final gates)
   assertions/<id>.json            verifier-authored assertions
   specs/<id>.json                 caller request that was sent to the observer
   observations/<id>.json          browser_observation receipt

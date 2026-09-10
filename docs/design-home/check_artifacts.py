@@ -18,6 +18,7 @@ BASELINE_SHA = "c2ebac5de803a0f7a00468ec4d3cdf06e4719096"
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DESIGN_HOME = REPO_ROOT / "docs" / "design-home"
 MANIFEST_PATH = DESIGN_HOME / "context" / "source-manifest.json"
+ACCEPTANCE_FACTS_PATH = DESIGN_HOME / "context" / "acceptance-facts.json"
 
 
 def fail(message: str) -> None:
@@ -50,6 +51,82 @@ def read_json(path: Path) -> dict[str, Any]:
     if not isinstance(value, dict):
         fail(f"JSON root must be an object: {path}")
     return value
+
+
+def load_acceptance_contract(
+    design_home: Path = DESIGN_HOME,
+) -> dict[str, Any]:
+    """Load and validate the one canonical acceptance ID/fact declaration."""
+    facts = read_json(design_home / "context" / "acceptance-facts.json")
+    if set(facts) != {
+        "schema_version", "approved_35", "sequence", "inventory", "final_gates"
+    } or facts["schema_version"] != 1:
+        fail("acceptance facts fields do not match schema")
+    expected_counts = {"approved_35": 35, "sequence": 9, "inventory": 189, "final_gates": 3}
+    rows_by_group: dict[str, list[dict[str, Any]]] = {}
+    for group, expected_count in expected_counts.items():
+        rows = facts[group]
+        if group == "approved_35":
+            if (
+                not isinstance(rows, list)
+                or len(rows) != expected_count
+                or len(rows) != len(set(rows))
+                or not all(isinstance(item, str) and item for item in rows)
+            ):
+                fail("approved_35 must preserve 35 unique IDs")
+            continue
+        if not isinstance(rows, list) or len(rows) != expected_count:
+            fail(f"acceptance facts {group} must contain exactly {expected_count} rows")
+        identifiers: set[str] = set()
+        normalized: list[dict[str, Any]] = []
+        for row in rows:
+            if not isinstance(row, dict) or set(row) != {
+                "id", "surface", "status", "precondition", "action",
+                "expected_fact", "predicate", "evidence_source"
+            }:
+                fail(f"acceptance fact row fields do not match schema in {group}")
+            identifier = row["id"]
+            if not isinstance(identifier, str) or not identifier or identifier in identifiers:
+                fail(f"acceptance fact IDs must be unique in {group}")
+            identifiers.add(identifier)
+            if row["surface"] not in {"aionui", "fleet", "personal"}:
+                fail(f"acceptance fact {identifier} has invalid surface")
+            if row["status"] not in {"normative", "measured-gap"}:
+                fail(f"acceptance fact {identifier} lacks normative/measured status")
+            for field in ("precondition", "action", "expected_fact", "evidence_source"):
+                if not isinstance(row[field], str) or not row[field].strip():
+                    fail(f"acceptance fact {identifier} lacks {field}")
+            predicate = row["predicate"]
+            if (
+                not isinstance(predicate, dict)
+                or set(predicate) != {"name", "path", "operator", "expected"}
+                or predicate["name"] != f"required fact: {identifier}"
+                or predicate["path"] != ["nodes"]
+                or predicate["operator"] != "ax_name_contains"
+                or not isinstance(predicate["expected"], str)
+                or not predicate["expected"].strip()
+            ):
+                fail(f"acceptance fact {identifier} predicate is not state-specific")
+            normalized.append(row)
+        rows_by_group[group] = normalized
+    inventory_ids = [row["id"] for row in rows_by_group["inventory"]]
+    if not set(facts["approved_35"]).issubset(inventory_ids):
+        fail("approved_35 meanings were not preserved in expanded inventory")
+    manifest = read_json(design_home / "context" / "source-manifest.json")
+    if manifest.get("acceptanceFacts") != "docs/design-home/context/acceptance-facts.json":
+        fail("source-manifest acceptanceFacts path mismatch")
+    if manifest.get("acceptanceInventoryIds") != inventory_ids:
+        fail("source-manifest inventory IDs differ from canonical facts")
+    return {
+        "sequence": tuple(row["id"] for row in rows_by_group["sequence"]),
+        "inventory": tuple(inventory_ids),
+        "final_gates": tuple(row["id"] for row in rows_by_group["final_gates"]),
+        "facts": {
+            row["id"]: row
+            for group in ("sequence", "inventory", "final_gates")
+            for row in rows_by_group[group]
+        },
+    }
 
 
 def git_source(relative: str) -> bytes:
@@ -466,28 +543,21 @@ def validate_acceptance_inventory(
     design_home: Path,
     manifest: dict[str, Any],
 ) -> list[str]:
+    try:
+        contract = load_acceptance_contract(design_home)
+    except (OSError, UnicodeError, ValueError, KeyError, TypeError) as exc:
+        return [str(exc)]
     inventory = (design_home / "inventory.md").read_text(encoding="utf-8")
-    documented = re.findall(
-        r"^\| `((?:dashboard-ui|fleet-dashboard|extension-join|personal-mcp)\.[a-z0-9.-]+)` \|",
-        inventory,
-        flags=re.MULTILINE,
+    section = markdown_section(
+        inventory, "<!-- acceptance-facts:start -->", "<!-- acceptance-facts:end -->"
     )
-    expected = manifest.get("acceptanceInventoryIds")
-    if not isinstance(expected, list) or not all(
-        isinstance(item, str) and item for item in expected
-    ):
-        return ["acceptanceInventoryIds must be a non-empty string array"]
+    documented = re.findall(r"^\| `([a-z0-9._-]+)` \|", section, flags=re.MULTILINE)
+    expected = [*contract["inventory"], *contract["final_gates"]]
     errors: list[str] = []
     if len(documented) != len(set(documented)):
-        errors.append("acceptance inventory contains duplicate IDs")
-    if len(expected) != len(set(expected)):
-        errors.append("acceptanceInventoryIds contains duplicate IDs")
-    missing = sorted(set(expected) - set(documented))
-    extra = sorted(set(documented) - set(expected))
-    if missing or extra:
-        errors.append(
-            f"acceptance inventory mismatch: missing={missing}, extra={extra}"
-        )
+        errors.append("acceptance fact catalog contains duplicate IDs")
+    if documented != expected:
+        errors.append("acceptance fact catalog IDs differ from canonical facts")
     return errors
 
 
@@ -694,6 +764,14 @@ def run_negative_probes() -> None:
         )
 
         shutil.copy2(DESIGN_HOME / "context" / "source-manifest.json", manifest_path)
+        facts_path = disposable / "context" / "acceptance-facts.json"
+        facts = read_json(facts_path)
+        facts["inventory"][0]["predicate"] = facts["inventory"][1]["predicate"]
+        facts_path.write_text(json.dumps(facts, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        fact_errors, _ = validate(disposable)
+        assert_probe("fact-id-predicate", fact_errors, "predicate is not state-specific")
+
+        shutil.copy2(DESIGN_HOME / "context" / "acceptance-facts.json", facts_path)
         restored_errors, _ = validate(disposable)
         if restored_errors:
             fail(f"restored disposable copy did not pass: {restored_errors}")

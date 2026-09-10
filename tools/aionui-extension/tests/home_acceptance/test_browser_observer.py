@@ -337,7 +337,11 @@ def _write_surface_observer(tmp_path: Path) -> tuple[Path, dict[str, dict[str, o
 def _write_complete_observation_manifest(
     tmp_path: Path, surfaces: dict[str, dict[str, object]]
 ) -> Path:
-    identifiers = [*harness_module.SEQUENCE, *sorted(harness_module.REQUIRED_INVENTORY)]
+    identifiers = [
+        *harness_module.SEQUENCE,
+        *sorted(harness_module.REQUIRED_INVENTORY),
+        *harness_module.REQUIRED_FINAL_GATES,
+    ]
     rows = []
     for identifier in identifiers:
         surface_id = harness_module._surface_for_identifier(identifier)
@@ -345,12 +349,7 @@ def _write_complete_observation_manifest(
         rows.append({
             "id": identifier,
             "page_url": f"{target['base_url']}/acceptance/{identifier}",
-            "assertions": [{
-                "name": "visible",
-                "path": ["nodes", 0, "name"],
-                "operator": "contains",
-                "expected": identifier,
-            }],
+            "assertions": [harness_module.REQUIRED_FACTS[identifier]["predicate"]],
         })
     path = tmp_path / "observations.json"
     path.write_text(json.dumps({
@@ -595,8 +594,12 @@ def test_prepare_expands_every_authoritative_observation_once(
     assert exit_code == 0
     result = json.loads(capsys.readouterr().out)
     plan = json.loads((evidence / "capture-plan.json").read_text(encoding="utf-8"))
-    expected = len(harness_module.SEQUENCE) + len(harness_module.REQUIRED_INVENTORY)
-    assert result["observations"] == expected == 198
+    expected = (
+        len(harness_module.SEQUENCE)
+        + len(harness_module.REQUIRED_INVENTORY)
+        + len(harness_module.REQUIRED_FINAL_GATES)
+    )
+    assert result["observations"] == expected == 201
     assert len(plan["commands"]) == expected
     assert len({command[command.index("--observation") + 1] for command in plan["commands"]}) == expected
 
@@ -620,6 +623,98 @@ def test_personal_surface_refuses_served_page_digest_mismatch(
             },
             "0" * 64,
         )
+
+
+def _personal_runtime_fixture(tmp_path: Path) -> tuple[dict[str, object], dict[str, object], str]:
+    repository = tmp_path / "checkout"
+    runtime_dir = tmp_path / "runtime"
+    artifact = repository / "packages/personal/src/pursers_personal/resources/dashboard.html"
+    server = repository / "packages/personal/src/pursers_personal/apps_server.py"
+    artifact.parent.mkdir(parents=True)
+    server.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_bytes(b"personal-dashboard")
+    server.write_bytes(b"exact-personal-server")
+    runtime_dir.mkdir(mode=0o700)
+    pid_file = runtime_dir / "personal.pid"
+    receipt_file = runtime_dir / "personal-receipt.json"
+    pid_file.write_text("4242\n"); pid_file.chmod(0o600)
+    source_digest = hashlib.sha256(server.read_bytes()).hexdigest()
+    receipt = {
+        "schema_version": 1,
+        "product": "Pursers Personal",
+        "server_name": "On Board Personal",
+        "version": "5.0.0a25",
+        "build": source_digest,
+        "candidate_commit": COMMIT,
+        "candidate_source": str(server),
+        "board_id": BOARD,
+        "pid": 4242,
+        "transport": "stdio",
+    }
+    receipt_file.write_text(json.dumps(receipt)); receipt_file.chmod(0o600)
+    surface: dict[str, object] = {
+        "adapter": "pinned-signed-aionui-personal-mcp",
+        "target": {"base_url": "http://127.0.0.1:8765", "board_id": BOARD},
+        "product": "Pursers Personal",
+        "version": "5.0.0a25",
+        "candidate_commit": COMMIT,
+        "artifact": artifact.relative_to(repository).as_posix(),
+        "artifact_sha256": hashlib.sha256(artifact.read_bytes()).hexdigest(),
+        "runtime": {
+            "artifact": server.relative_to(repository).as_posix(),
+            "artifact_sha256": source_digest,
+            "pid_file": str(pid_file),
+            "receipt": str(receipt_file),
+        },
+    }
+    return {"repository_root": str(repository)}, surface, hashlib.sha256(artifact.read_bytes()).hexdigest()
+
+
+def test_personal_runtime_binds_live_exact_apps_server(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config, surface, page_digest = _personal_runtime_fixture(tmp_path)
+    monkeypatch.setattr(observer_module, "_git_identity", lambda _repository: (COMMIT, ""))
+    runtime = surface["runtime"]
+    command = (
+        f"/usr/bin/python3 -m pursers_personal.cli mcp --candidate-source "
+        f"{tmp_path}/checkout/{runtime['artifact']} --candidate-commit {COMMIT} "
+        f"--board-id {BOARD} --acceptance-runtime-receipt {runtime['receipt']}"
+    )
+    monkeypatch.setattr(
+        observer_module,
+        "_run_identity_command",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess([], 0, stdout=command, stderr=""),
+    )
+    binding = observer_module._probe_personal_mcp_runtime(config, surface, page_digest)
+    assert binding == {
+        "product": "Pursers Personal",
+        "version": "5.0.0a25",
+        "build": runtime["artifact_sha256"],
+        "candidate_commit": COMMIT,
+    }
+
+
+def test_personal_runtime_rejects_stale_or_unrelated_process(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config, surface, page_digest = _personal_runtime_fixture(tmp_path)
+    monkeypatch.setattr(observer_module, "_git_identity", lambda _repository: (COMMIT, ""))
+    monkeypatch.setattr(
+        observer_module,
+        "_run_identity_command",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess([], 0, stdout="/usr/bin/python3 unrelated.py", stderr=""),
+    )
+    with pytest.raises(observer_module.ObserverError, match="not the MCP server"):
+        observer_module._probe_personal_mcp_runtime(config, surface, page_digest)
+
+    monkeypatch.setattr(observer_module, "_git_identity", lambda _repository: ("d" * 40, ""))
+    with pytest.raises(observer_module.ObserverError, match="candidate binding changed"):
+        observer_module._probe_personal_mcp_runtime(config, surface, page_digest)
+
+    monkeypatch.setattr(observer_module, "_git_identity", lambda _repository: (COMMIT, " M changed"))
+    with pytest.raises(observer_module.ObserverError, match="candidate binding changed"):
+        observer_module._probe_personal_mcp_runtime(config, surface, page_digest)
 
 
 def test_assemble_refuses_any_missing_authoritative_capture(

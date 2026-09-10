@@ -12,7 +12,7 @@ Subcommands:
 
 ``install-observer``  copy the observer into a verifier-owned directory
 ``doctor``            report observed capability status, exit non-zero if blocked
-``prepare``           expand the exact 198-observation verifier manifest
+``prepare``           expand 198 core observations plus 3 final gates
 ``capture``           record one real browser observation into evidence
 ``assemble``          refuse incomplete captures and assemble the report
 ``validate``          validate an evidence report through the installed observer
@@ -135,13 +135,15 @@ def _load_surface_manifest(path_value: str) -> dict[str, Any]:
     expected_adapters = {
         "aionui": "signed-aionui",
         "fleet": "pinned-process-artifact",
-        "personal": "pinned-signed-aionui-artifact",
+        "personal": "pinned-signed-aionui-personal-mcp",
     }
     for surface_id, product in SURFACE_PRODUCTS.items():
         row = surfaces[surface_id]
         required = {"adapter", "target"} if surface_id == "aionui" else {
             "adapter", "target", "artifact"
         }
+        if surface_id == "personal":
+            required.add("runtime")
         if not isinstance(row, dict) or set(row) != required:
             raise RunnerError(EXIT_USAGE, f"surface {surface_id} fields do not match schema")
         if row["adapter"] != expected_adapters[surface_id]:
@@ -181,6 +183,40 @@ def _load_surface_manifest(path_value: str) -> dict[str, Any]:
                 "artifact_sha256": hashlib.sha256(artifact.read_bytes()).hexdigest(),
                 "version": f"candidate-{candidate[:12]}",
             })
+        if surface_id == "personal":
+            runtime = row["runtime"]
+            if not isinstance(runtime, dict) or set(runtime) != {
+                "artifact", "pid_file", "receipt"
+            }:
+                raise RunnerError(EXIT_USAGE, "Personal runtime fields are invalid")
+            runtime_artifact = runtime["artifact"]
+            if (
+                not isinstance(runtime_artifact, str)
+                or runtime_artifact.startswith("/")
+                or ".." in Path(runtime_artifact).parts
+            ):
+                raise RunnerError(EXIT_USAGE, "Personal runtime artifact is invalid")
+            runtime_source = (REPOSITORY_ROOT / runtime_artifact).resolve()
+            if (
+                not runtime_source.is_relative_to(REPOSITORY_ROOT.resolve())
+                or not runtime_source.is_file()
+                or _git("ls-files", "--error-unmatch", runtime_artifact) != runtime_artifact
+            ):
+                raise RunnerError(EXIT_USAGE, "Personal runtime artifact is not exact tracked content")
+            runtime_paths: dict[str, str] = {}
+            for field in ("pid_file", "receipt"):
+                value = runtime[field]
+                if not isinstance(value, str) or not Path(value).expanduser().is_absolute():
+                    raise RunnerError(EXIT_USAGE, f"Personal runtime {field} must be absolute")
+                resolved = Path(value).expanduser().resolve()
+                if resolved.is_relative_to(REPOSITORY_ROOT.resolve()):
+                    raise RunnerError(EXIT_USAGE, f"Personal runtime {field} must stay outside checkout")
+                runtime_paths[field] = str(resolved)
+            normalized_row["runtime"] = {
+                "artifact": runtime_artifact,
+                "artifact_sha256": hashlib.sha256(runtime_source.read_bytes()).hexdigest(),
+                **runtime_paths,
+            }
         normalized[surface_id] = normalized_row
     personal_meta = tomllib.loads(
         (REPOSITORY_ROOT / "packages/personal/pyproject.toml").read_text(encoding="utf-8")
@@ -294,11 +330,15 @@ def _load_observer_config(observer_dir: Path) -> dict[str, Any]:
     return config
 
 
-def _acceptance_ids() -> tuple[tuple[str, ...], tuple[str, ...]]:
+def _acceptance_ids() -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
     sys.path.insert(0, str(HERE))
     import harness
 
-    return tuple(harness.SEQUENCE), tuple(sorted(harness.REQUIRED_INVENTORY))
+    return (
+        tuple(harness.SEQUENCE),
+        tuple(sorted(harness.REQUIRED_INVENTORY)),
+        tuple(harness.REQUIRED_FINAL_GATES),
+    )
 
 
 def _surface_for(identifier: str) -> str:
@@ -329,8 +369,8 @@ def prepare(args: argparse.Namespace) -> int:
     except harness.AcceptanceError as error:
         raise RunnerError(EXIT_USAGE, str(error)) from None
     rows = manifest["observations"]
-    sequence, inventory = _acceptance_ids()
-    required = {*sequence, *inventory}
+    sequence, inventory, final_gates = _acceptance_ids()
+    required = {*sequence, *inventory, *final_gates}
     if not isinstance(rows, list) or len(rows) != len(required):
         raise RunnerError(EXIT_USAGE, f"observation manifest must contain exactly {len(required)} rows")
     by_id: dict[str, dict[str, Any]] = {}
@@ -342,13 +382,19 @@ def prepare(args: argparse.Namespace) -> int:
             raise RunnerError(EXIT_USAGE, "observation manifest IDs must be unique strings")
         if not isinstance(row["assertions"], list) or not row["assertions"]:
             raise RunnerError(EXIT_USAGE, f"observation {identifier} needs assertions")
+        required_assertion = harness.REQUIRED_FACTS.get(identifier, {}).get("predicate")
+        if row["assertions"] != [required_assertion]:
+            raise RunnerError(
+                EXIT_USAGE,
+                f"observation {identifier} assertions do not match its canonical required fact",
+            )
         by_id[identifier] = row
     if set(by_id) != required:
         raise RunnerError(EXIT_USAGE, "observation manifest IDs do not match the authoritative set")
     evidence = Path(args.evidence).expanduser().resolve()
     evidence.mkdir(parents=True, exist_ok=True)
     commands: list[list[str]] = []
-    for identifier in (*sequence, *inventory):
+    for identifier in (*sequence, *inventory, *final_gates):
         row = by_id[identifier]
         surface_id = _surface_for(identifier)
         surface = config["surfaces"][surface_id]
@@ -375,6 +421,7 @@ def prepare(args: argparse.Namespace) -> int:
         "operator_topology": operator_topology,
         "sequence": list(sequence),
         "inventory": list(inventory),
+        "final_gates": list(final_gates),
         "commands": commands,
     }
     plan_path = evidence / "capture-plan.json"
@@ -401,7 +448,7 @@ def assemble(args: argparse.Namespace) -> int:
         raise RunnerError(EXIT_BLOCKED, "capture plan is missing or invalid") from None
     if not isinstance(plan, dict) or set(plan) != {
         "schema_version", "candidate_commit", "operator_topology",
-        "sequence", "inventory", "commands",
+        "sequence", "inventory", "final_gates", "commands",
     } or plan["schema_version"] != SCHEMA_VERSION:
         raise RunnerError(EXIT_FAILED, "capture plan fields do not match schema")
     candidate = config["surfaces"]["aionui"]["candidate_commit"]
@@ -419,10 +466,10 @@ def assemble(args: argparse.Namespace) -> int:
     suite_refs = suite_manifest["suites"]
     if not isinstance(suite_refs, dict) or set(suite_refs) != set(harness.REQUIRED_SUITES):
         raise RunnerError(EXIT_USAGE, "suite manifest does not match the required suite set")
-    sequence, inventory = _acceptance_ids()
+    sequence, inventory, final_gates = _acceptance_ids()
     observations: dict[str, dict[str, Any]] = {}
     surface_runtime: dict[str, dict[str, Any]] = {}
-    for identifier in (*sequence, *inventory):
+    for identifier in (*sequence, *inventory, *final_gates):
         path = evidence / "observations" / f"{identifier}.json"
         try:
             receipt = json.loads(path.read_text(encoding="utf-8"))
@@ -472,6 +519,10 @@ def assemble(args: argparse.Namespace) -> int:
         "inventory": [
             {"id": identifier, "status": "passed", "evidence": f"observations/{identifier}.json"}
             for identifier in inventory
+        ],
+        "final_gates": [
+            {"id": identifier, "status": "passed", "evidence": f"observations/{identifier}.json"}
+            for identifier in final_gates
         ],
         "suites": suites,
         "all_existing_suites_passed": True,

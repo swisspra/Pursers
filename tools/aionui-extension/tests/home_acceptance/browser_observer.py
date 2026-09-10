@@ -520,7 +520,7 @@ def _probe_pinned_artifact(
     if not isinstance(repository_value, str):
         raise _fail(EXIT_CONFIG, "observer repository_root is unavailable")
     repository = Path(repository_value).resolve()
-    head, _status = _git_identity(repository)
+    head, status = _git_identity(repository)
     if head != surface.get("candidate_commit"):
         raise _fail(EXIT_MISMATCH, "pinned surface repository commit changed")
     relative = surface.get("artifact")
@@ -583,14 +583,14 @@ def _observed_surface_binding(
         if not isinstance(selected_board, str):
             raise _fail(EXIT_CAPABILITY_UNAVAILABLE, "surface UI does not expose its selected board")
         binding["selected_board"] = selected_board
-    elif adapter == "pinned-signed-aionui-artifact":
+    elif adapter == "pinned-signed-aionui-personal-mcp":
         signed = _observed_runtime_binding(observation, base_url)
-        pinned = _probe_pinned_artifact_without_listener(
+        pinned = _probe_personal_mcp_runtime(
             config, surface, observation.get("page_sha256")
         )
         binding = {
             **pinned,
-            "source": "verifier-pinned-signed-aionui-artifact",
+            "source": "verifier-pinned-personal-mcp-runtime",
             "selected_board": signed["selected_board"],
         }
     else:
@@ -605,9 +605,9 @@ def _probe_pinned_artifact_without_listener(
     if not isinstance(repository_value, str):
         raise _fail(EXIT_CONFIG, "observer repository_root is unavailable")
     repository = Path(repository_value).resolve()
-    head, _status = _git_identity(repository)
+    head, status = _git_identity(repository)
     relative = surface.get("artifact")
-    if head != surface.get("candidate_commit") or not isinstance(relative, str):
+    if head != surface.get("candidate_commit") or status or not isinstance(relative, str):
         raise _fail(EXIT_MISMATCH, "pinned surface candidate binding changed")
     try:
         artifact = (repository / relative).resolve(strict=True)
@@ -625,6 +625,101 @@ def _probe_pinned_artifact_without_listener(
         "version": surface["version"],
         "build": digest,
         "candidate_commit": head,
+    }
+
+
+def _private_runtime_path(value: Any, label: str, repository: Path) -> Path:
+    if not isinstance(value, str) or not Path(value).is_absolute():
+        raise _fail(EXIT_CONFIG, f"Personal runtime {label} must be absolute")
+    path = Path(value).resolve()
+    if path.is_relative_to(repository) or not path.is_file():
+        raise _fail(EXIT_CAPABILITY_UNAVAILABLE, f"Personal runtime {label} is unavailable")
+    _require_private_mode(path, f"Personal runtime {label}")
+    return path
+
+
+def _probe_personal_mcp_runtime(
+    config: dict[str, Any], surface: dict[str, Any], observed_page_sha256: Any
+) -> dict[str, str]:
+    """Bind Personal evidence to the live exact-source stdio MCP server."""
+    pinned = _probe_pinned_artifact_without_listener(
+        config, surface, observed_page_sha256
+    )
+    repository_value = config.get("repository_root")
+    runtime = surface.get("runtime")
+    if not isinstance(repository_value, str) or not isinstance(runtime, dict):
+        raise _fail(EXIT_CONFIG, "Personal MCP runtime binding is unavailable")
+    repository = Path(repository_value).resolve()
+    if set(runtime) != {"artifact", "artifact_sha256", "pid_file", "receipt"}:
+        raise _fail(EXIT_CONFIG, "Personal MCP runtime fields are invalid")
+    relative = runtime["artifact"]
+    if not isinstance(relative, str) or relative.startswith("/") or ".." in Path(relative).parts:
+        raise _fail(EXIT_CONFIG, "Personal MCP runtime artifact is invalid")
+    artifact = (repository / relative).resolve(strict=True)
+    if not artifact.is_relative_to(repository) or not artifact.is_file():
+        raise _fail(EXIT_CONFIG, "Personal MCP runtime artifact escapes repository")
+    runtime_digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
+    if runtime_digest != runtime["artifact_sha256"]:
+        raise _fail(EXIT_MISMATCH, "Personal MCP runtime artifact digest changed")
+    pid_file = _private_runtime_path(runtime["pid_file"], "pid file", repository)
+    receipt_path = _private_runtime_path(runtime["receipt"], "receipt", repository)
+    try:
+        pid = int(pid_file.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        raise _fail(EXIT_CAPABILITY_UNAVAILABLE, "Personal MCP runtime PID is invalid") from None
+    command = _run_identity_command(
+        ["/bin/ps", "-p", str(pid), "-o", "command="],
+        "Personal MCP runtime process",
+    ).stdout.strip()
+    try:
+        argv = shlex.split(command)
+    except ValueError:
+        raise _fail(EXIT_CAPABILITY_UNAVAILABLE, "Personal MCP runtime command is malformed") from None
+    required_arguments = {
+        "--candidate-source": str(artifact),
+        "--candidate-commit": str(surface["candidate_commit"]),
+        "--board-id": str(surface["target"]["board_id"]),
+        "--acceptance-runtime-receipt": str(receipt_path),
+    }
+    if (
+        not argv
+        or not Path(argv[0]).name.startswith("python")
+        or not any(
+            argv[index : index + 3] == ["-m", "pursers_personal.cli", "mcp"]
+            for index in range(max(0, len(argv) - 2))
+        )
+    ):
+        raise _fail(EXIT_CAPABILITY_UNAVAILABLE, "Personal process is not the MCP server")
+    for flag, expected in required_arguments.items():
+        try:
+            actual = argv[argv.index(flag) + 1]
+        except (ValueError, IndexError):
+            raise _fail(EXIT_CAPABILITY_UNAVAILABLE, f"Personal MCP process lacks {flag}") from None
+        if actual != expected:
+            raise _fail(EXIT_MISMATCH, f"Personal MCP process {flag} changed")
+    try:
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        raise _fail(EXIT_CAPABILITY_UNAVAILABLE, "Personal MCP runtime receipt is invalid") from None
+    expected_receipt = {
+        "schema_version": 1,
+        "product": "Pursers Personal",
+        "server_name": "On Board Personal",
+        "version": surface["version"],
+        "build": runtime_digest,
+        "candidate_commit": surface["candidate_commit"],
+        "candidate_source": str(artifact),
+        "board_id": surface["target"]["board_id"],
+        "pid": pid,
+        "transport": "stdio",
+    }
+    if receipt != expected_receipt:
+        raise _fail(EXIT_MISMATCH, "Personal MCP runtime receipt changed")
+    return {
+        **pinned,
+        "version": receipt["version"],
+        "build": receipt["build"],
+        "candidate_commit": receipt["candidate_commit"],
     }
 
 

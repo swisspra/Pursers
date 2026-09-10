@@ -100,131 +100,210 @@
   ],
   "acceptanceInventoryIds": [
     "dashboard-ui.logic",
-    "dashboard-ui.styles",
     "dashboard-ui.shell",
-    "fleet-dashboard.surface",
-    "extension-join.surface",
-    "personal-mcp.surface",
     "dashboard-ui.state.empty-tickets",
-    "dashboard-ui.state.loading",
     "dashboard-ui.state.error",
+    "dashboard-ui.state.loading",
     "dashboard-ui.state.permission-denied",
-    "dashboard-ui.state.stale",
     "dashboard-ui.state.search-empty",
-    "fleet-dashboard.state.empty-centrals",
-    "fleet-dashboard.state.loading-board",
-    "fleet-dashboard.state.error-board",
-    "fleet-dashboard.state.offline",
-    "fleet-dashboard.state.bounded",
-    "fleet-dashboard.state.truncated-tickets",
-    "fleet-dashboard.state.edit-paused",
-    "fleet-dashboard.state.empty-workers",
-    "fleet-dashboard.state.empty-agents",
-    "fleet-dashboard.state.routes-unavailable",
-    "extension-join.state.initial",
-    "extension-join.state.joining",
-    "extension-join.state.joined",
-    "extension-join.state.error",
+    "dashboard-ui.state.stale",
+    "dashboard-ui.styles",
     "extension-join.state.bridge-missing",
-    "extension-join.state.status-loaded",
+    "extension-join.state.error",
+    "extension-join.state.initial",
+    "extension-join.state.joined",
+    "extension-join.state.joining",
     "extension-join.state.status-empty",
+    "extension-join.state.status-loaded",
+    "extension-join.surface",
+    "extension.bounded-errors",
+    "extension.environment-free-mcp-registration",
+    "extension.idempotent-reconnect",
+    "extension.join-form",
+    "extension.join-progress",
+    "extension.redacted-status-card",
+    "extension.reviewer-preset-claude",
+    "extension.reviewer-preset-codex",
+    "extension.settings-navigation",
+    "extension.worker-preset-claude",
+    "extension.worker-preset-codex",
+    "fleet-dashboard.state.bounded",
+    "fleet-dashboard.state.edit-paused",
+    "fleet-dashboard.state.empty-agents",
+    "fleet-dashboard.state.empty-centrals",
+    "fleet-dashboard.state.empty-workers",
+    "fleet-dashboard.state.error-board",
+    "fleet-dashboard.state.loading-board",
+    "fleet-dashboard.state.offline",
+    "fleet-dashboard.state.routes-unavailable",
+    "fleet-dashboard.state.truncated-tickets",
+    "fleet-dashboard.surface",
+    "fleet.active-ticket-rows",
+    "fleet.add-project-authorization-error",
+    "fleet.add-project-board",
+    "fleet.add-project-clone-steps",
+    "fleet.add-project-idempotent-rerun",
+    "fleet.add-project-one-time-doors",
+    "fleet.add-project-partial-failure",
+    "fleet.add-project-policy",
+    "fleet.add-project-principals",
+    "fleet.add-project-registry",
+    "fleet.agent-current-claims",
+    "fleet.agent-duplicate-names",
+    "fleet.agent-pool",
+    "fleet.agent-retired-stale-drawer",
+    "fleet.board-cards",
+    "fleet.board-detail-activity",
+    "fleet.board-detail-metadata",
+    "fleet.board-detail-truncation",
+    "fleet.central-availability-isolation",
+    "fleet.config-add-update-preview",
+    "fleet.config-bridge-versions",
+    "fleet.config-current-offers",
+    "fleet.config-discovery-import-conflicts",
+    "fleet.config-dispatch-policy-gaps-history",
+    "fleet.config-doctor",
+    "fleet.config-exact-diff-confirmation",
+    "fleet.config-registry-worktrees",
+    "fleet.config-seat-inventory",
+    "fleet.config-tier-skill-role-capabilities",
+    "fleet.coordinator-configuration",
+    "fleet.default-central-aliases",
+    "fleet.density",
+    "fleet.doors-connected-seats",
+    "fleet.doors-copy",
+    "fleet.doors-disabled",
+    "fleet.doors-error",
+    "fleet.doors-expiry",
+    "fleet.doors-key-id",
+    "fleet.doors-project-rows",
+    "fleet.doors-rotation-warning",
+    "fleet.doors-secret-free-output",
+    "fleet.doors-unconfigured",
+    "fleet.findings",
+    "fleet.hub-agents",
+    "fleet.hub-boards",
+    "fleet.hub-operations",
+    "fleet.hub-overview",
+    "fleet.intake",
+    "fleet.keyboard-help",
+    "fleet.operations-disabled-controls",
+    "fleet.operations-job-progress",
+    "fleet.operations-job-result",
+    "fleet.operations-rollback-failure",
+    "fleet.operations-unavailable-services",
+    "fleet.pool-available",
+    "fleet.pool-busy",
+    "fleet.pool-online",
+    "fleet.pool-stale",
+    "fleet.protocol-overhead",
+    "fleet.refresh-pause-resume",
+    "fleet.release-central",
+    "fleet.release-ci",
+    "fleet.release-github",
+    "fleet.release-immutable-confirmation-plan",
+    "fleet.release-manifest",
+    "fleet.release-pypi",
+    "fleet.release-restart-checklist",
+    "fleet.release-tag",
+    "fleet.search-no-results",
+    "fleet.search-results",
+    "fleet.tab-changes",
+    "fleet.tab-flow",
+    "fleet.tab-routes",
+    "fleet.tab-tickets",
+    "fleet.tab-timeline",
+    "fleet.theme",
+    "fleet.ticket-counts",
+    "fleet.unknown-route-recovery",
+    "fleet.updated-state",
+    "fleet.worker-management",
     "personal-mcp.state.board-empty",
+    "personal-mcp.state.fleet-unavailable",
+    "personal-mcp.state.links-empty",
+    "personal-mcp.state.memory-empty",
     "personal-mcp.state.not-onboarded",
     "personal-mcp.state.ticket-not-found",
-    "personal-mcp.state.memory-empty",
-    "personal-mcp.state.fleet-unavailable",
-    "personal-mcp.state.links-empty"
+    "personal-mcp.surface",
+    "personal.activity-bounded-feed",
+    "personal.activity-cursor",
+    "personal.activity-dropped-events",
+    "personal.activity-empty",
+    "personal.activity-error",
+    "personal.activity-has-more-resync",
+    "personal.activity-offline",
+    "personal.activity-scope",
+    "personal.activity-stale",
+    "personal.agents-current-ticket",
+    "personal.agents-duplicate-identity",
+    "personal.agents-duplicate-name",
+    "personal.agents-empty",
+    "personal.agents-focus",
+    "personal.agents-idle-lease",
+    "personal.agents-platform",
+    "personal.agents-role",
+    "personal.agents-stale",
+    "personal.agents-total-live",
+    "personal.board-identity",
+    "personal.connection-banner",
+    "personal.data-provenance",
+    "personal.fleet-empty",
+    "personal.fleet-online-busy-available-stale",
+    "personal.fleet-project-seats",
+    "personal.fleet-project-ticket-counts",
+    "personal.fleet-projects",
+    "personal.fleet-registry-warning",
+    "personal.fleet-shared-pool",
+    "personal.fleet-truncation",
+    "personal.fleet-unavailable",
+    "personal.health",
+    "personal.keyboard-tabs",
+    "personal.links-edge-types",
+    "personal.links-empty",
+    "personal.links-node-edge-totals",
+    "personal.links-pinned",
+    "personal.links-source-label",
+    "personal.links-truncation",
+    "personal.links-unavailable",
+    "personal.refresh",
+    "personal.search-no-results",
+    "personal.search-results",
+    "personal.source-board-event-feed",
+    "personal.source-board-snapshot",
+    "personal.source-fleet-snapshot",
+    "personal.source-link-snapshot",
+    "personal.theme",
+    "personal.today-active-agents",
+    "personal.today-current-work",
+    "personal.today-important-pinned-note",
+    "personal.today-latest-handoff",
+    "personal.today-recent-activity",
+    "personal.today-status-metrics",
+    "personal.work-abandonment",
+    "personal.work-lease",
+    "personal.work-no-ticket",
+    "personal.work-ownership",
+    "personal.work-priority",
+    "personal.work-rejection",
+    "personal.work-review-readiness",
+    "personal.work-status-groups",
+    "personal.work-total"
   ],
   "artifactManifest": [
     {
       "path": "docs/design-home/check_artifacts.py",
-      "lines": 726,
-      "bytes": 27022
+      "lines": 804,
+      "bytes": 31380
+    },
+    {
+      "path": "docs/design-home/context/acceptance-facts.json",
+      "lines": 3463,
+      "bytes": 150244
     },
     {
       "path": "docs/design-home/context/components.md",
       "lines": 223,
       "bytes": 7548
-    },
-    {
-      "path": "docs/design-home/context/layouts.md",
-      "lines": 152,
-      "bytes": 5729
-    },
-    {
-      "path": "docs/design-home/context/routes.md",
-      "lines": 320,
-      "bytes": 13625
-    },
-    {
-      "path": "docs/design-home/context/theme.md",
-      "lines": 200,
-      "bytes": 7619
-    },
-    {
-      "path": "docs/design-home/context/pages.md",
-      "lines": 158,
-      "bytes": 6473
-    },
-    {
-      "path": "docs/design-home/context/extractable-components.md",
-      "lines": 177,
-      "bytes": 8937
-    },
-    {
-      "path": "docs/design-home/inventory.md",
-      "lines": 159,
-      "bytes": 10094
-    },
-    {
-      "path": "docs/design-home/context/raw/tools/dashboard-ui/dashboard-entry.html",
-      "lines": 145,
-      "bytes": 10312
-    },
-    {
-      "path": "docs/design-home/context/raw/tools/dashboard-ui/src/dashboard.css",
-      "lines": 619,
-      "bytes": 21965
-    },
-    {
-      "path": "docs/design-home/context/raw/tools/dashboard-ui/vite.config.ts",
-      "lines": 11,
-      "bytes": 273
-    },
-    {
-      "path": "docs/design-home/context/raw/tools/dashboard-ui/package.json",
-      "lines": 21,
-      "bytes": 663
-    },
-    {
-      "path": "docs/design-home/context/raw/tools/dashboard-ui/tsconfig.json",
-      "lines": 13,
-      "bytes": 303
-    },
-    {
-      "path": "docs/design-home/context/raw/tools/aionui-extension/aion-extension.json",
-      "lines": 99,
-      "bytes": 2702
-    },
-    {
-      "path": "docs/design-home/context/raw/tools/aionui-extension/webui/index.html",
-      "lines": 33,
-      "bytes": 1211
-    },
-    {
-      "path": "docs/design-home/context/raw/tools/aionui-extension/webui/app.js",
-      "lines": 60,
-      "bytes": 1802
-    },
-    {
-      "path": "docs/design-home/context/raw/tools/aionui-extension/webui/routes.js",
-      "lines": 201,
-      "bytes": 5908
-    },
-    {
-      "path": "docs/design-home/context/raw/tools/aionui-extension/webui/style.css",
-      "lines": 66,
-      "bytes": 861
     },
     {
       "path": "docs/design-home/context/excerpts/dashboard-ts.txt",
@@ -240,11 +319,92 @@
       "path": "docs/design-home/context/excerpts/personal-apps-server-py.txt",
       "lines": 458,
       "bytes": 14208
+    },
+    {
+      "path": "docs/design-home/context/extractable-components.md",
+      "lines": 177,
+      "bytes": 8937
+    },
+    {
+      "path": "docs/design-home/context/layouts.md",
+      "lines": 152,
+      "bytes": 5729
+    },
+    {
+      "path": "docs/design-home/context/pages.md",
+      "lines": 158,
+      "bytes": 6473
+    },
+    {
+      "path": "docs/design-home/context/raw/tools/aionui-extension/aion-extension.json",
+      "lines": 99,
+      "bytes": 2702
+    },
+    {
+      "path": "docs/design-home/context/raw/tools/aionui-extension/webui/app.js",
+      "lines": 60,
+      "bytes": 1802
+    },
+    {
+      "path": "docs/design-home/context/raw/tools/aionui-extension/webui/index.html",
+      "lines": 33,
+      "bytes": 1211
+    },
+    {
+      "path": "docs/design-home/context/raw/tools/aionui-extension/webui/routes.js",
+      "lines": 201,
+      "bytes": 5908
+    },
+    {
+      "path": "docs/design-home/context/raw/tools/aionui-extension/webui/style.css",
+      "lines": 66,
+      "bytes": 861
+    },
+    {
+      "path": "docs/design-home/context/raw/tools/dashboard-ui/dashboard-entry.html",
+      "lines": 145,
+      "bytes": 10312
+    },
+    {
+      "path": "docs/design-home/context/raw/tools/dashboard-ui/package.json",
+      "lines": 21,
+      "bytes": 663
+    },
+    {
+      "path": "docs/design-home/context/raw/tools/dashboard-ui/src/dashboard.css",
+      "lines": 619,
+      "bytes": 21965
+    },
+    {
+      "path": "docs/design-home/context/raw/tools/dashboard-ui/tsconfig.json",
+      "lines": 13,
+      "bytes": 303
+    },
+    {
+      "path": "docs/design-home/context/raw/tools/dashboard-ui/vite.config.ts",
+      "lines": 11,
+      "bytes": 273
+    },
+    {
+      "path": "docs/design-home/context/routes.md",
+      "lines": 320,
+      "bytes": 13625
+    },
+    {
+      "path": "docs/design-home/context/theme.md",
+      "lines": 200,
+      "bytes": 7619
+    },
+    {
+      "path": "docs/design-home/inventory.md",
+      "lines": 367,
+      "bytes": 51129
     }
   ],
   "artifactTotal": {
-    "lines": 5292,
-    "bytes": 351976,
+    "lines": 9041,
+    "bytes": 547613,
     "excludedPath": "docs/design-home/context/source-manifest.json"
-  }
+  },
+  "acceptanceFacts": "docs/design-home/context/acceptance-facts.json"
 }

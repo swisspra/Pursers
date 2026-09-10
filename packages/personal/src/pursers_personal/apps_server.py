@@ -15,7 +15,9 @@ import importlib
 import importlib.resources
 import ipaddress
 import json
+import os
 import re
+import subprocess
 import sys
 from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from dataclasses import dataclass, field, replace
@@ -2395,7 +2397,99 @@ def build_personal_server(
     )
 
 
-def run_personal_mcp(profile_path: Path, host_id: str, session: str) -> None:
+def _write_acceptance_runtime_receipt(
+    path: Path,
+    *,
+    state: LiveDashboard,
+    candidate_source: Path,
+    candidate_commit: str,
+    board_id: str,
+) -> None:
+    """Bind a live stdio server to verifier-pinned source and sandbox identity."""
+    source = candidate_source.resolve(strict=True)
+    expected = Path(__file__).resolve(strict=True)
+    if source != expected:
+        raise ValueError("acceptance candidate source does not match loaded apps_server")
+    if not re.fullmatch(r"[0-9a-f]{40}", candidate_commit):
+        raise ValueError("acceptance candidate commit must be a full SHA")
+    repository = source.parents[4]
+    head = subprocess.check_output(
+        ["git", "-C", str(repository), "rev-parse", "HEAD"], text=True
+    ).strip()
+    dirty = subprocess.check_output(
+        ["git", "-C", str(repository), "status", "--porcelain"], text=True
+    )
+    if head != candidate_commit or dirty:
+        raise ValueError("acceptance runtime requires a clean exact-candidate checkout")
+    if state.config.board_id != board_id or not re.fullmatch(
+        r"(?:sandbox|test)-[A-Za-z0-9._-]{1,71}", board_id
+    ):
+        raise ValueError("acceptance runtime board does not match the sandbox profile")
+    receipt = {
+        "schema_version": 1,
+        "product": "Pursers Personal",
+        "server_name": "On Board Personal",
+        "version": PRODUCT_VERSION,
+        "build": hashlib.sha256(source.read_bytes()).hexdigest(),
+        "candidate_commit": candidate_commit,
+        "candidate_source": str(source),
+        "board_id": board_id,
+        "pid": os.getpid(),
+        "transport": "stdio",
+    }
+    path = path.expanduser().absolute()
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    parent = path.parent.resolve(strict=True)
+    if parent.is_relative_to(repository) or parent.stat().st_mode & 0o077:
+        raise ValueError("acceptance runtime receipt directory must be private and outside checkout")
+    if path.is_symlink():
+        raise ValueError("acceptance runtime receipt must not be a symlink")
+    path = parent / path.name
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            json.dump(receipt, stream, indent=2, sort_keys=True)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        os.chmod(path, 0o600)
+    finally:
+        with suppress(FileNotFoundError):
+            temporary.unlink()
+
+
+def run_personal_mcp(
+    profile_path: Path,
+    host_id: str,
+    session: str,
+    *,
+    acceptance_runtime_receipt: Path | None = None,
+    candidate_source: Path | None = None,
+    candidate_commit: str | None = None,
+    board_id: str | None = None,
+) -> None:
     """Run the profile-backed personal MCP server over stdio."""
-    server, _state = build_personal_server(profile_path, host_id, session)
+    server, state = build_personal_server(profile_path, host_id, session)
+    acceptance_values = (
+        acceptance_runtime_receipt,
+        candidate_source,
+        candidate_commit,
+        board_id,
+    )
+    if any(value is not None for value in acceptance_values):
+        if not all(value is not None for value in acceptance_values):
+            raise ValueError("acceptance runtime binding arguments must be complete")
+        assert acceptance_runtime_receipt is not None
+        assert candidate_source is not None
+        assert candidate_commit is not None
+        assert board_id is not None
+        _write_acceptance_runtime_receipt(
+            acceptance_runtime_receipt,
+            state=state,
+            candidate_source=candidate_source,
+            candidate_commit=candidate_commit,
+            board_id=board_id,
+        )
     server.run()

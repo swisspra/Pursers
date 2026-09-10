@@ -21,6 +21,7 @@ from .harness import (
     MAX_EVIDENCE_FILE_BYTES,
     MUTATION_OPT_IN,
     REQUIRED_INVENTORY,
+    REQUIRED_FINAL_GATES,
     REQUIRED_SUITES,
     SEQUENCE,
     AcceptanceCapabilityUnavailable,
@@ -79,6 +80,14 @@ def _legacy_report() -> dict[str, object]:
                 "evidence": f"observations/item-{_safe_name(identifier)}.json",
             }
             for identifier in sorted(REQUIRED_INVENTORY)
+        ],
+        "final_gates": [
+            {
+                "id": identifier,
+                "status": "passed",
+                "evidence": f"observations/item-{_safe_name(identifier)}.json",
+            }
+            for identifier in REQUIRED_FINAL_GATES
         ],
         "suites": [
             {
@@ -146,7 +155,7 @@ def _complete_report() -> dict[str, object]:
                 "product": "Pursers Personal",
                 "version": "5.0.0a25",
                 "build": "b" * 64,
-                "identity_source": "verifier-pinned-signed-aionui-artifact",
+                "identity_source": "verifier-pinned-personal-mcp-runtime",
             },
             "candidate_commit": CANDIDATE_SHA,
         },
@@ -290,6 +299,7 @@ def _write_report(tmp_path: Path, report: dict[str, object]) -> Path:
     observations = [
         *report.get("steps", []),
         *report.get("inventory", []),
+        *report.get("final_gates", []),
     ]
     for item in observations:
         if not isinstance(item, dict):
@@ -313,11 +323,11 @@ def _write_report(tmp_path: Path, report: dict[str, object]) -> Path:
             "page_url": f"{observation_base_url}/dashboard",
             "captured_at": CAPTURED_AT,
             "snapshot": {
-                "role": "document",
-                "name": "Pursers Home acceptance",
-                "children": [
-                    {"role": "heading", "name": identifier},
-                    {"role": "status", "name": "visible and verified"},
+                "title": "Pursers Home acceptance",
+                "viewport": {"w": 1280, "h": 800},
+                "nodes": [
+                    {"role": "heading", "name": harness_module.REQUIRED_FACTS[identifier]["predicate"]["expected"]},
+                    {"role": "status", "name": f"visible and verified: {identifier}"},
                     {"role": "main", "name": f"Acceptance surface for {identifier}"},
                 ],
             },
@@ -332,14 +342,7 @@ def _write_report(tmp_path: Path, report: dict[str, object]) -> Path:
             "page_url": f"{observation_base_url}/dashboard",
             "screenshot": _descriptor(screenshot, tmp_path),
             "accessibility_snapshot": _descriptor(snapshot, tmp_path),
-            "assertions": [
-                {
-                    "name": "observation heading",
-                    "path": ["children", 0, "name"],
-                    "operator": "equals",
-                    "expected": identifier,
-                }
-            ],
+            "assertions": [harness_module.REQUIRED_FACTS[identifier]["predicate"]],
         }
         if isinstance(surface, dict):
             receipt["surface_id"] = surface_id
@@ -382,7 +385,7 @@ def _write_forged_report(tmp_path: Path, report: dict[str, object]) -> Path:
         + (1).to_bytes(4, "big")
         + (1).to_bytes(4, "big")
     )
-    for item in [*report["steps"], *report["inventory"]]:  # type: ignore[misc]
+    for item in [*report["steps"], *report["inventory"], *report["final_gates"]]:  # type: ignore[misc]
         reference = item["evidence"]
         receipt_path = tmp_path / reference
         receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
@@ -489,11 +492,11 @@ def screenshot(identifier):
 request = json.load(sys.stdin)
 identifier = request["observation_id"]
 snapshot = {
-    "role": "document",
-    "name": "Pursers Home acceptance",
-    "children": [
-        {"role": "heading", "name": identifier},
-        {"role": "status", "name": "visible and verified"},
+    "title": "Pursers Home acceptance",
+    "viewport": {"w": 1280, "h": 800},
+    "nodes": [
+        {"role": "heading", "name": request["assertions"][0]["expected"]},
+        {"role": "status", "name": "visible and verified: " + identifier},
         {"role": "main", "name": "Acceptance surface for " + identifier},
     ],
 }
@@ -777,7 +780,7 @@ def test_verifier_browser_observer_replays_bounded_independent_capture(
 
     assert capture.observer_id == "verifier-session-1"
     assert capture.screenshot.startswith(b"\x89PNG")
-    assert capture.snapshot["children"][0]["name"] == "live-dashboard"
+    assert capture.snapshot["nodes"][0]["name"] == "ready"
     assert capture.candidate_commit == CANDIDATE_SHA
 
 
@@ -836,8 +839,82 @@ def test_structurally_valid_report_passes_with_trusted_observers(
         "candidate_commit": CANDIDATE_SHA,
         "steps_passed": len(SEQUENCE),
         "inventory_passed": len(REQUIRED_INVENTORY),
+        "final_gates_passed": len(REQUIRED_FINAL_GATES),
         "suites_passed": len(REQUIRED_SUITES),
     }
+
+
+def test_generic_assertion_cannot_replace_id_specific_required_fact(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("PURSERS_HOME_ACCEPTANCE_MUTATE", MUTATION_OPT_IN)
+    report = _complete_report()
+    path = _write_report(tmp_path, report)
+    reference = report["steps"][0]["evidence"]  # type: ignore[index]
+    receipt_path = tmp_path / reference
+    receipt = json.loads(receipt_path.read_text())
+    receipt["assertions"] = [{
+        "name": "generic title", "path": ["title"],
+        "operator": "contains", "expected": "Pursers",
+    }]
+    _write_json(receipt_path, receipt)
+    with pytest.raises(AcceptanceError, match="canonical required fact"):
+        _validate_report(
+            path,
+            validate_live_target("http://127.0.0.1:8765", "sandbox-home"),
+            RepositoryCapabilities((), (), (), (), ()),
+            CANDIDATE_SHA,
+        )
+
+
+def test_ax_name_assertion_ignores_hidden_accessibility_nodes() -> None:
+    assertion = {
+        "name": "required fact: hidden-state",
+        "path": ["nodes"],
+        "operator": "ax_name_contains",
+        "expected": "Only hidden",
+    }
+    with pytest.raises(AcceptanceError, match="assertion failed"):
+        harness_module._evaluate_browser_assertions(
+            {"nodes": [{"name": "Only hidden", "ignored": True}]}, [assertion]
+        )
+
+
+def test_wrapper_metadata_cannot_make_identical_accessibility_states_unique(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("PURSERS_HOME_ACCEPTANCE_MUTATE", MUTATION_OPT_IN)
+    report = _complete_report()
+    path = _write_report(tmp_path, report)
+    by_id = {item["id"]: item for item in report["inventory"]}  # type: ignore[index]
+    first, second = by_id["dashboard-ui.styles"], by_id["dashboard-ui.shell"]
+    first_receipt = json.loads((tmp_path / first["evidence"]).read_text())
+    first_snapshot = json.loads((tmp_path / first_receipt["accessibility_snapshot"]["path"]).read_text())
+    second_receipt_path = tmp_path / second["evidence"]
+    second_receipt = json.loads(second_receipt_path.read_text())
+    second_snapshot_path = tmp_path / second_receipt["accessibility_snapshot"]["path"]
+    second_snapshot = json.loads(second_snapshot_path.read_text())
+    second_snapshot["snapshot"] = first_snapshot["snapshot"]
+    _write_json(second_snapshot_path, second_snapshot)
+    second_receipt["accessibility_snapshot"] = _descriptor(second_snapshot_path, tmp_path)
+    _write_json(second_receipt_path, second_receipt)
+    with pytest.raises(AcceptanceError, match="unique underlying"):
+        _validate_report(
+            path,
+            validate_live_target("http://127.0.0.1:8765", "sandbox-home"),
+            RepositoryCapabilities((), (), (), (), ()),
+            CANDIDATE_SHA,
+        )
+
+
+def test_final_quickstart_fleet503_and_o1_gates_are_mandatory(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("PURSERS_HOME_ACCEPTANCE_MUTATE", MUTATION_OPT_IN)
+    report = _complete_report()
+    report.pop("final_gates")
+    with pytest.raises(AcceptanceError, match="final acceptance gates"):
+        _validate(tmp_path, report)
 
 
 def test_surface_report_binds_fleet_to_distinct_real_origin(

@@ -1,0 +1,3463 @@
+{
+  "approved_35": [
+    "dashboard-ui.logic",
+    "dashboard-ui.shell",
+    "dashboard-ui.state.empty-tickets",
+    "dashboard-ui.state.error",
+    "dashboard-ui.state.loading",
+    "dashboard-ui.state.permission-denied",
+    "dashboard-ui.state.search-empty",
+    "dashboard-ui.state.stale",
+    "dashboard-ui.styles",
+    "extension-join.state.bridge-missing",
+    "extension-join.state.error",
+    "extension-join.state.initial",
+    "extension-join.state.joined",
+    "extension-join.state.joining",
+    "extension-join.state.status-empty",
+    "extension-join.state.status-loaded",
+    "extension-join.surface",
+    "fleet-dashboard.state.bounded",
+    "fleet-dashboard.state.edit-paused",
+    "fleet-dashboard.state.empty-agents",
+    "fleet-dashboard.state.empty-centrals",
+    "fleet-dashboard.state.empty-workers",
+    "fleet-dashboard.state.error-board",
+    "fleet-dashboard.state.loading-board",
+    "fleet-dashboard.state.offline",
+    "fleet-dashboard.state.routes-unavailable",
+    "fleet-dashboard.state.truncated-tickets",
+    "fleet-dashboard.surface",
+    "personal-mcp.state.board-empty",
+    "personal-mcp.state.fleet-unavailable",
+    "personal-mcp.state.links-empty",
+    "personal-mcp.state.memory-empty",
+    "personal-mcp.state.not-onboarded",
+    "personal-mcp.state.ticket-not-found",
+    "personal-mcp.surface"
+  ],
+  "final_gates": [
+    {
+      "action": "Navigate to or trigger Quickstart Candidate Flow without relabelling another state.",
+      "evidence_source": "docs/design-home/quickstart.md",
+      "expected_fact": "The final Quickstart flow visibly reaches the exact installed candidate Home.",
+      "id": "final.quickstart-candidate-flow",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the final.quickstart-candidate-flow state on the real aionui surface.",
+      "predicate": {
+        "expected": "Pursers",
+        "name": "required fact: final.quickstart-candidate-flow",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "aionui"
+    },
+    {
+      "action": "Navigate to or trigger Fleet 503 Recovery without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The live Fleet surface visibly reports a 503 dependency failure and a subsequent recovered state.",
+      "id": "final.fleet-503-recovery",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the final.fleet-503-recovery state on the real aionui surface.",
+      "predicate": {
+        "expected": "Recovered",
+        "name": "required fact: final.fleet-503-recovery",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger O1 Readiness Rollback without relabelling another state.",
+      "evidence_source": "docs/design-home/acceptance.md",
+      "expected_fact": "The O1 readiness check and rollback outcome are both visible on the real operations surface.",
+      "id": "final.o1-readiness-rollback",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the final.o1-readiness-rollback state on the real aionui surface.",
+      "predicate": {
+        "expected": "Rollback",
+        "name": "required fact: final.o1-readiness-rollback",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    }
+  ],
+  "inventory": [
+    {
+      "action": "Navigate to or trigger Logic without relabelling another state.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "expected_fact": "The accessibility tree exposes 'Today' for dashboard-ui.logic.",
+      "id": "dashboard-ui.logic",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the dashboard-ui.logic state on the real personal surface.",
+      "predicate": {
+        "expected": "Today",
+        "name": "required fact: dashboard-ui.logic",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "personal"
+    },
+    {
+      "action": "Navigate to or trigger Shell without relabelling another state.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "expected_fact": "The accessibility tree exposes 'On Board Personal' for dashboard-ui.shell.",
+      "id": "dashboard-ui.shell",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the dashboard-ui.shell state on the real personal surface.",
+      "predicate": {
+        "expected": "On Board Personal",
+        "name": "required fact: dashboard-ui.shell",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "personal"
+    },
+    {
+      "action": "Navigate to or trigger Empty Tickets without relabelling another state.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "expected_fact": "The accessibility tree exposes 'No current work' for dashboard-ui.state.empty-tickets.",
+      "id": "dashboard-ui.state.empty-tickets",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the dashboard-ui.state.empty-tickets state on the real personal surface.",
+      "predicate": {
+        "expected": "No current work",
+        "name": "required fact: dashboard-ui.state.empty-tickets",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "personal"
+    },
+    {
+      "action": "Navigate to or trigger Error without relabelling another state.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "expected_fact": "The accessibility tree exposes 'Disconnected' for dashboard-ui.state.error.",
+      "id": "dashboard-ui.state.error",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the dashboard-ui.state.error state on the real personal surface.",
+      "predicate": {
+        "expected": "Disconnected",
+        "name": "required fact: dashboard-ui.state.error",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "personal"
+    },
+    {
+      "action": "Navigate to or trigger Loading without relabelling another state.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "expected_fact": "The accessibility tree exposes 'Loading' for dashboard-ui.state.loading.",
+      "id": "dashboard-ui.state.loading",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the dashboard-ui.state.loading state on the real personal surface.",
+      "predicate": {
+        "expected": "Loading",
+        "name": "required fact: dashboard-ui.state.loading",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "personal"
+    },
+    {
+      "action": "Navigate to or trigger Permission Denied without relabelling another state.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "expected_fact": "The accessibility tree exposes 'Permission denied' for dashboard-ui.state.permission-denied.",
+      "id": "dashboard-ui.state.permission-denied",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the dashboard-ui.state.permission-denied state on the real personal surface.",
+      "predicate": {
+        "expected": "Permission denied",
+        "name": "required fact: dashboard-ui.state.permission-denied",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "personal"
+    },
+    {
+      "action": "Navigate to or trigger Search Empty without relabelling another state.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "expected_fact": "The accessibility tree exposes 'No results' for dashboard-ui.state.search-empty.",
+      "id": "dashboard-ui.state.search-empty",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the dashboard-ui.state.search-empty state on the real personal surface.",
+      "predicate": {
+        "expected": "No results",
+        "name": "required fact: dashboard-ui.state.search-empty",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "personal"
+    },
+    {
+      "action": "Navigate to or trigger Stale without relabelling another state.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "expected_fact": "The accessibility tree exposes 'Stale' for dashboard-ui.state.stale.",
+      "id": "dashboard-ui.state.stale",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the dashboard-ui.state.stale state on the real personal surface.",
+      "predicate": {
+        "expected": "Stale",
+        "name": "required fact: dashboard-ui.state.stale",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "personal"
+    },
+    {
+      "action": "Navigate to or trigger Styles without relabelling another state.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "expected_fact": "The accessibility tree exposes 'On Board Personal' for dashboard-ui.styles.",
+      "id": "dashboard-ui.styles",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the dashboard-ui.styles state on the real personal surface.",
+      "predicate": {
+        "expected": "On Board Personal",
+        "name": "required fact: dashboard-ui.styles",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "personal"
+    },
+    {
+      "action": "Navigate to or trigger Bridge Missing without relabelling another state.",
+      "evidence_source": "tools/aionui-extension/webui/app.js",
+      "expected_fact": "The accessibility tree exposes 'Install the Pursers bridge' for extension-join.state.bridge-missing.",
+      "id": "extension-join.state.bridge-missing",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the extension-join.state.bridge-missing state on the real aionui surface.",
+      "predicate": {
+        "expected": "Install the Pursers bridge",
+        "name": "required fact: extension-join.state.bridge-missing",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "aionui"
+    },
+    {
+      "action": "Navigate to or trigger Error without relabelling another state.",
+      "evidence_source": "tools/aionui-extension/webui/app.js",
+      "expected_fact": "The accessibility tree exposes 'Join failed' for extension-join.state.error.",
+      "id": "extension-join.state.error",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the extension-join.state.error state on the real aionui surface.",
+      "predicate": {
+        "expected": "Join failed",
+        "name": "required fact: extension-join.state.error",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "aionui"
+    },
+    {
+      "action": "Navigate to or trigger Initial without relabelling another state.",
+      "evidence_source": "tools/aionui-extension/webui/app.js",
+      "expected_fact": "The accessibility tree exposes 'Join Pursers' for extension-join.state.initial.",
+      "id": "extension-join.state.initial",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the extension-join.state.initial state on the real aionui surface.",
+      "predicate": {
+        "expected": "Join Pursers",
+        "name": "required fact: extension-join.state.initial",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "aionui"
+    },
+    {
+      "action": "Navigate to or trigger Joined without relabelling another state.",
+      "evidence_source": "tools/aionui-extension/webui/app.js",
+      "expected_fact": "The accessibility tree exposes 'Joined and registered' for extension-join.state.joined.",
+      "id": "extension-join.state.joined",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the extension-join.state.joined state on the real aionui surface.",
+      "predicate": {
+        "expected": "Joined and registered",
+        "name": "required fact: extension-join.state.joined",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "aionui"
+    },
+    {
+      "action": "Navigate to or trigger Joining without relabelling another state.",
+      "evidence_source": "tools/aionui-extension/webui/app.js",
+      "expected_fact": "The accessibility tree exposes 'Joining' for extension-join.state.joining.",
+      "id": "extension-join.state.joining",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the extension-join.state.joining state on the real aionui surface.",
+      "predicate": {
+        "expected": "Joining",
+        "name": "required fact: extension-join.state.joining",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "aionui"
+    },
+    {
+      "action": "Navigate to or trigger Status Empty without relabelling another state.",
+      "evidence_source": "tools/aionui-extension/webui/app.js",
+      "expected_fact": "The accessibility tree exposes 'Join Pursers' for extension-join.state.status-empty.",
+      "id": "extension-join.state.status-empty",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the extension-join.state.status-empty state on the real aionui surface.",
+      "predicate": {
+        "expected": "Join Pursers",
+        "name": "required fact: extension-join.state.status-empty",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "aionui"
+    },
+    {
+      "action": "Navigate to or trigger Status Loaded without relabelling another state.",
+      "evidence_source": "tools/aionui-extension/webui/app.js",
+      "expected_fact": "The accessibility tree exposes 'Board' for extension-join.state.status-loaded.",
+      "id": "extension-join.state.status-loaded",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the extension-join.state.status-loaded state on the real aionui surface.",
+      "predicate": {
+        "expected": "Board",
+        "name": "required fact: extension-join.state.status-loaded",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "aionui"
+    },
+    {
+      "action": "Navigate to or trigger Surface without relabelling another state.",
+      "evidence_source": "tools/aionui-extension/webui/app.js",
+      "expected_fact": "The accessibility tree exposes 'Join Pursers' for extension-join.surface.",
+      "id": "extension-join.surface",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the extension-join.surface state on the real aionui surface.",
+      "predicate": {
+        "expected": "Join Pursers",
+        "name": "required fact: extension-join.surface",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "aionui"
+    },
+    {
+      "action": "Navigate to or trigger Bounded Errors without relabelling another state.",
+      "evidence_source": "tools/aionui-extension/webui/app.js",
+      "expected_fact": "The accessibility tree exposes 'Bounded Errors' for extension.bounded-errors.",
+      "id": "extension.bounded-errors",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the extension.bounded-errors state on the real aionui surface.",
+      "predicate": {
+        "expected": "Bounded Errors",
+        "name": "required fact: extension.bounded-errors",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "aionui"
+    },
+    {
+      "action": "Navigate to or trigger Environment Free MCP Registration without relabelling another state.",
+      "evidence_source": "tools/aionui-extension/webui/app.js",
+      "expected_fact": "The accessibility tree exposes 'Environment Free MCP Registration' for extension.environment-free-mcp-registration.",
+      "id": "extension.environment-free-mcp-registration",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the extension.environment-free-mcp-registration state on the real aionui surface.",
+      "predicate": {
+        "expected": "Environment Free MCP Registration",
+        "name": "required fact: extension.environment-free-mcp-registration",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "aionui"
+    },
+    {
+      "action": "Navigate to or trigger Idempotent Reconnect without relabelling another state.",
+      "evidence_source": "tools/aionui-extension/webui/app.js",
+      "expected_fact": "The accessibility tree exposes 'Idempotent Reconnect' for extension.idempotent-reconnect.",
+      "id": "extension.idempotent-reconnect",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the extension.idempotent-reconnect state on the real aionui surface.",
+      "predicate": {
+        "expected": "Idempotent Reconnect",
+        "name": "required fact: extension.idempotent-reconnect",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "aionui"
+    },
+    {
+      "action": "Navigate to or trigger Join Form without relabelling another state.",
+      "evidence_source": "tools/aionui-extension/webui/app.js",
+      "expected_fact": "The accessibility tree exposes 'Join Form' for extension.join-form.",
+      "id": "extension.join-form",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the extension.join-form state on the real aionui surface.",
+      "predicate": {
+        "expected": "Join Form",
+        "name": "required fact: extension.join-form",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "aionui"
+    },
+    {
+      "action": "Navigate to or trigger Join Progress without relabelling another state.",
+      "evidence_source": "tools/aionui-extension/webui/app.js",
+      "expected_fact": "The accessibility tree exposes 'Join Progress' for extension.join-progress.",
+      "id": "extension.join-progress",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the extension.join-progress state on the real aionui surface.",
+      "predicate": {
+        "expected": "Join Progress",
+        "name": "required fact: extension.join-progress",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "aionui"
+    },
+    {
+      "action": "Navigate to or trigger Redacted Status Card without relabelling another state.",
+      "evidence_source": "tools/aionui-extension/webui/app.js",
+      "expected_fact": "The accessibility tree exposes 'Redacted Status Card' for extension.redacted-status-card.",
+      "id": "extension.redacted-status-card",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the extension.redacted-status-card state on the real aionui surface.",
+      "predicate": {
+        "expected": "Redacted Status Card",
+        "name": "required fact: extension.redacted-status-card",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "aionui"
+    },
+    {
+      "action": "Navigate to or trigger Reviewer Preset Claude without relabelling another state.",
+      "evidence_source": "tools/aionui-extension/webui/app.js",
+      "expected_fact": "The accessibility tree exposes 'Reviewer Preset Claude' for extension.reviewer-preset-claude.",
+      "id": "extension.reviewer-preset-claude",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the extension.reviewer-preset-claude state on the real aionui surface.",
+      "predicate": {
+        "expected": "Reviewer Preset Claude",
+        "name": "required fact: extension.reviewer-preset-claude",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "aionui"
+    },
+    {
+      "action": "Navigate to or trigger Reviewer Preset Codex without relabelling another state.",
+      "evidence_source": "tools/aionui-extension/webui/app.js",
+      "expected_fact": "The accessibility tree exposes 'Reviewer Preset Codex' for extension.reviewer-preset-codex.",
+      "id": "extension.reviewer-preset-codex",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the extension.reviewer-preset-codex state on the real aionui surface.",
+      "predicate": {
+        "expected": "Reviewer Preset Codex",
+        "name": "required fact: extension.reviewer-preset-codex",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "aionui"
+    },
+    {
+      "action": "Navigate to or trigger Settings Navigation without relabelling another state.",
+      "evidence_source": "tools/aionui-extension/webui/app.js",
+      "expected_fact": "The accessibility tree exposes 'Settings Navigation' for extension.settings-navigation.",
+      "id": "extension.settings-navigation",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the extension.settings-navigation state on the real aionui surface.",
+      "predicate": {
+        "expected": "Settings Navigation",
+        "name": "required fact: extension.settings-navigation",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "aionui"
+    },
+    {
+      "action": "Navigate to or trigger Worker Preset Claude without relabelling another state.",
+      "evidence_source": "tools/aionui-extension/webui/app.js",
+      "expected_fact": "The accessibility tree exposes 'Worker Preset Claude' for extension.worker-preset-claude.",
+      "id": "extension.worker-preset-claude",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the extension.worker-preset-claude state on the real aionui surface.",
+      "predicate": {
+        "expected": "Worker Preset Claude",
+        "name": "required fact: extension.worker-preset-claude",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "aionui"
+    },
+    {
+      "action": "Navigate to or trigger Worker Preset Codex without relabelling another state.",
+      "evidence_source": "tools/aionui-extension/webui/app.js",
+      "expected_fact": "The accessibility tree exposes 'Worker Preset Codex' for extension.worker-preset-codex.",
+      "id": "extension.worker-preset-codex",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the extension.worker-preset-codex state on the real aionui surface.",
+      "predicate": {
+        "expected": "Worker Preset Codex",
+        "name": "required fact: extension.worker-preset-codex",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "aionui"
+    },
+    {
+      "action": "Navigate to or trigger Bounded without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'bounded view' for fleet-dashboard.state.bounded.",
+      "id": "fleet-dashboard.state.bounded",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet-dashboard.state.bounded state on the real fleet surface.",
+      "predicate": {
+        "expected": "bounded view",
+        "name": "required fact: fleet-dashboard.state.bounded",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Edit Paused without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'Refresh paused' for fleet-dashboard.state.edit-paused.",
+      "id": "fleet-dashboard.state.edit-paused",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet-dashboard.state.edit-paused state on the real fleet surface.",
+      "predicate": {
+        "expected": "Refresh paused",
+        "name": "required fact: fleet-dashboard.state.edit-paused",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Empty Agents without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'No active agents available' for fleet-dashboard.state.empty-agents.",
+      "id": "fleet-dashboard.state.empty-agents",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet-dashboard.state.empty-agents state on the real fleet surface.",
+      "predicate": {
+        "expected": "No active agents available",
+        "name": "required fact: fleet-dashboard.state.empty-agents",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Empty Centrals without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'No centrals' for fleet-dashboard.state.empty-centrals.",
+      "id": "fleet-dashboard.state.empty-centrals",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet-dashboard.state.empty-centrals state on the real fleet surface.",
+      "predicate": {
+        "expected": "No centrals",
+        "name": "required fact: fleet-dashboard.state.empty-centrals",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Empty Workers without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'No API workers configured' for fleet-dashboard.state.empty-workers.",
+      "id": "fleet-dashboard.state.empty-workers",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet-dashboard.state.empty-workers state on the real fleet surface.",
+      "predicate": {
+        "expected": "No API workers configured",
+        "name": "required fact: fleet-dashboard.state.empty-workers",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Error Board without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'Board detail unavailable' for fleet-dashboard.state.error-board.",
+      "id": "fleet-dashboard.state.error-board",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet-dashboard.state.error-board state on the real fleet surface.",
+      "predicate": {
+        "expected": "Board detail unavailable",
+        "name": "required fact: fleet-dashboard.state.error-board",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Loading Board without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'Loading board detail' for fleet-dashboard.state.loading-board.",
+      "id": "fleet-dashboard.state.loading-board",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet-dashboard.state.loading-board state on the real fleet surface.",
+      "predicate": {
+        "expected": "Loading board detail",
+        "name": "required fact: fleet-dashboard.state.loading-board",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Offline without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'Offline' for fleet-dashboard.state.offline.",
+      "id": "fleet-dashboard.state.offline",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet-dashboard.state.offline state on the real fleet surface.",
+      "predicate": {
+        "expected": "Offline",
+        "name": "required fact: fleet-dashboard.state.offline",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Routes Unavailable without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'Routes source unavailable' for fleet-dashboard.state.routes-unavailable.",
+      "id": "fleet-dashboard.state.routes-unavailable",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet-dashboard.state.routes-unavailable state on the real fleet surface.",
+      "predicate": {
+        "expected": "Routes source unavailable",
+        "name": "required fact: fleet-dashboard.state.routes-unavailable",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Truncated Tickets without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'tickets shown' for fleet-dashboard.state.truncated-tickets.",
+      "id": "fleet-dashboard.state.truncated-tickets",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet-dashboard.state.truncated-tickets state on the real fleet surface.",
+      "predicate": {
+        "expected": "tickets shown",
+        "name": "required fact: fleet-dashboard.state.truncated-tickets",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Surface without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'Pursers Fleet' for fleet-dashboard.surface.",
+      "id": "fleet-dashboard.surface",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet-dashboard.surface state on the real fleet surface.",
+      "predicate": {
+        "expected": "Pursers Fleet",
+        "name": "required fact: fleet-dashboard.surface",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Active Ticket Rows without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'Active Ticket Rows' for fleet.active-ticket-rows.",
+      "id": "fleet.active-ticket-rows",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.active-ticket-rows state on the real fleet surface.",
+      "predicate": {
+        "expected": "Active Ticket Rows",
+        "name": "required fact: fleet.active-ticket-rows",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Add Project Authorization Error without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'Add Project Authorization Error' for fleet.add-project-authorization-error.",
+      "id": "fleet.add-project-authorization-error",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.add-project-authorization-error state on the real fleet surface.",
+      "predicate": {
+        "expected": "Add Project Authorization Error",
+        "name": "required fact: fleet.add-project-authorization-error",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Add Project Board without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'Add Project Board' for fleet.add-project-board.",
+      "id": "fleet.add-project-board",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.add-project-board state on the real fleet surface.",
+      "predicate": {
+        "expected": "Add Project Board",
+        "name": "required fact: fleet.add-project-board",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Add Project Clone Steps without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'Add Project Clone Steps' for fleet.add-project-clone-steps.",
+      "id": "fleet.add-project-clone-steps",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.add-project-clone-steps state on the real fleet surface.",
+      "predicate": {
+        "expected": "Add Project Clone Steps",
+        "name": "required fact: fleet.add-project-clone-steps",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Add Project Idempotent Rerun without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'Add Project Idempotent Rerun' for fleet.add-project-idempotent-rerun.",
+      "id": "fleet.add-project-idempotent-rerun",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.add-project-idempotent-rerun state on the real fleet surface.",
+      "predicate": {
+        "expected": "Add Project Idempotent Rerun",
+        "name": "required fact: fleet.add-project-idempotent-rerun",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Add Project One Time Doors without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'Add Project One Time Doors' for fleet.add-project-one-time-doors.",
+      "id": "fleet.add-project-one-time-doors",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.add-project-one-time-doors state on the real fleet surface.",
+      "predicate": {
+        "expected": "Add Project One Time Doors",
+        "name": "required fact: fleet.add-project-one-time-doors",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Add Project Partial Failure without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'Add Project Partial Failure' for fleet.add-project-partial-failure.",
+      "id": "fleet.add-project-partial-failure",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.add-project-partial-failure state on the real fleet surface.",
+      "predicate": {
+        "expected": "Add Project Partial Failure",
+        "name": "required fact: fleet.add-project-partial-failure",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Add Project Policy without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'Add Project Policy' for fleet.add-project-policy.",
+      "id": "fleet.add-project-policy",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.add-project-policy state on the real fleet surface.",
+      "predicate": {
+        "expected": "Add Project Policy",
+        "name": "required fact: fleet.add-project-policy",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Add Project Principals without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'Add Project Principals' for fleet.add-project-principals.",
+      "id": "fleet.add-project-principals",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.add-project-principals state on the real fleet surface.",
+      "predicate": {
+        "expected": "Add Project Principals",
+        "name": "required fact: fleet.add-project-principals",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Add Project Registry without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'Add Project Registry' for fleet.add-project-registry.",
+      "id": "fleet.add-project-registry",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.add-project-registry state on the real fleet surface.",
+      "predicate": {
+        "expected": "Add Project Registry",
+        "name": "required fact: fleet.add-project-registry",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Agent Current Claims without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'Agent Current Claims' for fleet.agent-current-claims.",
+      "id": "fleet.agent-current-claims",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.agent-current-claims state on the real fleet surface.",
+      "predicate": {
+        "expected": "Agent Current Claims",
+        "name": "required fact: fleet.agent-current-claims",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Agent Duplicate Names without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'Agent Duplicate Names' for fleet.agent-duplicate-names.",
+      "id": "fleet.agent-duplicate-names",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.agent-duplicate-names state on the real fleet surface.",
+      "predicate": {
+        "expected": "Agent Duplicate Names",
+        "name": "required fact: fleet.agent-duplicate-names",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Agent Pool without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'Agent Pool' for fleet.agent-pool.",
+      "id": "fleet.agent-pool",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.agent-pool state on the real fleet surface.",
+      "predicate": {
+        "expected": "Agent Pool",
+        "name": "required fact: fleet.agent-pool",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Agent Retired Stale Drawer without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'Agent Retired Stale Drawer' for fleet.agent-retired-stale-drawer.",
+      "id": "fleet.agent-retired-stale-drawer",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.agent-retired-stale-drawer state on the real fleet surface.",
+      "predicate": {
+        "expected": "Agent Retired Stale Drawer",
+        "name": "required fact: fleet.agent-retired-stale-drawer",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Board Cards without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'Board Cards' for fleet.board-cards.",
+      "id": "fleet.board-cards",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.board-cards state on the real fleet surface.",
+      "predicate": {
+        "expected": "Board Cards",
+        "name": "required fact: fleet.board-cards",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Board Detail Activity without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'Board Detail Activity' for fleet.board-detail-activity.",
+      "id": "fleet.board-detail-activity",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.board-detail-activity state on the real fleet surface.",
+      "predicate": {
+        "expected": "Board Detail Activity",
+        "name": "required fact: fleet.board-detail-activity",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Board Detail Metadata without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'Board Detail Metadata' for fleet.board-detail-metadata.",
+      "id": "fleet.board-detail-metadata",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.board-detail-metadata state on the real fleet surface.",
+      "predicate": {
+        "expected": "Board Detail Metadata",
+        "name": "required fact: fleet.board-detail-metadata",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Board Detail Truncation without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'Board Detail Truncation' for fleet.board-detail-truncation.",
+      "id": "fleet.board-detail-truncation",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.board-detail-truncation state on the real fleet surface.",
+      "predicate": {
+        "expected": "Board Detail Truncation",
+        "name": "required fact: fleet.board-detail-truncation",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Central Availability Isolation without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'Central Availability Isolation' for fleet.central-availability-isolation.",
+      "id": "fleet.central-availability-isolation",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.central-availability-isolation state on the real fleet surface.",
+      "predicate": {
+        "expected": "Central Availability Isolation",
+        "name": "required fact: fleet.central-availability-isolation",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Config Add Update Preview without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'Config Add Update Preview' for fleet.config-add-update-preview.",
+      "id": "fleet.config-add-update-preview",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.config-add-update-preview state on the real fleet surface.",
+      "predicate": {
+        "expected": "Config Add Update Preview",
+        "name": "required fact: fleet.config-add-update-preview",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Config Bridge Versions without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'Config Bridge Versions' for fleet.config-bridge-versions.",
+      "id": "fleet.config-bridge-versions",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.config-bridge-versions state on the real fleet surface.",
+      "predicate": {
+        "expected": "Config Bridge Versions",
+        "name": "required fact: fleet.config-bridge-versions",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Config Current Offers without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'Config Current Offers' for fleet.config-current-offers.",
+      "id": "fleet.config-current-offers",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.config-current-offers state on the real fleet surface.",
+      "predicate": {
+        "expected": "Config Current Offers",
+        "name": "required fact: fleet.config-current-offers",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Config Discovery Import Conflicts without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'Config Discovery Import Conflicts' for fleet.config-discovery-import-conflicts.",
+      "id": "fleet.config-discovery-import-conflicts",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.config-discovery-import-conflicts state on the real fleet surface.",
+      "predicate": {
+        "expected": "Config Discovery Import Conflicts",
+        "name": "required fact: fleet.config-discovery-import-conflicts",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Config Dispatch Policy Gaps History without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'Config Dispatch Policy Gaps History' for fleet.config-dispatch-policy-gaps-history.",
+      "id": "fleet.config-dispatch-policy-gaps-history",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.config-dispatch-policy-gaps-history state on the real fleet surface.",
+      "predicate": {
+        "expected": "Config Dispatch Policy Gaps History",
+        "name": "required fact: fleet.config-dispatch-policy-gaps-history",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Config Doctor without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'Config Doctor' for fleet.config-doctor.",
+      "id": "fleet.config-doctor",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.config-doctor state on the real fleet surface.",
+      "predicate": {
+        "expected": "Config Doctor",
+        "name": "required fact: fleet.config-doctor",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Config Exact Diff Confirmation without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'Config Exact Diff Confirmation' for fleet.config-exact-diff-confirmation.",
+      "id": "fleet.config-exact-diff-confirmation",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.config-exact-diff-confirmation state on the real fleet surface.",
+      "predicate": {
+        "expected": "Config Exact Diff Confirmation",
+        "name": "required fact: fleet.config-exact-diff-confirmation",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Config Registry Worktrees without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'Config Registry Worktrees' for fleet.config-registry-worktrees.",
+      "id": "fleet.config-registry-worktrees",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.config-registry-worktrees state on the real fleet surface.",
+      "predicate": {
+        "expected": "Config Registry Worktrees",
+        "name": "required fact: fleet.config-registry-worktrees",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Config Seat Inventory without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'Config Seat Inventory' for fleet.config-seat-inventory.",
+      "id": "fleet.config-seat-inventory",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.config-seat-inventory state on the real fleet surface.",
+      "predicate": {
+        "expected": "Config Seat Inventory",
+        "name": "required fact: fleet.config-seat-inventory",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Config Tier Skill Role Capabilities without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'Config Tier Skill Role Capabilities' for fleet.config-tier-skill-role-capabilities.",
+      "id": "fleet.config-tier-skill-role-capabilities",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.config-tier-skill-role-capabilities state on the real fleet surface.",
+      "predicate": {
+        "expected": "Config Tier Skill Role Capabilities",
+        "name": "required fact: fleet.config-tier-skill-role-capabilities",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Coordinator Configuration without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'Coordinator Configuration' for fleet.coordinator-configuration.",
+      "id": "fleet.coordinator-configuration",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.coordinator-configuration state on the real fleet surface.",
+      "predicate": {
+        "expected": "Coordinator Configuration",
+        "name": "required fact: fleet.coordinator-configuration",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Default Central Aliases without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'Default Central Aliases' for fleet.default-central-aliases.",
+      "id": "fleet.default-central-aliases",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.default-central-aliases state on the real fleet surface.",
+      "predicate": {
+        "expected": "Default Central Aliases",
+        "name": "required fact: fleet.default-central-aliases",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Density without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'Density' for fleet.density.",
+      "id": "fleet.density",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.density state on the real fleet surface.",
+      "predicate": {
+        "expected": "Density",
+        "name": "required fact: fleet.density",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Doors Connected Seats without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'Doors Connected Seats' for fleet.doors-connected-seats.",
+      "id": "fleet.doors-connected-seats",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.doors-connected-seats state on the real fleet surface.",
+      "predicate": {
+        "expected": "Doors Connected Seats",
+        "name": "required fact: fleet.doors-connected-seats",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Doors Copy without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'Doors Copy' for fleet.doors-copy.",
+      "id": "fleet.doors-copy",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.doors-copy state on the real fleet surface.",
+      "predicate": {
+        "expected": "Doors Copy",
+        "name": "required fact: fleet.doors-copy",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Doors Disabled without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'Doors Disabled' for fleet.doors-disabled.",
+      "id": "fleet.doors-disabled",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.doors-disabled state on the real fleet surface.",
+      "predicate": {
+        "expected": "Doors Disabled",
+        "name": "required fact: fleet.doors-disabled",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Doors Error without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'Doors Error' for fleet.doors-error.",
+      "id": "fleet.doors-error",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.doors-error state on the real fleet surface.",
+      "predicate": {
+        "expected": "Doors Error",
+        "name": "required fact: fleet.doors-error",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Doors Expiry without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'Doors Expiry' for fleet.doors-expiry.",
+      "id": "fleet.doors-expiry",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.doors-expiry state on the real fleet surface.",
+      "predicate": {
+        "expected": "Doors Expiry",
+        "name": "required fact: fleet.doors-expiry",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Doors Key Id without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'Doors Key Id' for fleet.doors-key-id.",
+      "id": "fleet.doors-key-id",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.doors-key-id state on the real fleet surface.",
+      "predicate": {
+        "expected": "Doors Key Id",
+        "name": "required fact: fleet.doors-key-id",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Doors Project Rows without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'Doors Project Rows' for fleet.doors-project-rows.",
+      "id": "fleet.doors-project-rows",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.doors-project-rows state on the real fleet surface.",
+      "predicate": {
+        "expected": "Doors Project Rows",
+        "name": "required fact: fleet.doors-project-rows",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Doors Rotation Warning without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'Doors Rotation Warning' for fleet.doors-rotation-warning.",
+      "id": "fleet.doors-rotation-warning",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.doors-rotation-warning state on the real fleet surface.",
+      "predicate": {
+        "expected": "Doors Rotation Warning",
+        "name": "required fact: fleet.doors-rotation-warning",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Doors Secret Free Output without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'Doors Secret Free Output' for fleet.doors-secret-free-output.",
+      "id": "fleet.doors-secret-free-output",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.doors-secret-free-output state on the real fleet surface.",
+      "predicate": {
+        "expected": "Doors Secret Free Output",
+        "name": "required fact: fleet.doors-secret-free-output",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Doors Unconfigured without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'Doors Unconfigured' for fleet.doors-unconfigured.",
+      "id": "fleet.doors-unconfigured",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.doors-unconfigured state on the real fleet surface.",
+      "predicate": {
+        "expected": "Doors Unconfigured",
+        "name": "required fact: fleet.doors-unconfigured",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Findings without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'Findings' for fleet.findings.",
+      "id": "fleet.findings",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.findings state on the real fleet surface.",
+      "predicate": {
+        "expected": "Findings",
+        "name": "required fact: fleet.findings",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Hub Agents without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'Hub Agents' for fleet.hub-agents.",
+      "id": "fleet.hub-agents",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.hub-agents state on the real fleet surface.",
+      "predicate": {
+        "expected": "Hub Agents",
+        "name": "required fact: fleet.hub-agents",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Hub Boards without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'Hub Boards' for fleet.hub-boards.",
+      "id": "fleet.hub-boards",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.hub-boards state on the real fleet surface.",
+      "predicate": {
+        "expected": "Hub Boards",
+        "name": "required fact: fleet.hub-boards",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Hub Operations without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'Hub Operations' for fleet.hub-operations.",
+      "id": "fleet.hub-operations",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.hub-operations state on the real fleet surface.",
+      "predicate": {
+        "expected": "Hub Operations",
+        "name": "required fact: fleet.hub-operations",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Hub Overview without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'Hub Overview' for fleet.hub-overview.",
+      "id": "fleet.hub-overview",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.hub-overview state on the real fleet surface.",
+      "predicate": {
+        "expected": "Hub Overview",
+        "name": "required fact: fleet.hub-overview",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Intake without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'Intake' for fleet.intake.",
+      "id": "fleet.intake",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.intake state on the real fleet surface.",
+      "predicate": {
+        "expected": "Intake",
+        "name": "required fact: fleet.intake",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Keyboard Help without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'Keyboard Help' for fleet.keyboard-help.",
+      "id": "fleet.keyboard-help",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.keyboard-help state on the real fleet surface.",
+      "predicate": {
+        "expected": "Keyboard Help",
+        "name": "required fact: fleet.keyboard-help",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Operations Disabled Controls without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'Operations Disabled Controls' for fleet.operations-disabled-controls.",
+      "id": "fleet.operations-disabled-controls",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.operations-disabled-controls state on the real fleet surface.",
+      "predicate": {
+        "expected": "Operations Disabled Controls",
+        "name": "required fact: fleet.operations-disabled-controls",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Operations Job Progress without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'Operations Job Progress' for fleet.operations-job-progress.",
+      "id": "fleet.operations-job-progress",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.operations-job-progress state on the real fleet surface.",
+      "predicate": {
+        "expected": "Operations Job Progress",
+        "name": "required fact: fleet.operations-job-progress",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Operations Job Result without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'Operations Job Result' for fleet.operations-job-result.",
+      "id": "fleet.operations-job-result",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.operations-job-result state on the real fleet surface.",
+      "predicate": {
+        "expected": "Operations Job Result",
+        "name": "required fact: fleet.operations-job-result",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Operations Rollback Failure without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'Operations Rollback Failure' for fleet.operations-rollback-failure.",
+      "id": "fleet.operations-rollback-failure",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.operations-rollback-failure state on the real fleet surface.",
+      "predicate": {
+        "expected": "Operations Rollback Failure",
+        "name": "required fact: fleet.operations-rollback-failure",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Operations Unavailable Services without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'Operations Unavailable Services' for fleet.operations-unavailable-services.",
+      "id": "fleet.operations-unavailable-services",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.operations-unavailable-services state on the real fleet surface.",
+      "predicate": {
+        "expected": "Operations Unavailable Services",
+        "name": "required fact: fleet.operations-unavailable-services",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Pool Available without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'Pool Available' for fleet.pool-available.",
+      "id": "fleet.pool-available",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.pool-available state on the real fleet surface.",
+      "predicate": {
+        "expected": "Pool Available",
+        "name": "required fact: fleet.pool-available",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Pool Busy without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'Pool Busy' for fleet.pool-busy.",
+      "id": "fleet.pool-busy",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.pool-busy state on the real fleet surface.",
+      "predicate": {
+        "expected": "Pool Busy",
+        "name": "required fact: fleet.pool-busy",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Pool Online without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'Pool Online' for fleet.pool-online.",
+      "id": "fleet.pool-online",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.pool-online state on the real fleet surface.",
+      "predicate": {
+        "expected": "Pool Online",
+        "name": "required fact: fleet.pool-online",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Pool Stale without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'Pool Stale' for fleet.pool-stale.",
+      "id": "fleet.pool-stale",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.pool-stale state on the real fleet surface.",
+      "predicate": {
+        "expected": "Pool Stale",
+        "name": "required fact: fleet.pool-stale",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Protocol Overhead without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'Protocol Overhead' for fleet.protocol-overhead.",
+      "id": "fleet.protocol-overhead",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.protocol-overhead state on the real fleet surface.",
+      "predicate": {
+        "expected": "Protocol Overhead",
+        "name": "required fact: fleet.protocol-overhead",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Refresh Pause Resume without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'Refresh Pause Resume' for fleet.refresh-pause-resume.",
+      "id": "fleet.refresh-pause-resume",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.refresh-pause-resume state on the real fleet surface.",
+      "predicate": {
+        "expected": "Refresh Pause Resume",
+        "name": "required fact: fleet.refresh-pause-resume",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Release Central without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'Release Central' for fleet.release-central.",
+      "id": "fleet.release-central",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.release-central state on the real fleet surface.",
+      "predicate": {
+        "expected": "Release Central",
+        "name": "required fact: fleet.release-central",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Release CI without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'Release CI' for fleet.release-ci.",
+      "id": "fleet.release-ci",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.release-ci state on the real fleet surface.",
+      "predicate": {
+        "expected": "Release CI",
+        "name": "required fact: fleet.release-ci",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Release Github without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'Release Github' for fleet.release-github.",
+      "id": "fleet.release-github",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.release-github state on the real fleet surface.",
+      "predicate": {
+        "expected": "Release Github",
+        "name": "required fact: fleet.release-github",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Release Immutable Confirmation Plan without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'Release Immutable Confirmation Plan' for fleet.release-immutable-confirmation-plan.",
+      "id": "fleet.release-immutable-confirmation-plan",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.release-immutable-confirmation-plan state on the real fleet surface.",
+      "predicate": {
+        "expected": "Release Immutable Confirmation Plan",
+        "name": "required fact: fleet.release-immutable-confirmation-plan",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Release Manifest without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'Release Manifest' for fleet.release-manifest.",
+      "id": "fleet.release-manifest",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.release-manifest state on the real fleet surface.",
+      "predicate": {
+        "expected": "Release Manifest",
+        "name": "required fact: fleet.release-manifest",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Release PyPI without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'Release PyPI' for fleet.release-pypi.",
+      "id": "fleet.release-pypi",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.release-pypi state on the real fleet surface.",
+      "predicate": {
+        "expected": "Release PyPI",
+        "name": "required fact: fleet.release-pypi",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Release Restart Checklist without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'Release Restart Checklist' for fleet.release-restart-checklist.",
+      "id": "fleet.release-restart-checklist",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.release-restart-checklist state on the real fleet surface.",
+      "predicate": {
+        "expected": "Release Restart Checklist",
+        "name": "required fact: fleet.release-restart-checklist",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Release Tag without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'Release Tag' for fleet.release-tag.",
+      "id": "fleet.release-tag",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.release-tag state on the real fleet surface.",
+      "predicate": {
+        "expected": "Release Tag",
+        "name": "required fact: fleet.release-tag",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Search No Results without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'Search No Results' for fleet.search-no-results.",
+      "id": "fleet.search-no-results",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.search-no-results state on the real fleet surface.",
+      "predicate": {
+        "expected": "Search No Results",
+        "name": "required fact: fleet.search-no-results",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Search Results without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'Search Results' for fleet.search-results.",
+      "id": "fleet.search-results",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.search-results state on the real fleet surface.",
+      "predicate": {
+        "expected": "Search Results",
+        "name": "required fact: fleet.search-results",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Tab Changes without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'Tab Changes' for fleet.tab-changes.",
+      "id": "fleet.tab-changes",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.tab-changes state on the real fleet surface.",
+      "predicate": {
+        "expected": "Tab Changes",
+        "name": "required fact: fleet.tab-changes",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Tab Flow without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'Tab Flow' for fleet.tab-flow.",
+      "id": "fleet.tab-flow",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.tab-flow state on the real fleet surface.",
+      "predicate": {
+        "expected": "Tab Flow",
+        "name": "required fact: fleet.tab-flow",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Tab Routes without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'Tab Routes' for fleet.tab-routes.",
+      "id": "fleet.tab-routes",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.tab-routes state on the real fleet surface.",
+      "predicate": {
+        "expected": "Tab Routes",
+        "name": "required fact: fleet.tab-routes",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Tab Tickets without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'Tab Tickets' for fleet.tab-tickets.",
+      "id": "fleet.tab-tickets",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.tab-tickets state on the real fleet surface.",
+      "predicate": {
+        "expected": "Tab Tickets",
+        "name": "required fact: fleet.tab-tickets",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Tab Timeline without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'Tab Timeline' for fleet.tab-timeline.",
+      "id": "fleet.tab-timeline",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.tab-timeline state on the real fleet surface.",
+      "predicate": {
+        "expected": "Tab Timeline",
+        "name": "required fact: fleet.tab-timeline",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Theme without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'Theme' for fleet.theme.",
+      "id": "fleet.theme",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.theme state on the real fleet surface.",
+      "predicate": {
+        "expected": "Theme",
+        "name": "required fact: fleet.theme",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Ticket Counts without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'Ticket Counts' for fleet.ticket-counts.",
+      "id": "fleet.ticket-counts",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.ticket-counts state on the real fleet surface.",
+      "predicate": {
+        "expected": "Ticket Counts",
+        "name": "required fact: fleet.ticket-counts",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Unknown Route Recovery without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'Unknown Route Recovery' for fleet.unknown-route-recovery.",
+      "id": "fleet.unknown-route-recovery",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.unknown-route-recovery state on the real fleet surface.",
+      "predicate": {
+        "expected": "Unknown Route Recovery",
+        "name": "required fact: fleet.unknown-route-recovery",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Updated State without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'Updated State' for fleet.updated-state.",
+      "id": "fleet.updated-state",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.updated-state state on the real fleet surface.",
+      "predicate": {
+        "expected": "Updated State",
+        "name": "required fact: fleet.updated-state",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Worker Management without relabelling another state.",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
+      "expected_fact": "The accessibility tree exposes 'Worker Management' for fleet.worker-management.",
+      "id": "fleet.worker-management",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.worker-management state on the real fleet surface.",
+      "predicate": {
+        "expected": "Worker Management",
+        "name": "required fact: fleet.worker-management",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "fleet"
+    },
+    {
+      "action": "Navigate to or trigger Board Empty without relabelling another state.",
+      "evidence_source": "packages/personal/src/pursers_personal/apps_server.py",
+      "expected_fact": "The accessibility tree exposes 'No current work' for personal-mcp.state.board-empty.",
+      "id": "personal-mcp.state.board-empty",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the personal-mcp.state.board-empty state on the real personal surface.",
+      "predicate": {
+        "expected": "No current work",
+        "name": "required fact: personal-mcp.state.board-empty",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "personal"
+    },
+    {
+      "action": "Navigate to or trigger Fleet Unavailable without relabelling another state.",
+      "evidence_source": "packages/personal/src/pursers_personal/apps_server.py",
+      "expected_fact": "The accessibility tree exposes 'Fleet unavailable' for personal-mcp.state.fleet-unavailable.",
+      "id": "personal-mcp.state.fleet-unavailable",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the personal-mcp.state.fleet-unavailable state on the real personal surface.",
+      "predicate": {
+        "expected": "Fleet unavailable",
+        "name": "required fact: personal-mcp.state.fleet-unavailable",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "personal"
+    },
+    {
+      "action": "Navigate to or trigger Links Empty without relabelling another state.",
+      "evidence_source": "packages/personal/src/pursers_personal/apps_server.py",
+      "expected_fact": "The accessibility tree exposes 'No links' for personal-mcp.state.links-empty.",
+      "id": "personal-mcp.state.links-empty",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the personal-mcp.state.links-empty state on the real personal surface.",
+      "predicate": {
+        "expected": "No links",
+        "name": "required fact: personal-mcp.state.links-empty",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "personal"
+    },
+    {
+      "action": "Navigate to or trigger Memory Empty without relabelling another state.",
+      "evidence_source": "packages/personal/src/pursers_personal/apps_server.py",
+      "expected_fact": "The accessibility tree exposes 'No pinned memory' for personal-mcp.state.memory-empty.",
+      "id": "personal-mcp.state.memory-empty",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the personal-mcp.state.memory-empty state on the real personal surface.",
+      "predicate": {
+        "expected": "No pinned memory",
+        "name": "required fact: personal-mcp.state.memory-empty",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "personal"
+    },
+    {
+      "action": "Navigate to or trigger Not Onboarded without relabelling another state.",
+      "evidence_source": "packages/personal/src/pursers_personal/apps_server.py",
+      "expected_fact": "The accessibility tree exposes 'Not onboarded' for personal-mcp.state.not-onboarded.",
+      "id": "personal-mcp.state.not-onboarded",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the personal-mcp.state.not-onboarded state on the real personal surface.",
+      "predicate": {
+        "expected": "Not onboarded",
+        "name": "required fact: personal-mcp.state.not-onboarded",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "personal"
+    },
+    {
+      "action": "Navigate to or trigger Ticket Not Found without relabelling another state.",
+      "evidence_source": "packages/personal/src/pursers_personal/apps_server.py",
+      "expected_fact": "The accessibility tree exposes 'Ticket not found' for personal-mcp.state.ticket-not-found.",
+      "id": "personal-mcp.state.ticket-not-found",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the personal-mcp.state.ticket-not-found state on the real personal surface.",
+      "predicate": {
+        "expected": "Ticket not found",
+        "name": "required fact: personal-mcp.state.ticket-not-found",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "personal"
+    },
+    {
+      "action": "Navigate to or trigger Surface without relabelling another state.",
+      "evidence_source": "packages/personal/src/pursers_personal/apps_server.py",
+      "expected_fact": "The accessibility tree exposes 'On Board Personal' for personal-mcp.surface.",
+      "id": "personal-mcp.surface",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the personal-mcp.surface state on the real personal surface.",
+      "predicate": {
+        "expected": "On Board Personal",
+        "name": "required fact: personal-mcp.surface",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "personal"
+    },
+    {
+      "action": "Navigate to or trigger Activity Bounded Feed without relabelling another state.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "expected_fact": "The accessibility tree exposes 'Activity Bounded Feed' for personal.activity-bounded-feed.",
+      "id": "personal.activity-bounded-feed",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the personal.activity-bounded-feed state on the real personal surface.",
+      "predicate": {
+        "expected": "Activity Bounded Feed",
+        "name": "required fact: personal.activity-bounded-feed",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "personal"
+    },
+    {
+      "action": "Navigate to or trigger Activity Cursor without relabelling another state.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "expected_fact": "The accessibility tree exposes 'Activity Cursor' for personal.activity-cursor.",
+      "id": "personal.activity-cursor",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the personal.activity-cursor state on the real personal surface.",
+      "predicate": {
+        "expected": "Activity Cursor",
+        "name": "required fact: personal.activity-cursor",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "personal"
+    },
+    {
+      "action": "Navigate to or trigger Activity Dropped Events without relabelling another state.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "expected_fact": "The accessibility tree exposes 'Activity Dropped Events' for personal.activity-dropped-events.",
+      "id": "personal.activity-dropped-events",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the personal.activity-dropped-events state on the real personal surface.",
+      "predicate": {
+        "expected": "Activity Dropped Events",
+        "name": "required fact: personal.activity-dropped-events",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "personal"
+    },
+    {
+      "action": "Navigate to or trigger Activity Empty without relabelling another state.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "expected_fact": "The accessibility tree exposes 'Activity Empty' for personal.activity-empty.",
+      "id": "personal.activity-empty",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the personal.activity-empty state on the real personal surface.",
+      "predicate": {
+        "expected": "Activity Empty",
+        "name": "required fact: personal.activity-empty",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "personal"
+    },
+    {
+      "action": "Navigate to or trigger Activity Error without relabelling another state.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "expected_fact": "The accessibility tree exposes 'Activity Error' for personal.activity-error.",
+      "id": "personal.activity-error",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the personal.activity-error state on the real personal surface.",
+      "predicate": {
+        "expected": "Activity Error",
+        "name": "required fact: personal.activity-error",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "personal"
+    },
+    {
+      "action": "Navigate to or trigger Activity Has More Resync without relabelling another state.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "expected_fact": "The accessibility tree exposes 'Activity Has More Resync' for personal.activity-has-more-resync.",
+      "id": "personal.activity-has-more-resync",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the personal.activity-has-more-resync state on the real personal surface.",
+      "predicate": {
+        "expected": "Activity Has More Resync",
+        "name": "required fact: personal.activity-has-more-resync",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "personal"
+    },
+    {
+      "action": "Navigate to or trigger Activity Offline without relabelling another state.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "expected_fact": "The accessibility tree exposes 'Activity Offline' for personal.activity-offline.",
+      "id": "personal.activity-offline",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the personal.activity-offline state on the real personal surface.",
+      "predicate": {
+        "expected": "Activity Offline",
+        "name": "required fact: personal.activity-offline",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "personal"
+    },
+    {
+      "action": "Navigate to or trigger Activity Scope without relabelling another state.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "expected_fact": "The accessibility tree exposes 'Activity Scope' for personal.activity-scope.",
+      "id": "personal.activity-scope",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the personal.activity-scope state on the real personal surface.",
+      "predicate": {
+        "expected": "Activity Scope",
+        "name": "required fact: personal.activity-scope",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "personal"
+    },
+    {
+      "action": "Navigate to or trigger Activity Stale without relabelling another state.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "expected_fact": "The accessibility tree exposes 'Activity Stale' for personal.activity-stale.",
+      "id": "personal.activity-stale",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the personal.activity-stale state on the real personal surface.",
+      "predicate": {
+        "expected": "Activity Stale",
+        "name": "required fact: personal.activity-stale",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "personal"
+    },
+    {
+      "action": "Navigate to or trigger Agents Current Ticket without relabelling another state.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "expected_fact": "The accessibility tree exposes 'Agents Current Ticket' for personal.agents-current-ticket.",
+      "id": "personal.agents-current-ticket",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the personal.agents-current-ticket state on the real personal surface.",
+      "predicate": {
+        "expected": "Agents Current Ticket",
+        "name": "required fact: personal.agents-current-ticket",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "personal"
+    },
+    {
+      "action": "Navigate to or trigger Agents Duplicate Identity without relabelling another state.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "expected_fact": "The accessibility tree exposes 'Agents Duplicate Identity' for personal.agents-duplicate-identity.",
+      "id": "personal.agents-duplicate-identity",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the personal.agents-duplicate-identity state on the real personal surface.",
+      "predicate": {
+        "expected": "Agents Duplicate Identity",
+        "name": "required fact: personal.agents-duplicate-identity",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "personal"
+    },
+    {
+      "action": "Navigate to or trigger Agents Duplicate Name without relabelling another state.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "expected_fact": "The accessibility tree exposes 'Agents Duplicate Name' for personal.agents-duplicate-name.",
+      "id": "personal.agents-duplicate-name",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the personal.agents-duplicate-name state on the real personal surface.",
+      "predicate": {
+        "expected": "Agents Duplicate Name",
+        "name": "required fact: personal.agents-duplicate-name",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "personal"
+    },
+    {
+      "action": "Navigate to or trigger Agents Empty without relabelling another state.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "expected_fact": "The accessibility tree exposes 'Agents Empty' for personal.agents-empty.",
+      "id": "personal.agents-empty",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the personal.agents-empty state on the real personal surface.",
+      "predicate": {
+        "expected": "Agents Empty",
+        "name": "required fact: personal.agents-empty",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "personal"
+    },
+    {
+      "action": "Navigate to or trigger Agents Focus without relabelling another state.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "expected_fact": "The accessibility tree exposes 'Agents Focus' for personal.agents-focus.",
+      "id": "personal.agents-focus",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the personal.agents-focus state on the real personal surface.",
+      "predicate": {
+        "expected": "Agents Focus",
+        "name": "required fact: personal.agents-focus",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "personal"
+    },
+    {
+      "action": "Navigate to or trigger Agents Idle Lease without relabelling another state.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "expected_fact": "The accessibility tree exposes 'Agents Idle Lease' for personal.agents-idle-lease.",
+      "id": "personal.agents-idle-lease",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the personal.agents-idle-lease state on the real personal surface.",
+      "predicate": {
+        "expected": "Agents Idle Lease",
+        "name": "required fact: personal.agents-idle-lease",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "personal"
+    },
+    {
+      "action": "Navigate to or trigger Agents Platform without relabelling another state.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "expected_fact": "The accessibility tree exposes 'Agents Platform' for personal.agents-platform.",
+      "id": "personal.agents-platform",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the personal.agents-platform state on the real personal surface.",
+      "predicate": {
+        "expected": "Agents Platform",
+        "name": "required fact: personal.agents-platform",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "personal"
+    },
+    {
+      "action": "Navigate to or trigger Agents Role without relabelling another state.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "expected_fact": "The accessibility tree exposes 'Agents Role' for personal.agents-role.",
+      "id": "personal.agents-role",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the personal.agents-role state on the real personal surface.",
+      "predicate": {
+        "expected": "Agents Role",
+        "name": "required fact: personal.agents-role",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "personal"
+    },
+    {
+      "action": "Navigate to or trigger Agents Stale without relabelling another state.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "expected_fact": "The accessibility tree exposes 'Agents Stale' for personal.agents-stale.",
+      "id": "personal.agents-stale",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the personal.agents-stale state on the real personal surface.",
+      "predicate": {
+        "expected": "Agents Stale",
+        "name": "required fact: personal.agents-stale",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "personal"
+    },
+    {
+      "action": "Navigate to or trigger Agents Total Live without relabelling another state.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "expected_fact": "The accessibility tree exposes 'Agents Total Live' for personal.agents-total-live.",
+      "id": "personal.agents-total-live",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the personal.agents-total-live state on the real personal surface.",
+      "predicate": {
+        "expected": "Agents Total Live",
+        "name": "required fact: personal.agents-total-live",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "personal"
+    },
+    {
+      "action": "Navigate to or trigger Board Identity without relabelling another state.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "expected_fact": "The accessibility tree exposes 'Board Identity' for personal.board-identity.",
+      "id": "personal.board-identity",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the personal.board-identity state on the real personal surface.",
+      "predicate": {
+        "expected": "Board Identity",
+        "name": "required fact: personal.board-identity",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "personal"
+    },
+    {
+      "action": "Navigate to or trigger Connection Banner without relabelling another state.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "expected_fact": "The accessibility tree exposes 'Connection Banner' for personal.connection-banner.",
+      "id": "personal.connection-banner",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the personal.connection-banner state on the real personal surface.",
+      "predicate": {
+        "expected": "Connection Banner",
+        "name": "required fact: personal.connection-banner",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "personal"
+    },
+    {
+      "action": "Navigate to or trigger Data Provenance without relabelling another state.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "expected_fact": "The accessibility tree exposes 'Data Provenance' for personal.data-provenance.",
+      "id": "personal.data-provenance",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the personal.data-provenance state on the real personal surface.",
+      "predicate": {
+        "expected": "Data Provenance",
+        "name": "required fact: personal.data-provenance",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "personal"
+    },
+    {
+      "action": "Navigate to or trigger Fleet Empty without relabelling another state.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "expected_fact": "The accessibility tree exposes 'Fleet Empty' for personal.fleet-empty.",
+      "id": "personal.fleet-empty",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the personal.fleet-empty state on the real personal surface.",
+      "predicate": {
+        "expected": "Fleet Empty",
+        "name": "required fact: personal.fleet-empty",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "personal"
+    },
+    {
+      "action": "Navigate to or trigger Fleet Online Busy Available Stale without relabelling another state.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "expected_fact": "The accessibility tree exposes 'Fleet Online Busy Available Stale' for personal.fleet-online-busy-available-stale.",
+      "id": "personal.fleet-online-busy-available-stale",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the personal.fleet-online-busy-available-stale state on the real personal surface.",
+      "predicate": {
+        "expected": "Fleet Online Busy Available Stale",
+        "name": "required fact: personal.fleet-online-busy-available-stale",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "personal"
+    },
+    {
+      "action": "Navigate to or trigger Fleet Project Seats without relabelling another state.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "expected_fact": "The accessibility tree exposes 'Fleet Project Seats' for personal.fleet-project-seats.",
+      "id": "personal.fleet-project-seats",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the personal.fleet-project-seats state on the real personal surface.",
+      "predicate": {
+        "expected": "Fleet Project Seats",
+        "name": "required fact: personal.fleet-project-seats",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "personal"
+    },
+    {
+      "action": "Navigate to or trigger Fleet Project Ticket Counts without relabelling another state.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "expected_fact": "The accessibility tree exposes 'Fleet Project Ticket Counts' for personal.fleet-project-ticket-counts.",
+      "id": "personal.fleet-project-ticket-counts",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the personal.fleet-project-ticket-counts state on the real personal surface.",
+      "predicate": {
+        "expected": "Fleet Project Ticket Counts",
+        "name": "required fact: personal.fleet-project-ticket-counts",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "personal"
+    },
+    {
+      "action": "Navigate to or trigger Fleet Projects without relabelling another state.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "expected_fact": "The accessibility tree exposes 'Fleet Projects' for personal.fleet-projects.",
+      "id": "personal.fleet-projects",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the personal.fleet-projects state on the real personal surface.",
+      "predicate": {
+        "expected": "Fleet Projects",
+        "name": "required fact: personal.fleet-projects",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "personal"
+    },
+    {
+      "action": "Navigate to or trigger Fleet Registry Warning without relabelling another state.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "expected_fact": "The accessibility tree exposes 'Fleet Registry Warning' for personal.fleet-registry-warning.",
+      "id": "personal.fleet-registry-warning",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the personal.fleet-registry-warning state on the real personal surface.",
+      "predicate": {
+        "expected": "Fleet Registry Warning",
+        "name": "required fact: personal.fleet-registry-warning",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "personal"
+    },
+    {
+      "action": "Navigate to or trigger Fleet Shared Pool without relabelling another state.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "expected_fact": "The accessibility tree exposes 'Fleet Shared Pool' for personal.fleet-shared-pool.",
+      "id": "personal.fleet-shared-pool",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the personal.fleet-shared-pool state on the real personal surface.",
+      "predicate": {
+        "expected": "Fleet Shared Pool",
+        "name": "required fact: personal.fleet-shared-pool",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "personal"
+    },
+    {
+      "action": "Navigate to or trigger Fleet Truncation without relabelling another state.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "expected_fact": "The accessibility tree exposes 'Fleet Truncation' for personal.fleet-truncation.",
+      "id": "personal.fleet-truncation",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the personal.fleet-truncation state on the real personal surface.",
+      "predicate": {
+        "expected": "Fleet Truncation",
+        "name": "required fact: personal.fleet-truncation",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "personal"
+    },
+    {
+      "action": "Navigate to or trigger Fleet Unavailable without relabelling another state.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "expected_fact": "The accessibility tree exposes 'Fleet Unavailable' for personal.fleet-unavailable.",
+      "id": "personal.fleet-unavailable",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the personal.fleet-unavailable state on the real personal surface.",
+      "predicate": {
+        "expected": "Fleet Unavailable",
+        "name": "required fact: personal.fleet-unavailable",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "personal"
+    },
+    {
+      "action": "Navigate to or trigger Health without relabelling another state.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "expected_fact": "The accessibility tree exposes 'Health' for personal.health.",
+      "id": "personal.health",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the personal.health state on the real personal surface.",
+      "predicate": {
+        "expected": "Health",
+        "name": "required fact: personal.health",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "personal"
+    },
+    {
+      "action": "Navigate to or trigger Keyboard Tabs without relabelling another state.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "expected_fact": "The accessibility tree exposes 'Keyboard Tabs' for personal.keyboard-tabs.",
+      "id": "personal.keyboard-tabs",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the personal.keyboard-tabs state on the real personal surface.",
+      "predicate": {
+        "expected": "Keyboard Tabs",
+        "name": "required fact: personal.keyboard-tabs",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "personal"
+    },
+    {
+      "action": "Navigate to or trigger Links Edge Types without relabelling another state.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "expected_fact": "The accessibility tree exposes 'Links Edge Types' for personal.links-edge-types.",
+      "id": "personal.links-edge-types",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the personal.links-edge-types state on the real personal surface.",
+      "predicate": {
+        "expected": "Links Edge Types",
+        "name": "required fact: personal.links-edge-types",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "personal"
+    },
+    {
+      "action": "Navigate to or trigger Links Empty without relabelling another state.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "expected_fact": "The accessibility tree exposes 'Links Empty' for personal.links-empty.",
+      "id": "personal.links-empty",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the personal.links-empty state on the real personal surface.",
+      "predicate": {
+        "expected": "Links Empty",
+        "name": "required fact: personal.links-empty",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "personal"
+    },
+    {
+      "action": "Navigate to or trigger Links Node Edge Totals without relabelling another state.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "expected_fact": "The accessibility tree exposes 'Links Node Edge Totals' for personal.links-node-edge-totals.",
+      "id": "personal.links-node-edge-totals",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the personal.links-node-edge-totals state on the real personal surface.",
+      "predicate": {
+        "expected": "Links Node Edge Totals",
+        "name": "required fact: personal.links-node-edge-totals",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "personal"
+    },
+    {
+      "action": "Navigate to or trigger Links Pinned without relabelling another state.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "expected_fact": "The accessibility tree exposes 'Links Pinned' for personal.links-pinned.",
+      "id": "personal.links-pinned",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the personal.links-pinned state on the real personal surface.",
+      "predicate": {
+        "expected": "Links Pinned",
+        "name": "required fact: personal.links-pinned",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "personal"
+    },
+    {
+      "action": "Navigate to or trigger Links Source Label without relabelling another state.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "expected_fact": "The accessibility tree exposes 'Links Source Label' for personal.links-source-label.",
+      "id": "personal.links-source-label",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the personal.links-source-label state on the real personal surface.",
+      "predicate": {
+        "expected": "Links Source Label",
+        "name": "required fact: personal.links-source-label",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "personal"
+    },
+    {
+      "action": "Navigate to or trigger Links Truncation without relabelling another state.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "expected_fact": "The accessibility tree exposes 'Links Truncation' for personal.links-truncation.",
+      "id": "personal.links-truncation",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the personal.links-truncation state on the real personal surface.",
+      "predicate": {
+        "expected": "Links Truncation",
+        "name": "required fact: personal.links-truncation",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "personal"
+    },
+    {
+      "action": "Navigate to or trigger Links Unavailable without relabelling another state.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "expected_fact": "The accessibility tree exposes 'Links Unavailable' for personal.links-unavailable.",
+      "id": "personal.links-unavailable",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the personal.links-unavailable state on the real personal surface.",
+      "predicate": {
+        "expected": "Links Unavailable",
+        "name": "required fact: personal.links-unavailable",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "personal"
+    },
+    {
+      "action": "Navigate to or trigger Refresh without relabelling another state.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "expected_fact": "The accessibility tree exposes 'Refresh' for personal.refresh.",
+      "id": "personal.refresh",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the personal.refresh state on the real personal surface.",
+      "predicate": {
+        "expected": "Refresh",
+        "name": "required fact: personal.refresh",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "personal"
+    },
+    {
+      "action": "Navigate to or trigger Search No Results without relabelling another state.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "expected_fact": "The accessibility tree exposes 'Search No Results' for personal.search-no-results.",
+      "id": "personal.search-no-results",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the personal.search-no-results state on the real personal surface.",
+      "predicate": {
+        "expected": "Search No Results",
+        "name": "required fact: personal.search-no-results",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "personal"
+    },
+    {
+      "action": "Navigate to or trigger Search Results without relabelling another state.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "expected_fact": "The accessibility tree exposes 'Search Results' for personal.search-results.",
+      "id": "personal.search-results",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the personal.search-results state on the real personal surface.",
+      "predicate": {
+        "expected": "Search Results",
+        "name": "required fact: personal.search-results",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "personal"
+    },
+    {
+      "action": "Navigate to or trigger Source Board Event Feed without relabelling another state.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "expected_fact": "The accessibility tree exposes 'Source Board Event Feed' for personal.source-board-event-feed.",
+      "id": "personal.source-board-event-feed",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the personal.source-board-event-feed state on the real personal surface.",
+      "predicate": {
+        "expected": "Source Board Event Feed",
+        "name": "required fact: personal.source-board-event-feed",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "personal"
+    },
+    {
+      "action": "Navigate to or trigger Source Board Snapshot without relabelling another state.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "expected_fact": "The accessibility tree exposes 'Source Board Snapshot' for personal.source-board-snapshot.",
+      "id": "personal.source-board-snapshot",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the personal.source-board-snapshot state on the real personal surface.",
+      "predicate": {
+        "expected": "Source Board Snapshot",
+        "name": "required fact: personal.source-board-snapshot",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "personal"
+    },
+    {
+      "action": "Navigate to or trigger Source Fleet Snapshot without relabelling another state.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "expected_fact": "The accessibility tree exposes 'Source Fleet Snapshot' for personal.source-fleet-snapshot.",
+      "id": "personal.source-fleet-snapshot",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the personal.source-fleet-snapshot state on the real personal surface.",
+      "predicate": {
+        "expected": "Source Fleet Snapshot",
+        "name": "required fact: personal.source-fleet-snapshot",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "personal"
+    },
+    {
+      "action": "Navigate to or trigger Source Link Snapshot without relabelling another state.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "expected_fact": "The accessibility tree exposes 'Source Link Snapshot' for personal.source-link-snapshot.",
+      "id": "personal.source-link-snapshot",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the personal.source-link-snapshot state on the real personal surface.",
+      "predicate": {
+        "expected": "Source Link Snapshot",
+        "name": "required fact: personal.source-link-snapshot",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "personal"
+    },
+    {
+      "action": "Navigate to or trigger Theme without relabelling another state.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "expected_fact": "The accessibility tree exposes 'Theme' for personal.theme.",
+      "id": "personal.theme",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the personal.theme state on the real personal surface.",
+      "predicate": {
+        "expected": "Theme",
+        "name": "required fact: personal.theme",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "personal"
+    },
+    {
+      "action": "Navigate to or trigger Today Active Agents without relabelling another state.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "expected_fact": "The accessibility tree exposes 'Today Active Agents' for personal.today-active-agents.",
+      "id": "personal.today-active-agents",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the personal.today-active-agents state on the real personal surface.",
+      "predicate": {
+        "expected": "Today Active Agents",
+        "name": "required fact: personal.today-active-agents",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "personal"
+    },
+    {
+      "action": "Navigate to or trigger Today Current Work without relabelling another state.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "expected_fact": "The accessibility tree exposes 'Today Current Work' for personal.today-current-work.",
+      "id": "personal.today-current-work",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the personal.today-current-work state on the real personal surface.",
+      "predicate": {
+        "expected": "Today Current Work",
+        "name": "required fact: personal.today-current-work",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "personal"
+    },
+    {
+      "action": "Navigate to or trigger Today Important Pinned Note without relabelling another state.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "expected_fact": "The accessibility tree exposes 'Today Important Pinned Note' for personal.today-important-pinned-note.",
+      "id": "personal.today-important-pinned-note",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the personal.today-important-pinned-note state on the real personal surface.",
+      "predicate": {
+        "expected": "Today Important Pinned Note",
+        "name": "required fact: personal.today-important-pinned-note",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "personal"
+    },
+    {
+      "action": "Navigate to or trigger Today Latest Handoff without relabelling another state.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "expected_fact": "The accessibility tree exposes 'Today Latest Handoff' for personal.today-latest-handoff.",
+      "id": "personal.today-latest-handoff",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the personal.today-latest-handoff state on the real personal surface.",
+      "predicate": {
+        "expected": "Today Latest Handoff",
+        "name": "required fact: personal.today-latest-handoff",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "personal"
+    },
+    {
+      "action": "Navigate to or trigger Today Recent Activity without relabelling another state.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "expected_fact": "The accessibility tree exposes 'Today Recent Activity' for personal.today-recent-activity.",
+      "id": "personal.today-recent-activity",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the personal.today-recent-activity state on the real personal surface.",
+      "predicate": {
+        "expected": "Today Recent Activity",
+        "name": "required fact: personal.today-recent-activity",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "personal"
+    },
+    {
+      "action": "Navigate to or trigger Today Status Metrics without relabelling another state.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "expected_fact": "The accessibility tree exposes 'Today Status Metrics' for personal.today-status-metrics.",
+      "id": "personal.today-status-metrics",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the personal.today-status-metrics state on the real personal surface.",
+      "predicate": {
+        "expected": "Today Status Metrics",
+        "name": "required fact: personal.today-status-metrics",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "personal"
+    },
+    {
+      "action": "Navigate to or trigger Work Abandonment without relabelling another state.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "expected_fact": "The accessibility tree exposes 'Work Abandonment' for personal.work-abandonment.",
+      "id": "personal.work-abandonment",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the personal.work-abandonment state on the real personal surface.",
+      "predicate": {
+        "expected": "Work Abandonment",
+        "name": "required fact: personal.work-abandonment",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "personal"
+    },
+    {
+      "action": "Navigate to or trigger Work Lease without relabelling another state.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "expected_fact": "The accessibility tree exposes 'Work Lease' for personal.work-lease.",
+      "id": "personal.work-lease",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the personal.work-lease state on the real personal surface.",
+      "predicate": {
+        "expected": "Work Lease",
+        "name": "required fact: personal.work-lease",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "personal"
+    },
+    {
+      "action": "Navigate to or trigger Work No Ticket without relabelling another state.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "expected_fact": "The accessibility tree exposes 'Work No Ticket' for personal.work-no-ticket.",
+      "id": "personal.work-no-ticket",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the personal.work-no-ticket state on the real personal surface.",
+      "predicate": {
+        "expected": "Work No Ticket",
+        "name": "required fact: personal.work-no-ticket",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "personal"
+    },
+    {
+      "action": "Navigate to or trigger Work Ownership without relabelling another state.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "expected_fact": "The accessibility tree exposes 'Work Ownership' for personal.work-ownership.",
+      "id": "personal.work-ownership",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the personal.work-ownership state on the real personal surface.",
+      "predicate": {
+        "expected": "Work Ownership",
+        "name": "required fact: personal.work-ownership",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "personal"
+    },
+    {
+      "action": "Navigate to or trigger Work Priority without relabelling another state.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "expected_fact": "The accessibility tree exposes 'Work Priority' for personal.work-priority.",
+      "id": "personal.work-priority",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the personal.work-priority state on the real personal surface.",
+      "predicate": {
+        "expected": "Work Priority",
+        "name": "required fact: personal.work-priority",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "personal"
+    },
+    {
+      "action": "Navigate to or trigger Work Rejection without relabelling another state.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "expected_fact": "The accessibility tree exposes 'Work Rejection' for personal.work-rejection.",
+      "id": "personal.work-rejection",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the personal.work-rejection state on the real personal surface.",
+      "predicate": {
+        "expected": "Work Rejection",
+        "name": "required fact: personal.work-rejection",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "personal"
+    },
+    {
+      "action": "Navigate to or trigger Work Review Readiness without relabelling another state.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "expected_fact": "The accessibility tree exposes 'Work Review Readiness' for personal.work-review-readiness.",
+      "id": "personal.work-review-readiness",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the personal.work-review-readiness state on the real personal surface.",
+      "predicate": {
+        "expected": "Work Review Readiness",
+        "name": "required fact: personal.work-review-readiness",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "personal"
+    },
+    {
+      "action": "Navigate to or trigger Work Status Groups without relabelling another state.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "expected_fact": "The accessibility tree exposes 'Work Status Groups' for personal.work-status-groups.",
+      "id": "personal.work-status-groups",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the personal.work-status-groups state on the real personal surface.",
+      "predicate": {
+        "expected": "Work Status Groups",
+        "name": "required fact: personal.work-status-groups",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "personal"
+    },
+    {
+      "action": "Navigate to or trigger Work Total without relabelling another state.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
+      "expected_fact": "The accessibility tree exposes 'Work Total' for personal.work-total.",
+      "id": "personal.work-total",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the personal.work-total state on the real personal surface.",
+      "predicate": {
+        "expected": "Work Total",
+        "name": "required fact: personal.work-total",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "personal"
+    }
+  ],
+  "schema_version": 1,
+  "sequence": [
+    {
+      "action": "Navigate to or trigger Fresh_install without relabelling another state.",
+      "evidence_source": "docs/design-home/acceptance.md",
+      "expected_fact": "The accessibility tree exposes 'Pursers' for fresh_install.",
+      "id": "fresh_install",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the fresh_install state on the real aionui surface.",
+      "predicate": {
+        "expected": "Pursers",
+        "name": "required fact: fresh_install",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "aionui"
+    },
+    {
+      "action": "Navigate to or trigger Door_connect without relabelling another state.",
+      "evidence_source": "docs/design-home/acceptance.md",
+      "expected_fact": "The accessibility tree exposes 'Connected' for door_connect.",
+      "id": "door_connect",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the door_connect state on the real aionui surface.",
+      "predicate": {
+        "expected": "Connected",
+        "name": "required fact: door_connect",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "aionui"
+    },
+    {
+      "action": "Navigate to or trigger Team_setup without relabelling another state.",
+      "evidence_source": "docs/design-home/acceptance.md",
+      "expected_fact": "The accessibility tree exposes 'sandbox-home' for team_setup.",
+      "id": "team_setup",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the team_setup state on the real aionui surface.",
+      "predicate": {
+        "expected": "sandbox-home",
+        "name": "required fact: team_setup",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "aionui"
+    },
+    {
+      "action": "Navigate to or trigger Five_workers_three_reviewers without relabelling another state.",
+      "evidence_source": "docs/design-home/acceptance.md",
+      "expected_fact": "The accessibility tree exposes '5 workers' for five_workers_three_reviewers.",
+      "id": "five_workers_three_reviewers",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the five_workers_three_reviewers state on the real aionui surface.",
+      "predicate": {
+        "expected": "5 workers",
+        "name": "required fact: five_workers_three_reviewers",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "aionui"
+    },
+    {
+      "action": "Navigate to or trigger Ticket_offer_claim without relabelling another state.",
+      "evidence_source": "docs/design-home/acceptance.md",
+      "expected_fact": "The accessibility tree exposes 'claimed' for ticket_offer_claim.",
+      "id": "ticket_offer_claim",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the ticket_offer_claim state on the real aionui surface.",
+      "predicate": {
+        "expected": "claimed",
+        "name": "required fact: ticket_offer_claim",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "aionui"
+    },
+    {
+      "action": "Navigate to or trigger Ticket_submit_independent_review without relabelling another state.",
+      "evidence_source": "docs/design-home/acceptance.md",
+      "expected_fact": "The accessibility tree exposes 'approved' for ticket_submit_independent_review.",
+      "id": "ticket_submit_independent_review",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the ticket_submit_independent_review state on the real aionui surface.",
+      "predicate": {
+        "expected": "approved",
+        "name": "required fact: ticket_submit_independent_review",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "aionui"
+    },
+    {
+      "action": "Navigate to or trigger Result_visible without relabelling another state.",
+      "evidence_source": "docs/design-home/acceptance.md",
+      "expected_fact": "The accessibility tree exposes 'Result' for result_visible.",
+      "id": "result_visible",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the result_visible state on the real aionui surface.",
+      "predicate": {
+        "expected": "Result",
+        "name": "required fact: result_visible",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "aionui"
+    },
+    {
+      "action": "Navigate to or trigger Pause_resume_stop without relabelling another state.",
+      "evidence_source": "docs/design-home/acceptance.md",
+      "expected_fact": "The accessibility tree exposes 'Paused' for pause_resume_stop.",
+      "id": "pause_resume_stop",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the pause_resume_stop state on the real aionui surface.",
+      "predicate": {
+        "expected": "Paused",
+        "name": "required fact: pause_resume_stop",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "aionui"
+    },
+    {
+      "action": "Navigate to or trigger Clean_reconnect_after_rotation without relabelling another state.",
+      "evidence_source": "docs/design-home/acceptance.md",
+      "expected_fact": "The accessibility tree exposes 'Connected' for clean_reconnect_after_rotation.",
+      "id": "clean_reconnect_after_rotation",
+      "precondition": "Exact candidate and sandbox board are bound; arrange the clean_reconnect_after_rotation state on the real aionui surface.",
+      "predicate": {
+        "expected": "Connected",
+        "name": "required fact: clean_reconnect_after_rotation",
+        "operator": "ax_name_contains",
+        "path": [
+          "nodes"
+        ]
+      },
+      "status": "normative",
+      "surface": "aionui"
+    }
+  ]
+}
