@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import copy
 import hashlib
 import importlib.util
 import json
 import os
+import plistlib
 import re
+import shlex
 import stat
 import subprocess
 import sys
@@ -991,6 +994,301 @@ def test_fetcher_requests_central_max_snapshot_bounds() -> None:
         "max_bytes": 300_000,
         "include_retired": True,
     }
+
+
+def test_fetcher_real_client_uses_reserved_read_only_session_identity() -> None:
+    config = dashboard.Config(
+        url="http://127.0.0.1:8766/mcp",
+        token="test-token",
+        home_board="pursers",
+        agent_name="fleet-dashboard-session-default",
+        stale_seconds=300,
+        cache_seconds=5.0,
+    )
+
+    client = dashboard.FleetFetcher(config)._client("pursers")
+
+    assert isinstance(client, dashboard._FleetClientProxy)
+    assert client.agent_name == "fleet-dashboard-session-default"
+    assert client.role == "worker"
+    assert client.allow_takeover is False
+    assert client.allow_matching_takeover is True
+    assert client.capabilities == {"can_work": False, "can_review": False}
+    assert client.agent_platform == "pursers-fleet-dashboard"
+    assert client.task_focus == "dashboard-session-owner-v1"
+
+
+def test_real_central_matching_takeover_protects_worker_and_reviewer_identities(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    jwks_path = tmp_path / "jwks.json"
+    jwks_path.write_text('{"keys": []}', encoding="utf-8")
+    for key, value in {
+        "CENTRAL_AUTH_MODE": "jwt",
+        "CENTRAL_JWT_ISSUER": "https://issuer.example",
+        "CENTRAL_JWT_AUDIENCE": "http://localhost:8765/mcp",
+        "CENTRAL_JWKS_PATH": str(jwks_path),
+        "CENTRAL_ADMISSION": "invite",
+        "STORE_BACKEND": "sqlite",
+    }.items():
+        monkeypatch.setenv(key, value)
+    mcp, service = central.build_server("localhost", 8765, tmp_path / "central")
+    principal = central.Principal(
+        "PR-dashboard",
+        "dashboard",
+        frozenset({"board:read", "board:write", "board:review"}),
+    )
+    monkeypatch.setattr(central, "current_principal", lambda: principal)
+    dashboard_arguments = {
+        "board_id": "pursers",
+        "agent_name": "fleet-dashboard-session-default",
+        "role": "worker",
+        "capabilities": {"can_work": False, "can_review": False},
+        "agent_platform": "pursers-fleet-dashboard",
+        "task_focus": "dashboard-session-owner-v1",
+    }
+
+    async def scenario() -> tuple[object, object, object]:
+        first = await mcp.call_tool("board_join", dashboard_arguments)
+        restart = await mcp.call_tool(
+            "board_join",
+            {**dashboard_arguments, "allow_matching_takeover": True},
+        )
+        dashboard_id = central.agent_id(
+            "pursers", principal.principal_id, "fleet-dashboard-session-default"
+        )
+
+        def make_dashboard_stale(document: dict[str, object]) -> None:
+            document["members"][dashboard_id]["last_activity_at"] = central.iso_at(
+                time.time() - 4 * 86_400
+            )
+
+        service.mutate("pursers", make_dashboard_stale, require_generation=False)
+        stale_recovery = await mcp.call_tool(
+            "board_join",
+            {**dashboard_arguments, "allow_matching_takeover": True},
+        )
+        worker = await mcp.call_tool(
+            "board_join",
+            {
+                "board_id": "pursers",
+                "agent_name": "worker-seat",
+                "role": "worker",
+                "capabilities": {"can_work": True, "can_review": False},
+                "agent_platform": "codex",
+                "task_focus": "ticket-work",
+            },
+        )
+        reviewer = await mcp.call_tool(
+            "board_join",
+            {
+                "board_id": "pursers",
+                "agent_name": "reviewer-seat",
+                "role": "reviewer",
+                "capabilities": {"can_work": False, "can_review": True},
+                "agent_platform": "codex",
+                "task_focus": "ticket-review",
+            },
+        )
+        assert not any(
+            result.is_error
+            for result in (first, restart, stale_recovery, worker, reviewer)
+        )
+        async def refused(name: str) -> BaseException | None:
+            try:
+                await mcp.call_tool(
+                    "board_join",
+                    {
+                        **dashboard_arguments,
+                        "agent_name": name,
+                        "allow_matching_takeover": True,
+                    },
+                )
+            except BaseException as exc:
+                return exc
+            return None
+
+        worker_collision, reviewer_collision = await asyncio.gather(
+            refused("worker-seat"), refused("reviewer-seat")
+        )
+        return restart, worker_collision, reviewer_collision
+
+    restart, worker_collision, reviewer_collision = asyncio.run(scenario())
+
+    assert restart.is_error is False
+    assert "seat name already active" in str(worker_collision)
+    assert "seat name already active" in str(reviewer_collision)
+    document = service.load("pursers")
+    worker = document["members"][
+        central.agent_id("pursers", principal.principal_id, "worker-seat")
+    ]
+    reviewer = document["members"][
+        central.agent_id("pursers", principal.principal_id, "reviewer-seat")
+    ]
+    assert worker["role"] == "worker"
+    assert worker["capabilities"]["can_work"] is True
+    assert worker["agent_platform"] == "codex"
+    assert reviewer["role"] == "reviewer"
+    assert reviewer["capabilities"]["can_review"] is True
+    assert reviewer["agent_platform"] == "codex"
+
+
+def test_config_api_reuses_dashboard_identity_after_restart_and_concurrently() -> None:
+    class Central:
+        def __init__(self) -> None:
+            self.lock = threading.Lock()
+            self.active: dict[tuple[str, str], dict[str, object]] = {}
+            self.join_count = 0
+            self.close_count = 0
+            self.client_arguments: list[dict[str, object]] = []
+
+        def client_factory(
+            self, _url: str, _token: str, board_id: str, **arguments: object
+        ) -> object:
+            owner = self
+            captured = dict(arguments)
+
+            class Client:
+                async def __aenter__(self) -> Self:
+                    identity = (board_id, str(captured["agent_name"]))
+                    with owner.lock:
+                        expected = {
+                            key: captured[key]
+                            for key in (
+                                "role",
+                                "capabilities",
+                                "agent_platform",
+                                "task_focus",
+                            )
+                        }
+                        existing = owner.active.get(identity)
+                        if existing is not None and (
+                            not captured.get("allow_matching_takeover")
+                            or existing != expected
+                        ):
+                            raise dashboard.BoardClientError("unsafe identity collision")
+                        owner.active[identity] = expected
+                        owner.join_count += 1
+                        owner.client_arguments.append(captured)
+                    return self
+
+                async def __aexit__(self, *_args: object) -> None:
+                    with owner.lock:
+                        owner.close_count += 1
+
+                async def board_state_get(self, *, key: str) -> dict:
+                    raise dashboard.BoardClientError(f"state key not found: {key}")
+
+            return Client()
+
+    central = Central()
+    config = dashboard.Config(
+        url="http://127.0.0.1:8766/mcp",
+        token="test-token",
+        home_board="pursers",
+        agent_name="fleet-dashboard-session-default",
+        stale_seconds=300,
+        cache_seconds=5.0,
+    )
+    def run_server(request_count: int) -> None:
+        cache = dashboard.DashboardCache(
+            dashboard.FleetFetcher(config, client_factory=central.client_factory), 5.0
+        )
+        server = dashboard.ThreadingHTTPServer(
+            ("127.0.0.1", 0), dashboard.make_handler(cache)
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        url = f"http://127.0.0.1:{server.server_port}/api/config"
+
+        def request_config() -> int:
+            with urllib.request.urlopen(url) as response:
+                json.load(response)
+                return response.status
+
+        try:
+            assert request_config() == 200
+            with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+                assert list(
+                    executor.map(lambda _index: request_config(), range(request_count))
+                ) == [200] * request_count
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
+            cache.close()
+
+    run_server(4)
+    run_server(1)
+
+    assert set(central.active) == {
+        ("pursers", "fleet-dashboard-session-default")
+    }
+    assert central.join_count == 2
+    assert central.close_count == 2
+    assert all(
+        arguments == {
+            "agent_name": "fleet-dashboard-session-default",
+            "role": "worker",
+            "capabilities": {"can_work": False, "can_review": False},
+            "agent_platform": "pursers-fleet-dashboard",
+            "task_focus": "dashboard-session-owner-v1",
+            "allow_matching_takeover": True,
+        }
+        for arguments in central.client_arguments
+    )
+
+
+def test_fetcher_reconnects_once_after_transport_failure() -> None:
+    class Central:
+        def __init__(self) -> None:
+            self.joins = 0
+            self.closes = 0
+
+        def client_factory(self, *_args: object, **_kwargs: object) -> object:
+            owner = self
+            owner.joins += 1
+            generation = owner.joins
+
+            class Client:
+                async def __aenter__(self) -> Self:
+                    return self
+
+                async def __aexit__(self, *_args: object) -> None:
+                    owner.closes += 1
+
+                async def board_state_get(self, *, key: str) -> dict:
+                    assert key == "project_registry"
+                    if generation == 1:
+                        raise ConnectionError("connection closed")
+                    return {
+                        "state": {
+                            "value": json.dumps(
+                                {"schema_version": 1, "projects": {}}
+                            )
+                        }
+                    }
+
+            return Client()
+
+    central = Central()
+    config = dashboard.Config(
+        url="http://127.0.0.1:8766/mcp",
+        token="test-token",
+        home_board="pursers",
+        agent_name="fleet-dashboard-session-default",
+        stale_seconds=300,
+        cache_seconds=5.0,
+    )
+    fetcher = dashboard.FleetFetcher(config, client_factory=central.client_factory)
+    try:
+        result = asyncio.run(fetcher.fetch_project_registry())
+    finally:
+        fetcher.close()
+
+    assert result["registry"] == {"schema_version": 1, "projects": {}}
+    assert central.joins == 2
+    assert central.closes == 2
 
 
 def test_output_rows_and_titles_are_bounded() -> None:
@@ -2717,6 +3015,12 @@ def test_single_central_flags_and_response_shape_remain_compatible(
     assert configs_inherited[0].url == inherited_url
 
 
+@pytest.mark.parametrize("name", ["worker-seat", "reviewer-seat", "fleet-dashboard-viewer"])
+def test_cli_refuses_names_outside_dashboard_session_namespace(name: str) -> None:
+    with pytest.raises(SystemExit):
+        dashboard.parse_args(["--agent-name", name])
+
+
 def test_centrals_file_and_tokens_require_0600(tmp_path: Path) -> None:
     personal_token = tmp_path / "personal.token"
     work_token = tmp_path / "work.token"
@@ -3960,9 +4264,9 @@ def test_dashboard_v2_ia_agents_and_responsive_contract() -> None:
 
     assert 'class="app-shell"' in html
     assert 'aria-label="Primary navigation"' in html
-    assert 'href="#/boards"' in html
-    assert 'href="#/agents"' in html
-    assert 'href="#/operations"' in html
+    assert 'href="#/projects"' in html
+    assert 'href="#/team"' in html
+    assert 'href="#/settings"' in html
     assert "Fleet overview" in html
     assert "Board workspaces" in html
     assert "Unified agent pool" in html
@@ -3978,6 +4282,33 @@ def test_dashboard_v2_ia_agents_and_responsive_contract() -> None:
     assert "overflow-x:hidden" in html
     assert "https://cdn" not in html
     assert "http://cdn" not in html
+
+
+def test_dashboard_uses_warm_guided_home_shell() -> None:
+    html = dashboard.HTML
+
+    for destination in (
+        "home",
+        "projects",
+        "work",
+        "team",
+        "approvals",
+        "activity",
+        "settings",
+    ):
+        assert f'data-nav="{destination}" href="#/{destination}"' in html
+    assert "Your calm work home" in html
+    assert "Workspace context" in html
+    assert "function renderWarmHome()" in html
+    assert "function renderWarmProjects()" in html
+    assert "function renderWarmWork()" in html
+    assert "function renderWarmApprovals()" in html
+    assert "function renderWarmActivity()" in html
+    assert "function renderWarmSettings()" in html
+    assert ".warm-row>div:first-child{display:grid;justify-items:start;gap:3px}" in html
+    assert ".intake-form textarea,.intake-form button,.intake-actions button{min-height:44px" in html
+    assert "https://cdn.tailwindcss.com" not in html
+    assert "https://code.iconify.design" not in html
 
 
 def test_seat_config_manager_plan_apply_backup_restart_and_no_token_leak(
@@ -6697,6 +7028,13 @@ def test_add_project_single_action_happy_path_and_idempotent_rerun(tmp_path: Pat
     keys_dir = tmp_path / "keys"
     jwks_path = tmp_path / "jwks.json"
     fake_central = FakeDoorCentral()
+    repository_url = "https://example.invalid/new-svc.git"
+    fake_central.registry_data["projects"]["new-svc"] = {
+        "board_id": "old-board",
+        "work_dir": "/PATH/TO/OLD",
+        "status": "paused",
+        "repository_url": repository_url,
+    }
 
     config = dashboard.Config(
         url="http://127.0.0.1:8766/mcp",
@@ -6779,6 +7117,11 @@ def test_add_project_single_action_happy_path_and_idempotent_rerun(tmp_path: Pat
         assert new_board.dispatch_policy["fallback_broadcast"] is True
         assert new_board.review_policy == "strict"
         assert len(new_board.memberships) == 2  # worker and reviewer doors
+        registry_entry = fake_central.registry_data["projects"]["new-svc"]
+        assert registry_entry["repository_url"] == repository_url
+        assert dashboard.SeatConfigManager._clean_text(
+            f"repository_url={repository_url}"
+        ) == f"repository_url={repository_url}"
 
         # Second call: Idempotent re-run
         req2 = urllib.request.Request(
@@ -7061,27 +7404,13 @@ def test_doors_ui_rendering() -> None:
 
 
 def test_clean_text_redaction_is_linear_time_and_behavior_preserved() -> None:
-    """CodeQL py/polynomial-redos regression: the key/value redaction pass.
-
-    The previous pattern nested stars around the keyword alternation and
-    backtracked polynomially on repeated whitespace (seconds for ~30k
-    spaces). The remediated split must stay linear and produce identical
-    redaction output.
-    """
+    """CodeQL py/polynomial-redos regression: deterministic assignment scan."""
     clean = dashboard.SeatConfigManager._clean_text
 
-    adversarial = "token" + " " * 40_000
-    started = time.monotonic()
-    output = clean(adversarial)
-    elapsed = time.monotonic() - started
-    assert output == adversarial  # no separator on the line: nothing redacted
-    assert elapsed < 5.0  # pre-fix pattern took ~9s at this size
-
-    bigger = "token" + " " * 80_000
-    started = time.monotonic()
-    assert clean(bigger) == bigger
-    elapsed_bigger = time.monotonic() - started
-    assert elapsed_bigger < 5.0  # doubling input stays linear, not quadratic
+    adversarial = ":" + " " * 1_000_000
+    assert clean(adversarial) == adversarial
+    no_delimiter = "token" + " " * 1_000_000
+    assert clean(no_delimiter) == no_delimiter
 
     # Keyword fused into a longer key (no word boundary) is still redacted.
     assert clean("XTOKEN=abc") == "XTOKEN=[REDACTED]"
@@ -7092,9 +7421,443 @@ def test_clean_text_redaction_is_linear_time_and_behavior_preserved() -> None:
     assert clean("  MY SECRET = s3kr1t") == "  MY SECRET = [REDACTED]"
     # Only the first separator splits key/value; the rest stays in the value.
     assert clean("mytoken=a=b") == "mytoken=[REDACTED]"
+    assert clean("api-key:\t value") == "api-key:\t [REDACTED]"
+    assert clean("authorization=\u2003value") == "authorization=\u2003[REDACTED]"
+    assert clean("secret= \t") == "secret= \t[REDACTED]"
     # Lines without a sensitive keyword are untouched.
     assert clean("plain = value") == "plain = value"
     # Multi-line input redacts per line.
     assert clean("alpha=1\nmy bearer: x\nbeta=2") == (
         "alpha=1\nmy bearer: [REDACTED]\nbeta=2"
     )
+    assert clean("token:\nplain=value\nsecret: last") == (
+        "token:[REDACTED]\nplain=value\nsecret: [REDACTED]"
+    )
+    assert clean("token:\r\nplain=x") == "token:[REDACTED]\r\nplain=x"
+    assert clean("plain:\r\nnext=x") == "plain:\r\nnext=x"
+    for ending in (
+        "\r", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029",
+    ):
+        assert clean(f"token:{ending}plain=x") == (
+            f"token:[REDACTED]{ending}plain=x"
+        )
+
+
+def _deployment_runbook_blocks() -> list[str]:
+    readme = (MODULE_PATH.parent / "README.md").read_text(encoding="utf-8")
+    section = readme.split("### Coordinator-only exact-SHA deployment and rollback", 1)[1]
+    section = section.split("### Multiple central instances", 1)[0]
+    return re.findall(r"```bash\n(.*?)\n```", section, flags=re.DOTALL)
+
+
+def test_deployment_runbook_validates_before_mutation() -> None:
+    deploy, verify, rollback = _deployment_runbook_blocks()
+    for block in (deploy, verify, rollback):
+        assert block.splitlines()[0] == "set -euo pipefail"
+
+    assert deploy.index('test "$(git -C "$CANDIDATE_ROOT" rev-parse HEAD)" = "$CANDIDATE_SHA"') < deploy.index('plutil -lint "$LIVE_PLIST"')
+    assert deploy.index('plutil -lint "$LIVE_PLIST"') < deploy.index("source_path, *destination_paths")
+    assert deploy.index("source_path, *destination_paths") < deploy.index("os.ftruncate(descriptor, 0)")
+    assert deploy.index('plutil -lint "$STAGED_PLIST"') < deploy.index("source_path, backup_path, staged_path")
+    assert deploy.index("source_path, backup_path, staged_path") < deploy.index('install -m 600 "$STAGED_PLIST" "$LIVE_PLIST"')
+    assert rollback.index('plutil -lint "$BACKUP_PLIST"') < rollback.index("PREVIOUS_SOURCE=$(")
+    assert rollback.index("PREVIOUS_SOURCE=$(") < rollback.index('install -m 600 "$BACKUP_PLIST" "$LIVE_PLIST"')
+    for block in (deploy, rollback):
+        assert "bootout_if_present" in block
+        assert 'launchctl bootout "$JOB"' not in block
+        assert "|| true" not in block
+
+
+def _write_executable(path: Path, contents: str) -> None:
+    path.write_text(contents, encoding="utf-8")
+    path.chmod(0o755)
+
+
+def _deployment_fixture(tmp_path: Path) -> tuple[str, str, str, dict[str, str], dict[str, Path]]:
+    deploy, verify, rollback = _deployment_runbook_blocks()
+    candidate_sha = "1" * 40
+    fleet_clone = tmp_path / "fleet-clone"
+    candidate_root = tmp_path / "candidate"
+    live_plist = tmp_path / "live.plist"
+    private_parent = tmp_path / "private"
+    previous_root = tmp_path / "previous"
+    previous_source = previous_root / "tools/fleet-dashboard/fleet_dashboard.py"
+    previous_source.parent.mkdir(parents=True)
+    previous_source.write_text("# fixture\n", encoding="utf-8")
+    fleet_clone.mkdir()
+    with live_plist.open("wb") as stream:
+        plistlib.dump({"ProgramArguments": [sys.executable, str(previous_source)]}, stream)
+
+    replacements = {
+        "FLEET_CLONE": fleet_clone,
+        "CANDIDATE_SHA": candidate_sha,
+        "CANDIDATE_ROOT": candidate_root,
+        "LIVE_PLIST": live_plist,
+        "PRIVATE_PARENT": private_parent,
+    }
+    for name, value in replacements.items():
+        deploy = re.sub(
+            rf"^{name}=.*$",
+            f"{name}={shlex.quote(str(value))}",
+            deploy,
+            count=1,
+            flags=re.MULTILINE,
+        )
+
+    mock_bin = tmp_path / "bin"
+    mock_bin.mkdir()
+    log = tmp_path / "mock.log"
+    state = tmp_path / "launch.state"
+    source = tmp_path / "loaded.source"
+    state.write_text("loaded\n", encoding="utf-8")
+    source.write_text(str(previous_source), encoding="utf-8")
+
+    _write_executable(
+        mock_bin / "git",
+        """#!/bin/bash
+echo "git $*" >> "$MOCK_LOG"
+if [[ "$*" == *" fetch "* && "${MOCK_FAIL:-}" == git_fetch ]]; then exit 71; fi
+if [[ "$*" == *" worktree add --detach "* ]]; then
+  if [[ "${MOCK_FAIL:-}" == worktree_add ]]; then exit 72; fi
+  root="${@: -2:1}"
+  mkdir -p "$root/tools/fleet-dashboard"
+  printf '# fixture\n' > "$root/tools/fleet-dashboard/fleet_dashboard.py"
+fi
+if [[ "$*" == *" rev-parse HEAD"* ]]; then
+  printf '%s\n' "${MOCK_GIT_SHA_OUTPUT:-$MOCK_CANDIDATE_SHA}"
+fi
+""",
+    )
+    _write_executable(
+        mock_bin / "plutil",
+        """#!/bin/bash
+echo "plutil $*" >> "$MOCK_LOG"
+case "${MOCK_FAIL:-}:$2" in
+  live_lint:"$MOCK_LIVE_PLIST"|staged_lint:"$MOCK_STAGED_PLIST"|backup_lint:"$MOCK_BACKUP_PLIST") exit 73 ;;
+esac
+exit 0
+""",
+    )
+    _write_executable(
+        mock_bin / "install",
+        """#!/bin/bash
+echo "install $*" >> "$MOCK_LOG"
+if [[ "${MOCK_FAIL:-}" == install ]]; then exit 74; fi
+source="${@: -2:1}"
+destination="${@: -1}"
+cp "$source" "$destination"
+chmod 600 "$destination"
+""",
+    )
+    _write_executable(
+        mock_bin / "launchctl",
+        """#!/bin/bash
+echo "launchctl $*" >> "$MOCK_LOG"
+case "$1" in
+  print)
+    state=$(tr -d '\n' < "$MOCK_LAUNCH_STATE")
+    if [[ "$state" == loaded ]]; then printf 'pid = 4242\n'; exit 0; fi
+    if [[ "$state" == absent ]]; then echo 'Could not find service' >&2; exit 113; fi
+    echo 'launchctl probe failed' >&2; exit 77
+    ;;
+  bootout)
+    if [[ "${MOCK_FAIL:-}" == bootout ]]; then exit 77; fi
+    printf 'absent\n' > "$MOCK_LAUNCH_STATE"
+    ;;
+  bootstrap)
+    if [[ "${MOCK_FAIL:-}" == bootstrap ]]; then exit 78; fi
+    "$MOCK_PYTHON" -c 'import plistlib,sys; d=plistlib.load(open(sys.argv[1], "rb")); print(next(v for v in d["ProgramArguments"] if isinstance(v,str) and v.endswith("fleet_dashboard.py")))' "$3" > "$MOCK_LOADED_SOURCE"
+    printf 'loaded\n' > "$MOCK_LAUNCH_STATE"
+    ;;
+  *) exit 79 ;;
+esac
+""",
+    )
+    _write_executable(
+        mock_bin / "ps",
+        """#!/bin/bash
+echo "ps $*" >> "$MOCK_LOG"
+if [[ "${MOCK_FAIL:-}" == ps ]]; then exit 80; fi
+printf 'python %s\n' "$(cat "$MOCK_LOADED_SOURCE")"
+""",
+    )
+    _write_executable(
+        mock_bin / "curl",
+        """#!/bin/bash
+echo "curl $*" >> "$MOCK_LOG"
+if [[ "${MOCK_FAIL:-}" == curl ]]; then exit 81; fi
+""",
+    )
+
+    private_root = private_parent / candidate_sha
+    paths = {
+        "candidate_root": candidate_root,
+        "live_plist": live_plist,
+        "private_parent": private_parent,
+        "staged_plist": private_root / "staging/com.pursers.fleet-dashboard.plist",
+        "backup_plist": private_root / f"backups/com.pursers.fleet-dashboard.plist.before-{candidate_sha}",
+        "log": log,
+        "state": state,
+        "source": source,
+        "previous_source": previous_source,
+    }
+    env = {
+        **os.environ,
+        "PATH": f"{mock_bin}{os.pathsep}{os.environ['PATH']}",
+        "MOCK_LOG": str(log),
+        "MOCK_LAUNCH_STATE": str(state),
+        "MOCK_LOADED_SOURCE": str(source),
+        "MOCK_PYTHON": sys.executable,
+        "MOCK_CANDIDATE_SHA": candidate_sha,
+        "MOCK_LIVE_PLIST": str(live_plist),
+        "MOCK_STAGED_PLIST": str(paths["staged_plist"]),
+        "MOCK_BACKUP_PLIST": str(paths["backup_plist"]),
+    }
+    rollback_prelude = "\n".join(
+        (
+            f"BACKUP_PLIST={shlex.quote(str(paths['backup_plist']))}",
+            f"LIVE_PLIST={shlex.quote(str(live_plist))}",
+            f"JOB=gui/$(id -u)/com.pursers.fleet-dashboard",
+        )
+    )
+    return deploy, verify, f"{rollback_prelude}\n{rollback}", env, paths
+
+
+@pytest.mark.parametrize("initial_state, expects_bootout", (("loaded", True), ("absent", False)))
+def test_deployment_runbook_actual_deploy_and_verify_blocks_succeed(
+    tmp_path: Path, initial_state: str, expects_bootout: bool
+) -> None:
+    deploy, verify, _, env, paths = _deployment_fixture(tmp_path)
+    paths["state"].write_text(f"{initial_state}\n", encoding="utf-8")
+
+    result = subprocess.run(
+        ["bash", "-c", f"{deploy}\n{verify}"], env=env, check=False,
+        capture_output=True, text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    log = paths["log"].read_text(encoding="utf-8")
+    assert ("launchctl bootout" in log) is expects_bootout
+    assert "launchctl bootstrap" in log
+    assert log.count("curl ") == 5
+    assert paths["live_plist"].stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.parametrize(
+    "state, failure, expected_status",
+    (("probe_fault", "", 77), ("loaded", "bootout", 77)),
+)
+def test_deployment_runbook_actual_deploy_bootout_fault_never_bootstraps(
+    tmp_path: Path, state: str, failure: str, expected_status: int
+) -> None:
+    deploy, _, _, env, paths = _deployment_fixture(tmp_path)
+    paths["state"].write_text(f"{state}\n", encoding="utf-8")
+    if failure:
+        env["MOCK_FAIL"] = failure
+
+    result = subprocess.run(
+        ["bash", "-c", deploy], env=env, check=False, capture_output=True, text=True
+    )
+
+    assert result.returncode == expected_status
+    log = paths["log"].read_text(encoding="utf-8")
+    assert "install " in log
+    assert "launchctl bootstrap" not in log
+
+
+@pytest.mark.parametrize("rollback_state, expects_bootout", (("loaded", True), ("absent", False)))
+def test_deployment_runbook_actual_rollback_recovers_loaded_or_confirmed_absent_job(
+    tmp_path: Path, rollback_state: str, expects_bootout: bool
+) -> None:
+    deploy, _, rollback, env, paths = _deployment_fixture(tmp_path)
+    deployed = subprocess.run(
+        ["bash", "-c", deploy], env=env, check=False, capture_output=True, text=True
+    )
+    assert deployed.returncode == 0, deployed.stderr
+    paths["state"].write_text(f"{rollback_state}\n", encoding="utf-8")
+    paths["log"].write_text("", encoding="utf-8")
+
+    result = subprocess.run(
+        ["bash", "-c", rollback], env=env, check=False, capture_output=True, text=True
+    )
+
+    assert result.returncode == 0, result.stderr
+    log = paths["log"].read_text(encoding="utf-8")
+    assert ("launchctl bootout" in log) is expects_bootout
+    assert "launchctl bootstrap" in log
+    assert log.count("curl ") == 5
+    assert paths["source"].read_text(encoding="utf-8").strip() == str(paths["previous_source"])
+
+
+@pytest.mark.parametrize("state, failure", (("probe_fault", ""), ("loaded", "bootout")))
+def test_deployment_runbook_actual_rollback_bootout_fault_never_bootstraps(
+    tmp_path: Path, state: str, failure: str
+) -> None:
+    deploy, _, rollback, env, paths = _deployment_fixture(tmp_path)
+    deployed = subprocess.run(
+        ["bash", "-c", deploy], env=env, check=False, capture_output=True, text=True
+    )
+    assert deployed.returncode == 0, deployed.stderr
+    paths["state"].write_text(f"{state}\n", encoding="utf-8")
+    paths["log"].write_text("", encoding="utf-8")
+    if failure:
+        env["MOCK_FAIL"] = failure
+
+    result = subprocess.run(
+        ["bash", "-c", rollback], env=env, check=False, capture_output=True, text=True
+    )
+
+    assert result.returncode == 77
+    log = paths["log"].read_text(encoding="utf-8")
+    assert "install " in log
+    assert "launchctl bootstrap" not in log
+    assert "curl " not in log
+
+
+@pytest.mark.parametrize(
+    "failure",
+    (
+        "directory_symlink", "git_fetch", "worktree_add", "wrong_sha",
+        "live_lint", "rewrite", "destination_symlink", "destination_hardlink",
+        "staged_lint",
+    ),
+)
+def test_deployment_runbook_actual_deploy_validation_failures_stop_before_install(
+    tmp_path: Path, failure: str
+) -> None:
+    deploy, _, _, env, paths = _deployment_fixture(tmp_path)
+    if failure == "directory_symlink":
+        paths["private_parent"].symlink_to(tmp_path)
+    elif failure == "wrong_sha":
+        env["MOCK_GIT_SHA_OUTPUT"] = "2" * 40
+    elif failure == "rewrite":
+        with paths["live_plist"].open("wb") as stream:
+            plistlib.dump({"ProgramArguments": [sys.executable, "wrong-script.py"]}, stream)
+    elif failure in {"destination_symlink", "destination_hardlink"}:
+        paths["staged_plist"].parent.mkdir(parents=True, mode=0o700)
+        paths["backup_plist"].parent.mkdir(mode=0o700)
+        if failure == "destination_symlink":
+            paths["staged_plist"].symlink_to(paths["live_plist"])
+        else:
+            os.link(paths["live_plist"], paths["backup_plist"])
+    else:
+        env["MOCK_FAIL"] = failure
+
+    result = subprocess.run(
+        ["bash", "-c", deploy], env=env, check=False, capture_output=True, text=True
+    )
+
+    assert result.returncode != 0
+    log = paths["log"].read_text(encoding="utf-8") if paths["log"].exists() else ""
+    assert "install " not in log
+    assert "launchctl bootout" not in log
+    assert "launchctl bootstrap" not in log
+    if failure == "staged_lint":
+        assert not paths["backup_plist"].exists()
+
+
+@pytest.mark.parametrize(
+    "failure",
+    ("backup_symlink", "backup_mode", "backup_lint", "previous_source_parse", "previous_source_missing", "install"),
+)
+def test_deployment_runbook_actual_rollback_validation_failures_stop_before_service_mutation(
+    tmp_path: Path, failure: str
+) -> None:
+    deploy, _, rollback, env, paths = _deployment_fixture(tmp_path)
+    deployed = subprocess.run(
+        ["bash", "-c", deploy], env=env, check=False, capture_output=True, text=True
+    )
+    assert deployed.returncode == 0, deployed.stderr
+    if failure == "backup_symlink":
+        paths["backup_plist"].unlink()
+        paths["backup_plist"].symlink_to(paths["live_plist"])
+    elif failure == "backup_mode":
+        paths["backup_plist"].chmod(0o644)
+    elif failure == "previous_source_parse":
+        with paths["backup_plist"].open("wb") as stream:
+            plistlib.dump({"ProgramArguments": [sys.executable, "wrong-script.py"]}, stream)
+        paths["backup_plist"].chmod(0o600)
+    elif failure == "previous_source_missing":
+        missing = tmp_path / "missing/tools/fleet-dashboard/fleet_dashboard.py"
+        with paths["backup_plist"].open("wb") as stream:
+            plistlib.dump({"ProgramArguments": [sys.executable, str(missing)]}, stream)
+        paths["backup_plist"].chmod(0o600)
+    else:
+        env["MOCK_FAIL"] = failure
+    paths["log"].write_text("", encoding="utf-8")
+
+    result = subprocess.run(
+        ["bash", "-c", rollback], env=env, check=False, capture_output=True, text=True
+    )
+
+    assert result.returncode != 0
+    log = paths["log"].read_text(encoding="utf-8")
+    assert "launchctl bootout" not in log
+    assert "launchctl bootstrap" not in log
+    assert "curl " not in log
+    if failure != "install":
+        assert "install " not in log
+
+
+@pytest.mark.parametrize(
+    "phase, failure, expected_status",
+    (("deploy", "install", 74), ("deploy", "bootstrap", 78), ("rollback", "bootstrap", 78)),
+)
+def test_deployment_runbook_actual_service_failures_propagate(
+    tmp_path: Path, phase: str, failure: str, expected_status: int
+) -> None:
+    deploy, _, rollback, env, paths = _deployment_fixture(tmp_path)
+    if phase == "rollback":
+        deployed = subprocess.run(
+            ["bash", "-c", deploy], env=env, check=False, capture_output=True, text=True
+        )
+        assert deployed.returncode == 0, deployed.stderr
+        paths["log"].write_text("", encoding="utf-8")
+    env["MOCK_FAIL"] = failure
+
+    result = subprocess.run(
+        ["bash", "-c", deploy if phase == "deploy" else rollback], env=env,
+        check=False, capture_output=True, text=True,
+    )
+
+    assert result.returncode == expected_status
+    log = paths["log"].read_text(encoding="utf-8")
+    assert "curl " not in log
+
+
+@pytest.mark.parametrize("failure", ("probe_pipeline", "ps_substitution", "curl"))
+def test_deployment_runbook_actual_verify_pipeline_and_substitution_fail_closed(
+    tmp_path: Path, failure: str
+) -> None:
+    deploy, verify, _, env, paths = _deployment_fixture(tmp_path)
+    deployed = subprocess.run(
+        ["bash", "-c", deploy], env=env, check=False, capture_output=True, text=True
+    )
+    assert deployed.returncode == 0, deployed.stderr
+    paths["log"].write_text("", encoding="utf-8")
+    if failure == "probe_pipeline":
+        paths["state"].write_text("probe_fault\n", encoding="utf-8")
+    elif failure == "ps_substitution":
+        env["MOCK_FAIL"] = "ps"
+    else:
+        env["MOCK_FAIL"] = "curl"
+
+    prelude = "\n".join(
+        (
+            f"CANDIDATE_ROOT={shlex.quote(str(paths['candidate_root']))}",
+            f"CANDIDATE_SHA={'1' * 40}",
+            f"LIVE_PLIST={shlex.quote(str(paths['live_plist']))}",
+            "JOB=gui/$(id -u)/com.pursers.fleet-dashboard",
+        )
+    )
+    result = subprocess.run(
+        ["bash", "-c", f"{prelude}\n{verify}"], env=env, check=False,
+        capture_output=True, text=True,
+    )
+
+    assert result.returncode != 0
+    log = paths["log"].read_text(encoding="utf-8")
+    if failure == "probe_pipeline":
+        assert "ps " not in log and "curl " not in log
+    elif failure == "ps_substitution":
+        assert "curl " not in log

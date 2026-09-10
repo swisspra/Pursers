@@ -3,31 +3,373 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Pursers</title>
-    <link rel="stylesheet" href="/pursers/assets/style.css">
+    <meta name="color-scheme" content="light">
+    <title>Pursers Home</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="./style.css">
   </head>
   <body>
-    <main>
-      <h1>Pursers</h1>
-      <p class="intro">Join a worker or reviewer seat with a door from your coordinator.</p>
-      <form id="join-form">
-        <label for="door">Paste your door</label>
-        <input id="door" name="door" type="password" autocomplete="off" spellcheck="false" required>
-        <button type="submit">Join</button>
+    <a class="skip-link" href="#main-content">Skip to setup</a>
+    <div class="app-shell">
+      <aside class="sidebar" aria-label="Pursers navigation">
+        <a class="brand" href="#home" aria-label="Pursers Home">
+          <span class="brand-mark" aria-hidden="true">P</span>
+          <span><strong>Pursers</strong><small>Your calm work home</small></span>
+        </a>
+        <div class="context-card">
+          <span>Context</span>
+          <strong><span class="dot dot-ready"></span> WORK</strong>
+          <small>Project connections stay separate from PERSONAL.</small>
+        </div>
+        <nav>
+          <a class="nav-link active" href="#home"><span aria-hidden="true">⌂</span> Home</a>
+          <a class="nav-link" href="#connection"><span aria-hidden="true">⌁</span> Connection</a>
+          <a class="nav-link" href="#seat-lifecycle"><span aria-hidden="true">◉</span> Seat</a>
+          <a class="nav-link" href="#team"><span aria-hidden="true">◎</span> Team</a>
+          <a class="nav-link" href="#progress"><span aria-hidden="true">↗</span> Progress</a>
+          <a class="nav-link" href="#tickets"><span aria-hidden="true">□</span> Tickets</a>
+          <a class="nav-link" href="#advanced"><span aria-hidden="true">⚙</span> Advanced</a>
+        </nav>
+        <div class="sidebar-note">
+          <span class="dot" id="sidebar-dot"></span>
+          <strong id="sidebar-state">Checking connection</strong>
+          <small>Secrets never appear in status or activity.</small>
+        </div>
+      </aside>
+
+      <main id="main-content" tabindex="-1">
+        <header class="topbar" id="home">
+          <div>
+            <p class="breadcrumb"><span class="dot dot-ready"></span> WORK / Pursers Home</p>
+            <h1>Bring a project home</h1>
+            <p>Connect one project, prepare its Team, and see the next safe action.</p>
+          </div>
+          <button class="button button-quiet" id="refresh-all" type="button">Refresh status</button>
+        </header>
+
+        <div class="notice notice-info" id="global-notice" role="status" aria-live="polite">
+          <span class="notice-icon" aria-hidden="true">i</span>
+          <div><strong>Checking what is ready…</strong><p>Your saved connection and Team context are being read locally.</p></div>
+        </div>
+
+        <section class="hero card" aria-labelledby="next-step-title">
+          <div class="hero-icon" aria-hidden="true">→</div>
+          <div class="hero-copy">
+            <p class="eyebrow">Next step</p>
+            <h2 id="next-step-title">Connect your first project</h2>
+            <p id="next-step-copy">Use the door supplied by your coordinator. It is sent directly to the protected local backend and cleared from this page.</p>
+          </div>
+          <a class="button button-primary" id="next-step-action" href="#connection">Connect project</a>
+        </section>
+
+        <ol class="stepper" aria-label="Setup progress">
+          <li class="current" data-step="connection"><span>1</span><div><strong>Connect</strong><small>Secure project door</small></div></li>
+          <li data-step="team"><span>2</span><div><strong>Prepare Team</strong><small>Distinct seats and folders</small></div></li>
+          <li data-step="ready"><span>3</span><div><strong>Ready</strong><small>Follow board-dispatched work</small></div></li>
+        </ol>
+
+        <section class="section-block" id="helper" aria-labelledby="helper-title">
+          <div class="section-heading">
+            <div><p class="eyebrow">Local transport</p><h2 id="helper-title">Connect the Home helper</h2><p>AionUi 2.2.1 serves this page but does not execute extension route handlers. Connect the authenticated loopback helper first.</p></div>
+            <span class="status-pill neutral" id="helper-pill">Not connected</span>
+          </div>
+          <div class="two-column">
+            <form class="card form-card" id="helper-form">
+              <label class="field field-wide" for="helper-url">Helper URL
+                <span>Exact loopback origin printed when the packaged helper starts.</span>
+                <input id="helper-url" name="helper_url" type="url" value="http://127.0.0.1:43121" autocomplete="off" spellcheck="false" required>
+              </label>
+              <label class="field field-wide" for="helper-token">Local access token
+                <span>Read the mode-0600 token file. The value stays in page memory only.</span>
+                <input id="helper-token" name="helper_token" type="password" autocomplete="new-password" spellcheck="false" minlength="32" required>
+              </label>
+              <div class="form-actions field-wide"><button class="button button-primary" id="connect-helper" type="submit">Connect helper</button></div>
+              <p class="form-message field-wide" id="helper-message" role="status" aria-live="polite"></p>
+            </form>
+            <article class="card status-card" aria-labelledby="helper-status-title">
+              <div class="card-heading"><div><p class="eyebrow">Bound locally</p><h3 id="helper-status-title">Helper status</h3></div><span class="status-pill neutral" id="helper-state">Unknown</span></div>
+              <dl class="detail-list">
+                <div><dt>Selected board</dt><dd data-helper-field="board">—</dd></div>
+                <div><dt>Central domain</dt><dd data-helper-field="central">—</dd></div>
+                <div><dt>Transport</dt><dd data-helper-field="transport">—</dd></div>
+                <div><dt>AionCore</dt><dd data-helper-field="core_version">—</dd></div>
+                <div><dt>Team context</dt><dd data-helper-field="team_context">—</dd></div>
+              </dl>
+              <p class="support-copy">The helper never receives AionUi cookies. Wrong origin, token, or board requests fail closed.</p>
+            </article>
+          </div>
+        </section>
+
+        <section class="section-block" id="connection" aria-labelledby="connection-title">
+          <div class="section-heading">
+            <div><p class="eyebrow">1 · Trust and access</p><h2 id="connection-title">Connect this project</h2><p>A door connects exactly one board and role. Its value is never shown again.</p></div>
+            <span class="status-pill neutral" id="connection-pill">Not checked</span>
+          </div>
+
+          <div class="two-column">
+            <form class="card form-card" id="connection-form">
+              <label class="field field-wide" for="door">Door string
+                <span>Paste the complete coordinator-issued value.</span>
+                <input id="door" name="door" type="password" autocomplete="new-password" spellcheck="false" required>
+              </label>
+              <label class="field" for="seat-name">Seat name
+                <span>Unique within this project.</span>
+                <input id="seat-name" name="seat_name" value="pursers-worker-1" pattern="[A-Za-z0-9][A-Za-z0-9._\-]{0,79}" required>
+              </label>
+              <label class="field" for="role">Role
+                <span>Workers do work; reviewers only review.</span>
+                <select id="role" name="role"><option value="worker">Worker</option><option value="reviewer">Reviewer</option></select>
+              </label>
+              <label class="field" for="tier-max">Tier ceiling
+                <span>Operator configuration, not model intelligence.</span>
+                <select id="tier-max" name="tier_max"><option value="1">Tier 1</option><option value="2" selected>Tier 2</option><option value="3">Tier 3</option></select>
+              </label>
+              <label class="field" for="seat-folder">Workspace folder
+                <span>Relative folder, unique per teammate.</span>
+                <input id="seat-folder" name="folder" value="pursers-worker-1" required>
+              </label>
+              <details class="advanced-fields field-wide">
+                <summary>Assistant and model details</summary>
+                <div class="form-grid">
+                  <label class="field" for="assistant-id">Assistant ID<input id="assistant-id" name="assistant_id" placeholder="Select from AionUi"></label>
+                  <label class="field" for="model">Model override<input id="model" name="model" placeholder="Use preset default"></label>
+                </div>
+              </details>
+              <div class="form-actions field-wide">
+                <button class="button button-secondary" id="validate-door" type="button">Check door</button>
+                <button class="button button-primary" id="connect-door" type="submit">Connect project</button>
+                <button class="button button-danger-quiet" id="rotate-door" type="button">Replace door</button>
+              </div>
+              <p class="form-message field-wide" id="connection-message" role="status" aria-live="polite"></p>
+            </form>
+
+            <article class="card status-card" id="connection-card" aria-labelledby="saved-connection-title">
+              <div class="card-heading"><div><p class="eyebrow">Saved locally</p><h3 id="saved-connection-title">Connection status</h3></div><span class="status-pill neutral" id="saved-state">Unknown</span></div>
+              <dl class="detail-list">
+                <div><dt>Board</dt><dd data-field="board">—</dd></div>
+                <div><dt>Role</dt><dd data-field="role">—</dd></div>
+                <div><dt>Seat</dt><dd data-field="seat_name">—</dd></div>
+                <div><dt>Push mode</dt><dd data-field="push_mode">—</dd></div>
+                <div><dt>Key ID</dt><dd data-field="kid">—</dd></div>
+                <div><dt>Expires</dt><dd data-field="exp">—</dd></div>
+              </dl>
+              <div class="card-actions"><button class="button button-secondary" id="recover-seat" type="button" disabled>Recover registration</button></div>
+              <p class="support-copy">Recovery reuses stored redacted metadata. It never asks for or replays the door.</p>
+            </article>
+          </div>
+        </section>
+
+        <section class="section-block" id="seat-lifecycle" aria-labelledby="seat-lifecycle-title">
+          <div class="section-heading">
+            <div><p class="eyebrow">Standalone board seat</p><h2 id="seat-lifecycle-title">Seat lifecycle</h2><p>Join, inspect, or cooperatively retire one exact Pursers identity. Live Central state is authoritative.</p></div>
+            <button class="button button-quiet" id="refresh-seat-lifecycle" type="button">Refresh seat</button>
+          </div>
+          <div class="two-column">
+            <form class="card form-card" id="seat-lifecycle-form">
+              <label class="field field-wide" for="lifecycle-door">Door string<span>Used only for join and cleared immediately.</span><input id="lifecycle-door" type="password" autocomplete="new-password" spellcheck="false" required></label>
+              <label class="field" for="lifecycle-name">Seat name<input id="lifecycle-name" pattern="[A-Za-z0-9][A-Za-z0-9._\-]{0,79}" required></label>
+              <label class="field" for="lifecycle-role">Role<select id="lifecycle-role"><option value="worker">Worker</option><option value="reviewer">Reviewer</option></select></label>
+              <label class="field" for="lifecycle-tier">Tier ceiling<select id="lifecycle-tier"><option value="1">Tier 1</option><option value="2" selected>Tier 2</option><option value="3">Tier 3</option></select></label>
+              <label class="field" for="lifecycle-folder">Workspace focus<input id="lifecycle-folder" value="standalone-seat" required></label>
+              <details class="advanced-fields field-wide"><summary>Assistant and model details</summary><div class="form-grid">
+                <label class="field" for="lifecycle-assistant">Assistant ID<input id="lifecycle-assistant" placeholder="Use configured default"></label>
+                <label class="field" for="lifecycle-model">Model override<input id="lifecycle-model" placeholder="Use preset default"></label>
+              </div></details>
+              <div class="form-actions field-wide"><button class="button button-primary" id="join-seat-lifecycle" type="submit">Join standalone seat</button></div>
+              <p class="form-message field-wide" id="seat-lifecycle-message" role="status" aria-live="polite"></p>
+            </form>
+            <article class="card status-card" aria-labelledby="seat-lifecycle-status-title">
+              <div class="card-heading"><div><p class="eyebrow">Central identity</p><h3 id="seat-lifecycle-status-title">Live seat status</h3></div><span class="status-pill neutral" id="seat-lifecycle-pill">Not loaded</span></div>
+              <dl class="detail-list">
+                <div><dt>Board</dt><dd data-seat-field="board">—</dd></div>
+                <div><dt>Seat</dt><dd data-seat-field="agent_name">—</dd></div>
+                <div><dt>Role</dt><dd data-seat-field="role">—</dd></div>
+                <div><dt>Lifecycle</dt><dd data-seat-field="lifecycle_status">—</dd></div>
+                <div><dt>Dispatch</dt><dd data-seat-field="dispatch_status">—</dd></div>
+                <div><dt>Lease expires</dt><dd data-seat-field="lease_expires_at">—</dd></div>
+              </dl>
+              <label class="field" for="seat-retire-confirmation">Retirement confirmation<span id="seat-confirmation-help">Refresh an exact identity first.</span><input id="seat-retire-confirmation" autocomplete="off" disabled></label>
+              <div class="card-actions"><button class="button button-danger-quiet" id="disconnect-seat" type="button" disabled>Retire and disconnect</button></div>
+              <p class="support-copy" id="seat-recovery" aria-live="polite">No lifecycle action has run.</p>
+            </article>
+          </div>
+        </section>
+
+        <section class="section-block" id="groups" aria-labelledby="groups-title">
+          <div class="section-heading">
+            <div><p class="eyebrow">Standalone organization</p><h2 id="groups-title">Seat groups</h2><p>Organize existing Pursers seats on this board. Groups do not create, start, stop, or dispatch seats.</p></div>
+            <button class="button button-quiet" id="refresh-groups" type="button">Refresh groups</button>
+          </div>
+          <div class="two-column">
+            <form class="card form-card" id="group-form">
+              <input id="group-id" type="hidden">
+              <label class="field field-wide" for="group-name">Group name
+                <span>Unique on this board, up to 80 characters.</span>
+                <input id="group-name" maxlength="80" required autocomplete="off">
+              </label>
+              <fieldset class="field field-wide group-member-field">
+                <legend>Standalone seats</legend>
+                <span>Select one or more current or retired board seats.</span>
+                <div id="group-members" class="group-member-picker"></div>
+              </fieldset>
+              <div class="form-actions field-wide">
+                <button class="button button-primary" id="save-group" type="submit">Create group</button>
+                <button class="button button-quiet" id="cancel-group-edit" type="button" hidden>Cancel edit</button>
+              </div>
+              <p class="form-message field-wide" id="group-message" role="status" aria-live="polite"></p>
+            </form>
+            <div class="card roster-card">
+              <div class="card-heading"><div><p class="eyebrow">Board metadata</p><h3>Saved groups</h3></div><span class="status-pill neutral" id="groups-pill">Not loaded</span></div>
+              <div class="empty-state" id="groups-empty"><span aria-hidden="true">◫</span><h3>No seat groups yet</h3><p>Create one after connecting the local helper.</p></div>
+              <div class="group-list" id="group-list"></div>
+            </div>
+          </div>
+        </section>
+
+        <section class="section-block" id="team" aria-labelledby="team-title">
+          <div class="section-heading">
+            <div><p class="eyebrow">2 · Team and seats</p><h2 id="team-title">Prepare a Team</h2><p>Plan first. Starting members requires an explicit second confirmation and reports every seat separately.</p></div>
+            <span class="status-pill neutral" id="team-pill">Context not checked</span>
+          </div>
+
+          <div class="notice notice-warning" id="team-context-notice">
+            <span class="notice-icon" aria-hidden="true">!</span>
+            <div><strong>Use AionUi's native Team surface for lifecycle actions.</strong><p>The settings iframe has no supported conversation runtime. Home validates the plan shape but keeps Start disabled and never substitutes a mock roster.</p></div>
+          </div>
+
+          <form class="card form-card" id="team-form">
+            <div class="form-grid team-basics">
+              <label class="field" for="team-name">Existing Team name<span>Must match the open AionUi Team.</span><input id="team-name" name="team_name" required></label>
+              <label class="field" for="lead-name">Monitor lead name<span>The lead coordinates but never executes tickets.</span><input id="lead-name" name="lead_name" required></label>
+              <label class="field" for="lead-assistant">Lead assistant ID<span>Exact ID from the AionUi catalog.</span><input id="lead-assistant" name="lead_assistant" required></label>
+            </div>
+
+            <div class="member-heading"><div><h3>Teammates</h3><p>Each seat needs a unique name and folder. Role and tier ceilings remain fixed in the kickoff.</p></div><button class="button button-quiet" id="add-seat" type="button">Add teammate</button></div>
+            <div class="seat-list" id="seat-list"></div>
+            <div class="form-actions">
+              <button class="button button-secondary" id="refresh-team" type="button">Read current Team</button>
+              <button class="button button-primary" id="plan-team" type="submit">Preview Team plan</button>
+            </div>
+            <p class="form-message" id="team-message" role="status" aria-live="polite"></p>
+          </form>
+
+          <section class="card plan-card" id="plan-card" hidden aria-labelledby="plan-title">
+            <div class="card-heading"><div><p class="eyebrow">Review before starting</p><h3 id="plan-title">Team plan</h3></div><span class="status-pill neutral" id="plan-state">Dry run</span></div>
+            <div class="result-list" id="plan-results"></div>
+            <label class="confirm-row"><span class="confirm-control"><input id="confirm-start" type="checkbox"></span><span>I reviewed this exact plan and want to start only the listed teammates.</span></label>
+            <button class="button button-primary" id="start-team" type="button" disabled>Start listed teammates</button>
+          </section>
+        </section>
+
+        <section class="section-block" id="progress" aria-labelledby="progress-title">
+          <div class="section-heading">
+            <div><p class="eyebrow">3 · Progress and recovery</p><h2 id="progress-title">Current Team</h2><p>Roster state comes from the real Team host. Board dispatch still decides who receives work.</p></div>
+            <button class="button button-quiet" id="refresh-roster" type="button">Refresh roster</button>
+          </div>
+          <div class="card roster-card">
+            <div class="empty-state" id="roster-empty"><span aria-hidden="true">◎</span><h3>No Team context yet</h3><p>Open this extension from an existing AionUi Team conversation to read its roster.</p></div>
+            <div class="roster-list" id="roster-list"></div>
+          </div>
+          <div class="card results-card" aria-labelledby="results-title">
+            <div class="card-heading results-heading">
+              <div><p class="eyebrow">Board evidence</p><h3 id="results-title">Submitted results</h3><p>Read-only work summaries, bounded artifact references, and independent review outcomes for this board.</p></div>
+              <span class="status-pill neutral" id="results-pill">Not loaded</span>
+            </div>
+            <div class="results-controls">
+              <label class="field" for="result-state">Result state
+                <select id="result-state" name="result_state">
+                  <option value="">All states</option>
+                  <option value="pending">Pending review</option>
+                  <option value="approved">Approved</option>
+                  <option value="rejected">Rejected</option>
+                  <option value="failed">Failed</option>
+                  <option value="missing">Missing submission</option>
+                </select>
+              </label>
+              <button class="button button-secondary" id="refresh-results" type="button">Refresh results</button>
+            </div>
+            <p class="form-message" id="results-message" role="status" aria-live="polite"></p>
+            <div class="empty-state" id="results-empty"><span aria-hidden="true">↗</span><h3>No results loaded</h3><p>Connect the local helper to read the selected board.</p></div>
+            <div class="submission-list" id="submission-list" aria-live="polite"></div>
+          </div>
+          <div class="card dashboard-card">
+            <div><p class="eyebrow">Follow board work</p><h3>Open the Pursers dashboard</h3><p>The dashboard is supplied by the Pursers Personal MCP app. Open it from Tools in the same AionUi conversation. If the host does not expose the app, ask the Team to run <code>board_snapshot</code>; this page does not invent a navigation route.</p></div>
+            <span class="status-pill neutral">Host entrypoint</span>
+          </div>
+        </section>
+
+        <section class="section-block" id="tickets" aria-labelledby="tickets-title">
+          <div class="section-heading">
+            <div><p class="eyebrow">Board-backed work</p><h2 id="tickets-title">Ticket lifecycle</h2><p>Create unassigned work and follow persisted board status. Workers claim and submit elsewhere; independent reviewers approve.</p></div>
+            <button class="button button-quiet" id="refresh-tickets" type="button">Refresh tickets</button>
+          </div>
+          <div class="two-column ticket-layout">
+            <form class="card form-card" id="ticket-form">
+              <label class="field field-wide" for="ticket-title">Title<span>Short description shown in dispatch.</span><input id="ticket-title" maxlength="200" required></label>
+              <label class="field field-wide" for="ticket-description">Description<textarea id="ticket-description" maxlength="5000" rows="5" required></textarea></label>
+              <label class="field field-wide" for="ticket-target">Target URL<span>Include the project slug as the first path segment.</span><input id="ticket-target" maxlength="500" placeholder="project/feature" required></label>
+              <label class="field" for="ticket-scope">Scope<select id="ticket-scope"><option>interactive-no-send</option><option>READ-ONLY</option><option>interactive</option></select></label>
+              <label class="field" for="ticket-priority">Priority<select id="ticket-priority"><option>low</option><option selected>medium</option><option>high</option><option>critical</option></select></label>
+              <label class="field" for="ticket-tier">Tier<select id="ticket-tier"><option>1</option><option selected>2</option><option>3</option></select></label>
+              <label class="field field-wide" for="ticket-required">Required fields<span>One per line or comma-separated.</span><textarea id="ticket-required" rows="3" required>branch_and_commit
+files_changed
+test_output</textarea></label>
+              <details class="advanced-fields field-wide"><summary>Optional routing details</summary><div class="form-grid">
+                <label class="field" for="ticket-tags">Tags<input id="ticket-tags" placeholder="home, feature"></label>
+                <label class="field" for="ticket-files">Related files<input id="ticket-files" placeholder="tools/aionui-extension"></label>
+                <label class="field field-wide" for="ticket-forbidden">Forbidden actions<input id="ticket-forbidden" placeholder="No release"></label>
+              </div></details>
+              <div class="form-actions field-wide"><button class="button button-primary" id="create-ticket" type="submit">Create unassigned ticket</button></div>
+              <p class="form-message field-wide" id="ticket-message" role="status" aria-live="polite"></p>
+            </form>
+            <div class="card ticket-card" aria-labelledby="ticket-list-title">
+              <div class="card-heading"><div><p class="eyebrow">Persisted board state</p><h3 id="ticket-list-title">Recent tickets</h3></div><span class="status-pill neutral" id="ticket-pill">Not loaded</span></div>
+              <div class="empty-state" id="ticket-empty"><span aria-hidden="true">□</span><h3>No tickets loaded</h3><p>Connect the helper, then refresh.</p></div>
+              <div class="ticket-list" id="ticket-list" aria-live="polite"></div>
+            </div>
+          </div>
+        </section>
+
+        <section class="section-block" id="advanced" aria-labelledby="advanced-title">
+          <div class="section-heading"><div><p class="eyebrow">Advanced</p><h2 id="advanced-title">Supported boundaries</h2><p>Technical details are available here without exposing connection secrets.</p></div></div>
+          <div class="support-grid">
+            <article class="card"><h3>Pause</h3><p>Pause sends a checkpoint message by interrupting one active teammate turn. It does not pause the whole board.</p></article>
+            <article class="card"><h3>Stop</h3><p>Stop requests cooperative shutdown. A teammate may reject the request, so the UI reports “requested” until roster state changes.</p></article>
+            <article class="card"><h3>Resume</h3><p>The agent-facing host contract has no Team resume operation. Restart or continue the teammate from AionUi; this page will not claim an unsupported resume.</p></article>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <template id="seat-template">
+      <fieldset class="seat-row">
+        <legend>Teammate <span class="seat-number"></span></legend>
+        <label class="field">Seat name<input data-seat-field="name" required></label>
+        <label class="field">Assistant ID<input data-seat-field="assistant_id" required></label>
+        <label class="field">Role<select data-seat-field="role"><option value="worker">Worker</option><option value="reviewer">Reviewer</option></select></label>
+        <label class="field">Tier ceiling<select data-seat-field="tier_max"><option value="1">Tier 1</option><option value="2" selected>Tier 2</option><option value="3">Tier 3</option></select></label>
+        <label class="field">Workspace folder<input data-seat-field="folder" required></label>
+        <label class="field">Model override<input data-seat-field="model" placeholder="Use preset default"></label>
+        <button class="remove-seat" type="button" aria-label="Remove teammate">Remove</button>
+      </fieldset>
+    </template>
+
+    <dialog id="stop-dialog">
+      <form method="dialog" class="dialog-card">
+        <p class="eyebrow">Confirm scope</p><h2>Stop this teammate?</h2>
+        <p id="stop-copy">This requests cooperative shutdown. It does not delete history or close board work.</p>
+        <div class="form-actions"><button class="button button-quiet" value="cancel">Keep running</button><button class="button button-danger" id="confirm-stop" value="confirm">Request stop</button></div>
       </form>
-      <p id="message" role="status" aria-live="polite"></p>
-      <section id="status-card" hidden>
-        <h2>Status</h2>
-        <dl>
-          <dt>Board</dt><dd data-field="board">—</dd>
-          <dt>Role</dt><dd data-field="role">—</dd>
-          <dt>Seat name</dt><dd data-field="seat_name">—</dd>
-          <dt>Push mode</dt><dd data-field="push_mode">—</dd>
-          <dt>Key ID</dt><dd data-field="kid">—</dd>
-          <dt>Expires</dt><dd data-field="exp">—</dd>
-        </dl>
-      </section>
-    </main>
-    <script src="/pursers/assets/app.js"></script>
+    </dialog>
+
+    <dialog id="remove-group-dialog">
+      <form method="dialog" class="dialog-card">
+        <p class="eyebrow">Confirm metadata removal</p><h2>Remove this seat group?</h2>
+        <p id="remove-group-copy">Only the group is removed. Seats, board membership, tickets, and history remain unchanged.</p>
+        <div class="form-actions"><button class="button button-quiet" value="cancel">Keep group</button><button class="button button-danger" id="confirm-remove-group" value="confirm">Remove group</button></div>
+      </form>
+    </dialog>
+
+    <script src="./app.js"></script>
   </body>
 </html>
