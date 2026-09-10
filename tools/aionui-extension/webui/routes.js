@@ -148,6 +148,9 @@ function createHandlers(dependencies = {}) {
     importMcp,
   });
   const team = createTeamAdapter({ runCli: dependencies.runTeamCli });
+  const standaloneTeamStatus = typeof dependencies.runStandaloneTeamStatus === 'function'
+    ? dependencies.runStandaloneTeamStatus
+    : null;
   const tickets = dependencies.runTicketLifecycle && expectedBoard
     ? createTicketLifecycleAdapter({ run: dependencies.runTicketLifecycle, expectedBoard })
     : null;
@@ -228,7 +231,8 @@ function createHandlers(dependencies = {}) {
       });
     }
     let value;
-    if (operation === 'status') value = await team.status({ tasks: true });
+    if (operation === 'status' && standaloneTeamStatus) value = await standaloneTeamStatus();
+    else if (operation === 'status') value = await team.status({ tasks: true });
     else if (operation === 'plan') value = await team.plan(body);
     else if (operation === 'apply') value = await team.apply(body);
     else if (operation === 'pause') value = await team.pauseSeat(body.slot_id, body.message, body.reason);

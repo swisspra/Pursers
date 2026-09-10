@@ -161,6 +161,32 @@ test('team status returns the real host roster and task list', async () => {
   assert.deepEqual(calls.map((call) => call.command), [['members'], ['task', 'list']]);
 });
 
+test('team status uses the bounded standalone lifecycle projection when configured', async () => {
+  let nativeCalls = 0;
+  const handlers = createHandlers({
+    runTeamCli: async () => { nativeCalls += 1; return { success: false }; },
+    runStandaloneTeamStatus: async () => ({
+      ok: true,
+      op: 'status',
+      mode: 'board_managed_standalone',
+      native_team: false,
+      board: 'sandbox-home',
+      group_revision: 2,
+      group_count: 1,
+      members: [{ agent_id: 'AI-worker-1', name: 'worker-1', role: 'worker', status: 'active', lifecycle_status: 'active' }],
+      tasks: [],
+    }),
+  });
+  const response = await handlers.handle(new Request('http://localhost/pursers/team/status'));
+  const payload = await response.json();
+  assert.equal(response.status, 200);
+  assert.equal(payload.mode, 'board_managed_standalone');
+  assert.equal(payload.native_team, false);
+  assert.equal(payload.members[0].name, 'worker-1');
+  assert.equal('slot_id' in payload.members[0], false);
+  assert.equal(nativeCalls, 0);
+});
+
 test('team plan is dry-run and live apply requires the adapter confirmation contract', async () => {
   const calls = [];
   const runTeamCli = async (command, input) => {

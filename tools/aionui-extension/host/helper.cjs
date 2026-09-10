@@ -18,6 +18,10 @@ const TOKEN_HEADER = 'x-pursers-home-token';
 const SAFE_BOARD = /^[A-Za-z0-9._-]{1,80}$/;
 const SAFE_CENTRAL = /^[A-Za-z0-9._-]{1,80}$/;
 const SAFE_RUNTIME_ID = /^[A-Za-z0-9._:@/-]{1,256}$/;
+const SAFE_AGENT_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/;
+const SAFE_AGENT_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/;
+const STANDALONE_ROLES = new Set(['worker', 'reviewer']);
+const STANDALONE_LIFECYCLES = new Set(['active', 'handed_off', 'retired', 'stale', 'unknown']);
 const RUNTIME_ENV = [
   'AIONUI_BASE_URL',
   'AIONUI_USER_ID',
@@ -214,6 +218,64 @@ function createFleetResultsFetcher(baseUrl, fetchImpl = globalThis.fetch) {
   };
 }
 
+function createStandaloneTeamStatus(runTeamLifecycle, board) {
+  if (typeof runTeamLifecycle !== 'function') fail('standalone Team status requires a lifecycle runner');
+  if (!SAFE_BOARD.test(board || '')) fail('standalone Team status requires a safe board');
+  return async () => {
+    let current;
+    try {
+      current = await runTeamLifecycle('list', { board });
+    } catch (_error) {
+      current = null;
+    }
+    if (!current || current.ok !== true || current.board !== board || !Array.isArray(current.agents)) {
+      return {
+        ok: false,
+        op: 'status',
+        mode: 'board_managed_standalone',
+        error: {
+          code: 'transport_unavailable',
+          message: 'The board-managed standalone lifecycle is unavailable.',
+        },
+      };
+    }
+    const validAgents = current.agents.every((agent) => agent
+      && SAFE_AGENT_ID.test(agent.agent_id || '')
+      && SAFE_AGENT_NAME.test(agent.agent_name || '')
+      && STANDALONE_ROLES.has(agent.role)
+      && STANDALONE_LIFECYCLES.has(agent.lifecycle_status));
+    if (!validAgents) {
+      return {
+        ok: false,
+        op: 'status',
+        mode: 'board_managed_standalone',
+        error: {
+          code: 'transport_unavailable',
+          message: 'The board-managed standalone lifecycle returned invalid identity data.',
+        },
+      };
+    }
+    const members = current.agents.map((agent) => ({
+      agent_id: agent.agent_id,
+      name: agent.agent_name,
+      role: agent.role,
+      status: agent.lifecycle_status,
+      lifecycle_status: agent.lifecycle_status,
+    }));
+    return {
+      ok: true,
+      op: 'status',
+      mode: 'board_managed_standalone',
+      native_team: false,
+      board,
+      group_revision: Number.isInteger(current.revision) ? current.revision : 0,
+      group_count: Array.isArray(current.groups) ? current.groups.length : 0,
+      members,
+      tasks: [],
+    };
+  };
+}
+
 function readBody(request) {
   return new Promise((resolve, reject) => {
     const chunks = [];
@@ -299,6 +361,9 @@ function createHelperServer(options) {
     expectedCentral: central,
     runBridge,
     runTeamCli,
+    runStandaloneTeamStatus: options.runtimeContext
+      ? null
+      : createStandaloneTeamStatus(groupProcess.run, board),
     runTicketLifecycle: ticketLifecycle.run,
     fetchResults,
     runTeamLifecycle: groupProcess.run,
@@ -363,6 +428,7 @@ function createHelperServer(options) {
         transport: 'authenticated_loopback_helper',
         host_route_handlers: false,
         team_context: options.runtimeContext ? 'explicit_issuer_context' : 'unavailable_from_settings_tab',
+        team_status_source: options.runtimeContext ? 'native_team_runtime' : 'board_managed_standalone',
         core_version: options.coreVersion || 'unknown',
       }, origin);
       return;
@@ -460,6 +526,7 @@ module.exports = {
   bridgeArguments,
   createFleetResultsFetcher,
   createHelperServer,
+  createStandaloneTeamStatus,
   createTeamRunner,
   explicitRuntimeContext,
   normalizeOrigin,

@@ -10,6 +10,7 @@ const {
   TOKEN_HEADER,
   bridgeArguments,
   createHelperServer,
+  createStandaloneTeamStatus,
   createTeamRunner,
   explicitRuntimeContext,
   normalizeOrigin,
@@ -131,6 +132,7 @@ test('helper authenticates one exact origin and exposes selected-board status on
       transport: 'authenticated_loopback_helper',
       host_route_handlers: false,
       team_context: 'unavailable_from_settings_tab',
+      team_status_source: 'board_managed_standalone',
       core_version: '0.2.1',
     });
 
@@ -160,6 +162,75 @@ test('helper authenticates one exact origin and exposes selected-board status on
   } finally {
     await helper.close();
   }
+});
+
+test('standalone Team status exposes only the bounded board lifecycle projection', async () => {
+  const calls = [];
+  const status = createStandaloneTeamStatus(async (operation, payload) => {
+    calls.push([operation, payload]);
+    return {
+      ok: true,
+      board: 'sandbox-home',
+      revision: 3,
+      groups: [{ group_id: 'group-a1b2c3d4e5f6' }],
+      agents: [{
+        agent_id: 'AI-worker-1', agent_name: 'worker-1', role: 'worker',
+        lifecycle_status: 'active', principal_id: 'must-not-leak', slot_id: 'must-not-leak',
+      }],
+    };
+  }, 'sandbox-home');
+  const payload = await status();
+  assert.deepEqual(calls, [['list', { board: 'sandbox-home' }]]);
+  assert.deepEqual(payload, {
+    ok: true,
+    op: 'status',
+    mode: 'board_managed_standalone',
+    native_team: false,
+    board: 'sandbox-home',
+    group_revision: 3,
+    group_count: 1,
+    members: [{
+      agent_id: 'AI-worker-1', name: 'worker-1', role: 'worker',
+      status: 'active', lifecycle_status: 'active',
+    }],
+    tasks: [],
+  });
+  assert.equal(JSON.stringify(payload).includes('must-not-leak'), false);
+});
+
+test('helper Team status uses standalone board lifecycle while native mutations stay closed', async () => {
+  const groupProcess = {
+    async run(operation, payload) {
+      assert.deepEqual([operation, payload], ['list', { board: 'sandbox-home' }]);
+      return {
+        ok: true, board: 'sandbox-home', revision: 0, groups: [],
+        agents: [{ agent_id: 'AI-worker-1', agent_name: 'worker-1', role: 'worker', lifecycle_status: 'active' }],
+      };
+    },
+    async close() {},
+  };
+  const { helper, teamCalls, baseUrl } = await runningHelper({ groupProcess });
+  try {
+    const response = await fetch(`${baseUrl}/pursers/team/status`, { headers: authHeaders() });
+    const payload = await response.json();
+    assert.equal(response.status, 200);
+    assert.equal(payload.mode, 'board_managed_standalone');
+    assert.equal(payload.native_team, false);
+    assert.equal(payload.members[0].name, 'worker-1');
+    assert.deepEqual(teamCalls, []);
+  } finally {
+    await helper.close();
+  }
+});
+
+test('standalone Team status fails closed on invalid board identity data', async () => {
+  const status = createStandaloneTeamStatus(async () => ({
+    ok: true, board: 'sandbox-home', revision: 0, groups: [],
+    agents: [{ agent_id: 'AI-worker-1', agent_name: '../worker', role: 'worker', lifecycle_status: 'active' }],
+  }), 'sandbox-home');
+  const payload = await status();
+  assert.equal(payload.ok, false);
+  assert.equal(payload.error.code, 'transport_unavailable');
 });
 
 test('helper handles CORS preflight and refuses a door for another board', async () => {
