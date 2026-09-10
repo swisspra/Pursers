@@ -12,7 +12,9 @@ Subcommands:
 
 ``install-observer``  copy the observer into a verifier-owned directory
 ``doctor``            report observed capability status, exit non-zero if blocked
+``prepare``           expand the exact 198-observation verifier manifest
 ``capture``           record one real browser observation into evidence
+``assemble``          refuse incomplete captures and assemble the report
 ``validate``          validate an evidence report through the installed observer
 """
 
@@ -23,9 +25,11 @@ import base64
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
+import tomllib
 import uuid
 from pathlib import Path
 from typing import Any
@@ -34,6 +38,12 @@ HERE = Path(__file__).resolve().parent
 REPOSITORY_ROOT = HERE.parents[3]
 OBSERVER_SOURCE = HERE / "browser_observer.py"
 SCHEMA_VERSION = 1
+FULL_SHA = re.compile(r"[0-9a-f]{40}")
+SURFACE_PRODUCTS = {
+    "aionui": "AionUi",
+    "fleet": "Pursers Fleet",
+    "personal": "Pursers Personal",
+}
 
 EXIT_OK = 0
 EXIT_USAGE = 2
@@ -93,6 +103,97 @@ def _run_observer(argv: list[str], *, stdin_text: str | None = None) -> dict[str
     return payload
 
 
+def _git(*arguments: str) -> str:
+    completed = subprocess.run(
+        ["git", *arguments], cwd=REPOSITORY_ROOT, text=True, capture_output=True,
+        check=False, timeout=10,
+    )
+    if completed.returncode:
+        raise RunnerError(EXIT_BLOCKED, "verification checkout git identity is unavailable")
+    return completed.stdout.strip()
+
+
+def _load_surface_manifest(path_value: str) -> dict[str, Any]:
+    path = Path(path_value).expanduser().resolve()
+    try:
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        raise RunnerError(EXIT_USAGE, "surface manifest is not readable JSON") from None
+    if not isinstance(manifest, dict) or set(manifest) != {
+        "schema_version", "candidate_commit", "surfaces"
+    } or manifest["schema_version"] != SCHEMA_VERSION:
+        raise RunnerError(EXIT_USAGE, "surface manifest fields do not match schema")
+    candidate = manifest["candidate_commit"]
+    if not isinstance(candidate, str) or not FULL_SHA.fullmatch(candidate):
+        raise RunnerError(EXIT_USAGE, "surface manifest candidate_commit must be a full SHA")
+    if _git("rev-parse", "HEAD") != candidate or _git("status", "--porcelain"):
+        raise RunnerError(EXIT_BLOCKED, "verification checkout must be clean at candidate_commit")
+    surfaces = manifest["surfaces"]
+    if not isinstance(surfaces, dict) or set(surfaces) != set(SURFACE_PRODUCTS):
+        raise RunnerError(EXIT_USAGE, "surface manifest needs exact aionui, fleet, personal entries")
+    normalized: dict[str, Any] = {}
+    expected_adapters = {
+        "aionui": "signed-aionui",
+        "fleet": "pinned-process-artifact",
+        "personal": "pinned-signed-aionui-artifact",
+    }
+    for surface_id, product in SURFACE_PRODUCTS.items():
+        row = surfaces[surface_id]
+        required = {"adapter", "target"} if surface_id == "aionui" else {
+            "adapter", "target", "artifact"
+        }
+        if not isinstance(row, dict) or set(row) != required:
+            raise RunnerError(EXIT_USAGE, f"surface {surface_id} fields do not match schema")
+        if row["adapter"] != expected_adapters[surface_id]:
+            raise RunnerError(EXIT_USAGE, f"surface {surface_id} adapter is invalid")
+        target = row["target"]
+        if not isinstance(target, dict) or set(target) != {"base_url", "board_id"}:
+            raise RunnerError(EXIT_USAGE, f"surface {surface_id} target is invalid")
+        from urllib.parse import urlsplit
+        parsed = urlsplit(str(target["base_url"]))
+        if (
+            parsed.scheme not in {"http", "https"}
+            or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}
+            or parsed.path not in {"", "/"}
+            or parsed.query or parsed.fragment or parsed.username or parsed.password
+            or not isinstance(target["board_id"], str)
+            or not re.fullmatch(r"(?:sandbox|test)-[A-Za-z0-9._-]{1,71}", target["board_id"])
+        ):
+            raise RunnerError(EXIT_USAGE, f"surface {surface_id} target is unsafe")
+        normalized_row: dict[str, Any] = {
+            "adapter": row["adapter"],
+            "target": {"base_url": str(target["base_url"]).rstrip("/"), "board_id": target["board_id"]},
+            "product": product,
+            "candidate_commit": candidate,
+        }
+        if surface_id != "aionui":
+            relative = row["artifact"]
+            if not isinstance(relative, str) or relative.startswith("/") or ".." in Path(relative).parts:
+                raise RunnerError(EXIT_USAGE, f"surface {surface_id} artifact path is invalid")
+            artifact = (REPOSITORY_ROOT / relative).resolve()
+            if not artifact.is_relative_to(REPOSITORY_ROOT.resolve()) or not artifact.is_file():
+                raise RunnerError(EXIT_USAGE, f"surface {surface_id} artifact is unavailable")
+            tracked = _git("ls-files", "--error-unmatch", relative)
+            if tracked != relative:
+                raise RunnerError(EXIT_USAGE, f"surface {surface_id} artifact is not exact tracked content")
+            normalized_row.update({
+                "artifact": relative,
+                "artifact_sha256": hashlib.sha256(artifact.read_bytes()).hexdigest(),
+                "version": f"candidate-{candidate[:12]}",
+            })
+        normalized[surface_id] = normalized_row
+    personal_meta = tomllib.loads(
+        (REPOSITORY_ROOT / "packages/personal/pyproject.toml").read_text(encoding="utf-8")
+    )
+    personal_version = personal_meta.get("project", {}).get("version")
+    if not isinstance(personal_version, str):
+        raise RunnerError(EXIT_BLOCKED, "Personal package version is unavailable")
+    normalized["personal"]["version"] = personal_version
+    if normalized["fleet"]["target"]["base_url"] == normalized["aionui"]["target"]["base_url"]:
+        raise RunnerError(EXIT_USAGE, "Fleet must use its actual distinct loopback origin")
+    return normalized
+
+
 def install_observer(args: argparse.Namespace) -> int:
     destination = Path(args.dir).expanduser().resolve()
     if destination.is_relative_to(REPOSITORY_ROOT.resolve()):
@@ -118,6 +219,7 @@ def install_observer(args: argparse.Namespace) -> int:
         except (OSError, json.JSONDecodeError):
             existing_id = None
     observer_id = existing_id or f"observer-{uuid.uuid4().hex[:16]}"
+    surfaces = _load_surface_manifest(args.surface_manifest) if args.surface_manifest else None
     config = {
         "schema_version": SCHEMA_VERSION,
         "observer_id": observer_id,
@@ -125,6 +227,7 @@ def install_observer(args: argparse.Namespace) -> int:
         "max_age_s": int(args.max_age_s),
         "repository_root": str(REPOSITORY_ROOT.resolve()),
         "backend": backend,
+        "surfaces": surfaces,
     }
     config_path.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     os.chmod(config_path, 0o600)
@@ -137,6 +240,14 @@ def install_observer(args: argparse.Namespace) -> int:
             "observer_id": observer_id,
             "backend_kind": backend["kind"],
             "max_age_s": config["max_age_s"],
+            "surfaces": {
+                key: {
+                    "target": value["target"],
+                    "product": value["product"],
+                    "candidate_commit": value["candidate_commit"],
+                }
+                for key, value in (surfaces or {}).items()
+            },
         },
         sys.stdout,
         indent=2,
@@ -166,6 +277,213 @@ def _artifact(evidence_root: Path, relative: str, data: bytes) -> dict[str, str]
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(data)
     return {"path": relative, "sha256": hashlib.sha256(data).hexdigest()}
+
+
+def _load_observer_config(observer_dir: Path) -> dict[str, Any]:
+    _observer_command(observer_dir)
+    path = observer_dir.expanduser().resolve() / "observer.json"
+    try:
+        config = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        raise RunnerError(EXIT_BLOCKED, "installed observer config is unreadable") from None
+    if not isinstance(config, dict) or config.get("schema_version") != SCHEMA_VERSION:
+        raise RunnerError(EXIT_BLOCKED, "installed observer config is invalid")
+    surfaces = config.get("surfaces")
+    if not isinstance(surfaces, dict) or set(surfaces) != set(SURFACE_PRODUCTS):
+        raise RunnerError(EXIT_BLOCKED, "installed observer lacks verifier-pinned surfaces")
+    return config
+
+
+def _acceptance_ids() -> tuple[tuple[str, ...], tuple[str, ...]]:
+    sys.path.insert(0, str(HERE))
+    import harness
+
+    return tuple(harness.SEQUENCE), tuple(sorted(harness.REQUIRED_INVENTORY))
+
+
+def _surface_for(identifier: str) -> str:
+    sys.path.insert(0, str(HERE))
+    import harness
+
+    return str(harness._surface_for_identifier(identifier))
+
+
+def prepare(args: argparse.Namespace) -> int:
+    observer_dir = Path(args.observer).expanduser().resolve()
+    config = _load_observer_config(observer_dir)
+    try:
+        manifest = json.loads(Path(args.manifest).expanduser().read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        raise RunnerError(EXIT_USAGE, "observation manifest is not readable JSON") from None
+    if not isinstance(manifest, dict) or set(manifest) != {
+        "schema_version", "operator_topology", "observations"
+    } or manifest["schema_version"] != SCHEMA_VERSION:
+        raise RunnerError(EXIT_USAGE, "observation manifest fields do not match schema")
+    sys.path.insert(0, str(HERE))
+    import harness
+
+    try:
+        operator_topology = harness._validate_operator_topology(
+            manifest["operator_topology"]
+        )
+    except harness.AcceptanceError as error:
+        raise RunnerError(EXIT_USAGE, str(error)) from None
+    rows = manifest["observations"]
+    sequence, inventory = _acceptance_ids()
+    required = {*sequence, *inventory}
+    if not isinstance(rows, list) or len(rows) != len(required):
+        raise RunnerError(EXIT_USAGE, f"observation manifest must contain exactly {len(required)} rows")
+    by_id: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        if not isinstance(row, dict) or set(row) != {"id", "page_url", "assertions"}:
+            raise RunnerError(EXIT_USAGE, "observation manifest row fields do not match schema")
+        identifier = row["id"]
+        if not isinstance(identifier, str) or identifier in by_id:
+            raise RunnerError(EXIT_USAGE, "observation manifest IDs must be unique strings")
+        if not isinstance(row["assertions"], list) or not row["assertions"]:
+            raise RunnerError(EXIT_USAGE, f"observation {identifier} needs assertions")
+        by_id[identifier] = row
+    if set(by_id) != required:
+        raise RunnerError(EXIT_USAGE, "observation manifest IDs do not match the authoritative set")
+    evidence = Path(args.evidence).expanduser().resolve()
+    evidence.mkdir(parents=True, exist_ok=True)
+    commands: list[list[str]] = []
+    for identifier in (*sequence, *inventory):
+        row = by_id[identifier]
+        surface_id = _surface_for(identifier)
+        surface = config["surfaces"][surface_id]
+        target = surface["target"]
+        from urllib.parse import urlsplit
+        page = urlsplit(row["page_url"] if isinstance(row["page_url"], str) else "")
+        origin = urlsplit(target["base_url"])
+        if page.scheme != origin.scheme or page.netloc != origin.netloc or page.query or page.fragment:
+            raise RunnerError(EXIT_USAGE, f"observation {identifier} page_url uses the wrong surface origin")
+        assertion_path = evidence / "assertions" / f"{identifier}.json"
+        assertion_path.parent.mkdir(parents=True, exist_ok=True)
+        assertion_path.write_text(json.dumps(row["assertions"], indent=2, sort_keys=True) + "\n")
+        commands.append([
+            sys.executable, str(Path(__file__).resolve()), "capture",
+            "--observer", str(observer_dir), "--evidence", str(evidence),
+            "--observation", identifier, "--surface", surface_id,
+            "--target", target["base_url"], "--board", target["board_id"],
+            "--commit", surface["candidate_commit"], "--page", row["page_url"],
+            "--assertions", str(assertion_path),
+        ])
+    plan = {
+        "schema_version": SCHEMA_VERSION,
+        "candidate_commit": config["surfaces"]["aionui"]["candidate_commit"],
+        "operator_topology": operator_topology,
+        "sequence": list(sequence),
+        "inventory": list(inventory),
+        "commands": commands,
+    }
+    plan_path = evidence / "capture-plan.json"
+    plan_path.write_text(json.dumps(plan, indent=2, sort_keys=True) + "\n")
+    json.dump({"plan": str(plan_path), "observations": len(commands)}, sys.stdout, indent=2)
+    sys.stdout.write("\n")
+    return EXIT_OK
+
+
+def assemble(args: argparse.Namespace) -> int:
+    observer_dir = Path(args.observer).expanduser().resolve()
+    config = _load_observer_config(observer_dir)
+    evidence = Path(args.evidence).expanduser().resolve()
+    try:
+        suite_manifest = json.loads(Path(args.suite_manifest).expanduser().read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        raise RunnerError(EXIT_USAGE, "suite manifest is not readable JSON") from None
+    sys.path.insert(0, str(HERE))
+    import harness
+
+    try:
+        plan = json.loads((evidence / "capture-plan.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        raise RunnerError(EXIT_BLOCKED, "capture plan is missing or invalid") from None
+    if not isinstance(plan, dict) or set(plan) != {
+        "schema_version", "candidate_commit", "operator_topology",
+        "sequence", "inventory", "commands",
+    } or plan["schema_version"] != SCHEMA_VERSION:
+        raise RunnerError(EXIT_FAILED, "capture plan fields do not match schema")
+    candidate = config["surfaces"]["aionui"]["candidate_commit"]
+    if plan.get("candidate_commit") != candidate:
+        raise RunnerError(EXIT_FAILED, "capture plan candidate does not match observer")
+    try:
+        operator_topology = harness._validate_operator_topology(
+            plan.get("operator_topology")
+        )
+    except harness.AcceptanceError as error:
+        raise RunnerError(EXIT_FAILED, str(error)) from None
+
+    if not isinstance(suite_manifest, dict) or set(suite_manifest) != {"schema_version", "suites"}:
+        raise RunnerError(EXIT_USAGE, "suite manifest fields do not match schema")
+    suite_refs = suite_manifest["suites"]
+    if not isinstance(suite_refs, dict) or set(suite_refs) != set(harness.REQUIRED_SUITES):
+        raise RunnerError(EXIT_USAGE, "suite manifest does not match the required suite set")
+    sequence, inventory = _acceptance_ids()
+    observations: dict[str, dict[str, Any]] = {}
+    surface_runtime: dict[str, dict[str, Any]] = {}
+    for identifier in (*sequence, *inventory):
+        path = evidence / "observations" / f"{identifier}.json"
+        try:
+            receipt = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            raise RunnerError(EXIT_BLOCKED, f"capture missing or invalid: {identifier}") from None
+        surface_id = _surface_for(identifier)
+        if receipt.get("observation_id") != identifier or receipt.get("surface_id") != surface_id:
+            raise RunnerError(EXIT_FAILED, f"capture surface binding is invalid: {identifier}")
+        runtime = receipt.get("runtime")
+        if surface_id in surface_runtime and surface_runtime[surface_id] != runtime:
+            raise RunnerError(EXIT_FAILED, f"surface runtime changed across captures: {surface_id}")
+        surface_runtime[surface_id] = runtime
+        observations[identifier] = receipt
+    suites: list[dict[str, Any]] = []
+    for name, command in harness.REQUIRED_SUITES.items():
+        reference = suite_refs[name]
+        try:
+            receipt = json.loads((evidence / reference).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, TypeError):
+            raise RunnerError(EXIT_BLOCKED, f"suite receipt missing or invalid: {name}") from None
+        if receipt.get("name") != name or receipt.get("command") != command or receipt.get("exit_code") != 0:
+            raise RunnerError(EXIT_FAILED, f"suite receipt does not prove success: {name}")
+        suites.append({
+            "name": name, "command": command, "status": "passed",
+            "commit": receipt.get("commit"), "evidence": reference,
+        })
+    aion = config["surfaces"]["aionui"]
+    surfaces = {
+        surface_id: {
+            "target": config["surfaces"][surface_id]["target"],
+            "runtime": surface_runtime[surface_id],
+            "candidate_commit": candidate,
+        }
+        for surface_id in SURFACE_PRODUCTS
+    }
+    report = {
+        "schema_version": SCHEMA_VERSION,
+        "evidence_kind": "real_browser_host", "mocked": False, "synthetic": False,
+        "target": aion["target"],
+        "host": {**surface_runtime["aionui"], "evidence": "host-identity-aionui.json"},
+        "surfaces": surfaces,
+        "operator_topology": operator_topology,
+        "steps": [
+            {"id": identifier, "status": "passed", "evidence": f"observations/{identifier}.json"}
+            for identifier in sequence
+        ],
+        "inventory": [
+            {"id": identifier, "status": "passed", "evidence": f"observations/{identifier}.json"}
+            for identifier in inventory
+        ],
+        "suites": suites,
+        "all_existing_suites_passed": True,
+    }
+    report["host"].pop("identity_source", None)
+    destination = Path(args.report).expanduser().resolve()
+    if destination.parent != evidence:
+        raise RunnerError(EXIT_USAGE, "assembled report must live directly in the evidence directory")
+    destination.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+    json.dump({"report": str(destination), "observations": len(observations)}, sys.stdout, indent=2)
+    sys.stdout.write("\n")
+    return EXIT_OK
 
 
 def doctor(args: argparse.Namespace) -> int:
@@ -227,6 +545,7 @@ def capture(args: argparse.Namespace) -> int:
         "candidate_commit": args.commit,
         "page_url": args.page,
         "assertions": _load_assertions(args.assertions),
+        "surface_id": args.surface,
     }
     spec_dir = evidence_root / "specs"
     spec_dir.mkdir(parents=True, exist_ok=True)
@@ -254,7 +573,13 @@ def capture(args: argparse.Namespace) -> int:
         "evidence_kind": "browser_observation",
         "observation_id": payload["observation_id"],
         "target": payload["target"],
-        "host": {"version": payload["host_version"], "build": payload["host_build"]},
+        "surface_id": payload["surface_id"],
+        "runtime": {
+            "product": payload["host_product"],
+            "version": payload["host_version"],
+            "build": payload["host_build"],
+            "identity_source": payload["host_identity_source"],
+        },
         "candidate_commit": payload["candidate_commit"],
         "captured_at": payload["captured_at"],
         "page_url": payload["page_url"],
@@ -277,14 +602,15 @@ def capture(args: argparse.Namespace) -> int:
         "captured_at": payload["captured_at"],
         "source": payload["host_identity_source"],
     }
-    (evidence_root / "host-identity.json").write_text(
+    surface_host_reference = f"host-identity-{payload['surface_id']}.json"
+    (evidence_root / surface_host_reference).write_text(
         json.dumps(host_receipt, sort_keys=True), encoding="utf-8"
     )
     json.dump(
         {
             "observation_id": payload["observation_id"],
             "evidence": reference,
-            "host_identity_evidence": "host-identity.json",
+            "host_identity_evidence": surface_host_reference,
             "page_url": payload["page_url"],
             "screenshot_sha256": screenshot_artifact["sha256"],
             "snapshot_sha256": snapshot_artifact["sha256"],
@@ -343,6 +669,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     install.add_argument("--backend-command", nargs="+", help="alternative absolute capture backend command")
     install.add_argument("--max-age-s", type=int, default=43_200)
+    install.add_argument(
+        "--surface-manifest",
+        help="verifier-authored exact AionUi, Fleet, and Personal runtime bindings",
+    )
     install.add_argument("--rotate-session", action="store_true", help="mint a new observer_id")
     install.set_defaults(handler=install_observer)
 
@@ -355,16 +685,30 @@ def build_parser() -> argparse.ArgumentParser:
     )
     check.set_defaults(handler=doctor)
 
+    plan = sub.add_parser("prepare", help="expand an exact verifier observation manifest")
+    plan.add_argument("--observer", required=True)
+    plan.add_argument("--manifest", required=True)
+    plan.add_argument("--evidence", required=True)
+    plan.set_defaults(handler=prepare)
+
     shot = sub.add_parser("capture", help="record one real browser observation")
     shot.add_argument("--observer", required=True)
     shot.add_argument("--evidence", required=True)
     shot.add_argument("--observation", required=True)
+    shot.add_argument("--surface", choices=tuple(SURFACE_PRODUCTS), default="aionui")
     shot.add_argument("--target", required=True)
     shot.add_argument("--board", required=True)
     shot.add_argument("--commit", required=True)
     shot.add_argument("--page", required=True)
     shot.add_argument("--assertions", help="JSON file holding the observation assertions")
     shot.set_defaults(handler=capture)
+
+    report = sub.add_parser("assemble", help="assemble a complete report from all captures")
+    report.add_argument("--observer", required=True)
+    report.add_argument("--evidence", required=True)
+    report.add_argument("--suite-manifest", required=True)
+    report.add_argument("--report", required=True)
+    report.set_defaults(handler=assemble)
 
     check_report = sub.add_parser("validate", help="validate an evidence report")
     check_report.add_argument("--observer", required=True)

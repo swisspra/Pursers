@@ -41,7 +41,7 @@ SEQUENCE = (
     "fresh_install",
     "door_connect",
     "team_setup",
-    "six_workers_two_reviewers",
+    "five_workers_three_reviewers",
     "ticket_offer_claim",
     "ticket_submit_independent_review",
     "result_visible",
@@ -49,12 +49,30 @@ SEQUENCE = (
     "clean_reconnect_after_rotation",
 )
 CURRENT_OPERATOR_TIERS = {
-    "gemini_worker": 1,
-    "glm_worker": 1,
-    "qwen_worker": 2,
+    "goose_worker": 1,
     "codex_worker": 2,
-    "reviewer": 2,
+    "codex_reviewer": 2,
+    "optional_opus_worker": 2,
 }
+CURRENT_OPERATOR_TOPOLOGY = {
+    "goose_worker": {"count": 2, "model": "vertex_ai/gemini-3.8-flash", "tier_max": 1},
+    "codex_worker": {"count": 3, "model": "sol-high-fast", "tier_max": 2},
+    "codex_reviewer": {"count": 3, "model": "sol-high-fast", "tier_max": 2},
+}
+SURFACE_IDS = frozenset({"aionui", "fleet", "personal"})
+SURFACE_PRODUCTS = {
+    "aionui": "AionUi",
+    "fleet": "Pursers Fleet",
+    "personal": "Pursers Personal",
+}
+SURFACE_IDENTITY_SOURCES = frozenset(
+    {
+        "signed-aionui-webui-listener",
+        "signed-aionui-aionpro-listener",
+        "verifier-pinned-process-artifact",
+        "verifier-pinned-signed-aionui-artifact",
+    }
+)
 REQUIRED_MUTATION_CAPABILITIES = frozenset(
     {
         "door_join",
@@ -332,6 +350,9 @@ class BrowserObservationRequest:
     captured_at: str
     page_url: str
     assertions: tuple[dict[str, Any], ...]
+    surface_id: str = "aionui"
+    runtime_product: str = "AionUi"
+    runtime_identity_source: str = "signed-aionui-webui-listener"
 
 
 @dataclass(frozen=True)
@@ -348,6 +369,7 @@ class TrustedBrowserCapture:
     page_url: str
     screenshot: bytes
     snapshot: Any
+    surface_id: str = "aionui"
 
 
 @dataclass(frozen=True)
@@ -417,7 +439,7 @@ class VerifierBrowserObserver:
         expected = {
             "observer_id", "observation_id", "target", "host_product",
             "host_version", "host_build", "host_identity_source", "candidate_commit", "captured_at",
-            "page_url", "screenshot_base64", "snapshot",
+            "page_url", "screenshot_base64", "snapshot", "surface_id",
         }
         if not isinstance(payload, dict) or set(payload) != expected:
             raise AcceptanceError("trusted browser observer capture fields do not match schema")
@@ -440,6 +462,7 @@ class VerifierBrowserObserver:
             page_url=payload["page_url"],
             screenshot=screenshot,
             snapshot=payload["snapshot"],
+            surface_id=payload["surface_id"],
         )
 
 
@@ -535,6 +558,132 @@ def validate_live_target(base_url: str, board_id: str | None = None) -> LiveTarg
         if not re.fullmatch(r"(?:sandbox|test)-[A-Za-z0-9._-]{1,71}", board_id):
             raise AcceptanceError("board must have a sandbox- or test- prefix")
     return LiveTarget(base_url=base_url.rstrip("/"), board_id=board_id)
+
+
+def _surface_for_identifier(identifier: str) -> str:
+    if identifier.startswith(("fleet.", "fleet-dashboard.")):
+        return "fleet"
+    if identifier.startswith(("personal.", "personal-mcp.")):
+        return "personal"
+    return "aionui"
+
+
+def _validate_surface_bindings(
+    value: Any,
+    primary: LiveTarget,
+    host: dict[str, Any],
+    candidate_commit: str,
+) -> dict[str, dict[str, Any]] | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) != SURFACE_IDS:
+        raise AcceptanceError(
+            "surface bindings must contain exact aionui, fleet, and personal entries"
+        )
+    bindings: dict[str, dict[str, Any]] = {}
+    for surface_id in sorted(SURFACE_IDS):
+        row = value[surface_id]
+        if not isinstance(row, dict) or set(row) != {
+            "target", "runtime", "candidate_commit"
+        }:
+            raise AcceptanceError(f"surface {surface_id} fields do not match schema")
+        raw_target = row["target"]
+        if not isinstance(raw_target, dict) or set(raw_target) != {
+            "base_url", "board_id"
+        }:
+            raise AcceptanceError(f"surface {surface_id} target fields do not match schema")
+        surface_target = validate_live_target(
+            raw_target["base_url"], raw_target["board_id"]
+        )
+        if surface_target.board_id != primary.board_id:
+            raise AcceptanceError(
+                "every surface must bind the same explicit sandbox board"
+            )
+        runtime = row["runtime"]
+        if not isinstance(runtime, dict) or set(runtime) != {
+            "product", "version", "build", "identity_source"
+        }:
+            raise AcceptanceError(
+                f"surface {surface_id} runtime fields do not match schema"
+            )
+        if runtime["product"] != SURFACE_PRODUCTS[surface_id]:
+            raise AcceptanceError(f"surface {surface_id} product identity is invalid")
+        version = _require_exact_text(
+            runtime.get("version"), f"surface {surface_id} runtime version"
+        )
+        build = _require_exact_text(
+            runtime.get("build"), f"surface {surface_id} runtime build"
+        )
+        if (
+            (surface_id == "aionui" and not SEMVER.fullmatch(version))
+            or (surface_id != "aionui" and not BUILD_ID.fullmatch(version))
+            or not BUILD_ID.fullmatch(build)
+        ):
+            raise AcceptanceError(f"surface {surface_id} runtime identity is invalid")
+        if runtime["identity_source"] not in SURFACE_IDENTITY_SOURCES:
+            raise AcceptanceError(
+                f"surface {surface_id} identity source is unsupported"
+            )
+        if row["candidate_commit"] != candidate_commit:
+            raise AcceptanceError(
+                "every surface must bind the exact candidate commit"
+            )
+        bindings[surface_id] = {
+            "target": surface_target,
+            "runtime": dict(runtime),
+            "candidate_commit": candidate_commit,
+        }
+    aionui = bindings["aionui"]
+    if aionui["target"] != primary:
+        raise AcceptanceError(
+            "aionui surface must match the report primary target"
+        )
+    if (
+        aionui["runtime"]["product"] != "AionUi"
+        or aionui["runtime"]["version"] != host["version"]
+        or aionui["runtime"]["build"] != host["build"]
+        or not str(aionui["runtime"]["identity_source"]).startswith(
+            "signed-aionui-"
+        )
+    ):
+        raise AcceptanceError(
+            "aionui surface must match the signed report host identity"
+        )
+    if bindings["fleet"]["target"].base_url == primary.base_url:
+        raise AcceptanceError(
+            "fleet surface must use its actual distinct loopback origin"
+        )
+    expected_sources = {
+        "fleet": "verifier-pinned-process-artifact",
+        "personal": "verifier-pinned-signed-aionui-artifact",
+    }
+    for surface_id, expected_source in expected_sources.items():
+        if bindings[surface_id]["runtime"]["identity_source"] != expected_source:
+            raise AcceptanceError(
+                f"surface {surface_id} must use {expected_source} trust"
+            )
+    return bindings
+
+
+def _validate_operator_topology(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != {
+        *CURRENT_OPERATOR_TOPOLOGY, "optional_opus_worker"
+    }:
+        raise AcceptanceError("operator topology fields do not match the current fleet")
+    for kind, expected in CURRENT_OPERATOR_TOPOLOGY.items():
+        if value[kind] != expected:
+            raise AcceptanceError(f"operator topology {kind} is stale or invalid")
+    optional = value["optional_opus_worker"]
+    if (
+        not isinstance(optional, dict)
+        or set(optional) != {"enabled", "count", "model", "tier_max"}
+        or type(optional["enabled"]) is not bool
+        or optional["count"] != (1 if optional["enabled"] else 0)
+        or optional["model"] != "opus"
+        or optional["tier_max"] != 2
+    ):
+        raise AcceptanceError("optional Opus topology must be explicit and additional")
+    return json.loads(json.dumps(value))
 
 
 def require_mutation_opt_in(value: str | None) -> None:
@@ -726,6 +875,11 @@ def _validate_evidence_report(
         raise AcceptanceError(
             "report host version/build does not match the active loopback host"
         )
+    surface_bindings = _validate_surface_bindings(
+        report.get("surfaces"), target, host, candidate_commit
+    )
+    if surface_bindings is not None:
+        _validate_operator_topology(report.get("operator_topology"))
     host_reference = host.get("evidence")
     if not isinstance(host_reference, str):
         raise AcceptanceError("host identity needs an evidence receipt")
@@ -805,6 +959,7 @@ def _validate_evidence_report(
     )
     browser_evidence: list[_BrowserEvidence] = []
     for identifier, reference in {**passed_steps, **passed_inventory}.items():
+        surface_id = _surface_for_identifier(identifier)
         browser_evidence.append(_validate_browser_receipt(
             evidence_root,
             reference,
@@ -813,6 +968,8 @@ def _validate_evidence_report(
             host_version,
             host_build,
             candidate_commit,
+            None if surface_bindings is None else surface_bindings[surface_id],
+            surface_id,
         ))
     browser_attachment_references = [
         reference
@@ -980,21 +1137,50 @@ def _validate_browser_receipt(
     version: str,
     build: str,
     candidate_commit: str,
+    surface_binding: dict[str, Any] | None = None,
+    surface_id: str = "aionui",
 ) -> _BrowserEvidence:
     receipt = _load_receipt(evidence_root, reference, "browser observation receipt")
-    expected_keys = {
-        "schema_version", "evidence_kind", "observation_id", "target", "host",
-        "candidate_commit", "captured_at", "page_url", "screenshot",
-        "accessibility_snapshot", "assertions",
-    }
+    expected_keys = (
+        {
+            "schema_version", "evidence_kind", "observation_id", "target", "host",
+            "candidate_commit", "captured_at", "page_url", "screenshot",
+            "accessibility_snapshot", "assertions",
+        }
+        if surface_binding is None
+        else {
+            "schema_version", "evidence_kind", "observation_id", "surface_id",
+            "target", "runtime", "candidate_commit", "captured_at", "page_url",
+            "screenshot", "accessibility_snapshot", "assertions",
+        }
+    )
     if set(receipt) != expected_keys:
         raise AcceptanceError("browser observation receipt fields do not match schema")
+    expected_target = target
+    expected_version = version
+    expected_build = build
+    expected_product = "AionUi"
+    expected_source = "signed-aionui-webui-listener"
+    receipt_binding_matches = receipt.get("host") == {
+        "version": version, "build": build
+    }
+    if surface_binding is not None:
+        expected_target = surface_binding["target"]
+        runtime = surface_binding["runtime"]
+        expected_product = runtime["product"]
+        expected_version = runtime["version"]
+        expected_build = runtime["build"]
+        expected_source = runtime["identity_source"]
+        receipt_binding_matches = (
+            receipt.get("surface_id") == surface_id
+            and receipt.get("runtime") == runtime
+        )
     if (
         receipt["schema_version"] != 1
         or receipt["evidence_kind"] != "browser_observation"
         or receipt["observation_id"] != identifier
-        or receipt["target"] != asdict(target)
-        or receipt["host"] != {"version": version, "build": build}
+        or receipt["target"] != asdict(expected_target)
+        or not receipt_binding_matches
         or receipt["candidate_commit"] != candidate_commit
     ):
         raise AcceptanceError(
@@ -1002,7 +1188,7 @@ def _validate_browser_receipt(
         )
     _require_timestamp(receipt["captured_at"], "observation captured_at")
     page = urlsplit(receipt["page_url"] if isinstance(receipt["page_url"], str) else "")
-    origin = urlsplit(target.base_url)
+    origin = urlsplit(expected_target.base_url)
     if (
         page.scheme != origin.scheme
         or page.netloc != origin.netloc
@@ -1062,13 +1248,16 @@ def _validate_browser_receipt(
     return _BrowserEvidence(
         request=BrowserObservationRequest(
             observation_id=identifier,
-            target=target,
-            host_version=version,
-            host_build=build,
+            target=expected_target,
+            host_version=expected_version,
+            host_build=expected_build,
             candidate_commit=candidate_commit,
             captured_at=receipt["captured_at"],
             page_url=receipt["page_url"],
             assertions=tuple(assertions),
+            surface_id=surface_id,
+            runtime_product=expected_product,
+            runtime_identity_source=expected_source,
         ),
         screenshot=screenshot,
         snapshot=snapshot["snapshot"],
@@ -1097,14 +1286,11 @@ def _validate_trusted_browser_observations(
         if (
             capture.observation_id != request.observation_id
             or capture.target != request.target
-            or capture.host_product != "AionUi"
+            or capture.surface_id != request.surface_id
+            or capture.host_product != request.runtime_product
             or capture.host_version != request.host_version
             or capture.host_build != request.host_build
-            or capture.host_identity_source not in {
-                "host-api",
-                "signed-aionui-webui-listener",
-                "signed-aionui-aionpro-listener",
-            }
+            or capture.host_identity_source != request.runtime_identity_source
             or capture.candidate_commit != request.candidate_commit
             or capture.captured_at != request.captured_at
             or capture.page_url != request.page_url

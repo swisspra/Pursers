@@ -19,7 +19,8 @@ The helper:
 - reads only the selected board from a loopback Fleet dashboard, with a 5-second
   timeout, 512 KiB response cap, no credentials, and no redirects;
 - defers MCP registration to the authenticated same-origin AionCore API;
-- removes AionUi conversation runtime variables before Team CLI calls;
+- removes ambient AionUi runtime variables before Team CLI calls and injects
+  only an explicit complete issuer-owned runtime context when configured;
 - keeps one persistent board session for ticket reads, unassigned creation, and
   Central-authorized cancellation;
 - gives that dedicated actor neither work nor review capability;
@@ -29,12 +30,12 @@ The helper:
   door removal through a separate board-pinned sidecar; and
 - closes all ticket, group, and seat sidecars when the helper stops.
 
-The last rule is deliberate. A settings iframe has no supported Team
-conversation context in AionUi 2.2.1. Team status, plan, apply, pause, and stop
-therefore return the host's `runtime_context_missing` response. Home presents
-the actionable fallback—open or create the Team in AionUi and use its native
-Team controls—without treating local validation or a mock roster as host
-execution.
+A settings iframe has no implicit Team conversation context. Without the four
+explicit runtime options, Team status, plan, apply, pause, and stop therefore
+return the host's `runtime_context_missing` response. An isolated issuer may
+instead pass its own supported Aion runtime origin, user, conversation, and
+mode-0600 token file. Partial context and inherited sibling/session variables
+are refused; the token is never accepted on argv or printed.
 
 Ticket routes are `/pursers/tickets`, `/pursers/tickets/status`,
 `/pursers/tickets/get`, `/pursers/tickets/create`, and
@@ -63,6 +64,10 @@ node host/helper.cjs \
   --bridge-state-dir /PATH/TO/isolated-bridge-state \
   --bridge-bin /PATH/TO/pursers-wait-bridge \
   --aioncore-bin /PATH/TO/aioncore \
+  --runtime-base-url http://127.0.0.1:25808 \
+  --runtime-user-id ISSUER_USER_ID \
+  --runtime-conversation-id ISSUER_CONVERSATION_ID \
+  --runtime-token-file /PATH/TO/issuer-runtime-token \
   --fleet-url http://127.0.0.1:8899 \
   --core-version 0.2.1
 ```

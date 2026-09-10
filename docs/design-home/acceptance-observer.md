@@ -22,7 +22,7 @@ drive it.
 |---|---|
 | screenshot bytes, accessibility tree, observed page URL, selected board, `captured_at`, `observer_id` | observer only, from the authenticated real browser/UI channel |
 | running extension candidate SHA | observer only, fetched by that browser from the installed `candidate.json` and from the same-origin host status route, both inside a verifier-created CDP isolated world; when both answer they must agree |
-| host product / version / build | observer only, bound from the same-origin host status route inside that isolated world, or from the live listener to the signed and notarized AionUi bundle when that contract is unavailable |
+| surface product / version / build | observer only: signed AionUi listener for AionUi, verifier-pinned listener process plus exact clean-checkout artifact for Fleet, signed AionUi plus verifier-pinned Personal artifact for Personal |
 | observation id, expected origin / sandbox board / candidate commit, assertions | caller (runner request), accepted only when they equal the independently observed values |
 
 The observer answers replay requests only from captures it recorded itself, so
@@ -37,7 +37,7 @@ beside itself, never from environment variables.
 
 ## Prerequisites
 
-- an isolated authenticated AionUi host on loopback, running from the official
+- isolated authenticated AionUi and Fleet origins on loopback; AionUi runs from the official
   signed and notarized macOS AionUi bundle, and/or serving same-origin
   `GET /pursers/status` to the browser with JSON `schema_version: 1`,
   `host.product`, `host.version`, `host.build`, and optional
@@ -49,7 +49,7 @@ beside itself, never from environment variables.
 - CDP `Page.createIsolatedWorld` support; host-status and candidate fetches plus
   selected-board DOM reads run in that verifier world, so page-owned overrides
   of `fetch` or `Document.prototype.querySelector` cannot forge those bindings
-- the same target serving canonical AionCore `GET /health` with exact runtime
+- the AionUi target serving canonical AionCore `GET /health` with exact runtime
   version and build time
 - a sandbox board id prefixed `sandbox-` or `test-` (production boards are refused)
 - ego lite / the `ego-browser` CLI for the default capture backend
@@ -58,9 +58,10 @@ beside itself, never from environment variables.
 ## Reproducible commands
 
 ```sh
-# 1. install the observer into a verifier-owned directory outside the checkout
+# 1. install verifier-owned per-surface bindings outside the checkout
 python3 tools/aionui-extension/tests/home_acceptance/runner.py install-observer \
   --dir /PATH/TO/verifier-observer \
+  --surface-manifest /PATH/TO/verifier-surface-manifest.json \
   --ego-browser /PATH/TO/ego-browser \
   --task-space <authenticated-isolated-task-space-id>
 
@@ -70,18 +71,20 @@ python3 tools/aionui-extension/tests/home_acceptance/runner.py doctor \
   --target http://127.0.0.1:25808 \
   --probe-browser http://127.0.0.1:25808/
 
-# 3. record one real browser observation into the evidence directory
-python3 tools/aionui-extension/tests/home_acceptance/runner.py capture \
+# 3. expand the verifier-authored manifest into all 198 concrete capture commands
+python3 tools/aionui-extension/tests/home_acceptance/runner.py prepare \
   --observer /PATH/TO/verifier-observer \
   --evidence /PATH/TO/evidence \
-  --observation door_connect \
-  --target http://127.0.0.1:25808 \
-  --board sandbox-home \
-  --commit <full-40-hex-candidate-sha> \
-  --page http://127.0.0.1:25808/ \
-  --assertions /PATH/TO/assertions.json
+  --manifest /PATH/TO/verifier-observations.json
 
-# 4. validate the assembled report through the same installed observer
+# 4. run every command array in capture-plan.json, record suite receipts, then assemble
+python3 tools/aionui-extension/tests/home_acceptance/runner.py assemble \
+  --observer /PATH/TO/verifier-observer \
+  --evidence /PATH/TO/evidence \
+  --suite-manifest /PATH/TO/verifier-suites.json \
+  --report /PATH/TO/evidence/report.json
+
+# 5. validate the assembled report through the same installed observer
 PURSERS_HOME_ACCEPTANCE_MUTATE=I_UNDERSTAND_SANDBOX_ONLY \
 python3 tools/aionui-extension/tests/home_acceptance/runner.py validate \
   --observer /PATH/TO/verifier-observer \
@@ -90,6 +93,13 @@ python3 tools/aionui-extension/tests/home_acceptance/runner.py validate \
   --board sandbox-home \
   --commit <full-40-hex-candidate-sha>
 ```
+
+The observation manifest has exact top-level fields `schema_version`,
+`operator_topology`, and `observations`. `operator_topology` must declare two
+`vertex_ai/gemini-3.8-flash` Goose workers at tier 1, three `sol-high-fast`
+Codex workers and three `sol-high-fast` Codex reviewers at tier 2, plus an
+explicit optional Opus row whose count is zero unless enabled. `prepare` copies
+this into `capture-plan.json`; `assemble` preserves it in the report.
 
 `harness.py verify-evidence --browser-observer /PATH/TO/verifier-observer/browser_observer.py`
 remains the equivalent single-source-of-truth entrypoint; `runner.py validate`
@@ -109,12 +119,32 @@ new one. `--task-space` pins capture to the already authenticated isolated
 ego-browser task space instead of creating an unrelated browser context. All
 observations in one report must share a single `observer_id`.
 
+The surface manifest has exactly `aionui`, `fleet`, and `personal`. The installer
+derives the candidate from clean `git HEAD`, hashes tracked Fleet and Personal
+artifacts itself, and persists those values in its private config. A signed-origin
+shortcut is intentionally rejected for Fleet: the real Fleet UI is a distinct
+origin, so serving or labelling it as AionUi would erase actual-product provenance.
+
+```json
+{"schema_version":1,"candidate_commit":"FULL_SHA","surfaces":{
+  "aionui":{"adapter":"signed-aionui","target":{"base_url":"http://127.0.0.1:18822","board_id":"sandbox-home"}},
+  "fleet":{"adapter":"pinned-process-artifact","target":{"base_url":"http://127.0.0.1:18821","board_id":"sandbox-home"},"artifact":"tools/fleet-dashboard/fleet_dashboard.py"},
+  "personal":{"adapter":"pinned-signed-aionui-artifact","target":{"base_url":"http://127.0.0.1:18822","board_id":"sandbox-home"},"artifact":"packages/personal/src/pursers_personal/resources/dashboard.html"}
+}}
+```
+
+For Personal, the isolated browser also hashes the fetched page bytes; they must
+equal the installer-pinned tracked artifact. For Fleet, the observer requires one
+listener and proves its process command executes the pinned dashboard artifact.
+
 ## Evidence directory layout
 
 ```
 /PATH/TO/evidence/
   report.json                     the evidence report the harness validates
-  host-identity.json              host_identity receipt, source signed AionUi listener
+  host-identity-<surface>.json    independently observed surface identity receipt
+  capture-plan.json               exact 198-command expansion
+  assertions/<id>.json            verifier-authored assertions
   specs/<id>.json                 caller request that was sent to the observer
   observations/<id>.json          browser_observation receipt
   artifacts/<id>.png              observed screenshot bytes

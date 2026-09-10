@@ -16,6 +16,7 @@ import pytest
 
 from . import harness as harness_module
 from .harness import (
+    CURRENT_OPERATOR_TOPOLOGY,
     CURRENT_OPERATOR_TIERS,
     MAX_EVIDENCE_FILE_BYTES,
     MUTATION_OPT_IN,
@@ -103,6 +104,64 @@ def _descriptor(path: Path, root: Path) -> dict[str, str]:
     }
 
 
+def _complete_surface_report() -> dict[str, object]:
+    report = _complete_report()
+    report["operator_topology"] = {
+        **{kind: dict(value) for kind, value in CURRENT_OPERATOR_TOPOLOGY.items()},
+        "optional_opus_worker": {
+            "enabled": False,
+            "count": 0,
+            "model": "opus",
+            "tier_max": 2,
+        },
+    }
+    report["surfaces"] = {
+        "aionui": {
+            "target": dict(TARGET),
+            "runtime": {
+                **HOST,
+                "identity_source": "signed-aionui-webui-listener",
+            },
+            "candidate_commit": CANDIDATE_SHA,
+        },
+        "fleet": {
+            "target": {
+                "base_url": "http://127.0.0.1:8766",
+                "board_id": TARGET["board_id"],
+            },
+            "runtime": {
+                "product": "Pursers Fleet",
+                "version": "candidate-72c4345be172",
+                "build": "a" * 64,
+                "identity_source": "verifier-pinned-process-artifact",
+            },
+            "candidate_commit": CANDIDATE_SHA,
+        },
+        "personal": {
+            "target": dict(TARGET),
+            "runtime": {
+                "product": "Pursers Personal",
+                "version": "5.0.0a25",
+                "build": "b" * 64,
+                "identity_source": "verifier-pinned-signed-aionui-artifact",
+            },
+            "candidate_commit": CANDIDATE_SHA,
+        },
+    }
+    return report
+
+
+def test_surface_report_rejects_stale_six_worker_two_reviewer_topology(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("PURSERS_HOME_ACCEPTANCE_MUTATE", MUTATION_OPT_IN)
+    report = _complete_surface_report()
+    report["operator_topology"]["codex_worker"]["count"] = 6  # type: ignore[index]
+    report["operator_topology"]["codex_reviewer"]["count"] = 2  # type: ignore[index]
+    with pytest.raises(AcceptanceError, match="stale or invalid"):
+        _validate(tmp_path, report)
+
+
 def _png_chunk(kind: bytes, payload: bytes) -> bytes:
     checksum = zlib.crc32(kind + payload) & 0xFFFFFFFF
     return len(payload).to_bytes(4, "big") + kind + payload + checksum.to_bytes(4, "big")
@@ -171,6 +230,11 @@ def _write_report(tmp_path: Path, report: dict[str, object]) -> Path:
         reference = item.get("evidence")
         if not isinstance(identifier, str) or not isinstance(reference, str):
             continue
+        surface_id = harness_module._surface_for_identifier(identifier)
+        surfaces = report.get("surfaces")
+        surface = surfaces.get(surface_id) if isinstance(surfaces, dict) else None
+        observation_target = surface["target"] if isinstance(surface, dict) else target
+        observation_base_url = str(observation_target["base_url"]).rstrip("/")
         screenshot = tmp_path / "screenshots" / f"{_safe_name(identifier)}.png"
         screenshot.parent.mkdir(parents=True, exist_ok=True)
         screenshot.write_bytes(_png_bytes(identifier))
@@ -178,7 +242,7 @@ def _write_report(tmp_path: Path, report: dict[str, object]) -> Path:
         _write_json(snapshot, {
             "schema_version": 1,
             "observation_id": identifier,
-            "page_url": f"{base_url}/dashboard",
+            "page_url": f"{observation_base_url}/dashboard",
             "captured_at": CAPTURED_AT,
             "snapshot": {
                 "role": "document",
@@ -190,15 +254,14 @@ def _write_report(tmp_path: Path, report: dict[str, object]) -> Path:
                 ],
             },
         })
-        _write_json(tmp_path / reference, {
+        receipt = {
             "schema_version": 1,
             "evidence_kind": "browser_observation",
             "observation_id": identifier,
-            "target": target,
-            "host": {"version": HOST["version"], "build": HOST["build"]},
+            "target": observation_target,
             "candidate_commit": CANDIDATE_SHA,
             "captured_at": CAPTURED_AT,
-            "page_url": f"{base_url}/dashboard",
+            "page_url": f"{observation_base_url}/dashboard",
             "screenshot": _descriptor(screenshot, tmp_path),
             "accessibility_snapshot": _descriptor(snapshot, tmp_path),
             "assertions": [
@@ -209,7 +272,13 @@ def _write_report(tmp_path: Path, report: dict[str, object]) -> Path:
                     "expected": identifier,
                 }
             ],
-        })
+        }
+        if isinstance(surface, dict):
+            receipt["surface_id"] = surface_id
+            receipt["runtime"] = surface["runtime"]
+        else:
+            receipt["host"] = {"version": HOST["version"], "build": HOST["build"]}
+        _write_json(tmp_path / reference, receipt)
     for suite in report.get("suites", []):
         if not isinstance(suite, dict):
             continue
@@ -321,15 +390,16 @@ class _FixtureTrustedBrowserObserver:
             observer_id="unit-test-fixture-observer",
             observation_id=request.observation_id,
             target=request.target,
-            host_product="AionUi",
+            host_product=request.runtime_product,
             host_version=request.host_version,
             host_build=request.host_build,
-            host_identity_source="host-api",
+            host_identity_source=request.runtime_identity_source,
             candidate_commit=request.candidate_commit,
             captured_at=request.captured_at,
             page_url=request.page_url,
             screenshot=(self.root / receipt["screenshot"]["path"]).read_bytes(),
             snapshot=snapshot_wrapper["snapshot"],
+            surface_id=request.surface_id,
         )
 
 
@@ -362,11 +432,12 @@ snapshot = {
 json.dump({
     "observer_id": "verifier-session-1",
     "observation_id": identifier,
+    "surface_id": request["surface_id"],
     "target": request["target"],
-    "host_product": "AionUi",
+    "host_product": request["runtime_product"],
     "host_version": request["host_version"],
     "host_build": request["host_build"],
-    "host_identity_source": "host-api",
+    "host_identity_source": request["runtime_identity_source"],
     "candidate_commit": request["candidate_commit"],
     "captured_at": request["captured_at"],
     "page_url": request["page_url"],
@@ -413,7 +484,7 @@ def test_acceptance_sequence_and_current_operator_tiers_are_explicit() -> None:
         "fresh_install",
         "door_connect",
         "team_setup",
-        "six_workers_two_reviewers",
+        "five_workers_three_reviewers",
         "ticket_offer_claim",
         "ticket_submit_independent_review",
         "result_visible",
@@ -421,11 +492,10 @@ def test_acceptance_sequence_and_current_operator_tiers_are_explicit() -> None:
         "clean_reconnect_after_rotation",
     )
     assert CURRENT_OPERATOR_TIERS == {
-        "gemini_worker": 1,
-        "glm_worker": 1,
-        "qwen_worker": 2,
+        "goose_worker": 1,
         "codex_worker": 2,
-        "reviewer": 2,
+        "codex_reviewer": 2,
+        "optional_opus_worker": 2,
     }
 
 
@@ -705,6 +775,36 @@ def test_structurally_valid_report_passes_with_trusted_observers(
         "inventory_passed": len(REQUIRED_INVENTORY),
         "suites_passed": len(REQUIRED_SUITES),
     }
+
+
+def test_surface_report_binds_fleet_to_distinct_real_origin(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("PURSERS_HOME_ACCEPTANCE_MUTATE", MUTATION_OPT_IN)
+    result = _validate(tmp_path, _complete_surface_report())
+    assert result["inventory_passed"] == len(REQUIRED_INVENTORY)
+
+
+def test_surface_report_rejects_fleet_relabelled_as_aionui_origin(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("PURSERS_HOME_ACCEPTANCE_MUTATE", MUTATION_OPT_IN)
+    report = _complete_surface_report()
+    report["surfaces"]["fleet"]["target"] = dict(TARGET)  # type: ignore[index]
+    with pytest.raises(AcceptanceError, match="actual distinct loopback origin"):
+        _validate(tmp_path, report)
+
+
+def test_surface_report_rejects_fleet_signed_aionui_identity_string(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("PURSERS_HOME_ACCEPTANCE_MUTATE", MUTATION_OPT_IN)
+    report = _complete_surface_report()
+    report["surfaces"]["fleet"]["runtime"][  # type: ignore[index]
+        "identity_source"
+    ] = "signed-aionui-webui-listener"
+    with pytest.raises(AcceptanceError, match="pinned-process-artifact trust"):
+        _validate(tmp_path, report)
 
 
 def test_trusted_observer_capture_must_match_report_artifacts(

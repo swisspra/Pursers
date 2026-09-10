@@ -9,6 +9,7 @@ host identity all assert a concrete outcome.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 import subprocess
@@ -156,6 +157,7 @@ def _write_backend(
         "        'payload': {'schema_version': 1, 'candidate_commit': OBSERVED_COMMIT},\n"
         "    },\n"
         "    'selected_board': OBSERVED_BOARD,\n"
+        "    'page_sha256': None,\n"
         "}))\n",
         encoding="utf-8",
     )
@@ -275,12 +277,15 @@ def _replay(observer_dir: Path, request: dict[str, object]) -> subprocess.Comple
 
 
 def _request_from(receipt: dict[str, object]) -> dict[str, object]:
-    host = receipt["host"]
+    runtime = receipt["runtime"]
     return {
         "observation_id": receipt["observation_id"],
+        "surface_id": receipt["surface_id"],
         "target": receipt["target"],
-        "host_version": host["version"],
-        "host_build": host["build"],
+        "host_version": runtime["version"],
+        "host_build": runtime["build"],
+        "runtime_product": runtime["product"],
+        "runtime_identity_source": runtime["identity_source"],
         "candidate_commit": receipt["candidate_commit"],
         "captured_at": receipt["captured_at"],
         "page_url": receipt["page_url"],
@@ -294,6 +299,77 @@ def _free_port() -> int:
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         return int(probe.getsockname()[1])
+
+
+def _write_surface_observer(tmp_path: Path) -> tuple[Path, dict[str, dict[str, object]]]:
+    observer_dir = tmp_path / "surface-observer"
+    observer_dir.mkdir(mode=0o700)
+    command = observer_dir / "browser_observer.py"
+    command.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    command.chmod(0o700)
+    surfaces: dict[str, dict[str, object]] = {}
+    for index, (surface_id, product) in enumerate(runner_module.SURFACE_PRODUCTS.items()):
+        surfaces[surface_id] = {
+            "adapter": "signed-aionui",
+            "target": {
+                "base_url": f"http://127.0.0.1:{9100 + index}",
+                "board_id": BOARD,
+            },
+            "product": product,
+            "candidate_commit": COMMIT,
+        }
+    (observer_dir / "observer.json").write_text(
+        json.dumps({
+            "schema_version": 1,
+            "observer_id": "observer-surface-test",
+            "store_dir": "captures",
+            "max_age_s": 3600,
+            "repository_root": str(runner_module.REPOSITORY_ROOT),
+            "backend": {"kind": "command", "command": str(command)},
+            "surfaces": surfaces,
+        }),
+        encoding="utf-8",
+    )
+    (observer_dir / "observer.json").chmod(0o600)
+    return observer_dir, surfaces
+
+
+def _write_complete_observation_manifest(
+    tmp_path: Path, surfaces: dict[str, dict[str, object]]
+) -> Path:
+    identifiers = [*harness_module.SEQUENCE, *sorted(harness_module.REQUIRED_INVENTORY)]
+    rows = []
+    for identifier in identifiers:
+        surface_id = harness_module._surface_for_identifier(identifier)
+        target = surfaces[surface_id]["target"]
+        rows.append({
+            "id": identifier,
+            "page_url": f"{target['base_url']}/acceptance/{identifier}",
+            "assertions": [{
+                "name": "visible",
+                "path": ["nodes", 0, "name"],
+                "operator": "contains",
+                "expected": identifier,
+            }],
+        })
+    path = tmp_path / "observations.json"
+    path.write_text(json.dumps({
+        "schema_version": 1,
+        "operator_topology": {
+            **{
+                kind: dict(value)
+                for kind, value in harness_module.CURRENT_OPERATOR_TOPOLOGY.items()
+            },
+            "optional_opus_worker": {
+                "enabled": False,
+                "count": 0,
+                "model": "opus",
+                "tier_max": 2,
+            },
+        },
+        "observations": rows,
+    }), encoding="utf-8")
+    return path
 
 
 def _signed_listener_fixture(
@@ -406,7 +482,7 @@ def test_healthy_capture_replays_through_the_installed_observer(tmp_path: Path) 
     assert set(payload) == {
         "observer_id", "observation_id", "target", "host_product", "host_version",
         "host_build", "host_identity_source", "candidate_commit", "captured_at", "page_url",
-        "screenshot_base64", "snapshot",
+        "screenshot_base64", "snapshot", "surface_id",
     }
     assert payload["host_product"] == "AionUi"
     receipt = captured["receipt"]
@@ -448,11 +524,12 @@ def test_ego_binding_reads_are_isolated_from_page_monkeypatches() -> None:
         "fetch('/pursers/status'"
     )
     evaluations = script.split("Runtime.evaluate")[1:]
-    assert len(evaluations) == 3
+    assert len(evaluations) == 4
     assert all("contextId: contextId" in evaluation for evaluation in evaluations)
     assert "fetch('/pursers/status'" in evaluations[0]
     assert "candidate.json" in evaluations[1]
     assert "document.querySelector" in evaluations[2]
+    assert "crypto.subtle.digest" in evaluations[3]
 
 
 def test_harness_observer_binds_report_artifacts_to_the_capture(tmp_path: Path) -> None:
@@ -468,12 +545,15 @@ def test_harness_observer_binds_report_artifacts_to_the_capture(tmp_path: Path) 
         request = BrowserObservationRequest(
             observation_id=receipt["observation_id"],
             target=LiveTarget(**receipt["target"]),
-            host_version=receipt["host"]["version"],
-            host_build=receipt["host"]["build"],
+            host_version=receipt["runtime"]["version"],
+            host_build=receipt["runtime"]["build"],
             candidate_commit=receipt["candidate_commit"],
             captured_at=receipt["captured_at"],
             page_url=receipt["page_url"],
             assertions=tuple(receipt["assertions"]),
+            surface_id=receipt["surface_id"],
+            runtime_product=receipt["runtime"]["product"],
+            runtime_identity_source=receipt["runtime"]["identity_source"],
         )
         capture = observer.capture(request)
     snapshot = json.loads(
@@ -500,6 +580,71 @@ def test_harness_observer_binds_report_artifacts_to_the_capture(tmp_path: Path) 
 def test_missing_observer_is_explicit_non_pass() -> None:
     with pytest.raises(AcceptanceCapabilityUnavailable, match="observer is unavailable"):
         _validate_trusted_browser_observations([], None)
+
+
+def test_prepare_expands_every_authoritative_observation_once(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    observer_dir, surfaces = _write_surface_observer(tmp_path)
+    manifest = _write_complete_observation_manifest(tmp_path, surfaces)
+    evidence = tmp_path / "evidence-plan"
+    exit_code = runner_module.main([
+        "runner.py", "prepare", "--observer", str(observer_dir),
+        "--manifest", str(manifest), "--evidence", str(evidence),
+    ])
+    assert exit_code == 0
+    result = json.loads(capsys.readouterr().out)
+    plan = json.loads((evidence / "capture-plan.json").read_text(encoding="utf-8"))
+    expected = len(harness_module.SEQUENCE) + len(harness_module.REQUIRED_INVENTORY)
+    assert result["observations"] == expected == 198
+    assert len(plan["commands"]) == expected
+    assert len({command[command.index("--observation") + 1] for command in plan["commands"]}) == expected
+
+
+def test_personal_surface_refuses_served_page_digest_mismatch(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    artifact = tmp_path / "dashboard.html"
+    artifact.write_bytes(b"verifier-pinned-personal-artifact")
+    digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
+    monkeypatch.setattr(observer_module, "_git_identity", lambda _repository: (COMMIT, ""))
+    with pytest.raises(observer_module.ObserverError, match="served Personal artifact"):
+        observer_module._probe_pinned_artifact_without_listener(
+            {"repository_root": str(tmp_path)},
+            {
+                "candidate_commit": COMMIT,
+                "artifact": artifact.name,
+                "artifact_sha256": digest,
+                "product": "Pursers Personal",
+                "version": "5.0.0a25",
+            },
+            "0" * 64,
+        )
+
+
+def test_assemble_refuses_any_missing_authoritative_capture(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    observer_dir, surfaces = _write_surface_observer(tmp_path)
+    suites = tmp_path / "suites.json"
+    suites.write_text(json.dumps({
+        "schema_version": 1,
+        "suites": {name: f"suites/{name}.json" for name in harness_module.REQUIRED_SUITES},
+    }), encoding="utf-8")
+    evidence = tmp_path / "empty-evidence"
+    manifest = _write_complete_observation_manifest(tmp_path, surfaces)
+    assert runner_module.main([
+        "runner.py", "prepare", "--observer", str(observer_dir),
+        "--manifest", str(manifest), "--evidence", str(evidence),
+    ]) == 0
+    capsys.readouterr()
+    exit_code = runner_module.main([
+        "runner.py", "assemble", "--observer", str(observer_dir),
+        "--evidence", str(evidence), "--suite-manifest", str(suites),
+        "--report", str(evidence / "report.json"),
+    ])
+    assert exit_code == runner_module.EXIT_BLOCKED
+    assert "capture missing or invalid" in capsys.readouterr().err
 
 
 def test_unknown_observation_is_refused(tmp_path: Path) -> None:

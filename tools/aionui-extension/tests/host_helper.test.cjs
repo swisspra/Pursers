@@ -10,12 +10,70 @@ const {
   TOKEN_HEADER,
   bridgeArguments,
   createHelperServer,
+  createTeamRunner,
+  explicitRuntimeContext,
   normalizeOrigin,
   readTokenFile,
 } = require('../host/helper.cjs');
 
 const ORIGIN = 'http://127.0.0.1:25808';
 const TOKEN = 'a'.repeat(64);
+
+test('explicit issuer runtime is complete, private, and replaces ambient context', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'pursers-runtime-'));
+  const tokenFile = path.join(directory, 'runtime-token');
+  const command = path.join(directory, 'probe.cjs');
+  fs.writeFileSync(tokenFile, 'r'.repeat(64), { mode: 0o600 });
+  fs.writeFileSync(command, `#!/usr/bin/env node
+process.stdin.resume();
+process.stdin.on('end', () => process.stdout.write(JSON.stringify({ success: true, env: {
+  base: process.env.AIONUI_BASE_URL || null,
+  user: process.env.AIONUI_USER_ID || null,
+  conversation: process.env.AIONUI_CONVERSATION_ID || null,
+  token: process.env.AIONUI_RUNTIME_TOKEN || null,
+}})));
+`, { mode: 0o700 });
+  assert.throws(
+    () => explicitRuntimeContext({ 'runtime-base-url': ORIGIN }),
+    /explicit Team runtime requires/,
+  );
+  const context = explicitRuntimeContext({
+    'runtime-base-url': ORIGIN,
+    'runtime-user-id': 'issuer-user',
+    'runtime-conversation-id': 'issuer-conversation',
+    'runtime-token-file': tokenFile,
+  });
+  assert.deepEqual(context, {
+    AIONUI_BASE_URL: ORIGIN,
+    AIONUI_USER_ID: 'issuer-user',
+    AIONUI_CONVERSATION_ID: 'issuer-conversation',
+    AIONUI_RUNTIME_TOKEN: 'r'.repeat(64),
+  });
+  const previous = Object.fromEntries(['AIONUI_BASE_URL', 'AIONUI_USER_ID', 'AIONUI_CONVERSATION_ID', 'AIONUI_RUNTIME_TOKEN'].map((key) => [key, process.env[key]]));
+  Object.assign(process.env, {
+    AIONUI_BASE_URL: 'http://127.0.0.1:9999',
+    AIONUI_USER_ID: 'borrowed-user',
+    AIONUI_CONVERSATION_ID: 'borrowed-conversation',
+    AIONUI_RUNTIME_TOKEN: 'borrowed-token',
+  });
+  try {
+    assert.deepEqual((await createTeamRunner(command)(['members'], {})).env, {
+      base: null, user: null, conversation: null, token: null,
+    });
+    assert.deepEqual((await createTeamRunner(command, context)(['members'], {})).env, {
+      base: ORIGIN,
+      user: 'issuer-user',
+      conversation: 'issuer-conversation',
+      token: 'r'.repeat(64),
+    });
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
 
 function segment(value) {
   return Buffer.from(JSON.stringify(value)).toString('base64url');

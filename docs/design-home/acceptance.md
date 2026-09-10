@@ -103,9 +103,11 @@ same exact step IDs in the evidence report.
 3. `team_setup`: create or select only the disposable board-scoped standalone
    seat group through the integrated feature interface, then prove idempotent
    reopen/reload behavior.
-4. `six_workers_two_reviewers`: join six unique work seat identities and two
-   unique reviewer identities. Duplicate display name and duplicate principal
-   cases must be visible and must not collapse identities.
+4. `five_workers_three_reviewers`: join the declared standalone fleet of two
+   Goose workers at tier 1, three Codex workers at tier 2, and three unique
+   Codex reviewer identities at tier 2. An Opus worker is additional only when
+   explicitly enabled. Duplicate display name and duplicate principal cases
+   must be visible and must not collapse identities.
 5. `ticket_offer_claim`: create a disposable ticket, observe its targeted offer,
    claim only that live offer, and prove a stale/expired offer cannot be claimed.
 6. `ticket_submit_independent_review`: submit the claimed ticket and complete a
@@ -124,15 +126,14 @@ intelligence claim:
 
 | Seat kind | `tier_max` |
 |---|---:|
-| Gemini worker | `1` |
-| GLM worker | `1` |
-| Qwen worker | `2` |
-| Codex worker | `2` |
-| Reviewer | `2` |
+| Goose worker (`vertex_ai/gemini-3.8-flash`) | `1` |
+| Codex worker (`sol-high-fast`) | `2` |
+| Codex reviewer (`sol-high-fast`) | `2` |
+| Optional Opus worker, only when enabled | `2` |
 
-The six workers may repeat a configured model kind, but all six seat names and
-Central agent identities must be distinct. Both reviewers must be distinct from
-each other and from every submitting worker.
+The required topology is two Goose workers, three Codex workers, and three
+Codex reviewers. Every seat name and Central identity must be distinct. The
+optional Opus worker is additional; it never replaces a required seat.
 
 ## Dashboard inventory
 
@@ -214,6 +215,17 @@ are:
     "version": "2.2.1",
     "build": "2026.09.08.1",
     "evidence": "host.json"
+  },
+  "surfaces": {
+    "aionui": {"target": {}, "runtime": {}, "candidate_commit": "FULL_40_HEX_CANDIDATE_SHA"},
+    "fleet": {"target": {}, "runtime": {}, "candidate_commit": "FULL_40_HEX_CANDIDATE_SHA"},
+    "personal": {"target": {}, "runtime": {}, "candidate_commit": "FULL_40_HEX_CANDIDATE_SHA"}
+  },
+  "operator_topology": {
+    "goose_worker": {"count": 2, "model": "vertex_ai/gemini-3.8-flash", "tier_max": 1},
+    "codex_worker": {"count": 3, "model": "sol-high-fast", "tier_max": 2},
+    "codex_reviewer": {"count": 3, "model": "sol-high-fast", "tier_max": 2},
+    "optional_opus_worker": {"enabled": false, "count": 0, "model": "opus", "tier_max": 2}
   },
   "steps": [
     {"id": "fresh_install", "status": "passed", "evidence": "observations/fresh-install.json"}
@@ -302,9 +314,9 @@ candidate must resolve to a commit and equal `HEAD` of the verification
 checkout. Suite names and commands must exactly match `REQUIRED_SUITES`, and
 every suite row must carry that full lowercase 40-hex candidate SHA.
 
-Receipt shapes are exact. A browser receipt has
+Receipt shapes are exact. A per-surface browser receipt has
 `schema_version`, `evidence_kind=browser_observation`, `observation_id`,
-`target`, `host`, `candidate_commit`, `captured_at`, `page_url`, `screenshot`,
+`surface_id`, `target`, `runtime`, `candidate_commit`, `captured_at`, `page_url`, `screenshot`,
 `accessibility_snapshot`, and nonempty machine-evaluated `assertions`. The
 snapshot JSON has `schema_version`, `observation_id`, `page_url`, `captured_at`,
 and `snapshot`. A suite receipt has

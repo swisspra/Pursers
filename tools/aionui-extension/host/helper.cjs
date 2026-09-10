@@ -17,6 +17,7 @@ const MAX_FLEET_BODY_BYTES = 512 * 1024;
 const TOKEN_HEADER = 'x-pursers-home-token';
 const SAFE_BOARD = /^[A-Za-z0-9._-]{1,80}$/;
 const SAFE_CENTRAL = /^[A-Za-z0-9._-]{1,80}$/;
+const SAFE_RUNTIME_ID = /^[A-Za-z0-9._:@/-]{1,256}$/;
 const RUNTIME_ENV = [
   'AIONUI_BASE_URL',
   'AIONUI_USER_ID',
@@ -56,18 +57,40 @@ function normalizeOrigin(value) {
   return normalizeLoopbackOrigin(value, '--origin');
 }
 
-function readTokenFile(tokenFile) {
+function readPrivateTokenFile(tokenFile, label) {
   const info = fs.lstatSync(tokenFile);
-  if (!info.isFile() || info.isSymbolicLink()) fail('--token-file must be a regular file, not a symlink');
+  if (!info.isFile() || info.isSymbolicLink()) fail(`${label} must be a regular file, not a symlink`);
   if (process.platform !== 'win32' && (info.mode & 0o077) !== 0) {
-    fail('--token-file must not be readable or writable by group or other users');
+    fail(`${label} must not be readable or writable by group or other users`);
   }
-  if (info.size < 32 || info.size > 1024) fail('--token-file must contain 32-1024 bytes');
+  if (info.size < 32 || info.size > 1024) fail(`${label} must contain 32-1024 bytes`);
   const token = fs.readFileSync(tokenFile, 'utf8').trim();
   if (token.length < 32 || token.length > 512 || /\s/.test(token)) {
-    fail('--token-file must contain one 32-512 character token without whitespace');
+    fail(`${label} must contain one 32-512 character token without whitespace`);
   }
   return token;
+}
+
+function readTokenFile(tokenFile) {
+  return readPrivateTokenFile(tokenFile, '--token-file');
+}
+
+function explicitRuntimeContext(values) {
+  const keys = ['runtime-base-url', 'runtime-user-id', 'runtime-conversation-id', 'runtime-token-file'];
+  const present = keys.filter((key) => Boolean(values[key]));
+  if (present.length === 0) return null;
+  if (present.length !== keys.length) fail(`explicit Team runtime requires ${keys.map((key) => `--${key}`).join(', ')}`);
+  const userId = String(values['runtime-user-id']);
+  const conversationId = String(values['runtime-conversation-id']);
+  if (!SAFE_RUNTIME_ID.test(userId) || !SAFE_RUNTIME_ID.test(conversationId)) {
+    fail('runtime user and conversation IDs must be bounded identifiers');
+  }
+  return {
+    AIONUI_BASE_URL: normalizeLoopbackOrigin(values['runtime-base-url'], '--runtime-base-url'),
+    AIONUI_USER_ID: userId,
+    AIONUI_CONVERSATION_ID: conversationId,
+    AIONUI_RUNTIME_TOKEN: readPrivateTokenFile(values['runtime-token-file'], '--runtime-token-file'),
+  };
 }
 
 function safeEqual(left, right) {
@@ -111,10 +134,11 @@ function createBridgeRunner(command, stateDir) {
   );
 }
 
-function createTeamRunner(command) {
+function createTeamRunner(command, runtimeContext = null) {
   return (args, input) => new Promise((resolve) => {
     const env = { ...process.env };
     for (const name of RUNTIME_ENV) delete env[name];
+    if (runtimeContext) Object.assign(env, runtimeContext);
     const child = execFile(command, ['team', ...args], {
       encoding: 'utf8',
       maxBuffer: 4 * 1024 * 1024,
@@ -246,7 +270,9 @@ function createHelperServer(options) {
   if (!isLoopbackHostname(host)) fail('helper host must be loopback');
   const port = options.port === undefined ? DEFAULT_PORT : parseInteger(options.port, 'port', 0, 65535);
   const runBridge = options.runBridge || createBridgeRunner(options.bridgeCommand || 'pursers-wait-bridge', options.bridgeStateDir);
-  const runTeamCli = options.runTeamCli || createTeamRunner(options.aioncoreCommand || 'aioncore');
+  const runTeamCli = options.runTeamCli || createTeamRunner(
+    options.aioncoreCommand || 'aioncore', options.runtimeContext || null,
+  );
   const ticketLifecycle = options.ticketLifecycle || createTicketLifecycleProcess({
     command: options.bridgeCommand || 'pursers-wait-bridge',
     stateDir: options.bridgeStateDir,
@@ -336,7 +362,7 @@ function createHelperServer(options) {
         central,
         transport: 'authenticated_loopback_helper',
         host_route_handlers: false,
-        team_context: 'unavailable_from_settings_tab',
+        team_context: options.runtimeContext ? 'explicit_issuer_context' : 'unavailable_from_settings_tab',
         core_version: options.coreVersion || 'unknown',
       }, origin);
       return;
@@ -400,6 +426,7 @@ function parseArgs(argv) {
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const token = readTokenFile(args['token-file']);
+  const runtimeContext = explicitRuntimeContext(args);
   const helper = createHelperServer({
     board: args.board,
     central: args.central,
@@ -412,6 +439,7 @@ async function main() {
     aioncoreCommand: args['aioncore-bin'] || 'aioncore',
     fleetUrl: args['fleet-url'] || DEFAULT_FLEET_URL,
     coreVersion: args['core-version'] || 'unknown',
+    runtimeContext,
   });
   const address = await helper.start();
   process.stdout.write(`${JSON.stringify({ ok: true, host: address.address, port: address.port, board: args.board, central: args.central, origin: normalizeOrigin(args.origin) })}\n`);
@@ -432,6 +460,8 @@ module.exports = {
   bridgeArguments,
   createFleetResultsFetcher,
   createHelperServer,
+  createTeamRunner,
+  explicitRuntimeContext,
   normalizeOrigin,
   readTokenFile,
 };

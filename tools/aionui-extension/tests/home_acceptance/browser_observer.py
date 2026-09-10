@@ -58,12 +58,18 @@ EXIT_CAPTURE_FAILED = 8
 
 REQUEST_KEYS = {
     "observation_id", "target", "host_version", "host_build",
-    "candidate_commit", "captured_at", "page_url", "assertions",
+    "candidate_commit", "captured_at", "page_url", "assertions", "surface_id",
+    "runtime_product", "runtime_identity_source",
 }
 CAPTURE_KEYS = {
     "observer_id", "observation_id", "target", "host_product", "host_version",
     "host_build", "host_identity_source", "candidate_commit", "captured_at", "page_url",
-    "screenshot_base64", "snapshot",
+    "screenshot_base64", "snapshot", "surface_id",
+}
+SURFACE_PRODUCTS = {
+    "aionui": "AionUi",
+    "fleet": "Pursers Fleet",
+    "personal": "Pursers Personal",
 }
 
 
@@ -183,6 +189,7 @@ def _load_config() -> dict[str, Any]:
         "max_age_s": max_age_s,
         "backend": config.get("backend"),
         "repository_root": config.get("repository_root"),
+        "surfaces": config.get("surfaces"),
     }
 
 
@@ -217,6 +224,10 @@ def _read_request(stream: Any) -> dict[str, Any]:
     if not isinstance(request, dict) or set(request) != REQUEST_KEYS:
         raise _fail(EXIT_USAGE, "observation request fields do not match schema")
     request["target"] = _validate_target(request["target"])
+    if request["surface_id"] not in SURFACE_PRODUCTS:
+        raise _fail(EXIT_USAGE, "observation request surface_id is unsupported")
+    if request["runtime_product"] != SURFACE_PRODUCTS[request["surface_id"]]:
+        raise _fail(EXIT_USAGE, "observation request runtime product is invalid")
     _same_origin(request["page_url"], request["target"]["base_url"])
     _parse_timestamp(request["captured_at"], "request captured_at")
     if not isinstance(request["assertions"], list) or not request["assertions"]:
@@ -228,13 +239,21 @@ def replay(stream: Any, out: Any) -> int:
     config = _load_config()
     request = _read_request(stream)
     capture = _load_capture(config, request["observation_id"])
-    bound = ("target", "host_version", "host_build", "candidate_commit", "captured_at", "page_url")
+    bound = (
+        "surface_id", "target", "host_version", "host_build", "candidate_commit",
+        "captured_at", "page_url",
+    )
     for field in bound:
         if capture[field] != request[field]:
             raise _fail(
                 EXIT_MISMATCH,
                 f"stored capture {field} does not match the replayed request",
             )
+    if (
+        capture["host_product"] != request["runtime_product"]
+        or capture["host_identity_source"] != request["runtime_identity_source"]
+    ):
+        raise _fail(EXIT_MISMATCH, "stored capture runtime identity does not match request")
     if capture["observer_id"] != config["observer_id"]:
         raise _fail(EXIT_MISMATCH, "stored capture belongs to another observer session")
     age = (_now() - _parse_timestamp(capture["captured_at"], "capture captured_at")).total_seconds()
@@ -470,6 +489,145 @@ def _observed_runtime_binding(
     }
 
 
+def _git_identity(repository: Path) -> tuple[str, str]:
+    head = _run_identity_command(
+        ["/usr/bin/git", "-C", str(repository), "rev-parse", "HEAD"],
+        "pinned repository HEAD",
+    ).stdout.strip()
+    status = _run_identity_command(
+        ["/usr/bin/git", "-C", str(repository), "status", "--porcelain"],
+        "pinned repository status",
+    ).stdout
+    if not FULL_SHA.fullmatch(head) or status:
+        raise _fail(EXIT_CAPABILITY_UNAVAILABLE, "pinned repository is not clean at an exact commit")
+    return head, status
+
+
+def _surface_config(config: dict[str, Any], surface_id: str) -> dict[str, Any]:
+    surfaces = config.get("surfaces")
+    if not isinstance(surfaces, dict) or set(surfaces) != set(SURFACE_PRODUCTS):
+        raise _fail(EXIT_CONFIG, "observer.json lacks exact surface bindings")
+    surface = surfaces.get(surface_id)
+    if not isinstance(surface, dict):
+        raise _fail(EXIT_CONFIG, "observer surface binding is invalid")
+    return surface
+
+
+def _probe_pinned_artifact(
+    config: dict[str, Any], surface: dict[str, Any], base_url: str
+) -> dict[str, str]:
+    repository_value = config.get("repository_root")
+    if not isinstance(repository_value, str):
+        raise _fail(EXIT_CONFIG, "observer repository_root is unavailable")
+    repository = Path(repository_value).resolve()
+    head, _status = _git_identity(repository)
+    if head != surface.get("candidate_commit"):
+        raise _fail(EXIT_MISMATCH, "pinned surface repository commit changed")
+    relative = surface.get("artifact")
+    if not isinstance(relative, str) or relative.startswith("/") or ".." in Path(relative).parts:
+        raise _fail(EXIT_CONFIG, "pinned surface artifact path is invalid")
+    try:
+        artifact = (repository / relative).resolve(strict=True)
+    except (FileNotFoundError, RuntimeError):
+        raise _fail(EXIT_CAPABILITY_UNAVAILABLE, "pinned surface artifact is unavailable") from None
+    if not artifact.is_relative_to(repository) or not artifact.is_file():
+        raise _fail(EXIT_CONFIG, "pinned surface artifact is unavailable")
+    if hashlib.sha256(artifact.read_bytes()).hexdigest() != surface.get("artifact_sha256"):
+        raise _fail(EXIT_MISMATCH, "pinned surface artifact digest changed")
+    parsed = urlsplit(base_url)
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    listeners = _run_identity_command(
+        ["/usr/sbin/lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
+        "pinned surface listener lookup",
+    )
+    pids = sorted({line.strip() for line in listeners.stdout.splitlines() if line.strip()})
+    if len(pids) != 1 or not pids[0].isdigit():
+        raise _fail(EXIT_CAPABILITY_UNAVAILABLE, "surface has no unique listener process")
+    command = _run_identity_command(
+        ["/bin/ps", "-p", pids[0], "-o", "command="],
+        "pinned surface listener command",
+    ).stdout.strip()
+    try:
+        command_arguments = shlex.split(command)
+    except ValueError:
+        raise _fail(EXIT_CAPABILITY_UNAVAILABLE, "surface listener command is malformed") from None
+    if str(artifact) not in command_arguments:
+        raise _fail(EXIT_CAPABILITY_UNAVAILABLE, "surface listener does not execute the pinned artifact")
+    return {
+        "product": surface["product"],
+        "version": surface["version"],
+        "build": surface["artifact_sha256"],
+        "source": "verifier-pinned-process-artifact",
+        "candidate_commit": head,
+    }
+
+
+def _observed_surface_binding(
+    config: dict[str, Any], observation: dict[str, Any], surface_id: str, base_url: str
+) -> dict[str, str]:
+    if config.get("surfaces") is None:
+        if surface_id != "aionui":
+            raise _fail(EXIT_CONFIG, "non-AionUi capture needs verifier-pinned surface bindings")
+        probe_runtime_health(base_url)
+        return _observed_runtime_binding(observation, base_url)
+    surface = _surface_config(config, surface_id)
+    if surface.get("target", {}).get("base_url") != base_url:
+        raise _fail(EXIT_MISMATCH, "capture target does not match verifier-pinned surface")
+    adapter = surface.get("adapter")
+    if adapter == "signed-aionui":
+        probe_runtime_health(base_url)
+        binding = _observed_runtime_binding(observation, base_url)
+    elif adapter == "pinned-process-artifact":
+        binding = _probe_pinned_artifact(config, surface, base_url)
+        selected_board = observation.get("selected_board")
+        if not isinstance(selected_board, str):
+            raise _fail(EXIT_CAPABILITY_UNAVAILABLE, "surface UI does not expose its selected board")
+        binding["selected_board"] = selected_board
+    elif adapter == "pinned-signed-aionui-artifact":
+        signed = _observed_runtime_binding(observation, base_url)
+        pinned = _probe_pinned_artifact_without_listener(
+            config, surface, observation.get("page_sha256")
+        )
+        binding = {
+            **pinned,
+            "source": "verifier-pinned-signed-aionui-artifact",
+            "selected_board": signed["selected_board"],
+        }
+    else:
+        raise _fail(EXIT_CONFIG, "surface adapter is unsupported")
+    return binding
+
+
+def _probe_pinned_artifact_without_listener(
+    config: dict[str, Any], surface: dict[str, Any], observed_page_sha256: Any
+) -> dict[str, str]:
+    repository_value = config.get("repository_root")
+    if not isinstance(repository_value, str):
+        raise _fail(EXIT_CONFIG, "observer repository_root is unavailable")
+    repository = Path(repository_value).resolve()
+    head, _status = _git_identity(repository)
+    relative = surface.get("artifact")
+    if head != surface.get("candidate_commit") or not isinstance(relative, str):
+        raise _fail(EXIT_MISMATCH, "pinned surface candidate binding changed")
+    try:
+        artifact = (repository / relative).resolve(strict=True)
+    except (FileNotFoundError, RuntimeError):
+        raise _fail(EXIT_CAPABILITY_UNAVAILABLE, "pinned surface artifact is unavailable") from None
+    if not artifact.is_relative_to(repository) or not artifact.is_file():
+        raise _fail(EXIT_CONFIG, "pinned surface artifact escapes repository")
+    digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
+    if digest != surface.get("artifact_sha256"):
+        raise _fail(EXIT_MISMATCH, "pinned surface artifact digest changed")
+    if observed_page_sha256 != digest:
+        raise _fail(EXIT_MISMATCH, "served Personal artifact does not match verifier-pinned bytes")
+    return {
+        "product": surface["product"],
+        "version": surface["version"],
+        "build": digest,
+        "candidate_commit": head,
+    }
+
+
 def probe_runtime_health(base_url: str, timeout_s: float = 4.0) -> dict[str, str]:
     """Read the independently exposed AionCore runtime version and build."""
     opener = build_opener(ProxyHandler({}))
@@ -583,10 +741,24 @@ const candidateResult = await cdp('Runtime.evaluate', {
 })
 const boardResult = await cdp('Runtime.evaluate', {
   expression: `(() => {
-    const node = document.querySelector('[data-helper-field="board"]')
-    return node && node.textContent ? node.textContent.trim() : ''
+    const node = document.querySelector('[data-helper-field="board"], [data-board-id], #board-id')
+    if (!node) return ''
+    return (node.getAttribute('data-board-id') || node.textContent || '').trim()
   })()`,
   contextId: contextId,
+  returnByValue: true
+})
+const pageDigestResult = await cdp('Runtime.evaluate', {
+  expression: `(async () => {
+    try {
+      const response = await fetch(window.location.href, { credentials: 'same-origin', cache: 'no-store' })
+      if (!response.ok) return ''
+      const digest = await crypto.subtle.digest('SHA-256', await response.arrayBuffer())
+      return Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, '0')).join('')
+    } catch (_error) { return '' }
+  })()`,
+  contextId: contextId,
+  awaitPromise: true,
   returnByValue: true
 })
 const nodes = (ax && ax.nodes ? ax.nodes : []).slice(0, 400).map(function (node) {
@@ -603,7 +775,8 @@ cliLog(JSON.stringify({
   snapshot: { title: info.title || '', viewport: { w: info.w, h: info.h }, nodes: nodes },
   host_status: statusResult && statusResult.result ? statusResult.result.value : null,
   candidate_status: candidateResult && candidateResult.result ? candidateResult.result.value : null,
-  selected_board: boardResult && boardResult.result ? boardResult.result.value : null
+  selected_board: boardResult && boardResult.result ? boardResult.result.value : null,
+  page_sha256: pageDigestResult && pageDigestResult.result ? pageDigestResult.result.value : null
 }))
 """
 
@@ -707,7 +880,8 @@ def _run_backend(config: dict[str, Any], page_url: str) -> dict[str, Any]:
         if observation is not None:
             break
     expected_keys = {
-        "page_url", "screenshot_base64", "snapshot", "host_status", "candidate_status", "selected_board",
+        "page_url", "screenshot_base64", "snapshot", "host_status", "candidate_status",
+        "selected_board", "page_sha256",
     }
     if observation is None or set(observation) != expected_keys:
         diagnostic = (completed.stderr.strip().splitlines() or [""])[-1][:120]
@@ -735,7 +909,7 @@ def _run_backend(config: dict[str, Any], page_url: str) -> dict[str, Any]:
 
 SPEC_KEYS = {
     "schema_version", "observation_id", "target", "candidate_commit",
-    "page_url", "assertions",
+    "page_url", "assertions", "surface_id",
 }
 
 
@@ -754,6 +928,8 @@ def _read_spec(spec_path: Path) -> dict[str, Any]:
     if not isinstance(commit, str) or not FULL_SHA.fullmatch(commit):
         raise _fail(EXIT_USAGE, "capture spec candidate_commit must be a full 40-hex SHA")
     spec["target"] = _validate_target(spec["target"])
+    if spec["surface_id"] not in SURFACE_PRODUCTS:
+        raise _fail(EXIT_USAGE, "capture spec surface_id is unsupported")
     _same_origin(spec["page_url"], spec["target"]["base_url"])
     if not isinstance(spec["assertions"], list) or not spec["assertions"]:
         raise _fail(EXIT_USAGE, "capture spec needs explicit assertions")
@@ -763,11 +939,10 @@ def _read_spec(spec_path: Path) -> dict[str, Any]:
 def capture(spec_path: Path, out: Any) -> int:
     config = _load_config()
     spec = _read_spec(spec_path)
-    # A browser backend must not be able to relabel an unreachable/non-AionCore
-    # origin with a syntactically valid same-origin contract.
-    probe_runtime_health(spec["target"]["base_url"])
     observation = _run_backend(config, spec["page_url"])
-    binding = _observed_runtime_binding(observation, spec["target"]["base_url"])
+    binding = _observed_surface_binding(
+        config, observation, spec["surface_id"], spec["target"]["base_url"]
+    )
     observed_page_url = _same_origin(observation["page_url"], spec["target"]["base_url"])
     if binding["candidate_commit"] != spec["candidate_commit"]:
         raise _fail(
@@ -786,6 +961,7 @@ def capture(spec_path: Path, out: Any) -> int:
     payload = {
         "observer_id": config["observer_id"],
         "observation_id": spec["observation_id"],
+        "surface_id": spec["surface_id"],
         "target": observed_target,
         "host_product": binding["product"],
         "host_version": binding["version"],
