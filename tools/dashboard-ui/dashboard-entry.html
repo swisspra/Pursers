@@ -9,136 +9,489 @@
     <a class="skip-link" href="#main-content">Skip to dashboard</a>
 
     <div class="app-shell">
-      <header class="app-header" aria-labelledby="name">
-        <div class="brand-block">
-          <div class="brand-line">
-            <span class="product-mark" aria-hidden="true">OB</span>
-            <p class="eyebrow">On Board Personal</p>
-            <span class="label label-accent">Personal Preview</span>
-            <span class="label">Local</span>
-            <span class="label">Read-only</span>
-          </div>
-          <h1 id="name">Personal Preview Demo</h1>
-          <p id="board-id" class="board-id">Local board</p>
+      <div class="rail">
+        <a id="nav-brand-link" class="brand" href="#home" data-go-view="home">
+          <span class="brand-mark" aria-hidden="true">P</span>
+          <span class="brand-copy">
+            <span class="brand-name">Pursers</span>
+            <span class="brand-tag">Your calm work home</span>
+          </span>
+        </a>
+
+        <div class="context-card">
+          <p class="context-kicker" id="context-kicker">Context</p>
+          <button id="work-context-btn" type="button" class="context-option" data-context="work" disabled aria-disabled="true" aria-describedby="context-note">
+            <span class="context-icon" aria-hidden="true">&#9635;</span>
+            <span class="context-label">WORK</span>
+            <span class="context-state">Not opened here</span>
+          </button>
+          <button id="personal-context-btn" type="button" class="context-option is-active" data-context="personal" aria-current="true" aria-describedby="context-note">
+            <span class="context-icon" aria-hidden="true">&#8962;</span>
+            <span class="context-label">PERSONAL</span>
+            <span class="context-state">Active</span>
+          </button>
+          <p class="context-note" id="context-note">This View is the Personal preview: local, read-only and bounded. The WORK fleet dashboard is a separate local surface; this preview never opens or changes it.</p>
         </div>
-        <div class="header-actions">
-          <p id="source" class="source" aria-live="polite">Preparing local preview</p>
-          <button id="refresh" class="refresh-button" type="button">
-            <span aria-hidden="true">↻</span>
-            <span>Refresh</span>
+
+        <nav class="primary-nav" role="tablist" aria-label="Dashboard views" aria-orientation="vertical">
+          <button id="tab-home" class="nav-item" role="tab" type="button" aria-selected="true" aria-controls="view-home" tabindex="0" data-view="home">
+            <span class="nav-icon" aria-hidden="true">&#8962;</span><span class="nav-label">Home</span>
+          </button>
+          <button id="tab-fleet" class="nav-item" role="tab" type="button" aria-selected="false" aria-controls="view-fleet" tabindex="-1" data-view="projects">
+            <span class="nav-icon" aria-hidden="true">&#128194;</span><span class="nav-label">Projects</span><span class="nav-count" id="nav-count-projects" hidden></span>
+          </button>
+          <button id="tab-work" class="nav-item" role="tab" type="button" aria-selected="false" aria-controls="view-work" tabindex="-1" data-view="work">
+            <span class="nav-icon" aria-hidden="true">&#9638;</span><span class="nav-label">Work</span><span class="nav-count" id="nav-count-work" hidden></span>
+          </button>
+          <button id="tab-team" class="nav-item" role="tab" type="button" aria-selected="false" aria-controls="view-team" tabindex="-1" data-view="team">
+            <span class="nav-icon" aria-hidden="true">&#9733;</span><span class="nav-label">Team</span>
+          </button>
+          <button id="tab-approvals" class="nav-item" role="tab" type="button" aria-selected="false" aria-controls="view-approvals" tabindex="-1" data-view="approvals">
+            <span class="nav-icon" aria-hidden="true">&#10003;</span><span class="nav-label">Approvals</span><span class="nav-count nav-count-alert" id="nav-count-approvals" hidden></span>
+          </button>
+          <button id="tab-activity" class="nav-item" role="tab" type="button" aria-selected="false" aria-controls="view-activity" tabindex="-1" data-view="activity">
+            <span class="nav-icon" aria-hidden="true">&#8635;</span><span class="nav-label">Activity</span>
+          </button>
+          <button id="tab-settings" class="nav-item" role="tab" type="button" aria-selected="false" aria-controls="view-settings" tabindex="-1" data-view="settings">
+            <span class="nav-icon" aria-hidden="true">&#9881;</span><span class="nav-label">Settings</span>
+          </button>
+        </nav>
+
+        <div class="rail-foot">
+          <div class="preview-card">
+            <p class="preview-title"><span class="dot" data-tone="warning" aria-hidden="true"></span>Local preview</p>
+            <p class="preview-copy" id="preview-copy">Read-only projections of authorized local data. Actions stay in agent chat.</p>
+          </div>
+          <button id="help-button" class="nav-item" type="button" data-help-toggle aria-expanded="false" aria-controls="help-panel">
+            <span class="nav-icon" aria-hidden="true">&#63;</span><span class="nav-label">How Pursers works</span>
           </button>
         </div>
-      </header>
+      </div>
 
-      <section id="connection-banner" class="connection-banner" role="status" aria-live="polite">
-        <span class="status-dot" aria-hidden="true"></span>
-        <div>
-          <strong id="connection-title">Loading board</strong>
-          <p id="connection-detail">Connecting through the local MCP Apps bridge.</p>
-        </div>
-      </section>
+      <div class="workspace">
+        <header class="top-bar">
+          <div class="top-identity">
+            <p class="crumb"><span id="context-crumb">PERSONAL</span> <span class="crumb-sep" aria-hidden="true">/</span> <span id="name">Personal Preview Demo</span></p>
+            <p class="board-line"><span id="board-id">Local board</span> <span class="label" id="truth-local">Local</span> <span class="label" id="truth-read-only">Read-only</span> <span class="label" id="truth-bounded">Bounded data</span></p>
+          </div>
+          <div class="top-actions">
+            <p id="source" class="source" aria-live="polite">Preparing local preview</p>
+            <button id="search-button" class="ghost-button" type="button" aria-controls="command-bar">
+              <span aria-hidden="true">&#8981;</span><span>Search</span><kbd>/</kbd>
+            </button>
+            <button id="refresh" class="refresh-button" type="button">
+              <span aria-hidden="true">&#8635;</span><span>Refresh</span>
+            </button>
+          </div>
+        </header>
 
-      <section class="command-bar" aria-label="Dashboard search">
-        <label for="global-search" class="search-label">
-          <span aria-hidden="true">⌕</span>
-          <span class="sr-only">Search this dashboard</span>
-        </label>
-        <input id="global-search" type="search" autocomplete="off" placeholder="Search tickets, agents, links, activity" aria-describedby="search-help search-count" />
-        <kbd aria-hidden="true">/</kbd>
-        <span id="search-help" class="sr-only">Searches only the authorized data loaded in this dashboard. Press Escape to clear.</span>
-        <span id="search-count" class="search-count" aria-live="polite"></span>
-      </section>
-
-      <nav class="view-tabs" aria-label="Dashboard views" role="tablist">
-        <button id="tab-today" role="tab" aria-selected="true" aria-controls="view-today" tabindex="0" data-view="today" type="button">Today</button>
-        <button id="tab-work" role="tab" aria-selected="false" aria-controls="view-work" tabindex="-1" data-view="work" type="button">Work</button>
-        <button id="tab-agents" role="tab" aria-selected="false" aria-controls="view-agents" tabindex="-1" data-view="agents" type="button">Agents</button>
-        <button id="tab-fleet" role="tab" aria-selected="false" aria-controls="view-fleet" tabindex="-1" data-view="fleet" type="button">Fleet</button>
-        <button id="tab-links" role="tab" aria-selected="false" aria-controls="view-links" tabindex="-1" data-view="links" type="button">Links</button>
-        <button id="tab-activity" role="tab" aria-selected="false" aria-controls="view-activity" tabindex="-1" data-view="activity" type="button">Activity</button>
-      </nav>
-
-      <main id="main-content" tabindex="-1" aria-busy="true">
-        <section id="search-results" class="search-panel" aria-labelledby="search-title" hidden>
-          <div class="section-heading"><div><p class="section-kicker">Loaded data only</p><h2 id="search-title">Search results</h2></div></div>
-          <div id="search-results-list" class="search-results-list"></div>
+        <section id="command-bar" class="command-bar" aria-label="Dashboard search">
+          <label for="global-search" class="search-label">
+            <span aria-hidden="true">&#8981;</span>
+            <span class="sr-only">Search this dashboard</span>
+          </label>
+          <input id="global-search" type="search" autocomplete="off" placeholder="Search tickets, teammates, projects, relationships, activity" aria-describedby="search-help search-count" />
+          <kbd aria-hidden="true">/</kbd>
+          <span id="search-help" class="sr-only">Searches only the authorized data loaded in this dashboard. Press Escape to clear.</span>
+          <span id="search-count" class="search-count" aria-live="polite"></span>
         </section>
 
-        <section id="view-today" class="view-panel" role="tabpanel" aria-labelledby="tab-today" data-panel="today">
-          <div class="hero-grid">
-            <article class="health-card card">
-              <p class="section-kicker">Project health</p>
-              <div class="health-row"><span id="health-icon" class="health-icon" aria-hidden="true">●</span><div><h2 id="health-title">Preparing board</h2><p id="health-detail" class="muted">Waiting for an authorized snapshot.</p></div></div>
-            </article>
-            <dl class="metrics-grid" aria-label="Today at a glance">
-              <div class="metric card"><dt>Open</dt><dd id="metric-open">—</dd></div>
-              <div class="metric card"><dt>Working</dt><dd id="metric-working">—</dd></div>
-              <div class="metric card"><dt>Submitted</dt><dd id="metric-submitted">—</dd></div>
-              <div class="metric card"><dt>Agents active</dt><dd id="metric-agents">—</dd></div>
+        <section id="connection-banner" class="connection-banner" role="status" aria-live="polite">
+          <span class="status-dot" aria-hidden="true"></span>
+          <div>
+            <strong id="connection-title">Loading board</strong>
+            <p id="connection-detail">Connecting through the local MCP Apps bridge.</p>
+          </div>
+        </section>
+
+        <p id="action-announcer" class="sr-only" role="status" aria-live="polite"></p>
+
+        <section id="help-panel" class="help-panel" aria-labelledby="help-title" hidden>
+          <div class="section-heading">
+            <div>
+              <p class="section-kicker">One outcome-oriented path</p>
+              <h2 id="help-title">How Pursers works</h2>
+            </div>
+            <button id="help-close" class="ghost-button" type="button">Close</button>
+          </div>
+          <ol class="help-steps">
+            <li><strong>Connect a door.</strong> An operator pastes a door once; the secret is never shown again in this View.</li>
+            <li><strong>Start a Team.</strong> One folder per teammate, a monitor-only lead, and dispatch that comes from the board.</li>
+            <li><strong>Describe work.</strong> Work is described in agent chat; this preview only reads the authorized projection.</li>
+            <li><strong>Watch progress.</strong> Home and Work show status, ownership and review readiness as bounded data.</li>
+            <li><strong>Answer an approval.</strong> Approvals lists what waits on human judgment and says where the action lives.</li>
+            <li><strong>Receive a reviewed result.</strong> The latest reviewed handoff appears on Home and in Activity relationships.</li>
+          </ol>
+        </section>
+
+        <main id="main-content" tabindex="-1" aria-busy="true">
+          <section id="search-results" class="search-panel" aria-labelledby="search-title" hidden>
+            <div class="section-heading">
+              <div>
+                <p class="section-kicker">Loaded data only</p>
+                <h2 id="search-title">Search results</h2>
+              </div>
+            </div>
+            <div id="search-results-list" class="search-results-list"></div>
+          </section>
+
+          <section id="view-home" class="view-panel" role="tabpanel" aria-labelledby="tab-home" data-panel="home">
+            <div class="page-heading">
+              <div>
+                <p class="section-kicker" id="home-kicker">Your next step</p>
+                <h1 id="home-title">Good morning, your work is in good hands.</h1>
+                <p class="lede" id="home-lede">Pursers helps you delegate clearly, stay informed, and step in only when your judgment is needed.</p>
+              </div>
+            </div>
+
+            <div id="home-first-run" class="onboarding" hidden>
+              <h2 id="first-run-title">Start with one safe step</h2>
+              <p class="lede" id="first-run-detail">Nothing is connected yet.</p>
+              <ol class="help-steps" id="first-run-steps"></ol>
+            </div>
+
+            <section class="next-action" id="next-action-card" aria-labelledby="next-action-title">
+              <div class="next-action-copy">
+                <span class="next-action-icon" aria-hidden="true">&#10003;</span>
+                <div>
+                  <p class="section-kicker">Your next step</p>
+                  <h2 id="next-action-title">Preparing your next safe action</h2>
+                  <p id="next-action-detail">Waiting for an authorized snapshot.</p>
+                </div>
+              </div>
+              <button id="next-action-button" class="primary-button" type="button" data-go-view="work">View work</button>
+            </section>
+
+            <section class="summary-grid" aria-label="Project summary">
+              <article class="card summary-card" id="health-card">
+                <div class="summary-head"><span class="summary-label">Project health</span><span class="pill" id="health-mode" data-tone="demo">DEMO</span></div>
+                <p class="summary-state"><span class="dot" id="health-icon" data-tone="demo" aria-hidden="true"></span><strong id="health-title">Preparing board</strong></p>
+                <p class="summary-detail" id="health-detail">Waiting for an authorized snapshot.</p>
+              </article>
+              <article class="card summary-card"><p class="summary-label" id="label-open">Open work</p><p class="summary-number" id="metric-open">&mdash;</p><p class="summary-detail">Waiting to be picked up</p></article>
+              <article class="card summary-card"><p class="summary-label" id="label-working">In progress</p><p class="summary-number" id="metric-working">&mdash;</p><p class="summary-detail">Being handled by the Team</p></article>
+              <article class="card summary-card"><p class="summary-label" id="label-ready">Ready for you</p><p class="summary-number summary-number-alert" id="metric-submitted">&mdash;</p><p class="summary-detail">Submitted or needs attention</p></article>
+            </section>
+
+            <div class="home-grid">
+              <section class="card" aria-labelledby="home-work-title">
+                <div class="section-heading">
+                  <div><p class="section-kicker">What is happening</p><h2 id="home-work-title">Current work</h2></div>
+                  <button class="text-button" type="button" data-go-view="work">View all<span class="sr-only"> work</span></button>
+                </div>
+                <div id="home-work" class="stack-list"></div>
+              </section>
+
+              <section class="card" aria-labelledby="home-team-title">
+                <div class="section-heading">
+                  <div><p class="section-kicker">Who is here</p><h2 id="home-team-title">Your Team</h2></div>
+                  <button class="text-button" type="button" data-go-view="team">Manage<span class="sr-only"> team</span></button>
+                </div>
+                <div id="home-team" class="stack-list compact"></div>
+                <p class="card-foot"><span aria-hidden="true">&#9673;</span> Lead is monitor-only &middot; dispatch comes from the board</p>
+              </section>
+
+              <section class="card card-warm" aria-labelledby="home-approval-title">
+                <div class="section-heading">
+                  <div><p class="section-kicker">Needs your judgment</p><h2 id="home-approval-title">Approval waiting</h2></div>
+                  <span class="pill pill-alert" id="home-approval-count">0 requests</span>
+                </div>
+                <div id="home-approval"></div>
+              </section>
+
+              <section class="card card-calm" aria-labelledby="home-result-title">
+                <div class="section-heading">
+                  <div><p class="section-kicker">Latest reviewed result</p><h2 id="home-result-title">A handoff you can trust</h2></div>
+                  <span aria-hidden="true">&#10004;</span>
+                </div>
+                <div id="latest-handoff"></div>
+              </section>
+
+              <section class="card" aria-labelledby="important-title">
+                <div class="section-heading">
+                  <div><p class="section-kicker">Decision or warning</p><h2 id="important-title">Important pinned note</h2></div>
+                </div>
+                <div id="important-pinned"></div>
+              </section>
+
+              <section class="card" aria-labelledby="recent-title">
+                <div class="section-heading">
+                  <div><p id="recent-activity-scope" class="section-kicker">Synthetic preview activity</p><h2 id="recent-title">Recent activity</h2></div>
+                  <button class="text-button" type="button" data-go-view="activity">View activity</button>
+                </div>
+                <div id="recent-activity" class="timeline compact"></div>
+                <button class="text-button help-inline" type="button" id="help-button-alt" data-help-toggle aria-expanded="false" aria-controls="help-panel">How Pursers works</button>
+              </section>
+            </div>
+          </section>
+
+          <section id="view-fleet" class="view-panel" role="tabpanel" aria-labelledby="tab-fleet" data-panel="projects" hidden>
+            <div class="page-heading">
+              <div>
+                <p class="section-kicker">Authorized registry projection</p>
+                <h1 id="projects-title">Choose where your work happens.</h1>
+                <p class="lede">Registered projects, their board identity and their last-known counts. Selecting a project happens in agent chat; this preview never mutates the registry.</p>
+              </div>
+              <p id="fleet-total" class="count-badge"></p>
+            </div>
+            <div id="fleet-warning"></div>
+            <dl class="metrics-grid" aria-label="Fleet totals">
+              <div class="metric card"><dt>Agents online</dt><dd id="fleet-agents">&mdash;</dd></div>
+              <div class="metric card"><dt>Busy</dt><dd id="fleet-busy">&mdash;</dd></div>
+              <div class="metric card"><dt>Available</dt><dd id="fleet-available">&mdash;</dd></div>
+              <div class="metric card"><dt>Stale</dt><dd id="fleet-stale">&mdash;</dd></div>
             </dl>
-          </div>
-
-          <div class="today-grid">
-            <section class="card span-two" aria-labelledby="today-work-title">
-              <div class="section-heading"><div><p class="section-kicker">What needs attention</p><h2 id="today-work-title">Current work</h2></div><button class="text-button" type="button" data-go-view="work">View all work</button></div>
-              <div id="today-work" class="stack-list"></div>
-            </section>
-            <section class="card" aria-labelledby="today-agents-title">
-              <div class="section-heading"><div><p class="section-kicker">Who is here</p><h2 id="today-agents-title">Agents</h2></div><button class="text-button" type="button" data-go-view="agents">View agents</button></div>
-              <div id="today-agents" class="stack-list compact"></div>
-            </section>
-            <section class="card" aria-labelledby="handoff-title"><p class="section-kicker">Continuity</p><h2 id="handoff-title">Latest handoff</h2><div id="latest-handoff"></div></section>
-            <section class="card" aria-labelledby="important-title"><p class="section-kicker">Decision or warning</p><h2 id="important-title">Important pinned note</h2><div id="important-pinned"></div></section>
-            <section class="card" aria-labelledby="recent-title">
-              <div class="section-heading"><div><p id="recent-activity-scope" class="section-kicker">Synthetic preview activity</p><h2 id="recent-title">Recent activity</h2></div><button class="text-button" type="button" data-go-view="activity">View activity</button></div>
-              <div id="recent-activity" class="timeline compact"></div>
-            </section>
-          </div>
-        </section>
-
-        <section id="view-work" class="view-panel" role="tabpanel" aria-labelledby="tab-work" data-panel="work" hidden>
-          <div class="page-heading"><div><p class="section-kicker">Read-only board</p><h2>Work</h2><p class="muted">See status, ownership, and review readiness. Actions stay in agent chat for this preview.</p></div><p id="work-total" class="count-badge"></p></div>
-          <div id="work-notice"></div><div id="work-groups" class="work-groups"></div>
-        </section>
-
-        <section id="view-agents" class="view-panel" role="tabpanel" aria-labelledby="tab-agents" data-panel="agents" hidden>
-          <div class="page-heading"><div><p class="section-kicker">Local agent roster</p><h2>Agents</h2><p class="muted">Status reflects the current authorized board projection.</p></div><p id="agents-total" class="count-badge"></p></div>
-          <div id="agents-notice"></div><div id="agents-grid" class="agents-grid"></div>
-        </section>
-
-        <section id="view-fleet" class="view-panel" role="tabpanel" aria-labelledby="tab-fleet" data-panel="fleet" hidden>
-          <div class="page-heading"><div><p class="section-kicker">Organization-wide read-only view</p><h2>Fleet</h2><p class="muted">Registered projects and cross-project worker seats from the authorized fleet snapshot.</p></div></div>
-          <div id="fleet-warning"></div>
-          <dl class="metrics-grid fleet-metrics" aria-label="Fleet totals">
-            <div class="metric card"><dt>Agents online</dt><dd id="fleet-agents">—</dd></div>
-            <div class="metric card"><dt>Busy</dt><dd id="fleet-busy">—</dd></div>
-            <div class="metric card"><dt>Available</dt><dd id="fleet-available">—</dd></div>
-            <div class="metric card"><dt>Stale</dt><dd id="fleet-stale">—</dd></div>
-          </dl>
-          <div class="fleet-grid">
             <section class="card" aria-labelledby="fleet-projects-title">
-              <div class="section-heading"><div><p class="section-kicker">Project registry</p><h2 id="fleet-projects-title">Projects</h2></div></div>
-              <div id="fleet-projects"></div>
+              <div class="section-heading">
+                <div><p class="section-kicker">Project registry</p><h2 id="fleet-projects-title">Your projects</h2></div>
+                <label class="inline-label" for="project-filter">Filter<span class="sr-only"> projects by status</span></label>
+              </div>
+              <select id="project-filter" class="select" aria-describedby="project-filter-help">
+                <option value="all">All projects</option>
+                <option value="active">Active</option>
+                <option value="paused">Paused</option>
+                <option value="other">Other or unknown</option>
+              </select>
+              <p id="project-filter-help" class="sr-only">Filters only the projects already loaded in this read-only projection.</p>
+              <div id="fleet-projects" class="card-grid"></div>
+            </section>
+            <section class="card" aria-labelledby="projects-empty-title" id="projects-empty-card" hidden>
+              <h2 id="projects-empty-title">No work yet?</h2>
+              <p class="lede" id="projects-empty-detail">When a project has no tickets, start by describing one outcome in agent chat.</p>
+              <button class="text-button" type="button" data-go-view="team">See Team readiness</button>
+            </section>
+          </section>
+
+          <section id="view-work" class="view-panel" role="tabpanel" aria-labelledby="tab-work" data-panel="work" hidden>
+            <div class="page-heading">
+              <div>
+                <p class="section-kicker">Read-only board</p>
+                <h1 id="work-title">Work, without losing the thread.</h1>
+                <p class="lede">Status, ownership, lease and review readiness for the authorized tickets. Claiming, submitting and reviewing stay in agent chat.</p>
+              </div>
+              <p id="work-total" class="count-badge"></p>
+            </div>
+            <div id="work-notice"></div>
+            <div class="work-layout">
+              <div id="work-groups" class="work-groups"></div>
+              <section class="card detail-card" id="work-detail" aria-labelledby="detail-title" hidden>
+                <div class="section-heading">
+                  <div><p class="section-kicker">Ticket detail</p><h2 id="detail-title">Select a ticket</h2></div>
+                  <button class="ghost-button" type="button" id="detail-close">Close</button>
+                </div>
+                <div id="detail-body"></div>
+                <details class="disclosure" id="detail-more">
+                  <summary>More context<span class="sr-only">: timeline, changes, relationships and routes</span></summary>
+                  <div class="disclosure-body">
+                    <h3>Timeline</h3>
+                    <div id="detail-timeline" class="timeline compact"></div>
+                    <h3>Changes</h3>
+                    <div id="detail-changes"></div>
+                    <h3>Relationships</h3>
+                    <div id="detail-links"></div>
+                    <h3>Routes</h3>
+                    <div id="detail-routes"></div>
+                  </div>
+                </details>
+              </section>
+            </div>
+          </section>
+
+          <section id="view-team" class="view-panel" role="tabpanel" aria-labelledby="tab-team" data-panel="team" hidden>
+            <div class="page-heading">
+              <div>
+                <p class="section-kicker">Local teammate roster</p>
+                <h1 id="team-title">Your Team is here to help.</h1>
+                <p class="lede">One folder per teammate, a monitor-only lead, and work dispatched by the board. Status reflects the current authorized projection.</p>
+              </div>
+              <p id="agents-total" class="count-badge"></p>
+            </div>
+            <div id="agents-notice"></div>
+            <section class="card" aria-labelledby="team-health-title">
+              <div class="section-heading"><div><p class="section-kicker">Readiness</p><h2 id="team-health-title">Ready and working</h2></div></div>
+              <div id="team-health" class="stat-row"></div>
+            </section>
+            <section class="card" aria-labelledby="roster-title">
+              <div class="section-heading"><div><p class="section-kicker">Roster</p><h2 id="roster-title">Team roster</h2></div></div>
+              <div id="agents-grid" class="agents-grid"></div>
             </section>
             <section class="card" aria-labelledby="fleet-pool-title">
-              <div class="section-heading"><div><p class="section-kicker">Shared workers</p><h2 id="fleet-pool-title">Agent pool</h2></div></div>
+              <div class="section-heading"><div><p class="section-kicker">Shared workers</p><h2 id="fleet-pool-title">Cross-project pool</h2></div></div>
               <div id="fleet-pool"></div>
             </section>
-          </div>
-        </section>
+            <div class="team-grid">
+              <section class="card" aria-labelledby="model-title">
+                <div class="section-heading"><div><p class="section-kicker">Clear roles, one project</p><h2 id="model-title">How this Team works</h2></div></div>
+                <div id="team-model" class="stack-list"></div>
+              </section>
+              <section class="card" aria-labelledby="start-title">
+                <div class="section-heading"><div><p class="section-kicker">Lifecycle</p><h2 id="start-title">Last start attempt</h2></div></div>
+                <div id="team-start"></div>
+                <button class="text-button" type="button" data-go-view="settings" id="advanced-settings-link">Open advanced settings</button>
+              </section>
+            </div>
+          </section>
 
-        <section id="view-links" class="view-panel" role="tabpanel" aria-labelledby="tab-links" data-panel="links" hidden>
-          <div class="page-heading"><div><p class="section-kicker">Explicit project relationships</p><h2>Links</h2><p class="muted">Ticket, memory, file, and tag relationships from the board's bounded memory_links projection.</p></div><div class="links-summary"><p id="links-source" class="label label-accent">Authoritative · memory_links</p><p id="links-total" class="count-badge"></p></div></div>
-          <div id="links-notice"></div><div id="links-groups" class="link-groups"></div>
-        </section>
+          <section id="view-approvals" class="view-panel" role="tabpanel" aria-labelledby="tab-approvals" data-panel="approvals" hidden>
+            <div class="page-heading">
+              <div>
+                <p class="section-kicker">Human judgment</p>
+                <h1 id="approvals-title">Approvals, with room to think.</h1>
+                <p class="lede">What waits on you, what is already reviewed, and which controls this read-only preview cannot operate. Nothing here mutates the board.</p>
+              </div>
+              <p id="approvals-total" class="count-badge"></p>
+            </div>
+            <div id="approvals-notice"></div>
+            <section class="card card-warm" aria-labelledby="waiting-title">
+              <div class="section-heading"><div><p class="section-kicker">Waiting for you</p><h2 id="waiting-title">One decision is waiting for you</h2></div></div>
+              <div id="approvals-next"></div>
+            </section>
+            <div class="approvals-grid">
+              <section class="card" aria-labelledby="decision-title">
+                <div class="section-heading"><div><p class="section-kicker">Pinned digest</p><h2 id="decision-title">Human decisions</h2></div></div>
+                <div id="approvals-decisions"></div>
+              </section>
+              <section class="card" aria-labelledby="review-title">
+                <div class="section-heading"><div><p class="section-kicker">Submitted work</p><h2 id="review-title">Ready for independent review</h2></div></div>
+                <div id="approvals-review"></div>
+              </section>
+              <section class="card" aria-labelledby="attention-title">
+                <div class="section-heading"><div><p class="section-kicker">Needs another pass</p><h2 id="attention-title">Rejected or abandoned work</h2></div></div>
+                <div id="approvals-attention"></div>
+              </section>
+              <section class="card" aria-labelledby="intake-title">
+                <div class="section-heading"><div><p class="section-kicker">Intake requests</p><h2 id="intake-title">Intake and guarded confirmations</h2></div></div>
+                <div id="approvals-intake"></div>
+              </section>
+              <section class="card" aria-labelledby="guarded-title">
+                <div class="section-heading"><div><p class="section-kicker">Guarded operations</p><h2 id="guarded-title">Guarded confirmations</h2></div></div>
+                <div id="approvals-guarded"></div>
+              </section>
+              <section class="card" aria-labelledby="state-title">
+                <div class="section-heading"><div><p class="section-kicker">Connection and recovery</p><h2 id="state-title">Connection and recovery states stay visible</h2></div></div>
+                <div id="approvals-state"></div>
+              </section>
+            </div>
+          </section>
 
-        <section id="view-activity" class="view-panel" role="tabpanel" aria-labelledby="tab-activity" data-panel="activity" hidden>
-          <div class="page-heading"><div><p class="section-kicker">Bounded feed</p><h2>Activity</h2><p id="activity-scope-copy" class="muted">Synthetic preview events are authored fixtures; they do not represent local MCP-process activity or a complete audit log.</p></div><p id="activity-total" class="count-badge"></p></div>
-          <div id="activity-notice"></div><div id="activity-list" class="timeline"></div>
-        </section>
-      </main>
+          <section id="view-activity" class="view-panel" role="tabpanel" aria-labelledby="tab-activity" data-panel="activity" hidden>
+            <div class="page-heading">
+              <div>
+                <p class="section-kicker">Bounded feed</p>
+                <h1 id="activity-title">See what changed, without reading the whole log.</h1>
+                <p class="lede" id="activity-scope-copy">Synthetic preview events are authored fixtures; they do not represent local MCP-process activity or a complete audit log.</p>
+              </div>
+              <p id="activity-total" class="count-badge"></p>
+            </div>
+            <nav class="sub-nav" role="tablist" aria-label="Activity views">
+              <button id="tab-activity-feed" class="sub-tab" role="tab" type="button" aria-selected="true" aria-controls="activity-feed-panel" tabindex="0" data-subview="feed">Activity feed</button>
+              <button id="tab-links" class="sub-tab" role="tab" type="button" aria-selected="false" aria-controls="links-panel" tabindex="-1" data-subview="links">Relationships</button>
+            </nav>
 
-      <footer class="app-footer"><span>On Board Personal Preview</span><span>Local · Read-only · Actions stay in agent chat</span></footer>
+            <div id="activity-feed-panel" class="sub-panel" role="tabpanel" aria-labelledby="tab-activity-feed" data-subpanel="feed">
+              <section class="card" aria-labelledby="scope-title">
+                <div class="section-heading"><div><p class="section-kicker">Scope</p><h2 id="scope-title">This is a bounded activity view</h2></div></div>
+                <div id="activity-scope"></div>
+              </section>
+              <section class="card" aria-labelledby="filters-title">
+                <div class="section-heading"><div><p class="section-kicker">Narrow the feed</p><h2 id="filters-title">Activity filters</h2></div><button class="ghost-button" type="button" id="clear-filters-btn">Clear filters</button></div>
+                <div class="filter-row">
+                  <label class="inline-label" for="actor-filter">Actor</label>
+                  <select id="actor-filter" class="select"><option value="all">All actors</option></select>
+                  <label class="inline-label" for="type-filter">Type</label>
+                  <select id="type-filter" class="select"><option value="all">All types</option></select>
+                  <label class="inline-label" for="activity-search">Text</label>
+                  <input id="activity-search" class="input" type="search" autocomplete="off" placeholder="Filter loaded events" />
+                </div>
+                <p class="card-foot" id="filter-count">No filter applied.</p>
+              </section>
+              <div id="activity-notice"></div>
+              <section class="card" aria-labelledby="timeline-title">
+                <div class="section-heading"><div><p class="section-kicker">Newest first</p><h2 id="timeline-title">Recent activity</h2></div><button class="ghost-button" type="button" id="resync-btn">Try resync</button></div>
+                <div id="activity-list" class="timeline"></div>
+                <button class="text-button" type="button" id="load-more-btn" hidden>Load older activity</button>
+              </section>
+            </div>
+
+            <div id="links-panel" class="sub-panel" role="tabpanel" aria-labelledby="tab-links" data-subpanel="links" hidden>
+              <div class="page-heading compact">
+                <div>
+                  <p class="section-kicker">Explicit project relationships</p>
+                  <h2 id="links-heading">Relationships</h2>
+                  <p class="lede">Ticket, memory, file and tag relationships from the board's bounded memory_links projection. They never imply a complete audit graph.</p>
+                </div>
+                <div class="links-summary">
+                  <p id="links-source" class="label label-accent">Authoritative &middot; memory_links</p>
+                  <p id="links-total" class="count-badge"></p>
+                </div>
+              </div>
+              <div id="links-notice"></div>
+              <div id="links-groups" class="link-groups"></div>
+            </div>
+          </section>
+
+          <section id="view-settings" class="view-panel" role="tabpanel" aria-labelledby="tab-settings" data-panel="settings" hidden>
+            <div class="page-heading">
+              <div>
+                <p class="section-kicker">Connection, boundaries and diagnostics</p>
+                <h1 id="settings-title">Settings</h1>
+                <p class="lede">View-only summaries of this preview's connection and data boundaries. Controls that would mutate a service, credential, seat or registry are shown as unavailable with the reason, because this View holds no such capability.</p>
+              </div>
+            </div>
+            <section class="card" aria-labelledby="settings-summary-title">
+              <div class="section-heading"><div><p class="section-kicker">Status</p><h2 id="settings-summary-title">Your project is connected</h2></div></div>
+              <div id="settings-summary" class="stat-row"></div>
+            </section>
+            <div class="settings-grid">
+              <section class="card" aria-labelledby="connections-title">
+                <div class="section-heading"><div><p class="section-kicker">Connection</p><h2 id="connections-title">Connections</h2></div></div>
+                <div id="settings-connections"></div>
+                <details class="disclosure"><summary>Connection details</summary><div class="disclosure-body" id="settings-connection-details"></div></details>
+              </section>
+              <section class="card" aria-labelledby="team-seats-title">
+                <div class="section-heading"><div><p class="section-kicker">Team and seats</p><h2 id="team-seats-title">Team &amp; seats</h2></div></div>
+                <div id="settings-seats"></div>
+              </section>
+              <section class="card" aria-labelledby="dispatch-title">
+                <div class="section-heading"><div><p class="section-kicker">Dispatch</p><h2 id="dispatch-title">Dispatch policy</h2></div></div>
+                <div id="settings-dispatch"></div>
+                <details class="disclosure"><summary>Advanced dispatch policy</summary><div class="disclosure-body" id="settings-dispatch-details"></div></details>
+              </section>
+              <section class="card" aria-labelledby="workers-title">
+                <div class="section-heading"><div><p class="section-kicker">Workers</p><h2 id="workers-title">Workers</h2></div></div>
+                <div id="settings-workers"></div>
+                <div class="button-row">
+                  <button class="ghost-button" type="button" id="worker-test-btn">Test connection</button>
+                  <button class="ghost-button" type="button" id="worker-plan-btn" disabled aria-disabled="true">Review worker actions &middot; unavailable</button>
+                </div>
+              </section>
+              <section class="card" aria-labelledby="doors-title">
+                <div class="section-heading"><div><p class="section-kicker">Credentials</p><h2 id="doors-title">Doors</h2></div></div>
+                <div id="settings-doors"></div>
+                <p class="card-foot" id="door-state">Door and bearer values are never rendered in this View.</p>
+              </section>
+              <section class="card" aria-labelledby="diagnostics-title">
+                <div class="section-heading"><div><p class="section-kicker">Diagnostics</p><h2 id="diagnostics-title">Diagnostics</h2></div></div>
+                <div id="settings-diagnostics"></div>
+                <details class="disclosure"><summary>Advanced checks</summary><div class="disclosure-body" id="settings-diagnostics-details"></div></details>
+              </section>
+              <section class="card" aria-labelledby="release-title">
+                <div class="section-heading"><div><p class="section-kicker">Release operations</p><h2 id="release-title">Release &amp; operations</h2></div></div>
+                <div id="settings-release"></div>
+              </section>
+              <section class="card" aria-labelledby="appearance-title">
+                <div class="section-heading"><div><p class="section-kicker">Appearance</p><h2 id="appearance-title">Theme and density</h2></div></div>
+                <div id="settings-appearance"></div>
+              </section>
+            </div>
+          </section>
+        </main>
+
+        <footer class="app-footer">
+          <span>On Board Personal Preview</span>
+          <span id="footer-truth">Local &middot; Read-only &middot; Bounded data &middot; Actions stay in agent chat</span>
+        </footer>
+      </div>
     </div>
     <script type="module" src="/src/dashboard.ts"></script>
   </body>

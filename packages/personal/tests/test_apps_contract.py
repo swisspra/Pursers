@@ -69,8 +69,8 @@ def test_exact_view_lock_and_embedded_external_attestation_boundary() -> None:
     lock_path = root / "src/pursers_personal/resources/component-lock.json"
     payload = view_path.read_bytes()
     lock = json.loads(lock_path.read_text(encoding="utf-8"))
-    expected = "746c6eccd85afcc38588c8b9e1946ff2c91a7eb8477783c2f0d6bff0f4c6d922"
-    assert len(payload) == 404280
+    expected = "e8ac595fa78f54bbc0f4b19332bd08c50d75614603bd03f573161a3d715278b2"
+    assert len(payload) == 446717
     assert hashlib.sha256(payload).hexdigest() == expected
     assert lock["product_version"] == PRODUCT_VERSION == "5.0.0a25"
     assert lock["view"] == {
@@ -98,6 +98,36 @@ def test_exact_view_lock_and_embedded_external_attestation_boundary() -> None:
     assert "The candidate remains" not in readme
     for forbidden in ("uv tool install", "--apply", "--activate"):
         assert forbidden not in readme
+
+
+def test_primary_vertical_tabs_move_selection_and_focus_with_up_down() -> None:
+    repository = Path(__file__).resolve().parents[3]
+    entry = (repository / "tools/dashboard-ui/dashboard-entry.html").read_text(
+        encoding="utf-8"
+    )
+    source = (repository / "tools/dashboard-ui/src/dashboard.ts").read_text(
+        encoding="utf-8"
+    )
+    handler_start = source.index(
+        'document.querySelectorAll<HTMLButtonElement>("[role=tab][data-view]")'
+    )
+    handler_end = source.index(
+        'document.querySelectorAll<HTMLButtonElement>("[data-go-view]")',
+        handler_start,
+    )
+    handler = source[handler_start:handler_end]
+    select_start = source.index("function selectView(")
+    select_end = source.index("function setLoading(", select_start)
+    select_view = source[select_start:select_end]
+
+    assert 'aria-orientation="vertical"' in entry
+    assert '"ArrowUp"' in handler
+    assert '"ArrowDown"' in handler
+    assert 'event.key === "ArrowDown" || event.key === "ArrowRight"' in handler
+    assert "selectView(order[next], true)" in handler
+    assert 'tab.setAttribute("aria-selected", String(selected))' in select_view
+    assert "tab.tabIndex = selected ? 0 : -1" in select_view
+    assert "if (focusTab) tab.focus()" in select_view
 
 
 @pytest.fixture
@@ -203,6 +233,20 @@ async def test_discovery_envelope_partitions_app_and_model_surfaces(
                 "Copy path",
             ):
                 assert link_marker in html.text
+            for guided_home_marker in (
+                'data-view="home"',
+                'data-view="projects"',
+                'data-view="team"',
+                'data-view="approvals"',
+                'data-view="settings"',
+                'id="next-action-card"',
+                'id="work-detail"',
+                'id="activity-feed-panel"',
+                'id="links-panel"',
+                "Actions stay in agent chat",
+                "Door and bearer values are never rendered",
+            ):
+                assert guided_home_marker in html.text
             assert verified == [None]
 
             model_calls: list[tuple[str, tuple[Any, ...], dict[str, Any]]] = []
