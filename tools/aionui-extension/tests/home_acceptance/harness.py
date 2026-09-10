@@ -563,7 +563,10 @@ def validate_live_target(base_url: str, board_id: str | None = None) -> LiveTarg
 def _surface_for_identifier(identifier: str) -> str:
     if identifier.startswith(("fleet.", "fleet-dashboard.")):
         return "fleet"
-    if identifier.startswith(("personal.", "personal-mcp.")):
+    # docs/design-home/inventory.md binds the built dashboard-ui assets to the
+    # Personal dashboard.html live entrypoint, so they are Personal surface
+    # observations and must use the Personal artifact trust adapter.
+    if identifier.startswith(("personal.", "personal-mcp.", "dashboard-ui.")):
         return "personal"
     return "aionui"
 
@@ -821,6 +824,38 @@ def validate_evidence_report(
     )
 
 
+def validate_legacy_evidence_report(
+    report_path: Path,
+    target: LiveTarget,
+    capabilities: RepositoryCapabilities,
+    candidate_commit: str,
+    browser_observer_command: Path | None = None,
+) -> dict[str, Any]:
+    """Validate a report written against the legacy single-surface schema.
+
+    The legacy schema trusts the signed AionUi listener for every observation
+    and carries no per-surface bindings or operator topology. It exists only so
+    older recorded evidence stays readable. A legacy report can never qualify
+    final train acceptance; use validate_evidence_report for that.
+    """
+    configured = browser_observer_command or (
+        Path(value) if (value := os.environ.get("PURSERS_HOME_BROWSER_OBSERVER")) else None
+    )
+    observer = (
+        VerifierBrowserObserver(configured, report_path.parent)
+        if configured is not None
+        else None
+    )
+    return _validate_evidence_report(
+        report_path,
+        target,
+        capabilities,
+        candidate_commit,
+        trusted_browser_observer=observer,
+        legacy_compat=True,
+    )
+
+
 def _validate_evidence_report(
     report_path: Path,
     target: LiveTarget,
@@ -828,6 +863,7 @@ def _validate_evidence_report(
     candidate_commit: str,
     *,
     trusted_browser_observer: _TrustedBrowserObserver | None,
+    legacy_compat: bool = False,
 ) -> dict[str, Any]:
     require_mutation_opt_in(os.environ.get("PURSERS_HOME_ACCEPTANCE_MUTATE"))
     if target.board_id is None:
@@ -875,10 +911,21 @@ def _validate_evidence_report(
         raise AcceptanceError(
             "report host version/build does not match the active loopback host"
         )
+    surfaces = report.get("surfaces")
+    if surfaces is None and not legacy_compat:
+        raise AcceptanceError(
+            "final acceptance requires exact aionui, fleet, and personal surface "
+            "bindings; the legacy single-surface schema cannot qualify"
+        )
     surface_bindings = _validate_surface_bindings(
-        report.get("surfaces"), target, host, candidate_commit
+        surfaces, target, host, candidate_commit
     )
-    if surface_bindings is not None:
+    if surface_bindings is None:
+        if not legacy_compat:
+            raise AcceptanceError(
+                "final acceptance requires exact per-surface bindings"
+            )
+    else:
         _validate_operator_topology(report.get("operator_topology"))
     host_reference = host.get("evidence")
     if not isinstance(host_reference, str):

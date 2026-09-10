@@ -31,6 +31,7 @@ from .harness import (
     probe_host_identity,
     redact,
     require_mutation_opt_in,
+    _surface_for_identifier,
     validate_evidence_report,
     validate_live_target,
 )
@@ -54,7 +55,8 @@ def _safe_name(value: str) -> str:
     return value.replace(".", "-").replace("_", "-")
 
 
-def _complete_report() -> dict[str, object]:
+def _legacy_report() -> dict[str, object]:
+    """Legacy single-surface report shape, kept only for legacy-path coverage."""
     return {
         "schema_version": 1,
         "evidence_kind": "real_browser_host",
@@ -104,8 +106,9 @@ def _descriptor(path: Path, root: Path) -> dict[str, str]:
     }
 
 
-def _complete_surface_report() -> dict[str, object]:
-    report = _complete_report()
+def _complete_report() -> dict[str, object]:
+    """Complete final-train report: per-surface bindings and operator topology."""
+    report = _legacy_report()
     report["operator_topology"] = {
         **{kind: dict(value) for kind, value in CURRENT_OPERATOR_TOPOLOGY.items()},
         "optional_opus_worker": {
@@ -149,6 +152,71 @@ def _complete_surface_report() -> dict[str, object]:
         },
     }
     return report
+
+
+# The per-surface report is now the only complete shape; keep the old name so
+# existing per-surface tests keep reading naturally.
+_complete_surface_report = _complete_report
+
+
+def _retarget(
+    report: dict[str, object], base_url: str, board_id: str = "sandbox-home"
+) -> dict[str, object]:
+    """Point the primary target and the AionUi-hosted surfaces at a live server."""
+    target = {"base_url": base_url, "board_id": board_id}
+    report["target"] = dict(target)
+    surfaces = report.get("surfaces")
+    if isinstance(surfaces, dict):
+        for surface_id in ("aionui", "personal"):
+            surfaces[surface_id]["target"] = dict(target)
+        surfaces["fleet"]["target"] = {
+            **surfaces["fleet"]["target"],
+            "board_id": board_id,
+        }
+    return report
+
+
+def test_report_without_surface_bindings_is_rejected(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("PURSERS_HOME_ACCEPTANCE_MUTATE", MUTATION_OPT_IN)
+    with pytest.raises(AcceptanceError, match="surface"):
+        _validate(tmp_path, _legacy_report())
+
+
+def test_report_with_surfaces_but_no_operator_topology_is_rejected(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("PURSERS_HOME_ACCEPTANCE_MUTATE", MUTATION_OPT_IN)
+    report = _complete_report()
+    report.pop("operator_topology")
+    with pytest.raises(AcceptanceError):
+        _validate(tmp_path, report)
+
+
+def test_dashboard_ui_identifiers_bind_to_the_personal_surface() -> None:
+    for identifier in (
+        "dashboard-ui.logic",
+        "dashboard-ui.styles",
+        "dashboard-ui.shell",
+        "personal-mcp.surface",
+    ):
+        assert _surface_for_identifier(identifier) == "personal"
+    assert _surface_for_identifier("fleet-dashboard.surface") == "fleet"
+    assert _surface_for_identifier("extension-join.surface") == "aionui"
+
+
+def test_dashboard_ui_observation_bound_to_aionui_runtime_is_rejected(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("PURSERS_HOME_ACCEPTANCE_MUTATE", MUTATION_OPT_IN)
+    report = _complete_report()
+    report["surfaces"]["personal"]["runtime"] = {  # type: ignore[index]
+        **HOST,
+        "identity_source": "signed-aionui-webui-listener",
+    }
+    with pytest.raises(AcceptanceError):
+        _validate(tmp_path, report)
 
 
 def test_surface_report_rejects_stale_six_worker_two_reviewer_topology(
@@ -664,11 +732,7 @@ def test_complete_offline_bundle_and_self_selected_status_cannot_pass_without_ob
 ) -> None:
     monkeypatch.setenv("PURSERS_HOME_ACCEPTANCE_MUTATE", MUTATION_OPT_IN)
     with _minimal_status_server() as base_url:
-        report = _complete_report()
-        report["target"] = {
-            "base_url": base_url,
-            "board_id": "sandbox-home",
-        }
+        report = _retarget(_complete_report(), base_url)
         path = _write_report(tmp_path, report)
         with (
             patch.object(harness_module, "_execute_required_suite", return_value=None),
@@ -726,8 +790,7 @@ def test_public_validation_uses_verifier_owned_browser_replay(
     verifier = tmp_path / "verifier" / "browser-observer"
     _write_verifier_observer(verifier)
     with _minimal_status_server() as base_url:
-        report = _complete_report()
-        report["target"] = {"base_url": base_url, "board_id": "sandbox-home"}
+        report = _retarget(_complete_report(), base_url)
         path = _write_report(evidence, report)
         with patch.object(harness_module, "_execute_required_suite", return_value=None):
             result = validate_evidence_report(
