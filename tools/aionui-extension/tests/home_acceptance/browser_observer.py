@@ -1,0 +1,1150 @@
+#!/usr/bin/env python3
+"""Verifier-owned browser observer for real AionUi Home acceptance.
+
+The acceptance harness (``harness.VerifierBrowserObserver``) spawns this file as
+an opaque executable with a stripped environment (``PATH`` reset, ``cwd`` set to
+the executable's own directory) and one JSON observation request on stdin. The
+observer answers only from captures it recorded itself through a real browser
+channel, so caller-authored report artifacts cannot forge a pass.
+
+Two modes:
+
+``<observer>``                      replay mode (harness contract, stdin JSON)
+``<observer> capture --spec FILE``   capture mode (runner, real browser)
+
+Configuration is read from ``observer.json`` beside this file, never from the
+environment, because the harness strips the environment before spawning.
+"""
+
+from __future__ import annotations
+
+import base64
+import binascii
+import hashlib
+import json
+import os
+import plistlib
+import re
+import shlex
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.parse import urljoin, urlsplit
+from urllib.request import ProxyHandler, build_opener
+
+SCHEMA_VERSION = 1
+HOST_PRODUCT = "AionUi"
+SEMVER = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?")
+BUILD_ID = re.compile(r"[0-9A-Za-z][0-9A-Za-z._+-]{5,127}")
+FULL_SHA = re.compile(r"[0-9a-f]{40}")
+OBSERVER_ID = re.compile(r"[0-9A-Za-z][0-9A-Za-z._:-]{7,127}")
+OBSERVATION_ID = re.compile(r"[0-9A-Za-z][0-9A-Za-z._-]{0,127}")
+LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+DEFAULT_MAX_AGE_S = 43_200
+MAX_CAPTURE_BYTES = 8_000_000
+MIN_SNAPSHOT_NODES = 5
+
+EXIT_OK = 0
+EXIT_USAGE = 2
+EXIT_UNKNOWN_OBSERVATION = 3
+EXIT_MISMATCH = 4
+EXIT_STALE = 5
+EXIT_CONFIG = 6
+EXIT_CAPABILITY_UNAVAILABLE = 7
+EXIT_CAPTURE_FAILED = 8
+
+REQUEST_KEYS = {
+    "observation_id", "target", "host_version", "host_build",
+    "candidate_commit", "captured_at", "page_url", "assertions", "surface_id",
+    "runtime_product", "runtime_identity_source",
+}
+CAPTURE_KEYS = {
+    "observer_id", "observation_id", "target", "host_product", "host_version",
+    "host_build", "host_identity_source", "candidate_commit", "captured_at", "page_url",
+    "screenshot_base64", "snapshot", "surface_id",
+}
+SURFACE_PRODUCTS = {
+    "aionui": "AionUi",
+    "fleet": "Pursers Fleet",
+    "personal": "Pursers Personal",
+}
+
+
+class ObserverError(RuntimeError):
+    """Observer refusal carrying the process exit code the harness sees."""
+
+    def __init__(self, code: int, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+def _fail(code: int, message: str) -> "ObserverError":
+    return ObserverError(code, message)
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _parse_timestamp(value: Any, label: str) -> datetime:
+    if not isinstance(value, str) or len(value) > 64:
+        raise _fail(EXIT_MISMATCH, f"{label} must be an ISO-8601 timestamp")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        raise _fail(EXIT_MISMATCH, f"{label} must be an ISO-8601 timestamp") from None
+    if parsed.tzinfo is None:
+        raise _fail(EXIT_MISMATCH, f"{label} must carry a timezone")
+    return parsed
+
+
+def _require_private_mode(path: Path, label: str) -> None:
+    if path.stat().st_mode & 0o022:
+        raise _fail(EXIT_CONFIG, f"{label} must not be group/world writable")
+
+
+def _validate_target(target: Any) -> dict[str, Any]:
+    if not isinstance(target, dict) or set(target) != {"base_url", "board_id"}:
+        raise _fail(EXIT_MISMATCH, "target must carry exact base_url and board_id")
+    base_url = target["base_url"]
+    if not isinstance(base_url, str):
+        raise _fail(EXIT_MISMATCH, "target base_url must be a string")
+    parsed = urlsplit(base_url)
+    if (
+        parsed.scheme not in {"http", "https"}
+        or parsed.hostname not in LOOPBACK_HOSTS
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+        or parsed.path not in {"", "/"}
+    ):
+        raise _fail(EXIT_MISMATCH, "target base_url must be a bare loopback origin")
+    board_id = target["board_id"]
+    if board_id is not None and (
+        not isinstance(board_id, str)
+        or not re.fullmatch(r"(?:sandbox|test)-[A-Za-z0-9._-]{1,71}", board_id)
+    ):
+        raise _fail(EXIT_MISMATCH, "board must have a sandbox- or test- prefix")
+    return {"base_url": base_url.rstrip("/"), "board_id": board_id}
+
+
+def _same_origin(page_url: Any, base_url: str) -> str:
+    if not isinstance(page_url, str):
+        raise _fail(EXIT_MISMATCH, "page_url must be a string")
+    page = urlsplit(page_url)
+    origin = urlsplit(base_url)
+    if (
+        page.scheme != origin.scheme
+        or page.netloc != origin.netloc
+        or page.username is not None
+        or page.password is not None
+        or page.query
+        or page.fragment
+    ):
+        raise _fail(EXIT_MISMATCH, "page_url must use the target origin")
+    return page_url
+
+
+def _count_nodes(value: Any) -> int:
+    if isinstance(value, dict):
+        return 1 + sum(_count_nodes(item) for item in value.values())
+    if isinstance(value, list):
+        return sum(_count_nodes(item) for item in value)
+    return 1
+
+
+def _observer_home() -> Path:
+    return Path(__file__).resolve().parent
+
+
+def _load_config() -> dict[str, Any]:
+    home = _observer_home()
+    path = home / "observer.json"
+    if not path.is_file():
+        raise _fail(EXIT_CONFIG, "observer.json is missing beside the observer")
+    _require_private_mode(home, "observer directory")
+    _require_private_mode(path, "observer.json")
+    try:
+        config = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        raise _fail(EXIT_CONFIG, "observer.json is not readable JSON") from None
+    if not isinstance(config, dict) or config.get("schema_version") != SCHEMA_VERSION:
+        raise _fail(EXIT_CONFIG, "observer.json schema_version must be 1")
+    observer_id = config.get("observer_id")
+    if not isinstance(observer_id, str) or not OBSERVER_ID.fullmatch(observer_id):
+        raise _fail(EXIT_CONFIG, "observer.json needs an exact observer_id")
+    store_dir = config.get("store_dir", "captures")
+    if not isinstance(store_dir, str) or store_dir.startswith("/") or ".." in Path(store_dir).parts:
+        raise _fail(EXIT_CONFIG, "store_dir must be a relative path inside the observer home")
+    max_age_s = config.get("max_age_s", DEFAULT_MAX_AGE_S)
+    if not isinstance(max_age_s, int) or not 60 <= max_age_s <= 604_800:
+        raise _fail(EXIT_CONFIG, "max_age_s must be an int between 60 and 604800")
+    return {
+        "observer_id": observer_id,
+        "store": home / store_dir,
+        "max_age_s": max_age_s,
+        "backend": config.get("backend"),
+        "repository_root": config.get("repository_root"),
+        "surfaces": config.get("surfaces"),
+    }
+
+
+def _store_path(config: dict[str, Any], observation_id: str) -> Path:
+    if not OBSERVATION_ID.fullmatch(observation_id):
+        raise _fail(EXIT_MISMATCH, "observation_id is not an exact identifier")
+    return config["store"] / f"{observation_id}.json"
+
+
+def _load_capture(config: dict[str, Any], observation_id: str) -> dict[str, Any]:
+    path = _store_path(config, observation_id)
+    if not path.is_file():
+        raise _fail(
+            EXIT_UNKNOWN_OBSERVATION,
+            f"observer holds no capture for observation {observation_id}",
+        )
+    try:
+        capture = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        raise _fail(EXIT_CONFIG, "stored capture is not readable JSON") from None
+    if not isinstance(capture, dict) or not CAPTURE_KEYS.issubset(capture):
+        raise _fail(EXIT_CONFIG, "stored capture does not match the capture schema")
+    return capture
+
+
+def _read_request(stream: Any) -> dict[str, Any]:
+    raw = stream.read(1_000_000)
+    try:
+        request = json.loads(raw)
+    except json.JSONDecodeError:
+        raise _fail(EXIT_USAGE, "observation request is not valid JSON") from None
+    if not isinstance(request, dict) or set(request) != REQUEST_KEYS:
+        raise _fail(EXIT_USAGE, "observation request fields do not match schema")
+    request["target"] = _validate_target(request["target"])
+    if request["surface_id"] not in SURFACE_PRODUCTS:
+        raise _fail(EXIT_USAGE, "observation request surface_id is unsupported")
+    if request["runtime_product"] != SURFACE_PRODUCTS[request["surface_id"]]:
+        raise _fail(EXIT_USAGE, "observation request runtime product is invalid")
+    _same_origin(request["page_url"], request["target"]["base_url"])
+    _parse_timestamp(request["captured_at"], "request captured_at")
+    if not isinstance(request["assertions"], list) or not request["assertions"]:
+        raise _fail(EXIT_USAGE, "observation request needs explicit assertions")
+    return request
+
+
+def replay(stream: Any, out: Any) -> int:
+    config = _load_config()
+    request = _read_request(stream)
+    capture = _load_capture(config, request["observation_id"])
+    bound = (
+        "surface_id", "target", "host_version", "host_build", "candidate_commit",
+        "captured_at", "page_url",
+    )
+    for field in bound:
+        if capture[field] != request[field]:
+            raise _fail(
+                EXIT_MISMATCH,
+                f"stored capture {field} does not match the replayed request",
+            )
+    if (
+        capture["host_product"] != request["runtime_product"]
+        or capture["host_identity_source"] != request["runtime_identity_source"]
+    ):
+        raise _fail(EXIT_MISMATCH, "stored capture runtime identity does not match request")
+    if capture["observer_id"] != config["observer_id"]:
+        raise _fail(EXIT_MISMATCH, "stored capture belongs to another observer session")
+    age = (_now() - _parse_timestamp(capture["captured_at"], "capture captured_at")).total_seconds()
+    if age > config["max_age_s"]:
+        raise _fail(
+            EXIT_STALE,
+            f"capture for {request['observation_id']} is stale by {int(age - config['max_age_s'])}s",
+        )
+    payload = {key: capture[key] for key in CAPTURE_KEYS}
+    out.write(json.dumps(payload, sort_keys=True))
+    return EXIT_OK
+
+
+def _run_identity_command(command: list[str], label: str) -> subprocess.CompletedProcess[str]:
+    try:
+        completed = subprocess.run(
+            command,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=4,
+            env={"PATH": os.defpath, "LANG": "C", "LC_ALL": "C"},
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        raise _fail(EXIT_CAPABILITY_UNAVAILABLE, f"{label} is unavailable") from None
+    if completed.returncode != 0:
+        raise _fail(EXIT_CAPABILITY_UNAVAILABLE, f"{label} failed")
+    return completed
+
+
+def _argument_value(arguments: list[str], name: str) -> str:
+    positions = [index for index, value in enumerate(arguments) if value == name]
+    if len(positions) != 1 or positions[0] + 1 >= len(arguments):
+        raise _fail(EXIT_CAPABILITY_UNAVAILABLE, f"live AionCore lacks exact {name}")
+    return arguments[positions[0] + 1]
+
+
+def _probe_signed_bundle_listener(base_url: str) -> dict[str, str]:
+    if sys.platform != "darwin":
+        raise _fail(EXIT_CAPABILITY_UNAVAILABLE, "signed AionUi listener proof requires macOS")
+    parsed = urlsplit(base_url)
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    lsof = _run_identity_command(
+        ["/usr/sbin/lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
+        "live listener lookup",
+    )
+    pids = sorted({line.strip() for line in lsof.stdout.splitlines() if line.strip()})
+    if len(pids) != 1 or not pids[0].isdigit():
+        raise _fail(EXIT_CAPABILITY_UNAVAILABLE, "target does not have one verifiable listener")
+    process = _run_identity_command(
+        ["/bin/ps", "-p", pids[0], "-o", "command="],
+        "live listener command",
+    )
+    try:
+        arguments = shlex.split(process.stdout.strip())
+    except ValueError:
+        raise _fail(EXIT_CAPABILITY_UNAVAILABLE, "live listener command is not parseable") from None
+    if not arguments:
+        raise _fail(EXIT_CAPABILITY_UNAVAILABLE, "live listener command is empty")
+    try:
+        executable = Path(arguments[0]).resolve(strict=True)
+    except (OSError, RuntimeError):
+        raise _fail(EXIT_CAPABILITY_UNAVAILABLE, "live listener executable is unavailable") from None
+    bundle = next(
+        (candidate for candidate in executable.parents if candidate.suffix.lower() == ".app"),
+        None,
+    )
+    if bundle is None:
+        raise _fail(EXIT_CAPABILITY_UNAVAILABLE, "live listener is not inside an AionUi app bundle")
+    bundled_core = bundle / "Contents" / "Resources" / "bundled-aioncore"
+    if not executable.is_relative_to(bundled_core):
+        raise _fail(EXIT_CAPABILITY_UNAVAILABLE, "live listener is not the bundled AionCore")
+    listener_host = _argument_value(arguments, "--host")
+    listener_port = _argument_value(arguments, "--port")
+    app_version = _argument_value(arguments, "--app-version")
+    identity_mode = _argument_value(arguments, "--identity-mode")
+    if listener_host not in LOOPBACK_HOSTS or listener_port != str(port):
+        raise _fail(EXIT_CAPABILITY_UNAVAILABLE, "live listener does not match the loopback target")
+    if identity_mode not in {"webui", "aionpro"}:
+        raise _fail(EXIT_CAPABILITY_UNAVAILABLE, "live listener identity mode is unsupported")
+    try:
+        info = plistlib.loads((bundle / "Contents" / "Info.plist").read_bytes())
+    except (OSError, plistlib.InvalidFileException):
+        raise _fail(EXIT_CAPABILITY_UNAVAILABLE, "AionUi bundle metadata is unavailable") from None
+    version = info.get("CFBundleShortVersionString") if isinstance(info, dict) else None
+    if (
+        info.get("CFBundleIdentifier") != "com.aionui.app"
+        or not isinstance(version, str)
+        or not SEMVER.fullmatch(version)
+        or version != app_version
+    ):
+        raise _fail(EXIT_CAPABILITY_UNAVAILABLE, "live listener version does not match AionUi bundle")
+    _run_identity_command(
+        ["/usr/bin/codesign", "--verify", "--deep", "--strict", str(bundle)],
+        "AionUi bundle signature verification",
+    )
+    signature = _run_identity_command(
+        ["/usr/bin/codesign", "-dvvv", str(bundle)],
+        "AionUi bundle signature inspection",
+    )
+    details = f"{signature.stdout}\n{signature.stderr}"
+    fields = {
+        name: value
+        for line in details.splitlines()
+        if "=" in line
+        for name, value in [line.split("=", 1)]
+    }
+    build = fields.get("CDHash")
+    if (
+        fields.get("Identifier") != "com.aionui.app"
+        or fields.get("TeamIdentifier") != "52JQX2HUSC"
+        or not isinstance(build, str)
+        or not re.fullmatch(r"[0-9a-f]{40}", build)
+        or "Authority=Developer ID Application: AionUi Inc. (52JQX2HUSC)" not in details
+        or "Notarization Ticket=stapled" not in details
+    ):
+        raise _fail(EXIT_CAPABILITY_UNAVAILABLE, "AionUi bundle signer identity is unverifiable")
+    return {
+        "product": HOST_PRODUCT,
+        "version": version,
+        "build": build,
+        "source": f"signed-aionui-{identity_mode}-listener",
+    }
+
+
+def probe_host_identity(base_url: str, _timeout_s: float = 4.0) -> dict[str, str]:
+    return _probe_signed_bundle_listener(base_url)
+
+
+def _observed_runtime_binding(
+    observation: dict[str, Any], base_url: str
+) -> dict[str, str]:
+    """Bind host identity and candidate SHA from unforgeable observed sources.
+
+    The signed live AionUi bundled-AionCore listener is always required for host
+    identity. The authenticated same-origin status contract is helper-authored in
+    the static-helper architecture, so even a syntactically valid host block cannot
+    replace that process-level proof. The installed deterministic extension
+    manifest independently binds the candidate SHA.
+    """
+    contract = observation.get("host_status")
+    contract_type = contract.get("content_type") if isinstance(contract, dict) else None
+    contract_payload = contract.get("payload") if isinstance(contract, dict) else None
+    contract_host = contract_payload.get("host") if isinstance(contract_payload, dict) else None
+    contract_ok = bool(
+        isinstance(contract, dict)
+        and contract.get("http_status") == 200
+        and isinstance(contract_type, str)
+        and "application/json" in contract_type.lower()
+        and isinstance(contract_payload, dict)
+        and contract_payload.get("schema_version") == SCHEMA_VERSION
+        and isinstance(contract_host, dict)
+        and contract_host.get("product") == HOST_PRODUCT
+        and isinstance(contract_host.get("version"), str)
+        and SEMVER.fullmatch(contract_host["version"])
+        and isinstance(contract_host.get("build"), str)
+        and BUILD_ID.fullmatch(contract_host["build"])
+    )
+    try:
+        host = _probe_signed_bundle_listener(base_url)
+    except ObserverError:
+        raise _fail(
+            EXIT_CAPABILITY_UNAVAILABLE,
+            "the live signed AionUi bundled-AionCore listener is not verifiable; "
+            "helper-authored host status cannot establish host identity",
+        ) from None
+    if contract_ok and contract_host["version"] != host["version"]:
+        raise _fail(
+            EXIT_MISMATCH,
+            "helper host status version does not match the signed AionUi listener",
+        )
+    contract_extension = (
+        contract_payload.get("extension") if isinstance(contract_payload, dict) else None
+    )
+    contract_commit = (
+        contract_extension.get("candidate_commit")
+        if contract_ok and isinstance(contract_extension, dict)
+        else None
+    )
+    if contract_commit is not None and (
+        not isinstance(contract_commit, str) or not FULL_SHA.fullmatch(contract_commit)
+    ):
+        raise _fail(
+            EXIT_CAPABILITY_UNAVAILABLE,
+            "host status payload lacks the running extension candidate SHA",
+        )
+    candidate_status = observation.get("candidate_status")
+    content_type = candidate_status.get("content_type") if isinstance(candidate_status, dict) else None
+    candidate_payload = candidate_status.get("payload") if isinstance(candidate_status, dict) else None
+    manifest_commit = (
+        candidate_payload.get("candidate_commit")
+        if isinstance(candidate_payload, dict)
+        and candidate_payload.get("schema_version") == SCHEMA_VERSION
+        and candidate_status.get("http_status") == 200
+        and isinstance(content_type, str)
+        and "application/json" in content_type.lower()
+        else None
+    )
+    if not isinstance(manifest_commit, str) or not FULL_SHA.fullmatch(manifest_commit):
+        manifest_commit = None
+    if (
+        manifest_commit is not None
+        and contract_commit is not None
+        and manifest_commit != contract_commit
+    ):
+        raise _fail(
+            EXIT_MISMATCH,
+            "installed extension candidate manifest does not match the authenticated "
+            "same-origin host status",
+        )
+    candidate_commit = manifest_commit if manifest_commit is not None else contract_commit
+    if candidate_commit is None:
+        raise _fail(
+            EXIT_CAPABILITY_UNAVAILABLE,
+            "installed extension candidate manifest is unavailable",
+        )
+    selected_board = observation.get("selected_board")
+    if (
+        not isinstance(selected_board, str)
+        or not re.fullmatch(r"(?:sandbox|test)-[A-Za-z0-9._-]{1,71}", selected_board)
+    ):
+        raise _fail(
+            EXIT_CAPABILITY_UNAVAILABLE,
+            "authenticated Home UI does not expose a selected sandbox board",
+        )
+    return {
+        "product": host["product"],
+        "version": host["version"],
+        "build": host["build"],
+        "source": host["source"],
+        "candidate_commit": candidate_commit,
+        "selected_board": selected_board,
+    }
+
+
+def _git_identity(repository: Path) -> tuple[str, str]:
+    head = _run_identity_command(
+        ["/usr/bin/git", "-C", str(repository), "rev-parse", "HEAD"],
+        "pinned repository HEAD",
+    ).stdout.strip()
+    status = _run_identity_command(
+        ["/usr/bin/git", "-C", str(repository), "status", "--porcelain"],
+        "pinned repository status",
+    ).stdout
+    if not FULL_SHA.fullmatch(head) or status:
+        raise _fail(EXIT_CAPABILITY_UNAVAILABLE, "pinned repository is not clean at an exact commit")
+    return head, status
+
+
+def _surface_config(config: dict[str, Any], surface_id: str) -> dict[str, Any]:
+    surfaces = config.get("surfaces")
+    if not isinstance(surfaces, dict) or set(surfaces) != set(SURFACE_PRODUCTS):
+        raise _fail(EXIT_CONFIG, "observer.json lacks exact surface bindings")
+    surface = surfaces.get(surface_id)
+    if not isinstance(surface, dict):
+        raise _fail(EXIT_CONFIG, "observer surface binding is invalid")
+    return surface
+
+
+def _probe_pinned_artifact(
+    config: dict[str, Any], surface: dict[str, Any], base_url: str
+) -> dict[str, str]:
+    repository_value = config.get("repository_root")
+    if not isinstance(repository_value, str):
+        raise _fail(EXIT_CONFIG, "observer repository_root is unavailable")
+    repository = Path(repository_value).resolve()
+    head, status = _git_identity(repository)
+    if head != surface.get("candidate_commit"):
+        raise _fail(EXIT_MISMATCH, "pinned surface repository commit changed")
+    relative = surface.get("artifact")
+    if not isinstance(relative, str) or relative.startswith("/") or ".." in Path(relative).parts:
+        raise _fail(EXIT_CONFIG, "pinned surface artifact path is invalid")
+    try:
+        artifact = (repository / relative).resolve(strict=True)
+    except (FileNotFoundError, RuntimeError):
+        raise _fail(EXIT_CAPABILITY_UNAVAILABLE, "pinned surface artifact is unavailable") from None
+    if not artifact.is_relative_to(repository) or not artifact.is_file():
+        raise _fail(EXIT_CONFIG, "pinned surface artifact is unavailable")
+    if hashlib.sha256(artifact.read_bytes()).hexdigest() != surface.get("artifact_sha256"):
+        raise _fail(EXIT_MISMATCH, "pinned surface artifact digest changed")
+    parsed = urlsplit(base_url)
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    listeners = _run_identity_command(
+        ["/usr/sbin/lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
+        "pinned surface listener lookup",
+    )
+    pids = sorted({line.strip() for line in listeners.stdout.splitlines() if line.strip()})
+    if len(pids) != 1 or not pids[0].isdigit():
+        raise _fail(EXIT_CAPABILITY_UNAVAILABLE, "surface has no unique listener process")
+    command = _run_identity_command(
+        ["/bin/ps", "-p", pids[0], "-o", "command="],
+        "pinned surface listener command",
+    ).stdout.strip()
+    try:
+        command_arguments = shlex.split(command)
+    except ValueError:
+        raise _fail(EXIT_CAPABILITY_UNAVAILABLE, "surface listener command is malformed") from None
+    if str(artifact) not in command_arguments:
+        raise _fail(EXIT_CAPABILITY_UNAVAILABLE, "surface listener does not execute the pinned artifact")
+    return {
+        "product": surface["product"],
+        "version": surface["version"],
+        "build": surface["artifact_sha256"],
+        "source": "verifier-pinned-process-artifact",
+        "candidate_commit": head,
+    }
+
+
+def _observed_surface_binding(
+    config: dict[str, Any], observation: dict[str, Any], surface_id: str, base_url: str
+) -> dict[str, str]:
+    if config.get("surfaces") is None:
+        if surface_id != "aionui":
+            raise _fail(EXIT_CONFIG, "non-AionUi capture needs verifier-pinned surface bindings")
+        probe_runtime_health(base_url)
+        return _observed_runtime_binding(observation, base_url)
+    surface = _surface_config(config, surface_id)
+    if surface.get("target", {}).get("base_url") != base_url:
+        raise _fail(EXIT_MISMATCH, "capture target does not match verifier-pinned surface")
+    adapter = surface.get("adapter")
+    if adapter == "signed-aionui":
+        probe_runtime_health(base_url)
+        binding = _observed_runtime_binding(observation, base_url)
+    elif adapter == "pinned-process-artifact":
+        binding = _probe_pinned_artifact(config, surface, base_url)
+        selected_board = observation.get("selected_board")
+        if not isinstance(selected_board, str):
+            raise _fail(EXIT_CAPABILITY_UNAVAILABLE, "surface UI does not expose its selected board")
+        binding["selected_board"] = selected_board
+    elif adapter == "pinned-signed-aionui-personal-mcp":
+        signed = _observed_runtime_binding(observation, base_url)
+        pinned = _probe_personal_mcp_runtime(
+            config, surface, observation.get("page_sha256")
+        )
+        binding = {
+            **pinned,
+            "source": "verifier-pinned-personal-mcp-runtime",
+            "selected_board": signed["selected_board"],
+        }
+    else:
+        raise _fail(EXIT_CONFIG, "surface adapter is unsupported")
+    return binding
+
+
+def _probe_pinned_artifact_without_listener(
+    config: dict[str, Any], surface: dict[str, Any], observed_page_sha256: Any
+) -> dict[str, str]:
+    repository_value = config.get("repository_root")
+    if not isinstance(repository_value, str):
+        raise _fail(EXIT_CONFIG, "observer repository_root is unavailable")
+    repository = Path(repository_value).resolve()
+    head, status = _git_identity(repository)
+    relative = surface.get("artifact")
+    if head != surface.get("candidate_commit") or status or not isinstance(relative, str):
+        raise _fail(EXIT_MISMATCH, "pinned surface candidate binding changed")
+    try:
+        artifact = (repository / relative).resolve(strict=True)
+    except (FileNotFoundError, RuntimeError):
+        raise _fail(EXIT_CAPABILITY_UNAVAILABLE, "pinned surface artifact is unavailable") from None
+    if not artifact.is_relative_to(repository) or not artifact.is_file():
+        raise _fail(EXIT_CONFIG, "pinned surface artifact escapes repository")
+    digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
+    if digest != surface.get("artifact_sha256"):
+        raise _fail(EXIT_MISMATCH, "pinned surface artifact digest changed")
+    if observed_page_sha256 != digest:
+        raise _fail(EXIT_MISMATCH, "served Personal artifact does not match verifier-pinned bytes")
+    return {
+        "product": surface["product"],
+        "version": surface["version"],
+        "build": digest,
+        "candidate_commit": head,
+    }
+
+
+def _private_runtime_path(value: Any, label: str, repository: Path) -> Path:
+    if not isinstance(value, str) or not Path(value).is_absolute():
+        raise _fail(EXIT_CONFIG, f"Personal runtime {label} must be absolute")
+    path = Path(value).resolve()
+    if path.is_relative_to(repository) or not path.is_file():
+        raise _fail(EXIT_CAPABILITY_UNAVAILABLE, f"Personal runtime {label} is unavailable")
+    _require_private_mode(path, f"Personal runtime {label}")
+    return path
+
+
+def _probe_personal_mcp_runtime(
+    config: dict[str, Any], surface: dict[str, Any], observed_page_sha256: Any
+) -> dict[str, str]:
+    """Bind Personal evidence to the live exact-source stdio MCP server."""
+    pinned = _probe_pinned_artifact_without_listener(
+        config, surface, observed_page_sha256
+    )
+    repository_value = config.get("repository_root")
+    runtime = surface.get("runtime")
+    if not isinstance(repository_value, str) or not isinstance(runtime, dict):
+        raise _fail(EXIT_CONFIG, "Personal MCP runtime binding is unavailable")
+    repository = Path(repository_value).resolve()
+    if set(runtime) != {"artifact", "artifact_sha256", "pid_file", "receipt"}:
+        raise _fail(EXIT_CONFIG, "Personal MCP runtime fields are invalid")
+    relative = runtime["artifact"]
+    if not isinstance(relative, str) or relative.startswith("/") or ".." in Path(relative).parts:
+        raise _fail(EXIT_CONFIG, "Personal MCP runtime artifact is invalid")
+    artifact = (repository / relative).resolve(strict=True)
+    if not artifact.is_relative_to(repository) or not artifact.is_file():
+        raise _fail(EXIT_CONFIG, "Personal MCP runtime artifact escapes repository")
+    runtime_digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
+    if runtime_digest != runtime["artifact_sha256"]:
+        raise _fail(EXIT_MISMATCH, "Personal MCP runtime artifact digest changed")
+    pid_file = _private_runtime_path(runtime["pid_file"], "pid file", repository)
+    receipt_path = _private_runtime_path(runtime["receipt"], "receipt", repository)
+    try:
+        pid = int(pid_file.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        raise _fail(EXIT_CAPABILITY_UNAVAILABLE, "Personal MCP runtime PID is invalid") from None
+    command = _run_identity_command(
+        ["/bin/ps", "-p", str(pid), "-o", "command="],
+        "Personal MCP runtime process",
+    ).stdout.strip()
+    try:
+        argv = shlex.split(command)
+    except ValueError:
+        raise _fail(EXIT_CAPABILITY_UNAVAILABLE, "Personal MCP runtime command is malformed") from None
+    required_arguments = {
+        "--candidate-source": str(artifact),
+        "--candidate-commit": str(surface["candidate_commit"]),
+        "--board-id": str(surface["target"]["board_id"]),
+        "--acceptance-runtime-receipt": str(receipt_path),
+    }
+    if (
+        not argv
+        or not Path(argv[0]).name.startswith("python")
+        or not any(
+            argv[index : index + 3] == ["-m", "pursers_personal.cli", "mcp"]
+            for index in range(max(0, len(argv) - 2))
+        )
+    ):
+        raise _fail(EXIT_CAPABILITY_UNAVAILABLE, "Personal process is not the MCP server")
+    for flag, expected in required_arguments.items():
+        try:
+            actual = argv[argv.index(flag) + 1]
+        except (ValueError, IndexError):
+            raise _fail(EXIT_CAPABILITY_UNAVAILABLE, f"Personal MCP process lacks {flag}") from None
+        if actual != expected:
+            raise _fail(EXIT_MISMATCH, f"Personal MCP process {flag} changed")
+    try:
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        raise _fail(EXIT_CAPABILITY_UNAVAILABLE, "Personal MCP runtime receipt is invalid") from None
+    expected_receipt = {
+        "schema_version": 1,
+        "product": "Pursers Personal",
+        "server_name": "On Board Personal",
+        "version": surface["version"],
+        "build": runtime_digest,
+        "candidate_commit": surface["candidate_commit"],
+        "candidate_source": str(artifact),
+        "board_id": surface["target"]["board_id"],
+        "pid": pid,
+        "transport": "stdio",
+    }
+    if receipt != expected_receipt:
+        raise _fail(EXIT_MISMATCH, "Personal MCP runtime receipt changed")
+    return {
+        **pinned,
+        "version": receipt["version"],
+        "build": receipt["build"],
+        "candidate_commit": receipt["candidate_commit"],
+    }
+
+
+def probe_runtime_health(base_url: str, timeout_s: float = 4.0) -> dict[str, str]:
+    """Read the independently exposed AionCore runtime version and build."""
+    opener = build_opener(ProxyHandler({}))
+    endpoint = urljoin(f"{base_url}/", "health")
+    try:
+        with opener.open(endpoint, timeout=timeout_s) as response:
+            body = response.read(1_048_577)
+    except HTTPError as exc:
+        raise _fail(
+            EXIT_CAPABILITY_UNAVAILABLE,
+            f"runtime health route answered HTTP {exc.code}; AionCore identity unavailable",
+        ) from None
+    except (URLError, TimeoutError, OSError) as exc:
+        raise _fail(
+            EXIT_CAPABILITY_UNAVAILABLE,
+            f"runtime health route unreachable ({type(exc).__name__}); AionCore identity unavailable",
+        ) from None
+    try:
+        payload = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise _fail(
+            EXIT_CAPABILITY_UNAVAILABLE,
+            "runtime health route did not return the AionCore health contract",
+        ) from None
+    status = payload.get("status") if isinstance(payload, dict) else None
+    version = payload.get("version") if isinstance(payload, dict) else None
+    build = payload.get("build_time") if isinstance(payload, dict) else None
+    build = str(build) if isinstance(build, (str, int)) and not isinstance(build, bool) else None
+    if (
+        status != "ok"
+        or not isinstance(version, str)
+        or not SEMVER.fullmatch(version)
+        or not isinstance(build, str)
+        or not BUILD_ID.fullmatch(build)
+    ):
+        raise _fail(
+            EXIT_CAPABILITY_UNAVAILABLE,
+            "runtime health payload lacks a verifiable AionCore version/build",
+        )
+    return {"product": "AionCore", "version": version, "build": build}
+
+
+EGO_SCRIPT = """
+const taskSpace = %s
+const target = %s
+const task = await useOrCreateTaskSpace(taskSpace)
+await openOrReuseTab(target, { wait: true, timeout: 25 })
+await waitForLoad()
+const info = await pageInfo()
+if (!info || !info.url || info.w === 0 || info.h === 0) {
+  throw new Error('viewport unavailable')
+}
+const frameTree = await cdp('Page.getFrameTree')
+const frameId = frameTree && frameTree.frameTree && frameTree.frameTree.frame
+  ? frameTree.frameTree.frame.id : null
+if (!frameId) {
+  throw new Error('main frame unavailable')
+}
+const isolated = await cdp('Page.createIsolatedWorld', {
+  frameId: frameId,
+  worldName: 'pursers-verifier-observer',
+  grantUniveralAccess: false
+})
+const contextId = isolated ? isolated.executionContextId : null
+if (!contextId) {
+  throw new Error('isolated verifier world unavailable')
+}
+const shot = await cdp('Page.captureScreenshot', { format: 'png' })
+const ax = await cdp('Accessibility.getFullAXTree')
+const statusResult = await cdp('Runtime.evaluate', {
+  expression: `(async () => {
+    try {
+      const response = await fetch('/pursers/status', {
+        credentials: 'same-origin', cache: 'no-store', headers: { accept: 'application/json' }
+      })
+      let payload = null
+      try { payload = await response.json() } catch (_error) {}
+      return {
+        http_status: response.status,
+        content_type: response.headers.get('content-type') || '',
+        payload: payload
+      }
+    } catch (_error) {
+      return { http_status: 0, content_type: '', payload: null }
+    }
+  })()`,
+  contextId: contextId,
+  awaitPromise: true,
+  returnByValue: true
+})
+const candidateResult = await cdp('Runtime.evaluate', {
+  expression: `(async () => {
+    try {
+      const response = await fetch(new URL('candidate.json', window.location.href), {
+        credentials: 'same-origin', cache: 'no-store', headers: { accept: 'application/json' }
+      })
+      let payload = null
+      try { payload = await response.json() } catch (_error) {}
+      return {
+        http_status: response.status,
+        content_type: response.headers.get('content-type') || '',
+        payload: payload
+      }
+    } catch (_error) {
+      return { http_status: 0, content_type: '', payload: null }
+    }
+  })()`,
+  contextId: contextId,
+  awaitPromise: true,
+  returnByValue: true
+})
+const boardResult = await cdp('Runtime.evaluate', {
+  expression: `(() => {
+    const node = document.querySelector('[data-helper-field="board"], [data-board-id], #board-id')
+    if (!node) return ''
+    return (node.getAttribute('data-board-id') || node.textContent || '').trim()
+  })()`,
+  contextId: contextId,
+  returnByValue: true
+})
+const pageDigestResult = await cdp('Runtime.evaluate', {
+  expression: `(async () => {
+    try {
+      const response = await fetch(window.location.href, { credentials: 'same-origin', cache: 'no-store' })
+      if (!response.ok) return ''
+      const digest = await crypto.subtle.digest('SHA-256', await response.arrayBuffer())
+      return Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, '0')).join('')
+    } catch (_error) { return '' }
+  })()`,
+  contextId: contextId,
+  awaitPromise: true,
+  returnByValue: true
+})
+const nodes = (ax && ax.nodes ? ax.nodes : []).slice(0, 400).map(function (node) {
+  return {
+    nodeId: node.nodeId,
+    role: node.role && node.role.value ? node.role.value : null,
+    name: node.name && node.name.value ? node.name.value : null,
+    ignored: node.ignored === true
+  }
+})
+cliLog(JSON.stringify({
+  page_url: info.url,
+  screenshot_base64: shot.data,
+  snapshot: { title: info.title || '', viewport: { w: info.w, h: info.h }, nodes: nodes },
+  host_status: statusResult && statusResult.result ? statusResult.result.value : null,
+  candidate_status: candidateResult && candidateResult.result ? candidateResult.result.value : null,
+  selected_board: boardResult && boardResult.result ? boardResult.result.value : null,
+  page_sha256: pageDigestResult && pageDigestResult.result ? pageDigestResult.result.value : null
+}))
+"""
+
+
+def _validate_backend_command(config: dict[str, Any], command: list[str]) -> list[str]:
+    if not command or not all(isinstance(part, str) for part in command):
+        raise _fail(EXIT_CONFIG, "backend command must be a list of strings")
+    executable = Path(command[0])
+    if not executable.is_absolute():
+        raise _fail(EXIT_CONFIG, "backend command must be an absolute path")
+    try:
+        resolved = executable.resolve(strict=True)
+    except (FileNotFoundError, RuntimeError):
+        raise _fail(EXIT_CAPABILITY_UNAVAILABLE, "backend command is unavailable") from None
+    if not resolved.is_file() or not os.access(resolved, os.X_OK):
+        raise _fail(EXIT_CAPABILITY_UNAVAILABLE, "backend command is not executable")
+    repository_root = config.get("repository_root")
+    if isinstance(repository_root, str) and repository_root:
+        root = Path(repository_root).resolve()
+        if resolved.is_relative_to(root):
+            raise _fail(EXIT_CONFIG, "backend command must live outside the checkout")
+    if resolved.is_relative_to(config["store"].resolve().parent / config["store"].name):
+        raise _fail(EXIT_CONFIG, "backend command must live outside the capture store")
+    return [str(resolved), *command[1:]]
+
+
+def _run_backend(config: dict[str, Any], page_url: str) -> dict[str, Any]:
+    backend = config.get("backend")
+    if not isinstance(backend, dict) or backend.get("kind") not in {"ego-browser", "command"}:
+        raise _fail(EXIT_CONFIG, "observer.json needs an ego-browser or command backend")
+    raw_command = backend.get("command")
+    command = [raw_command] if isinstance(raw_command, str) else raw_command
+    if not isinstance(command, list):
+        raise _fail(EXIT_CONFIG, "backend command must be a string or list of strings")
+    command = _validate_backend_command(config, command)
+    if backend["kind"] == "ego-browser":
+        argv = [*command, "nodejs"]
+        task_space = backend.get("task_space", "pursers-home-acceptance")
+        if not isinstance(task_space, (str, int)) or isinstance(task_space, bool):
+            raise _fail(EXIT_CONFIG, "ego-browser task_space must be a string or integer")
+        if isinstance(task_space, str) and not 1 <= len(task_space) <= 128:
+            raise _fail(EXIT_CONFIG, "ego-browser task_space must be 1-128 characters")
+        if isinstance(task_space, int) and task_space < 1:
+            raise _fail(EXIT_CONFIG, "ego-browser task_space must be positive")
+        payload = EGO_SCRIPT % (json.dumps(task_space), json.dumps(page_url))
+        extra_path = str(Path(command[0]).parent)
+    else:
+        argv = command
+        payload = json.dumps({"page_url": page_url}, sort_keys=True)
+        extra_path = str(Path(command[0]).parent)
+    env = {
+        "PATH": os.pathsep.join([extra_path, os.defpath]),
+        "LANG": "C",
+        "LC_ALL": "C",
+        # Capture mode runs from the runner, where the browser channel needs its
+        # own installed state. Replay mode never reaches the backend, so the
+        # stripped harness environment stays intact.
+        "HOME": os.environ.get("HOME") or str(_observer_home()),
+    }
+    for passthrough in ("TMPDIR", "USER", "LOGNAME", "SHELL", "XDG_RUNTIME_DIR"):
+        value = os.environ.get(passthrough)
+        if value:
+            env[passthrough] = value
+    if isinstance(backend.get("env"), dict):
+        for key, value in backend["env"].items():
+            if isinstance(key, str) and isinstance(value, str):
+                env[key] = value
+    try:
+        completed = subprocess.run(
+            argv,
+            input=payload,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=int(backend.get("timeout_s", 120)),
+            cwd=_observer_home(),
+            env=env,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise _fail(
+            EXIT_CAPTURE_FAILED, f"browser backend execution failed ({type(exc).__name__})"
+        ) from None
+    if completed.returncode != 0:
+        tail = completed.stderr.strip().splitlines()[-1:] or ["no stderr"]
+        raise _fail(EXIT_CAPTURE_FAILED, f"browser backend exited {completed.returncode}: {tail[0][:200]}")
+    observation: dict[str, Any] | None = None
+    # Backends differ in which stream carries their result line: the
+    # ego-browser CLI logs through stderr, scripted backends through stdout.
+    for stream in (completed.stdout, completed.stderr):
+        for line in reversed(stream.splitlines()):
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                candidate = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(candidate, dict) and "screenshot_base64" in candidate:
+                observation = candidate
+                break
+        if observation is not None:
+            break
+    expected_keys = {
+        "page_url", "screenshot_base64", "snapshot", "host_status", "candidate_status",
+        "selected_board", "page_sha256",
+    }
+    if observation is None or set(observation) != expected_keys:
+        diagnostic = (completed.stderr.strip().splitlines() or [""])[-1][:120]
+        raise _fail(
+            EXIT_CAPTURE_FAILED,
+            f"browser backend returned no valid observation JSON ({diagnostic or 'no stderr'})",
+        )
+    try:
+        screenshot = base64.b64decode(observation["screenshot_base64"], validate=True)
+    except (TypeError, ValueError, binascii.Error):
+        raise _fail(EXIT_CAPTURE_FAILED, "browser backend screenshot is not valid base64") from None
+    if screenshot[:8] != b"\x89PNG\r\n\x1a\n" or len(screenshot) < 256:
+        raise _fail(EXIT_CAPTURE_FAILED, "browser backend screenshot is not a substantive PNG")
+    snapshot = observation["snapshot"]
+    serialized = json.dumps(snapshot, sort_keys=True)
+    if (
+        not isinstance(snapshot, (dict, list))
+        or _count_nodes(snapshot) < MIN_SNAPSHOT_NODES
+        or len(serialized) < 128
+        or len(serialized) > MAX_CAPTURE_BYTES
+    ):
+        raise _fail(EXIT_CAPTURE_FAILED, "browser backend accessibility snapshot is not substantive")
+    return observation
+
+
+SPEC_KEYS = {
+    "schema_version", "observation_id", "target", "candidate_commit",
+    "page_url", "assertions", "surface_id",
+}
+
+
+def _read_spec(spec_path: Path) -> dict[str, Any]:
+    try:
+        spec = json.loads(spec_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        raise _fail(EXIT_USAGE, "capture spec is not readable JSON") from None
+    if not isinstance(spec, dict) or set(spec) != SPEC_KEYS:
+        raise _fail(EXIT_USAGE, "capture spec fields do not match schema")
+    if spec["schema_version"] != SCHEMA_VERSION:
+        raise _fail(EXIT_USAGE, "capture spec schema_version must be 1")
+    if not OBSERVATION_ID.fullmatch(str(spec["observation_id"])):
+        raise _fail(EXIT_USAGE, "capture spec observation_id is not an exact identifier")
+    commit = spec["candidate_commit"]
+    if not isinstance(commit, str) or not FULL_SHA.fullmatch(commit):
+        raise _fail(EXIT_USAGE, "capture spec candidate_commit must be a full 40-hex SHA")
+    spec["target"] = _validate_target(spec["target"])
+    if spec["surface_id"] not in SURFACE_PRODUCTS:
+        raise _fail(EXIT_USAGE, "capture spec surface_id is unsupported")
+    _same_origin(spec["page_url"], spec["target"]["base_url"])
+    if not isinstance(spec["assertions"], list) or not spec["assertions"]:
+        raise _fail(EXIT_USAGE, "capture spec needs explicit assertions")
+    return spec
+
+
+def capture(spec_path: Path, out: Any) -> int:
+    config = _load_config()
+    spec = _read_spec(spec_path)
+    observation = _run_backend(config, spec["page_url"])
+    binding = _observed_surface_binding(
+        config, observation, spec["surface_id"], spec["target"]["base_url"]
+    )
+    observed_page_url = _same_origin(observation["page_url"], spec["target"]["base_url"])
+    if binding["candidate_commit"] != spec["candidate_commit"]:
+        raise _fail(
+            EXIT_MISMATCH,
+            "requested candidate_commit does not match the running extension",
+        )
+    if binding["selected_board"] != spec["target"]["board_id"]:
+        raise _fail(
+            EXIT_MISMATCH,
+            "requested board does not match the selected Home board",
+        )
+    observed_target = {
+        "base_url": spec["target"]["base_url"],
+        "board_id": binding["selected_board"],
+    }
+    payload = {
+        "observer_id": config["observer_id"],
+        "observation_id": spec["observation_id"],
+        "surface_id": spec["surface_id"],
+        "target": observed_target,
+        "host_product": binding["product"],
+        "host_version": binding["version"],
+        "host_build": binding["build"],
+        "host_identity_source": binding["source"],
+        "candidate_commit": binding["candidate_commit"],
+        "captured_at": _now().isoformat().replace("+00:00", "Z"),
+        "page_url": observed_page_url,
+        "screenshot_base64": observation["screenshot_base64"],
+        "snapshot": observation["snapshot"],
+    }
+    record = {
+        **payload,
+        "screenshot_sha256": hashlib.sha256(
+            base64.b64decode(payload["screenshot_base64"])
+        ).hexdigest(),
+        "assertions": spec["assertions"],
+        "recorded_at": payload["captured_at"],
+    }
+    store = config["store"]
+    store.mkdir(parents=True, exist_ok=True)
+    os.chmod(store, 0o700)
+    destination = _store_path(config, spec["observation_id"])
+    destination.write_text(json.dumps(record, sort_keys=True), encoding="utf-8")
+    os.chmod(destination, 0o600)
+    out.write(json.dumps(payload, sort_keys=True))
+    return EXIT_OK
+
+
+USAGE = (
+    "usage: browser_observer.py                          replay one stdin observation request\n"
+    "       browser_observer.py capture --spec FILE       record one real browser observation\n"
+    "       browser_observer.py probe-browser --page URL  report browser-channel health only\n"
+)
+
+
+def probe_browser(page_url: str, out: Any) -> int:
+    """Report real browser-channel health without recording any capture."""
+    config = _load_config()
+    observation = _run_backend(config, page_url)
+    screenshot = base64.b64decode(observation["screenshot_base64"], validate=True)
+    snapshot = observation["snapshot"]
+    binding = _observed_runtime_binding(observation, urlsplit(page_url)._replace(path="", query="", fragment="").geturl())
+    nodes = snapshot.get("nodes") if isinstance(snapshot, dict) else None
+    out.write(
+        json.dumps(
+            {
+                "observed_page_url": observation["page_url"],
+                "screenshot_bytes": len(screenshot),
+                "screenshot_sha256": hashlib.sha256(screenshot).hexdigest(),
+                "snapshot_nodes": len(nodes) if isinstance(nodes, list) else _count_nodes(snapshot),
+                "snapshot_bytes": len(json.dumps(snapshot, sort_keys=True)),
+                "host": {
+                    "product": binding["product"],
+                    "version": binding["version"],
+                    "build": binding["build"],
+                    "source": binding["source"],
+                },
+                "candidate_commit": binding["candidate_commit"],
+                "selected_board": binding["selected_board"],
+                "evidence_written": False,
+            },
+            sort_keys=True,
+        )
+    )
+    return EXIT_OK
+
+
+def main(argv: list[str]) -> int:
+    try:
+        if len(argv) == 1:
+            return replay(sys.stdin, sys.stdout)
+        if argv[1] == "probe-browser":
+            if len(argv) != 4 or argv[2] != "--page":
+                sys.stderr.write(USAGE)
+                return EXIT_USAGE
+            return probe_browser(argv[3], sys.stdout)
+        if argv[1] == "capture":
+            if len(argv) != 4 or argv[2] != "--spec":
+                sys.stderr.write(USAGE)
+                return EXIT_USAGE
+            return capture(Path(argv[3]), sys.stdout)
+        sys.stderr.write(USAGE)
+        return EXIT_USAGE
+    except ObserverError as error:
+        sys.stderr.write(f"observer: {error}\n")
+        return error.code
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv))
