@@ -13,7 +13,7 @@ def test_node_route_contract() -> None:
         text=True,
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr
-    assert "pass 11" in completed.stdout
+    assert "pass 12" in completed.stdout
 
 
 def test_node_helper_contract() -> None:
@@ -25,4 +25,4 @@ def test_node_helper_contract() -> None:
         text=True,
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr
-    assert "pass 7" in completed.stdout
+    assert "pass 10" in completed.stdout

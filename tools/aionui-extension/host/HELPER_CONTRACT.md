@@ -31,11 +31,14 @@ The helper:
 - closes all ticket, group, and seat sidecars when the helper stops.
 
 A settings iframe has no implicit Team conversation context. Without the four
-explicit runtime options, Team status, plan, apply, pause, and stop therefore
-return the host's `runtime_context_missing` response. An isolated issuer may
-instead pass its own supported Aion runtime origin, user, conversation, and
-mode-0600 token file. Partial context and inherited sibling/session variables
-are refused; the token is never accepted on argv or printed.
+explicit runtime options, `GET /pursers/team/status` returns a read-only
+`board_managed_standalone` projection from the selected board's lifecycle
+sidecar; it does not claim to be an Aion Team and exposes no native seat control
+IDs. Team plan, apply, pause, and stop remain closed with the host's
+`runtime_context_missing` response. An isolated issuer may instead pass its own
+supported Aion runtime origin, user, conversation, and mode-0600 token file.
+Partial context and inherited sibling/session variables are refused; the token
+is never accepted on argv or printed.
 
 Ticket routes are `/pursers/tickets`, `/pursers/tickets/status`,
 `/pursers/tickets/get`, `/pursers/tickets/create`, and
