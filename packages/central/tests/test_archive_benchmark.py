@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import statistics
 import sys
 import tempfile
 import time
@@ -30,6 +31,8 @@ import central  # noqa: E402
 BOARD = "pursers"
 READ_CALLS = 200
 JOIN_CALLS = 200
+SERVICE_READ_CALLS = 100
+SERVICE_READ_SAMPLES = 5
 SPEEDUP_TARGET = 10.0
 
 
@@ -219,20 +222,32 @@ class ArchiveBenchmarkTests(unittest.IsolatedAsyncioTestCase):
             await self.call("ticket_list")
         return time.perf_counter() - started
 
-    def measure_service_reads(self) -> float:
+    def measure_service_reads(self) -> list[tuple[float, float]]:
         """Document-read cost per call under production write churn.
 
         Seven live seats bump the board version constantly, so the board
         document's parsed cache is invalidated between calls exactly as
         production churn does; this isolates the load-the-hot-document cost
-        from the constant MCP tool-call wrapper overhead.
+        from the constant MCP tool-call wrapper overhead. Multiple complete
+        samples make the wall-clock gate robust to a single shared-runner
+        descheduling interval; CPU time is reported as a diagnostic, never as
+        a favorable replacement for the wall-clock result.
         """
         board_path = self.service._path(BOARD)
-        started = time.perf_counter()
-        for _ in range(READ_CALLS):
-            self.service.store.invalidate_parsed_cache(board_path)
-            self.service.load(BOARD)
-        return time.perf_counter() - started
+        samples: list[tuple[float, float]] = []
+        for _ in range(SERVICE_READ_SAMPLES):
+            wall_started = time.perf_counter()
+            cpu_started = time.process_time()
+            for _ in range(SERVICE_READ_CALLS):
+                self.service.store.invalidate_parsed_cache(board_path)
+                self.service.load(BOARD)
+            samples.append(
+                (
+                    time.perf_counter() - wall_started,
+                    time.process_time() - cpu_started,
+                )
+            )
+        return samples
 
     async def measure_joins(self) -> float:
         started = time.perf_counter()
@@ -268,12 +283,25 @@ class ArchiveBenchmarkTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(versions_before_reads, versions_after_reads)
         joins_after = await self.measure_joins()
 
-        speedup = service_reads_before / max(service_reads_after, 1e-9)
+        wall_before = statistics.median(sample[0] for sample in service_reads_before)
+        wall_after = statistics.median(sample[0] for sample in service_reads_after)
+        cpu_before = statistics.median(sample[1] for sample in service_reads_before)
+        cpu_after = statistics.median(sample[1] for sample in service_reads_after)
+        speedup = wall_before / max(wall_after, 1e-9)
+        cpu_speedup = cpu_before / max(cpu_after, 1e-9)
+        wall_before_samples = ",".join(
+            f"{sample[0]:.3f}" for sample in service_reads_before
+        )
+        wall_after_samples = ",".join(
+            f"{sample[0]:.3f}" for sample in service_reads_after
+        )
         report = (
             "legacy_hot_bytes={legacy} migrated_hot_bytes={migrated} "
             "tickets={tickets} members={members} | "
-            "document-read x{reads} (production churn, cache invalidated): "
-            "before={sb:.3f}s after={sa:.3f}s speedup={speedup:.1f}x | "
+            "document-read {samples}x{xreads} (production churn, cache invalidated): "
+            "wall_before=[{wbs}]s wall_after=[{was}]s "
+            "median_before={sb:.3f}s median_after={sa:.3f}s "
+            "speedup={speedup:.1f}x cpu_speedup={cpu_speedup:.1f}x | "
             "ticket_list tool x{reads}: before={rb:.3f}s after={ra:.3f}s | "
             "board_join tool x{joins}: before={jb:.3f}s after={ja:.3f}s"
         ).format(
@@ -282,9 +310,14 @@ class ArchiveBenchmarkTests(unittest.IsolatedAsyncioTestCase):
             tickets=ticket_count,
             members=member_count,
             reads=READ_CALLS,
-            sb=service_reads_before,
-            sa=service_reads_after,
+            samples=SERVICE_READ_SAMPLES,
+            xreads=SERVICE_READ_CALLS,
+            wbs=wall_before_samples,
+            was=wall_after_samples,
+            sb=wall_before,
+            sa=wall_after,
             speedup=speedup,
+            cpu_speedup=cpu_speedup,
             rb=reads_before,
             ra=reads_after,
             joins=JOIN_CALLS,
