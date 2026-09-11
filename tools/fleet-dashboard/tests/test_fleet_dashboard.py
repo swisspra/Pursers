@@ -7227,6 +7227,84 @@ def test_add_project_partial_failure_preserves_sanitized_progress(tmp_path: Path
         thread.join()
 
 
+def test_add_project_submit_handler_renders_structured_and_plain_failures() -> None:
+    start = dashboard.HTML.index("const bindSeatsBeforeDoors = bindSeats;")
+    end = dashboard.HTML.index("</script>", start)
+    handler_source = dashboard.HTML[start:end]
+    esc_source = next(
+        line for line in dashboard.HTML.splitlines() if line.startswith("const esc=")
+    )
+    script = f"""
+const failures = [
+  Object.assign(new Error('bounded failure'), {{details: {{
+    completed_steps: [{{step: 'registry_admin', status: 'created'}}],
+    failed_step: 'board_create'
+  }}}}),
+  new Error('plain failure')
+];
+let failureIndex = 0;
+let submitHandler = null;
+let postCalls = 0;
+let refreshCalls = 0;
+const form = {{
+  dataset: {{}},
+  elements: {{
+    name: {{value: 'project'}}, board_id: {{value: 'sandbox-project'}},
+    work_dir: {{value: '/PATH/TO/project'}}, integration_ref: {{value: 'main'}}
+  }},
+  addEventListener: (kind, handler) => {{ if (kind === 'submit') submitHandler = handler; }}
+}};
+const button = {{disabled: false}};
+const result = {{style: {{}}, innerHTML: ''}};
+const document = {{querySelector: selector => ({{
+  '#add-project-form': form,
+  '#add-project-submit': button,
+  '#add-project-result': result
+}}[selector] ?? null)}};
+let bindSeats = () => {{}};
+const seatClickBeforeDoors = () => {{}};
+const centralLabels = ['default'];
+const apiCentral = central => `central=${{central}}`;
+async function configPost() {{ postCalls += 1; throw failures[failureIndex]; }}
+async function refreshSeats() {{ refreshCalls += 1; }}
+{esc_source}
+{handler_source}
+(async () => {{
+  bindSeats();
+  await submitHandler({{preventDefault() {{}}}});
+  const structured = {{html: result.innerHTML, disabled: button.disabled}};
+  failureIndex = 1;
+  result.innerHTML = '';
+  button.disabled = false;
+  await submitHandler({{preventDefault() {{}}}});
+  const plain = {{html: result.innerHTML, disabled: button.disabled}};
+  console.log(JSON.stringify({{structured, plain, postCalls, refreshCalls}}));
+}})().catch(error => {{ console.error(error); process.exitCode = 1; }});
+"""
+    completed = subprocess.run(
+        ["node", "-e", script],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    rendered = json.loads(completed.stdout)
+    assert "Add project failed: bounded failure" in rendered["structured"]["html"]
+    assert "Failed step:</b> board_create" in rendered["structured"]["html"]
+    assert "Completed before failure:" in rendered["structured"]["html"]
+    assert "registry_admin" in rendered["structured"]["html"]
+    assert "created" in rendered["structured"]["html"]
+    assert "fleet_clone" not in rendered["structured"]["html"]
+    assert rendered["structured"]["disabled"] is False
+    assert "Add project failed: plain failure" in rendered["plain"]["html"]
+    assert "Failed step:" not in rendered["plain"]["html"]
+    assert "Completed before failure:" not in rendered["plain"]["html"]
+    assert rendered["plain"]["disabled"] is False
+    assert rendered["postCalls"] == 2
+    assert rendered["refreshCalls"] == 0
+
+
 def test_guards_reject_cross_origin_and_non_admin(tmp_path: Path) -> None:
     keys_dir = tmp_path / "keys"
     jwks_path = tmp_path / "jwks.json"
