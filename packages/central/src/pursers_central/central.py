@@ -4444,6 +4444,8 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
     def human_request_recipients(document: dict[str, Any]) -> list[str]:
         recipients: list[str] = []
         for member in document.get("members", {}).values():
+            if member.get("lifecycle_status", "active") != "active":
+                continue
             membership = document.get("principal_memberships", {}).get(
                 member.get("principal_id"), {}
             )
