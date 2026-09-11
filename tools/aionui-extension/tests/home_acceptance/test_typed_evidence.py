@@ -1232,6 +1232,36 @@ def test_fleet_trace_rejects_caller_owned_result_fields(
         )
 
 
+def test_fleet_trace_rejects_noncanonical_action_bytes(
+    tmp_path: Path, http_server: str,
+) -> None:
+    trust = _trust(tmp_path, http_server)
+    context = _context(
+        observation_id="fleet.attention", action_id="save-attention",
+        entity="fleet-attention",
+    )
+    action_path, _log_path, source = _fleet_trace_source(
+        tmp_path, trust, context
+    )
+    action_path.write_text('{ "attention": [] }\n', encoding="utf-8")
+    source["action_input_sha256"] = hashlib.sha256(
+        action_path.read_bytes()
+    ).hexdigest()
+    trust["log_sources"] = {"fleet-trace": source}
+    with pytest.raises(TypedEvidenceError, match="non-canonical"):
+        record_evidence(
+            _request(
+                "log_assertion",
+                {
+                    "source_id": "fleet-trace",
+                    "field_equals": {"/outcome": "succeeded"},
+                },
+                context,
+            ),
+            trust,
+        )
+
+
 @pytest.mark.parametrize(
     "entry_changes",
     [
@@ -1565,6 +1595,19 @@ def test_fleet_trace_real_product_roundtrip(tmp_path: Path) -> None:
                 ]),
                 trust,
             )
+        with pytest.raises(TypedEvidenceError, match="JSON pointer is absent"):
+            record_evidence(
+                _request(
+                    "log_assertion",
+                    {
+                        "source_id": "fleet-trace",
+                        "field_equals": {"/outcome": "succeeded"},
+                    },
+                    context,
+                ),
+                trust,
+            )
+        assert len(trace_path.read_text(encoding="utf-8").splitlines()) == 1
     finally:
         if process.poll() is None:
             process.terminate()
