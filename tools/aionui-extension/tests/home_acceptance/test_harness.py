@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import subprocess
 import threading
@@ -10,6 +11,7 @@ from contextlib import contextmanager
 from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -347,6 +349,17 @@ def _write_report(tmp_path: Path, report: dict[str, object]) -> Path:
         if isinstance(surface, dict):
             receipt["surface_id"] = surface_id
             receipt["runtime"] = surface["runtime"]
+            receipt["attestation_nonce"] = _fixture_nonce(identifier)
+            receipt["attestation"] = (
+                _fixture_attestation(
+                    surface["runtime"],
+                    CANDIDATE_SHA,
+                    observation_target["board_id"],
+                    _fixture_nonce(identifier),
+                )
+                if surface_id == "personal"
+                else None
+            )
         else:
             receipt["host"] = {"version": HOST["version"], "build": HOST["build"]}
         _write_json(tmp_path / reference, receipt)
@@ -435,6 +448,43 @@ def _validate_report(
         )
 
 
+CHALLENGE_KEY = b"\x44" * 32
+PERSONAL_PID = 4242
+PERSONAL_SOURCE = "/PATH/TO/candidate/apps_server.py"
+
+
+def _fixture_nonce(identifier: str) -> str:
+    """One distinct verifier nonce per observation, as the real flow requires."""
+    return hashlib.sha256(f"nonce:{identifier}".encode()).hexdigest()
+
+
+def _fixture_attestation(
+    runtime: dict[str, Any],
+    candidate_commit: str,
+    board_id: str,
+    nonce: str,
+    *,
+    key: bytes = CHALLENGE_KEY,
+    **overrides: Any,
+) -> dict[str, Any]:
+    """Sign a claim the way apps_server.acceptance_attestation serializes it."""
+    claim = {
+        "schema_version": 1,
+        "server_name": "On Board Personal",
+        "version": runtime["version"],
+        "build": runtime["build"],
+        "candidate_commit": candidate_commit,
+        "candidate_source": PERSONAL_SOURCE,
+        "board_id": board_id,
+        "pid": PERSONAL_PID,
+        "transport": "stdio",
+        "nonce": nonce,
+    }
+    claim.update(overrides)
+    payload = json.dumps(claim, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return {**claim, "signature": hmac.new(key, payload, hashlib.sha256).hexdigest()}
+
+
 class _FixtureTrustedBrowserObserver:
     """Unit-test double only; it is never used by the public acceptance path."""
 
@@ -471,14 +521,23 @@ class _FixtureTrustedBrowserObserver:
             screenshot=(self.root / receipt["screenshot"]["path"]).read_bytes(),
             snapshot=snapshot_wrapper["snapshot"],
             surface_id=request.surface_id,
+            attestation=receipt.get("attestation"),
+            attestation_nonce=receipt.get("attestation_nonce", ""),
         )
+
+    def personal_challenge(self) -> dict[str, Any]:
+        return {
+            "key": CHALLENGE_KEY,
+            "pid": PERSONAL_PID,
+            "candidate_source": PERSONAL_SOURCE,
+        }
 
 
 def _write_verifier_observer(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         """#!/usr/bin/env python3
-import base64, hashlib, json, sys, zlib
+import base64, hashlib, hmac, json, sys, zlib
 def chunk(kind, payload):
     checksum = zlib.crc32(kind + payload) & 0xffffffff
     return len(payload).to_bytes(4, "big") + kind + payload + checksum.to_bytes(4, "big")
@@ -500,6 +559,24 @@ snapshot = {
         {"role": "main", "name": "Acceptance surface for " + identifier},
     ],
 }
+attestation = None
+nonce = hashlib.sha256(("nonce:" + identifier).encode()).hexdigest()
+if request["surface_id"] == "personal":
+    claim = {
+        "schema_version": 1,
+        "server_name": "On Board Personal",
+        "version": request["host_version"],
+        "build": request["host_build"],
+        "candidate_commit": request["candidate_commit"],
+        "candidate_source": "/PATH/TO/candidate/apps_server.py",
+        "board_id": request["target"]["board_id"],
+        "pid": 4242,
+        "transport": "stdio",
+        "nonce": nonce,
+    }
+    signed = json.dumps(claim, sort_keys=True, separators=(",", ":")).encode()
+    claim["signature"] = hmac.new(bytes.fromhex("44" * 32), signed, hashlib.sha256).hexdigest()
+    attestation = claim
 json.dump({
     "observer_id": "verifier-session-1",
     "observation_id": identifier,
@@ -514,11 +591,35 @@ json.dump({
     "page_url": request["page_url"],
     "screenshot_base64": base64.b64encode(screenshot(identifier)).decode(),
     "snapshot": snapshot,
+    "attestation": attestation,
+    "attestation_nonce": nonce,
 }, sys.stdout)
 """,
         encoding="utf-8",
     )
     path.chmod(0o700)
+    key_path = path.parent / "acceptance-challenge.key"
+    key_path.write_bytes(CHALLENGE_KEY)
+    key_path.chmod(0o600)
+    pid_path = path.parent / "personal.pid"
+    pid_path.write_text(f"{PERSONAL_PID}\n", encoding="utf-8")
+    (path.parent / "observer.json").write_text(
+        json.dumps({
+            "schema_version": 1,
+            "observer_id": "verifier-session-1",
+            "repository_root": str(Path(PERSONAL_SOURCE).parent),
+            "surfaces": {
+                "personal": {
+                    "runtime": {
+                        "artifact": Path(PERSONAL_SOURCE).name,
+                        "challenge_key": str(key_path),
+                        "pid_file": str(pid_path),
+                    }
+                }
+            },
+        }),
+        encoding="utf-8",
+    )
 
 
 @contextmanager
@@ -1407,3 +1508,310 @@ def test_host_receipt_version_mismatch_is_rejected(
             RepositoryCapabilities((), (), (), (), ()),
             CANDIDATE_SHA,
         )
+
+
+# --- ground A: the Personal live transport challenge at validate time -------
+
+
+def _personal_observations(report: dict[str, object]) -> list[dict[str, object]]:
+    rows = [
+        *report.get("steps", []),  # type: ignore[list-item]
+        *report.get("inventory", []),  # type: ignore[list-item]
+        *report.get("final_gates", []),  # type: ignore[list-item]
+    ]
+    return [
+        row
+        for row in rows
+        if harness_module._surface_for_identifier(row["id"]) == "personal"
+    ]
+
+
+def test_personal_attestation_signed_with_a_foreign_key_is_rejected(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A hand-authored attestation cannot be produced without the verifier key."""
+    monkeypatch.setenv("PURSERS_HOME_ACCEPTANCE_MUTATE", MUTATION_OPT_IN)
+    report = _complete_report()
+    path = _write_report(tmp_path, report)
+    item = _personal_observations(report)[0]
+    receipt_path = tmp_path / item["evidence"]
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt["attestation"] = _fixture_attestation(
+        receipt["runtime"],
+        CANDIDATE_SHA,
+        receipt["target"]["board_id"],
+        receipt["attestation_nonce"],
+        key=b"\x99" * 32,
+    )
+    _write_json(receipt_path, receipt)
+
+    with pytest.raises(AcceptanceError, match="not signed"):
+        _validate_report(
+            path,
+            validate_live_target("http://127.0.0.1:8765", "sandbox-home"),
+            RepositoryCapabilities((), (), (), (), ()),
+            CANDIDATE_SHA,
+        )
+
+
+def test_personal_observation_without_an_attestation_is_rejected(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Dropping the block is a refusal, not a surface that carries no challenge."""
+    monkeypatch.setenv("PURSERS_HOME_ACCEPTANCE_MUTATE", MUTATION_OPT_IN)
+    report = _complete_report()
+    path = _write_report(tmp_path, report)
+    item = _personal_observations(report)[0]
+    receipt_path = tmp_path / item["evidence"]
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt["attestation"] = None
+    _write_json(receipt_path, receipt)
+
+    with pytest.raises(AcceptanceError, match="no live transport attestation"):
+        _validate_report(
+            path,
+            validate_live_target("http://127.0.0.1:8765", "sandbox-home"),
+            RepositoryCapabilities((), (), (), (), ()),
+            CANDIDATE_SHA,
+        )
+
+
+def test_correctly_signed_attestation_for_another_pid_is_rejected(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The signature is valid, but the pid is not the runtime the verifier holds."""
+    monkeypatch.setenv("PURSERS_HOME_ACCEPTANCE_MUTATE", MUTATION_OPT_IN)
+    report = _complete_report()
+    path = _write_report(tmp_path, report)
+    item = _personal_observations(report)[0]
+    receipt_path = tmp_path / item["evidence"]
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt["attestation"] = _fixture_attestation(
+        receipt["runtime"],
+        CANDIDATE_SHA,
+        receipt["target"]["board_id"],
+        receipt["attestation_nonce"],
+        pid=PERSONAL_PID + 1,
+    )
+    _write_json(receipt_path, receipt)
+
+    with pytest.raises(AcceptanceError, match="names a pid"):
+        _validate_report(
+            path,
+            validate_live_target("http://127.0.0.1:8765", "sandbox-home"),
+            RepositoryCapabilities((), (), (), (), ()),
+            CANDIDATE_SHA,
+        )
+
+
+def test_reused_challenge_nonce_across_personal_observations_is_rejected(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Two observations answering one nonce prove one moment, not two."""
+    monkeypatch.setenv("PURSERS_HOME_ACCEPTANCE_MUTATE", MUTATION_OPT_IN)
+    report = _complete_report()
+    path = _write_report(tmp_path, report)
+    first, second = _personal_observations(report)[:2]
+    first_receipt = json.loads((tmp_path / first["evidence"]).read_text(encoding="utf-8"))
+    second_path = tmp_path / second["evidence"]
+    second_receipt = json.loads(second_path.read_text(encoding="utf-8"))
+    second_receipt["attestation_nonce"] = first_receipt["attestation_nonce"]
+    second_receipt["attestation"] = _fixture_attestation(
+        second_receipt["runtime"],
+        CANDIDATE_SHA,
+        second_receipt["target"]["board_id"],
+        first_receipt["attestation_nonce"],
+    )
+    _write_json(second_path, second_receipt)
+
+    with pytest.raises(AcceptanceError, match="distinct challenge nonce"):
+        _validate_report(
+            path,
+            validate_live_target("http://127.0.0.1:8765", "sandbox-home"),
+            RepositoryCapabilities((), (), (), (), ()),
+            CANDIDATE_SHA,
+        )
+
+
+# --- uniqueness: what the observation shows, not how it was encoded --------
+
+
+def _reference_for(report: dict[str, object], identifier: str) -> str:
+    rows = [
+        *report.get("steps", []),  # type: ignore[list-item]
+        *report.get("inventory", []),  # type: ignore[list-item]
+        *report.get("final_gates", []),  # type: ignore[list-item]
+    ]
+    return next(row["evidence"] for row in rows if row["id"] == identifier)
+
+
+def _duplicate_expected_pair(report: dict[str, object]) -> tuple[str, str]:
+    """Two ids whose canonical required fact is the same expected value.
+
+    Only such a pair can hold identical accessibility state and still satisfy
+    both assertions, which is exactly the persistent-label case the uniqueness
+    gate has to catch.
+    """
+    rows = [
+        *report.get("steps", []),  # type: ignore[list-item]
+        *report.get("inventory", []),  # type: ignore[list-item]
+        *report.get("final_gates", []),  # type: ignore[list-item]
+    ]
+    seen: dict[str, str] = {}
+    for row in rows:
+        identifier = row["id"]
+        expected = harness_module.REQUIRED_FACTS[identifier]["predicate"]["expected"]
+        key = json.dumps(expected, sort_keys=True)
+        if key in seen:
+            return seen[key], identifier
+        seen[key] = identifier
+    pytest.skip("no two canonical facts share an expected value")
+
+
+def _snapshot_of(tmp_path: Path, report: dict[str, object], identifier: str) -> Any:
+    receipt = json.loads(
+        (tmp_path / _reference_for(report, identifier)).read_text(encoding="utf-8")
+    )
+    wrapper = json.loads(
+        (tmp_path / receipt["accessibility_snapshot"]["path"]).read_text(encoding="utf-8")
+    )
+    return wrapper["snapshot"]
+
+
+def _replace_snapshot(
+    tmp_path: Path, report: dict[str, object], identifier: str, snapshot: Any
+) -> None:
+    receipt_path = tmp_path / _reference_for(report, identifier)
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    snapshot_path = tmp_path / receipt["accessibility_snapshot"]["path"]
+    wrapper = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    wrapper["snapshot"] = snapshot
+    snapshot_path.write_text(json.dumps(wrapper), encoding="utf-8")
+    receipt["accessibility_snapshot"] = _descriptor(snapshot_path, tmp_path)
+    _write_json(receipt_path, receipt)
+
+
+def _with_node_ids(value: Any, counter: list[int]) -> Any:
+    if isinstance(value, dict):
+        counter[0] += 1
+        return {
+            "nodeId": f"cdp-{counter[0]}",
+            **{key: _with_node_ids(item, counter) for key, item in value.items()},
+        }
+    if isinstance(value, list):
+        return [_with_node_ids(item, counter) for item in value]
+    return value
+
+
+def _reversed_keys(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: _reversed_keys(value[key]) for key in reversed(list(value))}
+    if isinstance(value, list):
+        return [_reversed_keys(item) for item in value]
+    return value
+
+
+def _reencode_png(data: bytes) -> bytes:
+    """Same pixels, different filter and compression level."""
+    width, height, channels, pixels = harness_module.png_pixels.decode_png(data)
+    stride = width * channels
+    raw = bytearray()
+    for row in range(height):
+        line = pixels[row * stride:(row + 1) * stride]
+        raw.append(1)
+        for index in range(stride):
+            left = line[index - channels] if index >= channels else 0
+            raw.append((line[index] - left) & 0xFF)
+    header = (
+        width.to_bytes(4, "big")
+        + height.to_bytes(4, "big")
+        + bytes((8, 2 if channels == 3 else 6, 0, 0, 0))
+    )
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + _png_chunk(b"IHDR", header)
+        + _png_chunk(b"IDAT", zlib.compress(bytes(raw), 9))
+        + _png_chunk(b"IEND", b"")
+    )
+
+
+def test_snapshots_differing_only_in_node_ids_are_one_observation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("PURSERS_HOME_ACCEPTANCE_MUTATE", MUTATION_OPT_IN)
+    report = _complete_report()
+    path = _write_report(tmp_path, report)
+    source, target = _duplicate_expected_pair(report)
+    relabelled = _with_node_ids(_snapshot_of(tmp_path, report, source), [0])
+    _replace_snapshot(tmp_path, report, target, relabelled)
+
+    with pytest.raises(AcceptanceError, match="unique underlying"):
+        _validate_report(
+            path,
+            validate_live_target("http://127.0.0.1:8765", "sandbox-home"),
+            RepositoryCapabilities((), (), (), (), ()),
+            CANDIDATE_SHA,
+        )
+
+
+def test_snapshots_differing_only_in_key_order_are_one_observation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("PURSERS_HOME_ACCEPTANCE_MUTATE", MUTATION_OPT_IN)
+    report = _complete_report()
+    path = _write_report(tmp_path, report)
+    source, target = _duplicate_expected_pair(report)
+    reordered = _reversed_keys(_snapshot_of(tmp_path, report, source))
+    _replace_snapshot(tmp_path, report, target, reordered)
+
+    with pytest.raises(AcceptanceError, match="unique underlying"):
+        _validate_report(
+            path,
+            validate_live_target("http://127.0.0.1:8765", "sandbox-home"),
+            RepositoryCapabilities((), (), (), (), ()),
+            CANDIDATE_SHA,
+        )
+
+
+def test_identical_pixels_reencoded_are_one_observation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("PURSERS_HOME_ACCEPTANCE_MUTATE", MUTATION_OPT_IN)
+    report = _complete_report()
+    path = _write_report(tmp_path, report)
+    first, second = report["steps"][:2]  # type: ignore[index]
+    first_receipt = json.loads(
+        (tmp_path / first["evidence"]).read_text(encoding="utf-8")
+    )
+    original = (tmp_path / first_receipt["screenshot"]["path"]).read_bytes()
+    reencoded = _reencode_png(original)
+    assert reencoded != original
+    second_receipt_path = tmp_path / second["evidence"]
+    second_receipt = json.loads(second_receipt_path.read_text(encoding="utf-8"))
+    screenshot_path = tmp_path / second_receipt["screenshot"]["path"]
+    screenshot_path.write_bytes(reencoded)
+    second_receipt["screenshot"] = _descriptor(screenshot_path, tmp_path)
+    _write_json(second_receipt_path, second_receipt)
+
+    with pytest.raises(AcceptanceError, match="unique underlying"):
+        _validate_report(
+            path,
+            validate_live_target("http://127.0.0.1:8765", "sandbox-home"),
+            RepositoryCapabilities((), (), (), (), ()),
+            CANDIDATE_SHA,
+        )
+
+
+def test_undecodable_screenshot_is_refused_rather_than_compared_by_bytes() -> None:
+    """A 16-bit PNG is refused; the byte comparison is not a fallback."""
+    header = (
+        (320).to_bytes(4, "big") + (180).to_bytes(4, "big") + bytes((16, 2, 0, 0, 0))
+    )
+    sixteen_bit = (
+        b"\x89PNG\r\n\x1a\n"
+        + _png_chunk(b"IHDR", header)
+        + _png_chunk(b"IDAT", zlib.compress(b"\x00" * 64))
+        + _png_chunk(b"IEND", b"")
+    )
+    with pytest.raises(AcceptanceError, match="cannot be compared"):
+        harness_module._screenshot_identity(sixteen_bit)

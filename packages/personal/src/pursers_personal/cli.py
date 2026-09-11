@@ -1057,6 +1057,7 @@ def command_mcp(args: argparse.Namespace) -> None:
         args.host_id,
         args.session,
         acceptance_runtime_receipt=args.acceptance_runtime_receipt,
+        acceptance_challenge_key=args.acceptance_challenge_key,
         candidate_source=args.candidate_source,
         candidate_commit=args.candidate_commit,
         board_id=args.board_id,
@@ -1272,6 +1273,7 @@ def build_parser() -> argparse.ArgumentParser:
     mcp.add_argument("--host-id", required=True)
     mcp.add_argument("--session", required=True)
     mcp.add_argument("--acceptance-runtime-receipt", type=Path)
+    mcp.add_argument("--acceptance-challenge-key", type=Path)
     mcp.add_argument("--candidate-source", type=Path)
     mcp.add_argument("--candidate-commit")
     mcp.add_argument("--board-id")

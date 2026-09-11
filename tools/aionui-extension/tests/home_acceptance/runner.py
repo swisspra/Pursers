@@ -26,6 +26,7 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import sys
@@ -585,6 +586,28 @@ def doctor(args: argparse.Namespace) -> int:
     return exit_code
 
 
+ATTESTATION_NONCE = re.compile(r"^[0-9a-f]{32,128}$")
+
+
+def _attestation_nonce(args: argparse.Namespace) -> str:
+    """Return the verifier-selected nonce for this capture's live challenge.
+
+    The verifier owns nonce selection. For a Personal capture it passes the
+    same nonce it already handed to the AionUi conversation, so the signed
+    answer lands in this capture's accessibility snapshot; otherwise a fresh
+    nonce is generated here and no stale value can be reused.
+    """
+    supplied = getattr(args, "attestation_nonce", None)
+    if supplied is None:
+        return secrets.token_hex(32)
+    if not ATTESTATION_NONCE.fullmatch(supplied):
+        raise RunnerError(
+            EXIT_USAGE,
+            "--attestation-nonce must be 32-128 lowercase hex characters",
+        )
+    return supplied
+
+
 def capture(args: argparse.Namespace) -> int:
     command = _observer_command(Path(args.observer).expanduser())
     evidence_root = Path(args.evidence).expanduser().resolve()
@@ -597,6 +620,7 @@ def capture(args: argparse.Namespace) -> int:
         "page_url": args.page,
         "assertions": _load_assertions(args.assertions),
         "surface_id": args.surface,
+        "attestation_nonce": _attestation_nonce(args),
     }
     spec_dir = evidence_root / "specs"
     spec_dir.mkdir(parents=True, exist_ok=True)
@@ -637,6 +661,8 @@ def capture(args: argparse.Namespace) -> int:
         "screenshot": screenshot_artifact,
         "accessibility_snapshot": snapshot_artifact,
         "assertions": spec["assertions"],
+        "attestation": payload["attestation"],
+        "attestation_nonce": payload["attestation_nonce"],
     }
     reference = f"observations/{args.observation}.json"
     receipt_path = evidence_root / reference
@@ -752,6 +778,10 @@ def build_parser() -> argparse.ArgumentParser:
     shot.add_argument("--commit", required=True)
     shot.add_argument("--page", required=True)
     shot.add_argument("--assertions", help="JSON file holding the observation assertions")
+    shot.add_argument(
+        "--attestation-nonce",
+        help="verifier-selected nonce already answered in the AionUi conversation",
+    )
     shot.set_defaults(handler=capture)
 
     report = sub.add_parser("assemble", help="assemble a complete report from all captures")

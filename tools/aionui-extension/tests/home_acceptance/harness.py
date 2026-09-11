@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import base64
 import hashlib
+import hmac
 import importlib.util
 import json
 import os
@@ -22,6 +23,11 @@ try:
     from . import browser_observer
 except ImportError:
     import browser_observer
+
+try:
+    from . import png_pixels
+except ImportError:
+    import png_pixels
 
 EXTENSION_ROOT = Path(__file__).resolve().parents[2]
 REPOSITORY_ROOT = EXTENSION_ROOT.parents[1]
@@ -174,6 +180,8 @@ class TrustedBrowserCapture:
     screenshot: bytes
     snapshot: Any
     surface_id: str = "aionui"
+    attestation: Any = None
+    attestation_nonce: str = ""
 
 
 @dataclass(frozen=True)
@@ -182,11 +190,16 @@ class _BrowserEvidence:
     screenshot: bytes
     snapshot: Any
     references: tuple[str, str]
+    attestation: Any = None
+    attestation_nonce: str = ""
 
 
 class _TrustedBrowserObserver(Protocol):
     def capture(self, request: BrowserObservationRequest) -> TrustedBrowserCapture:
         """Capture the observation through a verifier-owned browser channel."""
+
+    def personal_challenge(self) -> dict[str, Any]:
+        """Return verifier-owned material for the Personal transport challenge."""
 
 
 class VerifierBrowserObserver:
@@ -244,6 +257,7 @@ class VerifierBrowserObserver:
             "observer_id", "observation_id", "target", "host_product",
             "host_version", "host_build", "host_identity_source", "candidate_commit", "captured_at",
             "page_url", "screenshot_base64", "snapshot", "surface_id",
+            "attestation", "attestation_nonce",
         }
         if not isinstance(payload, dict) or set(payload) != expected:
             raise AcceptanceError("trusted browser observer capture fields do not match schema")
@@ -267,7 +281,60 @@ class VerifierBrowserObserver:
             screenshot=screenshot,
             snapshot=payload["snapshot"],
             surface_id=payload["surface_id"],
+            attestation=payload["attestation"],
+            attestation_nonce=payload["attestation_nonce"],
         )
+
+    def personal_challenge(self) -> dict[str, Any]:
+        """Read verifier-owned material for the Personal transport challenge.
+
+        The key, the runtime pid file and the pinned candidate source come from
+        the verifier's own installed configuration, never from the report, so a
+        forged report cannot nominate a key it authored itself.
+        """
+        config_path = self.command.parent / "observer.json"
+        if not config_path.is_file():
+            raise AcceptanceError(
+                "observer.json is missing beside the trusted observer; the Personal "
+                "transport challenge cannot be validated"
+            )
+        try:
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            raise AcceptanceError("observer.json is not readable JSON") from None
+        surfaces = config.get("surfaces") if isinstance(config, dict) else None
+        personal = surfaces.get("personal") if isinstance(surfaces, dict) else None
+        runtime = personal.get("runtime") if isinstance(personal, dict) else None
+        repository_root = config.get("repository_root") if isinstance(config, dict) else None
+        if not isinstance(runtime, dict) or not isinstance(repository_root, str):
+            raise AcceptanceError(
+                "observer.json declares no Personal runtime; the transport challenge "
+                "cannot be validated"
+            )
+        for field in ("artifact", "challenge_key", "pid_file"):
+            if not isinstance(runtime.get(field), str):
+                raise AcceptanceError(f"Personal runtime {field} is missing from observer.json")
+        key_path = Path(runtime["challenge_key"])
+        if key_path.is_symlink():
+            raise AcceptanceError("acceptance challenge key must not be a symlink")
+        try:
+            status = key_path.stat()
+            key = key_path.read_bytes()
+        except OSError:
+            raise AcceptanceError(
+                "acceptance challenge key is unreadable; the Personal transport "
+                "challenge cannot be validated"
+            ) from None
+        if status.st_mode & 0o077:
+            raise AcceptanceError("acceptance challenge key must be private")
+        if len(key) < 32:
+            raise AcceptanceError("acceptance challenge key is too short")
+        try:
+            pid = int(Path(runtime["pid_file"]).read_text(encoding="utf-8").strip())
+        except (OSError, ValueError):
+            raise AcceptanceError("Personal MCP runtime PID is unreadable") from None
+        candidate_source = (Path(repository_root) / runtime["artifact"]).resolve()
+        return {"key": key, "pid": pid, "candidate_source": str(candidate_source)}
 
 
 def _semantic_capabilities(routes: tuple[str, ...]) -> set[str]:
@@ -821,10 +888,12 @@ def _validate_evidence_report(
         candidate_commit,
     )
     browser_evidence: list[_BrowserEvidence] = []
+    browser_identifiers: list[str] = []
     for identifier, reference in {
         **passed_steps, **passed_inventory, **passed_final_gates
     }.items():
         surface_id = _surface_for_identifier(identifier)
+        browser_identifiers.append(identifier)
         browser_evidence.append(_validate_browser_receipt(
             evidence_root,
             reference,
@@ -845,20 +914,15 @@ def _validate_evidence_report(
         raise AcceptanceError(
             "each browser observation needs distinct screenshot and snapshot artifacts"
         )
-    screenshot_digests = [hashlib.sha256(evidence.screenshot).hexdigest() for evidence in browser_evidence]
-    snapshot_digests = [
-        hashlib.sha256(
-            json.dumps(evidence.snapshot, sort_keys=True, separators=(",", ":")).encode()
-        ).hexdigest()
-        for evidence in browser_evidence
+    screenshot_digests = [
+        _screenshot_identity(evidence.screenshot) for evidence in browser_evidence
     ]
-    if (
-        len(screenshot_digests) != len(set(screenshot_digests))
-        or len(snapshot_digests) != len(set(snapshot_digests))
-    ):
-        raise AcceptanceError(
-            "each browser observation needs unique underlying screenshot and accessibility state"
-        )
+    snapshot_digests = [
+        _snapshot_identity(evidence.snapshot) for evidence in browser_evidence
+    ]
+    _validate_observation_distinctness(
+        browser_identifiers, screenshot_digests, snapshot_digests
+    )
     suite_output_references: list[str] = []
     for suite in suite_rows:
         suite_output_references.append(_validate_suite_receipt(
@@ -997,6 +1061,127 @@ def _artifact_descriptor(
     return path, data
 
 
+EPHEMERAL_SNAPSHOT_KEYS = frozenset({
+    "nodeid", "backendnodeid", "parentid", "childids", "loaderid", "frameid",
+    "sessionid", "observation_id", "captured_at", "recorded_at", "observer_id",
+    "schema_version", "timestamp",
+})
+
+
+def _behavioural_signature(identifier: str) -> frozenset[tuple[str, ...]]:
+    """The part of a canonical predicate that does not depend on what is on screen.
+
+    Accessibility conjuncts are excluded on purpose: if two rows share a screenshot
+    and an accessibility snapshot, their accessibility assertions cannot be what
+    tells them apart. Only an HTTP exchange, a receipt field, a log line, a state
+    transition or a named prior observation can.
+    """
+    row = _ACCEPTANCE_CONTRACT["facts"].get(identifier)
+    if row is None:
+        return frozenset()
+    predicate = row["predicate"]
+    if predicate.get("operator") != "all_of":
+        return frozenset()
+    signature = set()
+    for conjunct in predicate["conjuncts"]:
+        kind = conjunct["kind"]
+        if kind == "ax_name_contains":
+            continue
+        signature.add(
+            (kind,) + tuple(
+                str(conjunct[key]) for key in sorted(conjunct) if key != "kind"
+            )
+        )
+    return frozenset(signature)
+
+
+def _validate_observation_distinctness(
+    identifiers: list[str],
+    screenshot_digests: list[str],
+    snapshot_digests: list[str],
+) -> None:
+    """Two observations may share an image only if something else separates them.
+
+    AN-000000000367 removed the blanket requirement that every observation look
+    different, because one screen legitimately backs more than one proven action.
+    What it did not remove is the ban on manufactured difference, and that ban is
+    carried by the identity functions themselves: decoded pixels rather than encoded
+    bytes, and accessibility content with nodeId, timestamps and wrapper metadata
+    stripped.
+
+    The test is per dimension, not on the pair. If two observations share a
+    screenshot, or share an accessibility state, that dimension cannot be what tells
+    them apart, and a difference in the OTHER dimension is not accepted as the
+    answer either: an identical accessibility tree behind two different pictures is
+    exactly the relabelled-state failure reject-4 named. So either collision demands
+    real behavioural evidence, recorded outside the picture.
+    """
+    for label, digests in (
+        ("screenshot", screenshot_digests),
+        ("accessibility state", snapshot_digests),
+    ):
+        groups: dict[str, list[str]] = {}
+        for identifier, digest in zip(identifiers, digests):
+            groups.setdefault(digest, []).append(identifier)
+        for members in groups.values():
+            if len(members) == 1:
+                continue
+            signatures: dict[frozenset[tuple[str, ...]], str] = {}
+            for identifier in members:
+                signature = _behavioural_signature(identifier)
+                if not signature:
+                    raise AcceptanceError(
+                        "each browser observation needs unique underlying screenshot "
+                        f"and accessibility state: {identifier} shares its {label} "
+                        f"with {', '.join(m for m in members if m != identifier)} and "
+                        "asserts nothing beyond it"
+                    )
+                previous = signatures.get(signature)
+                if previous is not None:
+                    raise AcceptanceError(
+                        "each browser observation needs unique underlying screenshot "
+                        f"and accessibility state: {previous} and {identifier} share "
+                        f"their {label} and their behavioural assertions"
+                    )
+                signatures[signature] = identifier
+
+
+def _screenshot_identity(data: bytes) -> str:
+    """Identify a screenshot by what it shows, not by how it was encoded."""
+    try:
+        width, height, channels, pixels = png_pixels.decode_png(data)
+    except png_pixels.PngDecodeError as exc:
+        raise AcceptanceError(f"browser screenshot cannot be compared: {exc}") from None
+    header = f"{width}x{height}x{channels}".encode("ascii")
+    return hashlib.sha256(header + b"|" + pixels).hexdigest()
+
+
+def _normalized_snapshot(value: Any) -> Any:
+    """Strip ephemeral identifiers so relabelled identical states collide."""
+    if isinstance(value, dict):
+        return {
+            key: _normalized_snapshot(item)
+            for key, item in value.items()
+            if str(key).lower() not in EPHEMERAL_SNAPSHOT_KEYS
+        }
+    if isinstance(value, list):
+        return [_normalized_snapshot(item) for item in value]
+    return value
+
+
+def _snapshot_identity(snapshot: Any) -> str:
+    """Identify accessibility state by its semantic content.
+
+    Key order carries no meaning, so the canonical form sorts keys; two
+    snapshots that differ only in ordering or in ephemeral CDP identifiers
+    resolve to one identity and are refused as duplicates.
+    """
+    canonical = json.dumps(
+        _normalized_snapshot(snapshot), sort_keys=True, separators=(",", ":")
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def _validate_browser_receipt(
     evidence_root: Path,
     reference: str,
@@ -1020,6 +1205,7 @@ def _validate_browser_receipt(
             "schema_version", "evidence_kind", "observation_id", "surface_id",
             "target", "runtime", "candidate_commit", "captured_at", "page_url",
             "screenshot", "accessibility_snapshot", "assertions",
+            "attestation", "attestation_nonce",
         }
     )
     if set(receipt) != expected_keys:
@@ -1053,6 +1239,16 @@ def _validate_browser_receipt(
     ):
         raise AcceptanceError(
             f"browser observation receipt does not bind {identifier!r} to the report"
+        )
+    if surface_binding is not None:
+        _validate_attestation_shape(
+            receipt,
+            identifier,
+            surface_id,
+            expected_target,
+            expected_version,
+            expected_build,
+            candidate_commit,
         )
     _require_timestamp(receipt["captured_at"], "observation captured_at")
     page = urlsplit(receipt["page_url"] if isinstance(receipt["page_url"], str) else "")
@@ -1138,7 +1334,117 @@ def _validate_browser_receipt(
             receipt["screenshot"]["path"],
             receipt["accessibility_snapshot"]["path"],
         ),
+        attestation=None if surface_binding is None else receipt["attestation"],
+        attestation_nonce=(
+            "" if surface_binding is None else receipt["attestation_nonce"]
+        ),
     )
+
+
+def _validate_attestation_shape(
+    receipt: dict[str, Any],
+    identifier: str,
+    surface_id: str,
+    target: LiveTarget,
+    version: str,
+    build: str,
+    candidate_commit: str,
+) -> None:
+    """Bind the carried attestation to this observation's own runtime binding.
+
+    The signature itself is recomputed later against verifier-owned material.
+    A Personal observation without an attestation block is a refusal, never a
+    surface that happens to carry no challenge.
+    """
+    nonce = receipt["attestation_nonce"]
+    if not isinstance(nonce, str) or not browser_observer.ATTESTATION_NONCE.fullmatch(nonce):
+        raise AcceptanceError(
+            f"browser observation {identifier} carries no exact attestation nonce"
+        )
+    attestation = receipt["attestation"]
+    if surface_id != "personal":
+        if attestation is not None:
+            raise AcceptanceError(
+                f"observation {identifier} carries an attestation for a surface that has no challenge"
+            )
+        return
+    claim_keys = {*browser_observer.ATTESTATION_CLAIM_KEYS, "signature"}
+    if not isinstance(attestation, dict) or set(attestation) != claim_keys:
+        raise AcceptanceError(
+            f"Personal observation {identifier} carries no live transport attestation"
+        )
+    pid = attestation["pid"]
+    if (
+        not isinstance(attestation["signature"], str)
+        or not isinstance(pid, int)
+        or isinstance(pid, bool)
+        or pid <= 0
+    ):
+        raise AcceptanceError(
+            f"Personal attestation for {identifier} is not a signed runtime claim"
+        )
+    if (
+        attestation["schema_version"] != 1
+        or attestation["server_name"] != "On Board Personal"
+        or attestation["version"] != version
+        or attestation["build"] != build
+        or attestation["candidate_commit"] != candidate_commit
+        or attestation["board_id"] != target.board_id
+        or attestation["transport"] != "stdio"
+        or attestation["nonce"] != nonce
+    ):
+        raise AcceptanceError(
+            f"Personal attestation for {identifier} does not bind the observed runtime"
+        )
+
+
+def _verify_personal_attestation(
+    evidence: _BrowserEvidence, material: dict[str, Any]
+) -> None:
+    """Recompute the challenge exactly as the Personal runtime signed it."""
+    attestation = evidence.attestation
+    claim = {
+        name: attestation[name] for name in browser_observer.ATTESTATION_CLAIM_KEYS
+    }
+    if claim["pid"] != material["pid"]:
+        raise AcceptanceError(
+            f"Personal attestation for {evidence.request.observation_id} names a pid "
+            "the verifier runtime does not hold"
+        )
+    if claim["candidate_source"] != material["candidate_source"]:
+        raise AcceptanceError(
+            f"Personal attestation for {evidence.request.observation_id} names another "
+            "candidate source"
+        )
+    payload = json.dumps(claim, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    signature = hmac.new(material["key"], payload, hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(attestation["signature"], signature):
+        raise AcceptanceError(
+            f"Personal attestation for {evidence.request.observation_id} is not signed "
+            "by the verifier challenge key"
+        )
+
+
+def _personal_challenge_material(observer: _TrustedBrowserObserver) -> dict[str, Any]:
+    getter = getattr(observer, "personal_challenge", None)
+    if getter is None:
+        raise AcceptanceError(
+            "trusted browser observer exposes no verifier challenge material; the "
+            "Personal transport challenge cannot be validated"
+        )
+    material = getter()
+    if (
+        not isinstance(material, dict)
+        or not isinstance(material.get("key"), (bytes, bytearray))
+        or len(material["key"]) < 32
+        or not isinstance(material.get("pid"), int)
+        or not isinstance(material.get("candidate_source"), str)
+    ):
+        raise AcceptanceError(
+            "verifier challenge material is unusable; the Personal transport "
+            "challenge cannot be validated"
+        )
+    return material
 
 
 def _validate_trusted_browser_observations(
@@ -1150,6 +1456,8 @@ def _validate_trusted_browser_observations(
             "trusted browser observer is unavailable; report artifacts cannot establish GUI acceptance"
         )
     observer_ids: set[str] = set()
+    challenge_material: dict[str, Any] | None = None
+    personal_nonces: set[str] = set()
     for evidence in evidence_rows:
         request = evidence.request
         capture = observer.capture(request)
@@ -1180,6 +1488,22 @@ def _validate_trusted_browser_observations(
                 "accessibility snapshot does not match the trusted observer capture"
             )
         _evaluate_browser_assertions(capture.snapshot, list(request.assertions))
+        if evidence.attestation_nonce and (
+            capture.attestation != evidence.attestation
+            or capture.attestation_nonce != evidence.attestation_nonce
+        ):
+            raise AcceptanceError(
+                "browser attestation does not match the trusted observer capture"
+            )
+        if evidence.attestation is not None:
+            if challenge_material is None:
+                challenge_material = _personal_challenge_material(observer)
+            _verify_personal_attestation(evidence, challenge_material)
+            if evidence.attestation_nonce in personal_nonces:
+                raise AcceptanceError(
+                    "each Personal observation needs a distinct challenge nonce"
+                )
+            personal_nonces.add(evidence.attestation_nonce)
     if len(observer_ids) != 1:
         raise AcceptanceError(
             "all browser observations must come from one trusted observer session"

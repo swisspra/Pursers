@@ -10,6 +10,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import unicodedata
 from pathlib import Path
 from typing import Any
 
@@ -53,6 +54,132 @@ def read_json(path: Path) -> dict[str, Any]:
     return value
 
 
+def normalized_fact(value: str) -> str:
+    """Case- and whitespace-normalised form used for every fact comparison."""
+    return re.sub(r"\s+", " ", unicodedata.normalize("NFKC", value)).strip().casefold()
+
+
+# Exhaustive key sets. AN-000000000360 authorises behaviour predicates for IDs that
+# name behaviour rather than a rendered label, and prior_state for the transitions
+# ground C requires. Every shape below is checked with set equality, never a subset
+# test, so an unknown key can never pass unnoticed.
+CONJUNCT_KEYS: dict[str, set[str]] = {
+    "ax_name_contains": {"kind", "path", "expected"},
+    "http_response": {"kind", "request", "status", "body_contains"},
+    "state_transition": {"kind", "from", "to", "via"},
+    "receipt_field": {"kind", "receipt", "field", "expected"},
+    "log_assertion": {"kind", "stream", "expected"},
+    "prior_state": {"kind", "observation", "expected"},
+}
+DERIVATION_KEYS: dict[str, set[str]] = {
+    "literal": {"kind", "source_quote"},
+    "identifier": {"kind", "symbol"},
+    # AN-000000000368 keeps the three failures apart. A missing evidence collector is
+    # not a missing behaviour, and neither is a missing permission. Both gap kinds
+    # block acceptance; only the owner and the fix differ.
+    "collector_gap": {"kind", "owner", "action"},
+    "observed_gap": {"kind", "owner", "action"},
+}
+BLOCKING_DERIVATIONS = {"collector_gap", "observed_gap"}
+
+
+def conjunct_signature(identifier: str, conjunct: Any) -> tuple[str, ...]:
+    """Validate one conjunct exhaustively and return its canonical signature."""
+    if not isinstance(conjunct, dict) or conjunct.get("kind") not in CONJUNCT_KEYS:
+        fail(f"acceptance fact {identifier} has an unknown predicate conjunct kind")
+    kind = conjunct["kind"]
+    if set(conjunct) != CONJUNCT_KEYS[kind]:
+        fail(f"acceptance fact {identifier} {kind} conjunct fields do not match schema")
+    for key, value in conjunct.items():
+        if key == "status":
+            continue
+        if not isinstance(value, (str, list)) or not value:
+            fail(f"acceptance fact {identifier} {kind} conjunct field {key} is empty")
+    if kind == "ax_name_contains":
+        if conjunct["path"] != ["nodes"]:
+            fail(f"acceptance fact {identifier} accessibility conjunct path is not nodes")
+        return (kind, normalized_fact(conjunct["expected"]))
+    if kind == "http_response":
+        if not isinstance(conjunct["status"], int) or not 100 <= conjunct["status"] <= 599:
+            fail(f"acceptance fact {identifier} http_response status is not an HTTP code")
+        return (
+            kind,
+            normalized_fact(conjunct["request"]),
+            str(conjunct["status"]),
+            normalized_fact(conjunct["body_contains"]),
+        )
+    if kind == "state_transition":
+        if normalized_fact(conjunct["from"]) == normalized_fact(conjunct["to"]):
+            fail(f"acceptance fact {identifier} state_transition does not change state")
+        return (
+            kind,
+            normalized_fact(conjunct["from"]),
+            normalized_fact(conjunct["to"]),
+            normalized_fact(conjunct["via"]),
+        )
+    if kind == "receipt_field":
+        return (
+            kind,
+            normalized_fact(conjunct["receipt"]),
+            normalized_fact(conjunct["field"]),
+            normalized_fact(conjunct["expected"]),
+        )
+    if kind == "log_assertion":
+        return (
+            kind,
+            normalized_fact(conjunct["stream"]),
+            normalized_fact(conjunct["expected"]),
+        )
+    return (kind, conjunct["observation"], normalized_fact(conjunct["expected"]))
+
+
+def predicate_signature(identifier: str, predicate: Any) -> tuple[tuple[str, ...], ...]:
+    """Validate a predicate in either allowed shape and return its uniqueness key.
+
+    The simple shape is the approved 35-ID contract, preserved byte-for-byte in
+    meaning. The all_of shape carries one or more conjuncts and is the only place a
+    prior_state may appear, because a prior state alone identifies nothing.
+    """
+    if not isinstance(predicate, dict):
+        fail(f"acceptance fact {identifier} predicate is not an object")
+    if predicate.get("name") != f"required fact: {identifier}":
+        fail(f"acceptance fact {identifier} predicate name is not bound to its ID")
+    if predicate.get("operator") == "all_of":
+        if set(predicate) != {"name", "operator", "conjuncts"}:
+            fail(f"acceptance fact {identifier} all_of predicate fields do not match schema")
+        conjuncts = predicate["conjuncts"]
+        if not isinstance(conjuncts, list) or not conjuncts:
+            fail(f"acceptance fact {identifier} all_of predicate has no conjunct")
+        signatures = [conjunct_signature(identifier, item) for item in conjuncts]
+        if len(set(signatures)) != len(signatures):
+            fail(f"acceptance fact {identifier} repeats one conjunct")
+        if all(item[0] == "prior_state" for item in signatures):
+            fail(f"acceptance fact {identifier} asserts only a prior state")
+        return tuple(sorted(signatures))
+    if (
+        set(predicate) != {"name", "path", "operator", "expected"}
+        or predicate["path"] != ["nodes"]
+        or predicate["operator"] != "ax_name_contains"
+        or not isinstance(predicate["expected"], str)
+        or not predicate["expected"].strip()
+    ):
+        fail(f"acceptance fact {identifier} predicate is not state-specific")
+    return (("ax_name_contains", normalized_fact(predicate["expected"])),)
+
+
+def validate_derivation(identifier: str, derivation: Any) -> str:
+    """Validate the declared derivation kind exhaustively and return that kind."""
+    if not isinstance(derivation, dict) or derivation.get("kind") not in DERIVATION_KEYS:
+        fail(f"acceptance fact {identifier} has an unknown derivation kind")
+    kind = derivation["kind"]
+    if set(derivation) != DERIVATION_KEYS[kind]:
+        fail(f"acceptance fact {identifier} {kind} derivation fields do not match schema")
+    for key, value in derivation.items():
+        if not isinstance(value, str) or not value.strip():
+            fail(f"acceptance fact {identifier} derivation field {key} is empty")
+    return kind
+
+
 def load_acceptance_contract(
     design_home: Path = DESIGN_HOME,
 ) -> dict[str, Any]:
@@ -64,6 +191,12 @@ def load_acceptance_contract(
         fail("acceptance facts fields do not match schema")
     expected_counts = {"approved_35": 35, "sequence": 9, "inventory": 189, "final_gates": 3}
     rows_by_group: dict[str, list[dict[str, Any]]] = {}
+    # Global across every group: AN-000000000356 makes uniqueness span all 201 rows,
+    # and the key is the whole canonical conjunct tuple, not one expected string.
+    signature_owner: dict[tuple[tuple[str, ...], ...], str] = {}
+    declared_gaps: list[dict[str, str]] = []
+    duplicate_signatures: list[tuple[str, str]] = []
+    prior_state_refs: list[tuple[str, str]] = []
     for group, expected_count in expected_counts.items():
         rows = facts[group]
         if group == "approved_35":
@@ -82,7 +215,7 @@ def load_acceptance_contract(
         for row in rows:
             if not isinstance(row, dict) or set(row) != {
                 "id", "surface", "status", "precondition", "action",
-                "expected_fact", "predicate", "evidence_source"
+                "expected_fact", "predicate", "evidence_source", "derivation"
             }:
                 fail(f"acceptance fact row fields do not match schema in {group}")
             identifier = row["id"]
@@ -96,22 +229,53 @@ def load_acceptance_contract(
             for field in ("precondition", "action", "expected_fact", "evidence_source"):
                 if not isinstance(row[field], str) or not row[field].strip():
                     fail(f"acceptance fact {identifier} lacks {field}")
-            predicate = row["predicate"]
-            if (
-                not isinstance(predicate, dict)
-                or set(predicate) != {"name", "path", "operator", "expected"}
-                or predicate["name"] != f"required fact: {identifier}"
-                or predicate["path"] != ["nodes"]
-                or predicate["operator"] != "ax_name_contains"
-                or not isinstance(predicate["expected"], str)
-                or not predicate["expected"].strip()
-            ):
-                fail(f"acceptance fact {identifier} predicate is not state-specific")
+            signature = predicate_signature(identifier, row["predicate"])
+            owner = signature_owner.get(signature)
+            if owner is not None:
+                # Semantic, not structural. A repeated canonical fact BLOCKS acceptance
+                # but must not stop the contract loading, because the harness derives
+                # its whole inventory from here and would otherwise be unable to run at
+                # all. Reported by validate_acceptance_derivations instead.
+                duplicate_signatures.append((identifier, owner))
+            else:
+                signature_owner[signature] = identifier
+            for conjunct in row["predicate"].get("conjuncts", []):
+                if conjunct.get("kind") == "prior_state":
+                    prior_state_refs.append((identifier, conjunct["observation"]))
+            derivation_kind = validate_derivation(identifier, row["derivation"])
+            if derivation_kind in BLOCKING_DERIVATIONS:
+                if row["status"] != "measured-gap":
+                    fail(f"acceptance fact {identifier} hides a declared gap as normative")
+                declared_gaps.append(
+                    {
+                        "id": identifier,
+                        "kind": derivation_kind,
+                        "owner": row["derivation"]["owner"],
+                        "action": row["derivation"]["action"],
+                    }
+                )
+            elif row["status"] != "normative":
+                fail(f"acceptance fact {identifier} is measured-gap without a declared gap")
             normalized.append(row)
         rows_by_group[group] = normalized
     inventory_ids = [row["id"] for row in rows_by_group["inventory"]]
     if not set(facts["approved_35"]).issubset(inventory_ids):
         fail("approved_35 meanings were not preserved in expanded inventory")
+    # A prior_state may only name another canonical observation. The harness enforces
+    # the rest of the operator's condition, that the referenced observation is present
+    # in the same report and has independently passed its own validation.
+    known_ids = {
+        row["id"]
+        for group in ("sequence", "inventory", "final_gates")
+        for row in rows_by_group[group]
+    }
+    for identifier, referenced in prior_state_refs:
+        if referenced == identifier:
+            fail(f"acceptance fact {identifier} names itself as its prior state")
+        if referenced not in known_ids:
+            fail(
+                f"acceptance fact {identifier} names unknown prior observation {referenced}"
+            )
     manifest = read_json(design_home / "context" / "source-manifest.json")
     if manifest.get("acceptanceFacts") != "docs/design-home/context/acceptance-facts.json":
         fail("source-manifest acceptanceFacts path mismatch")
@@ -121,6 +285,8 @@ def load_acceptance_contract(
         "sequence": tuple(row["id"] for row in rows_by_group["sequence"]),
         "inventory": tuple(inventory_ids),
         "final_gates": tuple(row["id"] for row in rows_by_group["final_gates"]),
+        "gaps": tuple(declared_gaps),
+        "duplicates": tuple(duplicate_signatures),
         "facts": {
             row["id"]: row
             for group in ("sequence", "inventory", "final_gates")
@@ -640,6 +806,91 @@ def validate_no_stale_labels(design_home: Path) -> list[str]:
     return errors
 
 
+def predicate_expected_values(predicate: dict[str, Any]) -> list[str]:
+    """Every string a predicate claims will be observed, across both shapes."""
+    if predicate.get("operator") != "all_of":
+        return [predicate["expected"]]
+    values: list[str] = []
+    for conjunct in predicate["conjuncts"]:
+        if conjunct["kind"] in {"ax_name_contains", "receipt_field", "log_assertion"}:
+            values.append(conjunct["expected"])
+        elif conjunct["kind"] == "http_response":
+            values.append(conjunct["body_contains"])
+        elif conjunct["kind"] == "state_transition":
+            values.extend([conjunct["from"], conjunct["to"], conjunct["via"]])
+    return values
+
+
+def validate_acceptance_derivations(design_home: Path) -> list[str]:
+    """Every canonical fact must trace to its named source, or block acceptance.
+
+    literal      the quoted source text must exist in the evidence source, and every
+                 value the predicate expects must appear inside that quote
+    identifier   the named symbol must exist in the evidence source, because the
+                 observed value is produced at runtime rather than written literally
+    observed_gap the behaviour is undefined; per AN-000000000356 amendment one this
+                 does NOT pass, it blocks, and it carries an owner and an action
+    """
+    errors: list[str] = []
+    contract = load_acceptance_contract(design_home)
+    for identifier, owner in contract["duplicates"]:
+        errors.append(
+            f"acceptance fact {identifier} repeats the canonical fact of {owner} and "
+            "blocks acceptance; bind it to its distinguishing state instead of "
+            "rewording it"
+        )
+    cache: dict[str, str | None] = {}
+    for identifier, row in contract["facts"].items():
+        relative = row["evidence_source"]
+        if relative not in cache:
+            path = REPO_ROOT / relative
+            cache[relative] = (
+                path.read_text(encoding="utf-8", errors="replace")
+                if path.is_file()
+                else None
+            )
+        source = cache[relative]
+        derivation = row["derivation"]
+        kind = derivation["kind"]
+        if kind in BLOCKING_DERIVATIONS:
+            reason = (
+                "no evidence collector can observe it"
+                if kind == "collector_gap"
+                else "the behaviour itself is undefined"
+            )
+            errors.append(
+                f"acceptance fact {identifier} is a {kind} and blocks acceptance because "
+                f"{reason}: owner={derivation['owner']}, action={derivation['action']}"
+            )
+            continue
+        if source is None:
+            errors.append(
+                f"acceptance fact {identifier} names a missing evidence source {relative}"
+            )
+            continue
+        if kind == "identifier":
+            if derivation["symbol"] not in source:
+                errors.append(
+                    f"acceptance fact {identifier} names symbol {derivation['symbol']!r} "
+                    f"that does not exist in {relative}"
+                )
+            continue
+        quote = derivation["source_quote"]
+        if normalized_fact(quote) not in normalized_fact(source):
+            errors.append(
+                f"acceptance fact {identifier} quotes text absent from {relative}"
+            )
+            continue
+        quoted = normalized_fact(quote)
+        for value in predicate_expected_values(row["predicate"]):
+            if normalized_fact(value) not in quoted:
+                errors.append(
+                    f"acceptance fact {identifier} expects {value!r}, which its own "
+                    f"quoted source text does not contain"
+                )
+    return errors
+
+
 def validate(design_home: Path = DESIGN_HOME) -> tuple[list[str], tuple[int, int]]:
     try:
         manifest = load_manifest(design_home)
@@ -651,6 +902,7 @@ def validate(design_home: Path = DESIGN_HOME) -> tuple[list[str], tuple[int, int
         errors.extend(validate_route_matrices(design_home, sources))
         errors.extend(validate_source_counts(design_home, manifest, sources))
         errors.extend(validate_acceptance_inventory(design_home, manifest))
+        errors.extend(validate_acceptance_derivations(design_home))
         errors.extend(validate_no_stale_labels(design_home))
         manifest_errors, total = validate_artifact_manifest(design_home, manifest)
         errors.extend(manifest_errors)

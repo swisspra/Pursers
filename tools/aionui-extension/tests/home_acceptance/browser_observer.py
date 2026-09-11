@@ -21,6 +21,7 @@ from __future__ import annotations
 import base64
 import binascii
 import hashlib
+import hmac
 import json
 import os
 import plistlib
@@ -65,6 +66,10 @@ CAPTURE_KEYS = {
     "observer_id", "observation_id", "target", "host_product", "host_version",
     "host_build", "host_identity_source", "candidate_commit", "captured_at", "page_url",
     "screenshot_base64", "snapshot", "surface_id",
+    # The live transport challenge travels with the capture so the harness can
+    # recompute it independently at validate time. Surfaces that carry no
+    # challenge store an explicit null rather than omitting the field.
+    "attestation", "attestation_nonce",
 }
 SURFACE_PRODUCTS = {
     "aionui": "AionUi",
@@ -628,6 +633,59 @@ def _probe_pinned_artifact_without_listener(
     }
 
 
+_PYTHON_EXECUTABLE = re.compile(r"^python(\d+(\.\d+)?)?$")
+
+# CPython consumes a value for each of these; the interpreter never treats the
+# consumed value as its execution selector.
+_PYTHON_VALUE_SHORT_FLAGS = frozenset({"W", "X"})
+_PYTHON_VALUE_LONG_FLAGS = frozenset({"--check-hash-based-pycs"})
+
+
+def _python_execution_selector(argv: list[str]) -> tuple[str, str | None, int]:
+    """Return the execution mode CPython actually selects for ``argv``.
+
+    CPython stops at the FIRST of ``-c``, ``-m``, ``-`` or a script path and
+    ignores every later occurrence, so a tuple such as
+    ``-m pursers_personal.cli mcp`` appearing after an earlier ``-c`` is inert
+    argument text, not the running program. Scanning for that tuple anywhere in
+    the command line therefore accepts a decoy. The returned tuple is the
+    selector kind, its value where one exists, and the index of the first
+    argument that follows the selector.
+    """
+
+    index = 1
+    while index < len(argv):
+        argument = argv[index]
+        if argument == "-":
+            return "stdin", None, index + 1
+        if not argument.startswith("-"):
+            return "script", argument, index + 1
+        if argument.startswith("--"):
+            if argument in _PYTHON_VALUE_LONG_FLAGS:
+                index += 2
+            else:
+                index += 1
+            continue
+        position = 1
+        while position < len(argument):
+            letter = argument[position]
+            if letter in {"c", "m"}:
+                kind = "command" if letter == "c" else "module"
+                attached = argument[position + 1 :]
+                if attached:
+                    return kind, attached, index + 1
+                if index + 1 >= len(argv):
+                    return kind, None, index + 1
+                return kind, argv[index + 1], index + 2
+            if letter in _PYTHON_VALUE_SHORT_FLAGS:
+                if not argument[position + 1 :]:
+                    index += 1
+                break
+            position += 1
+        index += 1
+    return "repl", None, len(argv)
+
+
 def _private_runtime_path(value: Any, label: str, repository: Path) -> Path:
     if not isinstance(value, str) or not Path(value).is_absolute():
         raise _fail(EXIT_CONFIG, f"Personal runtime {label} must be absolute")
@@ -650,7 +708,13 @@ def _probe_personal_mcp_runtime(
     if not isinstance(repository_value, str) or not isinstance(runtime, dict):
         raise _fail(EXIT_CONFIG, "Personal MCP runtime binding is unavailable")
     repository = Path(repository_value).resolve()
-    if set(runtime) != {"artifact", "artifact_sha256", "pid_file", "receipt"}:
+    if set(runtime) != {
+        "artifact",
+        "artifact_sha256",
+        "challenge_key",
+        "pid_file",
+        "receipt",
+    }:
         raise _fail(EXIT_CONFIG, "Personal MCP runtime fields are invalid")
     relative = runtime["artifact"]
     if not isinstance(relative, str) or relative.startswith("/") or ".." in Path(relative).parts:
@@ -663,6 +727,9 @@ def _probe_personal_mcp_runtime(
         raise _fail(EXIT_MISMATCH, "Personal MCP runtime artifact digest changed")
     pid_file = _private_runtime_path(runtime["pid_file"], "pid file", repository)
     receipt_path = _private_runtime_path(runtime["receipt"], "receipt", repository)
+    challenge_key_path = _private_runtime_path(
+        runtime["challenge_key"], "challenge key", repository
+    )
     try:
         pid = int(pid_file.read_text(encoding="utf-8").strip())
     except (OSError, ValueError):
@@ -680,19 +747,22 @@ def _probe_personal_mcp_runtime(
         "--candidate-commit": str(surface["candidate_commit"]),
         "--board-id": str(surface["target"]["board_id"]),
         "--acceptance-runtime-receipt": str(receipt_path),
+        "--acceptance-challenge-key": str(challenge_key_path),
     }
-    if (
-        not argv
-        or not Path(argv[0]).name.startswith("python")
-        or not any(
-            argv[index : index + 3] == ["-m", "pursers_personal.cli", "mcp"]
-            for index in range(max(0, len(argv) - 2))
+    if not argv or not _PYTHON_EXECUTABLE.match(Path(argv[0]).name):
+        raise _fail(EXIT_CAPABILITY_UNAVAILABLE, "Personal process is not a Python interpreter")
+    selector, selected, after = _python_execution_selector(argv)
+    if selector != "module" or selected != "pursers_personal.cli":
+        raise _fail(
+            EXIT_CAPABILITY_UNAVAILABLE,
+            f"Personal process is not the MCP server: execution selector is {selector}",
         )
-    ):
+    if argv[after : after + 1] != ["mcp"]:
         raise _fail(EXIT_CAPABILITY_UNAVAILABLE, "Personal process is not the MCP server")
+    module_argv = argv[after:]
     for flag, expected in required_arguments.items():
         try:
-            actual = argv[argv.index(flag) + 1]
+            actual = module_argv[module_argv.index(flag) + 1]
         except (ValueError, IndexError):
             raise _fail(EXIT_CAPABILITY_UNAVAILABLE, f"Personal MCP process lacks {flag}") from None
         if actual != expected:
@@ -720,6 +790,13 @@ def _probe_personal_mcp_runtime(
         "version": receipt["version"],
         "build": receipt["build"],
         "candidate_commit": receipt["candidate_commit"],
+        # Material for the live transport challenge. capture() recomputes the
+        # attestation HMAC against these exact values, so a decoy process that
+        # merely looks right on the command line still fails.
+        "attestation_pid": str(pid),
+        "attestation_build": runtime_digest,
+        "attestation_source": str(artifact),
+        "attestation_key_path": str(challenge_key_path),
     }
 
 
@@ -1002,9 +1079,109 @@ def _run_backend(config: dict[str, Any], page_url: str) -> dict[str, Any]:
     return observation
 
 
+ATTESTATION_NONCE = re.compile(r"^[0-9a-f]{32,128}$")
+
+ATTESTATION_CLAIM_KEYS = (
+    "schema_version",
+    "server_name",
+    "version",
+    "build",
+    "candidate_commit",
+    "candidate_source",
+    "board_id",
+    "pid",
+    "transport",
+    "nonce",
+)
+
+
+def _iter_snapshot_strings(value: Any) -> Any:
+    """Yield every string the accessibility snapshot carries, at any depth."""
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for item in value.values():
+            yield from _iter_snapshot_strings(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from _iter_snapshot_strings(item)
+
+
+def _snapshot_attestations(snapshot: Any) -> list[dict[str, Any]]:
+    """Extract every candidate attestation object the capture contains.
+
+    The observer has no channel to the Personal stdio transport, so the answer
+    to the verifier nonce travels that transport into the conversation and
+    lands in the accessibility snapshot the reviewer already captures. Text in
+    the snapshot is untrusted until the HMAC is recomputed.
+    """
+    decoder = json.JSONDecoder()
+    found: list[dict[str, Any]] = []
+    for text in _iter_snapshot_strings(snapshot):
+        if "signature" not in text:
+            continue
+        index = text.find("{")
+        while index != -1:
+            try:
+                candidate, end = decoder.raw_decode(text, index)
+            except json.JSONDecodeError:
+                index = text.find("{", index + 1)
+                continue
+            if isinstance(candidate, dict) and "signature" in candidate:
+                found.append(candidate)
+            index = text.find("{", max(end, index + 1))
+    return found
+
+
+def _verify_acceptance_attestation(
+    binding: dict[str, str], spec: dict[str, Any], snapshot: Any
+) -> dict[str, Any]:
+    """Recompute the live transport challenge carried by the capture."""
+    key_path = Path(binding["attestation_key_path"])
+    if key_path.is_symlink():
+        raise _fail(EXIT_CONFIG, "acceptance challenge key must not be a symlink")
+    try:
+        status = key_path.stat()
+        key = key_path.read_bytes()
+    except OSError:
+        raise _fail(EXIT_CONFIG, "acceptance challenge key is unreadable") from None
+    if status.st_mode & 0o077:
+        raise _fail(EXIT_CONFIG, "acceptance challenge key must be private")
+    if len(key) < 32:
+        raise _fail(EXIT_CONFIG, "acceptance challenge key is too short")
+    expected = {
+        "schema_version": 1,
+        "server_name": "On Board Personal",
+        "version": binding["version"],
+        "build": binding["attestation_build"],
+        "candidate_commit": binding["candidate_commit"],
+        "candidate_source": binding["attestation_source"],
+        "board_id": binding["selected_board"],
+        "pid": int(binding["attestation_pid"]),
+        "transport": "stdio",
+        "nonce": spec["attestation_nonce"],
+    }
+    payload = json.dumps(expected, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    signature = hmac.new(key, payload, hashlib.sha256).hexdigest()
+    for candidate in _snapshot_attestations(snapshot):
+        if set(candidate) != {*ATTESTATION_CLAIM_KEYS, "signature"}:
+            continue
+        claim = {name: candidate[name] for name in ATTESTATION_CLAIM_KEYS}
+        if claim != expected:
+            continue
+        if not isinstance(candidate["signature"], str):
+            continue
+        if hmac.compare_digest(candidate["signature"], signature):
+            return candidate
+    raise _fail(
+        EXIT_MISMATCH,
+        "capture carries no valid acceptance_runtime_attest answer for this nonce",
+    )
+
+
 SPEC_KEYS = {
     "schema_version", "observation_id", "target", "candidate_commit",
-    "page_url", "assertions", "surface_id",
+    "page_url", "assertions", "surface_id", "attestation_nonce",
 }
 
 
@@ -1028,6 +1205,12 @@ def _read_spec(spec_path: Path) -> dict[str, Any]:
     _same_origin(spec["page_url"], spec["target"]["base_url"])
     if not isinstance(spec["assertions"], list) or not spec["assertions"]:
         raise _fail(EXIT_USAGE, "capture spec needs explicit assertions")
+    nonce = spec["attestation_nonce"]
+    if not isinstance(nonce, str) or not ATTESTATION_NONCE.fullmatch(nonce):
+        raise _fail(
+            EXIT_USAGE,
+            "capture spec attestation_nonce must be 32-128 lowercase hex characters",
+        )
     return spec
 
 
@@ -1053,6 +1236,15 @@ def capture(spec_path: Path, out: Any) -> int:
         "base_url": spec["target"]["base_url"],
         "board_id": binding["selected_board"],
     }
+    # The Personal adapter answers a verifier nonce over the same stdio
+    # transport AionUi drives, so the attestation arrives inside this capture's
+    # accessibility snapshot. A missing, stale, replayed or unsigned answer
+    # fails closed here.
+    attestation = None
+    if "attestation_key_path" in binding:
+        attestation = _verify_acceptance_attestation(
+            binding, spec, observation["snapshot"]
+        )
     payload = {
         "observer_id": config["observer_id"],
         "observation_id": spec["observation_id"],
@@ -1067,6 +1259,8 @@ def capture(spec_path: Path, out: Any) -> int:
         "page_url": observed_page_url,
         "screenshot_base64": observation["screenshot_base64"],
         "snapshot": observation["snapshot"],
+        "attestation_nonce": spec["attestation_nonce"],
+        "attestation": attestation,
     }
     record = {
         **payload,

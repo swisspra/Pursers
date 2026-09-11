@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import hmac
 import json
 import os
 import subprocess
@@ -479,6 +480,8 @@ def test_healthy_capture_replays_through_the_installed_observer(tmp_path: Path) 
     assert completed.returncode == 0, completed.stderr
     payload = json.loads(completed.stdout)
     assert set(payload) == {
+        "attestation",
+        "attestation_nonce",
         "observer_id", "observation_id", "target", "host_product", "host_version",
         "host_build", "host_identity_source", "candidate_commit", "captured_at", "page_url",
         "screenshot_base64", "snapshot", "surface_id",
@@ -563,6 +566,8 @@ def test_harness_observer_binds_report_artifacts_to_the_capture(tmp_path: Path) 
         screenshot=(evidence_root / receipt["screenshot"]["path"]).read_bytes(),
         snapshot=snapshot["snapshot"],
         references=(receipt["screenshot"]["path"], receipt["accessibility_snapshot"]["path"]),
+        attestation=receipt["attestation"],
+        attestation_nonce=receipt["attestation_nonce"],
     )
     _validate_trusted_browser_observations([evidence], observer)
     assert capture.screenshot == evidence.screenshot
@@ -571,6 +576,8 @@ def test_harness_observer_binds_report_artifacts_to_the_capture(tmp_path: Path) 
         screenshot=_png("forged"),
         snapshot=evidence.snapshot,
         references=evidence.references,
+        attestation=evidence.attestation,
+        attestation_nonce=evidence.attestation_nonce,
     )
     with pytest.raises(AcceptanceError, match="screenshot does not match"):
         _validate_trusted_browser_observations([forged], observer)
@@ -652,6 +659,8 @@ def _personal_runtime_fixture(tmp_path: Path) -> tuple[dict[str, object], dict[s
         "transport": "stdio",
     }
     receipt_file.write_text(json.dumps(receipt)); receipt_file.chmod(0o600)
+    challenge_key = runtime_dir / "acceptance-challenge.key"
+    challenge_key.write_bytes(b"\x11" * 32); challenge_key.chmod(0o600)
     surface: dict[str, object] = {
         "adapter": "pinned-signed-aionui-personal-mcp",
         "target": {"base_url": "http://127.0.0.1:8765", "board_id": BOARD},
@@ -665,6 +674,7 @@ def _personal_runtime_fixture(tmp_path: Path) -> tuple[dict[str, object], dict[s
             "artifact_sha256": source_digest,
             "pid_file": str(pid_file),
             "receipt": str(receipt_file),
+            "challenge_key": str(challenge_key),
         },
     }
     return {"repository_root": str(repository)}, surface, hashlib.sha256(artifact.read_bytes()).hexdigest()
@@ -679,7 +689,8 @@ def test_personal_runtime_binds_live_exact_apps_server(
     command = (
         f"/usr/bin/python3 -m pursers_personal.cli mcp --candidate-source "
         f"{tmp_path}/checkout/{runtime['artifact']} --candidate-commit {COMMIT} "
-        f"--board-id {BOARD} --acceptance-runtime-receipt {runtime['receipt']}"
+        f"--board-id {BOARD} --acceptance-runtime-receipt {runtime['receipt']} "
+        f"--acceptance-challenge-key {runtime['challenge_key']}"
     )
     monkeypatch.setattr(
         observer_module,
@@ -692,6 +703,10 @@ def test_personal_runtime_binds_live_exact_apps_server(
         "version": "5.0.0a25",
         "build": runtime["artifact_sha256"],
         "candidate_commit": COMMIT,
+        "attestation_pid": "4242",
+        "attestation_build": runtime["artifact_sha256"],
+        "attestation_source": f"{tmp_path}/checkout/{runtime['artifact']}",
+        "attestation_key_path": runtime["challenge_key"],
     }
 
 
@@ -715,6 +730,84 @@ def test_personal_runtime_rejects_stale_or_unrelated_process(
     monkeypatch.setattr(observer_module, "_git_identity", lambda _repository: (COMMIT, " M changed"))
     with pytest.raises(observer_module.ObserverError, match="candidate binding changed"):
         observer_module._probe_personal_mcp_runtime(config, surface, page_digest)
+
+
+def test_python_execution_selector_stops_at_the_first_selector() -> None:
+    selector = observer_module._python_execution_selector
+    assert selector(["python3", "-m", "pursers_personal.cli", "mcp"]) == (
+        "module",
+        "pursers_personal.cli",
+        3,
+    )
+    assert selector(["python3", "-mpursers_personal.cli", "mcp"]) == (
+        "module",
+        "pursers_personal.cli",
+        2,
+    )
+    assert selector(["python3", "-S", "-u", "-m", "pursers_personal.cli", "mcp"]) == (
+        "module",
+        "pursers_personal.cli",
+        5,
+    )
+    assert selector(["python3", "-Sm", "pursers_personal.cli", "mcp"]) == (
+        "module",
+        "pursers_personal.cli",
+        3,
+    )
+    assert selector(["python3", "-W", "ignore", "-m", "pursers_personal.cli", "mcp"]) == (
+        "module",
+        "pursers_personal.cli",
+        5,
+    )
+    # An earlier -c wins; the later -m tuple is inert argument text.
+    assert selector(["python3", "-c", "pass", "-m", "pursers_personal.cli", "mcp"]) == (
+        "command",
+        "pass",
+        3,
+    )
+    assert selector(["python3", "unrelated.py", "-m", "pursers_personal.cli", "mcp"]) == (
+        "script",
+        "unrelated.py",
+        2,
+    )
+    assert selector(["python3", "-", "-m", "pursers_personal.cli", "mcp"]) == ("stdin", None, 2)
+    assert selector(["python3"]) == ("repl", None, 1)
+
+
+def test_personal_runtime_rejects_inert_module_tuple_after_an_earlier_selector(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The exact bypass reported against 8d04a65.
+
+    Python executes ``-c pass`` and never imports the module, yet the old
+    predicate accepted the command because the required three-token tuple
+    appeared somewhere in argv.
+    """
+
+    config, surface, page_digest = _personal_runtime_fixture(tmp_path)
+    monkeypatch.setattr(observer_module, "_git_identity", lambda _repository: (COMMIT, ""))
+    runtime = surface["runtime"]
+    tail = (
+        f"--candidate-source {tmp_path}/checkout/{runtime['artifact']} "
+        f"--candidate-commit {COMMIT} --board-id {BOARD} "
+        f"--acceptance-runtime-receipt {runtime['receipt']}"
+    )
+    for decoy in (
+        f"/usr/bin/python3 -c pass -m pursers_personal.cli mcp {tail}",
+        f"/usr/bin/python3 decoy.py -m pursers_personal.cli mcp {tail}",
+        f"/usr/bin/python3 - -m pursers_personal.cli mcp {tail}",
+        f"/usr/bin/python3 -m pursers_personal.other mcp {tail}",
+        f"/usr/bin/python-decoy -m pursers_personal.cli mcp {tail}",
+    ):
+        monkeypatch.setattr(
+            observer_module,
+            "_run_identity_command",
+            lambda *_args, _stdout=decoy, **_kwargs: subprocess.CompletedProcess(
+                [], 0, stdout=_stdout, stderr=""
+            ),
+        )
+        with pytest.raises(observer_module.ObserverError):
+            observer_module._probe_personal_mcp_runtime(config, surface, page_digest)
 
 
 def test_assemble_refuses_any_missing_authoritative_capture(
@@ -996,3 +1089,221 @@ def test_doctor_reports_healthy_host_runtime_and_browser_channel(
         "build": "1788252518",
     }
     assert report["checks"]["browser_channel"]["state"] == "ok"
+
+
+# --- ground A: the live transport challenge carried by the capture ----------
+
+NONCE = "a" * 64
+
+
+def _attested_binding(surface: dict[str, object]) -> dict[str, str]:
+    """The binding _probe_personal_mcp_runtime returns for the fixture."""
+    runtime = surface["runtime"]
+    return {
+        "product": "Pursers Personal",
+        "version": "5.0.0a25",
+        "build": runtime["artifact_sha256"],
+        "candidate_commit": COMMIT,
+        "selected_board": BOARD,
+        "attestation_pid": "4242",
+        "attestation_build": runtime["artifact_sha256"],
+        "attestation_source": "/does/not/matter/apps_server.py",
+        "attestation_key_path": runtime["challenge_key"],
+    }
+
+
+def _signed_attestation(
+    binding: dict[str, str], nonce: str, key: bytes, **overrides: object
+) -> dict[str, object]:
+    """Sign a claim the way apps_server.acceptance_attestation serializes it."""
+    claim = {
+        "schema_version": 1,
+        "server_name": "On Board Personal",
+        "version": binding["version"],
+        "build": binding["attestation_build"],
+        "candidate_commit": binding["candidate_commit"],
+        "candidate_source": binding["attestation_source"],
+        "board_id": binding["selected_board"],
+        "pid": int(binding["attestation_pid"]),
+        "transport": "stdio",
+        "nonce": nonce,
+    }
+    claim.update(overrides)
+    payload = json.dumps(claim, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return {**claim, "signature": hmac.new(key, payload, hashlib.sha256).hexdigest()}
+
+
+def _snapshot_carrying(attestation: dict[str, object] | None) -> dict[str, object]:
+    """An accessibility snapshot shaped like the ones the backend returns."""
+    nodes: list[dict[str, object]] = [
+        {"role": "heading", "name": "On Board Personal"},
+        {"role": "button", "name": "Refresh"},
+    ]
+    if attestation is not None:
+        nodes.append(
+            {"role": "text", "name": f"acceptance_runtime_attest -> {json.dumps(attestation)}"}
+        )
+    return {"nodes": nodes}
+
+
+def test_attestation_verifies_when_the_live_server_answers_the_nonce(
+    tmp_path: Path,
+) -> None:
+    _config, surface, _digest = _personal_runtime_fixture(tmp_path)
+    binding = _attested_binding(surface)
+    key = Path(binding["attestation_key_path"]).read_bytes()
+    attestation = _signed_attestation(binding, NONCE, key)
+    verified = observer_module._verify_acceptance_attestation(
+        binding, {"attestation_nonce": NONCE}, _snapshot_carrying(attestation)
+    )
+    assert verified == attestation
+
+
+def test_capture_without_any_attestation_is_refused(tmp_path: Path) -> None:
+    _config, surface, _digest = _personal_runtime_fixture(tmp_path)
+    binding = _attested_binding(surface)
+    with pytest.raises(observer_module.ObserverError, match="no valid acceptance_runtime_attest"):
+        observer_module._verify_acceptance_attestation(
+            binding, {"attestation_nonce": NONCE}, _snapshot_carrying(None)
+        )
+
+
+def test_decoy_without_the_verifier_key_cannot_produce_the_signature(
+    tmp_path: Path,
+) -> None:
+    """A decoy MCP with a correct command line still holds no challenge key."""
+    _config, surface, _digest = _personal_runtime_fixture(tmp_path)
+    binding = _attested_binding(surface)
+    forged = _signed_attestation(binding, NONCE, b"\x99" * 32)
+    with pytest.raises(observer_module.ObserverError, match="no valid acceptance_runtime_attest"):
+        observer_module._verify_acceptance_attestation(
+            binding, {"attestation_nonce": NONCE}, _snapshot_carrying(forged)
+        )
+
+
+def test_stale_answer_after_key_rotation_is_refused(tmp_path: Path) -> None:
+    _config, surface, _digest = _personal_runtime_fixture(tmp_path)
+    binding = _attested_binding(surface)
+    key_path = Path(binding["attestation_key_path"])
+    stale = _signed_attestation(binding, NONCE, key_path.read_bytes())
+    key_path.write_bytes(b"\x22" * 32)
+    with pytest.raises(observer_module.ObserverError, match="no valid acceptance_runtime_attest"):
+        observer_module._verify_acceptance_attestation(
+            binding, {"attestation_nonce": NONCE}, _snapshot_carrying(stale)
+        )
+
+
+def test_replayed_nonce_from_an_earlier_capture_is_refused(tmp_path: Path) -> None:
+    _config, surface, _digest = _personal_runtime_fixture(tmp_path)
+    binding = _attested_binding(surface)
+    key = Path(binding["attestation_key_path"]).read_bytes()
+    earlier = _signed_attestation(binding, "b" * 64, key)
+    with pytest.raises(observer_module.ObserverError, match="no valid acceptance_runtime_attest"):
+        observer_module._verify_acceptance_attestation(
+            binding, {"attestation_nonce": NONCE}, _snapshot_carrying(earlier)
+        )
+
+
+@pytest.mark.parametrize(
+    "field, value",
+    [
+        ("pid", 9999),
+        ("build", "0" * 64),
+        ("candidate_commit", "1" * 40),
+        ("board_id", "another-board"),
+        ("transport", "http"),
+        ("server_name", "On Board Central"),
+    ],
+)
+def test_attestation_disagreeing_with_the_probed_runtime_is_refused(
+    tmp_path: Path, field: str, value: object
+) -> None:
+    _config, surface, _digest = _personal_runtime_fixture(tmp_path)
+    binding = _attested_binding(surface)
+    key = Path(binding["attestation_key_path"]).read_bytes()
+    signed = _signed_attestation(binding, NONCE, key, **{field: value})
+    with pytest.raises(observer_module.ObserverError, match="no valid acceptance_runtime_attest"):
+        observer_module._verify_acceptance_attestation(
+            binding, {"attestation_nonce": NONCE}, _snapshot_carrying(signed)
+        )
+
+
+def test_group_readable_challenge_key_is_refused(tmp_path: Path) -> None:
+    _config, surface, _digest = _personal_runtime_fixture(tmp_path)
+    binding = _attested_binding(surface)
+    key_path = Path(binding["attestation_key_path"])
+    attestation = _signed_attestation(binding, NONCE, key_path.read_bytes())
+    key_path.chmod(0o640)
+    with pytest.raises(observer_module.ObserverError, match="challenge key must be private"):
+        observer_module._verify_acceptance_attestation(
+            binding, {"attestation_nonce": NONCE}, _snapshot_carrying(attestation)
+        )
+
+
+def test_short_challenge_key_is_refused(tmp_path: Path) -> None:
+    _config, surface, _digest = _personal_runtime_fixture(tmp_path)
+    binding = _attested_binding(surface)
+    key_path = Path(binding["attestation_key_path"])
+    key_path.write_bytes(b"\x33" * 16)
+    attestation = _signed_attestation(binding, NONCE, b"\x33" * 16)
+    with pytest.raises(observer_module.ObserverError, match="challenge key is too short"):
+        observer_module._verify_acceptance_attestation(
+            binding, {"attestation_nonce": NONCE}, _snapshot_carrying(attestation)
+        )
+
+
+def test_personal_process_without_the_challenge_key_flag_is_refused(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The old command line, valid before ground A, no longer binds Personal."""
+    config, surface, page_digest = _personal_runtime_fixture(tmp_path)
+    monkeypatch.setattr(observer_module, "_git_identity", lambda _repository: (COMMIT, ""))
+    runtime = surface["runtime"]
+    command = (
+        f"/usr/bin/python3 -m pursers_personal.cli mcp --candidate-source "
+        f"{tmp_path}/checkout/{runtime['artifact']} --candidate-commit {COMMIT} "
+        f"--board-id {BOARD} --acceptance-runtime-receipt {runtime['receipt']}"
+    )
+    monkeypatch.setattr(
+        observer_module,
+        "_run_identity_command",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess([], 0, stdout=command, stderr=""),
+    )
+    with pytest.raises(
+        observer_module.ObserverError, match="lacks --acceptance-challenge-key"
+    ):
+        observer_module._probe_personal_mcp_runtime(config, surface, page_digest)
+
+
+def test_capture_spec_without_a_nonce_is_refused(tmp_path: Path) -> None:
+    spec = {
+        "schema_version": 1,
+        "observation_id": "door-connect",
+        "target": {"base_url": "http://127.0.0.1:8765", "board_id": BOARD},
+        "candidate_commit": COMMIT,
+        "page_url": "http://127.0.0.1:8765/index.html",
+        "assertions": [{"path": "nodes.0.name", "equals": "On Board Personal"}],
+        "surface_id": "personal",
+    }
+    spec_path = tmp_path / "spec.json"
+    spec_path.write_text(json.dumps(spec), encoding="utf-8")
+    with pytest.raises(observer_module.ObserverError, match="fields do not match schema"):
+        observer_module._read_spec(spec_path)
+
+
+@pytest.mark.parametrize("nonce", ["", "short", "A" * 64, "z" * 64, "a" * 200])
+def test_capture_spec_nonce_must_be_lowercase_hex(tmp_path: Path, nonce: str) -> None:
+    spec = {
+        "schema_version": 1,
+        "observation_id": "door-connect",
+        "target": {"base_url": "http://127.0.0.1:8765", "board_id": BOARD},
+        "candidate_commit": COMMIT,
+        "page_url": "http://127.0.0.1:8765/index.html",
+        "assertions": [{"path": "nodes.0.name", "equals": "On Board Personal"}],
+        "surface_id": "personal",
+        "attestation_nonce": nonce,
+    }
+    spec_path = tmp_path / "spec.json"
+    spec_path.write_text(json.dumps(spec), encoding="utf-8")
+    with pytest.raises(observer_module.ObserverError, match="attestation_nonce must be"):
+        observer_module._read_spec(spec_path)

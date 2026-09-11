@@ -24,6 +24,7 @@ drive it.
 | running extension candidate SHA | observer only, fetched by that browser from the installed `candidate.json` and from the same-origin host status route, both inside a verifier-created CDP isolated world; when both answer they must agree |
 | surface product / version / build | observer only: signed AionUi listener for AionUi; verifier-pinned listener process plus exact clean-checkout artifact for Fleet; signed AionUi page bytes plus a live exact-source Personal MCP stdio process and process-authored private receipt for Personal |
 | observation id, expected origin / sandbox board / candidate commit | caller (runner request), accepted only when they equal the independently observed values |
+| Personal live transport attestation | the Personal MCP process, signed with the verifier-held challenge key over a verifier-chosen nonce; carried by the capture and recomputed by the observer, never trusted as snapshot text |
 | assertions | canonical `acceptance-facts.json` declarations validated by `check_artifacts.py`; runner rejects generic or relabelled predicates before capture |
 
 Accessibility predicates inspect only non-ignored AX nodes. Hidden panels cannot
@@ -57,6 +58,9 @@ beside itself, never from environment variables.
   version and build time
 - a sandbox board id prefixed `sandbox-` or `test-` (production boards are refused)
 - ego lite / the `ego-browser` CLI for the default capture backend
+- a verifier-generated Personal challenge key outside the checkout, not a symlink,
+  mode `0600`, at least 32 bytes, and a Personal MCP launched with
+  `--acceptance-challenge-key`
 - `PURSERS_HOME_ACCEPTANCE_MUTATE=I_UNDERSTAND_SANDBOX_ONLY` for validation
 
 ## Reproducible commands
@@ -136,7 +140,7 @@ origin, so serving or labelling it as AionUi would erase actual-product provenan
 {"schema_version":1,"candidate_commit":"FULL_SHA","surfaces":{
   "aionui":{"adapter":"signed-aionui","target":{"base_url":"http://127.0.0.1:18822","board_id":"sandbox-home"}},
   "fleet":{"adapter":"pinned-process-artifact","target":{"base_url":"http://127.0.0.1:18821","board_id":"sandbox-home"},"artifact":"tools/fleet-dashboard/fleet_dashboard.py"},
-  "personal":{"adapter":"pinned-signed-aionui-personal-mcp","target":{"base_url":"http://127.0.0.1:18822","board_id":"sandbox-home"},"artifact":"packages/personal/src/pursers_personal/resources/dashboard.html","runtime":{"artifact":"packages/personal/src/pursers_personal/apps_server.py","pid_file":"/PATH/TO/verifier-runtime/personal.pid","receipt":"/PATH/TO/verifier-runtime/personal-runtime.json"}}
+  "personal":{"adapter":"pinned-signed-aionui-personal-mcp","target":{"base_url":"http://127.0.0.1:18822","board_id":"sandbox-home"},"artifact":"packages/personal/src/pursers_personal/resources/dashboard.html","runtime":{"artifact":"packages/personal/src/pursers_personal/apps_server.py","challenge_key":"/PATH/TO/verifier-runtime/personal-acceptance-challenge.key","pid_file":"/PATH/TO/verifier-runtime/personal.pid","receipt":"/PATH/TO/verifier-runtime/personal-runtime.json"}}
 }}
 ```
 
@@ -146,6 +150,96 @@ candidate source, sandbox board, PID and private process-authored runtime receip
 match the clean verifier checkout. A stale or unrelated MCP process is rejected.
 For Fleet, the observer requires one
 listener and proves its process command executes the pinned dashboard artifact.
+
+### Personal live transport challenge
+
+The bindings above prove that a matching process exists. They do not prove that
+the process answering the browser is that process, so every Personal capture also
+carries a verifier-issued challenge.
+
+**The verifier owns the key.** Generate it yourself. Never accept a key authored
+by a worker, and never place one inside the candidate checkout. The observer
+refuses a key that is a symlink, that carries any group or other permission bit,
+or that is shorter than 32 bytes. Keep it beside the pid file and the runtime
+receipt, outside the checkout:
+
+```sh
+umask 077
+head -c 48 /dev/urandom > /PATH/TO/verifier-runtime/personal-acceptance-challenge.key
+chmod 600 /PATH/TO/verifier-runtime/personal-acceptance-challenge.key
+```
+
+**Launch flag and manifest field.** The Personal MCP must now be started with
+`--acceptance-challenge-key` in addition to `--candidate-source`,
+`--candidate-commit`, `--board-id` and `--acceptance-runtime-receipt`, and the
+same path must appear as `runtime.challenge_key` in the surface manifest, whose
+Personal runtime field set is exactly `artifact`, `artifact_sha256`,
+`challenge_key`, `pid_file` and `receipt`. The new flag belongs to the
+all-or-none acceptance group, so an acceptance launch without a verifier key
+raises instead of degrading, and the older command line is refused with
+`lacks --acceptance-challenge-key`. Registration is conditional: a server started
+without a challenge does not expose `acceptance_runtime_attest` at all, so a
+non-acceptance server cannot be mistaken for one.
+
+**Nonce order matters.** `capture` drives the browser itself, so the answer has
+to be on the page before capture runs:
+
+1. choose a fresh nonce per observation, 32 to 128 lowercase hex characters;
+2. in the authenticated AionUi conversation, have the model call
+   `acceptance_runtime_attest` with that nonce, so the answer travels the same
+   stdio transport and lands in the conversation;
+3. run capture with the same value:
+
+```sh
+python3 tools/aionui-extension/tests/home_acceptance/runner.py capture \
+  --observer /PATH/TO/verifier-observer \
+  --evidence /PATH/TO/evidence \
+  --observation <observation-id> \
+  --surface personal \
+  --target http://127.0.0.1:18822 \
+  --board sandbox-home \
+  --commit <full-40-hex-candidate-sha> \
+  --page http://127.0.0.1:18822/PATH/TO/home-entry \
+  --assertions /PATH/TO/assertions.json \
+  --attestation-nonce <the-same-nonce>
+```
+
+The generated default nonce only suits surfaces that carry no challenge. For
+Personal, pass the exact value the conversation was asked to sign; a nonce the
+runtime never answered fails closed.
+
+**Why the challenge rides the browser evidence.** The observer has no channel to
+the Personal stdio transport at all. `probe_host_identity` is pure local process
+and code-signing inspection: `lsof` for the single listening PID, `ps` for its
+argv, bundle layout, `Info.plist`, then `codesign`. There is no route for
+invoking an MCP tool. The capture backend is the only other channel and it merely
+drives a browser at a page URL. A side-channel poll is therefore impossible, and
+it would also be weaker: under this design the answer literally travels the
+transport AionUi uses and lands inside the accessibility snapshot the reviewer
+already captures. The observer then recomputes the HMAC over the canonical claim
+(`schema_version`, `server_name`, `version`, `build`, `candidate_commit`,
+`candidate_source`, `board_id`, `pid`, `transport`, `nonce`, serialized with
+sorted keys and compact separators) and compares it with `hmac.compare_digest`.
+The attested PID, artifact digest, candidate SHA, board and `stdio` transport
+must equal the independently probed values, so a decoy that merely looks right on
+the command line, a stale answer from before key rotation, a replayed nonce, an
+unsigned claim or a missing answer all fail closed. Snapshot text stays untrusted
+until that recomputation succeeds.
+
+The harness repeats that recomputation independently at validate time, so the
+challenge is enforced by the final acceptance authority and not only inside
+capture. Each Personal observation receipt carries its `attestation` and
+`attestation_nonce`; `harness.py` binds the claim to that observation's own
+runtime binding, then re-derives the HMAC using the key, the runtime pid and the
+pinned candidate source read from the verifier's own `observer.json`, never from
+the report. Two observations may not answer the same nonce. If that material is
+missing or unreadable the report is refused: an absent key means the challenge
+cannot be validated, which is a refusal rather than a pass.
+
+Note: worker-3 rebinds its private handoff, meaning the challenge key, pid file,
+receipt and the launched runtime, to the final combined source after source
+freeze. The paths above describe the shape, not a promise that an existing
+handoff already carries them.
 
 ## Evidence directory layout
 
