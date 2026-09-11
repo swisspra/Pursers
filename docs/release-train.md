@@ -52,20 +52,35 @@ to match the manifest versions before it creates `SHA256SUMS.txt`. Alpha, beta,
 and release-candidate tags use `--prerelease --latest=false` on both the create
 and existing-release paths. Stable tags remain the latest release.
 
-For `v5.0.0b1`, the coordinator and operator must replace `<APPROVED_SHA>` below
+For `v5.0.0b1`, the coordinator and operator must replace
+`APPROVED_FULL_40_HEX_SHA` below
 with the same exact candidate that passed source review, all test suites,
 browser/201-behavior evidence, CI, and CodeQL. The preparation branch is not a
 tag candidate by itself.
 
 ```sh
 TAG=v5.0.0b1
-CANDIDATE=<APPROVED_SHA>
+CANDIDATE="APPROVED_FULL_40_HEX_SHA"
 test "$(git rev-parse "$CANDIDATE^{commit}")" = "$CANDIDATE"
 git tag -s "$TAG" "$CANDIDATE"
 git push origin "refs/tags/$TAG"
-gh run watch --repo swisspra/Pursers --workflow release
+RUN_ID=""
+for attempt in {1..30}; do
+  RUN_ID="$(gh run list --repo swisspra/Pursers --workflow release.yml \
+    --event push --branch "$TAG" --commit "$CANDIDATE" --limit 1 \
+    --json databaseId --jq '.[0].databaseId')"
+  test -n "$RUN_ID" && test "$RUN_ID" != null && break
+  sleep 2
+done
+test -n "$RUN_ID"
+gh run watch "$RUN_ID" --repo swisspra/Pursers --exit-status
 gh release view "$TAG" --repo swisspra/Pursers \
-  --json tagName,isPrerelease,isLatest,assets
+  --json tagName,isPrerelease,assets,targetCommitish
+test "$(gh release view "$TAG" --repo swisspra/Pursers \
+  --json isPrerelease --jq '.isPrerelease')" = true
+LATEST_STABLE="$(gh api repos/swisspra/Pursers/releases/latest \
+  --jq '.tag_name' 2>/dev/null || true)"
+test "$LATEST_STABLE" != "$TAG"
 gh release download "$TAG" --repo swisspra/Pursers --dir dist-release
 (cd dist-release && shasum -a 256 -c SHA256SUMS.txt)
 ```
