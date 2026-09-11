@@ -499,7 +499,11 @@ def test_mcp_stdio_rejects_inert_module_tuple(
 
 
 def _browser_state_trust(
-    tmp_path: Path, http_server: str,
+    tmp_path: Path,
+    http_server: str,
+    *,
+    action: dict[str, Any] | None = None,
+    action_result: Any = "clicked",
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     trust = _trust(tmp_path, http_server)
     verifier = tmp_path / "browser-verifier"
@@ -508,6 +512,10 @@ def _browser_state_trust(
     config.write_text("{}", encoding="utf-8")
     config.chmod(0o600)
     command = verifier / "browser_observer.py"
+    recipe_action = action or {
+        "kind": "click", "selector": "#start", "path": "/performed",
+    }
+    action_selected = {recipe_action["path"]: action_result}
     command.write_text(
         "#!/usr/bin/env python3\n"
         "import datetime,hashlib,json,sys\n"
@@ -516,14 +524,15 @@ def _browser_state_trust(
         "corr={k:context[k] for k in ('observation_id','run_id','action_id','entity')}\n"
         "def phase(name,method,selected):\n"
         " return {'method':method,'path':'/browser/state/'+name,'status':200,'selected':selected,'response_sha256':hashlib.sha256(json.dumps(selected,sort_keys=True).encode()).hexdigest(),'correlation':corr}\n"
+        f"action_selected={action_selected!r}\n"
         "now=datetime.datetime.now(datetime.timezone.utc).isoformat().replace('+00:00','Z')\n"
-        "print(json.dumps({'schema_version':1,'context':context,'surface_id':request['surface_id'],'target':request['target'],'candidate_commit':request['candidate_commit'],'page_url':request['page_url'],'runtime':{'product':'AionUi','version':'2.2.1','build':'build-1','source':'signed-aionui-webui-listener'},'before':phase('before','GET',{'/state':'idle'}),'action':phase('action','POST',{'/performed':'clicked'}),'after':phase('after','GET',{'/state':'ready'}),'order':{'before_at':now,'action_at':now,'after_at':now}}))\n",
+        "print(json.dumps({'schema_version':1,'context':context,'surface_id':request['surface_id'],'target':request['target'],'candidate_commit':request['candidate_commit'],'page_url':request['page_url'],'runtime':{'product':'AionUi','version':'2.2.1','build':'build-1','source':'signed-aionui-webui-listener'},'before':phase('before','GET',{'/state':'idle'}),'action':phase('action','POST',action_selected),'after':phase('after','GET',{'/state':'ready'}),'order':{'before_at':now,'action_at':now,'after_at':now}}))\n",
         encoding="utf-8",
     )
     command.chmod(0o700)
     recipe = {
         "before": [{"path": "/state", "selector": "#status", "property": "text"}],
-        "actions": [{"kind": "click", "selector": "#start", "path": "/performed"}],
+        "actions": [recipe_action],
         "after": [{"path": "/state", "selector": "#status", "property": "text"}],
         "settle_milliseconds": 0,
     }
@@ -543,7 +552,7 @@ def _browser_state_trust(
         "recipe": recipe,
         "env": {"PATH": os.defpath},
         "timeout_seconds": 10,
-        "select_allowlist": ["/state", "/performed"],
+        "select_allowlist": ["/state", recipe_action["path"]],
     }
     trust["state_sources"]["aionui-start"] = source
     context = _context(
@@ -601,6 +610,46 @@ def test_browser_fetch_json_action_has_closed_pointer_contract() -> None:
     extra = {**action, "script": "window.evil()"}
     with pytest.raises(TypedEvidenceError, match="fields do not match schema"):
         typed_evidence._browser_actions([extra])
+
+
+def test_browser_fetch_json_exact_structured_result_is_evaluable(
+    tmp_path: Path, http_server: str,
+) -> None:
+    transport = {
+        "type": "stdio",
+        "command": "pursers-wait-bridge",
+        "args": [],
+        "env": {},
+    }
+    action = {
+        "kind": "fetch_json",
+        "method": "POST",
+        "endpoint": "/pursers/onboarding/recover",
+        "body": {
+            "board": BOARD,
+            "role": "worker",
+            "seat_name": "worker-1",
+        },
+        "pointer": "/body/mcp_definition/transport",
+        "path": "/mcp_transport",
+    }
+    trust, context, recorder = _browser_state_trust(
+        tmp_path, http_server, action=action, action_result=transport
+    )
+    context["observation_id"] = "extension.environment-free-mcp-registration"
+    evidence = record_evidence(
+        _request("state_transition", recorder, context), trust
+    )
+    expected = _expected(evidence, [{
+        "phase": "action",
+        "path": "/mcp_transport",
+        "op": "eq",
+        "value": transport,
+    }])
+    changed = copy.deepcopy(expected)
+    changed["all_of"][0]["value"]["env"] = {"TOKEN": "inherited"}
+    assert evaluate_evidence(evidence, changed, trust)["passed"] is False
+    assert evaluate_evidence(evidence, expected, trust)["passed"] is True
 
 
 def test_http_response_real_roundtrip_and_all_of(tmp_path: Path, http_server: str) -> None:
