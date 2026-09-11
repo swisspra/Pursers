@@ -556,7 +556,14 @@
         "adversarial_negatives": [
           {
             "mutation": "registration requires inherited secrets or a populated env",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/registration_status",
+                "value": "declared counterexample: registration requires inherited secrets or a populated env"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -739,7 +746,34 @@
         "adversarial_negatives": [
           {
             "mutation": "unordered navigation links or a generic Progress heading are accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/connect_step",
+                "value": "declared counterexample: unordered navigation links or a generic Progress heading are accepted"
+              },
+              {
+                "phase": "after",
+                "path": "/prepare_step",
+                "value": "declared counterexample: unordered navigation links or a generic Progress heading are accepted"
+              },
+              {
+                "phase": "after",
+                "path": "/ready_step",
+                "value": "declared counterexample: unordered navigation links or a generic Progress heading are accepted"
+              },
+              {
+                "phase": "after",
+                "path": "/current_step_count",
+                "value": 2
+              },
+              {
+                "phase": "after",
+                "path": "/connection_section",
+                "value": 2
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -935,7 +969,14 @@
         "adversarial_negatives": [
           {
             "mutation": "the Codex reviewer or worker context is substituted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/selected_board",
+                "value": "declared counterexample: the Codex reviewer or worker context is substituted"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -1099,7 +1140,14 @@
         "adversarial_negatives": [
           {
             "mutation": "the Claude reviewer or worker context is substituted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/selected_board",
+                "value": "declared counterexample: the Claude reviewer or worker context is substituted"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -1263,7 +1311,14 @@
         "adversarial_negatives": [
           {
             "mutation": "the Codex worker or reviewer context is substituted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/selected_board",
+                "value": "declared counterexample: the Codex worker or reviewer context is substituted"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -1427,7 +1482,14 @@
         "adversarial_negatives": [
           {
             "mutation": "the Claude worker or reviewer context is substituted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/selected_board",
+                "value": "declared counterexample: the Claude worker or reviewer context is substituted"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -1548,51 +1610,30 @@
         "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; the operator lacks board-admin authority.",
         "action": "submit Add project",
         "expected_transition": "board-admin authorization fails before any registry, board, credential, key, or clone mutation",
-        "exact_selection": "assert PermissionError and byte-identical registry, boards, JWKS, and key state",
+        "exact_selection": "assert HTTP 403 PermissionError plus correlated failed/unchanged evidence computed from the project registry entry and credential-inclusive door material",
         "negative_counterexample": "a later board RPC denial after the registry write or a validation error is accepted",
         "correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id."
       },
       "adapter": {
         "support_status": "supported",
-        "channel": "browser_action_state",
-        "adapter": "trusted_browser_state_v1",
-        "surface": "fleet",
-        "page_binding": "verifier-owned exact candidate loopback page",
-        "recipe": {
-          "before": [
-            {
-              "path": "/fleet_add_project_authorization_error_board_admin_authority_required",
-              "selector": "#add-project-result",
-              "property": "text"
-            },
-            {
-              "path": "/fleet_add_project_authorization_error_control_disabled",
-              "selector": "#add-project-form",
-              "property": "disabled"
-            }
-          ],
-          "actions": [
-            {
-              "kind": "submit",
-              "selector": "#add-project-form",
-              "path": "/fleet_add_project_authorization_error_action"
-            }
-          ],
-          "after": [
-            {
-              "path": "/fleet_add_project_authorization_error_board_admin_authority_required",
-              "selector": "#add-project-result",
-              "property": "text"
-            }
-          ],
-          "settle_milliseconds": 250
-        },
+        "channel": "fleet_project_add",
+        "adapter": "trusted_http_v1",
+        "method": "POST",
+        "path": "/api/projects/add",
         "select_allowlist": [
-          "/fleet_add_project_authorization_error_action",
-          "/fleet_add_project_authorization_error_board_admin_authority_required",
-          "/fleet_add_project_authorization_error_control_disabled"
+          "/error",
+          "/_evidence/outcome",
+          "/_evidence/changed",
+          "/_evidence/effect"
         ],
-        "semantic_basis": "assert PermissionError and byte-identical registry, boards, JWKS, and key state"
+        "correlation": "verified Fleet trace binds the denied request to candidate, board, runtime, action and entity; credential-inclusive project and door-material before/after state drives changed/effect",
+        "fixture_bindings": {
+          "project": "denied-project",
+          "board": "sandbox-board",
+          "paths": "verifier substitutes a private absolute path for /PATH/TO/...",
+          "authority": "the correlated Fleet principal lacks admin membership on the home board"
+        },
+        "parent_contract_ref": "7f5ca61a556ed881567dadbc8c49f4b4a6a74c4a"
       },
       "required_evidence": [
         "trusted exact-candidate/board/runtime evidence from the named adapter",
@@ -1607,7 +1648,19 @@
         "adversarial_negatives": [
           {
             "mutation": "a later board RPC denial after the registry write or a validation error is accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "target": "field",
+                "path": "/_evidence/changed",
+                "value": true
+              },
+              {
+                "target": "field",
+                "path": "/_evidence/effect",
+                "value": "project_state_changed"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -1626,7 +1679,7 @@
       },
       "executable_request": {
         "schema_version": 1,
-        "kind": "state_transition",
+        "kind": "http_response",
         "context_bindings": [
           "observation_id",
           "run_id",
@@ -1639,56 +1692,65 @@
           "causal_index"
         ],
         "recorder": {
-          "source_id": "browser-state-fleet.add-project-authorization-error",
-          "before": [
-            {
-              "path": "/fleet_add_project_authorization_error_board_admin_authority_required",
-              "selector": "#add-project-result",
-              "property": "text"
+          "source_id": "fleet-api",
+          "action_origin": "verifier_api",
+          "request": {
+            "method": "POST",
+            "path": "/api/projects/add",
+            "body": {
+              "name": "denied-project",
+              "board_id": "sandbox-board",
+              "work_dir": "/PATH/TO/DENIED",
+              "integration_ref": "main"
             },
-            {
-              "path": "/fleet_add_project_authorization_error_control_disabled",
-              "selector": "#add-project-form",
-              "property": "disabled"
-            }
-          ],
-          "action": [
-            {
-              "kind": "submit",
-              "selector": "#add-project-form",
-              "path": "/fleet_add_project_authorization_error_action"
-            }
-          ],
-          "after": [
-            {
-              "path": "/fleet_add_project_authorization_error_board_admin_authority_required",
-              "selector": "#add-project-result",
-              "property": "text"
-            }
-          ]
+            "select": [
+              "/error",
+              "/_evidence/outcome",
+              "/_evidence/changed",
+              "/_evidence/effect"
+            ]
+          }
         }
       },
       "canonical_predicate": {
-        "kind": "state_transition",
-        "source_id": "browser-state-fleet.add-project-authorization-error",
+        "kind": "http_response",
+        "source_id": "fleet-api",
         "assertions": [
           {
-            "phase": "before",
-            "path": "/fleet_add_project_authorization_error_control_disabled",
+            "target": "action_origin",
+            "path": "",
+            "op": "eq",
+            "value": "verifier_api"
+          },
+          {
+            "target": "status",
+            "path": "",
+            "op": "eq",
+            "value": 403
+          },
+          {
+            "target": "field",
+            "path": "/error",
+            "op": "contains",
+            "value": "admin membership required"
+          },
+          {
+            "target": "field",
+            "path": "/_evidence/outcome",
+            "op": "eq",
+            "value": "failed"
+          },
+          {
+            "target": "field",
+            "path": "/_evidence/changed",
             "op": "eq",
             "value": false
           },
           {
-            "phase": "action",
-            "path": "/fleet_add_project_authorization_error_action",
+            "target": "field",
+            "path": "/_evidence/effect",
             "op": "eq",
-            "value": "submitted"
-          },
-          {
-            "phase": "after",
-            "path": "/fleet_add_project_authorization_error_board_admin_authority_required",
-            "op": "contains",
-            "value": "board admin authority required"
+            "value": "project_state_unchanged"
           }
         ]
       }
@@ -1779,7 +1841,19 @@
         "adversarial_negatives": [
           {
             "mutation": "Project name is treated as board ID",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/board_value",
+                "value": "declared counterexample: Project name is treated as board ID"
+              },
+              {
+                "phase": "after",
+                "path": "/board_error",
+                "value": "declared counterexample: Project name is treated as board ID"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -1932,7 +2006,19 @@
         "adversarial_negatives": [
           {
             "mutation": "a UI success message without clone state is accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "target": "field",
+                "path": "/steps/4/step",
+                "value": "declared counterexample: a UI success message without clone state is accepted"
+              },
+              {
+                "target": "field",
+                "path": "/steps/4/status",
+                "value": "declared counterexample: a UI success message without clone state is accepted"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -2080,7 +2166,34 @@
         "adversarial_negatives": [
           {
             "mutation": "already-present step labels are accepted while credentials are reissued",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "target": "field",
+                "path": "/_evidence/changed",
+                "value": true
+              },
+              {
+                "target": "field",
+                "path": "/_evidence/effect",
+                "value": "declared counterexample: already-present step labels are accepted while credentials are reissued"
+              },
+              {
+                "target": "field",
+                "path": "/doors",
+                "value": "declared counterexample: already-present step labels are accepted while credentials are reissued"
+              },
+              {
+                "target": "field",
+                "path": "/steps/5/step",
+                "value": "declared counterexample: already-present step labels are accepted while credentials are reissued"
+              },
+              {
+                "target": "field",
+                "path": "/steps/5/status",
+                "value": "declared counterexample: already-present step labels are accepted while credentials are reissued"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -2277,7 +2390,24 @@
         "adversarial_negatives": [
           {
             "mutation": "persistent Doors table metadata is accepted as the secret",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/worker_door_retained",
+                "value": 1
+              },
+              {
+                "phase": "after",
+                "path": "/reviewer_door_retained",
+                "value": 1
+              },
+              {
+                "phase": "after",
+                "path": "/door_input_count_after",
+                "value": 1
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -2478,7 +2608,14 @@
         "adversarial_negatives": [
           {
             "mutation": "generic error text is accepted as partial-step evidence",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/fleet_add_project_partial_failure_failed_step",
+                "value": "declared counterexample: generic error text is accepted as partial-step evidence"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -2615,7 +2752,19 @@
         "adversarial_negatives": [
           {
             "mutation": "generic configured text without exact values is accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "target": "field",
+                "path": "/steps/3/step",
+                "value": "declared counterexample: generic configured text without exact values is accepted"
+              },
+              {
+                "target": "field",
+                "path": "/steps/3/status",
+                "value": "declared counterexample: generic configured text without exact values is accepted"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -2747,7 +2896,19 @@
         "adversarial_negatives": [
           {
             "mutation": "two display rows without membership writes are accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "target": "field",
+                "path": "/steps/2/step",
+                "value": "declared counterexample: two display rows without membership writes are accepted"
+              },
+              {
+                "target": "field",
+                "path": "/steps/2/status",
+                "value": "declared counterexample: two display rows without membership writes are accepted"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -2879,7 +3040,19 @@
         "adversarial_negatives": [
           {
             "mutation": "board creation alone is accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "target": "field",
+                "path": "/steps/0/step",
+                "value": "declared counterexample: board creation alone is accepted"
+              },
+              {
+                "target": "field",
+                "path": "/steps/0/status",
+                "value": "declared counterexample: board creation alone is accepted"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -3046,7 +3219,19 @@
         "adversarial_negatives": [
           {
             "mutation": "pool busy status alone is accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/claim_link_count",
+                "value": 2
+              },
+              {
+                "phase": "after",
+                "path": "/claim_link_text",
+                "value": "declared counterexample: pool busy status alone is accepted"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -3258,7 +3443,24 @@
         "adversarial_negatives": [
           {
             "mutation": "two indistinguishable cards with the same name and no warning are accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/duplicate_cards",
+                "value": 3
+              },
+              {
+                "phase": "after",
+                "path": "/duplicate_warnings",
+                "value": 3
+              },
+              {
+                "phase": "after",
+                "path": "/ambiguous_local_controls",
+                "value": 1
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -3464,7 +3666,14 @@
         "adversarial_negatives": [
           {
             "mutation": "the Show stale filter without retired entries is accepted as the retired/stale drawer",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/fleet_agent_retired_stale_drawer_inactive_retired_agents",
+                "value": "declared counterexample: the Show stale filter without retired entries is accepted as the retired/stale drawer"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -3644,7 +3853,34 @@
         "adversarial_negatives": [
           {
             "mutation": "ticket updated timestamps are accepted as activity",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/timeline_tab_active",
+                "value": 2
+              },
+              {
+                "phase": "after",
+                "path": "/timeline_day_count",
+                "value": 0
+              },
+              {
+                "phase": "after",
+                "path": "/timeline_ticket_count",
+                "value": 0
+              },
+              {
+                "phase": "after",
+                "path": "/timeline_event_row_count",
+                "value": 0
+              },
+              {
+                "phase": "after",
+                "path": "/bounded_activity_note",
+                "value": "declared counterexample: ticket updated timestamps are accepted as activity"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -3851,7 +4087,19 @@
         "adversarial_negatives": [
           {
             "mutation": "board label alone is accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/detail_heading",
+                "value": "declared counterexample: board label alone is accepted"
+              },
+              {
+                "phase": "after",
+                "path": "/detail_board_id",
+                "value": "declared counterexample: board label alone is accepted"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -4024,7 +4272,14 @@
         "adversarial_negatives": [
           {
             "mutation": "bounded view badge without counts is accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/ticket_limit_notice",
+                "value": "declared counterexample: bounded view badge without counts is accepted"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -4180,7 +4435,14 @@
         "adversarial_negatives": [
           {
             "mutation": "direct mutation on submit is accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/fleet_config_add_update_preview_review_before_apply",
+                "value": "declared counterexample: direct mutation on submit is accepted"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -4358,7 +4620,24 @@
         "adversarial_negatives": [
           {
             "mutation": "installed version alone is accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/fleet_config_bridge_versions_installed",
+                "value": "declared counterexample: installed version alone is accepted"
+              },
+              {
+                "phase": "after",
+                "path": "/fleet_config_bridge_versions_pinned",
+                "value": "declared counterexample: installed version alone is accepted"
+              },
+              {
+                "phase": "after",
+                "path": "/fleet_config_bridge_versions_pypi_latest",
+                "value": "declared counterexample: installed version alone is accepted"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -4557,7 +4836,14 @@
         "adversarial_negatives": [
           {
             "mutation": "open-ticket dispatch state is accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/fleet_config_current_offers_current_offers",
+                "value": "declared counterexample: open-ticket dispatch state is accepted"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -4746,7 +5032,24 @@
         "adversarial_negatives": [
           {
             "mutation": "all discovered configs are shown as importable",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/fleet_config_discovery_import_conflicts_will_import",
+                "value": "declared counterexample: all discovered configs are shown as importable"
+              },
+              {
+                "phase": "after",
+                "path": "/fleet_config_discovery_import_conflicts_conflict",
+                "value": "declared counterexample: all discovered configs are shown as importable"
+              },
+              {
+                "phase": "after",
+                "path": "/fleet_config_discovery_import_conflicts_already_imported",
+                "value": "declared counterexample: all discovered configs are shown as importable"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -4957,7 +5260,24 @@
         "adversarial_negatives": [
           {
             "mutation": "a generic dispatch status is accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/fleet_config_dispatch_policy_gaps_history_missing_capabilities",
+                "value": "declared counterexample: a generic dispatch status is accepted"
+              },
+              {
+                "phase": "after",
+                "path": "/fleet_config_dispatch_policy_gaps_history_current_offers",
+                "value": "declared counterexample: a generic dispatch status is accepted"
+              },
+              {
+                "phase": "after",
+                "path": "/fleet_config_dispatch_policy_gaps_history_open_ticket_dispatch_history",
+                "value": "declared counterexample: a generic dispatch status is accepted"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -5151,7 +5471,14 @@
         "adversarial_negatives": [
           {
             "mutation": "bridge version alone is accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/fleet_config_doctor_doctor",
+                "value": "declared counterexample: bridge version alone is accepted"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -5312,7 +5639,14 @@
         "adversarial_negatives": [
           {
             "mutation": "form submission itself is treated as confirmation",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/fleet_config_exact_diff_confirmation_confirm_and_apply",
+                "value": "declared counterexample: form submission itself is treated as confirmation"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -5478,7 +5812,14 @@
         "adversarial_negatives": [
           {
             "mutation": "seat config path is accepted as registry worktree",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/fleet_config_registry_worktrees_fleet_clone",
+                "value": "declared counterexample: seat config path is accepted as registry worktree"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -5673,7 +6014,29 @@
         "adversarial_negatives": [
           {
             "mutation": "discovered-only candidates are accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/fleet_config_seat_inventory_capabilities",
+                "value": "declared counterexample: discovered-only candidates are accepted"
+              },
+              {
+                "phase": "after",
+                "path": "/fleet_config_seat_inventory_host_role",
+                "value": "declared counterexample: discovered-only candidates are accepted"
+              },
+              {
+                "phase": "after",
+                "path": "/fleet_config_seat_inventory_current_offer",
+                "value": "declared counterexample: discovered-only candidates are accepted"
+              },
+              {
+                "phase": "after",
+                "path": "/fleet_config_seat_inventory_bridge",
+                "value": "declared counterexample: discovered-only candidates are accepted"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -5930,7 +6293,34 @@
         "adversarial_negatives": [
           {
             "mutation": "role alone is accepted as all capabilities",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/role_after",
+                "value": "declared counterexample: role alone is accepted as all capabilities"
+              },
+              {
+                "phase": "after",
+                "path": "/tier_after",
+                "value": "declared counterexample: role alone is accepted as all capabilities"
+              },
+              {
+                "phase": "after",
+                "path": "/skills_after",
+                "value": "declared counterexample: role alone is accepted as all capabilities"
+              },
+              {
+                "phase": "after",
+                "path": "/review_after",
+                "value": false
+              },
+              {
+                "phase": "after",
+                "path": "/work_after",
+                "value": false
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -6193,7 +6583,14 @@
         "adversarial_negatives": [
           {
             "mutation": "first visible central label is assumed without loadCentrals",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/fleet_default_central_aliases_fleet_overview",
+                "value": "declared counterexample: first visible central label is assumed without loadCentrals"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -6376,7 +6773,24 @@
         "adversarial_negatives": [
           {
             "mutation": "agent pool membership is accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/connected_seat_count",
+                "value": 3
+              },
+              {
+                "phase": "after",
+                "path": "/connected_seats",
+                "value": "declared counterexample: agent pool membership is accepted"
+              },
+              {
+                "phase": "after",
+                "path": "/connected_seats",
+                "value": "declared counterexample: agent pool membership is accepted"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -6565,7 +6979,14 @@
         "adversarial_negatives": [
           {
             "mutation": "copying a key id is accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/fleet_doors_copy_door_string_copied_for_sandbox_board_worker",
+                "value": "declared counterexample: copying a key id is accepted"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -6736,7 +7157,14 @@
         "adversarial_negatives": [
           {
             "mutation": "a release-operation button or an always-enabled second door row is accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/disabled_after",
+                "value": true
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -6937,7 +7365,14 @@
         "adversarial_negatives": [
           {
             "mutation": "raw exception text or an unrelated Add project error is accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/fleet_doors_error_door_action_failed",
+                "value": "declared counterexample: raw exception text or an unrelated Add project error is accepted"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -7114,7 +7549,19 @@
         "adversarial_negatives": [
           {
             "mutation": "key ID is accepted as expiry",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/issued_expiry",
+                "value": "\u2014"
+              },
+              {
+                "phase": "after",
+                "path": "/absent_expiry",
+                "value": "declared counterexample: key ID is accepted as expiry"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -7318,7 +7765,19 @@
         "adversarial_negatives": [
           {
             "mutation": "door string or expiry is accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/issued_kid",
+                "value": "declared counterexample: door string or expiry is accepted"
+              },
+              {
+                "phase": "after",
+                "path": "/absent_kid",
+                "value": "declared counterexample: door string or expiry is accepted"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -7523,7 +7982,24 @@
         "adversarial_negatives": [
           {
             "mutation": "one row per project only is accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/fleet_doors_project_rows_sandbox_board",
+                "value": "declared counterexample: one row per project only is accepted"
+              },
+              {
+                "phase": "after",
+                "path": "/fleet_doors_project_rows_worker",
+                "value": "declared counterexample: one row per project only is accepted"
+              },
+              {
+                "phase": "after",
+                "path": "/fleet_doors_project_rows_reviewer",
+                "value": "declared counterexample: one row per project only is accepted"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -7717,7 +8193,14 @@
         "adversarial_negatives": [
           {
             "mutation": "copy success text is accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/fleet_doors_rotation_warning_credential_changed",
+                "value": "declared counterexample: copy success text is accepted"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -7894,7 +8377,14 @@
         "adversarial_negatives": [
           {
             "mutation": "the one-time Add project result is treated as the persistent list",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/fleet_doors_secret_free_output_copy_door_string",
+                "value": "declared counterexample: the one-time Add project result is treated as the persistent list"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -8071,7 +8561,14 @@
         "adversarial_negatives": [
           {
             "mutation": "zero configured doors with no guidance is accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/fleet_doors_unconfigured_no_door_credentials_configured",
+                "value": "declared counterexample: zero configured doors with no guidance is accepted"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -8248,7 +8745,14 @@
         "adversarial_negatives": [
           {
             "mutation": "legacy Agent pool section is accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/fleet_hub_agents_unified_agent_pool",
+                "value": "declared counterexample: legacy Agent pool section is accepted"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -8433,7 +8937,29 @@
         "adversarial_negatives": [
           {
             "mutation": "Fleet overview board cards are accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/boards_nav_active",
+                "value": 2
+              },
+              {
+                "phase": "after",
+                "path": "/boards_heading",
+                "value": "declared counterexample: Fleet overview board cards are accepted"
+              },
+              {
+                "phase": "after",
+                "path": "/board_card_count",
+                "value": 0
+              },
+              {
+                "phase": "after",
+                "path": "/board_route_action_count",
+                "value": 5
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -8645,7 +9171,29 @@
         "adversarial_negatives": [
           {
             "mutation": "Release card alone is accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/fleet_hub_operations_coordinator_policy_overhead_details_and_routes",
+                "value": "declared counterexample: Release card alone is accepted"
+              },
+              {
+                "phase": "after",
+                "path": "/fleet_hub_operations_config",
+                "value": "declared counterexample: Release card alone is accepted"
+              },
+              {
+                "phase": "after",
+                "path": "/fleet_hub_operations_overhead",
+                "value": "declared counterexample: Release card alone is accepted"
+              },
+              {
+                "phase": "after",
+                "path": "/fleet_hub_operations_guardrails",
+                "value": "declared counterexample: Release card alone is accepted"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -8866,7 +9414,19 @@
         "adversarial_negatives": [
           {
             "mutation": "all actions disabled regardless of configuration",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/publish_disabled",
+                "value": false
+              },
+              {
+                "phase": "after",
+                "path": "/stage_disabled",
+                "value": true
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -9054,7 +9614,14 @@
         "adversarial_negatives": [
           {
             "mutation": "final telemetry alone is accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/fleet_operations_job_progress_streaming_output",
+                "value": "declared counterexample: final telemetry alone is accepted"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -9230,7 +9797,19 @@
         "adversarial_negatives": [
           {
             "mutation": "terminal output visible only before the immediate refresh or a running job is accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/terminal_output",
+                "value": "declared counterexample: terminal output visible only before the immediate refresh or a running job is accepted"
+              },
+              {
+                "phase": "after",
+                "path": "/terminal_output",
+                "value": "declared counterexample: terminal output visible only before the immediate refresh or a running job is accepted"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -9392,7 +9971,24 @@
         "adversarial_negatives": [
           {
             "mutation": "primary failure without rollback outcome is accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "target": "field",
+                "path": "/status",
+                "value": "declared counterexample: primary failure without rollback outcome is accepted"
+              },
+              {
+                "target": "field",
+                "path": "/error",
+                "value": "declared counterexample: primary failure without rollback outcome is accepted"
+              },
+              {
+                "target": "field",
+                "path": "/logs",
+                "value": []
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -9557,7 +10153,29 @@
         "adversarial_negatives": [
           {
             "mutation": "one generic unavailable banner is accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/release_services",
+                "value": "declared counterexample: one generic unavailable banner is accepted"
+              },
+              {
+                "phase": "after",
+                "path": "/release_services",
+                "value": "declared counterexample: one generic unavailable banner is accepted"
+              },
+              {
+                "phase": "after",
+                "path": "/release_services",
+                "value": "declared counterexample: one generic unavailable banner is accepted"
+              },
+              {
+                "phase": "after",
+                "path": "/release_services",
+                "value": "declared counterexample: one generic unavailable banner is accepted"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -9752,7 +10370,19 @@
         "adversarial_negatives": [
           {
             "mutation": "Busy, Stale, or a count from another central is accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/fleet_pool_available_ready",
+                "value": "declared counterexample: Busy, Stale, or a count from another central is accepted"
+              },
+              {
+                "phase": "after",
+                "path": "/fleet_pool_available_target_nav_class",
+                "value": "declared counterexample: Busy, Stale, or a count from another central is accepted"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -9929,7 +10559,19 @@
         "adversarial_negatives": [
           {
             "mutation": "agent cards with busy status are accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/fleet_pool_busy_busy",
+                "value": "declared counterexample: agent cards with busy status are accepted"
+              },
+              {
+                "phase": "after",
+                "path": "/fleet_pool_busy_target_nav_class",
+                "value": "declared counterexample: agent cards with busy status are accepted"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -10129,7 +10771,24 @@
         "adversarial_negatives": [
           {
             "mutation": "central up or the number of visible non-stale cards is accepted as the online-agent count",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/online_metric",
+                "value": "declared counterexample: central up or the number of visible non-stale cards is accepted as the online-agent count"
+              },
+              {
+                "phase": "after",
+                "path": "/central_health",
+                "value": "declared counterexample: central up or the number of visible non-stale cards is accepted as the online-agent count"
+              },
+              {
+                "phase": "after",
+                "path": "/fleet_pool_online_target_nav_class",
+                "value": "declared counterexample: central up or the number of visible non-stale cards is accepted as the online-agent count"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -10322,7 +10981,19 @@
         "adversarial_negatives": [
           {
             "mutation": "Show stale toggle state is accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/fleet_pool_stale_stale",
+                "value": "declared counterexample: Show stale toggle state is accepted"
+              },
+              {
+                "phase": "after",
+                "path": "/fleet_pool_stale_target_nav_class",
+                "value": "declared counterexample: Show stale toggle state is accepted"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -10500,7 +11171,19 @@
         "adversarial_negatives": [
           {
             "mutation": "network failure or global pause is accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/resumed_status",
+                "value": "declared counterexample: network failure or global pause is accepted"
+              },
+              {
+                "phase": "after",
+                "path": "/pause_pill_count",
+                "value": 1
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -10653,7 +11336,24 @@
         "adversarial_negatives": [
           {
             "mutation": "package manifest version is accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "target": "field",
+                "path": "/central_version/live_version",
+                "value": "declared counterexample: package manifest version is accepted"
+              },
+              {
+                "target": "field",
+                "path": "/central_version/staged_version",
+                "value": "declared counterexample: package manifest version is accepted"
+              },
+              {
+                "target": "field",
+                "path": "/central_version/status",
+                "value": "declared counterexample: package manifest version is accepted"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -10789,7 +11489,39 @@
         "adversarial_negatives": [
           {
             "mutation": "GitHub Release presence is accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "target": "field",
+                "path": "/ci_status/main/status",
+                "value": "declared counterexample: GitHub Release presence is accepted"
+              },
+              {
+                "target": "field",
+                "path": "/ci_status/main/conclusion",
+                "value": "declared counterexample: GitHub Release presence is accepted"
+              },
+              {
+                "target": "field",
+                "path": "/ci_status/main/url",
+                "value": "declared counterexample: GitHub Release presence is accepted"
+              },
+              {
+                "target": "field",
+                "path": "/ci_status/tag/status",
+                "value": "declared counterexample: GitHub Release presence is accepted"
+              },
+              {
+                "target": "field",
+                "path": "/ci_status/tag/conclusion",
+                "value": "declared counterexample: GitHub Release presence is accepted"
+              },
+              {
+                "target": "field",
+                "path": "/ci_status/tag/url",
+                "value": "declared counterexample: GitHub Release presence is accepted"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -10942,7 +11674,19 @@
         "adversarial_negatives": [
           {
             "mutation": "latest tag text is accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "target": "field",
+                "path": "/github_release/present",
+                "value": false
+              },
+              {
+                "target": "field",
+                "path": "/github_release/url",
+                "value": "declared counterexample: latest tag text is accepted"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -11093,7 +11837,14 @@
         "adversarial_negatives": [
           {
             "mutation": "button click directly executes action",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/fleet_release_immutable_confirmation_plan_plan_digest",
+                "value": "declared counterexample: button click directly executes action"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -11235,7 +11986,54 @@
         "adversarial_negatives": [
           {
             "mutation": "package version alone is accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "target": "field",
+                "path": "/pypi/pursers/availability",
+                "value": "declared counterexample: package version alone is accepted"
+              },
+              {
+                "target": "field",
+                "path": "/pypi/pursers/present",
+                "value": false
+              },
+              {
+                "target": "field",
+                "path": "/pypi/pursers/status_code",
+                "value": 201
+              },
+              {
+                "target": "field",
+                "path": "/pypi/central/availability",
+                "value": "declared counterexample: package version alone is accepted"
+              },
+              {
+                "target": "field",
+                "path": "/pypi/central/present",
+                "value": true
+              },
+              {
+                "target": "field",
+                "path": "/pypi/central/status_code",
+                "value": 405
+              },
+              {
+                "target": "field",
+                "path": "/pypi/client/availability",
+                "value": "declared counterexample: package version alone is accepted"
+              },
+              {
+                "target": "field",
+                "path": "/pypi/client/present",
+                "value": "declared counterexample: package version alone is accepted"
+              },
+              {
+                "target": "field",
+                "path": "/pypi/client/error",
+                "value": "declared counterexample: package version alone is accepted"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -11415,7 +12213,49 @@
         "adversarial_negatives": [
           {
             "mutation": "bridge Installed value is accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "target": "field",
+                "path": "/restart_checklist/0/host",
+                "value": "declared counterexample: bridge Installed value is accepted"
+              },
+              {
+                "target": "field",
+                "path": "/restart_checklist/0/needs_restart",
+                "value": true
+              },
+              {
+                "target": "field",
+                "path": "/restart_checklist/0/reason",
+                "value": "declared counterexample: bridge Installed value is accepted"
+              },
+              {
+                "target": "field",
+                "path": "/restart_checklist/0/running_pids",
+                "value": []
+              },
+              {
+                "target": "field",
+                "path": "/restart_checklist/1/host",
+                "value": "declared counterexample: bridge Installed value is accepted"
+              },
+              {
+                "target": "field",
+                "path": "/restart_checklist/1/needs_restart",
+                "value": false
+              },
+              {
+                "target": "field",
+                "path": "/restart_checklist/1/reason",
+                "value": "declared counterexample: bridge Installed value is accepted"
+              },
+              {
+                "target": "field",
+                "path": "/restart_checklist/1/running_pids",
+                "value": []
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -11613,7 +12453,14 @@
         "adversarial_negatives": [
           {
             "mutation": "a board-local No matching tickets row is accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/fleet_search_no_results_no_results",
+                "value": "declared counterexample: a board-local No matching tickets row is accepted"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -11775,7 +12622,14 @@
         "adversarial_negatives": [
           {
             "mutation": "Timeline rows are accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/fleet_tab_changes_status_changes",
+                "value": "declared counterexample: Timeline rows are accepted"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -11936,7 +12790,14 @@
         "adversarial_negatives": [
           {
             "mutation": "raw status counts are accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/fleet_tab_flow_ticket_flow",
+                "value": "declared counterexample: raw status counts are accepted"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -12097,7 +12958,14 @@
         "adversarial_negatives": [
           {
             "mutation": "Timeline actor data is accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/fleet_tab_routes_ticket_provenance_routes",
+                "value": "declared counterexample: Timeline actor data is accepted"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -12258,7 +13126,14 @@
         "adversarial_negatives": [
           {
             "mutation": "overview active ticket rows are accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/fleet_tab_tickets_tickets",
+                "value": "declared counterexample: overview active ticket rows are accepted"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -12419,7 +13294,14 @@
         "adversarial_negatives": [
           {
             "mutation": "Changes summary is accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/fleet_tab_timeline_timeline",
+                "value": "declared counterexample: Changes summary is accepted"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -12593,7 +13475,24 @@
         "adversarial_negatives": [
           {
             "mutation": "a JavaScript exception or blank page is accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/overview_nav_active_after",
+                "value": 2
+              },
+              {
+                "phase": "after",
+                "path": "/overview_heading",
+                "value": "declared counterexample: a JavaScript exception or blank page is accepted"
+              },
+              {
+                "phase": "after",
+                "path": "/detail_content_count",
+                "value": 1
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -12758,7 +13657,29 @@
         "adversarial_negatives": [
           {
             "mutation": "a generic UI label is accepted without an actual failed board read",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "target": "field",
+                "path": "/registry_warning",
+                "value": "declared counterexample: a generic UI label is accepted without an actual failed board read"
+              },
+              {
+                "target": "field",
+                "path": "/projects/0/board_id",
+                "value": "declared counterexample: a generic UI label is accepted without an actual failed board read"
+              },
+              {
+                "target": "field",
+                "path": "/projects/1/board_id",
+                "value": "declared counterexample: a generic UI label is accepted without an actual failed board read"
+              },
+              {
+                "target": "field",
+                "path": "/projects/0/status",
+                "value": "declared counterexample: a generic UI label is accepted without an actual failed board read"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -12890,7 +13811,29 @@
         "adversarial_negatives": [
           {
             "mutation": "a Not onboarded label is accepted without proving no join was performed",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "target": "field",
+                "path": "/data_mode",
+                "value": "declared counterexample: a Not onboarded label is accepted without proving no join was performed"
+              },
+              {
+                "target": "field",
+                "path": "/connected",
+                "value": true
+              },
+              {
+                "target": "field",
+                "path": "/stale",
+                "value": false
+              },
+              {
+                "target": "field",
+                "path": "/feed_error",
+                "value": "declared counterexample: a Not onboarded label is accepted without proving no join was performed"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -13053,7 +13996,19 @@
         "adversarial_negatives": [
           {
             "mutation": "all 201 events or an arbitrary smaller count is accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/retained_total",
+                "value": "declared counterexample: all 201 events or an arbitrary smaller count is accepted"
+              },
+              {
+                "phase": "after",
+                "path": "/retained_event_count",
+                "value": 201
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -13236,7 +14191,14 @@
         "adversarial_negatives": [
           {
             "mutation": "snapshot_at or event count is treated as the cursor",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/personal_activity_cursor_cursor_17",
+                "value": "declared counterexample: snapshot_at or event count is treated as the cursor"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -13413,7 +14375,14 @@
         "adversarial_negatives": [
           {
             "mutation": "has_more or resync_notice alone is accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/personal_activity_dropped_events_2_older_events_were_dropped_from_this_bounded_vi",
+                "value": "declared counterexample: has_more or resync_notice alone is accepted"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -13590,7 +14559,14 @@
         "adversarial_negatives": [
           {
             "mutation": "an empty container without the state or the Home timeline is accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/personal_activity_empty_no_matching_activity",
+                "value": "declared counterexample: an empty container without the state or the Home timeline is accepted"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -13756,7 +14732,14 @@
         "adversarial_negatives": [
           {
             "mutation": "the UI clears loaded data or reports a live connection",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/personal_activity_error_local_feed_unavailable",
+                "value": "declared counterexample: the UI clears loaded data or reports a live connection"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -13928,7 +14911,24 @@
         "adversarial_negatives": [
           {
             "mutation": "only one of the two independent states is arranged",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/load_more_hidden",
+                "value": true
+              },
+              {
+                "phase": "after",
+                "path": "/resync_notice",
+                "value": "declared counterexample: only one of the two independent states is arranged"
+              },
+              {
+                "phase": "after",
+                "path": "/resync_notice",
+                "value": "declared counterexample: only one of the two independent states is arranged"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -14123,7 +15123,19 @@
         "adversarial_negatives": [
           {
             "mutation": "a stale live snapshot is relabelled as offline",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/offline_title",
+                "value": "declared counterexample: a stale live snapshot is relabelled as offline"
+              },
+              {
+                "phase": "after",
+                "path": "/demo_tone_count",
+                "value": 2
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -14291,7 +15303,19 @@
         "adversarial_negatives": [
           {
             "mutation": "demo or live connection copy is accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/stale_title",
+                "value": "declared counterexample: demo or live connection copy is accepted"
+              },
+              {
+                "phase": "after",
+                "path": "/stale_or_error_tone_count",
+                "value": 2
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -14463,7 +15487,14 @@
         "adversarial_negatives": [
           {
             "mutation": "a linked-work count or current_ticket_id chip alone is accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/personal_agents_current_ticket_working_on_tk_123_fixture_ticket",
+                "value": "declared counterexample: a linked-work count or current_ticket_id chip alone is accepted"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -14640,7 +15671,14 @@
         "adversarial_negatives": [
           {
             "mutation": "the duplicate_name badge alone is accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/personal_agents_duplicate_identity_duplicate_active_name_u2014_pick_a_unique_agent_",
+                "value": "declared counterexample: the duplicate_name badge alone is accepted"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -14823,7 +15861,19 @@
         "adversarial_negatives": [
           {
             "mutation": "duplicate=true identity conflict is accepted instead",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/duplicate_name_badge_count",
+                "value": 2
+              },
+              {
+                "phase": "after",
+                "path": "/duplicate_name_badge_text",
+                "value": "declared counterexample: duplicate=true identity conflict is accepted instead"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -15011,7 +16061,14 @@
         "adversarial_negatives": [
           {
             "mutation": "the Today 'No teammates yet' state is accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/personal_agents_empty_no_agents_yet",
+                "value": "declared counterexample: the Today 'No teammates yet' state is accepted"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -15188,7 +16245,14 @@
         "adversarial_negatives": [
           {
             "mutation": "role, platform, or another agent's focus is accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/personal_agents_focus_review_fleet_evidence",
+                "value": "declared counterexample: role, platform, or another agent's focus is accepted"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -15365,7 +16429,14 @@
         "adversarial_negatives": [
           {
             "mutation": "a ticket lease badge or idle-only card is treated as agent idle+lease proof",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/personal_agents_idle_lease_5m_idle",
+                "value": "declared counterexample: a ticket lease badge or idle-only card is treated as agent idle+lease proof"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -15492,7 +16563,7 @@
           "before": [
             {
               "path": "/personal_agents_platform_codex",
-              "selector": "#agents-grid .agent-card",
+              "selector": "#agents-grid .agent-card .meta-row .pill:nth-child(2)",
               "property": "text"
             },
             {
@@ -15511,7 +16582,7 @@
           "after": [
             {
               "path": "/personal_agents_platform_codex",
-              "selector": "#agents-grid .agent-card",
+              "selector": "#agents-grid .agent-card .meta-row .pill:nth-child(2)",
               "property": "text"
             },
             {
@@ -15542,7 +16613,14 @@
         "adversarial_negatives": [
           {
             "mutation": "role or agent name text containing codex is accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/personal_agents_platform_codex",
+                "value": "unknown"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -15578,7 +16656,7 @@
           "before": [
             {
               "path": "/personal_agents_platform_codex",
-              "selector": "#agents-grid .agent-card",
+              "selector": "#agents-grid .agent-card .meta-row .pill:nth-child(2)",
               "property": "text"
             },
             {
@@ -15597,7 +16675,7 @@
           "after": [
             {
               "path": "/personal_agents_platform_codex",
-              "selector": "#agents-grid .agent-card",
+              "selector": "#agents-grid .agent-card .meta-row .pill:nth-child(2)",
               "property": "text"
             },
             {
@@ -15627,7 +16705,7 @@
           {
             "phase": "after",
             "path": "/personal_agents_platform_codex",
-            "op": "contains",
+            "op": "eq",
             "value": "codex"
           },
           {
@@ -15669,7 +16747,7 @@
           "before": [
             {
               "path": "/personal_agents_role_reviewer",
-              "selector": "#agents-grid .agent-card",
+              "selector": "#agents-grid .agent-card .meta-row .pill:nth-child(1)",
               "property": "text"
             },
             {
@@ -15688,7 +16766,7 @@
           "after": [
             {
               "path": "/personal_agents_role_reviewer",
-              "selector": "#agents-grid .agent-card",
+              "selector": "#agents-grid .agent-card .meta-row .pill:nth-child(1)",
               "property": "text"
             },
             {
@@ -15719,7 +16797,14 @@
         "adversarial_negatives": [
           {
             "mutation": "status or focus text containing reviewer is accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/personal_agents_role_reviewer",
+                "value": "worker"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -15755,7 +16840,7 @@
           "before": [
             {
               "path": "/personal_agents_role_reviewer",
-              "selector": "#agents-grid .agent-card",
+              "selector": "#agents-grid .agent-card .meta-row .pill:nth-child(1)",
               "property": "text"
             },
             {
@@ -15774,7 +16859,7 @@
           "after": [
             {
               "path": "/personal_agents_role_reviewer",
-              "selector": "#agents-grid .agent-card",
+              "selector": "#agents-grid .agent-card .meta-row .pill:nth-child(1)",
               "property": "text"
             },
             {
@@ -15804,7 +16889,7 @@
           {
             "phase": "after",
             "path": "/personal_agents_role_reviewer",
-            "op": "contains",
+            "op": "eq",
             "value": "reviewer"
           },
           {
@@ -15832,7 +16917,7 @@
         "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; an agent has stale=true.",
         "action": "open Team",
         "expected_transition": "its card is ordered as stale and includes the exact stale badge",
-        "exact_selection": "assert data-stale='true' and exact stale pill on that card",
+        "exact_selection": "count agent cards carrying data-stale='true'",
         "negative_counterexample": "a fleet pool stale row is accepted",
         "correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id."
       },
@@ -15845,9 +16930,9 @@
         "recipe": {
           "before": [
             {
-              "path": "/personal_agents_stale_stale",
+              "path": "/stale_agent_card_count",
               "selector": "#agents-grid .agent-card[data-stale=\"true\"]",
-              "property": "text"
+              "property": "count"
             },
             {
               "path": "/personal_agents_stale_target_hidden",
@@ -15864,9 +16949,9 @@
           ],
           "after": [
             {
-              "path": "/personal_agents_stale_stale",
+              "path": "/stale_agent_card_count",
               "selector": "#agents-grid .agent-card[data-stale=\"true\"]",
-              "property": "text"
+              "property": "count"
             },
             {
               "path": "/personal_agents_stale_target_hidden",
@@ -15878,10 +16963,10 @@
         },
         "select_allowlist": [
           "/personal_agents_stale_action",
-          "/personal_agents_stale_stale",
+          "/stale_agent_card_count",
           "/personal_agents_stale_target_hidden"
         ],
-        "semantic_basis": "assert data-stale='true' and exact stale pill on that card"
+        "semantic_basis": "count agent cards carrying data-stale='true'"
       },
       "required_evidence": [
         "trusted exact-candidate/board/runtime evidence from the named adapter",
@@ -15896,7 +16981,14 @@
         "adversarial_negatives": [
           {
             "mutation": "a fleet pool stale row is accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/stale_agent_card_count",
+                "value": 0
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -15931,9 +17023,9 @@
           "source_id": "browser-state-personal.agents-stale",
           "before": [
             {
-              "path": "/personal_agents_stale_stale",
+              "path": "/stale_agent_card_count",
               "selector": "#agents-grid .agent-card[data-stale=\"true\"]",
-              "property": "text"
+              "property": "count"
             },
             {
               "path": "/personal_agents_stale_target_hidden",
@@ -15950,9 +17042,9 @@
           ],
           "after": [
             {
-              "path": "/personal_agents_stale_stale",
+              "path": "/stale_agent_card_count",
               "selector": "#agents-grid .agent-card[data-stale=\"true\"]",
-              "property": "text"
+              "property": "count"
             },
             {
               "path": "/personal_agents_stale_target_hidden",
@@ -15980,9 +17072,9 @@
           },
           {
             "phase": "after",
-            "path": "/personal_agents_stale_stale",
-            "op": "contains",
-            "value": "stale"
+            "path": "/stale_agent_card_count",
+            "op": "eq",
+            "value": 1
           },
           {
             "phase": "after",
@@ -16073,7 +17165,14 @@
         "adversarial_negatives": [
           {
             "mutation": "array length alone is accepted as both values",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/personal_agents_total_live_2_live_3_total",
+                "value": "declared counterexample: array length alone is accepted as both values"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -16250,7 +17349,14 @@
         "adversarial_negatives": [
           {
             "mutation": "Fleet data unavailable is accepted as an empty registry",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/personal_fleet_empty_no_registered_projects",
+                "value": "declared counterexample: Fleet data unavailable is accepted as an empty registry"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -16445,7 +17551,29 @@
         "adversarial_negatives": [
           {
             "mutation": "pool row statuses or four identical values are accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/personal_fleet_online_busy_available_stale_9",
+                "value": "declared counterexample: pool row statuses or four identical values are accepted"
+              },
+              {
+                "phase": "after",
+                "path": "/personal_fleet_online_busy_available_stale_3",
+                "value": "declared counterexample: pool row statuses or four identical values are accepted"
+              },
+              {
+                "phase": "after",
+                "path": "/personal_fleet_online_busy_available_stale_4",
+                "value": "declared counterexample: pool row statuses or four identical values are accepted"
+              },
+              {
+                "phase": "after",
+                "path": "/personal_fleet_online_busy_available_stale_2",
+                "value": "declared counterexample: pool row statuses or four identical values are accepted"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -16655,7 +17783,14 @@
         "adversarial_negatives": [
           {
             "mutation": "the pool status alone is accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/personal_fleet_project_seats_sandbox_project_tk_123",
+                "value": "declared counterexample: the pool status alone is accepted"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -16799,7 +17934,29 @@
         "adversarial_negatives": [
           {
             "mutation": "fleet totals or project count is accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "target": "field",
+                "path": "/projects/0/board_id",
+                "value": "declared counterexample: fleet totals or project count is accepted"
+              },
+              {
+                "target": "field",
+                "path": "/projects/0/tickets_open",
+                "value": 3
+              },
+              {
+                "target": "field",
+                "path": "/projects/0/tickets_claimed",
+                "value": 2
+              },
+              {
+                "target": "field",
+                "path": "/projects/0/tickets_submitted",
+                "value": 2
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -16949,7 +18106,14 @@
         "adversarial_negatives": [
           {
             "mutation": "Fleet unavailable fallback is accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/personal_fleet_registry_warning_registry",
+                "value": "declared counterexample: Fleet unavailable fallback is accepted"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -17138,7 +18302,34 @@
         "adversarial_negatives": [
           {
             "mutation": "a per-project agent card is accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/shared_pool_row_count",
+                "value": 2
+              },
+              {
+                "phase": "after",
+                "path": "/shared_pool_row",
+                "value": "declared counterexample: a per-project agent card is accepted"
+              },
+              {
+                "phase": "after",
+                "path": "/shared_pool_row",
+                "value": "declared counterexample: a per-project agent card is accepted"
+              },
+              {
+                "phase": "after",
+                "path": "/shared_pool_row",
+                "value": "declared counterexample: a per-project agent card is accepted"
+              },
+              {
+                "phase": "after",
+                "path": "/shared_pool_seat_count",
+                "value": 3
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -17349,7 +18540,14 @@
         "adversarial_negatives": [
           {
             "mutation": "backend truncation_counts presence without UI disclosure is accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/personal_fleet_truncation_fleet_snapshot_is_partial",
+                "value": "declared counterexample: backend truncation_counts presence without UI disclosure is accepted"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -17526,7 +18724,14 @@
         "adversarial_negatives": [
           {
             "mutation": "an available empty registry is accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/personal_fleet_unavailable_fleet_data_unavailable",
+                "value": "declared counterexample: an available empty registry is accepted"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -17732,7 +18937,29 @@
         "adversarial_negatives": [
           {
             "mutation": "backend acceptance of retracts or three rendered kinds is treated as all four",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/personal_links_edge_types_files",
+                "value": "declared counterexample: backend acceptance of retracts or three rendered kinds is treated as all four"
+              },
+              {
+                "phase": "after",
+                "path": "/personal_links_edge_types_tags",
+                "value": "declared counterexample: backend acceptance of retracts or three rendered kinds is treated as all four"
+              },
+              {
+                "phase": "after",
+                "path": "/personal_links_edge_types_retracts",
+                "value": "declared counterexample: backend acceptance of retracts or three rendered kinds is treated as all four"
+              },
+              {
+                "phase": "after",
+                "path": "/personal_links_edge_types_ticket",
+                "value": "declared counterexample: backend acceptance of retracts or three rendered kinds is treated as all four"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -17942,7 +19169,14 @@
         "adversarial_negatives": [
           {
             "mutation": "Links unavailable is accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/personal_links_empty_no_explicit_links",
+                "value": "declared counterexample: Links unavailable is accepted"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -18119,7 +19353,14 @@
         "adversarial_negatives": [
           {
             "mutation": "source totals node_count/edge_count or only one count is accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/personal_links_node_edge_totals_2_memories_u00b7_3_links",
+                "value": "declared counterexample: source totals node_count/edge_count or only one count is accepted"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -18296,7 +19537,14 @@
         "adversarial_negatives": [
           {
             "mutation": "an Important pinned Today card is accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/personal_links_pinned_pinned",
+                "value": "declared counterexample: an Important pinned Today card is accepted"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -18479,7 +19727,19 @@
         "adversarial_negatives": [
           {
             "mutation": "a generic source or authority label without tool name is accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/personal_links_source_label_authoritative_u00b7_memory_graph",
+                "value": "declared counterexample: a generic source or authority label without tool name is accepted"
+              },
+              {
+                "phase": "after",
+                "path": "/personal_links_source_label_synthetic_fixture",
+                "value": "declared counterexample: a generic source or authority label without tool name is accepted"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -18667,7 +19927,14 @@
         "adversarial_negatives": [
           {
             "mutation": "the compact #links-total returned counts alone are accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/personal_links_truncation_showing_2_of_3_memories_and_3_of_4_links",
+                "value": "declared counterexample: the compact #links-total returned counts alone are accepted"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -18840,7 +20107,14 @@
         "adversarial_negatives": [
           {
             "mutation": "a zero counter with an empty list is accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/personal_search_no_results_no_matching_loaded_data",
+                "value": "declared counterexample: a zero counter with an empty list is accepted"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -19005,7 +20279,39 @@
         "adversarial_negatives": [
           {
             "mutation": "a board_snapshot call is accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "target": "field",
+                "path": "/count",
+                "value": 3
+              },
+              {
+                "target": "field",
+                "path": "/events/0/seq",
+                "value": 17
+              },
+              {
+                "target": "field",
+                "path": "/events/1/seq",
+                "value": 18
+              },
+              {
+                "target": "field",
+                "path": "/event_cursor",
+                "value": 18
+              },
+              {
+                "target": "field",
+                "path": "/has_more",
+                "value": true
+              },
+              {
+                "target": "field",
+                "path": "/error",
+                "value": "declared counterexample: a board_snapshot call is accepted"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -19154,7 +20460,29 @@
         "adversarial_negatives": [
           {
             "mutation": "board_event_feed or fixture data is accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "target": "field",
+                "path": "/board/id",
+                "value": "declared counterexample: board_event_feed or fixture data is accepted"
+              },
+              {
+                "target": "field",
+                "path": "/data_mode",
+                "value": "declared counterexample: board_event_feed or fixture data is accepted"
+              },
+              {
+                "target": "field",
+                "path": "/connected",
+                "value": false
+              },
+              {
+                "target": "field",
+                "path": "/stale",
+                "value": true
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -19291,7 +20619,29 @@
         "adversarial_negatives": [
           {
             "mutation": "board_snapshot or fallback fleet data is accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "target": "field",
+                "path": "/registry_warning",
+                "value": "declared counterexample: board_snapshot or fallback fleet data is accepted"
+              },
+              {
+                "target": "field",
+                "path": "/projects/0/board_id",
+                "value": "declared counterexample: board_snapshot or fallback fleet data is accepted"
+              },
+              {
+                "target": "field",
+                "path": "/pool/0/agent_name",
+                "value": "declared counterexample: board_snapshot or fallback fleet data is accepted"
+              },
+              {
+                "target": "field",
+                "path": "/totals/agents",
+                "value": 2
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -19429,7 +20779,34 @@
         "adversarial_negatives": [
           {
             "mutation": "memory_links backend name or fallback links are accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "target": "field",
+                "path": "/source_tool",
+                "value": "declared counterexample: memory_links backend name or fallback links are accepted"
+              },
+              {
+                "target": "field",
+                "path": "/relationship_authority",
+                "value": "declared counterexample: memory_links backend name or fallback links are accepted"
+              },
+              {
+                "target": "field",
+                "path": "/returned_node_count",
+                "value": 3
+              },
+              {
+                "target": "field",
+                "path": "/returned_edge_count",
+                "value": 4
+              },
+              {
+                "target": "field",
+                "path": "/truncated",
+                "value": true
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -19598,7 +20975,29 @@
         "adversarial_negatives": [
           {
             "mutation": "the Team grid or total agent count is accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/active_agent_count",
+                "value": 5
+              },
+              {
+                "phase": "after",
+                "path": "/live_agent_name",
+                "value": "declared counterexample: the Team grid or total agent count is accepted"
+              },
+              {
+                "phase": "after",
+                "path": "/stale_agent_count",
+                "value": 1
+              },
+              {
+                "phase": "after",
+                "path": "/empty_team_count",
+                "value": 1
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -19816,7 +21215,29 @@
         "adversarial_negatives": [
           {
             "mutation": "all tickets or the Work view total is accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/active_work_count",
+                "value": 5
+              },
+              {
+                "phase": "after",
+                "path": "/active_work_id",
+                "value": "declared counterexample: all tickets or the Work view total is accepted"
+              },
+              {
+                "phase": "after",
+                "path": "/ended_work_count",
+                "value": 1
+              },
+              {
+                "phase": "after",
+                "path": "/empty_work_count",
+                "value": 1
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -20021,7 +21442,14 @@
         "adversarial_negatives": [
           {
             "mutation": "latest_handoff or any pinned link is accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/personal_today_important_pinned_note_pinned_fixture_note",
+                "value": "declared counterexample: latest_handoff or any pinned link is accepted"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -20198,7 +21626,14 @@
         "adversarial_negatives": [
           {
             "mutation": "important_pinned or an activity event is accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/personal_today_latest_handoff_no_handoff_yet",
+                "value": "declared counterexample: important_pinned or an activity event is accepted"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -20375,7 +21810,14 @@
         "adversarial_negatives": [
           {
             "mutation": "Activity view ordering without the five-row cap is accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/personal_today_recent_activity_17",
+                "value": "declared counterexample: Activity view ordering without the five-row cap is accepted"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -20564,7 +22006,24 @@
         "adversarial_negatives": [
           {
             "mutation": "raw ticket array length or rejected excluded from third metric is accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/personal_today_status_metrics_3",
+                "value": "declared counterexample: raw ticket array length or rejected excluded from third metric is accepted"
+              },
+              {
+                "phase": "after",
+                "path": "/personal_today_status_metrics_1",
+                "value": "declared counterexample: raw ticket array length or rejected excluded from third metric is accepted"
+              },
+              {
+                "phase": "after",
+                "path": "/personal_today_status_metrics_2",
+                "value": "declared counterexample: raw ticket array length or rejected excluded from third metric is accepted"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -20763,7 +22222,14 @@
         "adversarial_negatives": [
           {
             "mutation": "rejected status or rejection_count is accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/personal_work_abandonment_abandoned_u00d72",
+                "value": "declared counterexample: rejected status or rejection_count is accepted"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -20940,7 +22406,14 @@
         "adversarial_negatives": [
           {
             "mutation": "Today's 'No current work' state is accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/personal_work_no_ticket_no_tickets_yet",
+                "value": "declared counterexample: Today's 'No current work' state is accepted"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -21123,7 +22596,19 @@
         "adversarial_negatives": [
           {
             "mutation": "card-level unprefixed assignee or claimed_agent_id is accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/owner_metadata",
+                "value": "declared counterexample: card-level unprefixed assignee or claimed_agent_id is accepted"
+              },
+              {
+                "phase": "after",
+                "path": "/owner_pill_count",
+                "value": 4
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -21311,7 +22796,14 @@
         "adversarial_negatives": [
           {
             "mutation": "a global priority string or status pill is accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/personal_work_priority_critical",
+                "value": "declared counterexample: a global priority string or status pill is accepted"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -21488,7 +22980,14 @@
         "adversarial_negatives": [
           {
             "mutation": "abandoned_count without rejected status is accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/personal_work_rejection_needs_attention",
+                "value": "declared counterexample: abandoned_count without rejected status is accepted"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -21665,7 +23164,14 @@
         "adversarial_negatives": [
           {
             "mutation": "the Today submitted metric alone is accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/personal_work_review_readiness_submitted",
+                "value": "declared counterexample: the Today submitted metric alone is accepted"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -21878,7 +23384,44 @@
         "adversarial_negatives": [
           {
             "mutation": "toneForStatus colors or partial grouping is accepted",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/personal_work_status_groups_working",
+                "value": "declared counterexample: toneForStatus colors or partial grouping is accepted"
+              },
+              {
+                "phase": "after",
+                "path": "/personal_work_status_groups_open",
+                "value": "declared counterexample: toneForStatus colors or partial grouping is accepted"
+              },
+              {
+                "phase": "after",
+                "path": "/personal_work_status_groups_submitted",
+                "value": "declared counterexample: toneForStatus colors or partial grouping is accepted"
+              },
+              {
+                "phase": "after",
+                "path": "/personal_work_status_groups_needs_attention",
+                "value": "declared counterexample: toneForStatus colors or partial grouping is accepted"
+              },
+              {
+                "phase": "after",
+                "path": "/personal_work_status_groups_done",
+                "value": "declared counterexample: toneForStatus colors or partial grouping is accepted"
+              },
+              {
+                "phase": "after",
+                "path": "/personal_work_status_groups_ended",
+                "value": "declared counterexample: toneForStatus colors or partial grouping is accepted"
+              },
+              {
+                "phase": "after",
+                "path": "/personal_work_status_groups_other",
+                "value": "declared counterexample: toneForStatus colors or partial grouping is accepted"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
@@ -22121,7 +23664,14 @@
         "adversarial_negatives": [
           {
             "mutation": "loaded array length is accepted as total",
-            "expected": "fact-specific nonpass"
+            "expected": "fact-specific nonpass",
+            "observed_mutations": [
+              {
+                "phase": "after",
+                "path": "/personal_work_total_12_total",
+                "value": "declared counterexample: loaded array length is accepted as total"
+              }
+            ]
           },
           {
             "mutation": "change one selected field, DOM property, or action outcome",
