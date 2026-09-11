@@ -82,6 +82,7 @@ HELD_TICKET_KINDS = frozenset({
     "ticket_annotated",
     "ticket_status_changed",
     "human_input_resolved",
+    "coordinator_question_answered",
     "ticket_parked",
     "ticket_unparked",
     "review_lease_expired",

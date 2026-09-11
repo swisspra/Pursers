@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -61,6 +61,34 @@ class Connection:
         return self.value
 
 
+class DiscoveryClient:
+    agent_name = "configured-worker"
+    role = "worker"
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+
+    async def call_tool(
+        self, name: str, arguments: dict[str, Any], **_kwargs: Any
+    ) -> SimpleNamespace:
+        self.calls.append((name, arguments))
+        assert name == "board_join"
+        return SimpleNamespace(
+            is_error=False,
+            structured_content={
+                "ok": True,
+                "board_id": arguments["board_id"],
+                "agent_id": "AI-configured-worker",
+                "principal_id": "PR-configured-worker",
+                "agent_name": arguments["agent_name"],
+                "role": arguments["role"],
+                "claim_ttl_s": 30,
+                "renewed_leases": [],
+            },
+            content=[],
+        )
+
+
 class NoDiscoveryKeepalive(wait_server.LeaseKeepalive):
     async def _discover(self) -> None:
         return None
@@ -89,6 +117,45 @@ class ClaimOnDiscoveryKeepalive(NoDiscoveryKeepalive):
 
 
 class LeaseKeepaliveTests(unittest.IsolatedAsyncioTestCase):
+    async def test_discovery_preserves_model_capabilities_but_idles_codex(
+        self,
+    ) -> None:
+        client = DiscoveryClient()
+        keepalive = wait_server.LeaseKeepalive(Connection(client))
+        configured = {
+            "host": "codex",
+            "max_parallel": 1,
+            "tier_max": 2,
+            "can_work": True,
+            "can_review": False,
+        }
+        registry = {"schema_version": 1, "projects": {}}
+
+        with (
+            patch.object(
+                wait_server,
+                "_read_project_registry",
+                AsyncMock(return_value=registry),
+            ),
+            patch.object(wait_server, "_seat_capabilities", return_value=configured),
+            patch.object(wait_server, "_host_name", return_value="codex"),
+        ):
+            keepalive.model_refresh_pending = True
+            await keepalive._discover()
+            await keepalive._discover()
+
+        joins = [arguments for name, arguments in client.calls if name == "board_join"]
+        self.assertEqual(len(joins), 2)
+        self.assertEqual(joins[0]["role"], "worker")
+        self.assertEqual(joins[0]["renewal_source"], "model")
+        self.assertEqual(joins[0]["capabilities"], configured)
+        self.assertEqual(joins[1]["role"], "worker")
+        self.assertEqual(joins[1]["renewal_source"], "keepalive")
+        self.assertEqual(
+            joins[1]["capabilities"],
+            {**configured, "can_work": False, "can_review": False},
+        )
+
     def test_join_and_claim_results_populate_full_holder_identity(self) -> None:
         keepalive = NoDiscoveryKeepalive(Connection(RawClient()))
         keepalive.observe_join(

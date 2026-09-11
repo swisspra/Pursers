@@ -1880,8 +1880,15 @@ class LeaseKeepalive:
         except Exception:
             boards = [BOARD_ID]
         capabilities = _seat_capabilities()
-        if _host_name() in {"codex", "codex-cli"}:
-            capabilities = {"can_work": False, "can_review": False}
+        if (
+            selected_source == "keepalive"
+            and _host_name() in {"codex", "codex-cli"}
+        ):
+            capabilities = {
+                **(capabilities or {}),
+                "can_work": False,
+                "can_review": False,
+            }
         for board_id in boards:
             try:
                 joined = await _BoardView(client, board_id).board_join(
