@@ -127,6 +127,15 @@ fact must carry an explicit `browser context:` assertion so its screenshot and
 accessibility state remain substantive without pretending that visible copy
 proves the backend fact.
 
+Transport semantics remain literal. `mcp_tool_response` is a real verifier-
+created stdio tool call, separately source/PID/challenge bound, and contains no
+invented HTTP status or headers. It proves that exact tool execution only; the
+active AionUi/Personal connection is still proved by the browser observation's
+same-transport nonce challenge. UI actions use the closed browser-state adapter,
+which executes allowlisted actions in the verifier-owned isolated browser world
+and records actual before/action/after values; direct MCP/API calls cannot stand
+in for an unobserved UI action.
+
 `prior_state` is a report-graph edge, not a separately recordable evidence
 kind. It names an earlier canonical observation that passed independently. Both
 observations must carry typed evidence with one exact shared run and entity,

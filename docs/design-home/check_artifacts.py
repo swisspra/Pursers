@@ -66,6 +66,7 @@ def normalized_fact(value: str) -> str:
 CONJUNCT_KEYS: dict[str, set[str]] = {
     "ax_name_contains": {"kind", "path", "expected"},
     "http_response": {"kind", "request", "status", "body_contains"},
+    "mcp_tool_response": {"kind", "tool", "field", "expected"},
     "state_transition": {"kind", "from", "to", "via"},
     "receipt_field": {"kind", "receipt", "field", "expected"},
     "log_assertion": {"kind", "stream", "expected"},
@@ -73,12 +74,14 @@ CONJUNCT_KEYS: dict[str, set[str]] = {
 }
 FIELDED_CONJUNCT_KEYS: dict[str, set[str]] = {
     "http_response": {"kind", "source_id", "assertions"},
+    "mcp_tool_response": {"kind", "source_id", "assertions"},
     "state_transition": {"kind", "source_id", "assertions"},
     "receipt_field": {"kind", "source_id", "assertions"},
     "log_assertion": {"kind", "source_id", "assertions"},
 }
 FIELDED_ASSERTION_KEYS: dict[str, set[str]] = {
     "http_response": {"target", "path", "op", "value"},
+    "mcp_tool_response": {"path", "op", "value"},
     "state_transition": {"phase", "path", "op", "value"},
     "receipt_field": {"path", "op", "value"},
     "log_assertion": {"path", "op", "value"},
@@ -156,6 +159,13 @@ def conjunct_signature(identifier: str, conjunct: Any) -> tuple[str, ...]:
             normalized_fact(conjunct["request"]),
             str(conjunct["status"]),
             normalized_fact(conjunct["body_contains"]),
+        )
+    if kind == "mcp_tool_response":
+        return (
+            kind,
+            normalized_fact(conjunct["tool"]),
+            normalized_fact(conjunct["field"]),
+            normalized_fact(conjunct["expected"]),
         )
     if kind == "state_transition":
         if normalized_fact(conjunct["from"]) == normalized_fact(conjunct["to"]):
@@ -868,7 +878,10 @@ def predicate_expected_values(predicate: dict[str, Any]) -> list[str]:
                 if isinstance(assertion.get("value"), str)
             )
             continue
-        if conjunct["kind"] in {"ax_name_contains", "receipt_field", "log_assertion"}:
+        if conjunct["kind"] in {
+            "ax_name_contains", "mcp_tool_response", "receipt_field",
+            "log_assertion",
+        }:
             values.append(conjunct["expected"])
         elif conjunct["kind"] == "http_response":
             values.append(conjunct["body_contains"])

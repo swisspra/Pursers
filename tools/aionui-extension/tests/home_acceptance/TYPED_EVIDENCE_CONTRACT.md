@@ -1,6 +1,6 @@
 # Typed evidence recorder contract
 
-Version 1 implements the four non-visual evidence kinds authorized by AN360 and
+Version 1 implements the closed non-visual evidence kinds authorized by AN360 and
 bounded by AN366. It does not replace the screenshot and normalized
 accessibility-tree evidence required for every acceptance observation. It also
 does not decide report-level `prior_state` graph validity; the returned
@@ -54,12 +54,33 @@ The top-level trust object has these exact keys:
   "active_evidence_key": "evidence-key-1",
   "evidence_keys": {"evidence-key-1": "1111111111111111111111111111111111111111111111111111111111111111"},
   "http_sources": {},
+  "mcp_sources": {},
   "receipt_sources": {},
   "log_sources": {},
   "state_sources": {},
   "replay_guard": {"path": "/PATH/TO/VERIFIER/replay.log", "consume": true}
 }
 ```
+
+`mcp_tool_response` is distinct from `http_response`: it records an actual
+`stdio` MCP invocation and never invents an HTTP method, status, path, or
+headers. A `trusted_mcp_stdio_v1` source pins the Python executable and digest,
+effective `-m pursers_personal.cli mcp` selector, complete argv/environment,
+clean candidate checkout and `apps_server.py` digest, sandbox board, private
+challenge key, exact tool/arguments, and result selector allowlist. The recorder
+starts that process, verifies `acceptance_runtime_attest` from the same PID, and
+then invokes the allowlisted tool. This proves the verifier-created stdio tool
+execution; it does not replace the browser capture's independent challenge of
+the active AionUi/Personal transport and does not prove an unobserved UI action.
+
+`trusted_browser_state_v1` is a `state_transition` adapter. Its external private
+trust pins the installed `browser_observer.py` plus `observer.json`, surface,
+origin, page, candidate, board, and a closed recipe. Recipes allow only bounded
+DOM reads (`text`, `value`, `checked`, `disabled`, `count`, `class`, `hidden`)
+and the explicit actions `observe`, `click`, `set_value`, `select`, `submit`,
+`wait`, and same-origin `fetch`. Arbitrary script expressions are not accepted.
+The observer executes the recipe in its isolated browser world and returns the
+actual correlated before/action/after selections.
 
 Each source object is exact and versioned by its adapter value. Private headers,
 HMAC keys, and paths occur only in verifier trust:

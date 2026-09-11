@@ -76,6 +76,22 @@ SURFACE_PRODUCTS = {
     "fleet": "Pursers Fleet",
     "personal": "Pursers Personal",
 }
+TRANSITION_CONTEXT_KEYS = {
+    "observation_id", "run_id", "action_id", "entity", "surface",
+    "board_id", "candidate_commit", "issued_at", "causal_index",
+}
+TRANSITION_PROPERTIES = frozenset({
+    "text", "value", "checked", "disabled", "count", "class", "hidden",
+})
+TRANSITION_ACTION_KEYS = {
+    "observe": {"kind", "path"},
+    "click": {"kind", "selector", "path"},
+    "set_value": {"kind", "selector", "value", "path"},
+    "select": {"kind", "selector", "value", "path"},
+    "submit": {"kind", "selector", "path"},
+    "wait": {"kind", "milliseconds", "path"},
+    "fetch": {"kind", "method", "endpoint", "body", "path"},
+}
 
 
 class ObserverError(RuntimeError):
@@ -953,6 +969,140 @@ cliLog(JSON.stringify({
 """
 
 
+EGO_TRANSITION_SCRIPT = """
+const taskSpace = %s
+const target = %s
+const recipe = %s
+const task = await useOrCreateTaskSpace(taskSpace)
+await openOrReuseTab(target, { wait: true, timeout: 25 })
+await waitForLoad()
+const info = await pageInfo()
+if (!info || !info.url || info.w === 0 || info.h === 0) throw new Error('viewport unavailable')
+const frameTree = await cdp('Page.getFrameTree')
+const frameId = frameTree && frameTree.frameTree && frameTree.frameTree.frame
+  ? frameTree.frameTree.frame.id : null
+if (!frameId) throw new Error('main frame unavailable')
+const isolated = await cdp('Page.createIsolatedWorld', {
+  frameId: frameId,
+  worldName: 'pursers-verifier-transition',
+  grantUniveralAccess: false
+})
+const contextId = isolated ? isolated.executionContextId : null
+if (!contextId) throw new Error('isolated verifier world unavailable')
+const transitionResult = await cdp('Runtime.evaluate', {
+  expression: `(async () => {
+    const recipe = ${JSON.stringify(recipe)}
+    const read = (selectors) => {
+      const result = {}
+      for (const spec of selectors) {
+        const nodes = Array.from(document.querySelectorAll(spec.selector))
+        const node = nodes[0] || null
+        if (spec.property === 'count') result[spec.path] = nodes.length
+        else if (!node) result[spec.path] = null
+        else if (spec.property === 'text') result[spec.path] = (node.textContent || '').trim()
+        else if (spec.property === 'value') result[spec.path] = String(node.value ?? '')
+        else if (spec.property === 'checked') result[spec.path] = node.checked === true
+        else if (spec.property === 'disabled') result[spec.path] = node.disabled === true
+        else if (spec.property === 'class') result[spec.path] = String(node.className || '')
+        else if (spec.property === 'hidden') result[spec.path] = node.hidden === true
+        else throw new Error('unsupported selector property')
+      }
+      return result
+    }
+    const beforeAt = new Date().toISOString()
+    const before = read(recipe.before)
+    const actionAt = new Date().toISOString()
+    const action = {}
+    for (const spec of recipe.actions) {
+      if (spec.kind === 'observe') action[spec.path] = 'observed'
+      else if (spec.kind === 'wait') {
+        await new Promise(resolve => setTimeout(resolve, spec.milliseconds))
+        action[spec.path] = spec.milliseconds
+      } else if (spec.kind === 'fetch') {
+        const init = { method: spec.method, credentials: 'same-origin', cache: 'no-store', headers: { accept: 'application/json' } }
+        if (spec.body !== null) {
+          init.headers['content-type'] = 'application/json'
+          init.body = JSON.stringify(spec.body)
+        }
+        const response = await fetch(spec.endpoint, init)
+        let body = null
+        try { body = await response.json() } catch (_error) {}
+        action[spec.path] = { status: response.status, body: body }
+      } else {
+        const node = document.querySelector(spec.selector)
+        if (!node) throw new Error('action selector absent: ' + spec.selector)
+        if (spec.kind === 'click') {
+          node.click(); action[spec.path] = 'clicked'
+        } else if (spec.kind === 'set_value' || spec.kind === 'select') {
+          node.value = spec.value
+          node.dispatchEvent(new Event('input', { bubbles: true }))
+          node.dispatchEvent(new Event('change', { bubbles: true }))
+          action[spec.path] = String(node.value)
+        } else if (spec.kind === 'submit') {
+          if (typeof node.requestSubmit === 'function') node.requestSubmit()
+          else node.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+          action[spec.path] = 'submitted'
+        } else throw new Error('unsupported browser action')
+      }
+    }
+    if (recipe.settle_milliseconds) {
+      await new Promise(resolve => setTimeout(resolve, recipe.settle_milliseconds))
+    }
+    const afterAt = new Date().toISOString()
+    const after = read(recipe.after)
+    return { before: before, action: action, after: after, order: {
+      before_at: beforeAt, action_at: actionAt, after_at: afterAt
+    }}
+  })()`,
+  contextId: contextId,
+  awaitPromise: true,
+  returnByValue: true
+})
+const bindingResult = await cdp('Runtime.evaluate', {
+  expression: `(async () => {
+    const readJson = async (url) => {
+      try {
+        const response = await fetch(url, { credentials: 'same-origin', cache: 'no-store', headers: { accept: 'application/json' } })
+        let payload = null
+        try { payload = await response.json() } catch (_error) {}
+        return { http_status: response.status, content_type: response.headers.get('content-type') || '', payload: payload }
+      } catch (_error) { return { http_status: 0, content_type: '', payload: null } }
+    }
+    const host = await readJson('/pursers/status')
+    const candidate = await readJson(new URL('candidate.json', window.location.href))
+    const boardNode = document.querySelector('[data-helper-field="board"], [data-board-id], #board-id')
+    const selectedBoard = boardNode ? (boardNode.getAttribute('data-board-id') || boardNode.textContent || '').trim() : ''
+    let pageSha = ''
+    try {
+      const response = await fetch(window.location.href, { credentials: 'same-origin', cache: 'no-store' })
+      if (response.ok) {
+        const digest = await crypto.subtle.digest('SHA-256', await response.arrayBuffer())
+        pageSha = Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, '0')).join('')
+      }
+    } catch (_error) {}
+    return { host_status: host, candidate_status: candidate, selected_board: selectedBoard, page_sha256: pageSha }
+  })()`,
+  contextId: contextId,
+  awaitPromise: true,
+  returnByValue: true
+})
+const transition = transitionResult && transitionResult.result ? transitionResult.result.value : null
+const binding = bindingResult && bindingResult.result ? bindingResult.result.value : null
+if (!transition || !binding) throw new Error('transition result unavailable')
+cliLog(JSON.stringify({
+  page_url: info.url,
+  before: transition.before,
+  action: transition.action,
+  after: transition.after,
+  order: transition.order,
+  host_status: binding.host_status,
+  candidate_status: binding.candidate_status,
+  selected_board: binding.selected_board,
+  page_sha256: binding.page_sha256
+}))
+"""
+
+
 def _validate_backend_command(config: dict[str, Any], command: list[str]) -> list[str]:
     if not command or not all(isinstance(part, str) for part in command):
         raise _fail(EXIT_CONFIG, "backend command must be a list of strings")
@@ -1077,6 +1227,170 @@ def _run_backend(config: dict[str, Any], page_url: str) -> dict[str, Any]:
     ):
         raise _fail(EXIT_CAPTURE_FAILED, "browser backend accessibility snapshot is not substantive")
     return observation
+
+
+def _validate_transition_selectors(value: Any, label: str) -> list[dict[str, Any]]:
+    if not isinstance(value, list) or not value or len(value) > 64:
+        raise _fail(EXIT_USAGE, f"{label} selectors are empty or unbounded")
+    paths: set[str] = set()
+    for item in value:
+        if not isinstance(item, dict) or set(item) != {"path", "selector", "property"}:
+            raise _fail(EXIT_USAGE, f"{label} selector fields do not match schema")
+        path = item["path"]
+        selector = item["selector"]
+        if (
+            not isinstance(path, str) or not path.startswith("/") or path in paths
+            or not isinstance(selector, str) or not selector or len(selector) > 512
+            or item["property"] not in TRANSITION_PROPERTIES
+        ):
+            raise _fail(EXIT_USAGE, f"{label} selector is invalid")
+        paths.add(path)
+    return value
+
+
+def _validate_transition_actions(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list) or not value or len(value) > 32:
+        raise _fail(EXIT_USAGE, "transition actions are empty or unbounded")
+    paths: set[str] = set()
+    for item in value:
+        if not isinstance(item, dict) or item.get("kind") not in TRANSITION_ACTION_KEYS:
+            raise _fail(EXIT_USAGE, "transition action kind is unsupported")
+        kind = item["kind"]
+        if set(item) != TRANSITION_ACTION_KEYS[kind]:
+            raise _fail(EXIT_USAGE, "transition action fields do not match schema")
+        path = item["path"]
+        if not isinstance(path, str) or not path.startswith("/") or path in paths:
+            raise _fail(EXIT_USAGE, "transition action path is invalid")
+        paths.add(path)
+        if kind in {"click", "set_value", "select", "submit"} and (
+            not isinstance(item["selector"], str) or not item["selector"]
+            or len(item["selector"]) > 512
+        ):
+            raise _fail(EXIT_USAGE, "transition action selector is invalid")
+        if kind in {"set_value", "select"} and not isinstance(item["value"], str):
+            raise _fail(EXIT_USAGE, "transition action value is invalid")
+        if kind == "wait" and (
+            not isinstance(item["milliseconds"], int)
+            or isinstance(item["milliseconds"], bool)
+            or not 0 <= item["milliseconds"] <= 10_000
+        ):
+            raise _fail(EXIT_USAGE, "transition wait is invalid")
+        if kind == "fetch" and (
+            item["method"] not in {"GET", "POST", "PUT", "PATCH", "DELETE"}
+            or not isinstance(item["endpoint"], str)
+            or not item["endpoint"].startswith("/")
+            or item["endpoint"].startswith("//") or "#" in item["endpoint"]
+            or item["body"] is not None and not isinstance(item["body"], dict)
+        ):
+            raise _fail(EXIT_USAGE, "transition fetch action is invalid")
+    return value
+
+
+def _validate_transition_recipe(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != {
+        "before", "actions", "after", "settle_milliseconds"
+    }:
+        raise _fail(EXIT_USAGE, "transition recipe fields do not match schema")
+    _validate_transition_selectors(value["before"], "before")
+    _validate_transition_actions(value["actions"])
+    _validate_transition_selectors(value["after"], "after")
+    delay = value["settle_milliseconds"]
+    if (
+        not isinstance(delay, int) or isinstance(delay, bool)
+        or not 0 <= delay <= 10_000
+    ):
+        raise _fail(EXIT_USAGE, "transition settle delay is invalid")
+    return value
+
+
+def _run_transition_backend(
+    config: dict[str, Any], page_url: str, recipe: dict[str, Any]
+) -> dict[str, Any]:
+    backend = config.get("backend")
+    if not isinstance(backend, dict) or backend.get("kind") not in {"ego-browser", "command"}:
+        raise _fail(EXIT_CONFIG, "observer.json needs an ego-browser or command backend")
+    raw_command = backend.get("command")
+    command = [raw_command] if isinstance(raw_command, str) else raw_command
+    if not isinstance(command, list):
+        raise _fail(EXIT_CONFIG, "backend command must be a string or list of strings")
+    command = _validate_backend_command(config, command)
+    if backend["kind"] == "ego-browser":
+        argv = [*command, "nodejs"]
+        task_space = backend.get("task_space", "pursers-home-acceptance")
+        if not isinstance(task_space, (str, int)) or isinstance(task_space, bool):
+            raise _fail(EXIT_CONFIG, "ego-browser task_space must be a string or integer")
+        payload = EGO_TRANSITION_SCRIPT % (
+            json.dumps(task_space), json.dumps(page_url), json.dumps(recipe)
+        )
+    else:
+        argv = command
+        payload = json.dumps(
+            {"page_url": page_url, "recipe": recipe}, sort_keys=True
+        )
+    environment = {
+        "PATH": os.pathsep.join([str(Path(command[0]).parent), os.defpath]),
+        "LANG": "C", "LC_ALL": "C",
+        "HOME": os.environ.get("HOME") or str(_observer_home()),
+    }
+    for passthrough in ("TMPDIR", "USER", "LOGNAME", "SHELL", "XDG_RUNTIME_DIR"):
+        value = os.environ.get(passthrough)
+        if value:
+            environment[passthrough] = value
+    if isinstance(backend.get("env"), dict):
+        environment.update({
+            key: value for key, value in backend["env"].items()
+            if isinstance(key, str) and isinstance(value, str)
+        })
+    try:
+        completed = subprocess.run(
+            argv, input=payload, text=True, capture_output=True, check=False,
+            timeout=int(backend.get("timeout_s", 120)), cwd=_observer_home(),
+            env=environment,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise _fail(
+            EXIT_CAPTURE_FAILED,
+            f"browser transition backend failed ({type(exc).__name__})",
+        ) from None
+    if completed.returncode:
+        tail = completed.stderr.strip().splitlines()[-1:] or ["no stderr"]
+        raise _fail(
+            EXIT_CAPTURE_FAILED,
+            f"browser transition backend exited {completed.returncode}: {tail[0][:200]}",
+        )
+    result: dict[str, Any] | None = None
+    for stream in (completed.stdout, completed.stderr):
+        for line in reversed(stream.splitlines()):
+            if not line.strip().startswith("{"):
+                continue
+            try:
+                candidate = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(candidate, dict) and "before" in candidate:
+                result = candidate
+                break
+        if result is not None:
+            break
+    expected = {
+        "page_url", "before", "action", "after", "order", "host_status",
+        "candidate_status", "selected_board", "page_sha256",
+    }
+    if not isinstance(result, dict) or set(result) != expected:
+        raise _fail(EXIT_CAPTURE_FAILED, "browser transition result fields do not match schema")
+    for field in ("before", "action", "after"):
+        if not isinstance(result[field], dict):
+            raise _fail(EXIT_CAPTURE_FAILED, f"browser transition {field} is not structured")
+    order = result["order"]
+    if not isinstance(order, dict) or set(order) != {"before_at", "action_at", "after_at"}:
+        raise _fail(EXIT_CAPTURE_FAILED, "browser transition order is invalid")
+    moments = [
+        _parse_timestamp(order[field], f"transition {field}")
+        for field in ("before_at", "action_at", "after_at")
+    ]
+    if moments != sorted(moments):
+        raise _fail(EXIT_CAPTURE_FAILED, "browser transition order is not causal")
+    return result
 
 
 ATTESTATION_NONCE = re.compile(r"^[0-9a-f]{32,128}$")
@@ -1283,6 +1597,7 @@ def capture(spec_path: Path, out: Any) -> int:
 USAGE = (
     "usage: browser_observer.py                          replay one stdin observation request\n"
     "       browser_observer.py capture --spec FILE       record one real browser observation\n"
+    "       browser_observer.py transition                record one typed browser transition\n"
     "       browser_observer.py probe-browser --page URL  report browser-channel health only\n"
 )
 
@@ -1319,6 +1634,121 @@ def probe_browser(page_url: str, out: Any) -> int:
     return EXIT_OK
 
 
+def _read_transition_spec(stream: Any) -> dict[str, Any]:
+    try:
+        value = json.load(stream)
+    except (OSError, json.JSONDecodeError):
+        raise _fail(EXIT_USAGE, "transition spec is not readable JSON") from None
+    expected = {
+        "schema_version", "context", "surface_id", "target",
+        "candidate_commit", "page_url", "recipe",
+    }
+    if not isinstance(value, dict) or set(value) != expected:
+        raise _fail(EXIT_USAGE, "transition spec fields do not match schema")
+    if value["schema_version"] != SCHEMA_VERSION:
+        raise _fail(EXIT_USAGE, "transition schema_version is unsupported")
+    context = value["context"]
+    if not isinstance(context, dict) or set(context) != TRANSITION_CONTEXT_KEYS:
+        raise _fail(EXIT_USAGE, "transition context fields do not match schema")
+    value["target"] = _validate_target(value["target"])
+    for field in ("observation_id", "run_id", "action_id", "entity"):
+        if not OBSERVATION_ID.fullmatch(str(context[field])):
+            raise _fail(EXIT_USAGE, f"transition {field} is invalid")
+    if (
+        context["surface"] != value["surface_id"]
+        or context["board_id"] != value["target"].get("board_id")
+        or context["candidate_commit"] != value["candidate_commit"]
+        or not isinstance(context["causal_index"], int)
+        or isinstance(context["causal_index"], bool)
+        or context["causal_index"] < 0
+    ):
+        raise _fail(EXIT_USAGE, "transition context does not match its target")
+    _parse_timestamp(context["issued_at"], "transition issued_at")
+    if value["surface_id"] not in SURFACE_PRODUCTS:
+        raise _fail(EXIT_USAGE, "transition surface is unsupported")
+    if not FULL_SHA.fullmatch(str(value["candidate_commit"])):
+        raise _fail(EXIT_USAGE, "transition candidate_commit must be a full SHA")
+    _same_origin(value["page_url"], value["target"]["base_url"])
+    value["recipe"] = _validate_transition_recipe(value["recipe"])
+    return value
+
+
+def _transition_phase(
+    phase: str,
+    selected: dict[str, Any],
+    context: dict[str, Any],
+) -> dict[str, Any]:
+    payload = json.dumps(
+        selected, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    ).encode()
+    return {
+        "method": "POST" if phase == "action" else "GET",
+        "path": f"/browser/state/{phase}",
+        "status": 200,
+        "selected": selected,
+        "response_sha256": hashlib.sha256(payload).hexdigest(),
+        "correlation": {
+            field: context[field]
+            for field in ("observation_id", "run_id", "action_id", "entity")
+        },
+    }
+
+
+def transition(stream: Any, out: Any) -> int:
+    spec = _read_transition_spec(stream)
+    config = _load_config()
+    observation = _run_transition_backend(
+        config, spec["page_url"], spec["recipe"]
+    )
+    observed_page = _same_origin(
+        observation["page_url"], spec["target"]["base_url"]
+    )
+    requested_page = urlsplit(spec["page_url"])
+    actual_page = urlsplit(observed_page)
+    if actual_page.path != requested_page.path:
+        raise _fail(EXIT_MISMATCH, "transition browser loaded the wrong page")
+    binding = _observed_surface_binding(
+        config, observation, spec["surface_id"], spec["target"]["base_url"]
+    )
+    if (
+        binding["candidate_commit"] != spec["candidate_commit"]
+        or binding.get("selected_board") != spec["target"]["board_id"]
+    ):
+        raise _fail(EXIT_MISMATCH, "transition runtime binding changed")
+    recipe = spec["recipe"]
+    expected_paths = {
+        "before": {item["path"] for item in recipe["before"]},
+        "action": {item["path"] for item in recipe["actions"]},
+        "after": {item["path"] for item in recipe["after"]},
+    }
+    for phase in ("before", "action", "after"):
+        if set(observation[phase]) != expected_paths[phase]:
+            raise _fail(
+                EXIT_MISMATCH,
+                f"transition {phase} selectors differ from verifier recipe",
+            )
+    result = {
+        "schema_version": SCHEMA_VERSION,
+        "context": spec["context"],
+        "surface_id": spec["surface_id"],
+        "target": spec["target"],
+        "candidate_commit": spec["candidate_commit"],
+        "page_url": spec["page_url"],
+        "runtime": {
+            "product": binding["product"],
+            "version": binding["version"],
+            "build": binding["build"],
+            "source": binding["source"],
+        },
+        "before": _transition_phase("before", observation["before"], spec["context"]),
+        "action": _transition_phase("action", observation["action"], spec["context"]),
+        "after": _transition_phase("after", observation["after"], spec["context"]),
+        "order": observation["order"],
+    }
+    out.write(json.dumps(result, sort_keys=True))
+    return EXIT_OK
+
+
 def main(argv: list[str]) -> int:
     try:
         if len(argv) == 1:
@@ -1333,6 +1763,11 @@ def main(argv: list[str]) -> int:
                 sys.stderr.write(USAGE)
                 return EXIT_USAGE
             return capture(Path(argv[3]), sys.stdout)
+        if argv[1] == "transition":
+            if len(argv) != 2:
+                sys.stderr.write(USAGE)
+                return EXIT_USAGE
+            return transition(sys.stdin, sys.stdout)
         sys.stderr.write(USAGE)
         return EXIT_USAGE
     except ObserverError as error:

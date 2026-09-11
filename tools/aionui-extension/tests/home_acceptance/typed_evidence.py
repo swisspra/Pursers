@@ -10,6 +10,7 @@ CLI subcommands.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import fcntl
 import hashlib
 import hmac
@@ -17,6 +18,7 @@ import ipaddress
 import json
 import os
 import re
+import secrets
 import shlex
 import shutil
 import stat
@@ -32,7 +34,10 @@ from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_ope
 
 
 SCHEMA_VERSION = 1
-KINDS = frozenset({"http_response", "receipt_field", "log_assertion", "state_transition"})
+KINDS = frozenset({
+    "http_response", "mcp_tool_response", "receipt_field", "log_assertion",
+    "state_transition",
+})
 SURFACES = frozenset({"aionui", "fleet", "personal"})
 FULL_SHA = re.compile(r"[0-9a-f]{40}")
 SHA256 = re.compile(r"[0-9a-f]{64}")
@@ -78,8 +83,39 @@ FLEET_LOG_SOURCE_KEYS = LOG_COMMON_KEYS | {
 TRUST_KEYS = {
     "schema_version", "verifier_id", "trusted_module_path", "module_sha256",
     "candidate_checkout_root", "candidate_commit", "board_id", "max_age_seconds", "active_evidence_key",
-    "evidence_keys", "http_sources", "receipt_sources", "log_sources",
+    "evidence_keys", "http_sources", "mcp_sources", "receipt_sources", "log_sources",
     "state_sources", "replay_guard",
+}
+MCP_SOURCE_KEYS = {
+    "adapter", "provenance", "runtime_id", "surface", "board_id",
+    "candidate_commit", "command", "command_sha256", "args", "env", "cwd",
+    "candidate_source", "candidate_source_sha256", "challenge_key", "tool",
+    "arguments", "select_allowlist", "timeout_seconds",
+}
+MCP_ATTESTATION_KEYS = {
+    "schema_version", "server_name", "version", "build", "candidate_commit",
+    "candidate_source", "board_id", "pid", "transport", "nonce", "signature",
+}
+MCP_PUBLIC_ATTESTATION_KEYS = (
+    MCP_ATTESTATION_KEYS - {"candidate_source"}
+) | {"candidate_source_sha256"}
+BROWSER_STATE_SOURCE_KEYS = {
+    "adapter", "provenance", "runtime_id", "surface", "board_id",
+    "candidate_commit", "command", "command_sha256", "config_path",
+    "config_sha256", "base_url", "page_url", "recipe", "env",
+    "timeout_seconds", "select_allowlist",
+}
+BROWSER_PROPERTIES = frozenset({
+    "text", "value", "checked", "disabled", "count", "class", "hidden",
+})
+BROWSER_ACTION_KEYS = {
+    "observe": {"kind", "path"},
+    "click": {"kind", "selector", "path"},
+    "set_value": {"kind", "selector", "value", "path"},
+    "select": {"kind", "selector", "value", "path"},
+    "submit": {"kind", "selector", "path"},
+    "wait": {"kind", "milliseconds", "path"},
+    "fetch": {"kind", "method", "endpoint", "body", "path"},
 }
 
 
@@ -258,7 +294,10 @@ def _trust(trust: Any) -> dict[str, Any]:
     _safe_id(trust["board_id"], "trusted board_id")
     if not isinstance(trust["max_age_seconds"], int) or not 1 <= trust["max_age_seconds"] <= 86_400:
         raise TypedEvidenceError("max_age_seconds is invalid")
-    for field in ("evidence_keys", "http_sources", "receipt_sources", "log_sources", "state_sources"):
+    for field in (
+        "evidence_keys", "http_sources", "mcp_sources", "receipt_sources",
+        "log_sources", "state_sources",
+    ):
         if not isinstance(trust[field], dict):
             raise TypedEvidenceError(f"{field} must be an object")
     key_id = _safe_id(trust["active_evidence_key"], "active_evidence_key")
@@ -284,6 +323,284 @@ def _source(trust: dict[str, Any], collection: str, source_id: Any) -> tuple[str
     source = trust[collection].get(source_id)
     if not isinstance(source, dict):
         raise TypedEvidenceError("source is not verifier-trusted")
+    return source_id, source
+
+
+def _python_execution_selector(argv: list[str]) -> tuple[str, str | None, int]:
+    """Return CPython's first effective execution selector.
+
+    Later ``-m`` text is inert after ``-c`` or a script path, so source trust
+    cannot be satisfied by merely embedding the desired module tuple anywhere
+    in argv.
+    """
+    index = 1
+    while index < len(argv):
+        argument = argv[index]
+        if argument == "-":
+            return "stdin", None, index + 1
+        if not argument.startswith("-"):
+            return "script", argument, index + 1
+        if argument.startswith("--"):
+            index += 2 if argument == "--check-hash-based-pycs" else 1
+            continue
+        position = 1
+        while position < len(argument):
+            letter = argument[position]
+            if letter in {"c", "m"}:
+                kind = "command" if letter == "c" else "module"
+                attached = argument[position + 1 :]
+                if attached:
+                    return kind, attached, index + 1
+                value = argv[index + 1] if index + 1 < len(argv) else None
+                return kind, value, index + 2
+            if letter in {"W", "X"}:
+                if not argument[position + 1 :]:
+                    index += 1
+                break
+            position += 1
+        index += 1
+    return "repl", None, len(argv)
+
+
+def _clean_candidate_source(source: dict[str, Any], trust: dict[str, Any]) -> Path:
+    checkout = Path(str(trust["candidate_checkout_root"])).resolve()
+    candidate = Path(str(source["candidate_source"])).resolve()
+    if (
+        not candidate.is_file()
+        or not candidate.is_relative_to(checkout)
+        or not SHA256.fullmatch(str(source["candidate_source_sha256"]))
+        or hashlib.sha256(candidate.read_bytes()).hexdigest()
+        != source["candidate_source_sha256"]
+    ):
+        raise TypedEvidenceError("MCP candidate source is not verifier-pinned")
+    head = subprocess.run(
+        ["git", "-C", str(checkout), "rev-parse", "HEAD"],
+        text=True, capture_output=True, check=False, timeout=5,
+        env={"PATH": os.defpath, "LANG": "C", "LC_ALL": "C"},
+    )
+    dirty = subprocess.run(
+        ["git", "-C", str(checkout), "status", "--porcelain"],
+        text=True, capture_output=True, check=False, timeout=5,
+        env={"PATH": os.defpath, "LANG": "C", "LC_ALL": "C"},
+    )
+    if (
+        head.returncode or head.stdout.strip() != trust["candidate_commit"]
+        or dirty.returncode or dirty.stdout
+    ):
+        raise TypedEvidenceError("MCP candidate checkout is not the trusted clean commit")
+    return candidate
+
+
+def _mcp_source(
+    source_id: Any, trust: dict[str, Any], context: dict[str, Any]
+) -> tuple[str, dict[str, Any]]:
+    source_id, source = _source(trust, "mcp_sources", source_id)
+    _closed(source, MCP_SOURCE_KEYS, "MCP source")
+    if source["adapter"] != "trusted_mcp_stdio_v1":
+        raise TypedEvidenceError("MCP source adapter is unsupported")
+    if (
+        source["surface"] != context["surface"]
+        or source["board_id"] != context["board_id"]
+        or source["candidate_commit"] != context["candidate_commit"]
+    ):
+        raise TypedEvidenceError("MCP source binding does not match request")
+    command = Path(str(source["command"])).resolve()
+    if (
+        not command.is_absolute() or not command.is_file()
+        or not os.access(command, os.X_OK)
+        or not SHA256.fullmatch(str(source["command_sha256"]))
+        or hashlib.sha256(command.read_bytes()).hexdigest() != source["command_sha256"]
+    ):
+        raise TypedEvidenceError("MCP executable is not verifier-pinned")
+    checkout = Path(str(trust["candidate_checkout_root"])).resolve()
+    if Path(str(source["cwd"])).resolve() != checkout:
+        raise TypedEvidenceError("MCP working directory is not the candidate checkout")
+    args = source["args"]
+    if not isinstance(args, list) or not args or any(not isinstance(item, str) for item in args):
+        raise TypedEvidenceError("MCP argv is invalid")
+    selector, selected, after = _python_execution_selector([str(command), *args])
+    if (
+        selector != "module" or selected != "pursers_personal.cli"
+        or args[after - 1 : after] != ["mcp"]
+    ):
+        raise TypedEvidenceError("MCP argv does not execute pursers_personal.cli mcp")
+    env = source["env"]
+    if not isinstance(env, dict) or any(
+        not isinstance(key, str) or not isinstance(value, str)
+        for key, value in env.items()
+    ):
+        raise TypedEvidenceError("MCP environment is invalid")
+    _clean_candidate_source(source, trust)
+    challenge = Path(str(source["challenge_key"])).resolve()
+    if (
+        not challenge.is_absolute() or challenge.is_relative_to(checkout)
+        or challenge.is_symlink() or not challenge.is_file()
+        or challenge.stat().st_uid != os.getuid() or challenge.stat().st_mode & 0o077
+        or len(challenge.read_bytes()) < 32
+    ):
+        raise TypedEvidenceError("MCP challenge key is not private verifier material")
+    _safe_id(source["tool"], "MCP tool")
+    if not isinstance(source["arguments"], dict):
+        raise TypedEvidenceError("MCP tool arguments are invalid")
+    _safe_public(source["arguments"], "MCP tool arguments")
+    selectors = source["select_allowlist"]
+    if (
+        not isinstance(selectors, list) or not selectors
+        or len(selectors) != len(set(selectors))
+        or any(not isinstance(pointer, str) or not pointer.startswith("/") for pointer in selectors)
+    ):
+        raise TypedEvidenceError("MCP selector allowlist is invalid")
+    if not isinstance(source["timeout_seconds"], (int, float)) or not 0.1 <= source["timeout_seconds"] <= 30:
+        raise TypedEvidenceError("MCP timeout is invalid")
+    return source_id, source
+
+
+def _browser_selectors(value: Any, label: str) -> list[dict[str, Any]]:
+    if not isinstance(value, list) or not value or len(value) > 64:
+        raise TypedEvidenceError(f"{label} selectors are empty or unbounded")
+    paths: set[str] = set()
+    for selector in value:
+        _closed(selector, {"path", "selector", "property"}, f"{label} selector")
+        path = selector["path"]
+        css = selector["selector"]
+        if (
+            not isinstance(path, str) or not path.startswith("/") or path in paths
+            or not isinstance(css, str) or not css or len(css) > 512
+            or selector["property"] not in BROWSER_PROPERTIES
+        ):
+            raise TypedEvidenceError(f"{label} selector is invalid")
+        paths.add(path)
+    return value
+
+
+def _browser_actions(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list) or not value or len(value) > 32:
+        raise TypedEvidenceError("browser actions are empty or unbounded")
+    paths: set[str] = set()
+    for action in value:
+        if not isinstance(action, dict) or action.get("kind") not in BROWSER_ACTION_KEYS:
+            raise TypedEvidenceError("browser action kind is unsupported")
+        kind = action["kind"]
+        if set(action) != BROWSER_ACTION_KEYS[kind]:
+            raise TypedEvidenceError("browser action fields do not match schema")
+        path = action["path"]
+        if not isinstance(path, str) or not path.startswith("/") or path in paths:
+            raise TypedEvidenceError("browser action result path is invalid")
+        paths.add(path)
+        if kind in {"click", "set_value", "select", "submit"}:
+            selector = action["selector"]
+            if not isinstance(selector, str) or not selector or len(selector) > 512:
+                raise TypedEvidenceError("browser action selector is invalid")
+        if kind in {"set_value", "select"} and not isinstance(action["value"], str):
+            raise TypedEvidenceError("browser action value is invalid")
+        if kind == "wait" and (
+            not isinstance(action["milliseconds"], int)
+            or isinstance(action["milliseconds"], bool)
+            or not 0 <= action["milliseconds"] <= 10_000
+        ):
+            raise TypedEvidenceError("browser wait is invalid")
+        if kind == "fetch":
+            endpoint = action["endpoint"]
+            if (
+                action["method"] not in {"GET", "POST", "PUT", "PATCH", "DELETE"}
+                or not isinstance(endpoint, str) or not endpoint.startswith("/")
+                or endpoint.startswith("//") or "#" in endpoint
+                or action["body"] is not None and not isinstance(action["body"], dict)
+            ):
+                raise TypedEvidenceError("browser fetch action is invalid")
+    return value
+
+
+def _browser_state_source(
+    source_id: Any, trust: dict[str, Any], context: dict[str, Any]
+) -> tuple[str, dict[str, Any]]:
+    source_id, source = _source(trust, "state_sources", source_id)
+    _closed(source, BROWSER_STATE_SOURCE_KEYS, "browser state source")
+    if source["adapter"] != "trusted_browser_state_v1":
+        raise TypedEvidenceError("browser state adapter is unsupported")
+    if (
+        source["surface"] != context["surface"]
+        or source["board_id"] != context["board_id"]
+        or source["candidate_commit"] != context["candidate_commit"]
+    ):
+        raise TypedEvidenceError("browser state source binding does not match request")
+    checkout = Path(str(trust["candidate_checkout_root"])).resolve()
+    command = Path(str(source["command"])).resolve()
+    config = Path(str(source["config_path"])).resolve()
+    if (
+        not command.is_absolute() or not command.is_file() or not os.access(command, os.X_OK)
+        or command.is_relative_to(checkout) or command.stat().st_uid != os.getuid()
+        or command.stat().st_mode & 0o022
+        or hashlib.sha256(command.read_bytes()).hexdigest() != source["command_sha256"]
+        or not SHA256.fullmatch(str(source["command_sha256"]))
+    ):
+        raise TypedEvidenceError("browser state command is not verifier-pinned")
+    if (
+        not config.is_file() or config.is_relative_to(checkout)
+        or config.stat().st_uid != os.getuid() or config.stat().st_mode & 0o077
+        or config != command.parent / "observer.json"
+        or hashlib.sha256(config.read_bytes()).hexdigest() != source["config_sha256"]
+        or not SHA256.fullmatch(str(source["config_sha256"]))
+    ):
+        raise TypedEvidenceError("browser state config is not verifier-pinned")
+    head = subprocess.run(
+        ["git", "-C", str(checkout), "rev-parse", "HEAD"],
+        text=True, capture_output=True, check=False, timeout=5,
+        env={"PATH": os.defpath, "LANG": "C", "LC_ALL": "C"},
+    )
+    dirty = subprocess.run(
+        ["git", "-C", str(checkout), "status", "--porcelain"],
+        text=True, capture_output=True, check=False, timeout=5,
+        env={"PATH": os.defpath, "LANG": "C", "LC_ALL": "C"},
+    )
+    if (
+        head.returncode or head.stdout.strip() != trust["candidate_commit"]
+        or dirty.returncode or dirty.stdout
+    ):
+        raise TypedEvidenceError("browser candidate checkout is not the trusted clean commit")
+    parsed = urlsplit(str(source["base_url"]))
+    page = urlsplit(str(source["page_url"]))
+    try:
+        loopback = ipaddress.ip_address(parsed.hostname or "").is_loopback
+    except ValueError:
+        loopback = parsed.hostname == "localhost"
+    if (
+        parsed.scheme not in {"http", "https"} or not loopback
+        or parsed.username or parsed.password or parsed.query or parsed.fragment
+        or (page.scheme, page.hostname, page.port) != (parsed.scheme, parsed.hostname, parsed.port)
+        or page.username or page.password or page.query or page.fragment
+    ):
+        raise TypedEvidenceError("browser state origin or page is unsafe")
+    recipe = _closed(
+        source["recipe"], {"before", "actions", "after", "settle_milliseconds"},
+        "browser state recipe",
+    )
+    _browser_selectors(recipe["before"], "browser before")
+    _browser_actions(recipe["actions"])
+    _browser_selectors(recipe["after"], "browser after")
+    if (
+        not isinstance(recipe["settle_milliseconds"], int)
+        or isinstance(recipe["settle_milliseconds"], bool)
+        or not 0 <= recipe["settle_milliseconds"] <= 10_000
+    ):
+        raise TypedEvidenceError("browser settle delay is invalid")
+    expected_selectors = {
+        selector["path"] for selector in (*recipe["before"], *recipe["after"])
+    } | {action["path"] for action in recipe["actions"]}
+    allowlist = source["select_allowlist"]
+    if (
+        not isinstance(allowlist, list) or set(allowlist) != expected_selectors
+        or len(allowlist) != len(set(allowlist))
+    ):
+        raise TypedEvidenceError("browser state selector allowlist differs from recipe")
+    env = source["env"]
+    if not isinstance(env, dict) or any(
+        not isinstance(key, str) or not isinstance(value, str)
+        for key, value in env.items()
+    ):
+        raise TypedEvidenceError("browser state environment is invalid")
+    if not isinstance(source["timeout_seconds"], (int, float)) or not 1 <= source["timeout_seconds"] <= 180:
+        raise TypedEvidenceError("browser state timeout is invalid")
     return source_id, source
 
 
@@ -657,7 +974,8 @@ def _verify_evidence(evidence: Any, trust: dict[str, Any]) -> dict[str, Any]:
     if source["module_sha256"] != trust["module_sha256"]:
         raise TypedEvidenceError("evidence module digest changed")
     collection = {
-        "http_response": "http_sources", "receipt_field": "receipt_sources",
+        "http_response": "http_sources", "mcp_tool_response": "mcp_sources",
+        "receipt_field": "receipt_sources",
         "log_assertion": "log_sources", "state_transition": "state_sources",
     }[evidence["kind"]]
     source_id, trusted_source = _source(trust, collection, source["source_id"])
@@ -679,6 +997,66 @@ def _verify_evidence(evidence: Any, trust: dict[str, Any]) -> dict[str, Any]:
         ):
             raise TypedEvidenceError("HTTP runtime evidence changed")
         _validate_http_result(record["response"], trusted_source, "HTTP response record")
+    elif evidence["kind"] == "mcp_tool_response":
+        _, trusted_source = _mcp_source(source_id, trust, context)
+        record = _closed(
+            evidence["record"], {"process", "transport", "attestation", "result"},
+            "MCP evidence record",
+        )
+        if record["transport"] != "stdio":
+            raise TypedEvidenceError("MCP evidence transport is unsupported")
+        process = _closed(
+            record["process"],
+            {"pid", "argv_sha256", "executable_sha256", "candidate_source_sha256"},
+            "MCP process record",
+        )
+        if (
+            not isinstance(process["pid"], int) or isinstance(process["pid"], bool)
+            or process["pid"] <= 1
+            or any(
+                not SHA256.fullmatch(str(process[field]))
+                for field in ("argv_sha256", "executable_sha256", "candidate_source_sha256")
+            )
+            or process["executable_sha256"] != trusted_source["command_sha256"]
+            or process["candidate_source_sha256"] != trusted_source["candidate_source_sha256"]
+        ):
+            raise TypedEvidenceError("MCP process record changed")
+        attestation = _closed(
+            record["attestation"], MCP_PUBLIC_ATTESTATION_KEYS,
+            "MCP public attestation",
+        )
+        nonce = attestation.get("nonce")
+        if not isinstance(nonce, str) or not re.fullmatch(r"[0-9a-f]{64}", nonce):
+            raise TypedEvidenceError("MCP attestation nonce is invalid")
+        full_attestation = {
+            **attestation,
+            "candidate_source": str(Path(str(trusted_source["candidate_source"])).resolve()),
+        }
+        full_attestation.pop("candidate_source_sha256", None)
+        _validate_mcp_attestation(full_attestation, trusted_source, context, nonce)
+        result = _closed(
+            record["result"],
+            {"tool", "arguments_sha256", "selected", "result_sha256", "correlation"},
+            "MCP tool result record",
+        )
+        correlation = _closed(
+            result["correlation"], {"observation_id", "run_id", "action_id", "entity"},
+            "MCP result correlation",
+        )
+        if (
+            attestation["candidate_source_sha256"] != trusted_source["candidate_source_sha256"]
+            or attestation["pid"] != process["pid"]
+            or result["tool"] != trusted_source["tool"]
+            or result["arguments_sha256"] != _digest(trusted_source["arguments"])
+            or not isinstance(result["selected"], dict) or not result["selected"]
+            or not set(result["selected"]) <= set(trusted_source["select_allowlist"])
+            or not SHA256.fullmatch(str(result["result_sha256"]))
+            or correlation != {
+                key: context[key]
+                for key in ("observation_id", "run_id", "action_id", "entity")
+            }
+        ):
+            raise TypedEvidenceError("MCP tool result binding changed")
     elif evidence["kind"] == "receipt_field":
         record = _closed(
             evidence["record"],
@@ -803,41 +1181,76 @@ def _verify_evidence(evidence: Any, trust: dict[str, Any]) -> dict[str, Any]:
                 raise TypedEvidenceError("log process record has invalid types")
     else:
         record = evidence["record"]
-        record = _closed(
-            record,
-            {
-                "before", "action", "after", "order", "http_source_id",
-                "http_source_config_sha256", "runtime",
-            },
-            "state transition record",
-        )
-        http_id, http_source = _source(
-            trust, "http_sources", trusted_source["http_source_id"]
-        )
-        if (
-            trusted_source["runtime_id"] != http_source["runtime_id"]
-            or record["http_source_id"] != http_id
-            or record["http_source_config_sha256"] != _digest(http_source)
-            or trusted_source["http_source_config_sha256"] != _digest(http_source)
-        ):
-            raise TypedEvidenceError("state transition HTTP source binding changed")
-        runtime = _validate_runtime_record(record["runtime"], "state runtime record")
-        if runtime != _runtime_check(http_source["runtime"], trust, http_source["base_url"]):
-            raise TypedEvidenceError("state runtime evidence changed")
-        order = _closed(record["order"], {"before_at", "action_at", "after_at"}, "state transition order")
-        moments = [_timestamp(order[field], f"state transition {field}") for field in ("before_at", "action_at", "after_at")]
-        if moments != sorted(moments):
-            raise TypedEvidenceError("state transition causal order is invalid")
-        expected_correlation = {
-            "observation_id": context["observation_id"], "run_id": context["run_id"],
-            "action_id": context["action_id"], "entity": context["entity"],
-        }
-        for phase in ("before", "action", "after"):
-            phase_record = _validate_http_result(
-                record[phase], http_source, f"state transition {phase}"
+        if trusted_source.get("adapter") == "trusted_browser_state_v1":
+            _, trusted_source = _browser_state_source(source_id, trust, context)
+            record = _closed(
+                record, {"before", "action", "after", "order", "observer"},
+                "browser state transition record",
             )
-            if phase_record["correlation"] != expected_correlation:
-                raise TypedEvidenceError("state transition correlation changed")
+            order = _closed(
+                record["order"], {"before_at", "action_at", "after_at"},
+                "browser state order",
+            )
+            moments = [
+                _timestamp(order[field], f"browser state {field}")
+                for field in ("before_at", "action_at", "after_at")
+            ]
+            if moments != sorted(moments):
+                raise TypedEvidenceError("browser state causal order is invalid")
+            observer = _closed(
+                record["observer"],
+                {"command_sha256", "config_sha256", "runtime", "page_url"},
+                "browser observer record",
+            )
+            runtime = _closed(
+                observer["runtime"], {"product", "version", "build", "source"},
+                "browser observer runtime",
+            )
+            if (
+                observer["command_sha256"] != trusted_source["command_sha256"]
+                or observer["config_sha256"] != trusted_source["config_sha256"]
+                or observer["page_url"] != trusted_source["page_url"]
+                or any(not isinstance(value, str) or not value for value in runtime.values())
+            ):
+                raise TypedEvidenceError("browser observer binding changed")
+            for phase in ("before", "action", "after"):
+                _browser_phase(record[phase], trusted_source, context, phase)
+        else:
+            record = _closed(
+                record,
+                {
+                    "before", "action", "after", "order", "http_source_id",
+                    "http_source_config_sha256", "runtime",
+                },
+                "state transition record",
+            )
+            http_id, http_source = _source(
+                trust, "http_sources", trusted_source["http_source_id"]
+            )
+            if (
+                trusted_source["runtime_id"] != http_source["runtime_id"]
+                or record["http_source_id"] != http_id
+                or record["http_source_config_sha256"] != _digest(http_source)
+                or trusted_source["http_source_config_sha256"] != _digest(http_source)
+            ):
+                raise TypedEvidenceError("state transition HTTP source binding changed")
+            runtime = _validate_runtime_record(record["runtime"], "state runtime record")
+            if runtime != _runtime_check(http_source["runtime"], trust, http_source["base_url"]):
+                raise TypedEvidenceError("state runtime evidence changed")
+            order = _closed(record["order"], {"before_at", "action_at", "after_at"}, "state transition order")
+            moments = [_timestamp(order[field], f"state transition {field}") for field in ("before_at", "action_at", "after_at")]
+            if moments != sorted(moments):
+                raise TypedEvidenceError("state transition causal order is invalid")
+            expected_correlation = {
+                "observation_id": context["observation_id"], "run_id": context["run_id"],
+                "action_id": context["action_id"], "entity": context["entity"],
+            }
+            for phase in ("before", "action", "after"):
+                phase_record = _validate_http_result(
+                    record[phase], http_source, f"state transition {phase}"
+                )
+                if phase_record["correlation"] != expected_correlation:
+                    raise TypedEvidenceError("state transition correlation changed")
     return evidence
 
 
@@ -972,6 +1385,156 @@ def _http_call(
     }
 
 
+def _mcp_structured(result: Any, label: str) -> Any:
+    if bool(getattr(result, "is_error", False)):
+        raise TypedEvidenceError(f"{label} returned an MCP error")
+    value = getattr(result, "structured_content", None)
+    if value is None:
+        raise TypedEvidenceError(f"{label} returned no structured content")
+    return value
+
+
+def _validate_mcp_attestation(
+    attestation: Any,
+    source: dict[str, Any],
+    context: dict[str, Any],
+    nonce: str,
+) -> dict[str, Any]:
+    attestation = _closed(attestation, MCP_ATTESTATION_KEYS, "MCP attestation")
+    candidate = Path(str(source["candidate_source"])).resolve()
+    expected = {
+        "schema_version": SCHEMA_VERSION,
+        "server_name": "On Board Personal",
+        "version": attestation.get("version"),
+        "build": source["candidate_source_sha256"],
+        "candidate_commit": context["candidate_commit"],
+        "candidate_source": str(candidate),
+        "board_id": context["board_id"],
+        "pid": attestation.get("pid"),
+        "transport": "stdio",
+        "nonce": nonce,
+    }
+    if (
+        not isinstance(attestation["version"], str) or not attestation["version"]
+        or not isinstance(attestation["pid"], int) or isinstance(attestation["pid"], bool)
+        or attestation["pid"] <= 1
+        or {key: attestation[key] for key in expected} != expected
+        or not SHA256.fullmatch(str(attestation["signature"]))
+    ):
+        raise TypedEvidenceError("MCP attestation claims do not match verifier trust")
+    payload = _json_bytes(expected)
+    signature = hmac.new(
+        Path(str(source["challenge_key"])).read_bytes(), payload, hashlib.sha256
+    ).hexdigest()
+    if not hmac.compare_digest(signature, attestation["signature"]):
+        raise TypedEvidenceError("MCP attestation authentication failed")
+    return attestation
+
+
+def _mcp_process_record(
+    pid: int, source: dict[str, Any]
+) -> dict[str, Any]:
+    completed = subprocess.run(
+        ["/bin/ps", "-p", str(pid), "-o", "command="],
+        text=True, capture_output=True, check=False, timeout=5,
+        env={"PATH": os.defpath, "LANG": "C", "LC_ALL": "C"},
+    )
+    command_text = completed.stdout.strip()
+    try:
+        argv = shlex.split(command_text)
+    except ValueError:
+        argv = []
+    executable = Path(str(source["command"])).resolve()
+    if (
+        completed.returncode or not argv
+        or Path(argv[0]).resolve() != executable
+        or argv[1:] != source["args"]
+        or _process_cwd(pid, "MCP process") != Path(str(source["cwd"])).resolve()
+    ):
+        raise TypedEvidenceError("MCP attested process identity does not match source trust")
+    return {
+        "pid": pid,
+        "argv_sha256": hashlib.sha256(command_text.encode()).hexdigest(),
+        "executable_sha256": source["command_sha256"],
+        "candidate_source_sha256": source["candidate_source_sha256"],
+    }
+
+
+async def _execute_mcp_tool(
+    source: dict[str, Any], context: dict[str, Any], select: list[str]
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    try:
+        from mcp import Client
+        from mcp.client.stdio import StdioServerParameters
+    except ImportError as exc:
+        raise TypedEvidenceError("MCP client runtime is unavailable") from exc
+    params = StdioServerParameters(
+        command=str(Path(str(source["command"])).resolve()),
+        args=list(source["args"]),
+        env=dict(source["env"]),
+        cwd=str(Path(str(source["cwd"])).resolve()),
+    )
+    nonce = secrets.token_hex(32)
+    try:
+        async with Client(
+            params,
+            mode="2026-07-28",
+            read_timeout_seconds=float(source["timeout_seconds"]),
+        ) as client:
+            attestation_result = await client.call_tool(
+                "acceptance_runtime_attest", {"nonce": nonce}
+            )
+            attestation = _validate_mcp_attestation(
+                _mcp_structured(attestation_result, "MCP attestation"),
+                source, context, nonce,
+            )
+            process = _mcp_process_record(attestation["pid"], source)
+            result = await client.call_tool(source["tool"], dict(source["arguments"]))
+            document = _mcp_structured(result, f"MCP tool {source['tool']}")
+    except TypedEvidenceError:
+        raise
+    except Exception as exc:
+        raise TypedEvidenceError("trusted MCP stdio request failed") from exc
+    selected = {
+        pointer: _safe_public(_pointer(document, pointer), "MCP selected value")
+        for pointer in select
+    }
+    public_attestation = {
+        key: value
+        for key, value in attestation.items()
+        if key != "candidate_source"
+    }
+    public_attestation["candidate_source_sha256"] = source["candidate_source_sha256"]
+    return process, public_attestation, {
+        "tool": source["tool"],
+        "arguments_sha256": _digest(source["arguments"]),
+        "selected": selected,
+        "result_sha256": _digest(document),
+        "correlation": {
+            key: context[key]
+            for key in ("observation_id", "run_id", "action_id", "entity")
+        },
+    }
+
+
+def _mcp_call(
+    source: dict[str, Any], context: dict[str, Any], spec: Any
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    spec = _closed(spec, {"tool", "arguments", "select"}, "MCP request")
+    if (
+        spec["tool"] != source["tool"]
+        or spec["arguments"] != source["arguments"]
+        or not isinstance(spec["select"], list) or not spec["select"]
+        or len(spec["select"]) != len(set(spec["select"]))
+        or not set(spec["select"]) <= set(source["select_allowlist"])
+    ):
+        raise TypedEvidenceError("MCP request differs from verifier-owned tool recipe")
+    try:
+        return asyncio.run(_execute_mcp_tool(source, context, spec["select"]))
+    except RuntimeError as exc:
+        raise TypedEvidenceError("MCP recorder requires a synchronous verifier process") from exc
+
+
 def _record_http(request: dict[str, Any], trust: dict[str, Any], context: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
     recorder = _closed(request["recorder"], {"source_id", "request", "action_origin"}, "http_response recorder")
     if recorder["action_origin"] != "verifier_api":
@@ -983,6 +1546,30 @@ def _record_http(request: dict[str, Any], trust: dict[str, Any], context: dict[s
         "response": _http_call(source, context, recorder["request"], "HTTP"),
     }
     return _base_source(source_id, source, trust), record
+
+
+def _record_mcp(
+    request: dict[str, Any], trust: dict[str, Any], context: dict[str, Any]
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    recorder = _closed(
+        request["recorder"], {"source_id", "tool", "arguments", "select"},
+        "mcp_tool_response recorder",
+    )
+    source_id, source = _mcp_source(recorder["source_id"], trust, context)
+    process, attestation, result = _mcp_call(
+        source, context,
+        {
+            "tool": recorder["tool"],
+            "arguments": recorder["arguments"],
+            "select": recorder["select"],
+        },
+    )
+    return _base_source(source_id, source, trust), {
+        "process": process,
+        "transport": "stdio",
+        "attestation": attestation,
+        "result": result,
+    }
 
 
 def _record_receipt(request: dict[str, Any], trust: dict[str, Any], context: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -1414,8 +2001,138 @@ def _record_log(request: dict[str, Any], trust: dict[str, Any], context: dict[st
     return _base_source(source_id, source, trust), record
 
 
+def _browser_phase(
+    value: Any,
+    source: dict[str, Any],
+    context: dict[str, Any],
+    phase: str,
+) -> dict[str, Any]:
+    result = _validate_http_result(value, source, f"browser {phase} record")
+    expected_method = "POST" if phase == "action" else "GET"
+    expected_correlation = {
+        key: context[key]
+        for key in ("observation_id", "run_id", "action_id", "entity")
+    }
+    expected_paths = {
+        item["path"]
+        for item in (
+            source["recipe"]["actions"]
+            if phase == "action"
+            else source["recipe"][phase]
+        )
+    }
+    if (
+        result["method"] != expected_method
+        or result["path"] != f"/browser/state/{phase}"
+        or result["status"] != 200
+        or result["correlation"] != expected_correlation
+        or set(result["selected"]) != expected_paths
+    ):
+        raise TypedEvidenceError(f"browser {phase} result differs from verifier recipe")
+    return result
+
+
+def _browser_transition_call(
+    source: dict[str, Any], context: dict[str, Any]
+) -> dict[str, Any]:
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "context": context,
+        "surface_id": source["surface"],
+        "target": {"base_url": source["base_url"], "board_id": source["board_id"]},
+        "candidate_commit": source["candidate_commit"],
+        "page_url": source["page_url"],
+        "recipe": source["recipe"],
+    }
+    environment = {
+        "PATH": os.defpath,
+        "LANG": "C",
+        "LC_ALL": "C",
+        **source["env"],
+    }
+    try:
+        completed = subprocess.run(
+            [str(Path(str(source["command"])).resolve()), "transition"],
+            input=json.dumps(payload, sort_keys=True),
+            text=True, capture_output=True, check=False,
+            timeout=float(source["timeout_seconds"]),
+            cwd=Path(str(source["command"])).resolve().parent,
+            env=environment,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise TypedEvidenceError("trusted browser state command failed") from exc
+    if completed.returncode or len(completed.stdout.encode()) > MAX_CONFIG_BYTES:
+        raise TypedEvidenceError("trusted browser state command returned no valid result")
+    try:
+        result = json.loads(completed.stdout)
+    except json.JSONDecodeError:
+        raise TypedEvidenceError("trusted browser state command returned invalid JSON") from None
+    expected_keys = {
+        "schema_version", "context", "surface_id", "target", "candidate_commit",
+        "page_url", "runtime", "before", "action", "after", "order",
+    }
+    if not isinstance(result, dict) or set(result) != expected_keys:
+        raise TypedEvidenceError("trusted browser state result fields do not match schema")
+    if (
+        result["schema_version"] != SCHEMA_VERSION
+        or result["context"] != context
+        or result["surface_id"] != source["surface"]
+        or result["target"] != payload["target"]
+        or result["candidate_commit"] != source["candidate_commit"]
+        or result["page_url"] != source["page_url"]
+    ):
+        raise TypedEvidenceError("trusted browser state result binding changed")
+    runtime = _closed(
+        result["runtime"], {"product", "version", "build", "source"},
+        "browser runtime binding",
+    )
+    for field in runtime.values():
+        if not isinstance(field, str) or not field:
+            raise TypedEvidenceError("browser runtime binding is invalid")
+    order = _closed(
+        result["order"], {"before_at", "action_at", "after_at"},
+        "browser state order",
+    )
+    moments = [
+        _timestamp(order[field], f"browser state {field}")
+        for field in ("before_at", "action_at", "after_at")
+    ]
+    if moments != sorted(moments):
+        raise TypedEvidenceError("browser state causal order is invalid")
+    return {
+        "before": _browser_phase(result["before"], source, context, "before"),
+        "action": _browser_phase(result["action"], source, context, "action"),
+        "after": _browser_phase(result["after"], source, context, "after"),
+        "order": order,
+        "observer": {
+            "command_sha256": source["command_sha256"],
+            "config_sha256": source["config_sha256"],
+            "runtime": runtime,
+            "page_url": result["page_url"],
+        },
+    }
+
+
 def _record_transition(request: dict[str, Any], trust: dict[str, Any], context: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
     recorder = _closed(request["recorder"], {"source_id", "before", "action", "after"}, "state_transition recorder")
+    raw_source = trust["state_sources"].get(recorder["source_id"])
+    adapter = raw_source.get("adapter") if isinstance(raw_source, dict) else None
+    if adapter == "trusted_browser_state_v1":
+        source_id, source = _browser_state_source(
+            recorder["source_id"], trust, context
+        )
+        recipe = source["recipe"]
+        if (
+            recorder["before"] != recipe["before"]
+            or recorder["action"] != recipe["actions"]
+            or recorder["after"] != recipe["after"]
+        ):
+            raise TypedEvidenceError(
+                "browser state recorder differs from verifier-owned recipe"
+            )
+        return _base_source(source_id, source, trust), _browser_transition_call(
+            source, context
+        )
     source_id, source = _source(trust, "state_sources", recorder["source_id"])
     _closed(
         source,
@@ -1458,6 +2175,7 @@ def record_evidence(request: Any, trust_config: Any) -> dict[str, Any]:
     context = _context(request, trust)
     functions = {
         "http_response": _record_http,
+        "mcp_tool_response": _record_mcp,
         "receipt_field": _record_receipt,
         "log_assertion": _record_log,
         "state_transition": _record_transition,
@@ -1566,6 +2284,19 @@ def evaluate_evidence(evidence: Any, expected: Any, trust_config: Any) -> dict[s
                 raise TypedEvidenceError("http_response conjunct target is unsupported")
             passed = _compare(actual, {"op": conjunct["op"], "value": conjunct["value"]})
             checks.append({"target": conjunct["target"], "path": conjunct["path"], "op": conjunct["op"], "passed": passed})
+        elif kind == "mcp_tool_response":
+            conjunct = _closed(
+                conjunct, {"path", "op", "value"},
+                "mcp_tool_response conjunct",
+            )
+            actual = record["result"]["selected"].get(conjunct["path"], object())
+            passed = _compare(
+                actual, {"op": conjunct["op"], "value": conjunct["value"]}
+            )
+            checks.append({
+                "path": conjunct["path"], "op": conjunct["op"],
+                "passed": passed,
+            })
         elif kind == "receipt_field":
             conjunct = _closed(conjunct, {"path", "op", "value"}, "receipt_field conjunct")
             actual = record["fields"].get(conjunct["path"], object())
@@ -1644,6 +2375,17 @@ def _evaluate_parent_fielded_conjunct(
                 actual = record["response"]["selected"].get(path, object())
             else:
                 raise TypedEvidenceError("parent http_response assertion target/path is invalid")
+        elif kind == "mcp_tool_response":
+            assertion = _closed(
+                assertion, {"path", "op", "value"},
+                "parent mcp_tool_response assertion",
+            )
+            path = assertion["path"]
+            if not isinstance(path, str) or not path.startswith("/"):
+                raise TypedEvidenceError(
+                    "parent mcp_tool_response assertion path is invalid"
+                )
+            actual = record["result"]["selected"].get(path, object())
         elif kind == "receipt_field":
             assertion = _closed(
                 assertion, {"path", "op", "value"},
@@ -1736,6 +2478,20 @@ def evaluate_parent_request(request: Any, trust_config: Any) -> dict[str, Any]:
             record["response"]["status"] == conjunct["status"]
             and _semantic_contains(source_id, conjunct["request"])
             and _semantic_contains(record["response"]["selected"], conjunct["body_contains"])
+        )
+    elif kind == "mcp_tool_response":
+        conjunct = _closed(
+            conjunct, {"kind", "tool", "field", "expected"},
+            "parent mcp_tool_response conjunct",
+        )
+        field = str(conjunct["field"])
+        pointer = field if field.startswith("/") else "/" + field
+        passed = (
+            record["result"]["tool"] == conjunct["tool"]
+            and _semantic_contains(
+                record["result"]["selected"].get(pointer, object()),
+                conjunct["expected"],
+            )
         )
     elif kind == "receipt_field":
         conjunct = _closed(

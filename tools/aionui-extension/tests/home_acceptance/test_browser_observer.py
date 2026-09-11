@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import io
 import json
 import os
 import subprocess
@@ -553,6 +554,101 @@ def test_ego_binding_reads_are_isolated_from_page_monkeypatches() -> None:
     assert "candidate.json" in evaluations[1]
     assert "document.querySelector" in evaluations[2]
     assert "crypto.subtle.digest" in evaluations[3]
+
+
+def _transition_spec() -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "context": {
+            "observation_id": "extension.join-progress",
+            "run_id": "run-1",
+            "action_id": "inspect-progress",
+            "entity": "aionui-home",
+            "surface": "aionui",
+            "board_id": BOARD,
+            "candidate_commit": COMMIT,
+            "issued_at": observer_module._now().isoformat().replace("+00:00", "Z"),
+            "causal_index": 4,
+        },
+        "surface_id": "aionui",
+        "target": {"base_url": "http://127.0.0.1:18921", "board_id": BOARD},
+        "candidate_commit": COMMIT,
+        "page_url": "http://127.0.0.1:18921/home",
+        "recipe": {
+            "before": [
+                {"path": "/current", "selector": ".stepper .current", "property": "text"}
+            ],
+            "actions": [{"kind": "observe", "path": "/performed"}],
+            "after": [
+                {"path": "/steps", "selector": ".stepper li", "property": "count"}
+            ],
+            "settle_milliseconds": 0,
+        },
+    }
+
+
+def test_typed_browser_transition_is_closed_and_runtime_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spec = _transition_spec()
+    now = observer_module._now().isoformat().replace("+00:00", "Z")
+    observed = {
+        "page_url": spec["page_url"],
+        "before": {"/current": "Connect"},
+        "action": {"/performed": "observed"},
+        "after": {"/steps": 3},
+        "order": {"before_at": now, "action_at": now, "after_at": now},
+        "host_status": {},
+        "candidate_status": {},
+        "selected_board": BOARD,
+        "page_sha256": "0" * 64,
+    }
+    monkeypatch.setattr(observer_module, "_load_config", lambda: {})
+    monkeypatch.setattr(
+        observer_module, "_run_transition_backend",
+        lambda _config, _page, _recipe: observed,
+    )
+    monkeypatch.setattr(
+        observer_module, "_observed_surface_binding",
+        lambda *_args: {
+            "product": "AionUi", "version": HOST_VERSION, "build": HOST_BUILD,
+            "source": "signed-aionui-webui-listener",
+            "candidate_commit": COMMIT, "selected_board": BOARD,
+        },
+    )
+    output = io.StringIO()
+    assert observer_module.transition(io.StringIO(json.dumps(spec)), output) == 0
+    result = json.loads(output.getvalue())
+    assert result["before"]["selected"] == {"/current": "Connect"}
+    assert result["action"]["selected"] == {"/performed": "observed"}
+    assert result["after"]["selected"] == {"/steps": 3}
+    assert result["context"] == spec["context"]
+
+    observed["after"] = {"/decoy": 3}
+    with pytest.raises(observer_module.ObserverError, match="selectors differ"):
+        observer_module.transition(io.StringIO(json.dumps(spec)), io.StringIO())
+
+
+def test_typed_browser_transition_rejects_arbitrary_script_action() -> None:
+    spec = _transition_spec()
+    spec["recipe"]["actions"] = [
+        {"kind": "javascript", "path": "/performed", "expression": "window.evil()"}
+    ]
+    with pytest.raises(observer_module.ObserverError, match="kind is unsupported"):
+        observer_module._read_transition_spec(io.StringIO(json.dumps(spec)))
+
+
+def test_ego_transition_uses_isolated_world_and_closed_operations() -> None:
+    script = observer_module.EGO_TRANSITION_SCRIPT % (
+        json.dumps("acceptance"),
+        json.dumps("http://127.0.0.1:18921/home"),
+        json.dumps(_transition_spec()["recipe"]),
+    )
+    assert "Page.createIsolatedWorld" in script
+    assert "pursers-verifier-transition" in script
+    assert "eval(" not in script
+    assert "spec.kind === 'fetch'" in script
+    assert "spec.kind === 'click'" in script
 
 
 def test_harness_observer_binds_report_artifacts_to_the_capture(tmp_path: Path) -> None:

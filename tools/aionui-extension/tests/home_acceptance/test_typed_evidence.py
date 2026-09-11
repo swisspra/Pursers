@@ -303,6 +303,7 @@ def _trust(tmp_path: Path, http_server: str, **changes: Any) -> dict[str, Any]:
         "active_evidence_key": "test-key",
         "evidence_keys": {"test-key": EVIDENCE_KEY},
         "http_sources": {"fleet-api": http_source},
+        "mcp_sources": {},
         "receipt_sources": {},
         "log_sources": {},
         "state_sources": {
@@ -346,6 +347,236 @@ def _http_recorder(path: str = "/status") -> dict[str, Any]:
         "source_id": "fleet-api", "action_origin": "verifier_api",
         "request": {"method": "GET", "path": path, "body": None, "select": ["/ok", "/count"]},
     }
+
+
+def _mcp_trust(tmp_path: Path, http_server: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    trust = _trust(tmp_path, http_server)
+    checkout = Path(trust["candidate_checkout_root"])
+    candidate_source = (
+        checkout / "packages/personal/src/pursers_personal/apps_server.py"
+    )
+    challenge = tmp_path / "mcp-challenge.key"
+    challenge.write_bytes(b"\x33" * 32)
+    challenge.chmod(0o600)
+    executable = Path(sys.executable).resolve()
+    source = {
+        "adapter": "trusted_mcp_stdio_v1",
+        "provenance": "personal-live-stdio",
+        "runtime_id": "personal-mcp-runtime-1",
+        "surface": "personal",
+        "board_id": BOARD,
+        "candidate_commit": CANDIDATE,
+        "command": str(executable),
+        "command_sha256": hashlib.sha256(executable.read_bytes()).hexdigest(),
+        "args": ["-I", "-m", "pursers_personal.cli", "mcp"],
+        "env": {"PATH": os.defpath},
+        "cwd": str(checkout),
+        "candidate_source": str(candidate_source),
+        "candidate_source_sha256": hashlib.sha256(candidate_source.read_bytes()).hexdigest(),
+        "challenge_key": str(challenge),
+        "tool": "board_snapshot",
+        "arguments": {},
+        "select_allowlist": ["/connected", "/tickets"],
+        "timeout_seconds": 2,
+    }
+    trust["mcp_sources"]["personal-board-snapshot"] = source
+    context = _context(
+        observation_id="personal-mcp.state.board-empty",
+        action_id="board-snapshot",
+        entity="personal-board",
+        surface="personal",
+    )
+    return trust, context
+
+
+async def _fake_mcp_result(
+    source: dict[str, Any], context: dict[str, Any], selected: list[str]
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    del selected
+    pid = os.getpid()
+    nonce = "44" * 32
+    claim = {
+        "schema_version": 1,
+        "server_name": "On Board Personal",
+        "version": PERSONAL_VERSION,
+        "build": source["candidate_source_sha256"],
+        "candidate_commit": context["candidate_commit"],
+        "candidate_source": str(Path(source["candidate_source"]).resolve()),
+        "board_id": context["board_id"],
+        "pid": pid,
+        "transport": "stdio",
+        "nonce": nonce,
+    }
+    signature = hmac.new(
+        Path(source["challenge_key"]).read_bytes(),
+        _json_bytes(claim), hashlib.sha256,
+    ).hexdigest()
+    public = {
+        key: value for key, value in {**claim, "signature": signature}.items()
+        if key != "candidate_source"
+    }
+    public["candidate_source_sha256"] = source["candidate_source_sha256"]
+    process = {
+        "pid": pid,
+        "argv_sha256": "55" * 32,
+        "executable_sha256": source["command_sha256"],
+        "candidate_source_sha256": source["candidate_source_sha256"],
+    }
+    result = {
+        "tool": source["tool"],
+        "arguments_sha256": typed_evidence._digest(source["arguments"]),
+        "selected": {"/connected": True, "/tickets": []},
+        "result_sha256": "66" * 32,
+        "correlation": {
+            key: context[key]
+            for key in ("observation_id", "run_id", "action_id", "entity")
+        },
+    }
+    return process, public, result
+
+
+def test_mcp_stdio_response_is_source_bound_and_field_exact(
+    tmp_path: Path, http_server: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    trust, context = _mcp_trust(tmp_path, http_server)
+    monkeypatch.setattr(typed_evidence, "_execute_mcp_tool", _fake_mcp_result)
+    recorder = {
+        "source_id": "personal-board-snapshot",
+        "tool": "board_snapshot",
+        "arguments": {},
+        "select": ["/connected", "/tickets"],
+    }
+    evidence = record_evidence(_request("mcp_tool_response", recorder, context), trust)
+    result = evaluate_evidence(evidence, _expected(evidence, [
+        {"path": "/connected", "op": "eq", "value": True},
+        {"path": "/tickets", "op": "eq", "value": []},
+    ]), trust)
+    assert result["passed"] is True
+    assert trust["mcp_sources"]["personal-board-snapshot"]["candidate_source"] not in json.dumps(evidence)
+
+    wrong = _expected(evidence, [
+        {"path": "/tickets", "op": "eq", "value": ["decoy"]},
+    ])
+    assert evaluate_evidence(evidence, wrong, trust)["passed"] is False
+    evidence_path = tmp_path / "mcp-evidence.json"
+    evidence_path.write_text(json.dumps(evidence), encoding="utf-8")
+    parent_request = {
+        "observation_id": context["observation_id"],
+        "run_id": context["run_id"],
+        "action_id": context["action_id"],
+        "entity": context["entity"],
+        "causal_index": context["causal_index"],
+        "surface_id": context["surface"],
+        "board_id": context["board_id"],
+        "candidate_commit": context["candidate_commit"],
+        "conjunct": {
+            "kind": "mcp_tool_response",
+            "source_id": "personal-board-snapshot",
+            "assertions": [
+                {"path": "/connected", "op": "eq", "value": True},
+                {"path": "/tickets", "op": "eq", "value": []},
+            ],
+        },
+        "evidence_path": str(evidence_path),
+    }
+    assert typed_evidence.evaluate_parent_request(parent_request, trust)["passed"] is True
+
+
+def test_mcp_stdio_rejects_inert_module_tuple(
+    tmp_path: Path, http_server: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    trust, context = _mcp_trust(tmp_path, http_server)
+    trust["mcp_sources"]["personal-board-snapshot"]["args"] = [
+        "-c", "pass", "-m", "pursers_personal.cli", "mcp",
+    ]
+    monkeypatch.setattr(typed_evidence, "_execute_mcp_tool", _fake_mcp_result)
+    recorder = {
+        "source_id": "personal-board-snapshot",
+        "tool": "board_snapshot", "arguments": {}, "select": ["/connected"],
+    }
+    with pytest.raises(TypedEvidenceError, match="does not execute"):
+        record_evidence(_request("mcp_tool_response", recorder, context), trust)
+
+
+def _browser_state_trust(
+    tmp_path: Path, http_server: str,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    trust = _trust(tmp_path, http_server)
+    verifier = tmp_path / "browser-verifier"
+    verifier.mkdir(mode=0o700)
+    config = verifier / "observer.json"
+    config.write_text("{}", encoding="utf-8")
+    config.chmod(0o600)
+    command = verifier / "browser_observer.py"
+    command.write_text(
+        "#!/usr/bin/env python3\n"
+        "import datetime,hashlib,json,sys\n"
+        "request=json.load(sys.stdin)\n"
+        "context=request['context']\n"
+        "corr={k:context[k] for k in ('observation_id','run_id','action_id','entity')}\n"
+        "def phase(name,method,selected):\n"
+        " return {'method':method,'path':'/browser/state/'+name,'status':200,'selected':selected,'response_sha256':hashlib.sha256(json.dumps(selected,sort_keys=True).encode()).hexdigest(),'correlation':corr}\n"
+        "now=datetime.datetime.now(datetime.timezone.utc).isoformat().replace('+00:00','Z')\n"
+        "print(json.dumps({'schema_version':1,'context':context,'surface_id':request['surface_id'],'target':request['target'],'candidate_commit':request['candidate_commit'],'page_url':request['page_url'],'runtime':{'product':'AionUi','version':'2.2.1','build':'build-1','source':'signed-aionui-webui-listener'},'before':phase('before','GET',{'/state':'idle'}),'action':phase('action','POST',{'/performed':'clicked'}),'after':phase('after','GET',{'/state':'ready'}),'order':{'before_at':now,'action_at':now,'after_at':now}}))\n",
+        encoding="utf-8",
+    )
+    command.chmod(0o700)
+    recipe = {
+        "before": [{"path": "/state", "selector": "#status", "property": "text"}],
+        "actions": [{"kind": "click", "selector": "#start", "path": "/performed"}],
+        "after": [{"path": "/state", "selector": "#status", "property": "text"}],
+        "settle_milliseconds": 0,
+    }
+    source = {
+        "adapter": "trusted_browser_state_v1",
+        "provenance": "verifier-browser-transition",
+        "runtime_id": "aionui-browser-1",
+        "surface": "aionui",
+        "board_id": BOARD,
+        "candidate_commit": CANDIDATE,
+        "command": str(command),
+        "command_sha256": hashlib.sha256(command.read_bytes()).hexdigest(),
+        "config_path": str(config),
+        "config_sha256": hashlib.sha256(config.read_bytes()).hexdigest(),
+        "base_url": "http://127.0.0.1:18921",
+        "page_url": "http://127.0.0.1:18921/home",
+        "recipe": recipe,
+        "env": {"PATH": os.defpath},
+        "timeout_seconds": 10,
+        "select_allowlist": ["/state", "/performed"],
+    }
+    trust["state_sources"]["aionui-start"] = source
+    context = _context(
+        observation_id="extension.join-progress", action_id="start",
+        entity="aionui-home", surface="aionui",
+    )
+    recorder = {
+        "source_id": "aionui-start",
+        "before": recipe["before"],
+        "action": recipe["actions"],
+        "after": recipe["after"],
+    }
+    return trust, context, recorder
+
+
+def test_browser_state_transition_is_recipe_and_source_bound(
+    tmp_path: Path, http_server: str,
+) -> None:
+    trust, context, recorder = _browser_state_trust(tmp_path, http_server)
+    evidence = record_evidence(
+        _request("state_transition", recorder, context), trust
+    )
+    result = evaluate_evidence(evidence, _expected(evidence, [
+        {"phase": "before", "path": "/state", "op": "eq", "value": "idle"},
+        {"phase": "action", "path": "/performed", "op": "eq", "value": "clicked"},
+        {"phase": "after", "path": "/state", "op": "eq", "value": "ready"},
+    ]), trust)
+    assert result["passed"] is True
+
+    changed = copy.deepcopy(recorder)
+    changed["action"][0]["selector"] = "#decoy"
+    with pytest.raises(TypedEvidenceError, match="verifier-owned recipe"):
+        record_evidence(_request("state_transition", changed, context), trust)
 
 
 def test_http_response_real_roundtrip_and_all_of(tmp_path: Path, http_server: str) -> None:
@@ -1606,6 +1837,7 @@ def test_fleet_trace_real_product_roundtrip(tmp_path: Path) -> None:
             "active_evidence_key": "test-key",
             "evidence_keys": {"test-key": EVIDENCE_KEY},
             "http_sources": {"fleet-api": http_source},
+            "mcp_sources": {},
             "receipt_sources": {},
             "log_sources": {"fleet-trace": log_source},
             "state_sources": {},
