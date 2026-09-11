@@ -1,0 +1,1389 @@
+{
+  "schema_version": 1,
+  "ticket_id": "TK-7d8fb1bd7e28",
+  "parent_ticket_id": "TK-a565b6635db1",
+  "source_ref": "6368b72279f77e0132888c161e1bac001276dba1",
+  "partition": {
+    "prefixes": [
+      "fleet."
+    ],
+    "expected_counts": {
+      "fleet": 80,
+      "total": 80
+    },
+    "approved_35_overlap": []
+  },
+  "rows": [
+    {
+      "id": "fleet.active-ticket-rows",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "fleet",
+      "source": {
+        "path": "tools/fleet-dashboard/fleet_dashboard.py",
+        "line_start": 6082,
+        "line_end": 6082,
+        "evidence": "b.tickets.length?b.tickets.map"
+      },
+      "derivation_kind": "identifier",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; a board has active and ended tickets.",
+      "action": "open Fleet overview",
+      "expected_state": "its board card lists bounded ticket rows with ID, title, status label, and claimant",
+      "proposed_executable_assertion": "assert the keyed board card row cells",
+      "negative_counterexample": "a ticket count pill alone is accepted"
+    },
+    {
+      "id": "fleet.add-project-authorization-error",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "fleet",
+      "source": {
+        "path": "tools/fleet-dashboard/fleet_dashboard.py",
+        "line_start": 4224,
+        "line_end": 4253,
+        "evidence": "async def _require_board_admin"
+      },
+      "derivation_kind": "identifier",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; the operator lacks board-admin authority.",
+      "action": "submit Add project",
+      "expected_state": "the request fails before door actions and UI shows Add project failed",
+      "proposed_executable_assertion": "stub authorization failure and assert no issue_credential plus #add-project-result error",
+      "negative_counterexample": "a validation error or partial success is accepted"
+    },
+    {
+      "id": "fleet.add-project-board",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "fleet",
+      "source": {
+        "path": "tools/fleet-dashboard/fleet_dashboard.py",
+        "line_start": 6517,
+        "line_end": 6517,
+        "evidence": "<label>Board ID <input name=\"board_id\""
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; Config is open.",
+      "action": "inspect Add project form",
+      "expected_state": "Board ID is required and constrained to safe identifiers",
+      "proposed_executable_assertion": "assert input required and pattern plus submitted trimmed payload",
+      "negative_counterexample": "Project name is treated as board ID"
+    },
+    {
+      "id": "fleet.add-project-clone-steps",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "fleet",
+      "source": {
+        "path": "tools/fleet-dashboard/fleet_dashboard.py",
+        "line_start": 4489,
+        "line_end": 4526,
+        "evidence": "# Step e: fleet clone prepare"
+      },
+      "derivation_kind": "identifier",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; registry/board/principal/policy steps succeed.",
+      "action": "run Add project",
+      "expected_state": "fleet_clone reports prepared or already present after clone-state checks",
+      "proposed_executable_assertion": "assert ordered final fleet_clone step and persisted registry update",
+      "negative_counterexample": "a UI success message without clone state is accepted"
+    },
+    {
+      "id": "fleet.add-project-idempotent-rerun",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "fleet",
+      "source": {
+        "path": "tools/fleet-dashboard/fleet_dashboard.py",
+        "line_start": 4332,
+        "line_end": 4525,
+        "evidence": "\"status\": \"already present\""
+      },
+      "derivation_kind": "identifier",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; project, board, principals, policies, and clone already match.",
+      "action": "rerun Add project",
+      "expected_state": "each existing component is reported already present without duplicate mutation",
+      "proposed_executable_assertion": "spy mutation calls and assert ordered already-present steps",
+      "negative_counterexample": "a second credential issue is treated as proof of all-step idempotency"
+    },
+    {
+      "id": "fleet.add-project-one-time-doors",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "fleet",
+      "source": {
+        "path": "tools/fleet-dashboard/fleet_dashboard.py",
+        "line_start": 6633,
+        "line_end": 6633,
+        "evidence": "Door strings (returned once, copy now)"
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; Add project succeeds with worker and reviewer doors.",
+      "action": "inspect the result panel",
+      "expected_state": "both doors appear in password inputs with explicit copy controls only in the immediate response",
+      "proposed_executable_assertion": "assert two password inputs and that refresh removes their values",
+      "negative_counterexample": "persistent Doors table metadata is accepted as the secret"
+    },
+    {
+      "id": "fleet.add-project-partial-failure",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "fleet",
+      "source": {
+        "path": "tools/fleet-dashboard/fleet_dashboard.py",
+        "line_start": 6640,
+        "line_end": 6640,
+        "evidence": "Add project failed: ${esc(err.message)}"
+      },
+      "derivation_kind": "observed_gap",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; a backend step fails after an earlier durable step.",
+      "action": "submit Add project",
+      "expected_state": "completed steps and the exact failing step must remain visible",
+      "proposed_executable_assertion": "BLOCKED: the exception response drops accumulated steps and UI renders only a generic failure",
+      "negative_counterexample": "generic error text is accepted as partial-step evidence",
+      "gap": {
+        "owner": "Fleet dashboard owner",
+        "exact_action": "Return bounded completed_steps and failed_step on add_project failure, render both in #add-project-result, and assert no later step ran."
+      }
+    },
+    {
+      "id": "fleet.add-project-policy",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "fleet",
+      "source": {
+        "path": "tools/fleet-dashboard/fleet_dashboard.py",
+        "line_start": 4443,
+        "line_end": 4487,
+        "evidence": "# Step d: dispatch policy defaults and review policy default"
+      },
+      "derivation_kind": "identifier",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; board exists with non-default policies.",
+      "action": "run Add project",
+      "expected_state": "dispatch defaults 600/180/second_opinion/fallback and strict review are applied",
+      "proposed_executable_assertion": "spy exact policy calls and assert configured step",
+      "negative_counterexample": "generic configured text without exact values is accepted"
+    },
+    {
+      "id": "fleet.add-project-principals",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "fleet",
+      "source": {
+        "path": "tools/fleet-dashboard/fleet_dashboard.py",
+        "line_start": 4394,
+        "line_end": 4441,
+        "evidence": "# Step c: board_member_add for worker and reviewer door principals"
+      },
+      "derivation_kind": "identifier",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; board lacks worker and reviewer door principals.",
+      "action": "run Add project",
+      "expected_state": "member and reviewer principals are added with distinct roles",
+      "proposed_executable_assertion": "assert two board_member_add calls keyed by derived principal",
+      "negative_counterexample": "two display rows without membership writes are accepted"
+    },
+    {
+      "id": "fleet.add-project-registry",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "fleet",
+      "source": {
+        "path": "tools/fleet-dashboard/fleet_dashboard.py",
+        "line_start": 4326,
+        "line_end": 4363,
+        "evidence": "# Step a: registry_admin add (schema v1)"
+      },
+      "derivation_kind": "identifier",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; project is absent from registry.",
+      "action": "run Add project",
+      "expected_state": "an active registry entry with board/work_dir is saved under project name",
+      "proposed_executable_assertion": "assert optimistic registry save and created step",
+      "negative_counterexample": "board creation alone is accepted"
+    },
+    {
+      "id": "fleet.agent-current-claims",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "fleet",
+      "source": {
+        "path": "tools/fleet-dashboard/fleet_dashboard.py",
+        "line_start": 6332,
+        "line_end": 6332,
+        "evidence": "work.length?work.map"
+      },
+      "derivation_kind": "identifier",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; an agent has live and locally managed claims.",
+      "action": "open Agents",
+      "expected_state": "deduplicated claim rows link to exact board tickets",
+      "proposed_executable_assertion": "assert ticket links and no duplicate board/ticket pair",
+      "negative_counterexample": "pool busy status alone is accepted"
+    },
+    {
+      "id": "fleet.agent-duplicate-names",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "fleet",
+      "source": {
+        "path": "tools/fleet-dashboard/fleet_dashboard.py",
+        "line_start": 6082,
+        "line_end": 6082,
+        "evidence": "duplicate name"
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; two active identities share an agent name.",
+      "action": "open Fleet overview",
+      "expected_state": "the pool summary marks the duplicate name",
+      "proposed_executable_assertion": "assert warning marker on the named details summary",
+      "negative_counterexample": "two cards with the same text but no warning are accepted"
+    },
+    {
+      "id": "fleet.agent-pool",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "fleet",
+      "source": {
+        "path": "tools/fleet-dashboard/fleet_dashboard.py",
+        "line_start": 6335,
+        "line_end": 6335,
+        "evidence": "Unified agent pool"
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; fleet and local workers are loaded.",
+      "action": "open Agents",
+      "expected_state": "one unified set includes live pool seats and locally managed workers",
+      "proposed_executable_assertion": "assert keyed agent cards across both sources",
+      "negative_counterexample": "the legacy per-central pool alone is accepted"
+    },
+    {
+      "id": "fleet.agent-retired-stale-drawer",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "fleet",
+      "source": {
+        "path": "tools/fleet-dashboard/fleet_dashboard.py",
+        "line_start": 6071,
+        "line_end": 6071,
+        "evidence": "Show stale"
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; busy, available, and stale agents exist.",
+      "action": "toggle stale visibility",
+      "expected_state": "stale agents are hidden by default and shown only after the toggle",
+      "proposed_executable_assertion": "assert card set before/after aria-pressed toggle",
+      "negative_counterexample": "retired/stale rows always visible are accepted"
+    },
+    {
+      "id": "fleet.board-cards",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "fleet",
+      "source": {
+        "path": "tools/fleet-dashboard/fleet_dashboard.py",
+        "line_start": 6249,
+        "line_end": 6249,
+        "evidence": "class=\"board-card\""
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; multiple centrals and boards are loaded.",
+      "action": "open Boards",
+      "expected_state": "each card shows central, label, board id, counts, and workspace routes",
+      "proposed_executable_assertion": "assert keyed .board-card semantic fields",
+      "negative_counterexample": "overview legacy card is accepted"
+    },
+    {
+      "id": "fleet.board-detail-activity",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "fleet",
+      "source": {
+        "path": "tools/fleet-dashboard/fleet_dashboard.py",
+        "line_start": 6094,
+        "line_end": 6094,
+        "evidence": "read-only bounded catchup (ack=false)"
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; board detail has retained events.",
+      "action": "open Timeline",
+      "expected_state": "events are grouped by day and ticket with seq/kind/transition/time",
+      "proposed_executable_assertion": "assert grouped rows and bounded ack=false note",
+      "negative_counterexample": "ticket updated timestamps are accepted as activity"
+    },
+    {
+      "id": "fleet.board-detail-metadata",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "fleet",
+      "source": {
+        "path": "tools/fleet-dashboard/fleet_dashboard.py",
+        "line_start": 6101,
+        "line_end": 6101,
+        "evidence": "${esc(d.board.label)} · ${esc(d.central)}"
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; a board detail payload is loaded.",
+      "action": "open its workspace",
+      "expected_state": "header exposes label, central, and board id",
+      "proposed_executable_assertion": "assert exact header and meta values",
+      "negative_counterexample": "board label alone is accepted"
+    },
+    {
+      "id": "fleet.board-detail-truncation",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "fleet",
+      "source": {
+        "path": "tools/fleet-dashboard/fleet_dashboard.py",
+        "line_start": 6101,
+        "line_end": 6101,
+        "evidence": "${esc(d.ticket_returned)} of ${esc(d.ticket_total)} tickets shown"
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; detail payload is truncated.",
+      "action": "open workspace",
+      "expected_state": "header discloses returned and total ticket counts",
+      "proposed_executable_assertion": "assert exact status text and truncated=true precondition",
+      "negative_counterexample": "bounded view badge without counts is accepted"
+    },
+    {
+      "id": "fleet.central-availability-isolation",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "fleet",
+      "source": {
+        "path": "tools/fleet-dashboard/fleet_dashboard.py",
+        "line_start": 6085,
+        "line_end": 6085,
+        "evidence": "central-group unavailable"
+      },
+      "derivation_kind": "identifier",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; one central fails while another succeeds.",
+      "action": "refresh Fleet",
+      "expected_state": "failed central gets its own unavailable section while successful data remains",
+      "proposed_executable_assertion": "assert both independent central sections and aggregate Updated state",
+      "negative_counterexample": "all centrals are replaced by one global failure"
+    },
+    {
+      "id": "fleet.config-add-update-preview",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "fleet",
+      "source": {
+        "path": "tools/fleet-dashboard/fleet_dashboard.py",
+        "line_start": 6429,
+        "line_end": 6429,
+        "evidence": "Preview exact changes"
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; a seat form is valid.",
+      "action": "submit Add or update seat",
+      "expected_state": "an exact diff plan appears before Confirm and apply",
+      "proposed_executable_assertion": "assert seat-plan visible with diff and disabled-to-enabled apply transition",
+      "negative_counterexample": "direct mutation on submit is accepted"
+    },
+    {
+      "id": "fleet.config-bridge-versions",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "fleet",
+      "source": {
+        "path": "tools/fleet-dashboard/fleet_dashboard.py",
+        "line_start": 6435,
+        "line_end": 6435,
+        "evidence": "Pinned ${esc(seatBridge.pinned_version||'unknown')} · PyPI latest ${esc(latest)}"
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; bridge telemetry is loaded.",
+      "action": "open Config",
+      "expected_state": "installed, pinned, PyPI latest, and resolution source are distinguishable",
+      "proposed_executable_assertion": "assert four bridge values in Wait bridge card",
+      "negative_counterexample": "installed version alone is accepted"
+    },
+    {
+      "id": "fleet.config-current-offers",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "fleet",
+      "source": {
+        "path": "tools/fleet-dashboard/fleet_dashboard.py",
+        "line_start": 6434,
+        "line_end": 6434,
+        "evidence": "<h4>Current offers</h4>"
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; dispatch data has an offer.",
+      "action": "open Config",
+      "expected_state": "ticket, agent, and expiry appear under Current offers",
+      "proposed_executable_assertion": "assert exact offer triplet in its board panel",
+      "negative_counterexample": "open-ticket dispatch state is accepted"
+    },
+    {
+      "id": "fleet.config-discovery-import-conflicts",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "fleet",
+      "source": {
+        "path": "tools/fleet-dashboard/fleet_dashboard.py",
+        "line_start": 6433,
+        "line_end": 6433,
+        "evidence": "<span class=\"error\">Conflict</span>"
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; import review has candidates, conflicts, and already-imported rows.",
+      "action": "open Config",
+      "expected_state": "each category has a distinct review state and conflicts show reason",
+      "proposed_executable_assertion": "assert Will import, Conflict, Already imported rows",
+      "negative_counterexample": "all discovered configs are shown as importable"
+    },
+    {
+      "id": "fleet.config-dispatch-policy-gaps-history",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "fleet",
+      "source": {
+        "path": "tools/fleet-dashboard/fleet_dashboard.py",
+        "line_start": 6435,
+        "line_end": 6435,
+        "evidence": "policy · gaps · offers"
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; dispatch payload includes policy, unassignable tickets, and history.",
+      "action": "open Config",
+      "expected_state": "policy controls, missing capabilities, current offers, and history are distinct",
+      "proposed_executable_assertion": "assert each subsection against one board payload",
+      "negative_counterexample": "a generic dispatch status is accepted"
+    },
+    {
+      "id": "fleet.config-doctor",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "fleet",
+      "source": {
+        "path": "tools/fleet-dashboard/fleet_dashboard.py",
+        "line_start": 6435,
+        "line_end": 6435,
+        "evidence": "Doctor compares declared capabilities with Central."
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; seat doctor data is absent then present.",
+      "action": "open Config and run Doctor",
+      "expected_state": "guidance is replaced by per-check doctor badges/results",
+      "proposed_executable_assertion": "assert doctor control, job, and rendered check statuses",
+      "negative_counterexample": "bridge version alone is accepted"
+    },
+    {
+      "id": "fleet.config-exact-diff-confirmation",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "fleet",
+      "source": {
+        "path": "tools/fleet-dashboard/fleet_dashboard.py",
+        "line_start": 6435,
+        "line_end": 6435,
+        "evidence": "Review the diff before applying. Existing files are backed up first."
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; a seat plan exists.",
+      "action": "inspect and confirm it",
+      "expected_state": "exact diff is visible and apply requires the separate button",
+      "proposed_executable_assertion": "assert no apply call before #seat-apply click",
+      "negative_counterexample": "form submission itself is treated as confirmation"
+    },
+    {
+      "id": "fleet.config-registry-worktrees",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "fleet",
+      "source": {
+        "path": "tools/fleet-dashboard/fleet_dashboard.py",
+        "line_start": 6436,
+        "line_end": 6436,
+        "evidence": "Registry work trees"
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; registry projects include clone states.",
+      "action": "open Config",
+      "expected_state": "operator checkout and fleet clone paths plus dirty/detached/ahead/behind are shown",
+      "proposed_executable_assertion": "assert fields per project and clone action label",
+      "negative_counterexample": "seat config path is accepted as registry worktree"
+    },
+    {
+      "id": "fleet.config-seat-inventory",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "fleet",
+      "source": {
+        "path": "tools/fleet-dashboard/fleet_dashboard.py",
+        "line_start": 6435,
+        "line_end": 6435,
+        "evidence": "<h3>Seat inventory</h3>"
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; configured seats exist.",
+      "action": "open Config",
+      "expected_state": "table shows host/role, name, capabilities, state/doctor, offer, bridge, actions",
+      "proposed_executable_assertion": "assert seven headers and keyed row fields",
+      "negative_counterexample": "discovered-only candidates are accepted"
+    },
+    {
+      "id": "fleet.config-tier-skill-role-capabilities",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "fleet",
+      "source": {
+        "path": "tools/fleet-dashboard/fleet_dashboard.py",
+        "line_start": 6429,
+        "line_end": 6429,
+        "evidence": "Capabilities are generated in every host's managed environment block."
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; seat wizard is open.",
+      "action": "set role, tier, skills, review/work flags",
+      "expected_state": "preview payload preserves each capability dimension",
+      "proposed_executable_assertion": "assert seatPayload exact fields and form values",
+      "negative_counterexample": "role alone is accepted as all capabilities"
+    },
+    {
+      "id": "fleet.coordinator-configuration",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "fleet",
+      "source": {
+        "path": "tools/fleet-dashboard/fleet_dashboard.py",
+        "line_start": 6164,
+        "line_end": 6164,
+        "evidence": "Coordinator config · ${esc(d.central)}"
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; effective thresholds and intake config exist.",
+      "action": "navigate to central Config",
+      "expected_state": "live policy source, mode, values, concurrency, updater and time render",
+      "proposed_executable_assertion": "assert keyed config controls and provenance source labels",
+      "negative_counterexample": "seat Config hub is accepted"
+    },
+    {
+      "id": "fleet.default-central-aliases",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "fleet",
+      "source": {
+        "path": "tools/fleet-dashboard/fleet_dashboard.py",
+        "line_start": 6081,
+        "line_end": 6081,
+        "evidence": "central:defaultCentral"
+      },
+      "derivation_kind": "identifier",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; default central differs from another label.",
+      "action": "open legacy #/board and #/config hashes",
+      "expected_state": "routes resolve through defaultCentral while explicit hashes retain their central",
+      "proposed_executable_assertion": "assert route objects for both hash forms",
+      "negative_counterexample": "first visible central label is assumed without loadCentrals"
+    },
+    {
+      "id": "fleet.density",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "fleet",
+      "source": {
+        "path": "tools/fleet-dashboard/fleet_dashboard.py",
+        "line_start": 6111,
+        "line_end": 6111,
+        "evidence": "density=density==='comfortable'?'compact':'comfortable'"
+      },
+      "derivation_kind": "identifier",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; density starts comfortable.",
+      "action": "activate Compact density twice",
+      "expected_state": "root preference toggles compact then comfortable",
+      "proposed_executable_assertion": "assert data-density and persisted control label",
+      "negative_counterexample": "theme toggle is accepted"
+    },
+    {
+      "id": "fleet.doors-connected-seats",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "fleet",
+      "source": {
+        "path": "tools/fleet-dashboard/fleet_dashboard.py",
+        "line_start": 6484,
+        "line_end": 6484,
+        "evidence": "<th>Seats on door</th>"
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; a door key has two active seats.",
+      "action": "open Config Doors",
+      "expected_state": "both names and relative activity appear in that door row",
+      "proposed_executable_assertion": "assert exact names under Seats on door",
+      "negative_counterexample": "agent pool membership is accepted"
+    },
+    {
+      "id": "fleet.doors-copy",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "fleet",
+      "source": {
+        "path": "tools/fleet-dashboard/fleet_dashboard.py",
+        "line_start": 6556,
+        "line_end": 6566,
+        "evidence": "Door string copied for ${board} (${role}). Door strings are shown only once."
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; a configured door row exists.",
+      "action": "click Copy door string",
+      "expected_state": "clipboard receives response door and bounded status identifies board/role",
+      "proposed_executable_assertion": "spy exact API/clipboard and status text",
+      "negative_counterexample": "copying a key id is accepted"
+    },
+    {
+      "id": "fleet.doors-disabled",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "fleet",
+      "source": {
+        "path": "tools/fleet-dashboard/fleet_dashboard.py",
+        "line_start": 6553,
+        "line_end": 6583,
+        "evidence": "doorBtn.disabled = true;"
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; a configured door copy or rotate request is in flight.",
+      "action": "activate the selected door action",
+      "expected_state": "that door action is disabled until its request settles and is re-enabled in finally",
+      "proposed_executable_assertion": "hold the API promise and assert the clicked button disabled, then resolve/reject and assert enabled",
+      "negative_counterexample": "a release-operation button or an always-enabled second door row is accepted"
+    },
+    {
+      "id": "fleet.doors-error",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "fleet",
+      "source": {
+        "path": "tools/fleet-dashboard/fleet_dashboard.py",
+        "line_start": 6580,
+        "line_end": 6584,
+        "evidence": "Door action failed: ${e.message}"
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; copy or rotate API rejects.",
+      "action": "activate the door action",
+      "expected_state": "the control re-enables and an escaped bounded failure is surfaced",
+      "proposed_executable_assertion": "assert alert text and disabled=false",
+      "negative_counterexample": "silent failure or Add project error is accepted"
+    },
+    {
+      "id": "fleet.doors-expiry",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "fleet",
+      "source": {
+        "path": "tools/fleet-dashboard/fleet_dashboard.py",
+        "line_start": 6483,
+        "line_end": 6483,
+        "evidence": "<th>Expires</th>"
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; door metadata has exp and no-exp rows.",
+      "action": "open Doors",
+      "expected_state": "expiry is formatted for issued keys and em dash for absent expiry",
+      "proposed_executable_assertion": "assert both keyed cells",
+      "negative_counterexample": "key ID is accepted as expiry"
+    },
+    {
+      "id": "fleet.doors-key-id",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "fleet",
+      "source": {
+        "path": "tools/fleet-dashboard/fleet_dashboard.py",
+        "line_start": 6482,
+        "line_end": 6482,
+        "evidence": "<th>Key ID (kid)</th>"
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; door rows have issued and missing kid values.",
+      "action": "open Doors",
+      "expected_state": "exact kid or 'not issued' appears in its column",
+      "proposed_executable_assertion": "assert keyed cell text",
+      "negative_counterexample": "door string or expiry is accepted"
+    },
+    {
+      "id": "fleet.doors-project-rows",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "fleet",
+      "source": {
+        "path": "tools/fleet-dashboard/fleet_dashboard.py",
+        "line_start": 6489,
+        "line_end": 6501,
+        "evidence": "${doors.length ? doors.map(d => `<tr>"
+      },
+      "derivation_kind": "identifier",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; worker and reviewer doors span projects.",
+      "action": "open Doors",
+      "expected_state": "one row per project/board/role exposes metadata and actions",
+      "proposed_executable_assertion": "assert unique board-role row keys and count",
+      "negative_counterexample": "one row per project only is accepted"
+    },
+    {
+      "id": "fleet.doors-rotation-warning",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "fleet",
+      "source": {
+        "path": "tools/fleet-dashboard/fleet_dashboard.py",
+        "line_start": 6574,
+        "line_end": 6574,
+        "evidence": "Rotated ${board} (${role}) to key ${res.kid}. Warning: ${res.warning}"
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; rotate succeeds.",
+      "action": "click Rotate",
+      "expected_state": "warning names board, role, new kid, and rejoin consequence",
+      "proposed_executable_assertion": "assert exact warning from response",
+      "negative_counterexample": "copy success text is accepted"
+    },
+    {
+      "id": "fleet.doors-secret-free-output",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "fleet",
+      "source": {
+        "path": "tools/fleet-dashboard/fleet_dashboard.py",
+        "line_start": 6473,
+        "line_end": 6473,
+        "evidence": "Per-project door credentials for worker and reviewer seats."
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; door list metadata is loaded.",
+      "action": "open Doors without copying",
+      "expected_state": "table contains no door_string and only exposes project, role, kid, expiry and seats",
+      "proposed_executable_assertion": "assert secret sentinel absent from #doors-panel HTML/text",
+      "negative_counterexample": "the one-time Add project result is treated as the persistent list"
+    },
+    {
+      "id": "fleet.doors-unconfigured",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "fleet",
+      "source": {
+        "path": "tools/fleet-dashboard/fleet_dashboard.py",
+        "line_start": 6501,
+        "line_end": 6501,
+        "evidence": "No doors available. Configure PURSERS_DOORS_KEYS_DIR and PURSERS_JWKS_PATH."
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; doors configuration is absent.",
+      "action": "open Doors",
+      "expected_state": "empty table names both required configuration variables",
+      "proposed_executable_assertion": "assert exact empty-row text and no action buttons",
+      "negative_counterexample": "zero configured doors with no guidance is accepted"
+    },
+    {
+      "id": "fleet.findings",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "fleet",
+      "source": {
+        "path": "tools/fleet-dashboard/fleet_dashboard.py",
+        "line_start": 6100,
+        "line_end": 6100,
+        "evidence": "Coordinator findings"
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; coordinator_findings includes items and truncation.",
+      "action": "open board Tickets",
+      "expected_state": "kind, ticket, text, draft metadata and omitted count render",
+      "proposed_executable_assertion": "assert each semantic field and truncation warning",
+      "negative_counterexample": "overview attention synthesis is accepted"
+    },
+    {
+      "id": "fleet.hub-agents",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "fleet",
+      "source": {
+        "path": "tools/fleet-dashboard/fleet_dashboard.py",
+        "line_start": 6335,
+        "line_end": 6335,
+        "evidence": "pageHead('Agents','Unified agent pool'"
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; hub navigation is available.",
+      "action": "open Agents",
+      "expected_state": "the Agents hub exposes unified cards, guide, status, and New agent control",
+      "proposed_executable_assertion": "assert heading and controls",
+      "negative_counterexample": "legacy Agent pool section is accepted"
+    },
+    {
+      "id": "fleet.hub-boards",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "fleet",
+      "source": {
+        "path": "tools/fleet-dashboard/fleet_dashboard.py",
+        "line_start": 6249,
+        "line_end": 6249,
+        "evidence": "pageHead('Boards','Board workspaces'"
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; hub navigation is available.",
+      "action": "open Boards",
+      "expected_state": "board workspace cards and route actions render",
+      "proposed_executable_assertion": "assert heading plus board-card set",
+      "negative_counterexample": "Fleet overview board cards are accepted"
+    },
+    {
+      "id": "fleet.hub-operations",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "fleet",
+      "source": {
+        "path": "tools/fleet-dashboard/fleet_dashboard.py",
+        "line_start": 6336,
+        "line_end": 6336,
+        "evidence": "pageHead('Operations','Operations'"
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; hub navigation is available.",
+      "action": "open Operations",
+      "expected_state": "control-plane cards expose Config, Overhead, routes and write guardrails",
+      "proposed_executable_assertion": "assert heading, per-central cards and guardrail text",
+      "negative_counterexample": "Release card alone is accepted"
+    },
+    {
+      "id": "fleet.hub-overview",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "fleet",
+      "source": {
+        "path": "tools/fleet-dashboard/fleet_dashboard.py",
+        "line_start": 6248,
+        "line_end": 6248,
+        "evidence": "pageHead('Home','Fleet overview'"
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; multiple central states are loaded.",
+      "action": "open Home",
+      "expected_state": "health, waiting-for-you, and bounded attention sections render",
+      "proposed_executable_assertion": "assert all three sections and central cards",
+      "negative_counterexample": "legacy Fleet overview without human requests is accepted"
+    },
+    {
+      "id": "fleet.intake",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "fleet",
+      "source": {
+        "path": "tools/fleet-dashboard/fleet_dashboard.py",
+        "line_start": 6156,
+        "line_end": 6156,
+        "evidence": "สั่งงาน / new ask"
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; board workspace and intake queue are loaded.",
+      "action": "open the board",
+      "expected_state": "new ask constraints, pending drafts, approve/decline, and states render",
+      "proposed_executable_assertion": "assert form bounds and state-specific controls",
+      "negative_counterexample": "a free-text ticket form without approval is accepted"
+    },
+    {
+      "id": "fleet.keyboard-help",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "fleet",
+      "source": {
+        "path": "tools/fleet-dashboard/fleet_dashboard.py",
+        "line_start": 6054,
+        "line_end": 6054,
+        "evidence": "<h2>Keyboard shortcuts</h2>"
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; dashboard has focus outside an editor.",
+      "action": "press ?",
+      "expected_state": "dialog lists /, g f, g o, g c, arrows, Enter, ?, Esc",
+      "proposed_executable_assertion": "assert dialog open and exact shortcut definitions",
+      "negative_counterexample": "browser-native help or one shortcut is accepted"
+    },
+    {
+      "id": "fleet.operations-disabled-controls",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "fleet",
+      "source": {
+        "path": "tools/fleet-dashboard/fleet_dashboard.py",
+        "line_start": 6424,
+        "line_end": 6424,
+        "evidence": "Required trusted configuration is unavailable"
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; one release command is absent.",
+      "action": "open Release & Operations",
+      "expected_state": "only the corresponding action is disabled and explains why",
+      "proposed_executable_assertion": "table-test command-present versus command-absent buttons",
+      "negative_counterexample": "all actions disabled regardless of configuration"
+    },
+    {
+      "id": "fleet.operations-job-progress",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "fleet",
+      "source": {
+        "path": "tools/fleet-dashboard/fleet_dashboard.py",
+        "line_start": 6445,
+        "line_end": 6445,
+        "evidence": "Streaming output…"
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; an immutable operation plan is confirmed.",
+      "action": "start the operation",
+      "expected_state": "output shows queued job, command, streaming status and logs",
+      "proposed_executable_assertion": "stub job states queued/running and assert progressive output",
+      "negative_counterexample": "final telemetry alone is accepted"
+    },
+    {
+      "id": "fleet.operations-job-result",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "fleet",
+      "source": {
+        "path": "tools/fleet-dashboard/fleet_dashboard.py",
+        "line_start": 6445,
+        "line_end": 6445,
+        "evidence": "state.status==='succeeded'||state.status==='failed'"
+      },
+      "derivation_kind": "identifier",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; an operations job reaches terminal state.",
+      "action": "allow job watcher to refresh",
+      "expected_state": "polling stops, button re-enables, final status/logs remain, Config refreshes",
+      "proposed_executable_assertion": "assert clearInterval, enabled button and terminal output",
+      "negative_counterexample": "a running job is accepted as result"
+    },
+    {
+      "id": "fleet.operations-rollback-failure",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "fleet",
+      "source": {
+        "path": "tools/fleet-dashboard/release_ops.py",
+        "line_start": 1321,
+        "line_end": 1339,
+        "evidence": "ROLLBACK FAILED: "
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; stage Central mutates then both rollback targets include a failure.",
+      "action": "execute the immutable plan",
+      "expected_state": "job emits ROLLBACK FAILED and raises with bounded failure detail",
+      "proposed_executable_assertion": "inject rollback failure and assert terminal failed logs include exact marker",
+      "negative_counterexample": "primary failure without rollback outcome is accepted"
+    },
+    {
+      "id": "fleet.operations-unavailable-services",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "fleet",
+      "source": {
+        "path": "tools/fleet-dashboard/fleet_dashboard.py",
+        "line_start": 6406,
+        "line_end": 6426,
+        "evidence": "PyPI ${p.error||'unavailable'}"
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; PyPI/CI/Central telemetry contains unavailable states.",
+      "action": "open Release card",
+      "expected_state": "each unavailable service retains its own warning/placeholder state",
+      "proposed_executable_assertion": "assert separate PyPI, CI, and Central cells",
+      "negative_counterexample": "one generic unavailable banner is accepted"
+    },
+    {
+      "id": "fleet.pool-available",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "fleet",
+      "source": {
+        "path": "tools/fleet-dashboard/fleet_dashboard.py",
+        "line_start": 6082,
+        "line_end": 6082,
+        "evidence": "s[k]"
+      },
+      "derivation_kind": "identifier",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; pool_summary.available has a distinct value.",
+      "action": "open Fleet overview",
+      "expected_state": "available metric reproduces that value",
+      "proposed_executable_assertion": "assert metric label available and exact count",
+      "negative_counterexample": "busy or Ready health metric is accepted"
+    },
+    {
+      "id": "fleet.pool-busy",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "fleet",
+      "source": {
+        "path": "tools/fleet-dashboard/fleet_dashboard.py",
+        "line_start": 6082,
+        "line_end": 6082,
+        "evidence": "['online','busy','available','stale']"
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; pool_summary.busy has a distinct value.",
+      "action": "open Fleet overview",
+      "expected_state": "busy metric reproduces that value",
+      "proposed_executable_assertion": "assert metric label busy and exact count",
+      "negative_counterexample": "agent cards with busy status are accepted"
+    },
+    {
+      "id": "fleet.pool-online",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "fleet",
+      "source": {
+        "path": "tools/fleet-dashboard/fleet_dashboard.py",
+        "line_start": 6082,
+        "line_end": 6082,
+        "evidence": "['online','busy','available','stale']"
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; pool_summary.online has a distinct value.",
+      "action": "open Fleet overview",
+      "expected_state": "online metric reproduces that value",
+      "proposed_executable_assertion": "assert metric label online and exact count",
+      "negative_counterexample": "number of non-stale cards is accepted"
+    },
+    {
+      "id": "fleet.pool-stale",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "fleet",
+      "source": {
+        "path": "tools/fleet-dashboard/fleet_dashboard.py",
+        "line_start": 6082,
+        "line_end": 6082,
+        "evidence": "['online','busy','available','stale']"
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; pool_summary.stale has a distinct value.",
+      "action": "open Fleet overview",
+      "expected_state": "stale metric reproduces that value",
+      "proposed_executable_assertion": "assert metric label stale and exact count",
+      "negative_counterexample": "Show stale toggle state is accepted"
+    },
+    {
+      "id": "fleet.protocol-overhead",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "fleet",
+      "source": {
+        "path": "tools/fleet-dashboard/fleet_dashboard.py",
+        "line_start": 6089,
+        "line_end": 6089,
+        "evidence": "Model-visible wait cost is separated from bridge-to-Central diagnostics."
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; overhead payload has model, session and cumulative samples.",
+      "action": "open Overhead",
+      "expected_state": "model-visible wait, session pressure and bridge diagnostics are separate",
+      "proposed_executable_assertion": "assert three sections and their distinct units",
+      "negative_counterexample": "cumulative bridge bytes are called model-visible cost"
+    },
+    {
+      "id": "fleet.refresh-pause-resume",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "fleet",
+      "source": {
+        "path": "tools/fleet-dashboard/fleet_dashboard.py",
+        "line_start": 6083,
+        "line_end": 6084,
+        "evidence": "Refresh paused while editing · click to resume"
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; a non-search form has focus or dirty input.",
+      "action": "wait for auto-refresh then activate Resume",
+      "expected_state": "refresh pauses with a status pill and resumes after dirty/focus clears",
+      "proposed_executable_assertion": "assert fetch suppression and later refresh",
+      "negative_counterexample": "network failure or global pause is accepted"
+    },
+    {
+      "id": "fleet.release-central",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "fleet",
+      "source": {
+        "path": "tools/fleet-dashboard/fleet_dashboard.py",
+        "line_start": 6418,
+        "line_end": 6418,
+        "evidence": "const cv = releaseData.central_version || {};"
+      },
+      "derivation_kind": "identifier",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; central telemetry reports live/staged versions and status.",
+      "action": "open Release card",
+      "expected_state": "live, staged and Matches/Drift/unknown are distinct",
+      "proposed_executable_assertion": "assert exact versions and badge",
+      "negative_counterexample": "package manifest version is accepted"
+    },
+    {
+      "id": "fleet.release-ci",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "fleet",
+      "source": {
+        "path": "tools/fleet-dashboard/fleet_dashboard.py",
+        "line_start": 6414,
+        "line_end": 6416,
+        "evidence": "const ci = releaseData.ci_status || {};"
+      },
+      "derivation_kind": "identifier",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; main and tag CI states differ.",
+      "action": "open Release card",
+      "expected_state": "separate linked badges show each conclusion/status",
+      "proposed_executable_assertion": "assert main and tag href/text/class",
+      "negative_counterexample": "GitHub Release presence is accepted"
+    },
+    {
+      "id": "fleet.release-github",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "fleet",
+      "source": {
+        "path": "tools/fleet-dashboard/fleet_dashboard.py",
+        "line_start": 6411,
+        "line_end": 6412,
+        "evidence": "const ghRel = releaseData.github_release || {};"
+      },
+      "derivation_kind": "identifier",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; GitHub release is present then absent.",
+      "action": "open Release card",
+      "expected_state": "Published link and Not found warning are distinct",
+      "proposed_executable_assertion": "assert both branches and safe href",
+      "negative_counterexample": "latest tag text is accepted"
+    },
+    {
+      "id": "fleet.release-immutable-confirmation-plan",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "fleet",
+      "source": {
+        "path": "tools/fleet-dashboard/fleet_dashboard.py",
+        "line_start": 6445,
+        "line_end": 6445,
+        "evidence": "Resolving immutable ${action} plan…"
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; an operation control is enabled.",
+      "action": "activate it and inspect confirmation",
+      "expected_state": "plan command/digest/expiry are shown before execution and exact plan_id/digest are posted",
+      "proposed_executable_assertion": "assert no /api/config/ops call before confirm and exact payload after",
+      "negative_counterexample": "button click directly executes action"
+    },
+    {
+      "id": "fleet.release-manifest",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "fleet",
+      "source": {
+        "path": "tools/fleet-dashboard/release_ops.py",
+        "line_start": 358,
+        "line_end": 388,
+        "evidence": "manifest = self.load_manifest_versions()"
+      },
+      "derivation_kind": "identifier",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; release status has a readable versions manifest.",
+      "action": "fetch release status",
+      "expected_state": "product/package versions originate from the loaded manifest",
+      "proposed_executable_assertion": "assert telemetry versions deep-equal manifest data",
+      "negative_counterexample": "PyPI latest values are treated as manifest"
+    },
+    {
+      "id": "fleet.release-pypi",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "fleet",
+      "source": {
+        "path": "tools/fleet-dashboard/fleet_dashboard.py",
+        "line_start": 6404,
+        "line_end": 6407,
+        "evidence": "const p = (releaseData.pypi || {})[name] || {};"
+      },
+      "derivation_kind": "identifier",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; packages have present, absent, and error PyPI results.",
+      "action": "open Release card",
+      "expected_state": "each package row shows PyPI 200, PyPI 404, or specific unavailable state",
+      "proposed_executable_assertion": "assert all three badge branches keyed by package",
+      "negative_counterexample": "package version alone is accepted"
+    },
+    {
+      "id": "fleet.release-restart-checklist",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "fleet",
+      "source": {
+        "path": "tools/fleet-dashboard/fleet_dashboard.py",
+        "line_start": 6421,
+        "line_end": 6422,
+        "evidence": "const checklist = releaseData.restart_checklist || [];"
+      },
+      "derivation_kind": "identifier",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; hosts differ in needs_restart.",
+      "action": "open Release card",
+      "expected_state": "each row shows host, RESTART NEEDED/OK, reason and PIDs",
+      "proposed_executable_assertion": "assert both status branches and metadata",
+      "negative_counterexample": "bridge Installed value is accepted"
+    },
+    {
+      "id": "fleet.release-tag",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "fleet",
+      "source": {
+        "path": "tools/fleet-dashboard/fleet_dashboard.py",
+        "line_start": 6410,
+        "line_end": 6410,
+        "evidence": "const tag = releaseData.latest_tag || 'none';"
+      },
+      "derivation_kind": "identifier",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; latest_tag is present then absent.",
+      "action": "open Release card",
+      "expected_state": "exact tag or none appears under Latest tag",
+      "proposed_executable_assertion": "assert both branches",
+      "negative_counterexample": "GitHub Release URL is accepted"
+    },
+    {
+      "id": "fleet.search-no-results",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "fleet",
+      "source": {
+        "path": "tools/fleet-dashboard/fleet_dashboard.py",
+        "line_start": 6073,
+        "line_end": 6073,
+        "evidence": "<p class=\"empty\">No results</p>"
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; global filter has a non-empty unmatched query.",
+      "action": "type it",
+      "expected_state": "visible listbox shows No results",
+      "proposed_executable_assertion": "assert listbox visible, exact text, zero options",
+      "negative_counterexample": "a board-local No matching tickets row is accepted"
+    },
+    {
+      "id": "fleet.search-results",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "fleet",
+      "source": {
+        "path": "tools/fleet-dashboard/fleet_dashboard.py",
+        "line_start": 6073,
+        "line_end": 6073,
+        "evidence": "role=\"option\" aria-selected"
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; global query matches multiple grouped entities.",
+      "action": "type query and use arrows",
+      "expected_state": "grouped options render with one selected item and target hrefs",
+      "proposed_executable_assertion": "assert groups/options/selection and navigation",
+      "negative_counterexample": "board filtering without listbox options is accepted"
+    },
+    {
+      "id": "fleet.tab-changes",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "fleet",
+      "source": {
+        "path": "tools/fleet-dashboard/fleet_dashboard.py",
+        "line_start": 6096,
+        "line_end": 6096,
+        "evidence": "After seq ${esc(since)}"
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; board events have known seq/times.",
+      "action": "open Changes with and without since",
+      "expected_state": "24-hour and after-seq summaries are distinct and bounded by returned events",
+      "proposed_executable_assertion": "assert headings, five counts, event_count",
+      "negative_counterexample": "Timeline rows are accepted"
+    },
+    {
+      "id": "fleet.tab-flow",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "fleet",
+      "source": {
+        "path": "tools/fleet-dashboard/fleet_dashboard.py",
+        "line_start": 6097,
+        "line_end": 6097,
+        "evidence": "labels={open:'Open',claimed:'Claimed',submitted:'Submitted',closed_today:'Closed today'}"
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; returned tickets cover four flow buckets.",
+      "action": "open Ticket Flow",
+      "expected_state": "four columns contain only classified returned tickets",
+      "proposed_executable_assertion": "assert exact bucket membership and bounded note",
+      "negative_counterexample": "raw status counts are accepted"
+    },
+    {
+      "id": "fleet.tab-routes",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "fleet",
+      "source": {
+        "path": "tools/fleet-dashboard/fleet_dashboard.py",
+        "line_start": 6099,
+        "line_end": 6099,
+        "evidence": "aria-label=\"Ticket provenance routes\""
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; route data has stages, seat totals and truncation note.",
+      "action": "open Routes",
+      "expected_state": "seat load and ticket provenance stage columns render distinctly",
+      "proposed_executable_assertion": "assert stage cells and returned/total note",
+      "negative_counterexample": "Timeline actor data is accepted"
+    },
+    {
+      "id": "fleet.tab-tickets",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "fleet",
+      "source": {
+        "path": "tools/fleet-dashboard/fleet_dashboard.py",
+        "line_start": 6093,
+        "line_end": 6093,
+        "evidence": "No tickets match the filter."
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; board detail has tickets and a filter.",
+      "action": "open Tickets",
+      "expected_state": "bounded rows, sort, details, submission/review/annotations and exact empty state work",
+      "proposed_executable_assertion": "assert representative row plus empty-filter branch",
+      "negative_counterexample": "overview active ticket rows are accepted"
+    },
+    {
+      "id": "fleet.tab-timeline",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "fleet",
+      "source": {
+        "path": "tools/fleet-dashboard/fleet_dashboard.py",
+        "line_start": 6094,
+        "line_end": 6094,
+        "evidence": "No timeline events match the filter."
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; board detail has grouped events.",
+      "action": "open Timeline and filter",
+      "expected_state": "grouped bounded events render or exact timeline empty state appears",
+      "proposed_executable_assertion": "assert both populated and empty branches",
+      "negative_counterexample": "Changes summary is accepted"
+    },
+    {
+      "id": "fleet.theme",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "fleet",
+      "source": {
+        "path": "tools/fleet-dashboard/fleet_dashboard.py",
+        "line_start": 6111,
+        "line_end": 6111,
+        "evidence": "theme=theme==='dark'?'light':'dark'"
+      },
+      "derivation_kind": "identifier",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; theme starts dark.",
+      "action": "activate Light theme twice",
+      "expected_state": "root preference and button state toggle light then dark",
+      "proposed_executable_assertion": "assert data-theme and persisted label",
+      "negative_counterexample": "density state is accepted"
+    },
+    {
+      "id": "fleet.ticket-counts",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "fleet",
+      "source": {
+        "path": "tools/fleet-dashboard/fleet_dashboard.py",
+        "line_start": 6249,
+        "line_end": 6249,
+        "evidence": "Object.entries(b.counts||{})"
+      },
+      "derivation_kind": "identifier",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; board counts contain distinct status totals.",
+      "action": "open Boards",
+      "expected_state": "each card exposes each named count with its value",
+      "proposed_executable_assertion": "assert status/count pills keyed by board",
+      "negative_counterexample": "visible ticket total alone is accepted"
+    },
+    {
+      "id": "fleet.unknown-route-recovery",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "fleet",
+      "source": {
+        "path": "tools/fleet-dashboard/fleet_dashboard.py",
+        "line_start": 6081,
+        "line_end": 6081,
+        "evidence": "return null}catch{return null}"
+      },
+      "derivation_kind": "identifier",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; location hash is malformed or unknown.",
+      "action": "trigger hashchange",
+      "expected_state": "route returns null and hub falls back to overview without unsafe decoding",
+      "proposed_executable_assertion": "assert overview visible and no detail fetch",
+      "negative_counterexample": "a JavaScript exception or blank page is accepted"
+    },
+    {
+      "id": "fleet.updated-state",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "fleet",
+      "source": {
+        "path": "tools/fleet-dashboard/fleet_dashboard.py",
+        "line_start": 6085,
+        "line_end": 6085,
+        "evidence": "`Updated ${fmt(newest)}`:'No central available'"
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; at least one central succeeds, then none do.",
+      "action": "render Fleet",
+      "expected_state": "state shows newest update or No central available",
+      "proposed_executable_assertion": "assert both exact branches",
+      "negative_counterexample": "connection banner timestamp is accepted"
+    },
+    {
+      "id": "fleet.worker-management",
+      "baseline_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+      "surface": "fleet",
+      "source": {
+        "path": "tools/fleet-dashboard/fleet_dashboard.py",
+        "line_start": 6223,
+        "line_end": 6223,
+        "evidence": "Configured workers"
+      },
+      "derivation_kind": "literal",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; API workers include running, stopped, missing-seat and configured rows.",
+      "action": "open worker management",
+      "expected_state": "rows expose provider/model/process/seat/actions and form protects Keychain secrets",
+      "proposed_executable_assertion": "assert controls and disabled start/stop branches; secret absent from row",
+      "negative_counterexample": "unified agent cards without worker configuration are accepted"
+    }
+  ],
+  "observed_gaps": [
+    {
+      "id": "fleet.add-project-partial-failure",
+      "owner": "Fleet dashboard owner",
+      "exact_action": "Return bounded completed_steps and failed_step on add_project failure, render both in #add-project-result, and assert no later step ran."
+    }
+  ]
+}
