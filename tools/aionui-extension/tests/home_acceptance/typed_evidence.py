@@ -13,6 +13,7 @@ import argparse
 import fcntl
 import hashlib
 import hmac
+import ipaddress
 import json
 import os
 import re
@@ -178,6 +179,25 @@ def _leaf_pointers(document: Any, prefix: str = "") -> set[str]:
     return {prefix}
 
 
+def _without_member(document: dict[str, Any], member: str) -> dict[str, Any]:
+    return {key: value for key, value in document.items() if key != member}
+
+
+def _same_json_type(left: Any, right: Any) -> bool:
+    if left is None or right is None:
+        return left is None and right is None
+    if isinstance(left, bool) or isinstance(right, bool):
+        return isinstance(left, bool) and isinstance(right, bool)
+    if isinstance(left, (int, float)) or isinstance(right, (int, float)):
+        return (
+            isinstance(left, (int, float))
+            and not isinstance(left, bool)
+            and isinstance(right, (int, float))
+            and not isinstance(right, bool)
+        )
+    return type(left) is type(right)
+
+
 def _context(request: dict[str, Any], trust: dict[str, Any]) -> dict[str, Any]:
     context = _closed(request.get("context"), CONTEXT_KEYS, "request context")
     for field in ("observation_id", "run_id", "action_id", "entity"):
@@ -322,11 +342,148 @@ def _process_check(process: Any, receipt: Any | None = None) -> dict[str, Any] |
     return {"pid": pid, "argv_sha256": hashlib.sha256(command.encode()).hexdigest()}
 
 
+def _runtime_check(runtime: Any, trust: dict[str, Any], base_url: str) -> dict[str, Any]:
+    runtime = _closed(
+        runtime,
+        {
+            "pid_file", "command_sha256", "start_time", "executable",
+            "artifact_path", "artifact_sha256", "listener_port",
+        },
+        "HTTP runtime trust",
+    )
+    pid_path = Path(str(runtime["pid_file"])).resolve()
+    if (
+        not pid_path.is_absolute() or not pid_path.is_file()
+        or pid_path.stat().st_mode & 0o077 or pid_path.stat().st_uid != os.getuid()
+    ):
+        raise TypedEvidenceError("HTTP runtime PID file is unavailable or not private")
+    try:
+        pid = int(pid_path.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        raise TypedEvidenceError("HTTP runtime PID is invalid") from None
+    completed = subprocess.run(
+        ["/bin/ps", "-p", str(pid), "-o", "command="],
+        text=True, capture_output=True, check=False, timeout=5,
+        env={"PATH": os.defpath, "LANG": "C", "LC_ALL": "C"},
+    )
+    command = completed.stdout.strip()
+    started = subprocess.run(
+        ["/bin/ps", "-p", str(pid), "-o", "lstart="],
+        text=True, capture_output=True, check=False, timeout=5,
+        env={"PATH": os.defpath, "LANG": "C", "LC_ALL": "C"},
+    )
+    if completed.returncode or started.returncode or not command:
+        raise TypedEvidenceError("HTTP runtime process is unavailable")
+    start_time = str(runtime["start_time"])
+    if not start_time or started.stdout.strip() != start_time:
+        raise TypedEvidenceError("HTTP runtime start time changed")
+    try:
+        arguments = shlex.split(command)
+    except ValueError:
+        arguments = []
+    if (
+        not arguments
+        or str(Path(arguments[0]).resolve()) != str(Path(runtime["executable"]).resolve())
+        or hashlib.sha256(command.encode()).hexdigest() != runtime["command_sha256"]
+    ):
+        raise TypedEvidenceError("HTTP runtime executable or command changed")
+    artifact = Path(str(runtime["artifact_path"])).resolve()
+    checkout = Path(str(trust["candidate_checkout_root"])).resolve()
+    if (
+        not artifact.is_file() or not artifact.is_relative_to(checkout)
+        or hashlib.sha256(artifact.read_bytes()).hexdigest() != runtime["artifact_sha256"]
+    ):
+        raise TypedEvidenceError("HTTP runtime artifact is not verifier-pinned")
+    if not SHA256.fullmatch(str(runtime["artifact_sha256"])):
+        raise TypedEvidenceError("HTTP runtime artifact digest is invalid")
+    port = urlsplit(base_url).port
+    if runtime["listener_port"] != port or not isinstance(port, int):
+        raise TypedEvidenceError("HTTP runtime listener port changed")
+    listener = subprocess.run(
+        ["/usr/sbin/lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-Fp"],
+        text=True, capture_output=True, check=False, timeout=5,
+        env={"PATH": os.defpath, "LANG": "C", "LC_ALL": "C"},
+    )
+    listener_pids = {
+        int(line[1:]) for line in listener.stdout.splitlines()
+        if line.startswith("p") and line[1:].isdigit()
+    }
+    if listener.returncode or listener_pids != {pid}:
+        raise TypedEvidenceError("HTTP runtime listener is not owned by the trusted process")
+    head = subprocess.run(
+        ["git", "-C", str(checkout), "rev-parse", "HEAD"],
+        text=True, capture_output=True, check=False, timeout=5,
+        env={"PATH": os.defpath, "LANG": "C", "LC_ALL": "C"},
+    )
+    if head.returncode or head.stdout.strip() != trust["candidate_commit"]:
+        raise TypedEvidenceError("HTTP runtime checkout HEAD is not the trusted candidate")
+    return {
+        "pid": pid,
+        "start_time": start_time,
+        "command_sha256": runtime["command_sha256"],
+        "artifact_sha256": runtime["artifact_sha256"],
+        "listener_port": port,
+    }
+
+
 def _sign_evidence(evidence: dict[str, Any], trust: dict[str, Any]) -> dict[str, Any]:
     key_id = trust["active_evidence_key"]
     key = _key_bytes(trust["evidence_keys"][key_id], "evidence key")
     signature = hmac.new(key, _json_bytes(evidence), hashlib.sha256).hexdigest()
     return {**evidence, "auth": {"key_id": key_id, "hmac_sha256": signature}}
+
+
+def _validate_runtime_record(value: Any, label: str) -> dict[str, Any]:
+    value = _closed(
+        value,
+        {
+            "pid", "start_time", "command_sha256", "artifact_sha256",
+            "listener_port",
+        },
+        label,
+    )
+    if (
+        not isinstance(value["pid"], int) or isinstance(value["pid"], bool)
+        or value["pid"] <= 1
+        or not isinstance(value["start_time"], str) or not value["start_time"]
+        or not SHA256.fullmatch(str(value["command_sha256"]))
+        or not SHA256.fullmatch(str(value["artifact_sha256"]))
+        or not isinstance(value["listener_port"], int)
+        or isinstance(value["listener_port"], bool)
+        or not 1 <= value["listener_port"] <= 65535
+    ):
+        raise TypedEvidenceError(f"{label} has invalid types")
+    return value
+
+
+def _validate_http_result(value: Any, source: dict[str, Any], label: str) -> dict[str, Any]:
+    value = _closed(
+        value,
+        {
+            "method", "path", "status", "selected", "response_sha256",
+            "correlation",
+        },
+        label,
+    )
+    correlation = _closed(
+        value["correlation"],
+        {"observation_id", "run_id", "action_id", "entity"},
+        f"{label} correlation",
+    )
+    if (
+        not isinstance(value["method"], str)
+        or value["method"] not in {"GET", "POST", "PUT", "PATCH", "DELETE"}
+        or not isinstance(value["path"], str) or not value["path"].startswith("/")
+        or not isinstance(value["status"], int) or isinstance(value["status"], bool)
+        or not 100 <= value["status"] <= 599
+        or not isinstance(value["selected"], dict) or not value["selected"]
+        or any(not isinstance(key, str) for key in value["selected"])
+        or not set(value["selected"]) <= set(source["select_allowlist"])
+        or not SHA256.fullmatch(str(value["response_sha256"]))
+        or any(not isinstance(item, str) for item in correlation.values())
+    ):
+        raise TypedEvidenceError(f"{label} has invalid types or fields")
+    return value
 
 
 def _verify_evidence(evidence: Any, trust: dict[str, Any]) -> dict[str, Any]:
@@ -370,12 +527,83 @@ def _verify_evidence(evidence: Any, trust: dict[str, Any]) -> dict[str, Any]:
         raise TypedEvidenceError("evidence source no longer matches verifier trust")
     _fresh(evidence["captured_at"], trust["max_age_seconds"], "evidence captured_at")
     _safe_public(evidence["record"], "evidence record")
-    if evidence["kind"] == "state_transition":
+    if evidence["kind"] == "http_response":
+        record = _closed(
+            evidence["record"], {"action_origin", "runtime", "response"},
+            "HTTP evidence record",
+        )
+        if record["action_origin"] != "verifier_api":
+            raise TypedEvidenceError("HTTP evidence action origin is unsupported")
+        runtime = _validate_runtime_record(record["runtime"], "HTTP runtime record")
+        if runtime != _runtime_check(
+            trusted_source["runtime"], trust, trusted_source["base_url"]
+        ):
+            raise TypedEvidenceError("HTTP runtime evidence changed")
+        _validate_http_result(record["response"], trusted_source, "HTTP response record")
+    elif evidence["kind"] == "receipt_field":
+        record = _closed(
+            evidence["record"],
+            {"fields", "receipt_sha256", "authenticity", "process"},
+            "receipt evidence record",
+        )
+        if (
+            not isinstance(record["fields"], dict) or not record["fields"]
+            or any(not isinstance(key, str) or not key.startswith("/") for key in record["fields"])
+            or not SHA256.fullmatch(str(record["receipt_sha256"]))
+            or record["authenticity"]
+            not in {"canonical_hmac_sha256", "verifier_bound_personal_runtime"}
+        ):
+            raise TypedEvidenceError("receipt evidence record has invalid types")
+        if record["process"] is not None:
+            process = _closed(record["process"], {"pid", "argv_sha256"}, "receipt process record")
+            if (
+                not isinstance(process["pid"], int) or isinstance(process["pid"], bool)
+                or not SHA256.fullmatch(str(process["argv_sha256"]))
+            ):
+                raise TypedEvidenceError("receipt process record has invalid types")
+    elif evidence["kind"] == "log_assertion":
+        record = _closed(
+            evidence["record"],
+            {"entry", "entry_sha256", "authenticity", "process"},
+            "log evidence record",
+        )
+        if (
+            not isinstance(record["entry"], dict)
+            or set(record["entry"]) != set(trusted_source["document_keys"])
+            or not SHA256.fullmatch(str(record["entry_sha256"]))
+            or record["authenticity"] != "hmac_sha256"
+        ):
+            raise TypedEvidenceError("log evidence record has invalid fields")
+        if record["process"] is not None:
+            process = _closed(record["process"], {"pid", "argv_sha256"}, "log process record")
+            if (
+                not isinstance(process["pid"], int) or isinstance(process["pid"], bool)
+                or not SHA256.fullmatch(str(process["argv_sha256"]))
+            ):
+                raise TypedEvidenceError("log process record has invalid types")
+    else:
         record = evidence["record"]
         record = _closed(
-            record, {"before", "action", "after", "order", "http_source_id"},
+            record,
+            {
+                "before", "action", "after", "order", "http_source_id",
+                "http_source_config_sha256", "runtime",
+            },
             "state transition record",
         )
+        http_id, http_source = _source(
+            trust, "http_sources", trusted_source["http_source_id"]
+        )
+        if (
+            trusted_source["runtime_id"] != http_source["runtime_id"]
+            or record["http_source_id"] != http_id
+            or record["http_source_config_sha256"] != _digest(http_source)
+            or trusted_source["http_source_config_sha256"] != _digest(http_source)
+        ):
+            raise TypedEvidenceError("state transition HTTP source binding changed")
+        runtime = _validate_runtime_record(record["runtime"], "state runtime record")
+        if runtime != _runtime_check(http_source["runtime"], trust, http_source["base_url"]):
+            raise TypedEvidenceError("state runtime evidence changed")
         order = _closed(record["order"], {"before_at", "action_at", "after_at"}, "state transition order")
         moments = [_timestamp(order[field], f"state transition {field}") for field in ("before_at", "action_at", "after_at")]
         if moments != sorted(moments):
@@ -385,7 +613,10 @@ def _verify_evidence(evidence: Any, trust: dict[str, Any]) -> dict[str, Any]:
             "action_id": context["action_id"], "entity": context["entity"],
         }
         for phase in ("before", "action", "after"):
-            if not isinstance(record[phase], dict) or record[phase].get("correlation") != expected_correlation:
+            phase_record = _validate_http_result(
+                record[phase], http_source, f"state transition {phase}"
+            )
+            if phase_record["correlation"] != expected_correlation:
                 raise TypedEvidenceError("state transition correlation changed")
     return evidence
 
@@ -407,7 +638,8 @@ def _http_source(source_id: Any, trust: dict[str, Any], context: dict[str, Any])
     source_id, source = _source(trust, "http_sources", source_id)
     keys = {
         "adapter", "provenance", "runtime_id", "base_url", "surface", "board_id",
-        "candidate_commit", "methods", "headers", "timeout_seconds", "response_bindings",
+        "candidate_commit", "methods", "headers", "timeout_seconds",
+        "response_bindings", "runtime", "select_allowlist",
     }
     _closed(source, keys, "HTTP source")
     if source["adapter"] != "trusted_http_v1":
@@ -415,12 +647,27 @@ def _http_source(source_id: Any, trust: dict[str, Any], context: dict[str, Any])
     parsed = urlsplit(str(source["base_url"]))
     if parsed.scheme not in {"http", "https"} or parsed.username or parsed.password or parsed.query or parsed.fragment:
         raise TypedEvidenceError("HTTP source base_url is unsafe")
+    if parsed.scheme == "http":
+        try:
+            loopback = ipaddress.ip_address(parsed.hostname or "").is_loopback
+        except ValueError:
+            loopback = False
+        if not loopback:
+            raise TypedEvidenceError("HTTP source requires loopback or verified TLS")
     if source["surface"] != context["surface"] or source["board_id"] != context["board_id"] or source["candidate_commit"] != context["candidate_commit"]:
         raise TypedEvidenceError("HTTP source binding does not match request")
+    _runtime_check(source["runtime"], trust, source["base_url"])
     if not isinstance(source["methods"], list) or not source["methods"]:
         raise TypedEvidenceError("HTTP source methods are invalid")
     if not isinstance(source["headers"], dict) or any(not isinstance(k, str) or not isinstance(v, str) for k, v in source["headers"].items()):
         raise TypedEvidenceError("HTTP source headers are invalid")
+    if (
+        not isinstance(source["select_allowlist"], list)
+        or not source["select_allowlist"]
+        or len(set(source["select_allowlist"])) != len(source["select_allowlist"])
+        or any(not isinstance(pointer, str) or not pointer.startswith("/") for pointer in source["select_allowlist"])
+    ):
+        raise TypedEvidenceError("HTTP source selector allowlist is invalid")
     if not isinstance(source["timeout_seconds"], (int, float)) or not 0.1 <= source["timeout_seconds"] <= 30:
         raise TypedEvidenceError("HTTP source timeout is invalid")
     _require_context_bindings(
@@ -495,6 +742,8 @@ def _http_call(
     select = spec["select"]
     if not isinstance(select, list) or not select or len(select) > 32 or len(set(select)) != len(select):
         raise TypedEvidenceError(f"{label} selectors are invalid")
+    if not set(select) <= set(source["select_allowlist"]):
+        raise TypedEvidenceError(f"{label} selector is not verifier-allowlisted")
     selected = {pointer: _safe_public(_pointer(document, pointer), f"{label} selected value") for pointer in select}
     return {
         "method": method, "path": path, "status": status, "selected": selected,
@@ -504,11 +753,12 @@ def _http_call(
 
 def _record_http(request: dict[str, Any], trust: dict[str, Any], context: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
     recorder = _closed(request["recorder"], {"source_id", "request", "action_origin"}, "http_response recorder")
-    if recorder["action_origin"] not in {"verifier_api", "browser_observed"}:
+    if recorder["action_origin"] != "verifier_api":
         raise TypedEvidenceError("HTTP action_origin is invalid")
     source_id, source = _http_source(recorder["source_id"], trust, context)
     record = {
         "action_origin": recorder["action_origin"],
+        "runtime": _runtime_check(source["runtime"], trust, source["base_url"]),
         "response": _http_call(source, context, recorder["request"], "HTTP"),
     }
     return _base_source(source_id, source, trust), record
@@ -517,14 +767,33 @@ def _record_http(request: dict[str, Any], trust: dict[str, Any], context: dict[s
 def _record_receipt(request: dict[str, Any], trust: dict[str, Any], context: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
     recorder = _closed(request["recorder"], {"source_id", "fields"}, "receipt_field recorder")
     source_id, source = _source(trust, "receipt_sources", recorder["source_id"])
-    keys = {
-        "adapter", "provenance", "runtime_id", "path", "hmac_key_hex",
-        "signature_field", "signed_fields", "timestamp_pointer", "max_age_seconds",
-        "required_bindings", "issuer_pointer", "issuer", "runtime_pointer",
-        "transport_pointer", "transport", "process",
+    adapter = source.get("adapter")
+    common_keys = {
+        "adapter", "provenance", "runtime_id", "path", "max_age_seconds",
+        "required_bindings", "transport_pointer", "transport", "process",
+        "document_keys",
     }
-    _closed(source, keys, "receipt source")
-    if source["adapter"] != "hmac_json_v1":
+    if adapter == "hmac_json_v1":
+        _closed(
+            source,
+            common_keys
+            | {
+                "hmac_key_hex", "signature_field", "timestamp_pointer",
+                "issuer_pointer", "issuer", "runtime_pointer",
+            },
+            "receipt source",
+        )
+    elif adapter == "personal_runtime_receipt_v1":
+        _closed(
+            source,
+            common_keys
+            | {
+                "candidate_source", "candidate_source_sha256",
+                "product", "server_name",
+            },
+            "receipt source",
+        )
+    else:
         raise TypedEvidenceError("receipt adapter is unsupported")
     path = Path(str(source["path"])).resolve()
     if (
@@ -541,32 +810,71 @@ def _record_receipt(request: dict[str, Any], trust: dict[str, Any], context: dic
         raise TypedEvidenceError("receipt source is not readable JSON") from exc
     if not isinstance(receipt, dict):
         raise TypedEvidenceError("receipt source must be an object")
-    signature_field = source["signature_field"]
-    if not isinstance(signature_field, str) or signature_field not in receipt:
-        raise TypedEvidenceError("receipt signature is absent")
-    fields = source["signed_fields"]
+    document_keys = source["document_keys"]
     if (
-        not isinstance(fields, list) or not fields or len(set(fields)) != len(fields)
-        or any(not isinstance(field, str) for field in fields)
+        not isinstance(document_keys, list) or not document_keys
+        or len(set(document_keys)) != len(document_keys)
+        or any(not isinstance(field, str) for field in document_keys)
     ):
-        raise TypedEvidenceError("receipt signed_fields are invalid")
-    authenticated_fields = _leaf_pointers(receipt) - {f"/{signature_field}"}
-    if set(fields) != authenticated_fields:
-        raise TypedEvidenceError("receipt HMAC must authenticate every receipt field")
-    signed = {field: _pointer(receipt, field) for field in fields}
-    expected = hmac.new(_key_bytes(source["hmac_key_hex"], "receipt HMAC key"), _json_bytes(signed), hashlib.sha256).hexdigest()
-    if not isinstance(receipt[signature_field], str) or not hmac.compare_digest(expected, receipt[signature_field]):
-        raise TypedEvidenceError("receipt authenticity verification failed")
-    _fresh(_pointer(receipt, source["timestamp_pointer"]), source["max_age_seconds"], "receipt timestamp")
-    if _pointer(receipt, source["issuer_pointer"]) != source["issuer"]:
-        raise TypedEvidenceError("receipt issuer does not match verifier trust")
-    if _pointer(receipt, source["runtime_pointer"]) != source["runtime_id"]:
-        raise TypedEvidenceError("receipt runtime does not match verifier trust")
+        raise TypedEvidenceError("receipt document fields do not match schema")
+    if adapter == "hmac_json_v1":
+        signature_field = source["signature_field"]
+        if (
+            not isinstance(signature_field, str)
+            or set(receipt) != set(document_keys) | {signature_field}
+        ):
+            raise TypedEvidenceError("receipt document fields do not match schema")
+        expected = hmac.new(
+            _key_bytes(source["hmac_key_hex"], "receipt HMAC key"),
+            _json_bytes(_without_member(receipt, signature_field)),
+            hashlib.sha256,
+        ).hexdigest()
+        if not isinstance(receipt[signature_field], str) or not hmac.compare_digest(expected, receipt[signature_field]):
+            raise TypedEvidenceError("receipt authenticity verification failed")
+        _fresh(_pointer(receipt, source["timestamp_pointer"]), source["max_age_seconds"], "receipt timestamp")
+        if _pointer(receipt, source["issuer_pointer"]) != source["issuer"]:
+            raise TypedEvidenceError("receipt issuer does not match verifier trust")
+        if _pointer(receipt, source["runtime_pointer"]) != source["runtime_id"]:
+            raise TypedEvidenceError("receipt runtime does not match verifier trust")
+        authenticity = "canonical_hmac_sha256"
+    else:
+        if set(receipt) != set(document_keys):
+            raise TypedEvidenceError("receipt document fields do not match schema")
+        candidate_source = Path(str(source["candidate_source"])).resolve()
+        checkout = Path(str(trust["candidate_checkout_root"])).resolve()
+        head = subprocess.run(
+            ["git", "-C", str(checkout), "rev-parse", "HEAD"],
+            text=True, capture_output=True, check=False, timeout=5,
+            env={"PATH": os.defpath, "LANG": "C", "LC_ALL": "C"},
+        )
+        if (
+            head.returncode or head.stdout.strip() != trust["candidate_commit"]
+            or not candidate_source.is_file()
+            or not candidate_source.is_relative_to(checkout)
+            or hashlib.sha256(candidate_source.read_bytes()).hexdigest()
+            != source["candidate_source_sha256"]
+            or receipt.get("candidate_source") != str(candidate_source)
+            or receipt.get("build") != source["candidate_source_sha256"]
+            or receipt.get("product") != source["product"]
+            or receipt.get("server_name") != source["server_name"]
+            or receipt.get("candidate_commit") != context["candidate_commit"]
+            or receipt.get("board_id") != context["board_id"]
+            or receipt.get("transport") != source["transport"]
+        ):
+            raise TypedEvidenceError("Personal runtime receipt binding mismatch")
+        age = datetime.now(timezone.utc).timestamp() - path.stat().st_mtime
+        if age < -30 or age > source["max_age_seconds"]:
+            raise TypedEvidenceError("Personal runtime receipt is stale")
+        authenticity = "verifier_bound_personal_runtime"
     if _pointer(receipt, source["transport_pointer"]) != source["transport"]:
         raise TypedEvidenceError("receipt transport does not match verifier trust")
     _require_context_bindings(
         source["required_bindings"],
-        {"candidate_commit", "board_id", "surface", "entity", "run_id", "action_id"},
+        (
+            {"candidate_commit", "board_id", "surface", "entity", "run_id", "action_id"}
+            if adapter == "hmac_json_v1"
+            else {"candidate_commit", "board_id"}
+        ),
         "receipt source",
     )
     _check_bindings(receipt, source["required_bindings"], context, "receipt")
@@ -577,7 +885,7 @@ def _record_receipt(request: dict[str, Any], trust: dict[str, Any], context: dic
     selected = {pointer: _safe_public(_pointer(receipt, pointer), "receipt selected value") for pointer in requested}
     record = {
         "fields": selected, "receipt_sha256": hashlib.sha256(raw_receipt).hexdigest(),
-        "authenticity": "hmac_sha256", "process": process,
+        "authenticity": authenticity, "process": process,
     }
     return _base_source(source_id, source, trust), record
 
@@ -587,8 +895,9 @@ def _record_log(request: dict[str, Any], trust: dict[str, Any], context: dict[st
     source_id, source = _source(trust, "log_sources", recorder["source_id"])
     keys = {
         "adapter", "provenance", "runtime_id", "path", "hmac_key_hex",
-        "signature_field", "signed_fields", "timestamp_pointer", "max_age_seconds",
+        "signature_field", "timestamp_pointer", "max_age_seconds",
         "required_bindings", "emitter", "runtime_pointer", "max_bytes", "process",
+        "document_keys",
     }
     _closed(source, keys, "log source")
     if source["adapter"] != "hmac_jsonl_v1":
@@ -627,16 +936,20 @@ def _record_log(request: dict[str, Any], trust: dict[str, Any], context: dict[st
         if not isinstance(entry, dict) or entry.get("emitter") != source["emitter"]:
             continue
         signature_field = source["signature_field"]
-        fields = source["signed_fields"]
+        document_keys = source["document_keys"]
         if (
-            signature_field not in entry or not isinstance(fields, list) or not fields
-            or len(set(fields)) != len(fields)
-            or set(fields) != _leaf_pointers(entry) - {f"/{signature_field}"}
+            signature_field not in entry or not isinstance(document_keys, list)
+            or not document_keys or len(set(document_keys)) != len(document_keys)
+            or any(not isinstance(field, str) for field in document_keys)
+            or set(entry) != set(document_keys) | {signature_field}
         ):
             continue
         try:
-            signed = {field: _pointer(entry, field) for field in fields}
-            expected = hmac.new(_key_bytes(source["hmac_key_hex"], "log HMAC key"), _json_bytes(signed), hashlib.sha256).hexdigest()
+            expected = hmac.new(
+                _key_bytes(source["hmac_key_hex"], "log HMAC key"),
+                _json_bytes(_without_member(entry, signature_field)),
+                hashlib.sha256,
+            ).hexdigest()
             if not isinstance(entry[signature_field], str) or not hmac.compare_digest(expected, entry[signature_field]):
                 continue
             if _pointer(entry, source["runtime_pointer"]) != source["runtime_id"]:
@@ -662,10 +975,22 @@ def _record_log(request: dict[str, Any], trust: dict[str, Any], context: dict[st
 def _record_transition(request: dict[str, Any], trust: dict[str, Any], context: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
     recorder = _closed(request["recorder"], {"source_id", "before", "action", "after"}, "state_transition recorder")
     source_id, source = _source(trust, "state_sources", recorder["source_id"])
-    _closed(source, {"adapter", "provenance", "runtime_id", "http_source_id"}, "state source")
+    _closed(
+        source,
+        {
+            "adapter", "provenance", "runtime_id", "http_source_id",
+            "http_source_config_sha256",
+        },
+        "state source",
+    )
     if source["adapter"] != "trusted_http_state_v1":
         raise TypedEvidenceError("state adapter is unsupported")
     http_id, http_source = _http_source(source["http_source_id"], trust, context)
+    if (
+        source["runtime_id"] != http_source["runtime_id"]
+        or source["http_source_config_sha256"] != _digest(http_source)
+    ):
+        raise TypedEvidenceError("state source does not match its trusted HTTP runtime")
     before_at = _now_text()
     before = _http_call(http_source, context, recorder["before"], "state before")
     action_at = _now_text()
@@ -676,6 +1001,8 @@ def _record_transition(request: dict[str, Any], trust: dict[str, Any], context: 
         "before": before, "action": action, "after": after,
         "order": {"before_at": before_at, "action_at": action_at, "after_at": after_at},
         "http_source_id": http_id,
+        "http_source_config_sha256": _digest(http_source),
+        "runtime": _runtime_check(http_source["runtime"], trust, http_source["base_url"]),
     }
     return _base_source(source_id, source, trust), record
 
@@ -708,13 +1035,27 @@ def _compare(actual: Any, assertion: Any) -> bool:
     op = assertion["op"]
     expected = assertion["value"]
     if op == "eq":
-        return actual == expected
+        return _same_json_type(actual, expected) and actual == expected
     if op == "ne":
-        return actual != expected
+        return not (_same_json_type(actual, expected) and actual == expected)
     if op == "contains":
-        return isinstance(actual, (str, list, dict)) and expected in actual
+        if isinstance(actual, str) and isinstance(expected, str):
+            return expected in actual
+        if isinstance(actual, list):
+            return any(
+                _same_json_type(item, expected) and item == expected
+                for item in actual
+            )
+        if isinstance(actual, dict) and isinstance(expected, str):
+            return expected in actual
+        raise TypedEvidenceError("contains operands have incompatible JSON types")
     if op == "in":
-        return isinstance(expected, list) and actual in expected
+        if not isinstance(expected, list):
+            raise TypedEvidenceError("in expected value must be an array")
+        return any(
+            _same_json_type(actual, item) and actual == item
+            for item in expected
+        )
     if op in {"gt", "gte", "lt", "lte"} and isinstance(actual, (int, float)) and not isinstance(actual, bool) and isinstance(expected, (int, float)) and not isinstance(expected, bool):
         return {"gt": actual > expected, "gte": actual >= expected, "lt": actual < expected, "lte": actual <= expected}[op]
     raise TypedEvidenceError("typed assertion operator is unsupported")

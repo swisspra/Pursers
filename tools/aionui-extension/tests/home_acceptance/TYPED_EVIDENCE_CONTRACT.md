@@ -75,6 +75,7 @@ HMAC keys, and paths occur only in verifier trust:
     "methods": ["GET", "POST"],
     "headers": {},
     "timeout_seconds": 4,
+    "select_allowlist": ["/status", "/result/id"],
     "response_bindings": {
       "/candidate": "$candidate_commit",
       "/board": "$board_id",
@@ -83,6 +84,15 @@ HMAC keys, and paths occur only in verifier trust:
       "/run": "$run_id",
       "/action": "$action_id",
       "/runtime": "fleet-runtime-1"
+    },
+    "runtime": {
+      "pid_file": "/PATH/TO/VERIFIER/runtime.pid",
+      "command_sha256": "...",
+      "start_time": "Thu Sep 11 05:00:00 2026",
+      "executable": "/usr/bin/python3",
+      "artifact_path": "/PATH/TO/CANDIDATE/server.py",
+      "artifact_sha256": "...",
+      "listener_port": 18921
     }
   },
   "receipt": {
@@ -92,10 +102,10 @@ HMAC keys, and paths occur only in verifier trust:
     "path": "/PATH/TO/VERIFIER/receipt.json",
     "hmac_key_hex": "2222222222222222222222222222222222222222222222222222222222222222",
     "signature_field": "signature",
-    "signed_fields": [
-      "/schema_version", "/issuer", "/runtime_id", "/pid",
-      "/candidate_commit", "/board_id", "/surface", "/entity",
-      "/run_id", "/action_id", "/transport", "/role", "/captured_at"
+    "document_keys": [
+      "schema_version", "issuer", "runtime_id", "pid",
+      "candidate_commit", "board_id", "surface", "entity",
+      "run_id", "action_id", "transport", "role", "captured_at"
     ],
     "timestamp_pointer": "/captured_at",
     "max_age_seconds": 300,
@@ -121,10 +131,10 @@ HMAC keys, and paths occur only in verifier trust:
     "path": "/PATH/TO/VERIFIER/central.jsonl",
     "hmac_key_hex": "2222222222222222222222222222222222222222222222222222222222222222",
     "signature_field": "signature",
-    "signed_fields": [
-      "/emitter", "/timestamp", "/runtime_id", "/candidate_commit",
-      "/board_id", "/surface", "/entity", "/run_id", "/action_id",
-      "/event", "/outcome"
+    "document_keys": [
+      "emitter", "timestamp", "runtime_id", "candidate_commit",
+      "board_id", "surface", "entity", "run_id", "action_id",
+      "event", "outcome"
     ],
     "timestamp_pointer": "/timestamp",
     "max_age_seconds": 300,
@@ -145,7 +155,8 @@ HMAC keys, and paths occur only in verifier trust:
     "adapter": "trusted_http_state_v1",
     "provenance": "fleet-runtime-state",
     "runtime_id": "fleet-runtime-1",
-    "http_source_id": "fleet-api"
+    "http_source_id": "fleet-api",
+    "http_source_config_sha256": "..."
   },
   "process": {
     "pid_file": "/PATH/TO/VERIFIER/runtime.pid",
@@ -159,9 +170,13 @@ HMAC keys, and paths occur only in verifier trust:
 
 The `http`, `receipt`, `log`, `state`, and `process` labels above are explanatory;
 their values are placed under the corresponding source ID or `process` field.
-Receipt and log HMAC field lists must exactly cover every leaf except the
-signature itself, preventing a valid signature from being reused with an
-unsigned outcome field.
+Receipt and log `document_keys` are exact top-level schemas. HMAC covers the
+canonical complete document after removing only the signature member. Unknown,
+missing, or wrong-typed nested data fails closed, including empty containers.
+`personal_runtime_receipt_v1` is the non-HMAC adapter for the actual Personal
+runtime receipt: it pins the candidate checkout HEAD, source path and digest,
+build, product/server identity, board, transport, private receipt file, and live
+producer PID/argv.
 
 ## Closed common shapes
 
@@ -266,7 +281,7 @@ Recorder:
 ```json
 {
   "source_id": "fleet-api",
-  "action_origin": "verifier_api|browser_observed",
+  "action_origin": "verifier_api",
   "request": {
     "method": "GET",
     "path": "/status",
@@ -277,13 +292,15 @@ Recorder:
 ```
 
 The verifier trust source pins the exact origin, surface, board, candidate,
-runtime, allowed methods, private request headers, timeout, and response JSON
-bindings. The recorder injects observation/run/action/entity correlation
-headers and requires the real response to echo them. It records status,
-selected bounded JSON values, and a body digest. Redirects cannot escape the
-trusted origin. `action_origin: verifier_api` proves only that direct API call;
-an expected conjunct may require `browser_observed` when a UI action itself is
-the claim.
+runtime, allowed methods/selectors, private request headers, timeout, and
+response JSON bindings. Runtime verification requires a private PID file,
+process start time, executable and full command digest, exact listening PID and
+port, candidate-checkout HEAD, and an artifact path/digest inside that checkout.
+Thus a matching-body echo service cannot substitute for the candidate runtime.
+The recorder injects observation/run/action/entity correlation headers and
+requires the real response to echo them. It records status, selected bounded
+JSON values, and a body digest. Redirects cannot escape the trusted origin.
+Direct HTTP evidence is always `verifier_api`; it never claims a browser action.
 
 Conjuncts are exact
 `{"target":"status|field|action_origin","path":"","op":"eq","value":200}`.
@@ -297,10 +314,13 @@ Recorder:
 ```
 
 The explicit `hmac_json_v1` adapter reads a private verifier-pinned receipt,
-recomputes HMAC over an exact configured field list, enforces freshness and
+recomputes HMAC over the canonical complete document, enforces freshness and
 context bindings, and can bind receipt PID to a private PID file plus live
 process argv. This is the adapter point for the validated Personal HMAC path.
 Reading arbitrary worker JSON or matching a receipt-only PID is insufficient.
+For the actual Personal receipt, `personal_runtime_receipt_v1` performs the
+candidate/build/process checks described above and records authenticity as
+`verifier_bound_personal_runtime`.
 
 Conjuncts are exact `{"path":"/role","op":"eq","value":"worker"}`.
 
@@ -313,7 +333,8 @@ Recorder:
 ```
 
 The `hmac_jsonl_v1` adapter reads only a bounded tail from a verifier-pinned log,
-requires exactly one authentic fresh entry from the configured emitter, binds
+authenticates the complete exact-schema entry, requires exactly one fresh match
+from the configured emitter, binds
 candidate/board/surface/entity/run/action, and can verify the live emitter
 process. A substituted emitter, forged success line, stale line, duplicate
 match, or unrelated entry fails. The signature is removed from emitted data.
@@ -335,11 +356,12 @@ Recorder:
 }
 ```
 
-The `trusted_http_state_v1` adapter runs before, action, and after against one
-trusted HTTP runtime. Every phase has the same board/candidate/surface/entity/
-run/action correlation. The signed record preserves causal timestamps and
-rejects changed order. Expected conjuncts cover positive and supported negative
-action results:
+The `trusted_http_state_v1` adapter pins the referenced HTTP source configuration
+digest and runs before, action, and after against that one verified runtime.
+Every phase has the same board/candidate/surface/entity/run/action correlation.
+The signed record repeats the runtime and HTTP-source digest, preserves causal
+timestamps, and rejects changed identity, source, or order. Expected conjuncts
+cover positive and supported negative action results:
 
 ```json
 {"phase":"before|action|after","path":"/state|/status","op":"eq","value":"idle"}
@@ -347,9 +369,9 @@ action results:
 
 ## Current integration boundary
 
-The module and disposable tests prove executable recorder-to-evaluator
-roundtrips. No real AionUi/Fleet/Personal verifier trust config, runtime session,
-receipt HMAC key, authenticated log emitter, or production mutation is supplied
-by this delta. Those remain reviewer-owned setup and final browser-evidence
-gates. Opus owns wiring these results into the shared runner, harness, canonical
-facts, and report-level graph validation.
+The disposable tests prove executable producer-to-recorder-to-evaluator paths
+for the actual Personal receipt adapter and a live authenticated log emitter,
+plus verified HTTP/state runtimes. No production mutation or browser claim is
+supplied by this delta. Reviewer-owned setup and final browser evidence remain
+separate gates. Opus owns wiring results into the shared runner, harness,
+canonical facts, and report-level graph validation.
