@@ -23,9 +23,9 @@ except ImportError:  # Direct execution: ``python tools/regenerate_component_loc
 SOURCE_DATE_EPOCH = VERSIONS.source_date_epoch
 PRODUCT_VERSION = VERSIONS.product
 EXPECTED_VIEW_SHA256 = (
-    "5741a27258bb6979294262f290e4eb4f8e2c4bd4485363c55abe6f1012e9a36b"
+    "a9e4b104da8855c6a04f731e0e610115b605d98f2155a4551b48995d39785980"
 )
-EXPECTED_VIEW_SIZE = 447811
+EXPECTED_VIEW_SIZE = 447810
 PROJECTS = (
     ("central", "pursers-central", VERSIONS.packages["central"]),
     ("client", "pursers-client", VERSIONS.packages["client"]),
