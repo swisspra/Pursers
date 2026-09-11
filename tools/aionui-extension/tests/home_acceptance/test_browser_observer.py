@@ -790,20 +790,47 @@ def test_ego_response_capture_is_target_bound_exact_once_and_restored(mode: str)
     )
     prelude = r"""
 import vm from 'node:vm'
+import { createRequire } from 'node:module'
 
 const mode = __MODE__
 const pageUrl = 'http://127.0.0.1:18921/home'
-const helperOrigin = 'http://127.0.0.1:43121'
-const syntheticToken = 'synthetic-browser-test-token'
+const pageOrigin = new URL(pageUrl).origin
+const syntheticToken = 'synthetic-browser-test-token-0123456789'
 const transport = { type: 'stdio', command: 'pursers-wait-bridge', args: [], env: {} }
 const emitted = []
 const pending = []
-const originalFetch = async function (_input, _init) {
-  return new Response(JSON.stringify({ ok: true, mcp_definition: { transport } }), {
-    status: 200,
-    headers: { 'content-type': 'application/json' }
-  })
+const require = createRequire(import.meta.url)
+const { createHelperServer } = require('./tools/aionui-extension/host/helper.cjs')
+const helper = createHelperServer({
+  board: 'sandbox-home-observer',
+  central: 'work',
+  origin: pageOrigin,
+  token: syntheticToken,
+  port: 0,
+  runBridge: async () => [
+    'push_mode=push',
+    'board=sandbox-home-observer role=worker kid=synthetic-key exp=2000000000 seat_names_used=worker-1'
+  ].join('\n')
+})
+const helperAddress = await helper.start()
+const helperOrigin = `http://127.0.0.1:${helperAddress.port}`
+const nativeFetch = globalThis.fetch
+const originalFetch = async function (input, init) {
+  const outbound = mode === 'wrong_origin'
+    ? helperOrigin + '/pursers/onboarding/recover'
+    : input
+  const headers = new Headers(init.headers)
+  headers.set('origin', pageOrigin)
+  return nativeFetch(outbound, { ...init, headers })
 }
+const recoveryBody = JSON.stringify({
+  board: 'sandbox-home-observer',
+  role: 'worker',
+  seat_name: 'worker-1',
+  tier_max: 2,
+  folder: 'worker-1'
+})
+const wrongOrigin = `http://127.0.0.2:${helperAddress.port}`
 const mainGlobal = {
   URL, Headers, Response, setTimeout, clearTimeout, fetch: originalFetch,
   location: { href: pageUrl }
@@ -817,13 +844,17 @@ vm.runInContext(`const state = { helper: {
 const actionNode = {
   click() {
     const target = mode === 'wrong_origin'
-      ? 'http://127.0.0.1:43122/pursers/onboarding/recover'
+      ? wrongOrigin + '/pursers/onboarding/recover'
       : helperOrigin + '/pursers/onboarding/recover'
     const count = mode === 'duplicate' ? 2 : 1
     for (let index = 0; index < count; index += 1) {
       pending.push(mainGlobal.window.fetch(target, {
         method: 'POST',
-        headers: { 'x-pursers-home-token': syntheticToken },
+        headers: {
+          'content-type': 'application/json',
+          'x-pursers-home-token': syntheticToken
+        },
+        body: recoveryBody,
         credentials: 'omit',
         cache: 'no-store',
         referrerPolicy: 'no-referrer'
@@ -891,6 +922,7 @@ try {
   observedError = String(error && error.message ? error.message : error)
 }
 await Promise.allSettled(pending)
+await helper.close()
 const restored = mainGlobal.window.fetch === originalFetch
   && !Object.prototype.hasOwnProperty.call(mainGlobal.window, '__pursersVerifierFetchCapture')
 if (!restored) throw new Error('response capture did not restore page fetch state')
