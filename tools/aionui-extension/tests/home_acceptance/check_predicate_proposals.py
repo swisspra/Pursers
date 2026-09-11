@@ -41,6 +41,33 @@ PARENT_PRODUCER_IDS = {
     "fleet.release-pypi",
     "fleet.release-restart-checklist",
 }
+EXPECTED_CONTRACT_GAPS = {
+    "extension.reviewer-preset-claude",
+    "extension.reviewer-preset-codex",
+    "extension.worker-preset-claude",
+    "extension.worker-preset-codex",
+    "fleet.add-project-idempotent-rerun",
+    "fleet.doors-disabled",
+}
+PRESET_GAPS = EXPECTED_CONTRACT_GAPS - {
+    "fleet.add-project-idempotent-rerun", "fleet.doors-disabled",
+}
+PRESET_GAP_FIELDS = [
+    "/id", "/agentId", "/presetAgentType", "/contextFile",
+    "/resolvedRuntimeContext",
+]
+CREDENTIAL_GAP_FIELDS = [
+    "/before/worker_credential_digest",
+    "/before/reviewer_credential_digest",
+    "/action/id",
+    "/after/worker_credential_digest",
+    "/after/reviewer_credential_digest",
+    "/after/doors",
+]
+DOOR_DISABLED_GAP_FIELDS = [
+    "/before/disabled", "/action/outcome", "/action/during/disabled",
+    "/after/disabled",
+]
 OPS = {"eq", "ne", "contains", "in", "gt", "gte", "lt", "lte"}
 POINTER = re.compile(r"^/(?:[^/~]|~[01])+(?:/(?:[^/~]|~[01])+)*$")
 
@@ -189,6 +216,63 @@ def evaluate(predicate: dict[str, Any], observed: dict[tuple[str, str], Any]) ->
         )
         for assertion in predicate["assertions"]
     )
+
+
+def synthesized_observed(predicate: dict[str, Any]) -> dict[tuple[str, str], Any]:
+    observed: dict[tuple[str, str], Any] = {}
+    for assertion in predicate["assertions"]:
+        key = assertion_key(predicate["kind"], assertion)
+        expected = copy.deepcopy(assertion["value"])
+        op = assertion["op"]
+        if op == "ne":
+            value = "__different__" if expected != "__different__" else "__other__"
+        elif op == "in":
+            require(isinstance(expected, list) and expected, "empty in operand")
+            value = copy.deepcopy(expected[0])
+        elif op == "gt":
+            value = expected + 1
+        elif op == "lt":
+            value = expected - 1
+        else:
+            value = expected
+        if key not in observed or assertion["op"] != "contains":
+            observed[key] = value
+        elif isinstance(value, str):
+            observed[key] = f"{observed[key]} {value}"
+        elif isinstance(value, list):
+            observed[key] = list(dict.fromkeys([*observed[key], *value]))
+        elif isinstance(value, dict):
+            observed[key].update(value)
+        else:
+            raise Invalid("unsynthesizable contains value")
+    return observed
+
+
+def incompatible_value(assertion: dict[str, Any]) -> Any:
+    expected = assertion["value"]
+    op = assertion["op"]
+    if op == "ne":
+        return copy.deepcopy(expected)
+    if op == "contains":
+        if isinstance(expected, str):
+            return "__wrong_value__"
+        if isinstance(expected, list):
+            return []
+        if isinstance(expected, dict):
+            return {}
+    if op == "in":
+        return "__outside_allowlist__"
+    if op in {"gt", "gte"}:
+        return expected - 1
+    if op in {"lt", "lte"}:
+        return expected + 1
+    if isinstance(expected, bool):
+        return not expected
+    if isinstance(expected, (int, float)):
+        return expected + 1
+    if expected is None:
+        return "__not_null__"
+    return "__wrong_value__"
 
 
 def pointer_value(document: Any, pointer: str) -> Any:
@@ -498,6 +582,68 @@ const { createHandlers } = require('./tools/aionui-extension/webui/routes.js');
         require(cleanup_marker in observer.EGO_TRANSITION_SCRIPT, f"capture cleanup missing {cleanup_marker!r}")
 
 
+def check_fact_specific_mutations(proposals: list[dict[str, Any]]) -> int:
+    cases = (
+        ("extension.join-progress", ("before", "/connect_step"), "Wrong prior step"),
+        (
+            "fleet.refresh-pause-resume",
+            ("before", "/paused_status"),
+            "Updated without pause",
+        ),
+        (
+            "personal.work-priority",
+            ("before", "/personal_work_priority_target_hidden"),
+            False,
+        ),
+    )
+    for fact_id, key, wrong in cases:
+        item = next(proposal for proposal in proposals if proposal["id"] == fact_id)
+        predicate = item["canonical_predicate"]
+        observed = synthesized_observed(predicate)
+        require(evaluate(predicate, observed), f"{fact_id}: representative positive failed")
+        observed[key] = wrong
+        require(not evaluate(predicate, observed), f"{fact_id}: fact-specific mutation passed")
+    return len(cases)
+
+
+def check_contract_gap(item: dict[str, Any], keys: set[str]) -> None:
+    exact_keys(item, keys, item["id"])
+    require(item["status"] == "contract_gap", f"{item['id']}: gap status")
+    require(item["executable_request"] is None, f"{item['id']}: gap request must be null")
+    require(item["canonical_predicate"] is None, f"{item['id']}: gap predicate must be null")
+    exact_keys(
+        item["adapter"],
+        {
+            "support_status", "channel", "missing_channel_or_operation",
+            "bounded_parent_correction",
+        },
+        f"{item['id']}.adapter",
+    )
+    require(item["adapter"]["support_status"] == "contract_gap", f"{item['id']}: gap adapter")
+    require(item["validation"]["executable_now"] is False, f"{item['id']}: gap executable marker")
+    requested = item["requested_semantics"]
+    exact_keys(
+        requested,
+        {"kind", "source_id", "operation", "selection", "response_fields"},
+        f"{item['id']}.requested_semantics",
+    )
+    require(requested["kind"] == "state_transition", f"{item['id']}: gap kind")
+    require(
+        requested["source_id"] == f"browser-state-{item['id']}",
+        f"{item['id']}: gap source",
+    )
+    if item["id"] in PRESET_GAPS:
+        expected_fields = PRESET_GAP_FIELDS
+    elif item["id"] == "fleet.add-project-idempotent-rerun":
+        expected_fields = CREDENTIAL_GAP_FIELDS
+    else:
+        expected_fields = DOOR_DISABLED_GAP_FIELDS
+    require(
+        requested["response_fields"] == expected_fields,
+        f"{item['id']}: gap response fields",
+    )
+
+
 def check_predicate(item: dict[str, Any]) -> int:
     predicate = item["canonical_predicate"]
     exact_keys(predicate, {"kind", "source_id", "assertions"}, f"{item['id']}.predicate")
@@ -505,6 +651,12 @@ def check_predicate(item: dict[str, Any]) -> int:
     require(kind in {"state_transition", "http_response", "mcp_tool_response"}, f"{item['id']}: bad kind")
     assertions = predicate["assertions"]
     require(isinstance(assertions, list) and assertions, f"{item['id']}: empty assertions")
+    if kind == "state_transition":
+        require(
+            {assertion.get("phase") for assertion in assertions}
+            == {"before", "action", "after"},
+            f"{item['id']}: state transition must enforce before/action/after",
+        )
     seen_assertions: set[str] = set()
     for assertion in assertions:
         if kind == "state_transition":
@@ -522,38 +674,18 @@ def check_predicate(item: dict[str, Any]) -> int:
         require(encoded not in seen_assertions, f"{item['id']}: duplicate assertion")
         seen_assertions.add(encoded)
 
-    observed: dict[tuple[str, str], Any] = {}
-    for assertion in assertions:
-        key = assertion_key(kind, assertion)
-        expected = copy.deepcopy(assertion["value"])
-        op = assertion["op"]
-        if op == "ne":
-            value = "__different__" if expected != "__different__" else "__other__"
-        elif op == "in":
-            require(isinstance(expected, list) and expected, f"{item['id']}: empty in operand")
-            value = copy.deepcopy(expected[0])
-        elif op == "gt":
-            value = expected + 1
-        elif op == "lt":
-            value = expected - 1
-        else:
-            value = expected
-        if key not in observed or assertion["op"] != "contains":
-            observed[key] = value
-        elif isinstance(value, str):
-            observed[key] = f"{observed[key]} {value}"
-        elif isinstance(value, list):
-            observed[key] = list(dict.fromkeys([*observed[key], *value]))
-        elif isinstance(value, dict):
-            observed[key].update(value)
-        else:
-            raise Invalid(f"{item['id']}: unsynthesizable contains value")
+    observed = synthesized_observed(predicate)
     require(evaluate(predicate, observed), f"{item['id']}: synthesized positive did not pass")
     negative_count = 0
     for assertion in assertions:
+        key = assertion_key(kind, assertion)
         mutated = copy.deepcopy(observed)
-        mutated.pop(assertion_key(kind, assertion))
+        mutated.pop(key)
         require(not evaluate(predicate, mutated), f"{item['id']}: missing-field negative passed")
+        negative_count += 1
+        mutated = copy.deepcopy(observed)
+        mutated[key] = incompatible_value(assertion)
+        require(not evaluate(predicate, mutated), f"{item['id']}: wrong-value negative passed")
         negative_count += 1
     return negative_count
 
@@ -587,7 +719,7 @@ def check_request(item: dict[str, Any]) -> None:
             for selection in recorder[phase]:
                 exact_keys(selection, {"path", "selector", "property"}, f"{item['id']}.{phase}")
                 check_pointer(selection["path"], item["id"])
-                properties = {"text", "value", "count", "disabled", "checked", "hidden"}
+                properties = {"text", "value", "count", "disabled", "checked", "hidden", "class"}
                 require(
                     selection["property"] in properties,
                     f"{item['id']}: property",
@@ -597,27 +729,53 @@ def check_request(item: dict[str, Any]) -> None:
         available["action"] = set()
         require(isinstance(recorder["action"], list) and recorder["action"], f"{item['id']}: empty action")
         for action in recorder["action"]:
-            action_kinds = {
-                "observe", "click", "set_value", "submit", "press_key", "wait",
-                "click_response_json",
+            action_keys = {
+                "observe": {"kind", "path"},
+                "click": {"kind", "selector", "path"},
+                "set_value": {"kind", "selector", "value", "path"},
+                "select": {"kind", "selector", "value", "path"},
+                "submit": {"kind", "selector", "path"},
+                "press_key": {"kind", "selector", "key", "path"},
+                "wait": {"kind", "milliseconds", "path"},
+                "fetch": {"kind", "method", "endpoint", "body", "path"},
+                "fetch_json": {
+                    "kind", "method", "endpoint", "body", "pointer", "path",
+                },
+                "click_response_json": {
+                    "kind", "selector", "method", "endpoint", "pointer", "path",
+                },
             }
-            require(action.get("kind") in action_kinds, f"{item['id']}: action kind")
+            kind_name = action.get("kind")
+            require(kind_name in action_keys, f"{item['id']}: action kind")
+            exact_keys(action, action_keys[kind_name], f"{item['id']}.action")
             check_pointer(action.get("path"), item["id"])
-            if action["kind"] == "click_response_json":
-                exact_keys(
-                    action,
-                    {"kind", "selector", "method", "endpoint", "pointer", "path"},
-                    f"{item['id']}.action",
+            if kind_name in {
+                "click", "set_value", "select", "submit", "press_key",
+                "click_response_json",
+            }:
+                require(
+                    isinstance(action["selector"], str) and action["selector"],
+                    f"{item['id']}: action selector",
                 )
+            if kind_name in {"fetch", "fetch_json", "click_response_json"}:
                 require(
                     action["method"] in {"GET", "POST"}
-                    and isinstance(action["selector"], str) and action["selector"]
                     and isinstance(action["endpoint"], str)
                     and action["endpoint"].startswith("/")
                     and not action["endpoint"].startswith("//")
                     and "#" not in action["endpoint"],
                     f"{item['id']}: response capture target",
                 )
+                if kind_name in {"fetch", "fetch_json"}:
+                    require(
+                        (action["method"] == "GET" and action["body"] is None)
+                        or (
+                            action["method"] == "POST"
+                            and isinstance(action["body"], dict)
+                        ),
+                        f"{item['id']}: browser HTTP method/body mismatch",
+                    )
+            if kind_name in {"fetch_json", "click_response_json"}:
                 check_pointer(action["pointer"], item["id"])
             available["action"].add(action["path"])
         for assertion in predicate["assertions"]:
@@ -694,6 +852,18 @@ def check_regressions(proposals: list[dict[str, Any]]) -> None:
         path="/registration_status", op="contains",
         value="Registration recovered without replaying the door.",
     )
+    require_assertion(
+        proposals, "fleet.refresh-pause-resume", phase="before",
+        path="/paused_status", op="contains", value="Refresh paused while editing",
+    )
+    require_assertion(
+        proposals, "fleet.refresh-pause-resume", phase="action",
+        path="/resume_action", op="eq", value="clicked",
+    )
+    require_assertion(
+        proposals, "fleet.refresh-pause-resume", phase="after",
+        path="/resumed_status", op="contains", value="Updated",
+    )
     require_assertion(proposals, "fleet.doors-expiry", phase="after", path="/issued_expiry", op="ne", value="—")
     require_assertion(proposals, "fleet.doors-key-id", phase="after", path="/issued_kid", op="contains", value="kid-")
     require_assertion(
@@ -736,11 +906,41 @@ def validate(delta: dict[str, Any]) -> tuple[int, int, int]:
     exact_keys(delta, set(delta["proposal_contract"]["top_level_keys"]), "delta")
     check_partition(delta)
     proposals = delta["proposals"]
-    require(delta["contract_gaps"] == [], "all parent-supplied Fleet gaps must be executable")
     executable = [item for item in proposals if item["status"] == "executable_proposal"]
     gaps = [item for item in proposals if item["status"] == "contract_gap"]
-    require(len(executable) == 121 and not gaps, "expected 121 executable and zero gaps")
+    gap_ids = {item["id"] for item in gaps}
+    require(
+        len(executable) == 115 and gap_ids == EXPECTED_CONTRACT_GAPS,
+        "expected 115 executable and the six coordinator-confirmed gaps",
+    )
+    gap_summaries = delta["contract_gaps"]
+    require(
+        len(gap_summaries) == 6
+        and {item["id"] for item in gap_summaries} == EXPECTED_CONTRACT_GAPS,
+        "top-level contract-gap summary drift",
+    )
     normal_keys = set(delta["proposal_contract"]["executable_proposal_keys"])
+    gap_keys = set(delta["proposal_contract"]["contract_gap_keys"])
+    for item in gaps:
+        check_contract_gap(item, gap_keys)
+        summary = next(row for row in gap_summaries if row["id"] == item["id"])
+        exact_keys(
+            summary,
+            {
+                "id", "missing_channel_or_operation",
+                "bounded_parent_correction", "owner",
+            },
+            f"{item['id']}.gap_summary",
+        )
+        require(
+            summary["missing_channel_or_operation"]
+            == item["adapter"]["missing_channel_or_operation"]
+            and summary["bounded_parent_correction"]
+            == item["adapter"]["bounded_parent_correction"]
+            and summary["owner"]
+            == "TK-a565b6635db1 parent shared adapter/producer",
+            f"{item['id']}: gap summary mismatch",
+        )
     semantic: set[str] = set()
     negative_cases = 0
     first_negatives: set[str] = set()
@@ -761,8 +961,9 @@ def validate(delta: dict[str, Any]) -> tuple[int, int, int]:
         normalized = normalized_predicate(item["canonical_predicate"])
         require(normalized not in semantic, f"{item['id']}: duplicate semantic predicate")
         semantic.add(normalized)
-    require(len(semantic) == 121, "semantic predicates must be unique without source_id")
+    require(len(semantic) == 115, "semantic predicates must be unique without source_id")
     check_regressions(proposals)
+    negative_cases += check_fact_specific_mutations(proposals)
     producer_examples = check_parent_producer_examples(proposals)
     return check_source_anchors(proposals), negative_cases, producer_examples
 
@@ -778,10 +979,10 @@ def main() -> int:
         print(f"predicate_proposals=FAIL: {error}", file=sys.stderr)
         return 1
     print(f"proposal_file={args.delta.relative_to(ROOT) if args.delta.is_relative_to(ROOT) else args.delta}")
-    print("owned=121 complement=43 executable=121 contract_gaps=0")
-    print("unique_semantic_predicates=121")
+    print("owned=121 complement=43 executable=115 contract_gaps=6")
+    print("unique_semantic_predicates=115")
     print(f"validated_source_anchors={anchors}")
-    print(f"schema_positive_cases=121 negative_cases={negatives}")
+    print(f"schema_positive_cases=115 negative_cases={negatives}")
     print(f"actual_parent_producer_examples={producer_examples}")
     print("predicate_proposals=PASS")
     return 0
