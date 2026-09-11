@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "ticket_id": "TK-fadd47fce924",
-  "base_commit": "d09757f2e6187fd417ee1017814e92754047ea54",
+  "base_commit": "7f5ca61a556ed881567dadbc8c49f4b4a6a74c4a",
   "source_map": {
     "path": "docs/design-home/context/derivation-support/TK-63e391d86a18.json",
     "approved_commit": "f9b2d37ac687abcef510e7a854446a469588702a",
@@ -12,7 +12,7 @@
     "purpose": "closed per-ID predicate and recorder proposals for parent integration, with explicit nonpassing gaps; not runtime evidence or acceptance approval",
     "partition_rule": "owned_ids is exactly the 121 collector_gap rows at current full parent 99a32af; the disjoint 43-ID complement records parent-owned rows already converted there",
     "source_anchor_rule": "every proposal retains exact repository source commits, paths, and line ranges; requirement prose is never implementation proof",
-    "execution_rule": "119 owned rows carry an exact closed recorder request and predicate; two rows remain explicit nonpassing parent channel gaps",
+    "execution_rule": "all 121 owned rows carry an exact closed recorder request and predicate against a supported parent adapter",
     "predicate_rule": "canonical_predicate is the exact closed parent {kind,source_id,assertions} schema with typed case-sensitive operators",
     "privacy_rule": "verifier-owned trust supplies private paths, runtime identities, keys, and live fixture values; this public delta contains placeholders only as explicit fixture bindings",
     "top_level_keys": [
@@ -45,7 +45,7 @@
       "fleet_correlated_route": "trusted_http_v1 http_response against an allowlisted real Fleet route",
       "personal_stdio_mcp": "trusted_mcp_stdio_v1 mcp_tool_response against the exact Personal stdio tool and selector allowlist"
     },
-    "contract_gap_rule": "a contract_gap is nonpassing, names the exact missing producer operation, and cannot be consumed as acceptance evidence",
+    "contract_gap_rule": "contract gaps are forbidden after the verified parent supplied installed assistant, credential-safe rerun, and in-flight control-state channels",
     "contract_gap_keys": [
       "id",
       "status",
@@ -60,7 +60,7 @@
     ]
   },
   "prototype_contract": {
-    "commit": "d09757f2e6187fd417ee1017814e92754047ea54",
+    "commit": "7f5ca61a556ed881567dadbc8c49f4b4a6a74c4a",
     "parent_branch": "codex/TK-a565b6635db1-parent-worker2",
     "canonical_fielded_conjunct_keys": [
       "kind",
@@ -110,7 +110,7 @@
       "browser": "trusted_browser_state_v1 and aionui_assistant_binding_v1",
       "http": "trusted_http_v1",
       "mcp": "trusted_mcp_stdio_v1",
-      "fleet_producer": "ad80007b0f0bc00a77d68333b69ed41df9fe08c0"
+      "fleet_producer": "7f5ca61a556ed881567dadbc8c49f4b4a6a74c4a"
     },
     "closed_operators": [
       "eq",
@@ -126,7 +126,7 @@
   "reconciliation": {
     "stale_product_gap_source": "the approved source map predates the approved seven-behavior Fleet repair",
     "approved_repair_ref": "7b7c66d1d330b978376bdfb07e480f901f87825f",
-    "current_parent_ref": "d09757f2e6187fd417ee1017814e92754047ea54",
+    "current_parent_ref": "7f5ca61a556ed881567dadbc8c49f4b4a6a74c4a",
     "reconciled_ids": [
       "fleet.add-project-authorization-error",
       "fleet.add-project-idempotent-rerun",
@@ -139,15 +139,17 @@
     "focused_validation": "137 passed, 1 skipped (typed evidence plus harness); 79 passed, 1 skipped (typed evidence plus Fleet evidence/release producer)",
     "approved_project_trace_producer_ref": "6c0c324bdfd3bc191ff2615fc878ca8790f9ebb4",
     "reconciled_result": "all seven stale BLOCKED source-map rows use repaired current-parent semantics",
-    "working_parent": "d09757f2e6187fd417ee1017814e92754047ea54",
+    "working_parent": "7f5ca61a556ed881567dadbc8c49f4b4a6a74c4a",
     "parent_branch": "codex/TK-a565b6635db1-parent-worker2",
     "parent_corrections": {
       "safe_project_step_selectors": "ea3ee12ed2bd4063feb8487418c62df41051453a",
       "correlated_release_job_reads": "2d0f13f9a6bc1dbf4bf2211da2e7312b7606efd2",
       "structured_browser_action_results": "ad9d4bf59ca882c92c3899129e9c88c9072fa7d9",
-      "current_full_parent": "d09757f2e6187fd417ee1017814e92754047ea54",
+      "current_full_parent": "7f5ca61a556ed881567dadbc8c49f4b4a6a74c4a",
       "credential_state_trace": "ad80007b0f0bc00a77d68333b69ed41df9fe08c0",
-      "installed_assistant_binding": "d09757f2e6187fd417ee1017814e92754047ea54"
+      "installed_assistant_binding": "d09757f2e6187fd417ee1017814e92754047ea54",
+      "credential_safe_project_rerun": "7f5ca61a556ed881567dadbc8c49f4b4a6a74c4a",
+      "inflight_door_state": "0e5390b72407186ba842bdc93b84a2d502de13bd"
     }
   },
   "partition": {
@@ -2023,7 +2025,7 @@
     },
     {
       "id": "fleet.add-project-idempotent-rerun",
-      "status": "contract_gap",
+      "status": "executable_proposal",
       "source": {
         "commit": "313b025ce99017c8588f628a2263d6eed85887f1",
         "path": "tools/fleet-dashboard/fleet_dashboard.py",
@@ -2054,10 +2056,26 @@
         "correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id."
       },
       "adapter": {
-        "support_status": "contract_gap",
+        "support_status": "supported",
         "channel": "fleet_project_add",
-        "missing_channel_or_operation": "ad80007 binds and compares secret-free credential-inclusive before/after state, but the approved Fleet action result selector allowlist omits /doors and /steps/5/{step,status} needed to prove the correlated rerun result",
-        "bounded_parent_correction": "parent must allow the bounded /doors and /steps/5/{step,status} result projection for traced POST /api/projects/add, or publish an equivalent closed result binding"
+        "adapter": "trusted_http_v1",
+        "method": "POST",
+        "path": "/api/projects/add",
+        "select_allowlist": [
+          "/_evidence/changed",
+          "/_evidence/effect",
+          "/doors",
+          "/steps/5/step",
+          "/steps/5/status"
+        ],
+        "correlation": "verified parent Fleet trace binds the real rerun response to candidate, board, runtime, action and entity; credential-inclusive before/after state comparison drives changed/effect",
+        "fixture_bindings": {
+          "project": "sandbox-project",
+          "board": "sandbox-board",
+          "paths": "verifier substitutes private absolute paths for /PATH/TO/... placeholders",
+          "prior_state": "project and worker/reviewer door credentials already exist unchanged"
+        },
+        "parent_contract_ref": "7f5ca61a556ed881567dadbc8c49f4b4a6a74c4a"
       },
       "required_evidence": [
         "trusted exact-candidate/board/runtime evidence from the named adapter",
@@ -2067,8 +2085,8 @@
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
-        "shape_contract": "ad80007b0f0bc00a77d68333b69ed41df9fe08c0 credential-inclusive Fleet trace; result selector extension pending",
-        "executable_now": false,
+        "shape_contract": "7f5ca61a556ed881567dadbc8c49f4b4a6a74c4a credential-safe correlated project rerun projection",
+        "executable_now": true,
         "adversarial_negatives": [
           {
             "mutation": "already-present step labels are accepted while credentials are reissued",
@@ -2087,21 +2105,90 @@
             "expected": "provenance/correlation rejection"
           }
         ],
-        "deferred": "parent must allow the bounded /doors and /steps/5/{step,status} result projection for traced POST /api/projects/add, or publish an equivalent closed result binding"
+        "deferred": "fresh real fixture capture and independent 201-row acceptance remain reviewer-owned"
       },
-      "executable_request": null,
-      "canonical_predicate": null,
-      "requested_semantics": {
+      "executable_request": {
+        "schema_version": 1,
+        "kind": "http_response",
+        "context_bindings": [
+          "observation_id",
+          "run_id",
+          "action_id",
+          "entity",
+          "surface",
+          "board_id",
+          "candidate_commit",
+          "issued_at",
+          "causal_index"
+        ],
+        "recorder": {
+          "source_id": "fleet-api",
+          "action_origin": "verifier_api",
+          "request": {
+            "method": "POST",
+            "path": "/api/projects/add",
+            "body": {
+              "name": "sandbox-project",
+              "board_id": "sandbox-board",
+              "work_dir": "/PATH/TO/WORK",
+              "integration_ref": "main"
+            },
+            "select": [
+              "/_evidence/changed",
+              "/_evidence/effect",
+              "/doors",
+              "/steps/5/step",
+              "/steps/5/status"
+            ]
+          }
+        }
+      },
+      "canonical_predicate": {
         "kind": "http_response",
         "source_id": "fleet-api",
-        "operation": "correlated POST /api/projects/add rerun for the existing sandbox project",
-        "selection": "assert credential-inclusive trace unchanged plus exact already-present result and null doors",
-        "response_fields": [
-          "/_evidence/changed",
-          "/_evidence/effect",
-          "/doors",
-          "/steps/5/step",
-          "/steps/5/status"
+        "assertions": [
+          {
+            "target": "action_origin",
+            "path": "",
+            "op": "eq",
+            "value": "verifier_api"
+          },
+          {
+            "target": "status",
+            "path": "",
+            "op": "eq",
+            "value": 200
+          },
+          {
+            "target": "field",
+            "path": "/_evidence/changed",
+            "op": "eq",
+            "value": false
+          },
+          {
+            "target": "field",
+            "path": "/_evidence/effect",
+            "op": "eq",
+            "value": "project_state_unchanged"
+          },
+          {
+            "target": "field",
+            "path": "/doors",
+            "op": "eq",
+            "value": null
+          },
+          {
+            "target": "field",
+            "path": "/steps/5/step",
+            "op": "eq",
+            "value": "door_credentials"
+          },
+          {
+            "target": "field",
+            "path": "/steps/5/status",
+            "op": "eq",
+            "value": "already present"
+          }
         ]
       }
     },
@@ -6254,7 +6341,7 @@
     },
     {
       "id": "fleet.doors-disabled",
-      "status": "contract_gap",
+      "status": "executable_proposal",
       "source": {
         "commit": "6368b72279f77e0132888c161e1bac001276dba1",
         "path": "tools/fleet-dashboard/fleet_dashboard.py",
@@ -6273,10 +6360,56 @@
         "correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id."
       },
       "adapter": {
-        "support_status": "contract_gap",
+        "support_status": "supported",
         "channel": "browser_action_state",
-        "missing_channel_or_operation": "trusted_browser_state_v1 records the click but cannot select the clicked button disabled while the request promise is held before finally re-enables it",
-        "bounded_parent_correction": "parent must publish a held-response mid-action selector capture bound to the clicked door control"
+        "adapter": "trusted_browser_state_v1",
+        "surface": "fleet",
+        "page_binding": "verifier-owned exact candidate loopback page with the real door endpoint response held only before delivery to page code",
+        "recipe": {
+          "before": [
+            {
+              "path": "/disabled_before",
+              "selector": "[data-door-action=\"copy\"][data-board=\"sandbox-board\"][data-role=\"worker\"]",
+              "property": "disabled"
+            }
+          ],
+          "actions": [
+            {
+              "kind": "click_pending_state",
+              "selector": "[data-door-action=\"copy\"][data-board=\"sandbox-board\"][data-role=\"worker\"]",
+              "method": "POST",
+              "endpoint": "/api/doors/copy",
+              "property": "disabled",
+              "hold_milliseconds": 400,
+              "path": "/clicked",
+              "pending_path": "/disabled_while_pending",
+              "settled_path": "/request_settled",
+              "status_path": "/response_status",
+              "response_sha256_path": "/response_sha256",
+              "error_path": "/request_error"
+            }
+          ],
+          "after": [
+            {
+              "path": "/disabled_after",
+              "selector": "[data-door-action=\"copy\"][data-board=\"sandbox-board\"][data-role=\"worker\"]",
+              "property": "disabled"
+            }
+          ],
+          "settle_milliseconds": 400
+        },
+        "select_allowlist": [
+          "/clicked",
+          "/disabled_while_pending",
+          "/request_settled",
+          "/response_status",
+          "/response_sha256",
+          "/request_error",
+          "/disabled_before",
+          "/disabled_after"
+        ],
+        "semantic_basis": "bind one exact clicked door control disabled during its single correlated request and enabled after the real response settles",
+        "parent_contract_ref": "0e5390b72407186ba842bdc93b84a2d502de13bd"
       },
       "required_evidence": [
         "trusted exact-candidate/board/runtime evidence from the named adapter",
@@ -6286,8 +6419,8 @@
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
-        "shape_contract": "97a5ed712c7a7909642608211dea34601d12564b closed recorder and parent fielded-conjunct schemas",
-        "executable_now": false,
+        "shape_contract": "0e5390b72407186ba842bdc93b84a2d502de13bd in-flight door action capture",
+        "executable_now": true,
         "adversarial_negatives": [
           {
             "mutation": "a release-operation button or an always-enabled second door row is accepted",
@@ -6306,20 +6439,102 @@
             "expected": "provenance/correlation rejection"
           }
         ],
-        "deferred": "parent must publish a held-response mid-action selector capture bound to the clicked door control"
+        "deferred": "fresh real fixture capture, screenshot/AX pairing, and independent 201-row acceptance remain reviewer-owned"
       },
-      "executable_request": null,
-      "canonical_predicate": null,
-      "requested_semantics": {
+      "executable_request": {
+        "schema_version": 1,
+        "kind": "state_transition",
+        "context_bindings": [
+          "observation_id",
+          "run_id",
+          "action_id",
+          "entity",
+          "surface",
+          "board_id",
+          "candidate_commit",
+          "issued_at",
+          "causal_index"
+        ],
+        "recorder": {
+          "source_id": "browser-state-fleet.doors-disabled",
+          "before": [
+            {
+              "path": "/disabled_before",
+              "selector": "[data-door-action=\"copy\"][data-board=\"sandbox-board\"][data-role=\"worker\"]",
+              "property": "disabled"
+            }
+          ],
+          "action": [
+            {
+              "kind": "click_pending_state",
+              "selector": "[data-door-action=\"copy\"][data-board=\"sandbox-board\"][data-role=\"worker\"]",
+              "method": "POST",
+              "endpoint": "/api/doors/copy",
+              "property": "disabled",
+              "hold_milliseconds": 400,
+              "path": "/clicked",
+              "pending_path": "/disabled_while_pending",
+              "settled_path": "/request_settled",
+              "status_path": "/response_status",
+              "response_sha256_path": "/response_sha256",
+              "error_path": "/request_error"
+            }
+          ],
+          "after": [
+            {
+              "path": "/disabled_after",
+              "selector": "[data-door-action=\"copy\"][data-board=\"sandbox-board\"][data-role=\"worker\"]",
+              "property": "disabled"
+            }
+          ]
+        }
+      },
+      "canonical_predicate": {
         "kind": "state_transition",
         "source_id": "browser-state-fleet.doors-disabled",
-        "operation": "activate one exact door control against a held request and allow its finally handler to settle",
-        "selection": "bind the same clicked control disabled during the request and enabled after settle",
-        "response_fields": [
-          "/before/disabled",
-          "/action/outcome",
-          "/action/during/disabled",
-          "/after/disabled"
+        "assertions": [
+          {
+            "phase": "before",
+            "path": "/disabled_before",
+            "op": "eq",
+            "value": false
+          },
+          {
+            "phase": "action",
+            "path": "/clicked",
+            "op": "eq",
+            "value": "clicked"
+          },
+          {
+            "phase": "action",
+            "path": "/disabled_while_pending",
+            "op": "eq",
+            "value": true
+          },
+          {
+            "phase": "action",
+            "path": "/request_settled",
+            "op": "eq",
+            "value": true
+          },
+          {
+            "phase": "action",
+            "path": "/response_status",
+            "op": "eq",
+            "value": 200
+          },
+          {
+            "phase": "action",
+            "path": "/request_error",
+            "op": "eq",
+            "value": null
+          },
+          {
+            "phase": "after",
+            "path": "/disabled_after",
+            "op": "eq",
+            "value": false
+          }
         ]
       }
     },
@@ -21477,18 +21692,5 @@
       }
     }
   ],
-  "contract_gaps": [
-    {
-      "id": "fleet.add-project-idempotent-rerun",
-      "missing_channel_or_operation": "ad80007 binds and compares secret-free credential-inclusive before/after state, but the approved Fleet action result selector allowlist omits /doors and /steps/5/{step,status} needed to prove the correlated rerun result",
-      "bounded_parent_correction": "parent must allow the bounded /doors and /steps/5/{step,status} result projection for traced POST /api/projects/add, or publish an equivalent closed result binding",
-      "owner": "TK-a565b6635db1 parent shared adapter/producer"
-    },
-    {
-      "id": "fleet.doors-disabled",
-      "missing_channel_or_operation": "trusted_browser_state_v1 records the click but cannot select the clicked button disabled while the request promise is held before finally re-enables it",
-      "bounded_parent_correction": "parent must publish a held-response mid-action selector capture bound to the clicked door control",
-      "owner": "TK-a565b6635db1 parent shared adapter/producer"
-    }
-  ]
+  "contract_gaps": []
 }
