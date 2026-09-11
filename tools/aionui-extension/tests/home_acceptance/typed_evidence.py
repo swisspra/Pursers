@@ -139,6 +139,11 @@ BROWSER_ACTION_KEYS = {
         "kind", "method", "endpoint", "body", "pointer", "path",
     },
     "assistant_binding": {"kind", "endpoint", "assistant_id", "path"},
+    "click_pending_state": {
+        "kind", "selector", "method", "endpoint", "property",
+        "hold_milliseconds", "path", "pending_path", "settled_path",
+        "status_path", "response_sha256_path", "error_path",
+    },
     "click_response_json": {
         "kind", "selector", "method", "endpoint", "pointer", "path",
     },
@@ -510,13 +515,17 @@ def _browser_actions(value: Any) -> list[dict[str, Any]]:
         kind = action["kind"]
         if set(action) != BROWSER_ACTION_KEYS[kind]:
             raise TypedEvidenceError("browser action fields do not match schema")
-        path = action["path"]
-        if not isinstance(path, str) or not path.startswith("/") or path in paths:
+        result_paths = _browser_action_result_paths(action)
+        if any(
+            not isinstance(path, str) or not path.startswith("/") or path in paths
+            for path in result_paths
+        ) or len(result_paths) != (6 if kind == "click_pending_state" else 1):
             raise TypedEvidenceError("browser action result path is invalid")
-        paths.add(path)
+        paths.update(result_paths)
         if kind in {
             "click", "set_value", "select", "submit", "press_key",
             "click_response_json",
+            "click_pending_state",
         }:
             selector = action["selector"]
             if not isinstance(selector, str) or not selector or len(selector) > 512:
@@ -557,6 +566,15 @@ def _browser_actions(value: Any) -> list[dict[str, Any]]:
             or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", action["assistant_id"])
         ):
             raise TypedEvidenceError("browser assistant binding action is invalid")
+        if kind == "click_pending_state" and (
+            action["method"] != "POST"
+            or action["endpoint"] not in {"/api/doors/copy", "/api/doors/rotate"}
+            or action["property"] != "disabled"
+            or not isinstance(action["hold_milliseconds"], int)
+            or isinstance(action["hold_milliseconds"], bool)
+            or not 100 <= action["hold_milliseconds"] <= 2_000
+        ):
+            raise TypedEvidenceError("browser pending-state action is invalid")
         if kind == "click_response_json" and (
             action["method"] not in {"GET", "POST", "PUT", "PATCH", "DELETE"}
             or not isinstance(action["endpoint"], str)
@@ -574,7 +592,23 @@ def _browser_actions(value: Any) -> list[dict[str, Any]]:
             raise TypedEvidenceError("browser fetch JSON pointer is invalid")
     if sum(action["kind"] == "click_response_json" for action in value) > 1:
         raise TypedEvidenceError("browser response capture must be unique")
+    if (
+        sum(action["kind"] == "click_pending_state" for action in value) > 1
+        or any(action["kind"] == "click_pending_state" for action in value)
+        and any(action["kind"] == "click_response_json" for action in value)
+    ):
+        raise TypedEvidenceError("browser pending-state capture must be unique")
     return value
+
+
+def _browser_action_result_paths(action: dict[str, Any]) -> set[str]:
+    paths = {action["path"]}
+    if action["kind"] == "click_pending_state":
+        paths.update(action[field] for field in (
+            "pending_path", "settled_path", "status_path",
+            "response_sha256_path", "error_path",
+        ))
+    return paths
 
 
 def _browser_state_source(
@@ -659,9 +693,17 @@ def _browser_state_source(
         or not 0 <= recipe["settle_milliseconds"] <= 10_000
     ):
         raise TypedEvidenceError("browser settle delay is invalid")
+    pending = [item for item in recipe["actions"] if item["kind"] == "click_pending_state"]
+    if (
+        len(pending) > 1
+        or pending and recipe["settle_milliseconds"] < pending[0]["hold_milliseconds"]
+    ):
+        raise TypedEvidenceError("browser pending-state scheduling is invalid")
     expected_selectors = {
         selector["path"] for selector in (*recipe["before"], *recipe["after"])
-    } | {action["path"] for action in recipe["actions"]}
+    } | set().union(*(
+        _browser_action_result_paths(action) for action in recipe["actions"]
+    ))
     allowlist = source["select_allowlist"]
     if (
         not isinstance(allowlist, list) or set(allowlist) != expected_selectors
@@ -2248,11 +2290,15 @@ def _browser_phase(
     expected_paths = {
         item["path"]
         for item in (
-            source["recipe"]["actions"]
-            if phase == "action"
-            else source["recipe"][phase]
+            source["recipe"][phase]
+            if phase != "action" else []
         )
     }
+    if phase == "action":
+        expected_paths = set().union(*(
+            _browser_action_result_paths(item)
+            for item in source["recipe"]["actions"]
+        ))
     if (
         result["method"] != expected_method
         or result["path"] != f"/browser/state/{phase}"
@@ -2261,6 +2307,25 @@ def _browser_phase(
         or set(result["selected"]) != expected_paths
     ):
         raise TypedEvidenceError(f"browser {phase} result differs from verifier recipe")
+    if phase == "action":
+        pending = [
+            item for item in source["recipe"]["actions"]
+            if item["kind"] == "click_pending_state"
+        ]
+        if pending:
+            item = pending[0]
+            selected = result["selected"]
+            if (
+                selected[item["path"]] != "clicked"
+                or selected[item["pending_path"]] is not True
+                or selected[item["settled_path"]] is not True
+                or not isinstance(selected[item["status_path"]], int)
+                or isinstance(selected[item["status_path"]], bool)
+                or not 100 <= selected[item["status_path"]] <= 599
+                or not SHA256.fullmatch(str(selected[item["response_sha256_path"]]))
+                or selected[item["error_path"]] is not None
+            ):
+                raise TypedEvidenceError("browser pending-state result is invalid")
     return result
 
 

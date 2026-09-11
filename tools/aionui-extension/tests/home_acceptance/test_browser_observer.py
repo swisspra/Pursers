@@ -778,6 +778,32 @@ def test_typed_browser_transition_accepts_exact_assistant_binding() -> None:
         observer_module._read_transition_spec(io.StringIO(json.dumps(spec)))
 
 
+def test_typed_browser_transition_accepts_bounded_pending_state() -> None:
+    spec = _transition_spec()
+    action = {
+        "kind": "click_pending_state",
+        "selector": '[data-door-action="copy"][data-role="worker"]',
+        "method": "POST", "endpoint": "/api/doors/copy",
+        "property": "disabled", "hold_milliseconds": 400,
+        "path": "/clicked", "pending_path": "/disabled_while_pending",
+        "settled_path": "/request_settled", "status_path": "/response_status",
+        "response_sha256_path": "/response_sha256", "error_path": "/request_error",
+    }
+    spec["recipe"]["actions"] = [action]
+    spec["recipe"]["settle_milliseconds"] = 400
+    parsed = observer_module._read_transition_spec(io.StringIO(json.dumps(spec)))
+    assert parsed["recipe"]["actions"] == [action]
+
+    spec["recipe"]["settle_milliseconds"] = 399
+    with pytest.raises(observer_module.ObserverError, match="scheduling is invalid"):
+        observer_module._read_transition_spec(io.StringIO(json.dumps(spec)))
+
+    spec["recipe"]["settle_milliseconds"] = 400
+    spec["recipe"]["actions"][0]["status_path"] = "/clicked"
+    with pytest.raises(observer_module.ObserverError, match="action path is invalid"):
+        observer_module._read_transition_spec(io.StringIO(json.dumps(spec)))
+
+
 def test_ego_transition_uses_isolated_world_and_closed_operations() -> None:
     script = observer_module.EGO_TRANSITION_SCRIPT % (
         json.dumps("acceptance"),
@@ -793,6 +819,11 @@ def test_ego_transition_uses_isolated_world_and_closed_operations() -> None:
     assert "spec.kind === 'assistant_binding'" in script
     assert "runtime assistant match is not unique" in script
     assert "transport: 'same-origin-http'" in script
+    assert "spec.kind === 'click_pending_state'" in script
+    assert "pending-state request did not settle exactly once" in script
+    assert "node[spec.property] === true" in script
+    assert "response.clone().arrayBuffer()" in script
+    assert "window.fetch = capture.original" in script
     assert "performance.getEntriesByType('resource')" in script
     assert "entry.startTime >= startedAt" in script
     assert "url.origin === window.location.origin" in script
@@ -991,6 +1022,146 @@ console.log(JSON.stringify({ mode, restored, rejected: Boolean(observedError) })
         "mode": mode,
         "restored": True,
         "rejected": mode != "success",
+    }
+
+
+@pytest.mark.parametrize(
+    "mode", ["success", "no_request", "wrong_target", "duplicate", "stuck", "unchanged"],
+)
+def test_ego_pending_state_is_real_request_bound_and_restored(mode: str) -> None:
+    recipe = _transition_spec()["recipe"]
+    selector = '[data-door-action="copy"][data-role="worker"]'
+    recipe["actions"] = [{
+        "kind": "click_pending_state", "selector": selector,
+        "method": "POST", "endpoint": "/api/doors/copy",
+        "property": "disabled", "hold_milliseconds": 100,
+        "path": "/clicked", "pending_path": "/disabled_while_pending",
+        "settled_path": "/request_settled", "status_path": "/response_status",
+        "response_sha256_path": "/response_sha256", "error_path": "/request_error",
+    }]
+    recipe["before"] = [{"path": "/before_disabled", "selector": selector, "property": "disabled"}]
+    recipe["after"] = [{"path": "/after_disabled", "selector": selector, "property": "disabled"}]
+    recipe["settle_milliseconds"] = 100
+    generated = observer_module.EGO_TRANSITION_SCRIPT % (
+        json.dumps("acceptance"),
+        json.dumps("http://127.0.0.1:18921/home"),
+        json.dumps(recipe),
+    )
+    prelude = r"""
+import vm from 'node:vm'
+const mode = __MODE__
+const pageUrl = 'http://127.0.0.1:18921/home'
+const pageOrigin = new URL(pageUrl).origin
+const emitted = []
+const pending = []
+const originalFetch = async function(input) {
+  const url = new URL(input, pageUrl)
+  if (mode === 'stuck' && url.pathname === '/api/doors/copy') {
+    return await new Promise(() => {})
+  }
+  return new Response(JSON.stringify({ ok: true, door_string: 'synthetic-not-a-real-door' }), {
+    status: 200, headers: { 'content-type': 'application/json' }
+  })
+}
+const mainGlobal = {
+  URL, Headers, Response, setTimeout, clearTimeout, crypto, fetch: originalFetch,
+  location: { href: pageUrl, origin: pageOrigin }
+}
+mainGlobal.window = mainGlobal
+const mainContext = vm.createContext(mainGlobal)
+const actionNode = {
+  disabled: false,
+  click() {
+    if (mode !== 'unchanged') this.disabled = true
+    if (mode === 'no_request') {
+      setTimeout(() => { this.disabled = false }, 50)
+      return
+    }
+    const target = mode === 'wrong_target' ? '/api/attention' : '/api/doors/copy?central=work'
+    const count = mode === 'duplicate' ? 2 : 1
+    for (let index = 0; index < count; index += 1) {
+      const request = mainGlobal.window.fetch(target, { method: 'POST' })
+      if (mode !== 'stuck') request.finally(() => { this.disabled = false })
+      pending.push(request)
+    }
+  }
+}
+const boardNode = {
+  textContent: 'sandbox-home-observer',
+  getAttribute(name) { return name === 'data-board-id' ? 'sandbox-home-observer' : null }
+}
+const isolatedGlobal = {
+  URL, Headers, Response, setTimeout, clearTimeout, crypto,
+  Event: class Event {}, KeyboardEvent: class KeyboardEvent {},
+  fetch: async function(input) {
+    const url = new URL(input, pageUrl)
+    if (url.pathname === '/pursers/status' || url.pathname.endsWith('/candidate.json')) {
+      return new Response(JSON.stringify({ ok: true }), { status: 200 })
+    }
+    return new Response('<html>candidate</html>', { status: 200 })
+  },
+  document: {
+    querySelector(value) {
+      if (value === __SELECTOR__) return actionNode
+      if (value.includes('data-helper-field')) return boardNode
+      return null
+    },
+    querySelectorAll(value) { return value === __SELECTOR__ ? [actionNode] : [] }
+  }
+}
+isolatedGlobal.window = { location: { href: pageUrl } }
+const isolatedContext = vm.createContext(isolatedGlobal)
+async function useOrCreateTaskSpace(value) { return value }
+async function openOrReuseTab() {}
+async function waitForLoad() {}
+async function pageInfo() { return { url: pageUrl, w: 1280, h: 800 } }
+function cliLog(value) { emitted.push(value) }
+async function cdp(method, params = {}) {
+  if (method === 'Page.getFrameTree') return { frameTree: { frame: { id: 'main' } } }
+  if (method === 'Page.createIsolatedWorld') return { executionContextId: 7 }
+  if (method !== 'Runtime.evaluate') throw new Error('unexpected CDP method: ' + method)
+  const context = params.contextId === 7 ? isolatedContext : mainContext
+  try { return { result: { value: await vm.runInContext(params.expression, context) } } }
+  catch (error) { return { exceptionDetails: { text: String(error) } } }
+}
+let observedError = null
+try {
+""".replace("__MODE__", json.dumps(mode)).replace("__SELECTOR__", json.dumps(selector))
+    epilogue = r"""
+} catch (error) {
+  observedError = String(error && error.message ? error.message : error)
+}
+if (mode !== 'stuck') await Promise.allSettled(pending)
+const restored = mainGlobal.window.fetch === originalFetch
+  && !Object.prototype.hasOwnProperty.call(mainGlobal.window, '__pursersVerifierPendingCapture')
+if (!restored) throw new Error('pending capture did not restore page fetch state')
+if (mode === 'success' || mode === 'unchanged') {
+  if (observedError) throw new Error('capture failed: ' + observedError)
+  const payload = JSON.parse(emitted.at(-1))
+  if (mode === 'success' && (payload.action['/disabled_while_pending'] !== true
+      || payload.action['/request_settled'] !== true
+      || payload.action['/response_status'] !== 200
+      || !/^[0-9a-f]{64}$/.test(payload.action['/response_sha256'])
+      || payload.after['/after_disabled'] !== false)) {
+    throw new Error('successful pending-state capture differs')
+  }
+  if (mode === 'unchanged' && payload.action['/disabled_while_pending'] !== false) {
+    throw new Error('unchanged state was not exposed to the typed verifier')
+  }
+} else if (!observedError || !observedError.includes('did not settle exactly once')) {
+  throw new Error('negative capture did not fail closed: ' + observedError)
+}
+console.log(JSON.stringify({ mode, restored, rejected: Boolean(observedError) }))
+"""
+    result = subprocess.run(
+        ["node", "--input-type=module"], input=prelude + generated + epilogue,
+        capture_output=True, text=True, check=False, timeout=10,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    outcome = json.loads(result.stdout.strip().splitlines()[-1])
+    assert outcome == {
+        "mode": mode, "restored": True,
+        "rejected": mode not in {"success", "unchanged"},
     }
 
 

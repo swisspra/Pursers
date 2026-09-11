@@ -116,6 +116,20 @@ resolved UTF-8 context bytes. Persisted evidence contains only a compact binding
 digest, extension, endpoint, and `same-origin-http` transport); raw context and
 private installation paths do not leave the verifier process.
 
+`click_pending_state` captures an in-flight control state without modifying the
+product DOM. Before the click, the verifier installs one exact same-origin
+`POST /api/doors/copy` or `/api/doors/rotate` fetch wrapper in the page world.
+The wrapper forwards the real request immediately and delays only delivery of
+its real response to page code for a verifier-declared 100-2000 ms window. The
+isolated verifier world clicks the exact selector and records its `disabled`
+property during that window; the normal after phase runs only after the hold.
+The wrapper must observe exactly one matching request, preserves the original
+response or error for page code, hashes a clone of the real response body, and
+is restored on success or by a 30-second safety cleanup. Evidence exposes
+separate paths for clicked, disabled-while-pending, settled, HTTP status,
+response-body SHA-256, and null error, so canonical assertions can require the
+causal state and settled response without retaining a door credential or body.
+
 Each source object is exact and versioned by its adapter value. Private headers,
 HMAC keys, and paths occur only in verifier trust:
 

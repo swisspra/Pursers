@@ -515,7 +515,12 @@ def _browser_state_trust(
     recipe_action = action or {
         "kind": "click", "selector": "#start", "path": "/performed",
     }
-    action_selected = {recipe_action["path"]: action_result}
+    action_selected = (
+        action_result
+        if recipe_action["kind"] == "click_pending_state"
+        and isinstance(action_result, dict)
+        else {recipe_action["path"]: action_result}
+    )
     command.write_text(
         "#!/usr/bin/env python3\n"
         "import datetime,hashlib,json,sys\n"
@@ -534,7 +539,10 @@ def _browser_state_trust(
         "before": [{"path": "/state", "selector": "#status", "property": "text"}],
         "actions": [recipe_action],
         "after": [{"path": "/state", "selector": "#status", "property": "text"}],
-        "settle_milliseconds": 0,
+        "settle_milliseconds": (
+            recipe_action["hold_milliseconds"]
+            if recipe_action["kind"] == "click_pending_state" else 0
+        ),
     }
     source = {
         "adapter": "trusted_browser_state_v1",
@@ -552,7 +560,9 @@ def _browser_state_trust(
         "recipe": recipe,
         "env": {"PATH": os.defpath},
         "timeout_seconds": 10,
-        "select_allowlist": ["/state", recipe_action["path"]],
+        "select_allowlist": [
+            "/state", *sorted(typed_evidence._browser_action_result_paths(recipe_action)),
+        ],
     }
     trust["state_sources"]["aionui-start"] = source
     context = _context(
@@ -623,6 +633,53 @@ def test_browser_resource_delta_has_closed_same_origin_path_contract() -> None:
 
     with pytest.raises(TypedEvidenceError, match="browser wait is invalid"):
         typed_evidence._browser_actions([{**action, "milliseconds": 10_001}])
+
+
+def test_browser_pending_state_is_request_and_settlement_bound(
+    tmp_path: Path, http_server: str,
+) -> None:
+    action = {
+        "kind": "click_pending_state",
+        "selector": '[data-door-action="copy"][data-role="worker"]',
+        "method": "POST", "endpoint": "/api/doors/copy",
+        "property": "disabled", "hold_milliseconds": 400,
+        "path": "/clicked", "pending_path": "/disabled_while_pending",
+        "settled_path": "/request_settled", "status_path": "/response_status",
+        "response_sha256_path": "/response_sha256", "error_path": "/request_error",
+    }
+    selected = {
+        "/clicked": "clicked", "/disabled_while_pending": True,
+        "/request_settled": True, "/response_status": 200,
+        "/response_sha256": "a" * 64, "/request_error": None,
+    }
+    trust, context, recorder = _browser_state_trust(
+        tmp_path, http_server, action=action, action_result=selected
+    )
+    evidence = record_evidence(
+        _request("state_transition", recorder, context), trust
+    )
+    expected = _expected(evidence, [
+        {"phase": "action", "path": "/clicked", "op": "eq", "value": "clicked"},
+        {"phase": "action", "path": "/disabled_while_pending", "op": "eq", "value": True},
+        {"phase": "action", "path": "/request_settled", "op": "eq", "value": True},
+        {"phase": "action", "path": "/response_status", "op": "eq", "value": 200},
+        {"phase": "action", "path": "/request_error", "op": "eq", "value": None},
+        {"phase": "after", "path": "/state", "op": "eq", "value": "ready"},
+    ])
+    assert evaluate_evidence(evidence, expected, trust)["passed"] is True
+
+    changed = copy.deepcopy(evidence)
+    changed["record"]["action"]["selected"]["/disabled_while_pending"] = False
+    changed["payload_sha256"] = typed_evidence._digest(changed["record"])
+    changed["auth"] = typed_evidence._sign_evidence(
+        {key: value for key, value in changed.items() if key != "auth"}, trust
+    )["auth"]
+    with pytest.raises(TypedEvidenceError, match="pending-state result is invalid"):
+        evaluate_evidence(changed, expected, trust)
+
+    invalid = {**action, "endpoint": "/api/release/execute"}
+    with pytest.raises(TypedEvidenceError, match="pending-state action is invalid"):
+        typed_evidence._browser_actions([invalid])
 
 
 def test_aionui_assistant_binding_joins_installed_manifest_and_runtime(

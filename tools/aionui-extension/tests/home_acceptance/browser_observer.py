@@ -97,6 +97,11 @@ TRANSITION_ACTION_KEYS = {
         "kind", "method", "endpoint", "body", "pointer", "path",
     },
     "assistant_binding": {"kind", "endpoint", "assistant_id", "path"},
+    "click_pending_state": {
+        "kind", "selector", "method", "endpoint", "property",
+        "hold_milliseconds", "path", "pending_path", "settled_path",
+        "status_path", "response_sha256_path", "error_path",
+    },
     "click_response_json": {
         "kind", "selector", "method", "endpoint", "pointer", "path",
     },
@@ -1002,6 +1007,12 @@ const responseActions = recipe.actions.filter(spec => spec.kind === 'click_respo
 if (responseActions.length > 1) throw new Error('multiple response captures are unavailable')
 const responseAction = responseActions[0] || null
 const responseCaptureKey = '__pursersVerifierFetchCapture'
+const pendingActions = recipe.actions.filter(spec => spec.kind === 'click_pending_state')
+if (pendingActions.length > 1 || (pendingActions.length && responseAction)) {
+  throw new Error('pending-state capture must be unique')
+}
+const pendingAction = pendingActions[0] || null
+const pendingCaptureKey = '__pursersVerifierPendingCapture'
 if (responseAction) {
   const installed = await cdp('Runtime.evaluate', {
     expression: `(() => {
@@ -1084,6 +1095,73 @@ if (responseAction) {
   if (!installed || installed.exceptionDetails || !installed.result ||
       installed.result.value !== true) throw new Error('response capture unavailable')
 }
+if (pendingAction) {
+  const installed = await cdp('Runtime.evaluate', {
+    expression: `(() => {
+      const key = ${JSON.stringify(pendingCaptureKey)}
+      const method = ${JSON.stringify(pendingAction.method)}
+      const endpoint = ${JSON.stringify(pendingAction.endpoint)}
+      const holdMilliseconds = ${JSON.stringify(pendingAction.hold_milliseconds)}
+      const prior = window[key]
+      if (prior && prior.wrapper && window.fetch === prior.wrapper) {
+        window.fetch = prior.original
+        for (const release of prior.releases || []) release()
+      }
+      const original = window.fetch
+      const capture = {
+        original, wrapper: null, matches: 0, result: null, error: null,
+        releases: [], timer: null
+      }
+      const wrapper = async function(input, init = {}) {
+        const requestUrl = typeof input === 'string' ? input : input.url
+        const requestMethod = String(init.method || input.method || 'GET').toUpperCase()
+        let parsed = null
+        try { parsed = new URL(requestUrl, window.location.href) } catch (_error) {}
+        const queryKeys = parsed ? Array.from(parsed.searchParams.keys()) : []
+        const trustedRequest = parsed && parsed.origin === window.location.origin
+          && parsed.pathname === endpoint && !parsed.hash
+          && queryKeys.length <= 1 && queryKeys.every(key => key === 'central')
+        if (requestMethod !== method || !trustedRequest) {
+          return original.call(this, input, init)
+        }
+        capture.matches += 1
+        let release = null
+        const gate = new Promise(resolve => { release = resolve })
+        capture.releases.push(release)
+        window.setTimeout(release, holdMilliseconds)
+        try {
+          const response = await original.call(this, input, init)
+          const bytes = await response.clone().arrayBuffer()
+          const digest = await crypto.subtle.digest('SHA-256', bytes)
+          capture.result = {
+            status: response.status,
+            response_sha256: Array.from(new Uint8Array(digest))
+              .map(byte => byte.toString(16).padStart(2, '0')).join('')
+          }
+          await gate
+          return response
+        } catch (error) {
+          capture.error = String(error && error.message ? error.message : error)
+          await gate
+          throw error
+        }
+      }
+      capture.wrapper = wrapper
+      window.fetch = wrapper
+      capture.timer = window.setTimeout(() => {
+        for (const release of capture.releases) release()
+        if (window.fetch === wrapper) window.fetch = original
+        if (window[key] === capture) delete window[key]
+      }, 30000)
+      window[key] = capture
+      return true
+    })()`,
+    awaitPromise: true,
+    returnByValue: true
+  })
+  if (!installed || installed.exceptionDetails || !installed.result ||
+      installed.result.value !== true) throw new Error('pending-state capture unavailable')
+}
 const transitionResult = await cdp('Runtime.evaluate', {
   expression: `(async () => {
     const recipe = ${JSON.stringify(recipe)}
@@ -1162,6 +1240,11 @@ const transitionResult = await cdp('Runtime.evaluate', {
         if (!node) throw new Error('action selector absent: ' + spec.selector)
         if (spec.kind === 'click' || spec.kind === 'click_response_json') {
           node.click(); action[spec.path] = 'clicked'
+        } else if (spec.kind === 'click_pending_state') {
+          node.click()
+          await new Promise(resolve => setTimeout(resolve, 25))
+          action[spec.path] = 'clicked'
+          action[spec.pending_path] = node[spec.property] === true
         } else if (spec.kind === 'set_value' || spec.kind === 'select') {
           node.value = spec.value
           node.dispatchEvent(new Event('input', { bubbles: true }))
@@ -1193,6 +1276,33 @@ const transitionResult = await cdp('Runtime.evaluate', {
   awaitPromise: true,
   returnByValue: true
 })
+if (pendingAction) {
+  const captured = await cdp('Runtime.evaluate', {
+    expression: `(() => {
+      const key = ${JSON.stringify(pendingCaptureKey)}
+      const capture = window[key]
+      if (!capture) return null
+      for (const release of capture.releases || []) release()
+      if (capture.timer) window.clearTimeout(capture.timer)
+      if (window.fetch === capture.wrapper) window.fetch = capture.original
+      delete window[key]
+      return { matches: capture.matches, result: capture.result, error: capture.error }
+    })()`,
+    awaitPromise: true,
+    returnByValue: true
+  })
+  const value = captured && captured.result ? captured.result.value : null
+  if (!value || value.matches !== 1 || value.error !== null || !value.result ||
+      typeof value.result.status !== 'number' ||
+      !/^[0-9a-f]{64}$/.test(value.result.response_sha256)) {
+    throw new Error('pending-state request did not settle exactly once')
+  }
+  const selected = transitionResult.result.value.action
+  selected[pendingAction.settled_path] = true
+  selected[pendingAction.status_path] = value.result.status
+  selected[pendingAction.response_sha256_path] = value.result.response_sha256
+  selected[pendingAction.error_path] = null
+}
 const bindingResult = await cdp('Runtime.evaluate', {
   expression: `(async () => {
     const readJson = async (url) => {
@@ -1401,6 +1511,16 @@ def _validate_transition_selectors(value: Any, label: str) -> list[dict[str, Any
     return value
 
 
+def _transition_action_result_paths(item: dict[str, Any]) -> set[str]:
+    paths = {item["path"]}
+    if item["kind"] == "click_pending_state":
+        paths.update(item[field] for field in (
+            "pending_path", "settled_path", "status_path",
+            "response_sha256_path", "error_path",
+        ))
+    return paths
+
+
 def _validate_transition_actions(value: Any) -> list[dict[str, Any]]:
     if not isinstance(value, list) or not value or len(value) > 32:
         raise _fail(EXIT_USAGE, "transition actions are empty or unbounded")
@@ -1411,13 +1531,17 @@ def _validate_transition_actions(value: Any) -> list[dict[str, Any]]:
         kind = item["kind"]
         if set(item) != TRANSITION_ACTION_KEYS[kind]:
             raise _fail(EXIT_USAGE, "transition action fields do not match schema")
-        path = item["path"]
-        if not isinstance(path, str) or not path.startswith("/") or path in paths:
+        result_paths = _transition_action_result_paths(item)
+        if any(
+            not isinstance(path, str) or not path.startswith("/") or path in paths
+            for path in result_paths
+        ) or len(result_paths) != (6 if kind == "click_pending_state" else 1):
             raise _fail(EXIT_USAGE, "transition action path is invalid")
-        paths.add(path)
+        paths.update(result_paths)
         if kind in {
             "click", "set_value", "select", "submit", "press_key",
             "click_response_json",
+            "click_pending_state",
         } and (
             not isinstance(item["selector"], str) or not item["selector"]
             or len(item["selector"]) > 512
@@ -1459,6 +1583,15 @@ def _validate_transition_actions(value: Any) -> list[dict[str, Any]]:
             is None
         ):
             raise _fail(EXIT_USAGE, "transition assistant binding is invalid")
+        if kind == "click_pending_state" and (
+            item["method"] != "POST"
+            or item["endpoint"] not in {"/api/doors/copy", "/api/doors/rotate"}
+            or item["property"] != "disabled"
+            or not isinstance(item["hold_milliseconds"], int)
+            or isinstance(item["hold_milliseconds"], bool)
+            or not 100 <= item["hold_milliseconds"] <= 2_000
+        ):
+            raise _fail(EXIT_USAGE, "transition pending-state action is invalid")
         if kind == "click_response_json" and (
             item["method"] not in {"GET", "POST", "PUT", "PATCH", "DELETE"}
             or not isinstance(item["endpoint"], str)
@@ -1476,6 +1609,12 @@ def _validate_transition_actions(value: Any) -> list[dict[str, Any]]:
             raise _fail(EXIT_USAGE, "transition fetch JSON pointer is invalid")
     if sum(item["kind"] == "click_response_json" for item in value) > 1:
         raise _fail(EXIT_USAGE, "transition response capture must be unique")
+    if (
+        sum(item["kind"] == "click_pending_state" for item in value) > 1
+        or any(item["kind"] == "click_pending_state" for item in value)
+        and any(item["kind"] == "click_response_json" for item in value)
+    ):
+        raise _fail(EXIT_USAGE, "transition pending-state capture must be unique")
     return value
 
 
@@ -1493,6 +1632,12 @@ def _validate_transition_recipe(value: Any) -> dict[str, Any]:
         or not 0 <= delay <= 10_000
     ):
         raise _fail(EXIT_USAGE, "transition settle delay is invalid")
+    pending = [item for item in value["actions"] if item["kind"] == "click_pending_state"]
+    if (
+        len(pending) > 1
+        or pending and value["settle_milliseconds"] < pending[0]["hold_milliseconds"]
+    ):
+        raise _fail(EXIT_USAGE, "transition pending-state scheduling is invalid")
     return value
 
 
@@ -1911,7 +2056,9 @@ def transition(stream: Any, out: Any) -> int:
     recipe = spec["recipe"]
     expected_paths = {
         "before": {item["path"] for item in recipe["before"]},
-        "action": {item["path"] for item in recipe["actions"]},
+        "action": set().union(*(
+            _transition_action_result_paths(item) for item in recipe["actions"]
+        )),
         "after": {item["path"] for item in recipe["after"]},
     }
     for phase in ("before", "action", "after"):
