@@ -1,0 +1,881 @@
+#!/usr/bin/env python3
+"""Verifier-owned typed evidence recorders and closed evaluators.
+
+The module is deliberately independent of the acceptance runner.  Install it
+outside the candidate checkout, pin its digest in verifier-owned trust config,
+then call :func:`record_evidence` and :func:`evaluate_evidence` or the matching
+CLI subcommands.
+"""
+
+from __future__ import annotations
+
+import argparse
+import fcntl
+import hashlib
+import hmac
+import json
+import os
+import re
+import shlex
+import shutil
+import stat
+import subprocess
+import sys
+import tempfile
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.parse import urljoin, urlsplit
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
+
+
+SCHEMA_VERSION = 1
+KINDS = frozenset({"http_response", "receipt_field", "log_assertion", "state_transition"})
+SURFACES = frozenset({"aionui", "fleet", "personal"})
+FULL_SHA = re.compile(r"[0-9a-f]{40}")
+SHA256 = re.compile(r"[0-9a-f]{64}")
+SAFE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
+MAX_CONFIG_BYTES = 1_000_000
+MAX_HTTP_BODY_BYTES = 65_536
+MAX_LOG_BYTES = 262_144
+MAX_SELECTED_VALUE_BYTES = 16_384
+SENSITIVE_KEY = re.compile(r"(?:authorization|bearer|cookie|password|secret|token|private_key)", re.I)
+PRIVATE_PATH = re.compile(r"(?:/Users/|/home/|[A-Za-z]:\\\\Users\\\\)")
+SECRET_VALUE = re.compile(
+    r"(?:Bearer\s+\S+|prs1\.[A-Za-z0-9._-]{12,}|eyJ[A-Za-z0-9_-]+\."
+    r"[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)",
+    re.I,
+)
+CONTEXT_KEYS = {
+    "observation_id", "run_id", "action_id", "entity", "surface",
+    "board_id", "candidate_commit", "issued_at", "causal_index",
+}
+TRUST_KEYS = {
+    "schema_version", "verifier_id", "trusted_module_path", "module_sha256",
+    "candidate_checkout_root", "candidate_commit", "board_id", "max_age_seconds", "active_evidence_key",
+    "evidence_keys", "http_sources", "receipt_sources", "log_sources",
+    "state_sources", "replay_guard",
+}
+
+
+class TypedEvidenceError(ValueError):
+    """Fail-closed typed evidence contract error."""
+
+
+class _NoRedirect(HTTPRedirectHandler):
+    def redirect_request(
+        self, request: Request, file_pointer: Any, code: int, message: str,
+        headers: Any, new_url: str,
+    ) -> None:
+        return None
+
+
+def _closed(value: Any, keys: set[str], label: str) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != keys:
+        raise TypedEvidenceError(f"{label} fields do not match schema")
+    return value
+
+
+def _json_bytes(value: Any) -> bytes:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+
+
+def _digest(value: Any) -> str:
+    return hashlib.sha256(_json_bytes(value)).hexdigest()
+
+
+def _module_digest() -> str:
+    return hashlib.sha256(Path(__file__).resolve().read_bytes()).hexdigest()
+
+
+def _read_json(path: Path, label: str) -> Any:
+    try:
+        if path.stat().st_size > MAX_CONFIG_BYTES:
+            raise TypedEvidenceError(f"{label} is too large")
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise TypedEvidenceError(f"{label} is not readable JSON") from exc
+
+
+def _timestamp(value: Any, label: str) -> datetime:
+    if not isinstance(value, str):
+        raise TypedEvidenceError(f"{label} must be an RFC3339 timestamp")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        raise TypedEvidenceError(f"{label} must be an RFC3339 timestamp") from None
+    if parsed.tzinfo is None:
+        raise TypedEvidenceError(f"{label} must include a timezone")
+    return parsed.astimezone(timezone.utc)
+
+
+def _now_text() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _fresh(value: Any, max_age: int, label: str) -> None:
+    age = (datetime.now(timezone.utc) - _timestamp(value, label)).total_seconds()
+    if age < -30 or age > max_age:
+        raise TypedEvidenceError(f"{label} is stale")
+
+
+def _safe_id(value: Any, label: str) -> str:
+    if not isinstance(value, str) or not SAFE_ID.fullmatch(value):
+        raise TypedEvidenceError(f"{label} is invalid")
+    return value
+
+
+def _safe_public(value: Any, label: str, *, allow_path: bool = False) -> Any:
+    encoded = _json_bytes(value)
+    if len(encoded) > MAX_SELECTED_VALUE_BYTES:
+        raise TypedEvidenceError(f"{label} is too large")
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if not isinstance(key, str) or SENSITIVE_KEY.search(key):
+                raise TypedEvidenceError(f"{label} contains a sensitive key")
+            _safe_public(item, label, allow_path=allow_path)
+    elif isinstance(value, list):
+        for item in value:
+            _safe_public(item, label, allow_path=allow_path)
+    elif isinstance(value, str):
+        if SECRET_VALUE.search(value) or (not allow_path and PRIVATE_PATH.search(value)):
+            raise TypedEvidenceError(f"{label} contains sensitive data")
+    elif value is not None and not isinstance(value, (bool, int, float)):
+        raise TypedEvidenceError(f"{label} contains an unsupported value")
+    return value
+
+
+def _pointer(document: Any, pointer: str) -> Any:
+    if pointer == "":
+        return document
+    if not isinstance(pointer, str) or not pointer.startswith("/") or len(pointer) > 512:
+        raise TypedEvidenceError("JSON pointer is invalid")
+    current = document
+    for raw in pointer[1:].split("/"):
+        part = raw.replace("~1", "/").replace("~0", "~")
+        if isinstance(current, dict) and part in current:
+            current = current[part]
+        elif isinstance(current, list) and part.isdigit() and int(part) < len(current):
+            current = current[int(part)]
+        else:
+            raise TypedEvidenceError(f"JSON pointer is absent: {pointer}")
+    return current
+
+
+def _leaf_pointers(document: Any, prefix: str = "") -> set[str]:
+    if isinstance(document, dict):
+        result: set[str] = set()
+        for key, value in document.items():
+            escaped = str(key).replace("~", "~0").replace("/", "~1")
+            result.update(_leaf_pointers(value, f"{prefix}/{escaped}"))
+        return result
+    if isinstance(document, list):
+        result = set()
+        for index, value in enumerate(document):
+            result.update(_leaf_pointers(value, f"{prefix}/{index}"))
+        return result
+    return {prefix}
+
+
+def _context(request: dict[str, Any], trust: dict[str, Any]) -> dict[str, Any]:
+    context = _closed(request.get("context"), CONTEXT_KEYS, "request context")
+    for field in ("observation_id", "run_id", "action_id", "entity"):
+        _safe_id(context[field], field)
+    if context["surface"] not in SURFACES:
+        raise TypedEvidenceError("surface is invalid")
+    if context["board_id"] != trust["board_id"]:
+        raise TypedEvidenceError("request board does not match verifier trust")
+    if context["candidate_commit"] != trust["candidate_commit"]:
+        raise TypedEvidenceError("request candidate does not match verifier trust")
+    if not FULL_SHA.fullmatch(str(context["candidate_commit"])):
+        raise TypedEvidenceError("candidate_commit must be a full SHA")
+    if not isinstance(context["causal_index"], int) or isinstance(context["causal_index"], bool) or context["causal_index"] < 0:
+        raise TypedEvidenceError("causal_index is invalid")
+    _fresh(context["issued_at"], trust["max_age_seconds"], "request issued_at")
+    return context
+
+
+def _trust(trust: Any) -> dict[str, Any]:
+    trust = _closed(trust, TRUST_KEYS, "trust config")
+    if trust["schema_version"] != SCHEMA_VERSION:
+        raise TypedEvidenceError("trust schema_version is unsupported")
+    _safe_id(trust["verifier_id"], "verifier_id")
+    path = Path(str(trust["trusted_module_path"])).resolve()
+    if path != Path(__file__).resolve() or not path.is_file():
+        raise TypedEvidenceError("module path is not verifier-pinned")
+    checkout = Path(str(trust["candidate_checkout_root"])).resolve()
+    if not checkout.is_absolute() or not checkout.is_dir() or path.is_relative_to(checkout):
+        raise TypedEvidenceError("module must be installed outside the candidate checkout")
+    digest = _module_digest()
+    if trust["module_sha256"] != digest or not SHA256.fullmatch(str(trust["module_sha256"])):
+        raise TypedEvidenceError("module digest is not verifier-pinned")
+    if not FULL_SHA.fullmatch(str(trust["candidate_commit"])):
+        raise TypedEvidenceError("trusted candidate_commit must be a full SHA")
+    _safe_id(trust["board_id"], "trusted board_id")
+    if not isinstance(trust["max_age_seconds"], int) or not 1 <= trust["max_age_seconds"] <= 86_400:
+        raise TypedEvidenceError("max_age_seconds is invalid")
+    for field in ("evidence_keys", "http_sources", "receipt_sources", "log_sources", "state_sources"):
+        if not isinstance(trust[field], dict):
+            raise TypedEvidenceError(f"{field} must be an object")
+    key_id = _safe_id(trust["active_evidence_key"], "active_evidence_key")
+    if key_id not in trust["evidence_keys"]:
+        raise TypedEvidenceError("active evidence key is unavailable")
+    _key_bytes(trust["evidence_keys"][key_id], "evidence key")
+    replay = _closed(trust["replay_guard"], {"path", "consume"}, "replay_guard")
+    if not isinstance(replay["consume"], bool):
+        raise TypedEvidenceError("replay_guard consume must be boolean")
+    if replay["consume"] and not Path(str(replay["path"])).is_absolute():
+        raise TypedEvidenceError("replay_guard path must be absolute")
+    return trust
+
+
+def _key_bytes(value: Any, label: str) -> bytes:
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64,128}", value):
+        raise TypedEvidenceError(f"{label} must be 32-64 bytes of lowercase hex")
+    return bytes.fromhex(value)
+
+
+def _source(trust: dict[str, Any], collection: str, source_id: Any) -> tuple[str, dict[str, Any]]:
+    source_id = _safe_id(source_id, "source_id")
+    source = trust[collection].get(source_id)
+    if not isinstance(source, dict):
+        raise TypedEvidenceError("source is not verifier-trusted")
+    return source_id, source
+
+
+def _binding_value(value: Any, context: dict[str, Any]) -> Any:
+    if isinstance(value, str) and value.startswith("$"):
+        field = value[1:]
+        if field not in CONTEXT_KEYS:
+            raise TypedEvidenceError("source binding references an unsupported context field")
+        return context[field]
+    return value
+
+
+def _check_bindings(document: Any, bindings: Any, context: dict[str, Any], label: str) -> None:
+    if not isinstance(bindings, dict) or not bindings:
+        raise TypedEvidenceError(f"{label} needs verifier-owned bindings")
+    for pointer, expected in bindings.items():
+        if _pointer(document, pointer) != _binding_value(expected, context):
+            raise TypedEvidenceError(f"{label} binding mismatch: {pointer}")
+
+
+def _require_context_bindings(bindings: dict[str, Any], fields: set[str], label: str) -> None:
+    present = {value[1:] for value in bindings.values() if isinstance(value, str) and value.startswith("$")}
+    missing = fields - present
+    if missing:
+        raise TypedEvidenceError(f"{label} lacks required context bindings")
+
+
+def _process_check(process: Any, receipt: Any | None = None) -> dict[str, Any] | None:
+    if process is None:
+        return None
+    process = _closed(
+        process, {"pid_file", "argv_prefix", "argv_contains", "receipt_pid_pointer"},
+        "process trust",
+    )
+    pid_path = Path(str(process["pid_file"])).resolve()
+    if (
+        not pid_path.is_absolute() or not pid_path.is_file()
+        or pid_path.stat().st_mode & 0o077 or pid_path.stat().st_uid != os.getuid()
+    ):
+        raise TypedEvidenceError("trusted process PID file is unavailable or not private")
+    try:
+        pid = int(pid_path.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        raise TypedEvidenceError("trusted process PID is invalid") from None
+    if (
+        pid <= 1 or not isinstance(process["argv_prefix"], list) or not process["argv_prefix"]
+        or not isinstance(process["argv_contains"], list) or not process["argv_contains"]
+        or any(not isinstance(part, str) for part in process["argv_prefix"] + process["argv_contains"])
+    ):
+        raise TypedEvidenceError("trusted process contract is invalid")
+    completed = subprocess.run(
+        ["/bin/ps", "-p", str(pid), "-o", "command="], text=True,
+        capture_output=True, check=False, timeout=5,
+        env={"PATH": os.defpath, "LANG": "C", "LC_ALL": "C"},
+    )
+    command = completed.stdout.strip()
+    try:
+        arguments = shlex.split(command)
+    except ValueError:
+        arguments = []
+    prefix = process["argv_prefix"]
+    comparable = list(arguments)
+    if comparable:
+        comparable[0] = Path(comparable[0]).name
+    if (
+        completed.returncode or comparable[:len(prefix)] != prefix
+        or any(part not in arguments for part in process["argv_contains"])
+    ):
+        raise TypedEvidenceError("trusted process identity does not match")
+    pointer = process["receipt_pid_pointer"]
+    if receipt is not None and _pointer(receipt, pointer) != pid:
+        raise TypedEvidenceError("receipt PID does not match the trusted process")
+    return {"pid": pid, "argv_sha256": hashlib.sha256(command.encode()).hexdigest()}
+
+
+def _sign_evidence(evidence: dict[str, Any], trust: dict[str, Any]) -> dict[str, Any]:
+    key_id = trust["active_evidence_key"]
+    key = _key_bytes(trust["evidence_keys"][key_id], "evidence key")
+    signature = hmac.new(key, _json_bytes(evidence), hashlib.sha256).hexdigest()
+    return {**evidence, "auth": {"key_id": key_id, "hmac_sha256": signature}}
+
+
+def _verify_evidence(evidence: Any, trust: dict[str, Any]) -> dict[str, Any]:
+    keys = {
+        "schema_version", "kind", "context", "captured_at", "source",
+        "record", "payload_sha256", "auth",
+    }
+    evidence = _closed(evidence, keys, "evidence")
+    auth = _closed(evidence["auth"], {"key_id", "hmac_sha256"}, "evidence auth")
+    key_id = _safe_id(auth["key_id"], "evidence key_id")
+    if key_id not in trust["evidence_keys"] or not SHA256.fullmatch(str(auth["hmac_sha256"])):
+        raise TypedEvidenceError("evidence authentication is invalid")
+    unsigned = {key: value for key, value in evidence.items() if key != "auth"}
+    expected = hmac.new(
+        _key_bytes(trust["evidence_keys"][key_id], "evidence key"),
+        _json_bytes(unsigned), hashlib.sha256,
+    ).hexdigest()
+    if not hmac.compare_digest(expected, auth["hmac_sha256"]):
+        raise TypedEvidenceError("evidence authentication failed")
+    if evidence["schema_version"] != SCHEMA_VERSION or evidence["kind"] not in KINDS:
+        raise TypedEvidenceError("evidence schema is unsupported")
+    context = _context({"context": evidence["context"]}, trust)
+    if evidence["payload_sha256"] != _digest(evidence["record"]):
+        raise TypedEvidenceError("evidence payload digest changed")
+    source = _closed(
+        evidence["source"], {
+            "source_id", "adapter", "provenance", "runtime_id", "module_sha256",
+            "source_config_sha256",
+        },
+        "evidence source",
+    )
+    if source["module_sha256"] != trust["module_sha256"]:
+        raise TypedEvidenceError("evidence module digest changed")
+    collection = {
+        "http_response": "http_sources", "receipt_field": "receipt_sources",
+        "log_assertion": "log_sources", "state_transition": "state_sources",
+    }[evidence["kind"]]
+    source_id, trusted_source = _source(trust, collection, source["source_id"])
+    expected_source = _base_source(source_id, trusted_source, trust)
+    if source != expected_source:
+        raise TypedEvidenceError("evidence source no longer matches verifier trust")
+    _fresh(evidence["captured_at"], trust["max_age_seconds"], "evidence captured_at")
+    _safe_public(evidence["record"], "evidence record")
+    if evidence["kind"] == "state_transition":
+        record = evidence["record"]
+        record = _closed(
+            record, {"before", "action", "after", "order", "http_source_id"},
+            "state transition record",
+        )
+        order = _closed(record["order"], {"before_at", "action_at", "after_at"}, "state transition order")
+        moments = [_timestamp(order[field], f"state transition {field}") for field in ("before_at", "action_at", "after_at")]
+        if moments != sorted(moments):
+            raise TypedEvidenceError("state transition causal order is invalid")
+        expected_correlation = {
+            "observation_id": context["observation_id"], "run_id": context["run_id"],
+            "action_id": context["action_id"], "entity": context["entity"],
+        }
+        for phase in ("before", "action", "after"):
+            if not isinstance(record[phase], dict) or record[phase].get("correlation") != expected_correlation:
+                raise TypedEvidenceError("state transition correlation changed")
+    return evidence
+
+
+def _base_source(source_id: str, source: dict[str, Any], trust: dict[str, Any]) -> dict[str, Any]:
+    for field in ("adapter", "provenance", "runtime_id"):
+        _safe_id(source.get(field), f"source {field}")
+    return {
+        "source_id": source_id,
+        "adapter": source["adapter"],
+        "provenance": source["provenance"],
+        "runtime_id": source["runtime_id"],
+        "module_sha256": trust["module_sha256"],
+        "source_config_sha256": _digest(source),
+    }
+
+
+def _http_source(source_id: Any, trust: dict[str, Any], context: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    source_id, source = _source(trust, "http_sources", source_id)
+    keys = {
+        "adapter", "provenance", "runtime_id", "base_url", "surface", "board_id",
+        "candidate_commit", "methods", "headers", "timeout_seconds", "response_bindings",
+    }
+    _closed(source, keys, "HTTP source")
+    if source["adapter"] != "trusted_http_v1":
+        raise TypedEvidenceError("HTTP source adapter is unsupported")
+    parsed = urlsplit(str(source["base_url"]))
+    if parsed.scheme not in {"http", "https"} or parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise TypedEvidenceError("HTTP source base_url is unsafe")
+    if source["surface"] != context["surface"] or source["board_id"] != context["board_id"] or source["candidate_commit"] != context["candidate_commit"]:
+        raise TypedEvidenceError("HTTP source binding does not match request")
+    if not isinstance(source["methods"], list) or not source["methods"]:
+        raise TypedEvidenceError("HTTP source methods are invalid")
+    if not isinstance(source["headers"], dict) or any(not isinstance(k, str) or not isinstance(v, str) for k, v in source["headers"].items()):
+        raise TypedEvidenceError("HTTP source headers are invalid")
+    if not isinstance(source["timeout_seconds"], (int, float)) or not 0.1 <= source["timeout_seconds"] <= 30:
+        raise TypedEvidenceError("HTTP source timeout is invalid")
+    _require_context_bindings(
+        source["response_bindings"],
+        {"candidate_commit", "board_id", "surface", "entity", "run_id", "action_id"},
+        "HTTP source",
+    )
+    if source["runtime_id"] not in source["response_bindings"].values():
+        raise TypedEvidenceError("HTTP source lacks a runtime binding")
+    return source_id, source
+
+
+def _http_call(
+    source: dict[str, Any], context: dict[str, Any], spec: Any, label: str,
+) -> dict[str, Any]:
+    spec = _closed(spec, {"method", "path", "body", "select"}, f"{label} request")
+    method = str(spec["method"]).upper()
+    if method not in source["methods"] or method not in {"GET", "POST", "PUT", "PATCH", "DELETE"}:
+        raise TypedEvidenceError(f"{label} method is not allowlisted")
+    path = spec["path"]
+    if not isinstance(path, str) or not path.startswith("/") or path.startswith("//") or "#" in path:
+        raise TypedEvidenceError(f"{label} path is invalid")
+    target = urljoin(str(source["base_url"]).rstrip("/") + "/", path.lstrip("/"))
+    base = urlsplit(str(source["base_url"]))
+    actual = urlsplit(target)
+    if (actual.scheme, actual.hostname, actual.port) != (base.scheme, base.hostname, base.port):
+        raise TypedEvidenceError(f"{label} target escapes trusted origin")
+    body = spec["body"]
+    data = None
+    headers = dict(source["headers"])
+    headers.update({
+        "X-Pursers-Observation-Id": context["observation_id"],
+        "X-Pursers-Run-Id": context["run_id"],
+        "X-Pursers-Action-Id": context["action_id"],
+        "X-Pursers-Entity-Id": context["entity"],
+    })
+    if body is not None:
+        _safe_public(body, f"{label} request body")
+        data = _json_bytes(body)
+        headers["Content-Type"] = "application/json"
+    request = Request(target, data=data, headers=headers, method=method)
+    status: int
+    response_headers: Any
+    raw: bytes
+    try:
+        with build_opener(ProxyHandler({}), _NoRedirect()).open(request, timeout=source["timeout_seconds"]) as response:
+            status = response.status
+            response_headers = response.headers
+            raw = response.read(MAX_HTTP_BODY_BYTES + 1)
+    except HTTPError as exc:
+        status = exc.code
+        response_headers = exc.headers
+        raw = exc.read(MAX_HTTP_BODY_BYTES + 1)
+    except (URLError, TimeoutError, OSError) as exc:
+        raise TypedEvidenceError(f"{label} trusted request failed") from exc
+    if len(raw) > MAX_HTTP_BODY_BYTES:
+        raise TypedEvidenceError(f"{label} response is too large")
+    try:
+        document = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise TypedEvidenceError(f"{label} response is not bounded JSON") from None
+    _check_bindings(document, source["response_bindings"], context, f"{label} response")
+    correlation_headers = {
+        "observation_id": response_headers.get("X-Pursers-Observation-Id"),
+        "run_id": response_headers.get("X-Pursers-Run-Id"),
+        "action_id": response_headers.get("X-Pursers-Action-Id"),
+        "entity": response_headers.get("X-Pursers-Entity-Id"),
+    }
+    expected_correlation = {key: context[key] for key in correlation_headers}
+    if correlation_headers != expected_correlation:
+        raise TypedEvidenceError(f"{label} response is not correlated to the request")
+    select = spec["select"]
+    if not isinstance(select, list) or not select or len(select) > 32 or len(set(select)) != len(select):
+        raise TypedEvidenceError(f"{label} selectors are invalid")
+    selected = {pointer: _safe_public(_pointer(document, pointer), f"{label} selected value") for pointer in select}
+    return {
+        "method": method, "path": path, "status": status, "selected": selected,
+        "response_sha256": hashlib.sha256(raw).hexdigest(), "correlation": correlation_headers,
+    }
+
+
+def _record_http(request: dict[str, Any], trust: dict[str, Any], context: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    recorder = _closed(request["recorder"], {"source_id", "request", "action_origin"}, "http_response recorder")
+    if recorder["action_origin"] not in {"verifier_api", "browser_observed"}:
+        raise TypedEvidenceError("HTTP action_origin is invalid")
+    source_id, source = _http_source(recorder["source_id"], trust, context)
+    record = {
+        "action_origin": recorder["action_origin"],
+        "response": _http_call(source, context, recorder["request"], "HTTP"),
+    }
+    return _base_source(source_id, source, trust), record
+
+
+def _record_receipt(request: dict[str, Any], trust: dict[str, Any], context: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    recorder = _closed(request["recorder"], {"source_id", "fields"}, "receipt_field recorder")
+    source_id, source = _source(trust, "receipt_sources", recorder["source_id"])
+    keys = {
+        "adapter", "provenance", "runtime_id", "path", "hmac_key_hex",
+        "signature_field", "signed_fields", "timestamp_pointer", "max_age_seconds",
+        "required_bindings", "issuer_pointer", "issuer", "runtime_pointer",
+        "transport_pointer", "transport", "process",
+    }
+    _closed(source, keys, "receipt source")
+    if source["adapter"] != "hmac_json_v1":
+        raise TypedEvidenceError("receipt adapter is unsupported")
+    path = Path(str(source["path"])).resolve()
+    if (
+        not path.is_absolute() or not path.is_file()
+        or path.stat().st_mode & 0o077 or path.stat().st_uid != os.getuid()
+    ):
+        raise TypedEvidenceError("receipt source is unavailable or not private")
+    try:
+        raw_receipt = path.read_bytes()
+        if len(raw_receipt) > MAX_CONFIG_BYTES:
+            raise TypedEvidenceError("receipt source is too large")
+        receipt = json.loads(raw_receipt)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise TypedEvidenceError("receipt source is not readable JSON") from exc
+    if not isinstance(receipt, dict):
+        raise TypedEvidenceError("receipt source must be an object")
+    signature_field = source["signature_field"]
+    if not isinstance(signature_field, str) or signature_field not in receipt:
+        raise TypedEvidenceError("receipt signature is absent")
+    fields = source["signed_fields"]
+    if (
+        not isinstance(fields, list) or not fields or len(set(fields)) != len(fields)
+        or any(not isinstance(field, str) for field in fields)
+    ):
+        raise TypedEvidenceError("receipt signed_fields are invalid")
+    authenticated_fields = _leaf_pointers(receipt) - {f"/{signature_field}"}
+    if set(fields) != authenticated_fields:
+        raise TypedEvidenceError("receipt HMAC must authenticate every receipt field")
+    signed = {field: _pointer(receipt, field) for field in fields}
+    expected = hmac.new(_key_bytes(source["hmac_key_hex"], "receipt HMAC key"), _json_bytes(signed), hashlib.sha256).hexdigest()
+    if not isinstance(receipt[signature_field], str) or not hmac.compare_digest(expected, receipt[signature_field]):
+        raise TypedEvidenceError("receipt authenticity verification failed")
+    _fresh(_pointer(receipt, source["timestamp_pointer"]), source["max_age_seconds"], "receipt timestamp")
+    if _pointer(receipt, source["issuer_pointer"]) != source["issuer"]:
+        raise TypedEvidenceError("receipt issuer does not match verifier trust")
+    if _pointer(receipt, source["runtime_pointer"]) != source["runtime_id"]:
+        raise TypedEvidenceError("receipt runtime does not match verifier trust")
+    if _pointer(receipt, source["transport_pointer"]) != source["transport"]:
+        raise TypedEvidenceError("receipt transport does not match verifier trust")
+    _require_context_bindings(
+        source["required_bindings"],
+        {"candidate_commit", "board_id", "surface", "entity", "run_id", "action_id"},
+        "receipt source",
+    )
+    _check_bindings(receipt, source["required_bindings"], context, "receipt")
+    process = _process_check(source["process"], receipt)
+    requested = recorder["fields"]
+    if not isinstance(requested, list) or not requested or len(requested) > 32 or len(set(requested)) != len(requested):
+        raise TypedEvidenceError("receipt fields are invalid")
+    selected = {pointer: _safe_public(_pointer(receipt, pointer), "receipt selected value") for pointer in requested}
+    record = {
+        "fields": selected, "receipt_sha256": hashlib.sha256(raw_receipt).hexdigest(),
+        "authenticity": "hmac_sha256", "process": process,
+    }
+    return _base_source(source_id, source, trust), record
+
+
+def _record_log(request: dict[str, Any], trust: dict[str, Any], context: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    recorder = _closed(request["recorder"], {"source_id", "field_equals"}, "log_assertion recorder")
+    source_id, source = _source(trust, "log_sources", recorder["source_id"])
+    keys = {
+        "adapter", "provenance", "runtime_id", "path", "hmac_key_hex",
+        "signature_field", "signed_fields", "timestamp_pointer", "max_age_seconds",
+        "required_bindings", "emitter", "runtime_pointer", "max_bytes", "process",
+    }
+    _closed(source, keys, "log source")
+    if source["adapter"] != "hmac_jsonl_v1":
+        raise TypedEvidenceError("log adapter is unsupported")
+    _require_context_bindings(
+        source["required_bindings"],
+        {"candidate_commit", "board_id", "surface", "entity", "run_id", "action_id"},
+        "log source",
+    )
+    path = Path(str(source["path"])).resolve()
+    if (
+        not path.is_absolute() or not path.is_file()
+        or path.stat().st_mode & 0o077 or path.stat().st_uid != os.getuid()
+    ):
+        raise TypedEvidenceError("log source is unavailable or not private")
+    limit = source["max_bytes"]
+    if not isinstance(limit, int) or not 1 <= limit <= MAX_LOG_BYTES:
+        raise TypedEvidenceError("log max_bytes is invalid")
+    size = path.stat().st_size
+    with path.open("rb") as stream:
+        if size > limit:
+            stream.seek(size - limit)
+            stream.readline()
+        raw_lines = stream.read(limit + 1).splitlines()
+    if sum(len(line) for line in raw_lines) > limit:
+        raise TypedEvidenceError("bounded log capture exceeded")
+    filters = recorder["field_equals"]
+    if not isinstance(filters, dict) or len(filters) > 16:
+        raise TypedEvidenceError("log field_equals is invalid")
+    matches: list[tuple[dict[str, Any], bytes]] = []
+    for raw in raw_lines:
+        try:
+            entry = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if not isinstance(entry, dict) or entry.get("emitter") != source["emitter"]:
+            continue
+        signature_field = source["signature_field"]
+        fields = source["signed_fields"]
+        if (
+            signature_field not in entry or not isinstance(fields, list) or not fields
+            or len(set(fields)) != len(fields)
+            or set(fields) != _leaf_pointers(entry) - {f"/{signature_field}"}
+        ):
+            continue
+        try:
+            signed = {field: _pointer(entry, field) for field in fields}
+            expected = hmac.new(_key_bytes(source["hmac_key_hex"], "log HMAC key"), _json_bytes(signed), hashlib.sha256).hexdigest()
+            if not isinstance(entry[signature_field], str) or not hmac.compare_digest(expected, entry[signature_field]):
+                continue
+            if _pointer(entry, source["runtime_pointer"]) != source["runtime_id"]:
+                continue
+            _fresh(_pointer(entry, source["timestamp_pointer"]), source["max_age_seconds"], "log timestamp")
+            _check_bindings(entry, source["required_bindings"], context, "log entry")
+            if all(_pointer(entry, pointer) == expected_value for pointer, expected_value in filters.items()):
+                matches.append((entry, raw))
+        except TypedEvidenceError:
+            continue
+    if len(matches) != 1:
+        raise TypedEvidenceError("log capture needs exactly one authentic correlated entry")
+    entry, raw = matches[0]
+    process = _process_check(source["process"])
+    public_entry = {key: value for key, value in entry.items() if key != source["signature_field"]}
+    _safe_public(public_entry, "log entry")
+    return _base_source(source_id, source, trust), {
+        "entry": public_entry, "entry_sha256": hashlib.sha256(raw).hexdigest(),
+        "authenticity": "hmac_sha256", "process": process,
+    }
+
+
+def _record_transition(request: dict[str, Any], trust: dict[str, Any], context: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    recorder = _closed(request["recorder"], {"source_id", "before", "action", "after"}, "state_transition recorder")
+    source_id, source = _source(trust, "state_sources", recorder["source_id"])
+    _closed(source, {"adapter", "provenance", "runtime_id", "http_source_id"}, "state source")
+    if source["adapter"] != "trusted_http_state_v1":
+        raise TypedEvidenceError("state adapter is unsupported")
+    http_id, http_source = _http_source(source["http_source_id"], trust, context)
+    before_at = _now_text()
+    before = _http_call(http_source, context, recorder["before"], "state before")
+    action_at = _now_text()
+    action = _http_call(http_source, context, recorder["action"], "state action")
+    after_at = _now_text()
+    after = _http_call(http_source, context, recorder["after"], "state after")
+    record = {
+        "before": before, "action": action, "after": after,
+        "order": {"before_at": before_at, "action_at": action_at, "after_at": after_at},
+        "http_source_id": http_id,
+    }
+    return _base_source(source_id, source, trust), record
+
+
+def record_evidence(request: Any, trust_config: Any) -> dict[str, Any]:
+    """Execute one trusted recorder and return authenticated evidence."""
+    trust = _trust(trust_config)
+    request = _closed(request, {"schema_version", "kind", "context", "recorder"}, "record request")
+    if request["schema_version"] != SCHEMA_VERSION or request["kind"] not in KINDS:
+        raise TypedEvidenceError("record request schema is unsupported")
+    context = _context(request, trust)
+    functions = {
+        "http_response": _record_http,
+        "receipt_field": _record_receipt,
+        "log_assertion": _record_log,
+        "state_transition": _record_transition,
+    }
+    source, record = functions[request["kind"]](request, trust, context)
+    _safe_public(record, "evidence record")
+    unsigned = {
+        "schema_version": SCHEMA_VERSION, "kind": request["kind"], "context": context,
+        "captured_at": _now_text(), "source": source, "record": record,
+        "payload_sha256": _digest(record),
+    }
+    return _sign_evidence(unsigned, trust)
+
+
+def _compare(actual: Any, assertion: Any) -> bool:
+    assertion = _closed(assertion, {"op", "value"}, "typed assertion")
+    op = assertion["op"]
+    expected = assertion["value"]
+    if op == "eq":
+        return actual == expected
+    if op == "ne":
+        return actual != expected
+    if op == "contains":
+        return isinstance(actual, (str, list, dict)) and expected in actual
+    if op == "in":
+        return isinstance(expected, list) and actual in expected
+    if op in {"gt", "gte", "lt", "lte"} and isinstance(actual, (int, float)) and not isinstance(actual, bool) and isinstance(expected, (int, float)) and not isinstance(expected, bool):
+        return {"gt": actual > expected, "gte": actual >= expected, "lt": actual < expected, "lte": actual <= expected}[op]
+    raise TypedEvidenceError("typed assertion operator is unsupported")
+
+
+def _field_check(container: Any, conjunct: Any, label: str) -> dict[str, Any]:
+    conjunct = _closed(conjunct, {"path", "op", "value"}, f"{label} conjunct")
+    actual = _pointer(container, conjunct["path"])
+    assertion = {"op": conjunct["op"], "value": conjunct["value"]}
+    return {"path": conjunct["path"], "op": conjunct["op"], "passed": _compare(actual, assertion)}
+
+
+def _consume_replay(evidence_id: str, replay: dict[str, Any]) -> None:
+    if not replay["consume"]:
+        return
+    path = Path(str(replay["path"])).resolve()
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags, 0o600)
+    except OSError as exc:
+        raise TypedEvidenceError("replay journal is unavailable") from exc
+    details = os.fstat(descriptor)
+    if not stat.S_ISREG(details.st_mode) or details.st_uid != os.getuid() or details.st_mode & 0o077:
+        os.close(descriptor)
+        raise TypedEvidenceError("replay journal is not a private verifier file")
+    try:
+        with os.fdopen(descriptor, "r+", encoding="utf-8") as stream:
+            fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+            seen = {line.strip() for line in stream if line.strip()}
+            if evidence_id in seen:
+                raise TypedEvidenceError("evidence replay detected")
+            stream.write(evidence_id + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+    except Exception:
+        raise
+
+
+def evaluate_evidence(evidence: Any, expected: Any, trust_config: Any) -> dict[str, Any]:
+    """Evaluate an authenticated record against an exact closed all_of list."""
+    trust = _trust(trust_config)
+    evidence = _verify_evidence(evidence, trust)
+    expected = _closed(expected, {"schema_version", "kind", "context", "all_of"}, "expected predicate")
+    if expected["schema_version"] != SCHEMA_VERSION or expected["kind"] != evidence["kind"]:
+        raise TypedEvidenceError("expected predicate kind does not match evidence")
+    expected_context = _closed(expected["context"], CONTEXT_KEYS, "expected context")
+    if expected_context != evidence["context"]:
+        raise TypedEvidenceError("expected context does not match evidence")
+    conjuncts = expected["all_of"]
+    if not isinstance(conjuncts, list) or not conjuncts or len(conjuncts) > 64:
+        raise TypedEvidenceError("all_of must contain 1-64 conjuncts")
+    checks: list[dict[str, Any]] = []
+    kind = evidence["kind"]
+    record = evidence["record"]
+    for conjunct in conjuncts:
+        if kind == "http_response":
+            conjunct = _closed(conjunct, {"target", "path", "op", "value"}, "http_response conjunct")
+            if conjunct["target"] == "status":
+                actual = record["response"]["status"]
+            elif conjunct["target"] == "action_origin":
+                actual = record["action_origin"]
+            elif conjunct["target"] == "field":
+                actual = record["response"]["selected"].get(conjunct["path"], object())
+            else:
+                raise TypedEvidenceError("http_response conjunct target is unsupported")
+            passed = _compare(actual, {"op": conjunct["op"], "value": conjunct["value"]})
+            checks.append({"target": conjunct["target"], "path": conjunct["path"], "op": conjunct["op"], "passed": passed})
+        elif kind == "receipt_field":
+            conjunct = _closed(conjunct, {"path", "op", "value"}, "receipt_field conjunct")
+            actual = record["fields"].get(conjunct["path"], object())
+            passed = _compare(actual, {"op": conjunct["op"], "value": conjunct["value"]})
+            checks.append({"path": conjunct["path"], "op": conjunct["op"], "passed": passed})
+        elif kind == "log_assertion":
+            checks.append(_field_check(record["entry"], conjunct, "log_assertion"))
+        else:
+            conjunct = _closed(conjunct, {"phase", "path", "op", "value"}, "state_transition conjunct")
+            if conjunct["phase"] not in {"before", "action", "after"}:
+                raise TypedEvidenceError("state_transition phase is unsupported")
+            phase = record[conjunct["phase"]]
+            actual = phase["status"] if conjunct["path"] == "/status" else phase["selected"].get(conjunct["path"], object())
+            passed = _compare(actual, {"op": conjunct["op"], "value": conjunct["value"]})
+            checks.append({"phase": conjunct["phase"], "path": conjunct["path"], "op": conjunct["op"], "passed": passed})
+    passed = all(check["passed"] for check in checks)
+    evidence_id = _digest({"payload_sha256": evidence["payload_sha256"], "auth": evidence["auth"]})
+    if passed:
+        _consume_replay(evidence_id, trust["replay_guard"])
+    context = evidence["context"]
+    return {
+        "schema_version": SCHEMA_VERSION, "kind": kind,
+        "observation_id": context["observation_id"], "passed": passed, "checks": checks,
+        "correlation": {
+            "run_id": context["run_id"], "action_id": context["action_id"],
+            "entity": context["entity"], "surface": context["surface"],
+            "board_id": context["board_id"], "candidate_commit": context["candidate_commit"],
+            "causal_index": context["causal_index"], "runtime_id": evidence["source"]["runtime_id"],
+        },
+        "expected_digest": _digest(expected), "evidence_id": evidence_id,
+    }
+
+
+def install_module(destination: Path) -> dict[str, Any]:
+    """Install this recorder outside its source checkout with private mode."""
+    destination = destination.expanduser().resolve()
+    destination.mkdir(parents=True, exist_ok=True, mode=0o700)
+    target = destination / "typed_evidence.py"
+    if target.exists() and target.resolve() == Path(__file__).resolve():
+        raise TypedEvidenceError("install destination must differ from source")
+    descriptor, temporary_name = tempfile.mkstemp(prefix=".typed-evidence-", dir=destination)
+    os.close(descriptor)
+    temporary = Path(temporary_name)
+    try:
+        shutil.copyfile(Path(__file__).resolve(), temporary)
+        temporary.chmod(0o700)
+        os.replace(temporary, target)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+    return {"schema_version": SCHEMA_VERSION, "module": str(target), "module_sha256": hashlib.sha256(target.read_bytes()).hexdigest()}
+
+
+def _write_result(value: Any, output: str | None) -> None:
+    text = json.dumps(value, sort_keys=True) + "\n"
+    if output:
+        path = Path(output).expanduser().resolve()
+        path.write_text(text, encoding="utf-8")
+        path.chmod(0o600)
+    else:
+        sys.stdout.write(text)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    commands = parser.add_subparsers(dest="command", required=True)
+    install = commands.add_parser("install")
+    install.add_argument("--dir", required=True)
+    record = commands.add_parser("record")
+    record.add_argument("--request", required=True)
+    record.add_argument("--trust", required=True)
+    record.add_argument("--output")
+    evaluate = commands.add_parser("evaluate")
+    evaluate.add_argument("--evidence", required=True)
+    evaluate.add_argument("--expected", required=True)
+    evaluate.add_argument("--trust", required=True)
+    evaluate.add_argument("--output")
+    args = parser.parse_args(argv)
+    try:
+        if args.command == "install":
+            _write_result(install_module(Path(args.dir)), None)
+        elif args.command == "record":
+            value = record_evidence(
+                _read_json(Path(args.request).expanduser().resolve(), "record request"),
+                _read_json(Path(args.trust).expanduser().resolve(), "trust config"),
+            )
+            _write_result(value, args.output)
+        else:
+            value = evaluate_evidence(
+                _read_json(Path(args.evidence).expanduser().resolve(), "evidence"),
+                _read_json(Path(args.expected).expanduser().resolve(), "expected predicate"),
+                _read_json(Path(args.trust).expanduser().resolve(), "trust config"),
+            )
+            _write_result(value, args.output)
+    except TypedEvidenceError as exc:
+        sys.stderr.write(f"typed_evidence: {exc}\n")
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
