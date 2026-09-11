@@ -71,12 +71,15 @@ FLEET_RESPONSE_POINTERS = frozenset(
 )
 FLEET_PROJECT_STEP_POINTERS = frozenset(
     f"/steps/{index}/{field}"
-    for index in (0, 2, 3, 4)
+    for index in (0, 2, 3, 4, 5)
     for field in ("step", "status")
 )
+FLEET_PROJECT_CREDENTIAL_ABSENCE_POINTERS = frozenset({"/doors"})
 FLEET_ACTION_RESULT_POINTERS = {
     "/api/attention": frozenset({"/items"}),
-    "/api/projects/add": FLEET_PROJECT_STEP_POINTERS,
+    "/api/projects/add": (
+        FLEET_PROJECT_STEP_POINTERS | FLEET_PROJECT_CREDENTIAL_ABSENCE_POINTERS
+    ),
 }
 FLEET_ACTION_RESPONSE_POINTERS = {
     action_path: FLEET_RESPONSE_POINTERS | result_pointers
@@ -1125,6 +1128,33 @@ def _validate_runtime_record(value: Any, label: str) -> dict[str, Any]:
     return value
 
 
+def _validate_fleet_project_projection(
+    path: str, selected: dict[str, Any], label: str,
+) -> None:
+    """Validate the only credential-safe projection of Add project output."""
+    project_pointers = (
+        FLEET_PROJECT_STEP_POINTERS | FLEET_PROJECT_CREDENTIAL_ABSENCE_POINTERS
+    )
+    if path != "/api/projects/add":
+        if set(selected) & project_pointers:
+            raise TypedEvidenceError(
+                f"{label} uses project selectors on another route"
+            )
+        return
+    if "/doors" in selected and selected["/doors"] is not None:
+        raise TypedEvidenceError(f"{label} retained door credential material")
+    if (
+        "/steps/5/step" in selected
+        and selected["/steps/5/step"] != "door_credentials"
+    ):
+        raise TypedEvidenceError(f"{label} door credential step changed")
+    if (
+        "/steps/5/status" in selected
+        and selected["/steps/5/status"] not in {"created", "already present"}
+    ):
+        raise TypedEvidenceError(f"{label} door credential status is invalid")
+
+
 def _validate_http_result(value: Any, source: dict[str, Any], label: str) -> dict[str, Any]:
     value = _closed(
         value,
@@ -1152,6 +1182,7 @@ def _validate_http_result(value: Any, source: dict[str, Any], label: str) -> dic
         or any(not isinstance(item, str) for item in correlation.values())
     ):
         raise TypedEvidenceError(f"{label} has invalid types or fields")
+    _validate_fleet_project_projection(value["path"], value["selected"], label)
     return value
 
 
@@ -1357,10 +1388,11 @@ def _verify_evidence(evidence: Any, trust: dict[str, Any]) -> dict[str, Any]:
             }
             expected_selected["/_evidence/log_emitted"] = True
             result_values = {
-                pointer: action_response["selected"].get(pointer)
+                pointer: action_response["selected"][pointer]
                 for pointer in FLEET_ACTION_RESULT_POINTERS[
                     trusted_source["action_path"]
                 ]
+                if pointer in action_response["selected"]
             }
             expected_selected.update(result_values)
             if (
@@ -1546,6 +1578,28 @@ def _http_source(source_id: Any, trust: dict[str, Any], context: dict[str, Any])
     return source_id, source
 
 
+def _select_http_projection(
+    document: Any, select: list[str], path: str, label: str,
+) -> dict[str, Any]:
+    selected: dict[str, Any] = {}
+    for pointer in select:
+        value = _pointer(document, pointer)
+        # A first-run response contains one-time door credentials.  Do not put
+        # that mapping in evidence; retain the exact pointer only when the
+        # product returned null on an idempotent rerun.
+        if (
+            path == "/api/projects/add"
+            and pointer == "/doors"
+            and value is not None
+        ):
+            if not isinstance(value, dict):
+                raise TypedEvidenceError(f"{label} doors result has an invalid shape")
+            continue
+        selected[pointer] = _safe_public(value, f"{label} selected value")
+    _validate_fleet_project_projection(path, selected, label)
+    return selected
+
+
 def _http_call(
     source: dict[str, Any], context: dict[str, Any], spec: Any, label: str,
 ) -> dict[str, Any]:
@@ -1607,11 +1661,16 @@ def _http_call(
     if correlation_headers != expected_correlation:
         raise TypedEvidenceError(f"{label} response is not correlated to the request")
     select = spec["select"]
-    if not isinstance(select, list) or not select or len(select) > 32 or len(set(select)) != len(select):
+    if (
+        not isinstance(select, list)
+        or not select
+        or len(select) > 64
+        or len(set(select)) != len(select)
+    ):
         raise TypedEvidenceError(f"{label} selectors are invalid")
     if not set(select) <= set(source["select_allowlist"]):
         raise TypedEvidenceError(f"{label} selector is not verifier-allowlisted")
-    selected = {pointer: _safe_public(_pointer(document, pointer), f"{label} selected value") for pointer in select}
+    selected = _select_http_projection(document, select, path, label)
     return {
         "method": method, "path": path, "status": status, "selected": selected,
         "response_sha256": hashlib.sha256(raw).hexdigest(), "correlation": correlation_headers,
@@ -2238,8 +2297,9 @@ def _record_log(request: dict[str, Any], trust: dict[str, Any], context: dict[st
         }
         expected_selected["/_evidence/log_emitted"] = True
         result_values = {
-            pointer: action_response["selected"].get(pointer)
+            pointer: action_response["selected"][pointer]
             for pointer in FLEET_ACTION_RESULT_POINTERS[source["action_path"]]
+            if pointer in action_response["selected"]
         }
         expected_selected.update(result_values)
         if (

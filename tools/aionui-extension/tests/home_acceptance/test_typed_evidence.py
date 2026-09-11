@@ -158,6 +158,29 @@ class _Handler(BaseHTTPRequestHandler):
                 "log_emitted": True,
             }
             self._send(200, payload)
+        elif self.path == "/api/projects/add":
+            statuses = ["already present"] * 6
+            if body.get("mode") == "bad-status":
+                statuses[5] = "invented"
+            payload.update({
+                "steps": [
+                    {"step": step, "status": status}
+                    for step, status in zip(
+                        (
+                            "registry_admin", "board_create", "door_principals",
+                            "policies", "fleet_clone", "door_credentials",
+                        ),
+                        statuses,
+                        strict=True,
+                    )
+                ],
+                "doors": (
+                    {"worker": "one-time-value", "reviewer": "one-time-value"}
+                    if body.get("mode") == "first-run"
+                    else None
+                ),
+            })
+            self._send(200, payload)
         else:
             self._send(404, payload)
 
@@ -2049,11 +2072,14 @@ def test_fleet_project_add_route_has_closed_effect_and_result_contract(
     assert "/steps/3/step" in project_selectors
     assert "/steps/4/step" in project_selectors
     assert "/steps/4/status" in project_selectors
+    assert "/steps/5/step" in project_selectors
+    assert "/steps/5/status" in project_selectors
     assert not any(pointer.endswith("/message") for pointer in project_selectors)
     assert "/steps" not in project_selectors
     assert "/items" not in project_selectors
-    assert "/doors" not in project_selectors
-    assert len(project_selectors) == 32
+    assert "/doors" in project_selectors
+    assert not any(pointer.startswith("/doors/") for pointer in project_selectors)
+    assert len(project_selectors) == 35
     trust["http_sources"]["fleet-api"]["select_allowlist"] = sorted(
         project_selectors
     )
@@ -2087,6 +2113,67 @@ def test_fleet_project_add_route_has_closed_effect_and_result_contract(
     decoy_source = {**source, "action_path": "/api/projects/decoy"}
     with pytest.raises(TypedEvidenceError, match="action path is not allowlisted"):
         typed_evidence._fleet_source_contract(decoy_source)
+
+
+def test_fleet_project_add_projection_retains_only_null_credential_absence(
+    tmp_path: Path, http_server: str,
+) -> None:
+    trust = _trust(tmp_path, http_server)
+    source = trust["http_sources"]["fleet-api"]
+    source["select_allowlist"] = sorted(
+        set(source["select_allowlist"])
+        | typed_evidence.FLEET_ACTION_RESULT_POINTERS["/api/projects/add"]
+    )
+    context = _context(
+        observation_id="fleet.add-project-idempotent-rerun",
+        action_id="add-project-rerun",
+        entity="project:sandbox-board",
+    )
+    select = sorted(
+        typed_evidence.FLEET_ACTION_RESULT_POINTERS["/api/projects/add"]
+    )
+    first = typed_evidence._http_call(
+        source,
+        context,
+        {
+            "method": "POST", "path": "/api/projects/add",
+            "body": {"mode": "first-run"}, "select": select,
+        },
+        "Fleet project add",
+    )
+    assert "/doors" not in first["selected"]
+    assert "one-time-value" not in json.dumps(first, sort_keys=True)
+
+    rerun = typed_evidence._http_call(
+        source,
+        context,
+        {
+            "method": "POST", "path": "/api/projects/add",
+            "body": {"mode": "rerun"}, "select": select,
+        },
+        "Fleet project rerun",
+    )
+    assert rerun["selected"]["/doors"] is None
+    assert rerun["selected"]["/steps/5/step"] == "door_credentials"
+    assert rerun["selected"]["/steps/5/status"] == "already present"
+
+    with pytest.raises(TypedEvidenceError, match="status is invalid"):
+        typed_evidence._http_call(
+            source,
+            context,
+            {
+                "method": "POST", "path": "/api/projects/add",
+                "body": {"mode": "bad-status"}, "select": select,
+            },
+            "Fleet project rerun",
+        )
+
+    forged = copy.deepcopy(rerun)
+    forged["selected"]["/doors"] = {"worker": "forged"}
+    with pytest.raises(TypedEvidenceError, match="credential material"):
+        typed_evidence._validate_http_result(
+            forged, source, "Fleet project rerun"
+        )
 
 
 def test_fleet_trace_real_product_roundtrip(tmp_path: Path) -> None:

@@ -130,6 +130,15 @@ separate paths for clicked, disabled-while-pending, settled, HTTP status,
 response-body SHA-256, and null error, so canonical assertions can require the
 causal state and settled response without retaining a door credential or body.
 
+The Fleet `POST /api/projects/add` result projection is likewise credential
+safe. It exposes only allowlisted step names/statuses, including exact
+`/steps/5/{step,status}`. The exact `/doors` pointer is retained only when the
+real response value is `null`; a first-run credential mapping is omitted before
+the signed record is built. Nested door selectors are never allowlisted. This
+lets an idempotent rerun prove `door_credentials` / `already present` and
+credential absence while the correlated response digest and Fleet trace bind
+the result to the real operation.
+
 Each source object is exact and versioned by its adapter value. Private headers,
 HMAC keys, and paths occur only in verifier trust:
 
@@ -619,13 +628,14 @@ cover positive and supported negative action results:
 
 The disposable tests prove executable producer-to-recorder-to-evaluator paths
 for the actual Personal MCP receipt process and clean-checkout HTTP/state
-runtimes. Preparatory Fleet-trace tests are negative-only until the independently
-reviewed `TK-3df615678068` producer is available; they prove that forged result,
-runtime, entrypoint, correlation, and JSON-type variants cannot become PASS.
-The final positive must launch the real Fleet handler, execute its disposable
-`POST /api/attention` action, and consume the resulting product trace. No
-production mutation or browser claim is supplied by this delta. Reviewer-owned
-setup and final browser evidence remain separate gates. The shared runner invokes
+runtimes. Fleet coverage launches the real handler from a separate clean
+same-SHA producer checkout, executes a disposable correlated action, and
+consumes the resulting product trace. The Add project producer test passes its
+actual first-run and idempotent-rerun responses through the same secret-free
+projection used by the recorder, including invalid-status and credential-leak
+negatives. No production mutation or browser claim is supplied by this delta.
+Reviewer-owned setup and final browser evidence remain separate gates. The
+shared runner invokes
 the installed module's `evaluate-parent` command for every nonvisual canonical
 conjunct. That command authenticates the evidence with verifier-owned trust,
 binds the full observation correlation, evaluates the canonical source/state

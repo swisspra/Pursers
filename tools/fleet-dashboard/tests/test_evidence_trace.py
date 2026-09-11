@@ -24,6 +24,17 @@ dashboard = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = dashboard
 SPEC.loader.exec_module(dashboard)
 
+TYPED_MODULE_PATH = (
+    Path(__file__).parents[2]
+    / "aionui-extension/tests/home_acceptance/typed_evidence.py"
+)
+TYPED_SPEC = importlib.util.spec_from_file_location(
+    "fleet_typed_evidence_test", TYPED_MODULE_PATH
+)
+assert TYPED_SPEC and TYPED_SPEC.loader
+typed_evidence = importlib.util.module_from_spec(TYPED_SPEC)
+TYPED_SPEC.loader.exec_module(typed_evidence)
+
 
 class Cache:
     def labels(self) -> list[str]:
@@ -621,6 +632,32 @@ def test_real_add_project_handler_emits_steps_and_actual_registry_transition(
         == rerun_result["_evidence"]["after_sha256"]
     )
     assert door_state_after_create == door_state_after_rerun
+    result_selectors = sorted(
+        typed_evidence.FLEET_ACTION_RESULT_POINTERS["/api/projects/add"]
+    )
+    first_projection = typed_evidence._select_http_projection(
+        result, result_selectors, "/api/projects/add", "actual first Add project"
+    )
+    assert "/doors" not in first_projection
+    assert "prs1." not in json.dumps(first_projection, sort_keys=True)
+    rerun_projection = typed_evidence._select_http_projection(
+        rerun_result,
+        result_selectors,
+        "/api/projects/add",
+        "actual Add project rerun",
+    )
+    assert rerun_projection["/doors"] is None
+    assert rerun_projection["/steps/5/step"] == "door_credentials"
+    assert rerun_projection["/steps/5/status"] == "already present"
+    malformed_rerun = copy.deepcopy(rerun_result)
+    malformed_rerun["steps"][5]["status"] = "invented"
+    with pytest.raises(typed_evidence.TypedEvidenceError, match="status is invalid"):
+        typed_evidence._select_http_projection(
+            malformed_rerun,
+            result_selectors,
+            "/api/projects/add",
+            "actual Add project rerun",
+        )
     rerun_context = trace.context(rerun_headers, "POST", "/api/projects/add")
     assert rerun_context is not None
     for key, header in dashboard.CORRELATION_HEADERS.items():
