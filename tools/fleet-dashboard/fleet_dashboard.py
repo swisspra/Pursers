@@ -243,6 +243,27 @@ class ConfigConflictError(RuntimeError):
     """The dashboard form was based on missing or superseded state."""
 
 
+class AddProjectPartialFailure(RuntimeError):
+    """Bounded add-project progress for a failure after zero or more steps."""
+
+    def __init__(
+        self,
+        completed_steps: list[dict[str, Any]],
+        failed_step: str,
+        status_code: int = 409,
+    ) -> None:
+        self.completed_steps = [
+            {
+                "step": str(item.get("step", ""))[:32],
+                "status": str(item.get("status", ""))[:32],
+            }
+            for item in completed_steps[:8]
+        ]
+        self.failed_step = failed_step[:32]
+        self.status_code = status_code
+        super().__init__("add project could not complete")
+
+
 class IntakeRateLimitError(RuntimeError):
     """The dashboard intake write rate exceeded its bounded hourly window."""
 
@@ -4305,6 +4326,42 @@ class FleetFetcher:
         integration_ref: str = "main",
         seats_manager: Any = None,
     ) -> dict[str, Any]:
+        progress: dict[str, Any] = {}
+        try:
+            return await self._add_project_steps(
+                project_name=project_name,
+                board_id=board_id,
+                work_dir=work_dir,
+                integration_ref=integration_ref,
+                seats_manager=seats_manager,
+                progress=progress,
+            )
+        except asyncio.CancelledError:
+            raise
+        except AddProjectPartialFailure:
+            raise
+        except Exception as exc:
+            if not progress.get("started"):
+                raise
+            status_code = 403 if isinstance(exc, PermissionError) else 409
+            if isinstance(exc, (ValueError, TypeError, json.JSONDecodeError)):
+                status_code = 400
+            raise AddProjectPartialFailure(
+                progress.get("steps", []),
+                str(progress.get("failed_step", "unknown")),
+                status_code,
+            ) from exc
+
+    async def _add_project_steps(
+        self,
+        *,
+        project_name: str,
+        board_id: str,
+        work_dir: str,
+        integration_ref: str = "main",
+        seats_manager: Any = None,
+        progress: dict[str, Any],
+    ) -> dict[str, Any]:
         keys_dir, jwks_path = self._require_doors_config()
         if not isinstance(project_name, str) or not project_name.strip():
             raise ValueError("project name must be a non-empty string")
@@ -4322,6 +4379,7 @@ class FleetFetcher:
         integration_ref = integration_ref.strip()
 
         steps: list[dict[str, Any]] = []
+        progress.update(started=True, steps=steps, failed_step="registry_admin")
 
         # Step a: registry_admin add (schema v1)
         reg_payload = await self.fetch_project_registry()
@@ -4363,6 +4421,7 @@ class FleetFetcher:
             })
 
         # Step b: board create + first board_onboard as admin (or detect existing)
+        progress["failed_step"] = "board_create"
         board_already_present = False
         try:
             async with self._client(self.config.home_board) as home_client:
@@ -4392,6 +4451,7 @@ class FleetFetcher:
                 })
 
             # Step c: board_member_add for worker and reviewer door principals
+            progress["failed_step"] = "door_principals"
             worker_pid = door_principal_id(board_id, "worker", self.config.url)
             reviewer_pid = door_principal_id(board_id, "reviewer", self.config.url)
             existing_members = {}
@@ -4441,6 +4501,7 @@ class FleetFetcher:
                 })
 
             # Step d: dispatch policy defaults and review policy default
+            progress["failed_step"] = "policies"
             status = await _client_call(client, "board_status", {})
             board_obj = (
                 status.get("board", {})
@@ -4487,6 +4548,7 @@ class FleetFetcher:
                 })
 
         # Step e: fleet clone prepare (existing prepare_fleet_clone path)
+        progress["failed_step"] = "fleet_clone"
         if seats_manager is not None and hasattr(seats_manager, "prepare_fleet_clone"):
             reg_payload = await self.fetch_project_registry()
             reg_entry = reg_payload["registry"]["projects"].get(project_name, {})
@@ -4526,6 +4588,7 @@ class FleetFetcher:
             })
 
         # Issue door strings
+        progress["failed_step"] = "door_credentials"
         worker_door = door_admin.issue_credential(
             board=board_id,
             role="worker",
@@ -6376,7 +6439,7 @@ function seatPayload(form){const f=new FormData(form);return{host:f.get('host'),
 function seatForm(record={}){return `<form id="seat-wizard" class="seat-form"><label>Host<select name="host">${['codex','codex-cli','goose','claude-code','claude-desktop','headless'].map(x=>`<option ${record.host===x?'selected':''}>${esc(x)}</option>`).join('')}</select></label><label>Role<select name="role"><option ${record.role==='worker'?'selected':''}>worker</option><option ${record.role==='reviewer'?'selected':''}>reviewer</option><option ${record.role==='orchestrator'?'selected':''}>orchestrator</option></select></label><label>Name<input name="name" value="${esc(record.name||'')}" pattern="[A-Za-z0-9][A-Za-z0-9._-]{0,79}" required></label><label>Home board <span class="muted">(blank = any registry board)</span><input name="home_board" value="${esc(record.home_board||'')}" placeholder="blank = any project; a name = dedicated"></label><label class="wide">Central URL<input name="central_url" type="url" value="${esc(record.central_url||'http://127.0.0.1:8766/mcp')}" required></label><label class="wide">Token file path · token never enters this page<input name="token_file" value="${esc(record.token_file||'')}" required></label><label class="wide">CA file path <span class="muted">(optional, remote TLS only)</span><input name="ca_file" value="${esc(record.ca_file||'')}"></label><label class="wide">Bridge command<input name="bridge_command" value="${esc(record.bridge_command||seatBridge.command||'pursers-wait-bridge')}" required></label><label class="wide">Host config path<input name="config_path" value="${esc(record.config_path||'')}" required></label><label>Seat directory (Goose)<input name="seat_dir" value="${esc(record.seat_dir||'')}"></label><label>Repository (optional)<input name="repository" value="${esc(record.repository||'')}"></label><button class="primary-action wide" type="submit">Preview exact changes</button><p id="seat-form-status" class="muted wide">Paths are checked locally; token contents are never read into the browser.</p></form>`}
 function seatRows(){const configured=(seatData.seats||[]).map(s=>`<tr><td><b>${esc(s.host)}</b><div class="meta">${esc(s.role)}</div></td><td><span class="id">${esc(s.name)}</span><div class="meta">${esc(s.principal_label)}</div></td><td>${esc(seatBridge.installed_version||'not installed')}<div class="meta">pinned ${esc(s.bridge_version||seatBridge.pinned_version||'unknown')}</div></td><td>${esc(s.profile?.host_timeout_s||'—')}s / ${esc(s.profile?.block_s||'—')}s<div class="meta">push ${s.push_mode===null?'unknown':s.push_mode?'yes':'no'}</div></td><td><span class="status">${esc(s.doctor_status||'not run')}</span>${s.needs_restart?'<div class="restart-badge">NEEDS RESTART</div>':''}</td><td><div class="seat-actions"><button data-seat-action="doctor" data-name="${esc(s.name)}">Doctor</button><button data-seat-action="fix" data-name="${esc(s.name)}">Fix</button><button data-seat-action="prompt" data-name="${esc(s.name)}">Copy prompt</button><button data-seat-action="upgrade">Upgrade bridge</button>${s.host==='goose'?`<button data-seat-action="goose" data-name="${esc(s.name)}">Regenerate Goose</button>`:''}</div></td></tr>`).join('');const discovered=(seatData.discovered_configs||[]).map(s=>`<tr><td><b>${esc(s.host)}</b><div class="meta">discovered</div></td><td><span class="muted">Not inventoried</span><div class="meta">${esc(s.config_path)}</div></td><td>${esc(seatBridge.installed_version||'not installed')}<div class="meta">pinned ${esc(seatBridge.pinned_version||'unknown')}</div></td><td>—</td><td><span class="status">setup needed</span></td><td><button data-seat-action="discover" data-host="${esc(s.host)}" data-path="${esc(s.config_path)}">Use in wizard</button></td></tr>`).join('');return configured+discovered}
 function renderSeats(){const installed=seatBridge.installed_version||'not installed',latest=seatBridge.latest_pypi_version||'unavailable',source=seatBridge.resolution_source||'unresolved',bridgeStatus=seatBridge.status||'unknown',bridgeMessage=seatBridge.message||'';return `${pageHead('Config','Seats and host setup','Configure local seats, verify push-wait health, and upgrade the pinned bridge.','<div class="seat-toolbar"><button data-seat-global="doctor">Doctor all</button><button data-seat-global="install">Install / upgrade bridge</button><button data-seat-global="upgrade-all">Upgrade all seats</button></div>')}${seatActionMessage?`<p class="status">${esc(seatActionMessage)} ${seatSessionPrompt?'<button id="copy-session-prompt">Copy session prompt</button>':''}</p>`:''}<div class="seat-layout"><div class="seat-stack"><section class="card pool"><div class="section-title"><h3>Seat inventory</h3><span class="status">${(seatData.seats||[]).length} configured</span></div><div class="table-scroll"><table><thead><tr><th>Host / role</th><th>Name / principal</th><th>Bridge</th><th>Profile / push</th><th>Doctor</th><th>Actions</th></tr></thead><tbody>${seatRows()||'<tr><td colspan="6" class="empty">No configured seats. Use the wizard.</td></tr>'}</tbody></table></div></section><section class="card pool"><h3>Add or update seat</h3>${seatForm()}</section><section id="seat-plan" class="card pool" ${seatPlan?'':'hidden'}><h3>Confirm changes</h3><p class="muted">Review the diff before applying. Existing files are backed up first.</p><pre class="seat-diff">${esc((seatPlan?.changes||[]).map(c=>`${c.description}\n${c.diff||c.action}`).join('\n')||'No changes required.')}</pre><button id="seat-apply" class="primary-action" ${seatPlan?'':'disabled'}>Confirm and apply</button></section></div><aside class="seat-stack"><section class="card pool"><h3>Wait bridge</h3><p><span class="status">${esc(bridgeStatus)}</span>${bridgeMessage?` ${esc(bridgeMessage)}`:''}</p><p>Installed <b>${esc(installed)}</b></p><p class="meta">Pinned ${esc(seatBridge.pinned_version||'unknown')} · PyPI latest ${esc(latest)}</p><p class="meta">Resolved via ${esc(source)}</p><p class="meta">Private CA ${seatBridge.private_ca_active?'active':'not active'}</p></section><section class="card pool"><h3>Doctor</h3><div id="seat-doctor">${seatDoctorResult?doctorResult(seatDoctorResult):'<p class="muted">Run one seat or all seats for config, timeout, token/CA path, bridge, live push, and restart checks.</p>'}</div></section><section class="card pool"><h3>Registry coverage</h3>${(seatRegistry.boards||[]).map(b=>`<div class="doctor-check"><span>${esc(b.label||b.board_id)}</span><span class="status">${esc(b.seat_coverage)}/${esc(b.configured_seats)}</span></div>`).join('')||'<p class="muted">No boards loaded.</p>'}<p class="meta">Read-only registry view.</p></section></aside></div>`}
-async function configPost(path,payload={}){const response=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}),body=await response.json();if(!response.ok)throw new Error(body.error||`HTTP ${response.status}`);return body}
+async function configPost(path,payload={}){const response=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}),body=await response.json();if(!response.ok){const error=new Error(body.error||`HTTP ${response.status}`);error.details=body;throw error}return body}
 async function refreshSeats(){try{const [inventory,bridge]=await Promise.all([fetchJson('/api/config/seats'),fetchJson('/api/config/bridge')]);seatData=inventory;seatBridge=bridge;if(navKind()==='seats'&&!refreshPaused())renderHub();const central=centralLabels[0];if(central)try{seatRegistry=await fetchJson(`/api/config/registry?${apiCentral(central)}`)}catch(_error){seatRegistry={boards:[],unavailable:true}}if(navKind()==='seats'&&!refreshPaused())renderHub()}catch(e){if(navKind()==='seats'&&!refreshPaused())document.querySelector('#central-sections').innerHTML=`<p class="error">Config unavailable: ${esc(e.message)}</p>`}}
 function findSeat(name){return (seatData.seats||[]).find(s=>s.name===name)}
 function doctorResult(result){if(!result?.seats)return `<pre class="seat-diff">${esc(JSON.stringify(result,null,2))}</pre>`;return result.seats.map(s=>`<div><b>${esc(s.seat)} · ${esc(s.overall)}</b>${(s.checks||[]).map(c=>`<div class="doctor-check"><span>${esc(c.check)}<span class="meta">${esc(c.message)}</span></span><span class="status">${esc(c.status)}</span></div>`).join('')}${s.overall==='PASS'?'':'<p class="muted">Fix hint: open this seat with Fix, review the plan, then apply and restart the host if prompted.</p>'}</div>`).join('')}
@@ -6637,7 +6700,16 @@ bindSeats = function() {
         if (resultDiv) resultDiv.innerHTML = out;
         await refreshSeats();
       } catch (err) {
-        if (resultDiv) resultDiv.innerHTML = `<p class="error">Add project failed: ${esc(err.message)}</p>`;
+        const completed = Array.isArray(err.details?.completed_steps) ? err.details.completed_steps.slice(0, 8) : [];
+        const failedStep = typeof err.details?.failed_step === 'string' ? err.details.failed_step : null;
+        let out = `<p class="error">Add project failed: ${esc(err.message)}</p>`;
+        if (failedStep) out += `<p><b>Failed step:</b> ${esc(failedStep)}</p>`;
+        if (completed.length) {
+          out += '<h4>Completed before failure:</h4><ul style="list-style:none;padding-left:0">';
+          for (const step of completed) out += `<li><b>${esc(step.step)}:</b> <span class="status pass">${esc(step.status)}</span></li>`;
+          out += '</ul>';
+        }
+        if (resultDiv) resultDiv.innerHTML = out;
       } finally {
         if (btn) btn.disabled = false;
       }
@@ -7435,6 +7507,20 @@ def make_handler(
                         raise ValueError(
                             "intake request must be a new ask or approve/decline decision"
                         )
+            except AddProjectPartialFailure as exc:
+                self._send(
+                    exc.status_code,
+                    "application/json; charset=utf-8",
+                    _json_bytes(
+                        {
+                            "error": "Add project could not complete.",
+                            "completed_steps": exc.completed_steps,
+                            "failed_step": exc.failed_step,
+                            "central": label,
+                        }
+                    ),
+                )
+                return
             except KeyError:
                 if route in config_routes:
                     self._send(

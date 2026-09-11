@@ -7150,6 +7150,83 @@ def test_add_project_single_action_happy_path_and_idempotent_rerun(tmp_path: Pat
         thread.join()
 
 
+def test_add_project_partial_failure_preserves_sanitized_progress(tmp_path: Path) -> None:
+    class FailingCentral(FakeDoorCentral):
+        def client_factory(
+            self, url: str, token: str, board_id: str, **kwargs: object
+        ) -> FakeDoorBoardClient:
+            board = super().client_factory(url, token, board_id, **kwargs)
+            if board_id == "partial-board":
+                async def fail_onboard(**_kwargs: object) -> dict:
+                    raise RuntimeError("sensitive detail at /PATH/TO/SECRET")
+
+                board.board_onboard = fail_onboard
+            return board
+
+    class UnreachedSeats:
+        calls = 0
+
+        def prepare_fleet_clone(self, *_args: object, **_kwargs: object) -> dict:
+            self.calls += 1
+            raise AssertionError("later fleet clone step must not run")
+
+    central = FailingCentral()
+    config = dashboard.Config(
+        url="http://127.0.0.1:8766/mcp",
+        token="test-token",
+        home_board="pursers",
+        agent_name="viewer",
+        stale_seconds=300,
+        cache_seconds=5,
+        doors_keys_dir=tmp_path / "keys",
+        jwks_path=tmp_path / "jwks.json",
+    )
+    fetcher = dashboard.FleetFetcher(config, client_factory=central.client_factory)
+    cache = dashboard.DashboardCache([fetcher], 60)
+    seats = UnreachedSeats()
+    server = dashboard.ThreadingHTTPServer(
+        ("127.0.0.1", 0), dashboard.make_handler(cache, seat_manager=seats)
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+
+    request = urllib.request.Request(
+        base + "/api/projects/add",
+        data=json.dumps(
+            {
+                "name": "partial-project",
+                "board_id": "partial-board",
+                "work_dir": str(tmp_path / "work"),
+            }
+        ).encode(),
+        headers={"Content-Type": "application/json", "Origin": base},
+        method="POST",
+    )
+    try:
+        with pytest.raises(urllib.error.HTTPError) as captured:
+            urllib.request.urlopen(request)
+        assert captured.value.code == 409
+        body = json.load(captured.value)
+        assert body == {
+            "error": "Add project could not complete.",
+            "completed_steps": [{"step": "registry_admin", "status": "created"}],
+            "failed_step": "board_create",
+            "central": "default",
+        }
+        assert central.registry_data["projects"]["partial-project"]["status"] == "active"
+        assert central.boards["partial-board"].memberships == {}
+        assert seats.calls == 0
+        assert "sensitive detail" not in json.dumps(body)
+        assert "/PATH/TO/SECRET" not in json.dumps(body)
+        assert "Completed before failure:" in dashboard.HTML
+        assert "err.details?.completed_steps" in dashboard.HTML
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
 def test_guards_reject_cross_origin_and_non_admin(tmp_path: Path) -> None:
     keys_dir = tmp_path / "keys"
     jwks_path = tmp_path / "jwks.json"

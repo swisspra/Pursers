@@ -120,6 +120,13 @@ type FleetSnapshot = {
   registry_warning: string | null;
   projects: FleetProject[];
   pool: FleetPoolEntry[];
+  truncation_counts: {
+    projects: number;
+    boards: number;
+    agents: number;
+    tickets: number;
+    pool: number;
+  };
   totals: {
     agents: number | null;
     busy: number | null;
@@ -215,6 +222,7 @@ const fleetFallback: FleetSnapshot = {
       seats: [{ board_id: "board-synthetic", project: "preview", live: true, current_ticket_id: null }],
     },
   ],
+  truncation_counts: { projects: 0, boards: 0, agents: 0, tickets: 0, pool: 0 },
   totals: { agents: 2, busy: 1, available: 1, stale: 0 },
 };
 
@@ -470,6 +478,7 @@ function decodeFleetPoolEntry(value: unknown): FleetPoolEntry | null {
 function decodeFleetSnapshot(value: unknown): FleetSnapshot | null {
   if (!record(value)) return null;
   const totals = record(value.totals) ? value.totals : {};
+  const truncation = record(value.truncation_counts) ? value.truncation_counts : {};
   return {
     schema_version: optionalNonNegative(value.schema_version),
     registry_warning: optionalText(value.registry_warning, MAX_LONG_TEXT_LENGTH),
@@ -481,6 +490,13 @@ function decodeFleetSnapshot(value: unknown): FleetSnapshot | null {
       .slice(0, MAX_AGENTS)
       .map(decodeFleetPoolEntry)
       .filter((item): item is FleetPoolEntry => item !== null),
+    truncation_counts: {
+      projects: nonNegative(truncation.projects),
+      boards: nonNegative(truncation.boards),
+      agents: nonNegative(truncation.agents),
+      tickets: nonNegative(truncation.tickets),
+      pool: nonNegative(truncation.pool),
+    },
     totals: {
       agents: optionalNonNegative(totals.agents),
       busy: optionalNonNegative(totals.busy),
@@ -964,6 +980,8 @@ function renderAgents(data: Snapshot): void {
     meta.append(agentField("project", agent.project ?? null));
     meta.append(agentField("ticket", shortTicketId(agent.current_ticket_id ?? agent.current_ticket?.id ?? null)));
     meta.append(pill(`${Math.round(agent.idle_minutes)}m idle`));
+    const lease = leaseBadge(agent.lease_expires_at);
+    if (lease) meta.append(lease);
     card.append(meta);
     if (agent.duplicate) {
       const warn = element("div", "notice");
@@ -1042,6 +1060,24 @@ function renderFleet(data: FleetSnapshot | null): void {
     notice.dataset.tone = "warning";
     notice.append(element("p", undefined, warningText));
     warning.append(notice);
+  }
+  if (!unavailable) {
+    const omitted = Object.entries(data.truncation_counts).filter(([, count]) => count > 0);
+    if (omitted.length) {
+      const notice = element("div", "notice");
+      notice.dataset.tone = "warning";
+      notice.setAttribute("aria-label", "Fleet data truncation");
+      const labels: Record<string, string> = {
+        projects: "projects omitted",
+        boards: "board snapshots truncated",
+        agents: "agent records omitted",
+        tickets: "ticket records omitted",
+        pool: "pool records omitted",
+      };
+      const detail = omitted.map(([kind, count]) => `${count} ${labels[kind]}`).join(", ");
+      notice.append(element("p", undefined, `Fleet snapshot is partial: ${detail}.`));
+      warning.append(notice);
+    }
   }
 
   const projects = unavailable ? [] : data.projects.filter((project) => {
@@ -1216,6 +1252,7 @@ function renderLinks(data: LinkSnapshot | null): void {
 
         const files = data.edges.filter((edge) => edge.from === node.memory_id && edge.kind === "file");
         const tags = data.edges.filter((edge) => edge.from === node.memory_id && edge.kind === "tag");
+        const retracts = data.edges.filter((edge) => edge.from === node.memory_id && edge.kind === "retracts");
         if (files.length) {
           const fileList = element("div", "link-values");
           fileList.append(element("strong", undefined, "Files"));
@@ -1233,12 +1270,23 @@ function renderLinks(data: LinkSnapshot | null): void {
           tags.forEach((edge) => tagList.append(pill(`${edge.authority === "suggested" ? "Suggested · " : ""}${edge.to}`, edge.authority === "suggested" ? "warning" : undefined)));
           row.append(tagList);
         }
+        if (retracts.length) {
+          const retractList = element("div", "link-values");
+          retractList.append(element("strong", undefined, "Retracts"));
+          retracts.forEach((edge) => {
+            const item = element("div", "link-value");
+            item.append(element("code", undefined, edge.to), copyButton("Copy retracted memory ID", edge.to));
+            if (edge.authority === "suggested") item.append(pill("Suggested", "warning"));
+            retractList.append(item);
+          });
+          row.append(retractList);
+        }
         memoryList.append(row);
       });
       group.append(memoryList);
       return group;
     });
-  container.replaceChildren(...(groupCards.length ? groupCards : [emptyState("No explicit links", "Ticket, file, and tag relationships appear when project memories declare them.")]));
+  container.replaceChildren(...(groupCards.length ? groupCards : [emptyState("No explicit links", "Ticket, file, tag, and retracts relationships appear when project memories declare them.")]));
 }
 
 function newestEvents(events: BoardEvent[]): BoardEvent[] {

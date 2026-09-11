@@ -130,6 +130,23 @@ def test_primary_vertical_tabs_move_selection_and_focus_with_up_down() -> None:
     assert "if (focusTab) tab.focus()" in select_view
 
 
+def test_dashboard_renders_agent_lease_fleet_truncation_and_retracts() -> None:
+    repository = Path(__file__).resolve().parents[3]
+    source = (repository / "tools/dashboard-ui/src/dashboard.ts").read_text(
+        encoding="utf-8"
+    )
+
+    assert "const lease = leaseBadge(agent.lease_expires_at);" in source
+    assert "if (lease) meta.append(lease);" in source
+    assert "const truncation = record(value.truncation_counts)" in source
+    assert 'notice.setAttribute("aria-label", "Fleet data truncation")' in source
+    assert "Fleet snapshot is partial: ${detail}." in source
+    assert 'boards: "board snapshots truncated"' in source
+    assert 'edge.kind === "retracts"' in source
+    assert 'element("strong", undefined, "Retracts")' in source
+    assert 'copyButton("Copy retracted memory ID", edge.to)' in source
+
+
 @pytest.fixture
 def anyio_backend() -> str:
     return "asyncio"
