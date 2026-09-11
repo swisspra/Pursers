@@ -209,6 +209,31 @@ class ProjectSeats:
         }
 
 
+class ReadEvidenceSeats:
+    def __init__(self) -> None:
+        self.fail_release = False
+        self.jobs = {
+            "a" * 32: {
+                "job_id": "a" * 32,
+                "action": "doctor",
+                "status": "succeeded",
+            }
+        }
+
+    def seats(self) -> dict[str, Any]:
+        return {"seats": []}
+
+    def release_status(self) -> dict[str, Any]:
+        if self.fail_release:
+            raise RuntimeError("release status unavailable")
+        return {"state": "ready", "version": "5.0.0b1"}
+
+    def job(self, job_id: str) -> dict[str, Any]:
+        if job_id not in self.jobs:
+            raise KeyError(job_id)
+        return self.jobs[job_id]
+
+
 def test_real_attention_handler_emits_actual_sanitized_evidence(tmp_path: Path) -> None:
     trace, output = _trace(tmp_path)
     state_dir = tmp_path / "state"
@@ -276,6 +301,80 @@ def test_real_attention_handler_emits_actual_sanitized_evidence(tmp_path: Path) 
     assert len(record["candidate_commit"]) == 40
     assert stat.S_IMODE(output.stat().st_mode) == 0o600
     assert secret not in lines[0]
+
+
+def test_release_and_job_reads_emit_correlated_evidence_without_a_log(
+    tmp_path: Path,
+) -> None:
+    trace, output = _trace(tmp_path)
+    seats = ReadEvidenceSeats()
+    server = dashboard.ThreadingHTTPServer(
+        ("127.0.0.1", 0),
+        dashboard.make_handler(
+            Cache(), worker_manager=SimpleNamespace(), seat_manager=seats,
+            evidence_trace=trace,
+        ),
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base_url = f"http://127.0.0.1:{server.server_port}"
+    headers = _headers(
+        observation_id="fleet.release-status",
+        action_id="read-release",
+        entity="release",
+    )
+    try:
+        release_status, release, release_headers = _call(
+            base_url, "GET", path="/api/config/release", headers=headers
+        )
+        job_status, job, job_headers = _call(
+            base_url, "GET", path=f"/api/config/jobs/{'a' * 32}", headers=headers
+        )
+        missing_status, missing, missing_headers = _call(
+            base_url, "GET", path=f"/api/config/jobs/{'b' * 32}", headers=headers
+        )
+        seats_status, seats_result, seats_headers = _call(
+            base_url, "GET", path="/api/config/seats", headers=headers
+        )
+        seats.fail_release = True
+        failed_status, failed, failed_headers = _call(
+            base_url, "GET", path="/api/config/release", headers=headers
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+    assert release_status == job_status == seats_status == 200
+    assert missing_status == 404
+    assert failed_status == 503
+    assert release["state"] == "ready"
+    assert job["status"] == "succeeded"
+    assert missing["error"] == "job not found"
+    assert failed["error"] == "RuntimeError"
+    assert seats_result == {"seats": []}
+    assert "_evidence" not in seats_result
+    assert seats_headers.get("X-Pursers-Run-Id") is None
+    for document, effect, outcome in (
+        (release, "release_state_unchanged", "succeeded"),
+        (job, "job_state_unchanged", "succeeded"),
+        (missing, "job_state_unchanged", "failed"),
+        (failed, "release_state_unchanged", "failed"),
+    ):
+        evidence = document["_evidence"]
+        assert evidence["effect"] == effect
+        assert evidence["outcome"] == outcome
+        assert evidence["changed"] is False
+        assert evidence["action_sha256"] is None
+        assert evidence["log_emitted"] is False
+    for returned in (
+        release_headers, job_headers, missing_headers, failed_headers,
+    ):
+        assert returned["X-Pursers-Observation-Id"] == "fleet.release-status"
+        assert returned["X-Pursers-Run-Id"] == "run-1"
+        assert returned["X-Pursers-Action-Id"] == "read-release"
+        assert returned["X-Pursers-Entity-Id"] == "release"
+    assert not output.exists()
 
 
 def test_real_add_project_handler_emits_steps_and_actual_registry_transition(
@@ -491,6 +590,11 @@ def test_trace_route_allowlist_is_closed_for_project_evidence(tmp_path: Path) ->
     assert trace.context(headers, "GET", "/api/projects/add") is None
     assert trace.context(headers, "POST", "/api/projects/add/steps") is None
     assert trace.context(headers, "POST", "/api/config/registry/clone") is None
+    assert trace.context(headers, "GET", "/api/config/release") is not None
+    assert trace.context(headers, "POST", "/api/config/release") is None
+    assert trace.context(headers, "GET", f"/api/config/jobs/{'a' * 32}") is not None
+    assert trace.context(headers, "GET", f"/api/config/jobs/{'A' * 32}") is None
+    assert trace.context(headers, "POST", f"/api/config/jobs/{'a' * 32}") is None
     context = trace.context(headers, "POST", "/api/projects/add")
     assert context is not None
     assert trace.observe(

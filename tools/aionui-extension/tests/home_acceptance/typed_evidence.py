@@ -69,9 +69,16 @@ FLEET_RESPONSE_POINTERS = frozenset(
     {f"/_evidence/{field}" for field in FLEET_TRACE_KEYS}
     | {"/_evidence/log_emitted"}
 )
+FLEET_PROJECT_STEP_POINTERS = frozenset(
+    {"/steps/4/step", "/steps/4/status"}
+)
+FLEET_ACTION_RESULT_POINTERS = {
+    "/api/attention": frozenset({"/items"}),
+    "/api/projects/add": FLEET_PROJECT_STEP_POINTERS,
+}
 FLEET_ACTION_RESPONSE_POINTERS = {
-    "/api/attention": FLEET_RESPONSE_POINTERS | {"/items"},
-    "/api/projects/add": FLEET_RESPONSE_POINTERS | {"/steps"},
+    action_path: FLEET_RESPONSE_POINTERS | result_pointers
+    for action_path, result_pointers in FLEET_ACTION_RESULT_POINTERS.items()
 }
 LOG_COMMON_KEYS = frozenset({
     "adapter", "provenance", "runtime_id", "path",
@@ -1155,12 +1162,13 @@ def _verify_evidence(evidence: Any, trust: dict[str, Any]) -> dict[str, Any]:
                 for key, value in record["entry"].items()
             }
             expected_selected["/_evidence/log_emitted"] = True
-            result_pointer = (
-                "/items" if trusted_source["action_path"] == "/api/attention"
-                else "/steps"
-            )
-            result_value = action_response["selected"].get(result_pointer)
-            expected_selected[result_pointer] = result_value
+            result_values = {
+                pointer: action_response["selected"].get(pointer)
+                for pointer in FLEET_ACTION_RESULT_POINTERS[
+                    trusted_source["action_path"]
+                ]
+            }
+            expected_selected.update(result_values)
             if (
                 action_response["method"] != "POST"
                 or action_response["path"] != trusted_source["action_path"]
@@ -1171,8 +1179,10 @@ def _verify_evidence(evidence: Any, trust: dict[str, Any]) -> dict[str, Any]:
                     "Fleet trace action response does not match its log entry"
                 )
             if trusted_source["action_path"] == "/api/attention" and (
-                _digest({"items": result_value}) != record["entry"]["after_sha256"]
-                or _digest({"items": result_value}) != record["entry"]["result_sha256"]
+                _digest({"items": result_values["/items"]})
+                != record["entry"]["after_sha256"]
+                or _digest({"items": result_values["/items"]})
+                != record["entry"]["result_sha256"]
             ):
                 raise TypedEvidenceError(
                     "Fleet attention response does not match its state digests"
@@ -2023,11 +2033,11 @@ def _record_log(request: dict[str, Any], trust: dict[str, Any], context: dict[st
             f"/_evidence/{key}": value for key, value in entry.items()
         }
         expected_selected["/_evidence/log_emitted"] = True
-        result_pointer = (
-            "/items" if source["action_path"] == "/api/attention" else "/steps"
-        )
-        result_value = action_response["selected"].get(result_pointer)
-        expected_selected[result_pointer] = result_value
+        result_values = {
+            pointer: action_response["selected"].get(pointer)
+            for pointer in FLEET_ACTION_RESULT_POINTERS[source["action_path"]]
+        }
+        expected_selected.update(result_values)
         if (
             action_response["status"] != entry["status"]
             or action_response["selected"] != expected_selected
@@ -2036,8 +2046,9 @@ def _record_log(request: dict[str, Any], trust: dict[str, Any], context: dict[st
                 "Fleet trace action response does not match its log entry"
             )
         if source["action_path"] == "/api/attention" and (
-            _digest({"items": result_value}) != entry["after_sha256"]
-            or _digest({"items": result_value}) != entry["result_sha256"]
+            _digest({"items": result_values["/items"]}) != entry["after_sha256"]
+            or _digest({"items": result_values["/items"]})
+            != entry["result_sha256"]
         ):
             raise TypedEvidenceError(
                 "Fleet attention response does not match its state digests"

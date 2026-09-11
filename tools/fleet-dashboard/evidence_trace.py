@@ -38,10 +38,24 @@ MAX_CONFIG_BYTES = 8_192
 TRACE_ROUTES = frozenset(
     {
         ("GET", "/api/attention"),
+        ("GET", "/api/config/release"),
         ("POST", "/api/attention"),
         ("POST", "/api/projects/add"),
     }
 )
+TRACE_JOB_ROUTE = re.compile(r"/api/config/jobs/[a-f0-9]{32}")
+
+
+def _trace_route_effect(method: str, route: str) -> str | None:
+    if (method, route) in TRACE_ROUTES:
+        if route == "/api/attention":
+            return "attention_state"
+        if route == "/api/projects/add":
+            return "project_state"
+        return "release_state"
+    if method == "GET" and TRACE_JOB_ROUTE.fullmatch(route):
+        return "job_state"
+    return None
 
 
 class EvidenceTraceConfigError(ValueError):
@@ -215,7 +229,7 @@ class EvidenceTrace:
         return None
 
     def context(self, headers: Mapping[str, str], method: str, route: str) -> TraceContext | None:
-        if (method, route) not in TRACE_ROUTES:
+        if _trace_route_effect(method, route) is None:
             return None
         values: dict[str, str] = {}
         for key, header in CORRELATION_HEADERS.items():
@@ -242,10 +256,10 @@ class EvidenceTrace:
         result_body: bytes,
     ) -> tuple[dict[str, Any] | None, bool]:
         """Return response metadata and append the real POST action once when possible."""
-        if (method, route) not in TRACE_ROUTES:
+        effect_prefix = _trace_route_effect(method, route)
+        if effect_prefix is None:
             return None, False
         changed = _digest(before) != _digest(after)
-        effect_prefix = "attention_state" if route == "/api/attention" else "project_state"
         record: dict[str, Any] = {
             "schema_version": 1,
             "emitter": "fleet-dashboard-runtime",

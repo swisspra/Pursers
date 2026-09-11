@@ -7047,25 +7047,33 @@ def make_handler(
                         payload = seats.release_status()
                     elif route == "/api/attention":
                         payload = seats.attention_state()
-                        if getattr(self, "_evidence_context", None) is not None:
-                            self._evidence_before = payload
-                            self._evidence_after = payload
                     else:
                         payload = seats.job(config_job.group(1))
                 except KeyError:
+                    payload = {"error": "job not found"}
+                    if getattr(self, "_evidence_context", None) is not None:
+                        self._evidence_before = payload
+                        self._evidence_after = payload
                     self._send(
                         404,
                         "application/json; charset=utf-8",
-                        b'{"error":"job not found"}',
+                        _json_bytes(payload),
                     )
                     return
                 except Exception as exc:  # noqa: BLE001 - bounded type only.
+                    payload = {"error": type(exc).__name__}
+                    if getattr(self, "_evidence_context", None) is not None:
+                        self._evidence_before = payload
+                        self._evidence_after = payload
                     self._send(
                         503,
                         "application/json; charset=utf-8",
-                        _json_bytes({"error": type(exc).__name__}),
+                        _json_bytes(payload),
                     )
                     return
+                if getattr(self, "_evidence_context", None) is not None:
+                    self._evidence_before = payload
+                    self._evidence_after = payload
                 self._send(200, "application/json; charset=utf-8", _json_bytes(payload))
                 return
             try:

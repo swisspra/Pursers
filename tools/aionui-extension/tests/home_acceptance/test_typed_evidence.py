@@ -1790,7 +1790,10 @@ def test_fleet_project_add_route_has_closed_effect_and_result_contract(
     project_selectors = typed_evidence.FLEET_ACTION_RESPONSE_POINTERS[
         "/api/projects/add"
     ]
-    assert "/steps" in project_selectors
+    assert typed_evidence.FLEET_PROJECT_STEP_POINTERS <= project_selectors
+    assert "/steps/4/step" in project_selectors
+    assert "/steps/4/status" in project_selectors
+    assert "/steps" not in project_selectors
     assert "/items" not in project_selectors
     assert "/doors" not in project_selectors
     trust["http_sources"]["fleet-api"]["select_allowlist"] = sorted(
