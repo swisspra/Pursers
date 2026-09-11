@@ -2320,6 +2320,17 @@
         392,
         394
       ],
+      "supporting_sources": [
+        {
+          "source_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+          "source_path": "tools/dashboard-ui/src/dashboard.ts",
+          "source_lines": [
+            245,
+            245
+          ],
+          "fact": "MAX_EVENTS is defined as 200"
+        }
+      ],
       "source_sha": "6368b72279f77e0132888c161e1bac001276dba1",
       "map_source_ref": "11885134bd53ec83821ea8c672f8c85358825be1",
       "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; a valid snapshot carries more than 200 events.",
@@ -3166,6 +3177,17 @@
       "source_lines": [
         1216,
         1241
+      ],
+      "supporting_sources": [
+        {
+          "source_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+          "source_path": "tools/dashboard-ui/src/dashboard.ts",
+          "source_lines": [
+            1176,
+            1200
+          ],
+          "fact": "ticket edges are grouped by memory into ticket sections with a ticket ID copy control"
+        }
       ],
       "source_sha": "6368b72279f77e0132888c161e1bac001276dba1",
       "map_source_ref": "11885134bd53ec83821ea8c672f8c85358825be1",
