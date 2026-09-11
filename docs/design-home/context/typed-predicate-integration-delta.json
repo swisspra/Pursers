@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "ticket_id": "TK-fadd47fce924",
-  "base_commit": "97a5ed712c7a7909642608211dea34601d12564b",
+  "base_commit": "d09757f2e6187fd417ee1017814e92754047ea54",
   "source_map": {
     "path": "docs/design-home/context/derivation-support/TK-63e391d86a18.json",
     "approved_commit": "f9b2d37ac687abcef510e7a854446a469588702a",
@@ -12,7 +12,7 @@
     "purpose": "closed per-ID predicate and recorder proposals for parent integration, with explicit nonpassing gaps; not runtime evidence or acceptance approval",
     "partition_rule": "owned_ids is exactly the 121 collector_gap rows at current full parent 99a32af; the disjoint 43-ID complement records parent-owned rows already converted there",
     "source_anchor_rule": "every proposal retains exact repository source commits, paths, and line ranges; requirement prose is never implementation proof",
-    "execution_rule": "115 owned rows carry an exact closed recorder request and predicate; six rows remain explicit nonpassing parent channel gaps",
+    "execution_rule": "119 owned rows carry an exact closed recorder request and predicate; two rows remain explicit nonpassing parent channel gaps",
     "predicate_rule": "canonical_predicate is the exact closed parent {kind,source_id,assertions} schema with typed case-sensitive operators",
     "privacy_rule": "verifier-owned trust supplies private paths, runtime identities, keys, and live fixture values; this public delta contains placeholders only as explicit fixture bindings",
     "top_level_keys": [
@@ -40,7 +40,7 @@
       "validation"
     ],
     "supported_adapters": {
-      "browser_action_state": "trusted_browser_state_v1 state_transition with exact verifier-owned recipe and DOM selections",
+      "browser_action_state": "trusted_browser_state_v1 state transitions plus aionui_assistant_binding_v1 installed-manifest/runtime joins",
       "fleet_project_add": "trusted_http_v1 http_response against correlated POST /api/projects/add with exact /steps selection",
       "fleet_correlated_route": "trusted_http_v1 http_response against an allowlisted real Fleet route",
       "personal_stdio_mcp": "trusted_mcp_stdio_v1 mcp_tool_response against the exact Personal stdio tool and selector allowlist"
@@ -60,7 +60,7 @@
     ]
   },
   "prototype_contract": {
-    "commit": "97a5ed712c7a7909642608211dea34601d12564b",
+    "commit": "d09757f2e6187fd417ee1017814e92754047ea54",
     "parent_branch": "codex/TK-a565b6635db1-parent-worker2",
     "canonical_fielded_conjunct_keys": [
       "kind",
@@ -107,10 +107,10 @@
       "out-of-order prior-state causal index"
     ],
     "adapter_contracts": {
-      "browser": "trusted_browser_state_v1",
+      "browser": "trusted_browser_state_v1 and aionui_assistant_binding_v1",
       "http": "trusted_http_v1",
       "mcp": "trusted_mcp_stdio_v1",
-      "fleet_producer": "2d0f13f9a6bc1dbf4bf2211da2e7312b7606efd2"
+      "fleet_producer": "ad80007b0f0bc00a77d68333b69ed41df9fe08c0"
     },
     "closed_operators": [
       "eq",
@@ -126,7 +126,7 @@
   "reconciliation": {
     "stale_product_gap_source": "the approved source map predates the approved seven-behavior Fleet repair",
     "approved_repair_ref": "7b7c66d1d330b978376bdfb07e480f901f87825f",
-    "current_parent_ref": "97a5ed712c7a7909642608211dea34601d12564b",
+    "current_parent_ref": "d09757f2e6187fd417ee1017814e92754047ea54",
     "reconciled_ids": [
       "fleet.add-project-authorization-error",
       "fleet.add-project-idempotent-rerun",
@@ -139,13 +139,15 @@
     "focused_validation": "137 passed, 1 skipped (typed evidence plus harness); 79 passed, 1 skipped (typed evidence plus Fleet evidence/release producer)",
     "approved_project_trace_producer_ref": "6c0c324bdfd3bc191ff2615fc878ca8790f9ebb4",
     "reconciled_result": "all seven stale BLOCKED source-map rows use repaired current-parent semantics",
-    "working_parent": "97a5ed712c7a7909642608211dea34601d12564b",
+    "working_parent": "d09757f2e6187fd417ee1017814e92754047ea54",
     "parent_branch": "codex/TK-a565b6635db1-parent-worker2",
     "parent_corrections": {
       "safe_project_step_selectors": "ea3ee12ed2bd4063feb8487418c62df41051453a",
       "correlated_release_job_reads": "2d0f13f9a6bc1dbf4bf2211da2e7312b7606efd2",
       "structured_browser_action_results": "ad9d4bf59ca882c92c3899129e9c88c9072fa7d9",
-      "current_full_parent": "97a5ed712c7a7909642608211dea34601d12564b"
+      "current_full_parent": "d09757f2e6187fd417ee1017814e92754047ea54",
+      "credential_state_trace": "ad80007b0f0bc00a77d68333b69ed41df9fe08c0",
+      "installed_assistant_binding": "d09757f2e6187fd417ee1017814e92754047ea54"
     }
   },
   "partition": {
@@ -872,7 +874,7 @@
     },
     {
       "id": "extension.reviewer-preset-claude",
-      "status": "contract_gap",
+      "status": "executable_proposal",
       "source": {
         "commit": "6368b72279f77e0132888c161e1bac001276dba1",
         "path": "tools/aionui-extension/aion-extension.json",
@@ -891,10 +893,42 @@
         "correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id."
       },
       "adapter": {
-        "support_status": "contract_gap",
+        "support_status": "supported",
         "channel": "browser_action_state",
-        "missing_channel_or_operation": "GET /api/extensions/assistants exposes resolved id/agentId/context but drops raw presetAgentType and contextFile; the installed aion-extension.json is not available through the approved browser adapter",
-        "bounded_parent_correction": "parent must publish an authenticated installed-manifest projection joined to the actual runtime assistant binding"
+        "adapter": "aionui_assistant_binding_v1",
+        "surface": "aionui",
+        "page_binding": "verifier-owned exact candidate loopback page plus byte-identical installed manifest/context",
+        "recipe": {
+          "before": [
+            {
+              "path": "/selected_board",
+              "selector": "[data-helper-field=\"board\"]",
+              "property": "text"
+            }
+          ],
+          "actions": [
+            {
+              "kind": "assistant_binding",
+              "endpoint": "/api/extensions/assistants",
+              "assistant_id": "pursers-reviewer-claude",
+              "path": "/assistant_binding"
+            }
+          ],
+          "after": [
+            {
+              "path": "/selected_board",
+              "selector": "[data-helper-field=\"board\"]",
+              "property": "text"
+            }
+          ],
+          "settle_milliseconds": 0
+        },
+        "select_allowlist": [
+          "/assistant_binding",
+          "/selected_board"
+        ],
+        "semantic_basis": "join the exact installed manifest entry to its unique same-origin runtime assistant and resolved context",
+        "parent_contract_ref": "d09757f2e6187fd417ee1017814e92754047ea54"
       },
       "required_evidence": [
         "trusted exact-candidate/board/runtime evidence from the named adapter",
@@ -904,8 +938,8 @@
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
-        "shape_contract": "97a5ed712c7a7909642608211dea34601d12564b closed recorder and parent fielded-conjunct schemas",
-        "executable_now": false,
+        "shape_contract": "d09757f2e6187fd417ee1017814e92754047ea54 installed assistant binding contract",
+        "executable_now": true,
         "adversarial_negatives": [
           {
             "mutation": "the Codex reviewer or worker context is substituted",
@@ -924,27 +958,87 @@
             "expected": "provenance/correlation rejection"
           }
         ],
-        "deferred": "parent must publish an authenticated installed-manifest projection joined to the actual runtime assistant binding"
+        "deferred": "fresh real installed-host capture, screenshot/AX pairing, and independent 201-row acceptance remain reviewer-owned"
       },
-      "executable_request": null,
-      "canonical_predicate": null,
-      "requested_semantics": {
+      "executable_request": {
+        "schema_version": 1,
+        "kind": "state_transition",
+        "context_bindings": [
+          "observation_id",
+          "run_id",
+          "action_id",
+          "entity",
+          "surface",
+          "board_id",
+          "candidate_commit",
+          "issued_at",
+          "causal_index"
+        ],
+        "recorder": {
+          "source_id": "browser-state-extension.reviewer-preset-claude",
+          "before": [
+            {
+              "path": "/selected_board",
+              "selector": "[data-helper-field=\"board\"]",
+              "property": "text"
+            }
+          ],
+          "action": [
+            {
+              "kind": "assistant_binding",
+              "endpoint": "/api/extensions/assistants",
+              "assistant_id": "pursers-reviewer-claude",
+              "path": "/assistant_binding"
+            }
+          ],
+          "after": [
+            {
+              "path": "/selected_board",
+              "selector": "[data-helper-field=\"board\"]",
+              "property": "text"
+            }
+          ]
+        }
+      },
+      "canonical_predicate": {
         "kind": "state_transition",
         "source_id": "browser-state-extension.reviewer-preset-claude",
-        "operation": "query the installed assistant manifest and the actual runtime preset binding",
-        "selection": "exact assistant pursers-reviewer-claude",
-        "response_fields": [
-          "/id",
-          "/agentId",
-          "/presetAgentType",
-          "/contextFile",
-          "/resolvedRuntimeContext"
+        "assertions": [
+          {
+            "phase": "before",
+            "path": "/selected_board",
+            "op": "eq",
+            "value": "sandbox-board"
+          },
+          {
+            "phase": "action",
+            "path": "/assistant_binding",
+            "op": "eq",
+            "value": {
+              "manifest_id": "pursers-reviewer-claude",
+              "runtime_id": "ext-pursers-reviewer-claude",
+              "agent_id": "claude",
+              "preset_agent_type": "claude",
+              "context_file": "contexts/reviewer.md",
+              "context_sha256": "451722de5bb3d3b0b2abf018110edb11a78560a265134e5e904dfeaa5468ce1e",
+              "manifest_sha256": "aba90f00d74dce49d4f14a69a15b37cc5135bb298f858f8221ac19ba37cd25b8",
+              "extension_name": "pursers",
+              "endpoint": "/api/extensions/assistants",
+              "transport": "same-origin-http"
+            }
+          },
+          {
+            "phase": "after",
+            "path": "/selected_board",
+            "op": "eq",
+            "value": "sandbox-board"
+          }
         ]
       }
     },
     {
       "id": "extension.reviewer-preset-codex",
-      "status": "contract_gap",
+      "status": "executable_proposal",
       "source": {
         "commit": "6368b72279f77e0132888c161e1bac001276dba1",
         "path": "tools/aionui-extension/aion-extension.json",
@@ -963,10 +1057,42 @@
         "correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id."
       },
       "adapter": {
-        "support_status": "contract_gap",
+        "support_status": "supported",
         "channel": "browser_action_state",
-        "missing_channel_or_operation": "GET /api/extensions/assistants exposes resolved id/agentId/context but drops raw presetAgentType and contextFile; the installed aion-extension.json is not available through the approved browser adapter",
-        "bounded_parent_correction": "parent must publish an authenticated installed-manifest projection joined to the actual runtime assistant binding"
+        "adapter": "aionui_assistant_binding_v1",
+        "surface": "aionui",
+        "page_binding": "verifier-owned exact candidate loopback page plus byte-identical installed manifest/context",
+        "recipe": {
+          "before": [
+            {
+              "path": "/selected_board",
+              "selector": "[data-helper-field=\"board\"]",
+              "property": "text"
+            }
+          ],
+          "actions": [
+            {
+              "kind": "assistant_binding",
+              "endpoint": "/api/extensions/assistants",
+              "assistant_id": "pursers-reviewer-codex",
+              "path": "/assistant_binding"
+            }
+          ],
+          "after": [
+            {
+              "path": "/selected_board",
+              "selector": "[data-helper-field=\"board\"]",
+              "property": "text"
+            }
+          ],
+          "settle_milliseconds": 0
+        },
+        "select_allowlist": [
+          "/assistant_binding",
+          "/selected_board"
+        ],
+        "semantic_basis": "join the exact installed manifest entry to its unique same-origin runtime assistant and resolved context",
+        "parent_contract_ref": "d09757f2e6187fd417ee1017814e92754047ea54"
       },
       "required_evidence": [
         "trusted exact-candidate/board/runtime evidence from the named adapter",
@@ -976,8 +1102,8 @@
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
-        "shape_contract": "97a5ed712c7a7909642608211dea34601d12564b closed recorder and parent fielded-conjunct schemas",
-        "executable_now": false,
+        "shape_contract": "d09757f2e6187fd417ee1017814e92754047ea54 installed assistant binding contract",
+        "executable_now": true,
         "adversarial_negatives": [
           {
             "mutation": "the Claude reviewer or worker context is substituted",
@@ -996,27 +1122,87 @@
             "expected": "provenance/correlation rejection"
           }
         ],
-        "deferred": "parent must publish an authenticated installed-manifest projection joined to the actual runtime assistant binding"
+        "deferred": "fresh real installed-host capture, screenshot/AX pairing, and independent 201-row acceptance remain reviewer-owned"
       },
-      "executable_request": null,
-      "canonical_predicate": null,
-      "requested_semantics": {
+      "executable_request": {
+        "schema_version": 1,
+        "kind": "state_transition",
+        "context_bindings": [
+          "observation_id",
+          "run_id",
+          "action_id",
+          "entity",
+          "surface",
+          "board_id",
+          "candidate_commit",
+          "issued_at",
+          "causal_index"
+        ],
+        "recorder": {
+          "source_id": "browser-state-extension.reviewer-preset-codex",
+          "before": [
+            {
+              "path": "/selected_board",
+              "selector": "[data-helper-field=\"board\"]",
+              "property": "text"
+            }
+          ],
+          "action": [
+            {
+              "kind": "assistant_binding",
+              "endpoint": "/api/extensions/assistants",
+              "assistant_id": "pursers-reviewer-codex",
+              "path": "/assistant_binding"
+            }
+          ],
+          "after": [
+            {
+              "path": "/selected_board",
+              "selector": "[data-helper-field=\"board\"]",
+              "property": "text"
+            }
+          ]
+        }
+      },
+      "canonical_predicate": {
         "kind": "state_transition",
         "source_id": "browser-state-extension.reviewer-preset-codex",
-        "operation": "query the installed assistant manifest and the actual runtime preset binding",
-        "selection": "exact assistant pursers-reviewer-codex",
-        "response_fields": [
-          "/id",
-          "/agentId",
-          "/presetAgentType",
-          "/contextFile",
-          "/resolvedRuntimeContext"
+        "assertions": [
+          {
+            "phase": "before",
+            "path": "/selected_board",
+            "op": "eq",
+            "value": "sandbox-board"
+          },
+          {
+            "phase": "action",
+            "path": "/assistant_binding",
+            "op": "eq",
+            "value": {
+              "manifest_id": "pursers-reviewer-codex",
+              "runtime_id": "ext-pursers-reviewer-codex",
+              "agent_id": "codex",
+              "preset_agent_type": "codex",
+              "context_file": "contexts/reviewer.md",
+              "context_sha256": "451722de5bb3d3b0b2abf018110edb11a78560a265134e5e904dfeaa5468ce1e",
+              "manifest_sha256": "aba90f00d74dce49d4f14a69a15b37cc5135bb298f858f8221ac19ba37cd25b8",
+              "extension_name": "pursers",
+              "endpoint": "/api/extensions/assistants",
+              "transport": "same-origin-http"
+            }
+          },
+          {
+            "phase": "after",
+            "path": "/selected_board",
+            "op": "eq",
+            "value": "sandbox-board"
+          }
         ]
       }
     },
     {
       "id": "extension.worker-preset-claude",
-      "status": "contract_gap",
+      "status": "executable_proposal",
       "source": {
         "commit": "6368b72279f77e0132888c161e1bac001276dba1",
         "path": "tools/aionui-extension/aion-extension.json",
@@ -1035,10 +1221,42 @@
         "correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id."
       },
       "adapter": {
-        "support_status": "contract_gap",
+        "support_status": "supported",
         "channel": "browser_action_state",
-        "missing_channel_or_operation": "GET /api/extensions/assistants exposes resolved id/agentId/context but drops raw presetAgentType and contextFile; the installed aion-extension.json is not available through the approved browser adapter",
-        "bounded_parent_correction": "parent must publish an authenticated installed-manifest projection joined to the actual runtime assistant binding"
+        "adapter": "aionui_assistant_binding_v1",
+        "surface": "aionui",
+        "page_binding": "verifier-owned exact candidate loopback page plus byte-identical installed manifest/context",
+        "recipe": {
+          "before": [
+            {
+              "path": "/selected_board",
+              "selector": "[data-helper-field=\"board\"]",
+              "property": "text"
+            }
+          ],
+          "actions": [
+            {
+              "kind": "assistant_binding",
+              "endpoint": "/api/extensions/assistants",
+              "assistant_id": "pursers-worker-claude",
+              "path": "/assistant_binding"
+            }
+          ],
+          "after": [
+            {
+              "path": "/selected_board",
+              "selector": "[data-helper-field=\"board\"]",
+              "property": "text"
+            }
+          ],
+          "settle_milliseconds": 0
+        },
+        "select_allowlist": [
+          "/assistant_binding",
+          "/selected_board"
+        ],
+        "semantic_basis": "join the exact installed manifest entry to its unique same-origin runtime assistant and resolved context",
+        "parent_contract_ref": "d09757f2e6187fd417ee1017814e92754047ea54"
       },
       "required_evidence": [
         "trusted exact-candidate/board/runtime evidence from the named adapter",
@@ -1048,8 +1266,8 @@
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
-        "shape_contract": "97a5ed712c7a7909642608211dea34601d12564b closed recorder and parent fielded-conjunct schemas",
-        "executable_now": false,
+        "shape_contract": "d09757f2e6187fd417ee1017814e92754047ea54 installed assistant binding contract",
+        "executable_now": true,
         "adversarial_negatives": [
           {
             "mutation": "the Codex worker or reviewer context is substituted",
@@ -1068,27 +1286,87 @@
             "expected": "provenance/correlation rejection"
           }
         ],
-        "deferred": "parent must publish an authenticated installed-manifest projection joined to the actual runtime assistant binding"
+        "deferred": "fresh real installed-host capture, screenshot/AX pairing, and independent 201-row acceptance remain reviewer-owned"
       },
-      "executable_request": null,
-      "canonical_predicate": null,
-      "requested_semantics": {
+      "executable_request": {
+        "schema_version": 1,
+        "kind": "state_transition",
+        "context_bindings": [
+          "observation_id",
+          "run_id",
+          "action_id",
+          "entity",
+          "surface",
+          "board_id",
+          "candidate_commit",
+          "issued_at",
+          "causal_index"
+        ],
+        "recorder": {
+          "source_id": "browser-state-extension.worker-preset-claude",
+          "before": [
+            {
+              "path": "/selected_board",
+              "selector": "[data-helper-field=\"board\"]",
+              "property": "text"
+            }
+          ],
+          "action": [
+            {
+              "kind": "assistant_binding",
+              "endpoint": "/api/extensions/assistants",
+              "assistant_id": "pursers-worker-claude",
+              "path": "/assistant_binding"
+            }
+          ],
+          "after": [
+            {
+              "path": "/selected_board",
+              "selector": "[data-helper-field=\"board\"]",
+              "property": "text"
+            }
+          ]
+        }
+      },
+      "canonical_predicate": {
         "kind": "state_transition",
         "source_id": "browser-state-extension.worker-preset-claude",
-        "operation": "query the installed assistant manifest and the actual runtime preset binding",
-        "selection": "exact assistant pursers-worker-claude",
-        "response_fields": [
-          "/id",
-          "/agentId",
-          "/presetAgentType",
-          "/contextFile",
-          "/resolvedRuntimeContext"
+        "assertions": [
+          {
+            "phase": "before",
+            "path": "/selected_board",
+            "op": "eq",
+            "value": "sandbox-board"
+          },
+          {
+            "phase": "action",
+            "path": "/assistant_binding",
+            "op": "eq",
+            "value": {
+              "manifest_id": "pursers-worker-claude",
+              "runtime_id": "ext-pursers-worker-claude",
+              "agent_id": "claude",
+              "preset_agent_type": "claude",
+              "context_file": "contexts/worker.md",
+              "context_sha256": "c56153bbebca092a72c899985581af055a9e86f62c9c9c5889de406a4a934558",
+              "manifest_sha256": "aba90f00d74dce49d4f14a69a15b37cc5135bb298f858f8221ac19ba37cd25b8",
+              "extension_name": "pursers",
+              "endpoint": "/api/extensions/assistants",
+              "transport": "same-origin-http"
+            }
+          },
+          {
+            "phase": "after",
+            "path": "/selected_board",
+            "op": "eq",
+            "value": "sandbox-board"
+          }
         ]
       }
     },
     {
       "id": "extension.worker-preset-codex",
-      "status": "contract_gap",
+      "status": "executable_proposal",
       "source": {
         "commit": "6368b72279f77e0132888c161e1bac001276dba1",
         "path": "tools/aionui-extension/aion-extension.json",
@@ -1107,10 +1385,42 @@
         "correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id."
       },
       "adapter": {
-        "support_status": "contract_gap",
+        "support_status": "supported",
         "channel": "browser_action_state",
-        "missing_channel_or_operation": "GET /api/extensions/assistants exposes resolved id/agentId/context but drops raw presetAgentType and contextFile; the installed aion-extension.json is not available through the approved browser adapter",
-        "bounded_parent_correction": "parent must publish an authenticated installed-manifest projection joined to the actual runtime assistant binding"
+        "adapter": "aionui_assistant_binding_v1",
+        "surface": "aionui",
+        "page_binding": "verifier-owned exact candidate loopback page plus byte-identical installed manifest/context",
+        "recipe": {
+          "before": [
+            {
+              "path": "/selected_board",
+              "selector": "[data-helper-field=\"board\"]",
+              "property": "text"
+            }
+          ],
+          "actions": [
+            {
+              "kind": "assistant_binding",
+              "endpoint": "/api/extensions/assistants",
+              "assistant_id": "pursers-worker-codex",
+              "path": "/assistant_binding"
+            }
+          ],
+          "after": [
+            {
+              "path": "/selected_board",
+              "selector": "[data-helper-field=\"board\"]",
+              "property": "text"
+            }
+          ],
+          "settle_milliseconds": 0
+        },
+        "select_allowlist": [
+          "/assistant_binding",
+          "/selected_board"
+        ],
+        "semantic_basis": "join the exact installed manifest entry to its unique same-origin runtime assistant and resolved context",
+        "parent_contract_ref": "d09757f2e6187fd417ee1017814e92754047ea54"
       },
       "required_evidence": [
         "trusted exact-candidate/board/runtime evidence from the named adapter",
@@ -1120,8 +1430,8 @@
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
-        "shape_contract": "97a5ed712c7a7909642608211dea34601d12564b closed recorder and parent fielded-conjunct schemas",
-        "executable_now": false,
+        "shape_contract": "d09757f2e6187fd417ee1017814e92754047ea54 installed assistant binding contract",
+        "executable_now": true,
         "adversarial_negatives": [
           {
             "mutation": "the Claude worker or reviewer context is substituted",
@@ -1140,21 +1450,81 @@
             "expected": "provenance/correlation rejection"
           }
         ],
-        "deferred": "parent must publish an authenticated installed-manifest projection joined to the actual runtime assistant binding"
+        "deferred": "fresh real installed-host capture, screenshot/AX pairing, and independent 201-row acceptance remain reviewer-owned"
       },
-      "executable_request": null,
-      "canonical_predicate": null,
-      "requested_semantics": {
+      "executable_request": {
+        "schema_version": 1,
+        "kind": "state_transition",
+        "context_bindings": [
+          "observation_id",
+          "run_id",
+          "action_id",
+          "entity",
+          "surface",
+          "board_id",
+          "candidate_commit",
+          "issued_at",
+          "causal_index"
+        ],
+        "recorder": {
+          "source_id": "browser-state-extension.worker-preset-codex",
+          "before": [
+            {
+              "path": "/selected_board",
+              "selector": "[data-helper-field=\"board\"]",
+              "property": "text"
+            }
+          ],
+          "action": [
+            {
+              "kind": "assistant_binding",
+              "endpoint": "/api/extensions/assistants",
+              "assistant_id": "pursers-worker-codex",
+              "path": "/assistant_binding"
+            }
+          ],
+          "after": [
+            {
+              "path": "/selected_board",
+              "selector": "[data-helper-field=\"board\"]",
+              "property": "text"
+            }
+          ]
+        }
+      },
+      "canonical_predicate": {
         "kind": "state_transition",
         "source_id": "browser-state-extension.worker-preset-codex",
-        "operation": "query the installed assistant manifest and the actual runtime preset binding",
-        "selection": "exact assistant pursers-worker-codex",
-        "response_fields": [
-          "/id",
-          "/agentId",
-          "/presetAgentType",
-          "/contextFile",
-          "/resolvedRuntimeContext"
+        "assertions": [
+          {
+            "phase": "before",
+            "path": "/selected_board",
+            "op": "eq",
+            "value": "sandbox-board"
+          },
+          {
+            "phase": "action",
+            "path": "/assistant_binding",
+            "op": "eq",
+            "value": {
+              "manifest_id": "pursers-worker-codex",
+              "runtime_id": "ext-pursers-worker-codex",
+              "agent_id": "codex",
+              "preset_agent_type": "codex",
+              "context_file": "contexts/worker.md",
+              "context_sha256": "c56153bbebca092a72c899985581af055a9e86f62c9c9c5889de406a4a934558",
+              "manifest_sha256": "aba90f00d74dce49d4f14a69a15b37cc5135bb298f858f8221ac19ba37cd25b8",
+              "extension_name": "pursers",
+              "endpoint": "/api/extensions/assistants",
+              "transport": "same-origin-http"
+            }
+          },
+          {
+            "phase": "after",
+            "path": "/selected_board",
+            "op": "eq",
+            "value": "sandbox-board"
+          }
         ]
       }
     },
@@ -1685,9 +2055,9 @@
       },
       "adapter": {
         "support_status": "contract_gap",
-        "channel": "browser_action_state",
-        "missing_channel_or_operation": "trusted_browser_state_v1 exposes displayed KIDs and absence of returned door inputs but no operation-correlated digest of persisted credential files before and after the rerun",
-        "bounded_parent_correction": "parent must publish a secret-free credential-state digest source bound to the exact add-project rerun action"
+        "channel": "fleet_project_add",
+        "missing_channel_or_operation": "ad80007 binds and compares secret-free credential-inclusive before/after state, but the approved Fleet action result selector allowlist omits /doors and /steps/5/{step,status} needed to prove the correlated rerun result",
+        "bounded_parent_correction": "parent must allow the bounded /doors and /steps/5/{step,status} result projection for traced POST /api/projects/add, or publish an equivalent closed result binding"
       },
       "required_evidence": [
         "trusted exact-candidate/board/runtime evidence from the named adapter",
@@ -1697,7 +2067,7 @@
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
-        "shape_contract": "97a5ed712c7a7909642608211dea34601d12564b closed recorder and parent fielded-conjunct schemas",
+        "shape_contract": "ad80007b0f0bc00a77d68333b69ed41df9fe08c0 credential-inclusive Fleet trace; result selector extension pending",
         "executable_now": false,
         "adversarial_negatives": [
           {
@@ -1717,22 +2087,21 @@
             "expected": "provenance/correlation rejection"
           }
         ],
-        "deferred": "parent must publish a secret-free credential-state digest source bound to the exact add-project rerun action"
+        "deferred": "parent must allow the bounded /doors and /steps/5/{step,status} result projection for traced POST /api/projects/add, or publish an equivalent closed result binding"
       },
       "executable_request": null,
       "canonical_predicate": null,
       "requested_semantics": {
-        "kind": "state_transition",
-        "source_id": "browser-state-fleet.add-project-idempotent-rerun",
-        "operation": "rerun POST /api/projects/add for the same project and bind persisted credential state before and after",
-        "selection": "compare operation-correlated worker/reviewer credential digests and assert returned doors are null",
+        "kind": "http_response",
+        "source_id": "fleet-api",
+        "operation": "correlated POST /api/projects/add rerun for the existing sandbox project",
+        "selection": "assert credential-inclusive trace unchanged plus exact already-present result and null doors",
         "response_fields": [
-          "/before/worker_credential_digest",
-          "/before/reviewer_credential_digest",
-          "/action/id",
-          "/after/worker_credential_digest",
-          "/after/reviewer_credential_digest",
-          "/after/doors"
+          "/_evidence/changed",
+          "/_evidence/effect",
+          "/doors",
+          "/steps/5/step",
+          "/steps/5/status"
         ]
       }
     },
@@ -21110,33 +21479,9 @@
   ],
   "contract_gaps": [
     {
-      "id": "extension.reviewer-preset-claude",
-      "missing_channel_or_operation": "GET /api/extensions/assistants exposes resolved id/agentId/context but drops raw presetAgentType and contextFile; the installed aion-extension.json is not available through the approved browser adapter",
-      "bounded_parent_correction": "parent must publish an authenticated installed-manifest projection joined to the actual runtime assistant binding",
-      "owner": "TK-a565b6635db1 parent shared adapter/producer"
-    },
-    {
-      "id": "extension.reviewer-preset-codex",
-      "missing_channel_or_operation": "GET /api/extensions/assistants exposes resolved id/agentId/context but drops raw presetAgentType and contextFile; the installed aion-extension.json is not available through the approved browser adapter",
-      "bounded_parent_correction": "parent must publish an authenticated installed-manifest projection joined to the actual runtime assistant binding",
-      "owner": "TK-a565b6635db1 parent shared adapter/producer"
-    },
-    {
-      "id": "extension.worker-preset-claude",
-      "missing_channel_or_operation": "GET /api/extensions/assistants exposes resolved id/agentId/context but drops raw presetAgentType and contextFile; the installed aion-extension.json is not available through the approved browser adapter",
-      "bounded_parent_correction": "parent must publish an authenticated installed-manifest projection joined to the actual runtime assistant binding",
-      "owner": "TK-a565b6635db1 parent shared adapter/producer"
-    },
-    {
-      "id": "extension.worker-preset-codex",
-      "missing_channel_or_operation": "GET /api/extensions/assistants exposes resolved id/agentId/context but drops raw presetAgentType and contextFile; the installed aion-extension.json is not available through the approved browser adapter",
-      "bounded_parent_correction": "parent must publish an authenticated installed-manifest projection joined to the actual runtime assistant binding",
-      "owner": "TK-a565b6635db1 parent shared adapter/producer"
-    },
-    {
       "id": "fleet.add-project-idempotent-rerun",
-      "missing_channel_or_operation": "trusted_browser_state_v1 exposes displayed KIDs and absence of returned door inputs but no operation-correlated digest of persisted credential files before and after the rerun",
-      "bounded_parent_correction": "parent must publish a secret-free credential-state digest source bound to the exact add-project rerun action",
+      "missing_channel_or_operation": "ad80007 binds and compares secret-free credential-inclusive before/after state, but the approved Fleet action result selector allowlist omits /doors and /steps/5/{step,status} needed to prove the correlated rerun result",
+      "bounded_parent_correction": "parent must allow the bounded /doors and /steps/5/{step,status} result projection for traced POST /api/projects/add, or publish an equivalent closed result binding",
       "owner": "TK-a565b6635db1 parent shared adapter/producer"
     },
     {
