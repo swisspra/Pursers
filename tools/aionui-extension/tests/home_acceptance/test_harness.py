@@ -1125,6 +1125,51 @@ def test_all_of_nonvisual_fact_without_typed_evidence_is_rejected(
         )
 
 
+@pytest.mark.parametrize(
+    "identifier",
+    (
+        "door_connect",
+        "ticket_offer_claim",
+        "result_visible",
+        "clean_reconnect_after_rotation",
+        "final.quickstart-candidate-flow",
+        "final.o1-readiness-rollback",
+    ),
+)
+def test_behavioral_flow_facts_require_fielded_typed_evidence(
+    identifier: str,
+) -> None:
+    predicate = harness_module.REQUIRED_FACTS[identifier]["predicate"]
+    assert predicate["operator"] == "all_of"
+    typed = harness_module._canonical_typed_conjuncts(identifier)
+    assert typed
+    assert all(
+        set(conjunct) == {"kind", "source_id", "assertions"}
+        and conjunct["assertions"]
+        for conjunct in typed
+    )
+
+
+@pytest.mark.parametrize(
+    ("identifier", "prior_id"),
+    (
+        ("ticket_offer_claim", "five_workers_three_reviewers"),
+        ("result_visible", "ticket_submit_independent_review"),
+        ("clean_reconnect_after_rotation", "pause_resume_stop"),
+        ("final.quickstart-candidate-flow", "clean_reconnect_after_rotation"),
+    ),
+)
+def test_behavioral_flow_facts_pin_their_exact_prior_state(
+    identifier: str, prior_id: str,
+) -> None:
+    conjuncts = harness_module.REQUIRED_FACTS[identifier]["predicate"]["conjuncts"]
+    assert [item for item in conjuncts if item["kind"] == "prior_state"] == [{
+        "kind": "prior_state",
+        "observation": prior_id,
+        "expected": harness_module.REQUIRED_FACTS[prior_id]["expected_fact"],
+    }]
+
+
 def test_prior_state_requires_same_entity_run_and_causal_precedence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
