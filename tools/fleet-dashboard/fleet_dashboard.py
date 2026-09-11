@@ -6405,13 +6405,13 @@ function renderBoardsHub(){const cards=[];for(const [central,d] of Object.entrie
 function workerByName(central,name){return (hubWorkers[central]?.workers||[]).find(w=>w.name===name)}
 function agentIdentity(a){return String(a.principal_id||a.agent_id||a.name||a.agent_name||'unknown')}
 function agentIdentityLabel(a){const value=agentIdentity(a);return value.length>12?'…'+value.slice(-12):value}
-function workerForAgent(central,a){const workers=hubWorkers[central]?.workers||[],identity=agentIdentity(a),exact=workers.find(w=>agentIdentity(w)===identity);if(exact)return exact;const matches=workers.filter(w=>w.name===a.agent_name);return matches.length===1?matches[0]:null}
+function workerForAgent(central,a){const workers=hubWorkers[central]?.workers||[],identity=agentIdentity(a),exact=workers.find(w=>agentIdentity(w)===identity);if(exact)return exact;const matches=workers.filter(w=>w.name===a.agent_name),liveMatches=(fleetData[central]?.agents||[]).filter(live=>live.agent_name===a.agent_name);return matches.length===1&&liveMatches.length===1?matches[0]:null}
 function renderRoleChips(seats,fallback){const roles=[];for(const s of seats||[]){if(!s.role||!s.board_id)continue;roles.push({board_id:s.board_id,role:s.role})}if(!roles.length)return esc(fallback||'worker');const unique=new Set(roles.map(r=>r.role));if(unique.size===1){const role=roles[0].role,boards=roles.map(r=>esc(r.board_id)).join(', ');return '<span class="role-chip" title="'+esc(role)+' on '+boards+'">'+esc(role)+' (all boards)</span>'}return roles.map(r=>'<span class="role-chip" title="'+esc(r.board_id)+': '+esc(r.role)+'"><span class="chip-board">'+esc(r.board_id)+'</span>: <span class="chip-role">'+esc(r.role)+'</span></span>').join('')}
 function liveAgentCard(central,a){const managed=workerForAgent(central,a),liveWork=agentLiveWork(a),managedWork=managed?.current_work||[],work=[...liveWork,...managedWork.filter(x=>!liveWork.some(s=>s.board_id===x.board_id&&s.current_ticket_id===x.ticket_id))],identity=agentIdentityLabel(a),duplicate=a.duplicate_name?`<span class="warning">Duplicate name · identity ${esc(identity)}</span>`:`<span class="meta">Identity ${esc(identity)}</span>`;return `<article class="agent-card" data-agent-identity="${esc(agentIdentity(a))}"><div class="agent-card-head"><div><span class="agent-role">${renderRoleChips(a.seats,managed?.role||'worker')}</span><h3>${esc(a.agent_name)}</h3><span class="meta">${esc(central)} · ${esc((a.boards||[]).join(', '))}</span>${duplicate}</div><div class="agent-card-state"><span class="status">${esc(a.pool_status)}</span><span class="meta">${esc(relativeAge(a.last_seen))}</span></div></div>${work.length?work.map(s=>`<div class="work-row"><span class="severity"></span><div>${agentTicketLink(central,s)}<span class="meta">${esc(s.project||`${s.role||managed?.role||'worker'} · ${s.board_id}`)}</span></div></div>`).join(''):'<p class="empty">ว่าง/idle</p>'}${managed?managedControls(central,managed,false):'<span class="meta">Live pool seat · not locally managed</span>'}</article>`}
 function managedControls(central,w,includeWork=true){const p=w.pressure,work=w.current_work||[],logs=w.log_tail||[];return `<div class="pressure-line">${p?pressureBadge(p):'<span class="status">pressure unavailable</span>'}<span class="meta">${p?`${esc(p.latest_estimated_tokens)} tokens / poll`:'No local sample'}</span></div>${includeWork?work.map(x=>`<div class="work-row"><span class="severity"></span><div><b>${esc(x.ticket_title||x.ticket_id)}</b><span class="meta">${esc(x.role||w.role)} · ${esc(x.board_id)}</span></div><span class="id">${esc(x.ticket_id)}</span></div>`).join(''):''}<div class="agent-actions"><button data-hub-agent-action="test" data-central="${esc(central)}" data-name="${esc(w.name)}">Test</button><button data-hub-agent-action="start" data-central="${esc(central)}" data-name="${esc(w.name)}" ${w.running?'disabled':''}>Start</button><button data-hub-agent-action="stop" data-central="${esc(central)}" data-name="${esc(w.name)}" ${w.running?'':'disabled'}>Stop</button><button data-hub-agent-action="restart" data-central="${esc(central)}" data-name="${esc(w.name)}" ${w.running?'':'disabled'}>Restart</button>${w.seat_exists?'':`<button data-hub-copy="${esc(w.seat_admin_command)}">Copy seat command</button>`}</div><details><summary>Log tail · last 20 lines</summary><pre class="log-tail">${esc(logs.join('\n')||'No log output yet.')}</pre></details>`}
 function renderGuide(){if(!hubGuide)return'';return `<section class="card pool"><div class="section-title"><h3>Finish ${esc(hubGuide.name)}</h3><span class="status">2 steps</span></div><div class="guide"><div class="guide-step"><b>1 · Provision seat</b><p class="muted">Run once, copy it, then Refresh to auto-detect.</p><code>${esc(hubGuide.seat_admin_command||'Seat already detected.')}</code>${hubGuide.seat_exists?'':'<button type="button" class="button" data-hub-copy="'+esc(hubGuide.seat_admin_command)+'">Copy command</button>'}</div><div class="guide-step"><b>2 · Start agent</b><p class="muted">Start unlocks after the seat and token are detected.</p><button type="button" class="primary-action" data-hub-agent-action="start" data-central="${esc(hubGuide.central)}" data-name="${esc(hubGuide.name)}" ${hubGuide.seat_exists?'':'disabled'}>Start</button></div></div></section>`}
 function inactiveAgentDrawer(){const rows=[];for(const [central,d] of Object.entries(fleetData))for(const a of d.inactive_agents||[])rows.push({central,agent:a});if(!rows.length)return'';return `<details id="inactive-agent-drawer" class="card pool"><summary>Retired / inactive agents · ${rows.length}</summary><div class="table-scroll"><table><thead><tr><th>Name</th><th>Lifecycle</th><th>Board</th><th>Stable identity</th><th>Last seen</th></tr></thead><tbody>${rows.sort((x,y)=>x.agent.agent_name.localeCompare(y.agent.agent_name)||agentIdentity(x.agent).localeCompare(agentIdentity(y.agent))).map(x=>`<tr><td><b>${esc(x.agent.agent_name)}</b><div class="meta">${esc(x.central)}</div></td><td><span class="status">${esc(x.agent.lifecycle_status||'inactive')}</span></td><td>${esc(x.agent.board_id||'—')}</td><td class="id">${esc(agentIdentityLabel(x.agent))}</td><td>${esc(relativeAge(x.agent.last_seen))}</td></tr>`).join('')}</tbody></table></div></details>`}
-function renderAgentsHub(){const records=[],seen=new Set();for(const [central,d] of Object.entries(fleetData)){for(const a of d.agents||[]){const key=`${central}/${agentIdentity(a)}`;if(!seen.has(key))records.push({central,agent:a});seen.add(key)}for(const w of hubWorkers[central]?.workers||[]){const stable=Boolean(w.principal_id||w.agent_id),liveMatches=(d.agents||[]).filter(a=>a.agent_name===w.name);if(!stable&&liveMatches.length===1)continue;const key=`${central}/${agentIdentity(w)}`;if(!seen.has(key)){const work=w.current_work||[];records.push({central,agent:{agent_name:w.name,agent_id:w.agent_id,principal_id:w.principal_id,pool_status:work.length?'busy':w.running?'available':'stale',boards:[...new Set(work.map(x=>x.board_id).filter(Boolean))],seats:[],last_seen:w.last_seen||null}});seen.add(key)}}}const cards=records.filter(x=>showStaleAgents||x.agent.pool_status==='busy'||x.agent.pool_status==='available').sort((a,b)=>compareAgents(a.agent,b.agent)||a.central.localeCompare(b.central)||agentIdentity(a.agent).localeCompare(agentIdentity(b.agent))).map(x=>liveAgentCard(x.central,x.agent)),action=`<div class="agent-actions">${agentVisibilityToggle()}<button id="new-agent" class="primary-action" type="button">+ New agent</button></div>`;return `${pageHead('Agents','Unified agent pool','Live workers, reviewers, local API agents, claims, pressure, controls, and bounded logs.',action)}${renderGuide()}<p id="hub-agent-status" class="muted"></p><section class="agent-grid">${cards.join('')||`<p class="empty">${showStaleAgents?'No agents available.':'No active agents available.'}</p>`}</section>${inactiveAgentDrawer()}`}
+function renderAgentsHub(){const records=[],seen=new Set();for(const [central,d] of Object.entries(fleetData)){for(const a of d.agents||[]){const key=`${central}/${agentIdentity(a)}`;if(!seen.has(key))records.push({central,agent:a});seen.add(key)}for(const w of hubWorkers[central]?.workers||[]){const stable=Boolean(w.principal_id||w.agent_id),liveMatches=(d.agents||[]).filter(a=>a.agent_name===w.name);if(!stable&&liveMatches.length)continue;const key=`${central}/${agentIdentity(w)}`;if(!seen.has(key)){const work=w.current_work||[];records.push({central,agent:{agent_name:w.name,agent_id:w.agent_id,principal_id:w.principal_id,pool_status:work.length?'busy':w.running?'available':'stale',boards:[...new Set(work.map(x=>x.board_id).filter(Boolean))],seats:[],last_seen:w.last_seen||null}});seen.add(key)}}}const cards=records.filter(x=>showStaleAgents||x.agent.pool_status==='busy'||x.agent.pool_status==='available').sort((a,b)=>compareAgents(a.agent,b.agent)||a.central.localeCompare(b.central)||agentIdentity(a.agent).localeCompare(agentIdentity(b.agent))).map(x=>liveAgentCard(x.central,x.agent)),action=`<div class="agent-actions">${agentVisibilityToggle()}<button id="new-agent" class="primary-action" type="button">+ New agent</button></div>`;return `${pageHead('Agents','Unified agent pool','Live workers, reviewers, local API agents, claims, pressure, controls, and bounded logs.',action)}${renderGuide()}<p id="hub-agent-status" class="muted"></p><section class="agent-grid">${cards.join('')||`<p class="empty">${showStaleAgents?'No agents available.':'No active agents available.'}</p>`}</section>${inactiveAgentDrawer()}`}
 function renderOperationsHub(){const cards=centralLabels.map(central=>{const d=fleetData[central],routes=(d?.boards||[]).map(b=>`<a href="${boardHref(central,b.board_id,'routes')}">${esc(b.label)} routes</a>`).join('');return `<article class="ops-card"><p class="eyebrow">${esc(central)}</p><h3>Control plane</h3><p class="muted">Policy, protocol pressure, and provenance routes.</p><div class="card-actions"><a class="primary-action" href="${centralHref(central,'config')}">Config</a><a href="${centralHref(central,'overhead')}">Overhead</a></div><div class="route-links">${routes||'<span class="empty">Boards loading…</span>'}</div></article>`}).join('');return `${pageHead('Operations','Operations','Coordinator policy, overhead details, and routes—without expanding the board write surface.')}<section class="ops-grid">${cards||'<div class="skeleton"></div>'}</section><section class="card pool"><h3>Guardrails</h3><p class="muted">Board writes remain exactly <code>coordinator_config</code> and <code>coordinator_intake</code>. Agent actions stay local under <code>/api/workers</code>.</p></section>`}
 function renderHub(){const host=document.querySelector('#central-sections'),kind=navKind();if(!['overview','boards','agents','operations'].includes(kind))return;host.innerHTML=kind==='boards'?renderBoardsHub():kind==='agents'?renderAgentsHub():kind==='operations'?renderOperationsHub():renderOverview();const newest=Object.values(fleetData).map(d=>d.generated_at).sort().at(-1);document.querySelector('#state').textContent=newest?`Updated ${fmt(newest)}`:'Connecting to centrals…';bindInteractive(host);bindHub();renderSearchResults();syncNav()}
 renderFleet=renderHub;
@@ -6542,7 +6542,7 @@ if(navKind()==='overview')renderHub();
     "</script></body>",
     r"""
 </script><script>
-let doorsData = {doors: []};
+let doorsData = {doors: []}, doorRotateOutcome = '';
 function doorsPanel() {
   const doors = doorsData.doors || [];
   return `<section class="card pool" id="doors-panel">
@@ -6551,7 +6551,7 @@ function doorsPanel() {
       <span class="status">${doors.length} door keys</span>
     </div>
     <p class="muted">Per-project door credentials for worker and reviewer seats. Copy door string to onboard a seat, or Rotate to generate a new key.</p>
-    <div id="door-rotate-warning" class="warning" style="display:none;margin-bottom:10px;"></div>
+    <div id="door-rotate-warning" class="warning" style="display:${doorRotateOutcome?'block':'none'};margin-bottom:10px;">${esc(doorRotateOutcome)}</div>
     <div id="door-copy-status" class="status pass" style="display:none;margin-bottom:10px;"></div>
     <div id="door-action-status" class="error" role="alert" style="display:none;margin-bottom:10px;"></div>
     <div class="table-scroll">
@@ -6625,10 +6625,12 @@ refreshSeats = async function() {
 };
 
 const seatClickBeforeDoors = seatClick;
-function showDoorActionFailure() {
+function showDoorActionFailure(credentialChanged=false) {
   const failure = document.querySelector('#door-action-status');
   if (failure) {
-    failure.textContent = 'Door action failed. No credential was changed; retry or inspect bounded server logs.';
+    failure.textContent = credentialChanged
+      ? 'Door rotated, but follow-up delivery or refresh failed. The credential was changed; refresh Fleet state and recover the new door.'
+      : 'Door action failed. No credential was changed; retry or inspect bounded server logs.';
     failure.style.display = 'block';
   }
 }
@@ -6638,6 +6640,7 @@ seatClick = async function(event) {
     const action = doorBtn.dataset.doorAction;
     const board = doorBtn.dataset.board;
     const role = doorBtn.dataset.role;
+    let credentialChanged = false;
     doorBtn.disabled = true;
     const central = centralLabels[0];
     try {
@@ -6656,19 +6659,27 @@ seatClick = async function(event) {
         }
       } else if (action === 'rotate') {
         const res = await configPost(`/api/doors/rotate?${apiCentral(central)}`, {board, role});
-        if (navigator.clipboard && navigator.clipboard.writeText) {
-          await navigator.clipboard.writeText(res.door_string);
+        credentialChanged = true;
+        let copyFailed = false;
+        try {
+          if (navigator.clipboard && navigator.clipboard.writeText) await navigator.clipboard.writeText(res.door_string);
+          else copyFailed = true;
+        } catch (_clipboardError) {
+          copyFailed = true;
         }
+        doorRotateOutcome = copyFailed
+          ? `Rotated ${board} (${role}) to key ${res.kid}. Credential changed, but clipboard copy failed; use Copy door string to recover it.`
+          : `Rotated ${board} (${role}) to key ${res.kid}. Warning: ${res.warning}`;
         const warn = document.querySelector('#door-rotate-warning');
         if (warn) {
-          warn.textContent = `Rotated ${board} (${role}) to key ${res.kid}. Warning: ${res.warning}`;
+          warn.textContent = doorRotateOutcome;
           warn.style.display = 'block';
         }
         await refreshSeats();
         renderHub();
       }
     } catch (e) {
-      showDoorActionFailure();
+      showDoorActionFailure(credentialChanged);
     } finally {
       doorBtn.disabled = false;
     }

@@ -7721,6 +7721,72 @@ def test_agents_hub_keeps_duplicate_names_distinct_and_exposes_inactive_drawer()
     assert "retired" in result
 
 
+def test_agents_hub_does_not_attach_unidentified_worker_to_duplicate_live_names() -> None:
+    script = "\n".join(
+        re.findall(r"<script>(.*?)</script>", dashboard.HTML, re.DOTALL | re.IGNORECASE)
+    )
+    lines = script.splitlines()
+
+    def source(prefix: str) -> str:
+        return next(line for line in lines if line.startswith(prefix))
+
+    agents = [
+        {
+            "agent_name": "same-name",
+            "principal_id": principal_id,
+            "duplicate_name": True,
+            "pool_status": "available",
+            "boards": ["pursers"],
+            "seats": [],
+            "last_seen": "2030-01-01T11:59:00Z",
+        }
+        for principal_id in ("PR-111111111111", "PR-222222222222")
+    ]
+    workers = {
+        "workers": [
+            {
+                "name": "same-name",
+                "role": "worker",
+                "running": True,
+                "current_work": [],
+            }
+        ]
+    }
+    program = "\n".join(
+        [
+            source("const esc="),
+            source("const agentStatusRank="),
+            source("function compareAgents("),
+            source("function relativeAge("),
+            source("function clippedAgentTitle("),
+            source("function agentLiveWork("),
+            source("function agentTicketLink("),
+            source("function agentVisibilityToggle("),
+            source("function pageHead("),
+            source("function agentIdentity("),
+            source("function agentIdentityLabel("),
+            source("function workerForAgent("),
+            source("function renderRoleChips("),
+            source("function liveAgentCard("),
+            source("function inactiveAgentDrawer("),
+            source("function renderAgentsHub("),
+            "const renderGuide=()=>'';",
+            "const managedControls=()=>'<span>AMBIGUOUS-CONTROLS</span>';",
+            "Date.now=()=>new Date('2030-01-01T12:00:00Z').getTime();",
+            f"let fleetData={{fleet:{{agents:{json.dumps(agents)},inactive_agents:[]}}}},hubWorkers={{fleet:{json.dumps(workers)}}},hubGuide=null,showStaleAgents=false;",
+            "console.log(renderAgentsHub());",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "-e", program], check=True, capture_output=True, text=True
+    ).stdout
+
+    assert result.count('<article class="agent-card"') == 2
+    assert result.count('data-agent-identity="PR-') == 2
+    assert "AMBIGUOUS-CONTROLS" not in result
+    assert "Live pool seat · not locally managed" in result
+
+
 def test_overview_renders_exact_online_count_separately_from_central_health() -> None:
     script = "\n".join(
         re.findall(r"<script>(.*?)</script>", dashboard.HTML, re.DOTALL | re.IGNORECASE)
@@ -7785,16 +7851,16 @@ def test_door_failure_is_bounded_inline_and_does_not_echo_exception() -> None:
     script = "\n".join(
         re.findall(r"<script>(.*?)</script>", dashboard.HTML, re.DOTALL | re.IGNORECASE)
     )
-    helper = script.split("function showDoorActionFailure()", 1)[1].split(
+    helper = script.split("function showDoorActionFailure", 1)[1].split(
         "seatClick = async function", 1
     )[0]
-    helper = "function showDoorActionFailure()" + helper
+    helper = "function showDoorActionFailure" + helper
     program = "\n".join(
         [
             "const node={textContent:'',style:{display:'none'}};",
             "const document={querySelector:()=>node};",
             helper,
-            "showDoorActionFailure(new Error('secret-token-value'));",
+            "showDoorActionFailure(false,new Error('secret-token-value'));",
             "console.log(JSON.stringify(node));",
         ]
     )
@@ -7811,6 +7877,47 @@ def test_door_failure_is_bounded_inline_and_does_not_echo_exception() -> None:
     )[0]
     assert "alert(`Door action failed" not in door_handler
     assert "e.message" not in door_handler
+
+
+def test_rotate_success_survives_clipboard_rejection_and_refreshes() -> None:
+    script = "\n".join(
+        re.findall(r"<script>(.*?)</script>", dashboard.HTML, re.DOTALL | re.IGNORECASE)
+    )
+    handler = "function showDoorActionFailure" + script.split(
+        "function showDoorActionFailure", 1
+    )[1].split("const bindSeatsBeforeDoors", 1)[0]
+    program = "\n".join(
+        [
+            "let seatClick,doorRotateOutcome='',refreshCount=0,renderCount=0;",
+            "const seatClickBeforeDoors=()=>{};",
+            "const warning={textContent:'',style:{display:'none'}};",
+            "const failure={textContent:'',style:{display:'none'}};",
+            "const document={querySelector:(s)=>s==='#door-rotate-warning'?warning:failure};",
+            "const navigator={clipboard:{writeText:async()=>{throw new Error('secret clipboard detail')}}};",
+            "const centralLabels=['fleet'],apiCentral=()=>'',configPost=async()=>({door_string:'door-secret',kid:'kid-new',warning:'old key revoked'});",
+            "const refreshSeats=async()=>{refreshCount++},renderHub=()=>{renderCount++};",
+            handler,
+            "const button={dataset:{doorAction:'rotate',board:'pursers',role:'worker'},disabled:false};",
+            "const event={target:{closest:(s)=>s==='[data-door-action]'?button:null}};",
+            "seatClick(event).then(()=>console.log(JSON.stringify({warning,failure,doorRotateOutcome,refreshCount,renderCount,disabled:button.disabled})));",
+        ]
+    )
+    result = json.loads(
+        subprocess.run(
+            ["node", "-e", program], check=True, capture_output=True, text=True
+        ).stdout
+    )
+
+    assert result["refreshCount"] == 1
+    assert result["renderCount"] == 1
+    assert result["disabled"] is False
+    assert result["warning"]["style"]["display"] == "block"
+    assert "kid-new" in result["warning"]["textContent"]
+    assert "clipboard copy failed" in result["warning"]["textContent"]
+    assert "Credential changed" in result["warning"]["textContent"]
+    assert result["doorRotateOutcome"] == result["warning"]["textContent"]
+    assert result["failure"]["style"]["display"] == "none"
+    assert "secret clipboard detail" not in json.dumps(result)
 
 
 def test_clean_text_redaction_is_linear_time_and_behavior_preserved() -> None:
