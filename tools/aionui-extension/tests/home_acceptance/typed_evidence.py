@@ -772,7 +772,8 @@ def _verify_evidence(evidence: Any, trust: dict[str, Any]) -> dict[str, Any]:
                 or action_response["path"] != "/api/attention"
                 or action_response["status"] != record["entry"]["status"]
                 or action_response["selected"] != expected_selected
-                or _digest(items) != record["entry"]["after_sha256"]
+                or _digest({"items": items})
+                != record["entry"]["after_sha256"]
                 or _digest({"items": items})
                 != record["entry"]["result_sha256"]
             ):
@@ -1389,7 +1390,7 @@ def _record_log(request: dict[str, Any], trust: dict[str, Any], context: dict[st
         if (
             action_response["status"] != entry["status"]
             or action_response["selected"] != expected_selected
-            or _digest(items) != entry["after_sha256"]
+            or _digest({"items": items}) != entry["after_sha256"]
             or _digest({"items": items}) != entry["result_sha256"]
         ):
             raise TypedEvidenceError(
