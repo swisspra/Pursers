@@ -579,6 +579,30 @@ def test_browser_state_transition_is_recipe_and_source_bound(
         record_evidence(_request("state_transition", changed, context), trust)
 
 
+def test_browser_fetch_json_action_has_closed_pointer_contract() -> None:
+    action = {
+        "kind": "fetch_json",
+        "method": "POST",
+        "endpoint": "/pursers/onboarding/recover",
+        "body": {
+            "board": BOARD,
+            "role": "worker",
+            "seat_name": "worker-1",
+        },
+        "pointer": "/body/mcp_definition/transport",
+        "path": "/mcp_transport",
+    }
+    assert typed_evidence._browser_actions([action]) == [action]
+
+    invalid = {**action, "pointer": "/body/~2invalid"}
+    with pytest.raises(TypedEvidenceError, match="JSON pointer is invalid"):
+        typed_evidence._browser_actions([invalid])
+
+    extra = {**action, "script": "window.evil()"}
+    with pytest.raises(TypedEvidenceError, match="fields do not match schema"):
+        typed_evidence._browser_actions([extra])
+
+
 def test_http_response_real_roundtrip_and_all_of(tmp_path: Path, http_server: str) -> None:
     trust = _trust(tmp_path, http_server)
     evidence = record_evidence(_request("http_response", _http_recorder()), trust)

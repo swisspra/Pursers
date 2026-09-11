@@ -92,6 +92,9 @@ TRANSITION_ACTION_KEYS = {
     "press_key": {"kind", "selector", "key", "path"},
     "wait": {"kind", "milliseconds", "path"},
     "fetch": {"kind", "method", "endpoint", "body", "path"},
+    "fetch_json": {
+        "kind", "method", "endpoint", "body", "pointer", "path",
+    },
 }
 
 
@@ -1014,12 +1017,24 @@ const transitionResult = await cdp('Runtime.evaluate', {
     const before = read(recipe.before)
     const actionAt = new Date().toISOString()
     const action = {}
+    const selectJson = (value, pointer) => {
+      let current = value
+      for (const encoded of pointer.slice(1).split('/')) {
+        const token = encoded.replace(/~1/g, '/').replace(/~0/g, '~')
+        if (current === null || typeof current !== 'object' ||
+            !Object.prototype.hasOwnProperty.call(current, token)) {
+          throw new Error('fetch JSON pointer absent')
+        }
+        current = current[token]
+      }
+      return current
+    }
     for (const spec of recipe.actions) {
       if (spec.kind === 'observe') action[spec.path] = 'observed'
       else if (spec.kind === 'wait') {
         await new Promise(resolve => setTimeout(resolve, spec.milliseconds))
         action[spec.path] = spec.milliseconds
-      } else if (spec.kind === 'fetch') {
+      } else if (spec.kind === 'fetch' || spec.kind === 'fetch_json') {
         const init = { method: spec.method, credentials: 'same-origin', cache: 'no-store', headers: { accept: 'application/json' } }
         if (spec.body !== null) {
           init.headers['content-type'] = 'application/json'
@@ -1028,7 +1043,9 @@ const transitionResult = await cdp('Runtime.evaluate', {
         const response = await fetch(spec.endpoint, init)
         let body = null
         try { body = await response.json() } catch (_error) {}
-        action[spec.path] = { status: response.status, body: body }
+        const envelope = { status: response.status, body: body }
+        action[spec.path] = spec.kind === 'fetch_json'
+          ? selectJson(envelope, spec.pointer) : envelope
       } else {
         const node = document.querySelector(spec.selector)
         if (!node) throw new Error('action selector absent: ' + spec.selector)
@@ -1287,7 +1304,7 @@ def _validate_transition_actions(value: Any) -> list[dict[str, Any]]:
             or not 0 <= item["milliseconds"] <= 10_000
         ):
             raise _fail(EXIT_USAGE, "transition wait is invalid")
-        if kind == "fetch" and (
+        if kind in {"fetch", "fetch_json"} and (
             item["method"] not in {"GET", "POST", "PUT", "PATCH", "DELETE"}
             or not isinstance(item["endpoint"], str)
             or not item["endpoint"].startswith("/")
@@ -1295,6 +1312,13 @@ def _validate_transition_actions(value: Any) -> list[dict[str, Any]]:
             or item["body"] is not None and not isinstance(item["body"], dict)
         ):
             raise _fail(EXIT_USAGE, "transition fetch action is invalid")
+        if kind == "fetch_json" and (
+            not isinstance(item["pointer"], str)
+            or len(item["pointer"]) > 512
+            or re.fullmatch(r"(?:/(?:[^~/]|~[01])*)+", item["pointer"])
+            is None
+        ):
+            raise _fail(EXIT_USAGE, "transition fetch JSON pointer is invalid")
     return value
 
 

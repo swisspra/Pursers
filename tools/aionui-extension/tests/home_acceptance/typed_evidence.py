@@ -131,6 +131,9 @@ BROWSER_ACTION_KEYS = {
     "press_key": {"kind", "selector", "key", "path"},
     "wait": {"kind", "milliseconds", "path"},
     "fetch": {"kind", "method", "endpoint", "body", "path"},
+    "fetch_json": {
+        "kind", "method", "endpoint", "body", "pointer", "path",
+    },
 }
 
 
@@ -520,7 +523,7 @@ def _browser_actions(value: Any) -> list[dict[str, Any]]:
             or not 0 <= action["milliseconds"] <= 10_000
         ):
             raise TypedEvidenceError("browser wait is invalid")
-        if kind == "fetch":
+        if kind in {"fetch", "fetch_json"}:
             endpoint = action["endpoint"]
             if (
                 action["method"] not in {"GET", "POST", "PUT", "PATCH", "DELETE"}
@@ -529,6 +532,13 @@ def _browser_actions(value: Any) -> list[dict[str, Any]]:
                 or action["body"] is not None and not isinstance(action["body"], dict)
             ):
                 raise TypedEvidenceError("browser fetch action is invalid")
+        if kind == "fetch_json" and (
+            not isinstance(action["pointer"], str)
+            or len(action["pointer"]) > 512
+            or re.fullmatch(r"(?:/(?:[^~/]|~[01])*)+", action["pointer"])
+            is None
+        ):
+            raise TypedEvidenceError("browser fetch JSON pointer is invalid")
     return value
 
 

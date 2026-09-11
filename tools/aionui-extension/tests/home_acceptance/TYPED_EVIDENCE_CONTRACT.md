@@ -78,8 +78,12 @@ trust pins the installed `browser_observer.py` plus `observer.json`, surface,
 origin, page, candidate, board, and a closed recipe. Recipes allow only bounded
 DOM reads (`text`, `value`, `checked`, `disabled`, `count`, `class`, `hidden`)
 and the explicit actions `observe`, `click`, `set_value`, `select`, `submit`,
-the closed navigation-key action `press_key`, `wait`, and same-origin `fetch`.
-Arbitrary script expressions and arbitrary key strings are not accepted.
+the closed navigation-key action `press_key`, `wait`, same-origin `fetch`, and
+same-origin `fetch_json`. The latter selects one required RFC 6901 JSON pointer
+from the real `{status, body}` response envelope and fails if it is absent;
+this permits exact structured action-result assertions without retaining a
+whole response or request credential. Arbitrary script expressions and
+arbitrary key strings are not accepted.
 The observer executes the recipe in its isolated browser world and returns the
 actual correlated before/action/after selections.
 

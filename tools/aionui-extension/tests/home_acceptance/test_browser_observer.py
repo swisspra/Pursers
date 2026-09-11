@@ -680,6 +680,31 @@ def test_typed_browser_transition_is_closed_and_runtime_bound(
     assert result["after"]["selected"] == {"/steps": 3}
     assert result["context"] == spec["context"]
 
+    transport = {
+        "type": "stdio",
+        "command": "pursers-wait-bridge",
+        "args": [],
+        "env": {},
+    }
+    spec["recipe"]["actions"] = [{
+        "kind": "fetch_json",
+        "method": "POST",
+        "endpoint": "/pursers/onboarding/recover",
+        "body": {
+            "board": BOARD,
+            "role": "worker",
+            "seat_name": "worker-1",
+        },
+        "pointer": "/body/mcp_definition/transport",
+        "path": "/mcp_transport",
+    }]
+    observed["action"] = {"/mcp_transport": transport}
+    output = io.StringIO()
+    assert observer_module.transition(io.StringIO(json.dumps(spec)), output) == 0
+    assert json.loads(output.getvalue())["action"]["selected"] == {
+        "/mcp_transport": transport
+    }
+
     observed["after"] = {"/decoy": 3}
     with pytest.raises(observer_module.ObserverError, match="selectors differ"):
         observer_module.transition(io.StringIO(json.dumps(spec)), io.StringIO())
@@ -694,6 +719,20 @@ def test_typed_browser_transition_rejects_arbitrary_script_action() -> None:
         observer_module._read_transition_spec(io.StringIO(json.dumps(spec)))
 
 
+def test_typed_browser_transition_rejects_invalid_fetch_json_pointer() -> None:
+    spec = _transition_spec()
+    spec["recipe"]["actions"] = [{
+        "kind": "fetch_json",
+        "method": "GET",
+        "endpoint": "/status",
+        "body": None,
+        "pointer": "/body/~2invalid",
+        "path": "/selected",
+    }]
+    with pytest.raises(observer_module.ObserverError, match="JSON pointer is invalid"):
+        observer_module._read_transition_spec(io.StringIO(json.dumps(spec)))
+
+
 def test_ego_transition_uses_isolated_world_and_closed_operations() -> None:
     script = observer_module.EGO_TRANSITION_SCRIPT % (
         json.dumps("acceptance"),
@@ -704,6 +743,8 @@ def test_ego_transition_uses_isolated_world_and_closed_operations() -> None:
     assert "pursers-verifier-transition" in script
     assert "eval(" not in script
     assert "spec.kind === 'fetch'" in script
+    assert "spec.kind === 'fetch_json'" in script
+    assert "selectJson(envelope, spec.pointer)" in script
     assert "spec.kind === 'click'" in script
 
 
