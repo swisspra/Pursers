@@ -769,6 +769,158 @@ def test_ego_transition_uses_isolated_world_and_closed_operations() -> None:
     assert "spec.kind === 'click'" in script
 
 
+@pytest.mark.parametrize("mode", ["success", "wrong_origin", "duplicate"])
+def test_ego_response_capture_is_target_bound_exact_once_and_restored(mode: str) -> None:
+    recipe = _transition_spec()["recipe"]
+    recipe["actions"] = [{
+        "kind": "click_response_json",
+        "selector": "#recover-seat",
+        "method": "POST",
+        "endpoint": "/pursers/onboarding/recover",
+        "pointer": "/body/mcp_definition/transport",
+        "path": "/mcp_transport",
+    }]
+    recipe["before"] = []
+    recipe["after"] = []
+    recipe["settle_milliseconds"] = 25
+    generated = observer_module.EGO_TRANSITION_SCRIPT % (
+        json.dumps("acceptance"),
+        json.dumps("http://127.0.0.1:18921/home"),
+        json.dumps(recipe),
+    )
+    prelude = r"""
+import vm from 'node:vm'
+
+const mode = __MODE__
+const pageUrl = 'http://127.0.0.1:18921/home'
+const helperOrigin = 'http://127.0.0.1:43121'
+const syntheticToken = 'synthetic-browser-test-token'
+const transport = { type: 'stdio', command: 'pursers-wait-bridge', args: [], env: {} }
+const emitted = []
+const pending = []
+const originalFetch = async function (_input, _init) {
+  return new Response(JSON.stringify({ ok: true, mcp_definition: { transport } }), {
+    status: 200,
+    headers: { 'content-type': 'application/json' }
+  })
+}
+const mainGlobal = {
+  URL, Headers, Response, setTimeout, clearTimeout, fetch: originalFetch,
+  location: { href: pageUrl }
+}
+mainGlobal.window = mainGlobal
+const mainContext = vm.createContext(mainGlobal)
+vm.runInContext(`const state = { helper: {
+  baseUrl: '${helperOrigin}', token: '${syntheticToken}'
+} }`, mainContext)
+
+const actionNode = {
+  click() {
+    const target = mode === 'wrong_origin'
+      ? 'http://127.0.0.1:43122/pursers/onboarding/recover'
+      : helperOrigin + '/pursers/onboarding/recover'
+    const count = mode === 'duplicate' ? 2 : 1
+    for (let index = 0; index < count; index += 1) {
+      pending.push(mainGlobal.window.fetch(target, {
+        method: 'POST',
+        headers: { 'x-pursers-home-token': syntheticToken },
+        credentials: 'omit',
+        cache: 'no-store',
+        referrerPolicy: 'no-referrer'
+      }))
+    }
+  }
+}
+const boardNode = {
+  textContent: 'sandbox-home-observer',
+  getAttribute(name) { return name === 'data-board-id' ? 'sandbox-home-observer' : null }
+}
+const isolatedGlobal = {
+  URL, Headers, Response, setTimeout, clearTimeout, crypto,
+  Event: class Event {},
+  KeyboardEvent: class KeyboardEvent {},
+  fetch: async function (input) {
+    const url = new URL(input, pageUrl)
+    if (url.pathname === '/pursers/status') {
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200, headers: { 'content-type': 'application/json' }
+      })
+    }
+    if (url.pathname.endsWith('/candidate.json')) {
+      return new Response(JSON.stringify({ candidate_commit: '0'.repeat(40) }), {
+        status: 200, headers: { 'content-type': 'application/json' }
+      })
+    }
+    return new Response('<html>candidate</html>', { status: 200 })
+  },
+  document: {
+    querySelector(selector) {
+      if (selector === '#recover-seat') return actionNode
+      if (selector.includes('data-helper-field')) return boardNode
+      return null
+    },
+    querySelectorAll() { return [] }
+  }
+}
+isolatedGlobal.window = { location: { href: pageUrl } }
+const isolatedContext = vm.createContext(isolatedGlobal)
+
+async function useOrCreateTaskSpace(value) { return value }
+async function openOrReuseTab() {}
+async function waitForLoad() {}
+async function pageInfo() { return { url: pageUrl, w: 1280, h: 800 } }
+function cliLog(value) { emitted.push(value) }
+async function cdp(method, params = {}) {
+  if (method === 'Page.getFrameTree') return { frameTree: { frame: { id: 'main' } } }
+  if (method === 'Page.createIsolatedWorld') return { executionContextId: 7 }
+  if (method !== 'Runtime.evaluate') throw new Error('unexpected CDP method: ' + method)
+  const context = params.contextId === 7 ? isolatedContext : mainContext
+  try {
+    const value = await vm.runInContext(params.expression, context)
+    return { result: { value } }
+  } catch (error) {
+    return { exceptionDetails: { text: String(error) } }
+  }
+}
+
+let observedError = null
+try {
+""".replace("__MODE__", json.dumps(mode))
+    epilogue = r"""
+} catch (error) {
+  observedError = String(error && error.message ? error.message : error)
+}
+await Promise.allSettled(pending)
+const restored = mainGlobal.window.fetch === originalFetch
+  && !Object.prototype.hasOwnProperty.call(mainGlobal.window, '__pursersVerifierFetchCapture')
+if (!restored) throw new Error('response capture did not restore page fetch state')
+if (mode === 'success') {
+  if (observedError) throw new Error('successful capture failed: ' + observedError)
+  const payload = JSON.parse(emitted.at(-1))
+  if (JSON.stringify(payload.action['/mcp_transport']) !== JSON.stringify(transport)) {
+    throw new Error('captured transport differs')
+  }
+} else if (!observedError || !observedError.includes('match exactly once')) {
+  throw new Error('negative capture did not fail closed: ' + observedError)
+}
+console.log(JSON.stringify({ mode, restored, rejected: Boolean(observedError) }))
+"""
+    result = subprocess.run(
+        ["node", "--input-type=module"],
+        input=prelude + generated + epilogue,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    outcome = json.loads(result.stdout.strip().splitlines()[-1])
+    assert outcome == {
+        "mode": mode,
+        "restored": True,
+        "rejected": mode != "success",
+    }
+
+
 def test_harness_observer_binds_report_artifacts_to_the_capture(tmp_path: Path) -> None:
     backend = _write_backend(tmp_path, "result_visible")
     observer_dir = _install(tmp_path, backend)
