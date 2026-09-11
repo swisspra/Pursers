@@ -307,7 +307,8 @@ def _process_check(process: Any, receipt: Any | None = None) -> dict[str, Any] |
         process, {
             "pid_file", "argv0_names", "argv_prefix", "argv_contains",
             "required_arguments", "cwd", "artifact_path", "artifact_sha256",
-            "receipt_pid_pointer",
+            "receipt_pid_pointer", "executable", "executable_sha256",
+            "entrypoint",
         },
         "process trust",
     )
@@ -347,11 +348,17 @@ def _process_check(process: Any, receipt: Any | None = None) -> dict[str, Any] |
         arguments = shlex.split(command)
     except ValueError:
         arguments = []
+    executable = Path(str(process["executable"])).resolve()
     prefix = process["argv_prefix"]
     required_arguments = process["required_arguments"]
     if (
         completed.returncode or not arguments
         or Path(arguments[0]).name not in process["argv0_names"]
+        or Path(arguments[0]).resolve() != executable
+        or not executable.is_file()
+        or not SHA256.fullmatch(str(process["executable_sha256"]))
+        or hashlib.sha256(executable.read_bytes()).hexdigest()
+        != process["executable_sha256"]
         or arguments[1:1 + len(prefix)] != prefix
         or any(part not in arguments for part in process["argv_contains"])
     ):
@@ -362,6 +369,57 @@ def _process_check(process: Any, receipt: Any | None = None) -> dict[str, Any] |
             raise TypedEvidenceError(f"trusted process lacks exact {flag}")
         if arguments[positions[0] + 1] != expected:
             raise TypedEvidenceError(f"trusted process {flag} changed")
+    entrypoint = _closed(
+        process["entrypoint"],
+        {"kind", "module", "path", "sha256", "resolver", "resolver_sha256"},
+        "process entrypoint trust",
+    )
+    entrypoint_path = Path(str(entrypoint["path"])).resolve()
+    if (
+        entrypoint["kind"] not in {"isolated_module", "script"}
+        or not isinstance(entrypoint["module"], str)
+        or not entrypoint_path.is_file()
+        or not SHA256.fullmatch(str(entrypoint["sha256"]))
+        or hashlib.sha256(entrypoint_path.read_bytes()).hexdigest()
+        != entrypoint["sha256"]
+    ):
+        raise TypedEvidenceError("trusted process entrypoint is invalid")
+    if entrypoint["kind"] == "script":
+        if (
+            entrypoint["module"] or entrypoint["resolver"]
+            or entrypoint["resolver_sha256"]
+            or len(arguments) < 2 or Path(arguments[1]).resolve() != entrypoint_path
+        ):
+            raise TypedEvidenceError("trusted process script is not the executed entrypoint")
+    else:
+        module = entrypoint["module"]
+        resolver = Path(str(entrypoint["resolver"])).resolve()
+        if (
+            not module or arguments[1:4] != ["-I", "-m", module]
+            or not resolver.is_file()
+            or not SHA256.fullmatch(str(entrypoint["resolver_sha256"]))
+            or hashlib.sha256(resolver.read_bytes()).hexdigest()
+            != entrypoint["resolver_sha256"]
+        ):
+            raise TypedEvidenceError("trusted process module invocation is not isolated")
+        probe = subprocess.run(
+            [
+                str(entrypoint["resolver"]), "-I", "-c",
+                (
+                    "import importlib.util,sys; s=importlib.util.find_spec(sys.argv[1]); "
+                    "print('' if s is None else s.origin)"
+                ),
+                module,
+            ],
+            text=True, capture_output=True, check=False, timeout=5,
+            env={"PATH": os.defpath, "LANG": "C", "LC_ALL": "C"},
+        )
+        try:
+            resolved_module = Path(probe.stdout.strip()).resolve()
+        except (OSError, RuntimeError):
+            resolved_module = Path("/")
+        if probe.returncode or resolved_module != entrypoint_path:
+            raise TypedEvidenceError("trusted process module resolution changed")
     expected_cwd = Path(str(process["cwd"])).resolve()
     if not expected_cwd.is_absolute() or _process_cwd(pid, "trusted process") != expected_cwd:
         raise TypedEvidenceError("trusted process working directory changed")
@@ -381,6 +439,8 @@ def _process_check(process: Any, receipt: Any | None = None) -> dict[str, Any] |
         "argv_sha256": hashlib.sha256(command.encode()).hexdigest(),
         "cwd_sha256": hashlib.sha256(str(expected_cwd).encode()).hexdigest(),
         "artifact_sha256": process["artifact_sha256"],
+        "entrypoint_sha256": entrypoint["sha256"],
+        "executable_sha256": process["executable_sha256"],
     }
 
 
@@ -441,8 +501,8 @@ def _runtime_check(runtime: Any, trust: dict[str, Any], base_url: str) -> dict[s
     expected_cwd = Path(str(runtime["cwd"])).resolve()
     if expected_cwd != checkout or _process_cwd(pid, "HTTP runtime") != checkout:
         raise TypedEvidenceError("HTTP runtime working directory is not the candidate checkout")
-    if str(artifact) not in arguments:
-        raise TypedEvidenceError("HTTP runtime artifact is absent from the process command")
+    if len(arguments) < 2 or Path(arguments[1]).resolve() != artifact:
+        raise TypedEvidenceError("HTTP runtime artifact is not the executed script")
     port = urlsplit(base_url).port
     if runtime["listener_port"] != port or not isinstance(port, int):
         raise TypedEvidenceError("HTTP runtime listener port changed")
@@ -613,7 +673,10 @@ def _verify_evidence(evidence: Any, trust: dict[str, Any]) -> dict[str, Any]:
         if record["process"] is not None:
             process = _closed(
                 record["process"],
-                {"pid", "argv_sha256", "cwd_sha256", "artifact_sha256"},
+                {
+                    "pid", "argv_sha256", "cwd_sha256", "artifact_sha256",
+                    "entrypoint_sha256", "executable_sha256",
+                },
                 "receipt process record",
             )
             if (
@@ -621,6 +684,8 @@ def _verify_evidence(evidence: Any, trust: dict[str, Any]) -> dict[str, Any]:
                 or not SHA256.fullmatch(str(process["argv_sha256"]))
                 or not SHA256.fullmatch(str(process["cwd_sha256"]))
                 or not SHA256.fullmatch(str(process["artifact_sha256"]))
+                or not SHA256.fullmatch(str(process["entrypoint_sha256"]))
+                or not SHA256.fullmatch(str(process["executable_sha256"]))
             ):
                 raise TypedEvidenceError("receipt process record has invalid types")
     elif evidence["kind"] == "log_assertion":
@@ -638,7 +703,10 @@ def _verify_evidence(evidence: Any, trust: dict[str, Any]) -> dict[str, Any]:
             raise TypedEvidenceError("log evidence record has invalid fields")
         process = _closed(
             record["process"],
-            {"pid", "argv_sha256", "cwd_sha256", "artifact_sha256"},
+            {
+                "pid", "argv_sha256", "cwd_sha256", "artifact_sha256",
+                "entrypoint_sha256", "executable_sha256",
+            },
             "log process record",
         )
         if (
@@ -646,6 +714,8 @@ def _verify_evidence(evidence: Any, trust: dict[str, Any]) -> dict[str, Any]:
             or not SHA256.fullmatch(str(process["argv_sha256"]))
             or not SHA256.fullmatch(str(process["cwd_sha256"]))
             or not SHA256.fullmatch(str(process["artifact_sha256"]))
+            or not SHA256.fullmatch(str(process["entrypoint_sha256"]))
+            or not SHA256.fullmatch(str(process["executable_sha256"]))
         ):
             raise TypedEvidenceError("log process record has invalid types")
     else:

@@ -396,7 +396,7 @@ def test_http_rejects_dirty_checkout_and_unbound_artifact(
         "artifact_path": str(unbound),
         "artifact_sha256": hashlib.sha256(unbound.read_bytes()).hexdigest(),
     })
-    with pytest.raises(TypedEvidenceError, match="absent from the process command"):
+    with pytest.raises(TypedEvidenceError, match="executed script"):
         record_evidence(_request("http_response", _http_recorder()), trust)
 
     trust = _trust(tmp_path, http_server)
@@ -407,6 +407,58 @@ def test_http_rejects_dirty_checkout_and_unbound_artifact(
             record_evidence(_request("http_response", _http_recorder()), trust)
     finally:
         dirty.unlink()
+
+
+def test_http_rejects_same_cwd_listener_with_unused_candidate_argument(
+    tmp_path: Path, http_server: str,
+) -> None:
+    trust = _trust(tmp_path, http_server)
+    checkout = Path(trust["candidate_checkout_root"])
+    artifact = checkout / "tools/aionui-extension/tests/home_acceptance/test_typed_evidence.py"
+    port = _free_port()
+    decoy_code = """
+import json,sys
+from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
+class H(BaseHTTPRequestHandler):
+ def log_message(self,*a): pass
+ def do_GET(self):
+  body=json.dumps({'board':'sandbox-typed-evidence','candidate':'%s','surface':'fleet','runtime':'fleet-runtime-1','entity':self.headers['X-Pursers-Entity-Id'],'run':self.headers['X-Pursers-Run-Id'],'action':self.headers['X-Pursers-Action-Id'],'ok':True,'count':3}).encode()
+  self.send_response(200)
+  for n in ('X-Pursers-Observation-Id','X-Pursers-Run-Id','X-Pursers-Action-Id','X-Pursers-Entity-Id'): self.send_header(n,self.headers.get(n,''))
+  self.send_header('Content-Type','application/json'); self.send_header('Content-Length',str(len(body))); self.end_headers(); self.wfile.write(body)
+ThreadingHTTPServer(('127.0.0.1',int(sys.argv[2])),H).serve_forever()
+""" % CANDIDATE
+    decoy = subprocess.Popen(
+        [sys.executable, "-c", decoy_code, str(artifact), str(port)],
+        cwd=checkout,
+        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, text=True,
+    )
+    _wait_for_port(decoy, port)
+    try:
+        command = subprocess.check_output(
+            ["/bin/ps", "-p", str(decoy.pid), "-o", "command="], text=True
+        ).strip()
+        started = subprocess.check_output(
+            ["/bin/ps", "-p", str(decoy.pid), "-o", "lstart="], text=True
+        ).strip()
+        runtime = trust["http_sources"]["fleet-api"]["runtime"]
+        runtime["pid_file"] = str(tmp_path / "same-cwd-decoy.pid")
+        Path(runtime["pid_file"]).write_text(str(decoy.pid), encoding="utf-8")
+        Path(runtime["pid_file"]).chmod(0o600)
+        runtime.update({
+            "command_sha256": hashlib.sha256(command.encode()).hexdigest(),
+            "start_time": started,
+            "executable": str(Path(command.split()[0]).resolve()),
+            "listener_port": port,
+        })
+        trust["http_sources"]["fleet-api"]["base_url"] = f"http://127.0.0.1:{port}"
+        with pytest.raises(TypedEvidenceError, match="executed script"):
+            record_evidence(_request("http_response", _http_recorder()), trust)
+    finally:
+        decoy.terminate()
+        decoy.wait(timeout=3)
 
 
 def test_http_rejects_plaintext_non_loopback_origin(
@@ -524,6 +576,11 @@ def test_receipt_rejects_decoy_pid(tmp_path: Path, http_server: str) -> None:
     marker.write_text("import time; time.sleep(30)\n", encoding="utf-8")
     process = subprocess.Popen([sys.executable, str(marker)], cwd=tmp_path)
     try:
+        threading.Event().wait(0.05)
+        command = subprocess.check_output(
+            ["/bin/ps", "-p", str(process.pid), "-o", "command="], text=True
+        ).strip()
+        live_executable = Path(command.split()[0]).resolve()
         pid_file = tmp_path / "runtime.pid"
         pid_file.write_text(str(process.pid), encoding="utf-8")
         pid_file.chmod(0o600)
@@ -536,10 +593,19 @@ def test_receipt_rejects_decoy_pid(tmp_path: Path, http_server: str) -> None:
         process_trust = {
             "pid_file": str(pid_file),
             "argv0_names": [Path(sys.executable).name, "Python"],
+            "executable": str(live_executable),
+            "executable_sha256": hashlib.sha256(
+                live_executable.read_bytes()
+            ).hexdigest(),
             "argv_prefix": [str(marker)], "argv_contains": [],
             "required_arguments": {}, "cwd": str(tmp_path),
             "artifact_path": str(marker),
             "artifact_sha256": hashlib.sha256(marker.read_bytes()).hexdigest(),
+            "entrypoint": {
+                "kind": "script", "module": "", "path": str(marker),
+                "sha256": hashlib.sha256(marker.read_bytes()).hexdigest(),
+                "resolver": "", "resolver_sha256": "",
+            },
             "receipt_pid_pointer": "/pid",
         }
         trust["receipt_sources"] = {"personal-receipt": _receipt_source(path, process_trust)}
@@ -702,6 +768,12 @@ def test_personal_receipt_real_producer_capture_adapter(
         "".join(f"{relative},,\n" for relative in central_installed_members),
         encoding="utf-8",
     )
+    personal_package = site_packages / "pursers_personal"
+    shutil.rmtree(personal_package)
+    personal_package.symlink_to(
+        candidate_checkout / "packages/personal/src/pursers_personal",
+        target_is_directory=True,
+    )
     project = tmp_path / "sandbox-personal"
     project.mkdir()
     profiles = tmp_path / "personal-profiles"
@@ -723,7 +795,7 @@ def test_personal_receipt_real_producer_capture_adapter(
         "board_id"
     ]
     command = [
-        str(runtime_python), "-m", "pursers_personal.cli", "mcp",
+        str(runtime_python), "-I", "-m", "pursers_personal.cli", "mcp",
         "--profile", profile_path, "--host-id", "pytest",
         "--session", "typed-evidence", "--acceptance-runtime-receipt",
         str(receipt), "--candidate-source", str(candidate_source),
@@ -731,11 +803,7 @@ def test_personal_receipt_real_producer_capture_adapter(
     ]
     process = subprocess.Popen(
         command, cwd=candidate_checkout,
-        env={
-            **os.environ,
-            "PYTHONDONTWRITEBYTECODE": "1",
-            "PYTHONPATH": str(candidate_checkout / "packages/personal/src"),
-        },
+        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         text=True,
     )
@@ -748,6 +816,10 @@ def test_personal_receipt_real_producer_capture_adapter(
             process.terminate()
             _stdout, stderr = process.communicate(timeout=3)
             raise AssertionError(f"Personal MCP did not write receipt: {stderr[-1000:]}")
+        live_command = subprocess.check_output(
+            ["/bin/ps", "-p", str(process.pid), "-o", "command="], text=True
+        ).strip()
+        live_executable = Path(live_command.split()[0]).resolve()
         pid_file = tmp_path / "personal-runtime.pid"
         pid_file.write_text(str(process.pid), encoding="utf-8")
         pid_file.chmod(0o600)
@@ -757,7 +829,11 @@ def test_personal_receipt_real_producer_capture_adapter(
                 Path(sys.executable).name, runtime_python.name,
                 runtime_python.resolve().name, "Python",
             ],
-            "argv_prefix": ["-m", "pursers_personal.cli", "mcp"],
+            "executable": str(live_executable),
+            "executable_sha256": hashlib.sha256(
+                live_executable.read_bytes()
+            ).hexdigest(),
+            "argv_prefix": ["-I", "-m", "pursers_personal.cli", "mcp"],
             "argv_contains": [],
             "required_arguments": {
                 "--profile": profile_path,
@@ -771,6 +847,17 @@ def test_personal_receipt_real_producer_capture_adapter(
             "cwd": str(candidate_checkout),
             "artifact_path": str(candidate_source),
             "artifact_sha256": hashlib.sha256(candidate_source.read_bytes()).hexdigest(),
+            "entrypoint": {
+                "kind": "isolated_module", "module": "pursers_personal.cli",
+                "path": str(candidate_source.with_name("cli.py")),
+                "sha256": hashlib.sha256(
+                    candidate_source.with_name("cli.py").read_bytes()
+                ).hexdigest(),
+                "resolver": str(runtime_python),
+                "resolver_sha256": hashlib.sha256(
+                    runtime_python.resolve().read_bytes()
+                ).hexdigest(),
+            },
             "receipt_pid_pointer": "/pid",
         }
         trust["board_id"] = profile_board
@@ -824,6 +911,42 @@ def test_personal_receipt_real_producer_capture_adapter(
                     ),
                     trust,
                 )
+        receipt.write_text(json.dumps(original), encoding="utf-8")
+        receipt.chmod(0o600)
+        personal_package.unlink()
+        personal_package.mkdir()
+        (personal_package / "__init__.py").write_text("", encoding="utf-8")
+        (personal_package / "cli.py").write_text(
+            "import time; time.sleep(30)\n", encoding="utf-8"
+        )
+        shadow = subprocess.Popen(
+            command, cwd=candidate_checkout,
+            env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            shadow_receipt = {**original, "pid": shadow.pid}
+            receipt.write_text(json.dumps(shadow_receipt), encoding="utf-8")
+            receipt.chmod(0o600)
+            pid_file.write_text(str(shadow.pid), encoding="utf-8")
+            with pytest.raises(TypedEvidenceError, match="module resolution"):
+                record_evidence(
+                    _request(
+                        "receipt_field",
+                        {"source_id": "personal-runtime", "fields": ["/product"]},
+                        context,
+                    ),
+                    trust,
+                )
+        finally:
+            shadow.terminate()
+            shadow.wait(timeout=3)
+        shutil.rmtree(personal_package)
+        personal_package.symlink_to(
+            candidate_checkout / "packages/personal/src/pursers_personal",
+            target_is_directory=True,
+        )
         receipt.write_text(json.dumps(original), encoding="utf-8")
         receipt.chmod(0o600)
         arbitrary = subprocess.Popen(
@@ -890,12 +1013,20 @@ def log_emitter(tmp_path: Path, request: pytest.FixtureRequest) -> Any:
                 raise AssertionError(f"emitter exited: {stderr[-1000:]}")
             threading.Event().wait(0.01)
         assert log_path.exists()
+        live_command = subprocess.check_output(
+            ["/bin/ps", "-p", str(process.pid), "-o", "command="], text=True
+        ).strip()
+        live_executable = Path(live_command.split()[0]).resolve()
         pid_file = tmp_path / f"emitter-{index}.pid"
         pid_file.write_text(str(process.pid), encoding="utf-8")
         pid_file.chmod(0o600)
         process_trust = {
             "pid_file": str(pid_file),
             "argv0_names": [Path(sys.executable).name, "Python"],
+            "executable": str(live_executable),
+            "executable_sha256": hashlib.sha256(
+                live_executable.read_bytes()
+            ).hexdigest(),
             "argv_prefix": [str(artifact), "--typed-evidence-log-emitter"],
             "argv_contains": [],
             "required_arguments": {
@@ -903,6 +1034,11 @@ def log_emitter(tmp_path: Path, request: pytest.FixtureRequest) -> Any:
             },
             "cwd": str(checkout), "artifact_path": str(artifact),
             "artifact_sha256": hashlib.sha256(artifact.read_bytes()).hexdigest(),
+            "entrypoint": {
+                "kind": "script", "module": "", "path": str(artifact),
+                "sha256": hashlib.sha256(artifact.read_bytes()).hexdigest(),
+                "resolver": "", "resolver_sha256": "",
+            },
             "receipt_pid_pointer": "/pid",
         }
         source = {

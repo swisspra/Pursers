@@ -154,6 +154,8 @@ HMAC keys, and paths occur only in verifier trust:
     "process": {
       "pid_file": "/PATH/TO/VERIFIER/emitter.pid",
       "argv0_names": ["python3", "Python"],
+      "executable": "/PATH/TO/PYTHON",
+      "executable_sha256": "...",
       "argv_prefix": ["/PATH/TO/CANDIDATE/emitter.py"],
       "argv_contains": [],
       "required_arguments": {
@@ -163,6 +165,14 @@ HMAC keys, and paths occur only in verifier trust:
       "cwd": "/PATH/TO/CANDIDATE",
       "artifact_path": "/PATH/TO/CANDIDATE/emitter.py",
       "artifact_sha256": "...",
+      "entrypoint": {
+        "kind": "script",
+        "module": "",
+        "path": "/PATH/TO/CANDIDATE/emitter.py",
+        "sha256": "...",
+        "resolver": "",
+        "resolver_sha256": ""
+      },
       "receipt_pid_pointer": "/pid"
     }
   },
@@ -176,7 +186,9 @@ HMAC keys, and paths occur only in verifier trust:
   "process": {
     "pid_file": "/PATH/TO/VERIFIER/runtime.pid",
     "argv0_names": ["python3", "Python"],
-    "argv_prefix": ["-m", "pursers_personal.cli", "mcp"],
+    "executable": "/PATH/TO/PYTHON",
+    "executable_sha256": "...",
+    "argv_prefix": ["-I", "-m", "pursers_personal.cli", "mcp"],
     "argv_contains": [],
     "required_arguments": {
       "--candidate-source": "/PATH/TO/CANDIDATE/apps_server.py",
@@ -187,6 +199,14 @@ HMAC keys, and paths occur only in verifier trust:
     "cwd": "/PATH/TO/CANDIDATE",
     "artifact_path": "/PATH/TO/CANDIDATE/apps_server.py",
     "artifact_sha256": "...",
+    "entrypoint": {
+      "kind": "isolated_module",
+      "module": "pursers_personal.cli",
+      "path": "/PATH/TO/CANDIDATE/pursers_personal/cli.py",
+      "sha256": "...",
+      "resolver": "/PATH/TO/ISOLATED/PYTHON",
+      "resolver_sha256": "..."
+    },
     "receipt_pid_pointer": "/pid"
   }
 }
@@ -203,7 +223,10 @@ runtime receipt. It requires the exact schema-version-1 document and pinned
 Personal version, and pins the candidate checkout HEAD, source path and digest,
 build, product/server identity, board, transport, private receipt file, and live
 producer PID/argv/cwd. Process trust checks each required CLI flag/value exactly
-once and binds the command to the pinned artifact bytes.
+once, pins the live executable bytes, and requires either the pinned script at
+argv position one or an isolated `-I -m` invocation whose resolver selects the
+pinned module bytes. A candidate path used only as an unrelated data argument
+does not bind the entrypoint.
 
 ## Closed common shapes
 
@@ -323,7 +346,8 @@ runtime, allowed methods/selectors, private request headers, timeout, and
 response JSON bindings. Runtime verification requires a private PID file,
 process start time, executable, full command digest, process cwd, exact listening
 PID and port, clean candidate-checkout HEAD, and an artifact path/digest inside
-that checkout which appears in the process command. Thus a matching-body echo
+that checkout which is the executed script at argv position one. Thus a
+matching-body echo
 service, including one serving identical bytes from another cwd, cannot
 substitute for the candidate runtime.
 The recorder injects observation/run/action/entity correlation headers and
