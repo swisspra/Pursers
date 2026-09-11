@@ -118,6 +118,37 @@ class _Handler(BaseHTTPRequestHandler):
                 "action_sha256": self.headers.get("X-Pursers-Action-SHA256"),
             })
             self._send(409, payload)
+        elif self.path == "/api/attention":
+            action_sha256 = self.headers.get("X-Pursers-Action-SHA256")
+            payload["_evidence"] = {
+                "schema_version": 1,
+                "emitter": "fleet-dashboard-runtime",
+                "timestamp": _now(),
+                "runtime_id": "fleet-runtime-1",
+                "pid": os.getpid(),
+                "candidate_commit": CANDIDATE,
+                "entrypoint_sha256": hashlib.sha256(
+                    Path(__file__).read_bytes()
+                ).hexdigest(),
+                "board_id": BOARD,
+                "surface": "fleet",
+                "observation_id": self.headers["X-Pursers-Observation-Id"],
+                "run_id": self.headers["X-Pursers-Run-Id"],
+                "action_id": self.headers["X-Pursers-Action-Id"],
+                "entity": self.headers["X-Pursers-Entity-Id"],
+                "method": "POST",
+                "path": "/api/attention",
+                "status": 200,
+                "outcome": "succeeded",
+                "effect": "attention_state_changed",
+                "changed": True,
+                "before_sha256": "33" * 32,
+                "after_sha256": "44" * 32,
+                "result_sha256": "55" * 32,
+                "action_sha256": action_sha256,
+                "log_emitted": True,
+            }
+            self._send(200, payload)
         else:
             self._send(404, payload)
 
@@ -241,6 +272,7 @@ def _trust(tmp_path: Path, http_server: str, **changes: Any) -> dict[str, Any]:
         "timeout_seconds": 2,
         "select_allowlist": [
             "/ok", "/count", "/state", "/accepted", "/action_sha256",
+            *sorted(typed_evidence.FLEET_RESPONSE_POINTERS),
         ],
         "response_bindings": {
             "/board": "$board_id", "/candidate": "$candidate_commit",
@@ -1226,7 +1258,7 @@ def test_fleet_trace_rejects_forged_runtime_correlation_and_types(
         tmp_path, trust, context, entry_changes=entry_changes
     )
     trust["log_sources"] = {"fleet-trace": source}
-    with pytest.raises(TypedEvidenceError, match="exactly one"):
+    with pytest.raises(TypedEvidenceError, match="append"):
         record_evidence(
             _request(
                 "log_assertion",

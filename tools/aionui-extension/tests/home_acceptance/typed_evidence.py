@@ -59,6 +59,10 @@ FLEET_TRACE_KEYS = frozenset({
     "status", "outcome", "effect", "changed", "before_sha256",
     "after_sha256", "result_sha256", "action_sha256",
 })
+FLEET_RESPONSE_POINTERS = frozenset(
+    {f"/_evidence/{field}" for field in FLEET_TRACE_KEYS}
+    | {"/_evidence/log_emitted"}
+)
 TRUST_KEYS = {
     "schema_version", "verifier_id", "trusted_module_path", "module_sha256",
     "candidate_checkout_root", "candidate_commit", "board_id", "max_age_seconds", "active_evidence_key",
@@ -700,7 +704,10 @@ def _verify_evidence(evidence: Any, trust: dict[str, Any]) -> dict[str, Any]:
         record = _closed(
             evidence["record"],
             (
-                {"entry", "entry_sha256", "authenticity", "runtime"}
+                {
+                    "entry", "entry_sha256", "authenticity", "runtime",
+                    "action_response",
+                }
                 if adapter == "fleet_evidence_trace_v1"
                 else {"entry", "entry_sha256", "authenticity", "process"}
             ),
@@ -733,6 +740,24 @@ def _verify_evidence(evidence: Any, trust: dict[str, Any]) -> dict[str, Any]:
                 http_source["runtime"], trust, http_source["base_url"]
             ):
                 raise TypedEvidenceError("log runtime evidence changed")
+            action_response = _validate_http_result(
+                record["action_response"], http_source,
+                "Fleet trace action response",
+            )
+            expected_selected = {
+                f"/_evidence/{key}": value
+                for key, value in record["entry"].items()
+            }
+            expected_selected["/_evidence/log_emitted"] = True
+            if (
+                action_response["method"] != "POST"
+                or action_response["path"] != "/api/attention"
+                or action_response["status"] != record["entry"]["status"]
+                or action_response["selected"] != expected_selected
+            ):
+                raise TypedEvidenceError(
+                    "Fleet trace action response does not match its log entry"
+                )
         else:
             if record["authenticity"] != "verifier_captured_process_bound":
                 raise TypedEvidenceError("log evidence record has invalid fields")
@@ -1112,11 +1137,8 @@ def _record_log(request: dict[str, Any], trust: dict[str, Any], context: dict[st
         "log source",
     )
     path = Path(str(source["path"])).resolve()
-    if (
-        not path.is_absolute() or not path.is_file()
-        or path.stat().st_mode & 0o077 or path.stat().st_uid != os.getuid()
-    ):
-        raise TypedEvidenceError("log source is unavailable or not private")
+    if not path.is_absolute():
+        raise TypedEvidenceError("log source path is not absolute")
     action_path = Path(str(source["action_input_path"])).resolve()
     if (
         not action_path.is_absolute() or not action_path.is_file()
@@ -1129,13 +1151,15 @@ def _record_log(request: dict[str, Any], trust: dict[str, Any], context: dict[st
         raise TypedEvidenceError("log action input is not verifier-pinned")
     process = None
     runtime = None
+    action_response = None
     if adapter == "process_captured_jsonl_v1":
         process = _process_check(source["process"])
         if process is None:
             raise TypedEvidenceError("log capture requires a bound emitter process")
     else:
         try:
-            action_document = json.loads(action_path.read_text(encoding="utf-8"))
+            action_raw = action_path.read_bytes()
+            action_document = json.loads(action_raw)
         except (OSError, json.JSONDecodeError) as exc:
             raise TypedEvidenceError("Fleet trace action input is not JSON") from exc
         document_keys = source["document_keys"]
@@ -1147,10 +1171,11 @@ def _record_log(request: dict[str, Any], trust: dict[str, Any], context: dict[st
             raise TypedEvidenceError("Fleet trace document schema is invalid")
         if (
             not isinstance(action_document, dict)
+            or action_raw != _json_bytes(action_document)
             or set(action_document) & set(document_keys)
         ):
             raise TypedEvidenceError(
-                "Fleet trace action input contains producer-owned fields"
+                "Fleet trace action input is non-canonical or contains producer-owned fields"
             )
         _, http_source = _http_source(
             source["http_source_id"], trust, context
@@ -1203,12 +1228,60 @@ def _record_log(request: dict[str, Any], trust: dict[str, Any], context: dict[st
     limit = source["max_bytes"]
     if not isinstance(limit, int) or not 1 <= limit <= MAX_LOG_BYTES:
         raise TypedEvidenceError("log max_bytes is invalid")
-    size = path.stat().st_size
-    with path.open("rb") as stream:
-        if size > limit:
-            stream.seek(size - limit)
-            stream.readline()
-        raw_lines = stream.read(limit + 1).splitlines()
+    before = b""
+    if path.exists():
+        info = path.stat()
+        if (
+            not path.is_file() or info.st_mode & 0o077
+            or info.st_uid != os.getuid()
+        ):
+            raise TypedEvidenceError("log source is unavailable or not private")
+        if adapter == "fleet_evidence_trace_v1":
+            before = path.read_bytes()
+            if len(before) > limit or (before and not before.endswith(b"\n")):
+                raise TypedEvidenceError("Fleet trace baseline is invalid")
+    elif adapter == "process_captured_jsonl_v1":
+        raise TypedEvidenceError("log source is unavailable or not private")
+    elif (
+        not path.parent.is_dir()
+        or path.parent.stat().st_uid != os.getuid()
+        or path.parent.stat().st_mode & 0o077
+    ):
+        raise TypedEvidenceError("Fleet trace directory is unavailable or not private")
+    if adapter == "fleet_evidence_trace_v1":
+        if not FLEET_RESPONSE_POINTERS <= set(http_source["select_allowlist"]):
+            raise TypedEvidenceError(
+                "Fleet trace HTTP source lacks exact response selectors"
+            )
+        action_response = _http_call(
+            http_source,
+            context,
+            {
+                "method": "POST", "path": "/api/attention",
+                "body": action_document,
+                "select": sorted(FLEET_RESPONSE_POINTERS),
+            },
+            "Fleet trace action",
+        )
+        if (
+            not path.is_file() or path.stat().st_mode & 0o077
+            or path.stat().st_uid != os.getuid()
+        ):
+            raise TypedEvidenceError("Fleet trace action produced no private log")
+        after = path.read_bytes()
+        if (
+            len(after) > limit or not after.startswith(before)
+            or len(after) == len(before) or not after.endswith(b"\n")
+        ):
+            raise TypedEvidenceError("Fleet trace append is invalid")
+        raw_lines = after[len(before):].splitlines()
+    else:
+        size = path.stat().st_size
+        with path.open("rb") as stream:
+            if size > limit:
+                stream.seek(size - limit)
+                stream.readline()
+            raw_lines = stream.read(limit + 1).splitlines()
     if sum(len(line) for line in raw_lines) > limit:
         raise TypedEvidenceError("bounded log capture exceeded")
     filters = recorder["field_equals"]
@@ -1287,6 +1360,18 @@ def _record_log(request: dict[str, Any], trust: dict[str, Any], context: dict[st
     if len(matches) != 1:
         raise TypedEvidenceError("log capture needs exactly one authentic correlated entry")
     entry, raw = matches[0]
+    if adapter == "fleet_evidence_trace_v1":
+        expected_selected = {
+            f"/_evidence/{key}": value for key, value in entry.items()
+        }
+        expected_selected["/_evidence/log_emitted"] = True
+        if (
+            action_response["status"] != entry["status"]
+            or action_response["selected"] != expected_selected
+        ):
+            raise TypedEvidenceError(
+                "Fleet trace action response does not match its log entry"
+            )
     _safe_public(entry, "log entry")
     record = {
         "entry": entry,
@@ -1299,6 +1384,7 @@ def _record_log(request: dict[str, Any], trust: dict[str, Any], context: dict[st
     }
     if adapter == "fleet_evidence_trace_v1":
         record["runtime"] = runtime
+        record["action_response"] = action_response
     else:
         record["process"] = process
     return _base_source(source_id, source, trust), record
