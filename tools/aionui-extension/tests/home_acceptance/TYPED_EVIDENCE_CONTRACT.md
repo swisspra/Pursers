@@ -103,6 +103,19 @@ headers, the helper URL, or the helper token, and restores the page's original
 The observer executes the recipe in its isolated browser world and returns the
 actual correlated before/action/after selections.
 
+`aionui_assistant_binding_v1` is the closed preset variant. Its only action is
+`assistant_binding {endpoint:"/api/extensions/assistants", assistant_id, path}`.
+The browser performs a credential-preserving same-origin GET and selects the
+single runtime row whose ID is `ext-<assistant_id>`. The verifier separately
+pins `candidate_manifest` and its SHA-256 in a clean candidate checkout, then
+requires `installed_manifest` outside that checkout plus the referenced context
+file to be byte-for-byte identical. The runtime row must exactly match the
+manifest name, description, `agentId`, extension identity, preset flags, and the
+resolved UTF-8 context bytes. Persisted evidence contains only a compact binding
+(`manifest_id`, runtime ID, agent/preset type, context path and digest, manifest
+digest, extension, endpoint, and `same-origin-http` transport); raw context and
+private installation paths do not leave the verifier process.
+
 Each source object is exact and versioned by its adapter value. Private headers,
 HMAC keys, and paths occur only in verifier trust:
 

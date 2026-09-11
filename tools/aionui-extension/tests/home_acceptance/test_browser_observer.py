@@ -760,6 +760,24 @@ def test_typed_browser_transition_accepts_bounded_resource_delta() -> None:
         observer_module._read_transition_spec(io.StringIO(json.dumps(spec)))
 
 
+def test_typed_browser_transition_accepts_exact_assistant_binding() -> None:
+    spec = _transition_spec()
+    action = {
+        "kind": "assistant_binding",
+        "endpoint": "/api/extensions/assistants",
+        "assistant_id": "pursers-reviewer-codex",
+        "path": "/assistant_binding",
+    }
+    spec["recipe"]["actions"] = [action]
+    assert observer_module._read_transition_spec(
+        io.StringIO(json.dumps(spec))
+    )["recipe"]["actions"] == [action]
+
+    spec["recipe"]["actions"][0]["endpoint"] = "/aion-extension.json"
+    with pytest.raises(observer_module.ObserverError, match="assistant binding is invalid"):
+        observer_module._read_transition_spec(io.StringIO(json.dumps(spec)))
+
+
 def test_ego_transition_uses_isolated_world_and_closed_operations() -> None:
     script = observer_module.EGO_TRANSITION_SCRIPT % (
         json.dumps("acceptance"),
@@ -772,6 +790,9 @@ def test_ego_transition_uses_isolated_world_and_closed_operations() -> None:
     assert "spec.kind === 'fetch'" in script
     assert "spec.kind === 'fetch_json'" in script
     assert "spec.kind === 'resource_delta'" in script
+    assert "spec.kind === 'assistant_binding'" in script
+    assert "runtime assistant match is not unique" in script
+    assert "transport: 'same-origin-http'" in script
     assert "performance.getEntriesByType('resource')" in script
     assert "entry.startTime >= startedAt" in script
     assert "url.origin === window.location.origin" in script

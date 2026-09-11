@@ -119,6 +119,9 @@ BROWSER_STATE_SOURCE_KEYS = {
     "config_sha256", "base_url", "page_url", "recipe", "env",
     "timeout_seconds", "select_allowlist",
 }
+ASSISTANT_BINDING_SOURCE_KEYS = BROWSER_STATE_SOURCE_KEYS | {
+    "candidate_manifest", "candidate_manifest_sha256", "installed_manifest",
+}
 BROWSER_PROPERTIES = frozenset({
     "text", "value", "checked", "disabled", "count", "class", "hidden",
 })
@@ -135,6 +138,7 @@ BROWSER_ACTION_KEYS = {
     "fetch_json": {
         "kind", "method", "endpoint", "body", "pointer", "path",
     },
+    "assistant_binding": {"kind", "endpoint", "assistant_id", "path"},
     "click_response_json": {
         "kind", "selector", "method", "endpoint", "pointer", "path",
     },
@@ -547,6 +551,12 @@ def _browser_actions(value: Any) -> list[dict[str, Any]]:
                 or action["body"] is not None and not isinstance(action["body"], dict)
             ):
                 raise TypedEvidenceError("browser fetch action is invalid")
+        if kind == "assistant_binding" and (
+            action["endpoint"] != "/api/extensions/assistants"
+            or not isinstance(action["assistant_id"], str)
+            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", action["assistant_id"])
+        ):
+            raise TypedEvidenceError("browser assistant binding action is invalid")
         if kind == "click_response_json" and (
             action["method"] not in {"GET", "POST", "PUT", "PATCH", "DELETE"}
             or not isinstance(action["endpoint"], str)
@@ -571,8 +581,17 @@ def _browser_state_source(
     source_id: Any, trust: dict[str, Any], context: dict[str, Any]
 ) -> tuple[str, dict[str, Any]]:
     source_id, source = _source(trust, "state_sources", source_id)
-    _closed(source, BROWSER_STATE_SOURCE_KEYS, "browser state source")
-    if source["adapter"] != "trusted_browser_state_v1":
+    adapter = source.get("adapter")
+    _closed(
+        source,
+        (
+            ASSISTANT_BINDING_SOURCE_KEYS
+            if adapter == "aionui_assistant_binding_v1"
+            else BROWSER_STATE_SOURCE_KEYS
+        ),
+        "browser state source",
+    )
+    if adapter not in {"trusted_browser_state_v1", "aionui_assistant_binding_v1"}:
         raise TypedEvidenceError("browser state adapter is unsupported")
     if (
         source["surface"] != context["surface"]
@@ -657,7 +676,103 @@ def _browser_state_source(
         raise TypedEvidenceError("browser state environment is invalid")
     if not isinstance(source["timeout_seconds"], (int, float)) or not 1 <= source["timeout_seconds"] <= 180:
         raise TypedEvidenceError("browser state timeout is invalid")
+    if adapter == "aionui_assistant_binding_v1":
+        actions = [item for item in recipe["actions"] if item["kind"] == "assistant_binding"]
+        if len(actions) != 1 or len(recipe["actions"]) != 1:
+            raise TypedEvidenceError("assistant binding recipe must contain one exact action")
+        _assistant_manifest_binding(source, trust, actions[0]["assistant_id"])
     return source_id, source
+
+
+def _assistant_manifest_binding(
+    source: dict[str, Any], trust: dict[str, Any], assistant_id: str,
+) -> tuple[dict[str, Any], bytes, str]:
+    """Bind an installed manifest/context byte-for-byte to the clean candidate."""
+    checkout = Path(str(trust["candidate_checkout_root"])).resolve()
+    candidate_value = Path(str(source["candidate_manifest"]))
+    installed_value = Path(str(source["installed_manifest"]))
+    candidate = candidate_value.resolve()
+    installed = installed_value.resolve()
+    if (
+        not candidate_value.is_absolute() or not candidate.is_file()
+        or candidate != checkout / "tools/aionui-extension/aion-extension.json"
+        or not SHA256.fullmatch(str(source["candidate_manifest_sha256"]))
+        or hashlib.sha256(candidate.read_bytes()).hexdigest()
+        != source["candidate_manifest_sha256"]
+    ):
+        raise TypedEvidenceError("candidate assistant manifest is not verifier-pinned")
+    candidate_bytes = candidate.read_bytes()
+    if (
+        not installed_value.is_absolute() or installed_value.is_symlink()
+        or not installed.is_file() or installed.is_relative_to(checkout)
+        or installed.read_bytes() != candidate_bytes
+    ):
+        raise TypedEvidenceError("installed assistant manifest differs from candidate")
+    try:
+        manifest = json.loads(candidate_bytes)
+    except json.JSONDecodeError:
+        raise TypedEvidenceError("candidate assistant manifest is not JSON") from None
+    if not isinstance(manifest, dict) or not isinstance(manifest.get("name"), str):
+        raise TypedEvidenceError("candidate assistant manifest has no extension identity")
+    contributes = manifest.get("contributes")
+    assistants = contributes.get("assistants") if isinstance(contributes, dict) else None
+    matches = [
+        item for item in assistants or []
+        if isinstance(item, dict) and item.get("id") == assistant_id
+    ]
+    if len(matches) != 1:
+        raise TypedEvidenceError("candidate assistant manifest match is not unique")
+    assistant = _closed(
+        matches[0],
+        {"id", "name", "description", "agentId", "presetAgentType", "contextFile"},
+        "candidate assistant manifest entry",
+    )
+    if (
+        not all(isinstance(assistant[field], str) and assistant[field]
+                for field in assistant)
+        or assistant["agentId"] != assistant["presetAgentType"]
+        or re.fullmatch(r"contexts/[^/]+\.md", assistant["contextFile"]) is None
+    ):
+        raise TypedEvidenceError("candidate assistant manifest entry is invalid")
+    candidate_context_value = candidate.parent / assistant["contextFile"]
+    installed_context_value = installed.parent / assistant["contextFile"]
+    candidate_context = candidate_context_value.resolve()
+    installed_context = installed_context_value.resolve()
+    if (
+        candidate_context_value.is_symlink() or not candidate_context.is_file()
+        or not candidate_context.is_relative_to(candidate.parent)
+        or installed_context_value.is_symlink() or not installed_context.is_file()
+        or not installed_context.is_relative_to(installed.parent)
+        or installed_context.is_relative_to(checkout)
+        or installed_context.read_bytes() != candidate_context.read_bytes()
+    ):
+        raise TypedEvidenceError("installed assistant context differs from candidate")
+    context_bytes = candidate_context.read_bytes()
+    try:
+        context_bytes.decode("utf-8")
+    except UnicodeDecodeError:
+        raise TypedEvidenceError("candidate assistant context is not UTF-8") from None
+    return assistant, context_bytes, manifest["name"]
+
+
+def _assistant_public_binding(
+    source: dict[str, Any], trust: dict[str, Any], assistant_id: str,
+) -> dict[str, Any]:
+    assistant, context_bytes, extension_name = _assistant_manifest_binding(
+        source, trust, assistant_id
+    )
+    return {
+        "manifest_id": assistant["id"],
+        "runtime_id": f"ext-{assistant['id']}",
+        "agent_id": assistant["agentId"],
+        "preset_agent_type": assistant["presetAgentType"],
+        "context_file": assistant["contextFile"],
+        "context_sha256": hashlib.sha256(context_bytes).hexdigest(),
+        "manifest_sha256": source["candidate_manifest_sha256"],
+        "extension_name": extension_name,
+        "endpoint": "/api/extensions/assistants",
+        "transport": "same-origin-http",
+    }
 
 
 def _binding_value(value: Any, context: dict[str, Any]) -> Any:
@@ -1247,7 +1362,9 @@ def _verify_evidence(evidence: Any, trust: dict[str, Any]) -> dict[str, Any]:
                 raise TypedEvidenceError("log process record has invalid types")
     else:
         record = evidence["record"]
-        if trusted_source.get("adapter") == "trusted_browser_state_v1":
+        if trusted_source.get("adapter") in {
+            "trusted_browser_state_v1", "aionui_assistant_binding_v1",
+        }:
             _, trusted_source = _browser_state_source(source_id, trust, context)
             record = _closed(
                 record, {"before", "action", "after", "order", "observer"},
@@ -1281,6 +1398,14 @@ def _verify_evidence(evidence: Any, trust: dict[str, Any]) -> dict[str, Any]:
                 raise TypedEvidenceError("browser observer binding changed")
             for phase in ("before", "action", "after"):
                 _browser_phase(record[phase], trusted_source, context, phase)
+            if trusted_source["adapter"] == "aionui_assistant_binding_v1":
+                action_spec = trusted_source["recipe"]["actions"][0]
+                if record["action"]["selected"].get(action_spec["path"]) != (
+                    _assistant_public_binding(
+                        trusted_source, trust, action_spec["assistant_id"]
+                    )
+                ):
+                    raise TypedEvidenceError("assistant binding evidence changed")
         else:
             record = _closed(
                 record,
@@ -2140,7 +2265,7 @@ def _browser_phase(
 
 
 def _browser_transition_call(
-    source: dict[str, Any], context: dict[str, Any]
+    source: dict[str, Any], context: dict[str, Any], trust: dict[str, Any]
 ) -> dict[str, Any]:
     payload = {
         "schema_version": SCHEMA_VERSION,
@@ -2206,9 +2331,51 @@ def _browser_transition_call(
     ]
     if moments != sorted(moments):
         raise TypedEvidenceError("browser state causal order is invalid")
+    action = _browser_phase(result["action"], source, context, "action")
+    if source["adapter"] == "aionui_assistant_binding_v1":
+        action_spec = source["recipe"]["actions"][0]
+        raw = action["selected"][action_spec["path"]]
+        raw = _closed(
+            raw, {"transport", "endpoint", "status", "assistant"},
+            "runtime assistant binding",
+        )
+        runtime_assistant = _closed(
+            raw["assistant"], {
+                "id", "name", "description", "avatar", "agentId", "context",
+                "models", "enabledSkills", "prompts", "isPreset", "isBuiltin",
+                "enabled", "_source", "_extensionName", "_kind",
+            }, "runtime assistant",
+        )
+        manifest_assistant, context_bytes, extension_name = _assistant_manifest_binding(
+            source, trust, action_spec["assistant_id"]
+        )
+        expected_runtime = {
+            "id": f"ext-{manifest_assistant['id']}",
+            "name": manifest_assistant["name"],
+            "description": manifest_assistant["description"],
+            "avatar": None,
+            "agentId": manifest_assistant["agentId"],
+            "context": context_bytes.decode("utf-8"),
+            "models": [], "enabledSkills": [], "prompts": [],
+            "isPreset": True, "isBuiltin": False, "enabled": True,
+            "_source": "extension", "_extensionName": extension_name,
+            "_kind": "assistant",
+        }
+        if (
+            raw["transport"] != "same-origin-http"
+            or raw["endpoint"] != "/api/extensions/assistants"
+            or raw["status"] != 200
+            or runtime_assistant != expected_runtime
+        ):
+            raise TypedEvidenceError("runtime assistant differs from installed candidate")
+        compact = _assistant_public_binding(
+            source, trust, action_spec["assistant_id"]
+        )
+        action["selected"] = {action_spec["path"]: compact}
+        action["response_sha256"] = _digest(action["selected"])
     return {
         "before": _browser_phase(result["before"], source, context, "before"),
-        "action": _browser_phase(result["action"], source, context, "action"),
+        "action": action,
         "after": _browser_phase(result["after"], source, context, "after"),
         "order": order,
         "observer": {
@@ -2224,7 +2391,7 @@ def _record_transition(request: dict[str, Any], trust: dict[str, Any], context: 
     recorder = _closed(request["recorder"], {"source_id", "before", "action", "after"}, "state_transition recorder")
     raw_source = trust["state_sources"].get(recorder["source_id"])
     adapter = raw_source.get("adapter") if isinstance(raw_source, dict) else None
-    if adapter == "trusted_browser_state_v1":
+    if adapter in {"trusted_browser_state_v1", "aionui_assistant_binding_v1"}:
         source_id, source = _browser_state_source(
             recorder["source_id"], trust, context
         )
@@ -2238,7 +2405,7 @@ def _record_transition(request: dict[str, Any], trust: dict[str, Any], context: 
                 "browser state recorder differs from verifier-owned recipe"
             )
         return _base_source(source_id, source, trust), _browser_transition_call(
-            source, context
+            source, context, trust
         )
     source_id, source = _source(trust, "state_sources", recorder["source_id"])
     _closed(

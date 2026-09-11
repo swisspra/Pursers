@@ -96,6 +96,7 @@ TRANSITION_ACTION_KEYS = {
     "fetch_json": {
         "kind", "method", "endpoint", "body", "pointer", "path",
     },
+    "assistant_binding": {"kind", "endpoint", "assistant_id", "path"},
     "click_response_json": {
         "kind", "selector", "method", "endpoint", "pointer", "path",
     },
@@ -1134,9 +1135,9 @@ const transitionResult = await cdp('Runtime.evaluate', {
               && url.pathname === spec.endpoint
           } catch (_error) { return false }
         }).length
-      } else if (spec.kind === 'fetch' || spec.kind === 'fetch_json') {
-        const init = { method: spec.method, credentials: 'same-origin', cache: 'no-store', headers: { accept: 'application/json' } }
-        if (spec.body !== null) {
+      } else if (spec.kind === 'fetch' || spec.kind === 'fetch_json' || spec.kind === 'assistant_binding') {
+        const init = { method: spec.kind === 'assistant_binding' ? 'GET' : spec.method, credentials: 'same-origin', cache: 'no-store', headers: { accept: 'application/json' } }
+        if (spec.kind !== 'assistant_binding' && spec.body !== null) {
           init.headers['content-type'] = 'application/json'
           init.body = JSON.stringify(spec.body)
         }
@@ -1144,8 +1145,18 @@ const transitionResult = await cdp('Runtime.evaluate', {
         let body = null
         try { body = await response.json() } catch (_error) {}
         const envelope = { status: response.status, body: body }
-        action[spec.path] = spec.kind === 'fetch_json'
-          ? selectJson(envelope, spec.pointer) : envelope
+        if (spec.kind === 'assistant_binding') {
+          const rows = body && body.success === true && Array.isArray(body.data) ? body.data : []
+          const matches = rows.filter(row => row && row.id === 'ext-' + spec.assistant_id)
+          if (matches.length !== 1) throw new Error('runtime assistant match is not unique')
+          action[spec.path] = {
+            transport: 'same-origin-http', endpoint: spec.endpoint,
+            status: response.status, assistant: matches[0]
+          }
+        } else {
+          action[spec.path] = spec.kind === 'fetch_json'
+            ? selectJson(envelope, spec.pointer) : envelope
+        }
       } else {
         const node = document.querySelector(spec.selector)
         if (!node) throw new Error('action selector absent: ' + spec.selector)
@@ -1441,6 +1452,13 @@ def _validate_transition_actions(value: Any) -> list[dict[str, Any]]:
             or item["body"] is not None and not isinstance(item["body"], dict)
         ):
             raise _fail(EXIT_USAGE, "transition fetch action is invalid")
+        if kind == "assistant_binding" and (
+            item["endpoint"] != "/api/extensions/assistants"
+            or not isinstance(item["assistant_id"], str)
+            or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", item["assistant_id"])
+            is None
+        ):
+            raise _fail(EXIT_USAGE, "transition assistant binding is invalid")
         if kind == "click_response_json" and (
             item["method"] not in {"GET", "POST", "PUT", "PATCH", "DELETE"}
             or not isinstance(item["endpoint"], str)

@@ -625,6 +625,120 @@ def test_browser_resource_delta_has_closed_same_origin_path_contract() -> None:
         typed_evidence._browser_actions([{**action, "milliseconds": 10_001}])
 
 
+def test_aionui_assistant_binding_joins_installed_manifest_and_runtime(
+    tmp_path: Path, http_server: str,
+) -> None:
+    assistant_id = "pursers-reviewer-codex"
+    manifest = json.loads(
+        (REPOSITORY / "tools/aionui-extension/aion-extension.json").read_text()
+    )
+    assistant = next(
+        item for item in manifest["contributes"]["assistants"]
+        if item["id"] == assistant_id
+    )
+    context_text = (
+        REPOSITORY / "tools/aionui-extension" / assistant["contextFile"]
+    ).read_text()
+    runtime_assistant = {
+        "id": f"ext-{assistant_id}", "name": assistant["name"],
+        "description": assistant["description"], "avatar": None,
+        "agentId": assistant["agentId"], "context": context_text,
+        "models": [], "enabledSkills": [], "prompts": [],
+        "isPreset": True, "isBuiltin": False, "enabled": True,
+        "_source": "extension", "_extensionName": manifest["name"],
+        "_kind": "assistant",
+    }
+    action = {
+        "kind": "assistant_binding", "endpoint": "/api/extensions/assistants",
+        "assistant_id": assistant_id, "path": "/assistant_binding",
+    }
+    action_result = {
+        "transport": "same-origin-http", "endpoint": action["endpoint"],
+        "status": 200, "assistant": runtime_assistant,
+    }
+    trust, context, recorder = _browser_state_trust(
+        tmp_path, http_server, action=action, action_result=action_result
+    )
+    checkout = Path(trust["candidate_checkout_root"])
+    candidate_manifest = checkout / "tools/aionui-extension/aion-extension.json"
+    installed = tmp_path / "installed-extension"
+    installed.mkdir()
+    (installed / "contexts").mkdir()
+    shutil.copy2(candidate_manifest, installed / "aion-extension.json")
+    shutil.copy2(
+        checkout / "tools/aionui-extension" / assistant["contextFile"],
+        installed / assistant["contextFile"],
+    )
+    source = trust["state_sources"]["aionui-start"]
+    source.update({
+        "adapter": "aionui_assistant_binding_v1",
+        "candidate_manifest": str(candidate_manifest),
+        "candidate_manifest_sha256": hashlib.sha256(candidate_manifest.read_bytes()).hexdigest(),
+        "installed_manifest": str(installed / "aion-extension.json"),
+    })
+    evidence = record_evidence(
+        _request("state_transition", recorder, context), trust
+    )
+    binding = evidence["record"]["action"]["selected"]["/assistant_binding"]
+    assert binding == {
+        "manifest_id": assistant_id,
+        "runtime_id": f"ext-{assistant_id}",
+        "agent_id": "codex", "preset_agent_type": "codex",
+        "context_file": "contexts/reviewer.md",
+        "context_sha256": hashlib.sha256(context_text.encode()).hexdigest(),
+        "manifest_sha256": source["candidate_manifest_sha256"],
+        "extension_name": "pursers",
+        "endpoint": "/api/extensions/assistants",
+        "transport": "same-origin-http",
+    }
+    assert context_text not in json.dumps(evidence)
+    assert evaluate_evidence(evidence, _expected(evidence, [{
+        "phase": "action", "path": "/assistant_binding", "op": "eq",
+        "value": binding,
+    }]), trust)["passed"] is True
+
+    changed = copy.deepcopy(trust)
+    changed["state_sources"]["aionui-start"]["candidate_manifest_sha256"] = "0" * 64
+    with pytest.raises(TypedEvidenceError, match="manifest is not verifier-pinned"):
+        record_evidence(_request("state_transition", recorder, context), changed)
+
+
+def test_aionui_assistant_binding_rejects_runtime_substitution(
+    tmp_path: Path, http_server: str,
+) -> None:
+    action = {
+        "kind": "assistant_binding", "endpoint": "/api/extensions/assistants",
+        "assistant_id": "pursers-reviewer-codex", "path": "/assistant_binding",
+    }
+    result = {
+        "transport": "same-origin-http", "endpoint": action["endpoint"],
+        "status": 200,
+        "assistant": {
+            "id": "ext-pursers-reviewer-codex", "name": "decoy",
+            "description": "decoy", "avatar": None, "agentId": "claude",
+            "context": "decoy", "models": [], "enabledSkills": [], "prompts": [],
+            "isPreset": True, "isBuiltin": False, "enabled": True,
+            "_source": "extension", "_extensionName": "pursers", "_kind": "assistant",
+        },
+    }
+    trust, context, recorder = _browser_state_trust(
+        tmp_path, http_server, action=action, action_result=result
+    )
+    checkout = Path(trust["candidate_checkout_root"])
+    source_root = checkout / "tools/aionui-extension"
+    installed = tmp_path / "installed-extension"
+    shutil.copytree(source_root, installed)
+    manifest_path = source_root / "aion-extension.json"
+    trust["state_sources"]["aionui-start"].update({
+        "adapter": "aionui_assistant_binding_v1",
+        "candidate_manifest": str(manifest_path),
+        "candidate_manifest_sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
+        "installed_manifest": str(installed / "aion-extension.json"),
+    })
+    with pytest.raises(TypedEvidenceError, match="runtime assistant differs"):
+        record_evidence(_request("state_transition", recorder, context), trust)
+
+
 def test_browser_fetch_json_exact_structured_result_is_evaluable(
     tmp_path: Path, http_server: str,
 ) -> None:
