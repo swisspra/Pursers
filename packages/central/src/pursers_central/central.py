@@ -355,6 +355,7 @@ INTAKE_RATE_WINDOW_SECONDS = 3_600
 COORDINATOR_EVENT_FIELDS = frozenset(
     {
         "ticket_id",
+        "question_id",
         "origin",
         "target_agent_id",
         "coordinator_op_key",

@@ -320,6 +320,7 @@ class CoordinatorQuestionTests(unittest.IsolatedAsyncioTestCase):
         ).structured_content
         self.assertEqual(answered["question"]["state"], "answered")
         self.assertEqual(answered["event"]["kind"], COORDINATOR_QUESTION_ANSWERED)
+        self.assertEqual(answered["event"]["question_id"], asked["question_id"])
         self.assertEqual(
             answered["event"]["recipient_identities"], [self.agent_ids["worker"]]
         )
@@ -333,6 +334,15 @@ class CoordinatorQuestionTests(unittest.IsolatedAsyncioTestCase):
                 submitted=False,
             )
         )
+        self.principal = self.worker
+        caught_up = (
+            await self.call(
+                "board_catchup", agent_name="worker",
+                cursor=answered["event"]["seq"] - 1,
+                ack=False, touch=False,
+            )
+        ).structured_content
+        self.assertEqual(caught_up["events"][0]["question_id"], asked["question_id"])
 
     async def test_second_coordinator_cannot_consume_an_accepted_question(self) -> None:
         await self.register_coordinators("coord", "coord2")
