@@ -641,6 +641,26 @@ def test_prepare_expands_every_authoritative_observation_once(
     }
 
 
+def test_prepare_refuses_missing_typed_evidence_contract(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    observer_dir, surfaces = _write_surface_observer(tmp_path)
+    manifest_path = _write_complete_observation_manifest(tmp_path, surfaces)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    row = next(
+        item for item in manifest["observations"]
+        if item["id"] == "dashboard-ui.styles"
+    )
+    row.pop("typed_evidence")
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    exit_code = runner_module.main([
+        "runner.py", "prepare", "--observer", str(observer_dir),
+        "--manifest", str(manifest_path), "--evidence", str(tmp_path / "evidence"),
+    ])
+    assert exit_code == runner_module.EXIT_USAGE
+    assert "fields do not match schema" in capsys.readouterr().err
+
+
 def test_personal_surface_refuses_served_page_digest_mismatch(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
