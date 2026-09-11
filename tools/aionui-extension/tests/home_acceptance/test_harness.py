@@ -1980,28 +1980,46 @@ def _reference_for(report: dict[str, object], identifier: str) -> str:
     return next(row["evidence"] for row in rows if row["id"] == identifier)
 
 
-def _duplicate_expected_pair(report: dict[str, object]) -> tuple[str, str]:
-    """Two ids whose canonical required fact is the same expected value.
-
-    Only such a pair can hold identical accessibility state and still satisfy
-    both assertions, which is exactly the persistent-label case the uniqueness
-    gate has to catch.
-    """
+def _typed_observation_pair(report: dict[str, object]) -> tuple[str, str]:
+    """Two typed IDs whose visual context can share one combined snapshot."""
     rows = [
         *report.get("steps", []),  # type: ignore[list-item]
         *report.get("inventory", []),  # type: ignore[list-item]
         *report.get("final_gates", []),  # type: ignore[list-item]
     ]
-    seen: dict[str, str] = {}
-    for row in rows:
-        identifier = row["id"]
-        for assertion in harness_module._canonical_browser_assertions(identifier):
-            expected = assertion["expected"]
-            key = json.dumps(expected, sort_keys=True)
-            if key in seen:
-                return seen[key], identifier
-            seen[key] = identifier
-    pytest.skip("no two canonical facts share an expected value")
+    identifiers = [
+        row["id"]
+        for row in rows
+        if not harness_module._canonical_browser_assertions(row["id"])
+        and harness_module._canonical_typed_conjuncts(row["id"])
+    ]
+    assert len(identifiers) >= 2
+    return identifiers[0], identifiers[1]
+
+
+def _combined_typed_snapshot(
+    tmp_path: Path, report: dict[str, object], source: str, target: str
+) -> dict[str, Any]:
+    """One valid accessibility tree containing both fixture observation names."""
+    source_snapshot = _snapshot_of(tmp_path, report, source)
+    target_snapshot = _snapshot_of(tmp_path, report, target)
+    assert isinstance(source_snapshot, dict)
+    assert isinstance(target_snapshot, dict)
+    assert isinstance(source_snapshot.get("nodes"), list)
+    assert isinstance(target_snapshot.get("nodes"), list)
+    return {
+        **source_snapshot,
+        "nodes": [*source_snapshot["nodes"], *target_snapshot["nodes"]],
+    }
+
+
+def _share_typed_predicate(
+    monkeypatch: pytest.MonkeyPatch, source: str, target: str
+) -> None:
+    """Make two fixture observations assert the same off-screen behaviour."""
+    facts = harness_module._ACCEPTANCE_CONTRACT["facts"]
+    predicate = json.loads(json.dumps(facts[source]["predicate"]))
+    monkeypatch.setitem(facts[target], "predicate", predicate)
 
 
 def _snapshot_of(tmp_path: Path, report: dict[str, object], identifier: str) -> Any:
@@ -2076,9 +2094,12 @@ def test_snapshots_differing_only_in_node_ids_are_one_observation(
 ) -> None:
     monkeypatch.setenv("PURSERS_HOME_ACCEPTANCE_MUTATE", MUTATION_OPT_IN)
     report = _complete_report()
+    source, target = _typed_observation_pair(report)
+    _share_typed_predicate(monkeypatch, source, target)
     path = _write_report(tmp_path, report)
-    source, target = _duplicate_expected_pair(report)
-    relabelled = _with_node_ids(_snapshot_of(tmp_path, report, source), [0])
+    combined = _combined_typed_snapshot(tmp_path, report, source, target)
+    _replace_snapshot(tmp_path, report, source, combined)
+    relabelled = _with_node_ids(combined, [0])
     _replace_snapshot(tmp_path, report, target, relabelled)
 
     with pytest.raises(AcceptanceError, match="unique underlying"):
@@ -2095,9 +2116,12 @@ def test_snapshots_differing_only_in_key_order_are_one_observation(
 ) -> None:
     monkeypatch.setenv("PURSERS_HOME_ACCEPTANCE_MUTATE", MUTATION_OPT_IN)
     report = _complete_report()
+    source, target = _typed_observation_pair(report)
+    _share_typed_predicate(monkeypatch, source, target)
     path = _write_report(tmp_path, report)
-    source, target = _duplicate_expected_pair(report)
-    reordered = _reversed_keys(_snapshot_of(tmp_path, report, source))
+    combined = _combined_typed_snapshot(tmp_path, report, source, target)
+    _replace_snapshot(tmp_path, report, source, combined)
+    reordered = _reversed_keys(combined)
     _replace_snapshot(tmp_path, report, target, reordered)
 
     with pytest.raises(AcceptanceError, match="unique underlying"):

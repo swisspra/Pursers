@@ -20,6 +20,10 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 DESIGN_HOME = REPO_ROOT / "docs" / "design-home"
 MANIFEST_PATH = DESIGN_HOME / "context" / "source-manifest.json"
 ACCEPTANCE_FACTS_PATH = DESIGN_HOME / "context" / "acceptance-facts.json"
+TYPED_PREDICATE_DELTA_PATH = (
+    DESIGN_HOME / "context" / "typed-predicate-integration-delta.json"
+)
+TYPED_PREDICATE_BASE = "594ec7b0fab83ae7ed1c5a5fe80d216d17cd930c"
 
 
 def fail(message: str) -> None:
@@ -95,6 +99,9 @@ DERIVATION_KEYS: dict[str, set[str]] = {
     # block acceptance; only the owner and the fix differ.
     "collector_gap": {"kind", "owner", "action"},
     "observed_gap": {"kind", "owner", "action"},
+    "typed_predicate": {
+        "kind", "proposal_id", "source_commit", "source_lines",
+    },
 }
 BLOCKING_DERIVATIONS = {"collector_gap", "observed_gap"}
 
@@ -233,6 +240,24 @@ def validate_derivation(identifier: str, derivation: Any) -> str:
     kind = derivation["kind"]
     if set(derivation) != DERIVATION_KEYS[kind]:
         fail(f"acceptance fact {identifier} {kind} derivation fields do not match schema")
+    if kind == "typed_predicate":
+        for key in ("kind", "proposal_id", "source_commit"):
+            value = derivation[key]
+            if not isinstance(value, str) or not value.strip():
+                fail(f"acceptance fact {identifier} derivation field {key} is empty")
+        if derivation["proposal_id"] != identifier:
+            fail(f"acceptance fact {identifier} typed proposal ID is not self-bound")
+        if re.fullmatch(r"[0-9a-f]{40}", derivation["source_commit"]) is None:
+            fail(f"acceptance fact {identifier} typed source commit is not immutable")
+        lines = derivation["source_lines"]
+        if (
+            not isinstance(lines, list)
+            or len(lines) != 2
+            or not all(isinstance(line, int) and line > 0 for line in lines)
+            or lines[0] > lines[1]
+        ):
+            fail(f"acceptance fact {identifier} typed source lines are invalid")
+        return kind
     for key, value in derivation.items():
         if not isinstance(value, str) or not value.strip():
             fail(f"acceptance fact {identifier} derivation field {key} is empty")
@@ -902,6 +927,39 @@ def validate_acceptance_derivations(design_home: Path) -> list[str]:
     """
     errors: list[str] = []
     contract = load_acceptance_contract(design_home)
+    delta = read_json(
+        design_home / "context" / TYPED_PREDICATE_DELTA_PATH.name
+    )
+    proposals = delta.get("proposals")
+    partition = delta.get("partition")
+    if (
+        delta.get("schema_version") != 1
+        or delta.get("base_commit") != TYPED_PREDICATE_BASE
+        or not isinstance(proposals, list)
+        or not isinstance(partition, dict)
+        or not isinstance(partition.get("owned_ids"), list)
+    ):
+        fail("typed predicate delta identity or partition is invalid")
+    proposal_by_id = {
+        proposal.get("id"): proposal
+        for proposal in proposals
+        if isinstance(proposal, dict) and isinstance(proposal.get("id"), str)
+    }
+    owned_ids = partition["owned_ids"]
+    if (
+        len(proposal_by_id) != 121
+        or len(owned_ids) != 121
+        or len(set(owned_ids)) != 121
+        or set(proposal_by_id) != set(owned_ids)
+    ):
+        fail("typed predicate delta must contain the exact 121-ID owned partition")
+    typed_ids = {
+        identifier
+        for identifier, row in contract["facts"].items()
+        if row["derivation"]["kind"] == "typed_predicate"
+    }
+    if typed_ids != set(owned_ids):
+        fail("canonical typed predicates do not consume the exact delta partition")
     for identifier, owner in contract["duplicates"]:
         errors.append(
             f"acceptance fact {identifier} repeats the canonical fact of {owner} and "
@@ -931,6 +989,71 @@ def validate_acceptance_derivations(design_home: Path) -> list[str]:
                 f"acceptance fact {identifier} is a {kind} and blocks acceptance because "
                 f"{reason}: owner={derivation['owner']}, action={derivation['action']}"
             )
+            continue
+        if kind == "typed_predicate":
+            proposal = proposal_by_id[identifier]
+            proposal_source = proposal.get("source")
+            causal = proposal.get("causal")
+            canonical = proposal.get("canonical_predicate")
+            if (
+                proposal.get("status") != "executable_proposal"
+                or not isinstance(proposal_source, dict)
+                or not isinstance(causal, dict)
+                or not isinstance(canonical, dict)
+            ):
+                errors.append(f"acceptance fact {identifier} has an invalid typed proposal")
+                continue
+            if row["evidence_source"] != proposal_source.get("path"):
+                errors.append(
+                    f"acceptance fact {identifier} evidence source differs from its typed proposal"
+                )
+            if derivation != {
+                "kind": "typed_predicate",
+                "proposal_id": identifier,
+                "source_commit": proposal_source.get("commit"),
+                "source_lines": proposal_source.get("lines"),
+            }:
+                errors.append(
+                    f"acceptance fact {identifier} derivation differs from its typed proposal"
+                )
+            expected_fields = {
+                "precondition": causal.get("precondition"),
+                "action": causal.get("action"),
+                "expected_fact": causal.get("expected_transition"),
+            }
+            for field, expected in expected_fields.items():
+                if row[field] != expected:
+                    errors.append(
+                        f"acceptance fact {identifier} {field} differs from its typed proposal"
+                    )
+            expected_predicate = {
+                "name": f"required fact: {identifier}",
+                "operator": "all_of",
+                "conjuncts": [canonical],
+            }
+            if row["predicate"] != expected_predicate:
+                errors.append(
+                    f"acceptance fact {identifier} predicate differs from its typed proposal"
+                )
+            commit = derivation["source_commit"]
+            start, end = derivation["source_lines"]
+            try:
+                anchored = subprocess.check_output(
+                    ["git", "show", f"{commit}:{row['evidence_source']}"],
+                    cwd=REPO_ROOT,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                ).splitlines()
+            except subprocess.CalledProcessError as exc:
+                errors.append(
+                    f"acceptance fact {identifier} typed source anchor is unavailable: "
+                    f"{exc.output.strip()}"
+                )
+            else:
+                if not 1 <= start <= end <= len(anchored):
+                    errors.append(
+                        f"acceptance fact {identifier} typed source lines are out of range"
+                    )
             continue
         if source is None:
             errors.append(
@@ -1090,9 +1213,42 @@ def run_negative_probes() -> None:
         facts["inventory"][0]["predicate"] = facts["inventory"][1]["predicate"]
         facts_path.write_text(json.dumps(facts, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         fact_errors, _ = validate(disposable)
-        assert_probe("fact-id-predicate", fact_errors, "predicate is not state-specific")
+        assert_probe(
+            "fact-id-predicate",
+            fact_errors,
+            "predicate name is not bound to its ID",
+        )
 
         shutil.copy2(DESIGN_HOME / "context" / "acceptance-facts.json", facts_path)
+        facts = read_json(facts_path)
+        typed_row = next(
+            row
+            for group in ("sequence", "inventory", "final_gates")
+            for row in facts[group]
+            if row["derivation"]["kind"] == "typed_predicate"
+        )
+        typed_row["derivation"]["source_commit"] = "main"
+        facts_path.write_text(json.dumps(facts, indent=2) + "\n", encoding="utf-8")
+        anchor_errors, _ = validate(disposable)
+        assert_probe(
+            "typed-source-anchor",
+            anchor_errors,
+            "typed source commit is not immutable",
+        )
+
+        shutil.copy2(DESIGN_HOME / "context" / "acceptance-facts.json", facts_path)
+        delta_path = disposable / "context" / TYPED_PREDICATE_DELTA_PATH.name
+        delta = read_json(delta_path)
+        delta["proposals"][0]["canonical_predicate"]["source_id"] += "-probe"
+        delta_path.write_text(json.dumps(delta, indent=2) + "\n", encoding="utf-8")
+        proposal_errors, _ = validate(disposable)
+        assert_probe(
+            "typed-proposal-binding",
+            proposal_errors,
+            "predicate differs from its typed proposal",
+        )
+
+        shutil.copy2(TYPED_PREDICATE_DELTA_PATH, delta_path)
         restored_errors, _ = validate(disposable)
         if restored_errors:
             fail(f"restored disposable copy did not pass: {restored_errors}")
