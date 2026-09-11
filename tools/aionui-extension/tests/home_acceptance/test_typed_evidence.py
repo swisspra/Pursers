@@ -590,14 +590,10 @@ def test_browser_state_transition_is_recipe_and_source_bound(
 
 def test_browser_fetch_json_action_has_closed_pointer_contract() -> None:
     action = {
-        "kind": "fetch_json",
+        "kind": "click_response_json",
+        "selector": "#recover-seat",
         "method": "POST",
         "endpoint": "/pursers/onboarding/recover",
-        "body": {
-            "board": BOARD,
-            "role": "worker",
-            "seat_name": "worker-1",
-        },
         "pointer": "/body/mcp_definition/transport",
         "path": "/mcp_transport",
     }
@@ -622,14 +618,10 @@ def test_browser_fetch_json_exact_structured_result_is_evaluable(
         "env": {},
     }
     action = {
-        "kind": "fetch_json",
+        "kind": "click_response_json",
+        "selector": "#recover-seat",
         "method": "POST",
         "endpoint": "/pursers/onboarding/recover",
-        "body": {
-            "board": BOARD,
-            "role": "worker",
-            "seat_name": "worker-1",
-        },
         "pointer": "/body/mcp_definition/transport",
         "path": "/mcp_transport",
     }

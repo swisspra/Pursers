@@ -687,14 +687,10 @@ def test_typed_browser_transition_is_closed_and_runtime_bound(
         "env": {},
     }
     spec["recipe"]["actions"] = [{
-        "kind": "fetch_json",
+        "kind": "click_response_json",
+        "selector": "#recover-seat",
         "method": "POST",
         "endpoint": "/pursers/onboarding/recover",
-        "body": {
-            "board": BOARD,
-            "role": "worker",
-            "seat_name": "worker-1",
-        },
         "pointer": "/body/mcp_definition/transport",
         "path": "/mcp_transport",
     }]
@@ -722,10 +718,10 @@ def test_typed_browser_transition_rejects_arbitrary_script_action() -> None:
 def test_typed_browser_transition_rejects_invalid_fetch_json_pointer() -> None:
     spec = _transition_spec()
     spec["recipe"]["actions"] = [{
-        "kind": "fetch_json",
+        "kind": "click_response_json",
+        "selector": "#recover-seat",
         "method": "GET",
         "endpoint": "/status",
-        "body": None,
         "pointer": "/body/~2invalid",
         "path": "/selected",
     }]
@@ -745,6 +741,9 @@ def test_ego_transition_uses_isolated_world_and_closed_operations() -> None:
     assert "spec.kind === 'fetch'" in script
     assert "spec.kind === 'fetch_json'" in script
     assert "selectJson(envelope, spec.pointer)" in script
+    assert "spec.kind === 'click_response_json'" in script
+    assert "response capture did not match exactly once" in script
+    assert "window.fetch = state.original" in script
     assert "spec.kind === 'click'" in script
 
 

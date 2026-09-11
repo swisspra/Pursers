@@ -134,6 +134,9 @@ BROWSER_ACTION_KEYS = {
     "fetch_json": {
         "kind", "method", "endpoint", "body", "pointer", "path",
     },
+    "click_response_json": {
+        "kind", "selector", "method", "endpoint", "pointer", "path",
+    },
 }
 
 
@@ -506,7 +509,10 @@ def _browser_actions(value: Any) -> list[dict[str, Any]]:
         if not isinstance(path, str) or not path.startswith("/") or path in paths:
             raise TypedEvidenceError("browser action result path is invalid")
         paths.add(path)
-        if kind in {"click", "set_value", "select", "submit", "press_key"}:
+        if kind in {
+            "click", "set_value", "select", "submit", "press_key",
+            "click_response_json",
+        }:
             selector = action["selector"]
             if not isinstance(selector, str) or not selector or len(selector) > 512:
                 raise TypedEvidenceError("browser action selector is invalid")
@@ -532,13 +538,23 @@ def _browser_actions(value: Any) -> list[dict[str, Any]]:
                 or action["body"] is not None and not isinstance(action["body"], dict)
             ):
                 raise TypedEvidenceError("browser fetch action is invalid")
-        if kind == "fetch_json" and (
+        if kind == "click_response_json" and (
+            action["method"] not in {"GET", "POST", "PUT", "PATCH", "DELETE"}
+            or not isinstance(action["endpoint"], str)
+            or not action["endpoint"].startswith("/")
+            or action["endpoint"].startswith("//")
+            or "#" in action["endpoint"]
+        ):
+            raise TypedEvidenceError("browser response capture is invalid")
+        if kind in {"fetch_json", "click_response_json"} and (
             not isinstance(action["pointer"], str)
             or len(action["pointer"]) > 512
             or re.fullmatch(r"(?:/(?:[^~/]|~[01])*)+", action["pointer"])
             is None
         ):
             raise TypedEvidenceError("browser fetch JSON pointer is invalid")
+    if sum(action["kind"] == "click_response_json" for action in value) > 1:
+        raise TypedEvidenceError("browser response capture must be unique")
     return value
 
 

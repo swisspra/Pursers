@@ -95,6 +95,9 @@ TRANSITION_ACTION_KEYS = {
     "fetch_json": {
         "kind", "method", "endpoint", "body", "pointer", "path",
     },
+    "click_response_json": {
+        "kind", "selector", "method", "endpoint", "pointer", "path",
+    },
 }
 
 
@@ -993,6 +996,66 @@ const isolated = await cdp('Page.createIsolatedWorld', {
 })
 const contextId = isolated ? isolated.executionContextId : null
 if (!contextId) throw new Error('isolated verifier world unavailable')
+const responseActions = recipe.actions.filter(spec => spec.kind === 'click_response_json')
+if (responseActions.length > 1) throw new Error('multiple response captures are unavailable')
+const responseAction = responseActions[0] || null
+const responseCaptureKey = '__pursersVerifierFetchCapture'
+if (responseAction) {
+  const installed = await cdp('Runtime.evaluate', {
+    expression: `(() => {
+      const key = ${JSON.stringify(responseCaptureKey)}
+      const method = ${JSON.stringify(responseAction.method)}
+      const endpoint = ${JSON.stringify(responseAction.endpoint)}
+      const pointer = ${JSON.stringify(responseAction.pointer)}
+      const prior = window[key]
+      if (prior && prior.wrapper && window.fetch === prior.wrapper) {
+        window.fetch = prior.original
+      }
+      const original = window.fetch
+      const selectJson = (value) => {
+        let current = value
+        for (const encoded of pointer.slice(1).split('/')) {
+          const token = encoded.replace(/~1/g, '/').replace(/~0/g, '~')
+          if (current === null || typeof current !== 'object' ||
+              !Object.prototype.hasOwnProperty.call(current, token)) {
+            throw new Error('response JSON pointer absent')
+          }
+          current = current[token]
+        }
+        return current
+      }
+      const state = { original, values: [], error: null, wrapper: null, timer: null }
+      const wrapper = async function(input, init = {}) {
+        const response = await original.call(this, input, init)
+        const requestUrl = typeof input === 'string' ? input : input.url
+        const requestMethod = String(init.method || input.method || 'GET').toUpperCase()
+        let pathname = ''
+        try { pathname = new URL(requestUrl, window.location.href).pathname } catch (_error) {}
+        if (requestMethod === method && pathname === endpoint) {
+          try {
+            const body = await response.clone().json()
+            state.values.push(selectJson({ status: response.status, body }))
+          } catch (error) {
+            state.error = String(error && error.message ? error.message : error)
+          }
+        }
+        return response
+      }
+      state.wrapper = wrapper
+      window.fetch = wrapper
+      state.timer = window.setTimeout(() => {
+        if (window.fetch === wrapper) window.fetch = original
+        if (window[key] === state) delete window[key]
+      }, 15000)
+      window[key] = state
+      return true
+    })()`,
+    awaitPromise: true,
+    returnByValue: true
+  })
+  if (!installed || installed.exceptionDetails || !installed.result ||
+      installed.result.value !== true) throw new Error('response capture unavailable')
+}
 const transitionResult = await cdp('Runtime.evaluate', {
   expression: `(async () => {
     const recipe = ${JSON.stringify(recipe)}
@@ -1049,7 +1112,7 @@ const transitionResult = await cdp('Runtime.evaluate', {
       } else {
         const node = document.querySelector(spec.selector)
         if (!node) throw new Error('action selector absent: ' + spec.selector)
-        if (spec.kind === 'click') {
+        if (spec.kind === 'click' || spec.kind === 'click_response_json') {
           node.click(); action[spec.path] = 'clicked'
         } else if (spec.kind === 'set_value' || spec.kind === 'select') {
           node.value = spec.value
@@ -1113,6 +1176,24 @@ const bindingResult = await cdp('Runtime.evaluate', {
 const transition = transitionResult && transitionResult.result ? transitionResult.result.value : null
 const binding = bindingResult && bindingResult.result ? bindingResult.result.value : null
 if (!transition || !binding) throw new Error('transition result unavailable')
+if (responseAction) {
+  const captured = await cdp('Runtime.evaluate', {
+    expression: `(() => {
+      const key = ${JSON.stringify(responseCaptureKey)}
+      const state = window[key]
+      if (!state) return null
+      window.clearTimeout(state.timer)
+      if (window.fetch === state.wrapper) window.fetch = state.original
+      delete window[key]
+      return { values: state.values, error: state.error }
+    })()`,
+    returnByValue: true
+  })
+  const value = captured && captured.result ? captured.result.value : null
+  if (!value || value.error || !Array.isArray(value.values) ||
+      value.values.length !== 1) throw new Error('response capture did not match exactly once')
+  transition.action[responseAction.path] = value.values[0]
+}
 cliLog(JSON.stringify({
   page_url: info.url,
   before: transition.before,
@@ -1286,7 +1367,10 @@ def _validate_transition_actions(value: Any) -> list[dict[str, Any]]:
         if not isinstance(path, str) or not path.startswith("/") or path in paths:
             raise _fail(EXIT_USAGE, "transition action path is invalid")
         paths.add(path)
-        if kind in {"click", "set_value", "select", "submit", "press_key"} and (
+        if kind in {
+            "click", "set_value", "select", "submit", "press_key",
+            "click_response_json",
+        } and (
             not isinstance(item["selector"], str) or not item["selector"]
             or len(item["selector"]) > 512
         ):
@@ -1312,13 +1396,23 @@ def _validate_transition_actions(value: Any) -> list[dict[str, Any]]:
             or item["body"] is not None and not isinstance(item["body"], dict)
         ):
             raise _fail(EXIT_USAGE, "transition fetch action is invalid")
-        if kind == "fetch_json" and (
+        if kind == "click_response_json" and (
+            item["method"] not in {"GET", "POST", "PUT", "PATCH", "DELETE"}
+            or not isinstance(item["endpoint"], str)
+            or not item["endpoint"].startswith("/")
+            or item["endpoint"].startswith("//")
+            or "#" in item["endpoint"]
+        ):
+            raise _fail(EXIT_USAGE, "transition response capture is invalid")
+        if kind in {"fetch_json", "click_response_json"} and (
             not isinstance(item["pointer"], str)
             or len(item["pointer"]) > 512
             or re.fullmatch(r"(?:/(?:[^~/]|~[01])*)+", item["pointer"])
             is None
         ):
             raise _fail(EXIT_USAGE, "transition fetch JSON pointer is invalid")
+    if sum(item["kind"] == "click_response_json" for item in value) > 1:
+        raise _fail(EXIT_USAGE, "transition response capture must be unique")
     return value
 
 

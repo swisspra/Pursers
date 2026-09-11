@@ -84,6 +84,13 @@ from the real `{status, body}` response envelope and fails if it is absent;
 this permits exact structured action-result assertions without retaining a
 whole response or request credential. Arbitrary script expressions and
 arbitrary key strings are not accepted.
+
+For a page-owned cross-origin helper request, `click_response_json` clicks one
+real control, temporarily observes the single matching method/path response
+that the page sends with its in-memory authentication, and selects one required
+JSON pointer from the same bounded envelope. It never records request headers,
+the helper URL, or the helper token, and restores the page's original `fetch`
+function immediately after the action (with a bounded safety timeout).
 The observer executes the recipe in its isolated browser world and returns the
 actual correlated before/action/after selections.
 
