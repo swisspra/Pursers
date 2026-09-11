@@ -313,7 +313,8 @@ def test_receipt_rejects_decoy_pid(tmp_path: Path, http_server: str) -> None:
         )
         trust = _trust(tmp_path, http_server)
         process_trust = {
-            "pid_file": str(pid_file), "argv_prefix": [Path(sys.executable).name, "-c"],
+            "pid_file": str(pid_file),
+            "argv0_names": [Path(sys.executable).name, "Python"], "argv_prefix": ["-c"],
             "argv_contains": ["typed-evidence-marker"],
             "receipt_pid_pointer": "/pid",
         }

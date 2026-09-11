@@ -149,7 +149,8 @@ HMAC keys, and paths occur only in verifier trust:
   },
   "process": {
     "pid_file": "/PATH/TO/VERIFIER/runtime.pid",
-    "argv_prefix": ["python3", "-m", "pursers_personal.cli"],
+    "argv0_names": ["python3", "Python"],
+    "argv_prefix": ["-m", "pursers_personal.cli"],
     "argv_contains": ["--board-id", "sandbox-board"],
     "receipt_pid_pointer": "/pid"
   }

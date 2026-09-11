@@ -272,7 +272,10 @@ def _process_check(process: Any, receipt: Any | None = None) -> dict[str, Any] |
     if process is None:
         return None
     process = _closed(
-        process, {"pid_file", "argv_prefix", "argv_contains", "receipt_pid_pointer"},
+        process, {
+            "pid_file", "argv0_names", "argv_prefix", "argv_contains",
+            "receipt_pid_pointer",
+        },
         "process trust",
     )
     pid_path = Path(str(process["pid_file"])).resolve()
@@ -287,8 +290,12 @@ def _process_check(process: Any, receipt: Any | None = None) -> dict[str, Any] |
         raise TypedEvidenceError("trusted process PID is invalid") from None
     if (
         pid <= 1 or not isinstance(process["argv_prefix"], list) or not process["argv_prefix"]
+        or not isinstance(process["argv0_names"], list) or not process["argv0_names"]
         or not isinstance(process["argv_contains"], list) or not process["argv_contains"]
-        or any(not isinstance(part, str) for part in process["argv_prefix"] + process["argv_contains"])
+        or any(
+            not isinstance(part, str)
+            for part in process["argv0_names"] + process["argv_prefix"] + process["argv_contains"]
+        )
     ):
         raise TypedEvidenceError("trusted process contract is invalid")
     completed = subprocess.run(
@@ -302,11 +309,10 @@ def _process_check(process: Any, receipt: Any | None = None) -> dict[str, Any] |
     except ValueError:
         arguments = []
     prefix = process["argv_prefix"]
-    comparable = list(arguments)
-    if comparable:
-        comparable[0] = Path(comparable[0]).name
     if (
-        completed.returncode or comparable[:len(prefix)] != prefix
+        completed.returncode or not arguments
+        or Path(arguments[0]).name not in process["argv0_names"]
+        or arguments[1:1 + len(prefix)] != prefix
         or any(part not in arguments for part in process["argv_contains"])
     ):
         raise TypedEvidenceError("trusted process identity does not match")
