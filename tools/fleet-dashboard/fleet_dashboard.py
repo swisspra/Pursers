@@ -77,6 +77,7 @@ from release_ops import ReleaseOpsManager
 import runtime_environment
 from warm_home import apply_warm_guided_home
 from result_visibility import project_ticket_result
+from evidence_trace import CORRELATION_HEADERS, EvidenceTrace, EvidenceTraceConfigError
 
 
 DEFAULT_URL = "http://127.0.0.1:8766/mcp"
@@ -6728,6 +6729,7 @@ def make_handler(
     stats_path: str | Path | None = None,
     worker_manager: WorkerManager | None = None,
     seat_manager: SeatConfigManager | None = None,
+    evidence_trace: EvidenceTrace | None = None,
 ) -> type[BaseHTTPRequestHandler]:
     selected_stats_path = (
         bridge_stats_path() if stats_path is None else Path(stats_path)
@@ -6831,7 +6833,52 @@ def make_handler(
         return str(resolver(central))
 
     class Handler(BaseHTTPRequestHandler):
+        def _prepare_evidence(self, method: str, route: str) -> None:
+            self._evidence_context = None
+            self._evidence_before = None
+            if evidence_trace is None:
+                return
+            context = evidence_trace.context(self.headers, method, route)
+            if context is None:
+                return
+            try:
+                before = seats.attention_state()
+            except Exception:  # noqa: BLE001 - observability cannot break the API.
+                return
+            self._evidence_context = context
+            self._evidence_before = before
+
         def _send(self, status: int, content_type: str, body: bytes) -> None:
+            evidence_headers: dict[str, str] = {}
+            context = getattr(self, "_evidence_context", None)
+            before = getattr(self, "_evidence_before", None)
+            if (
+                evidence_trace is not None
+                and context is not None
+                and before is not None
+                and content_type.startswith("application/json")
+            ):
+                try:
+                    after = seats.attention_state()
+                    metadata, _emitted = evidence_trace.observe(
+                        context=context,
+                        method=self.command,
+                        route=urlsplit(self.path).path,
+                        status=status,
+                        before=before,
+                        after=after,
+                        result_body=body,
+                    )
+                    document = json.loads(body)
+                    if metadata is not None and isinstance(document, dict):
+                        document["_evidence"] = metadata
+                        body = _json_bytes(document)
+                        evidence_headers = {
+                            header: getattr(context, key)
+                            for key, header in CORRELATION_HEADERS.items()
+                        }
+                except Exception:  # noqa: BLE001 - observability is fail-passive.
+                    pass
             self.send_response(status)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(body)))
@@ -6841,6 +6888,8 @@ def make_handler(
                 "Content-Security-Policy",
                 "default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'",
             )
+            for header, value in evidence_headers.items():
+                self.send_header(header, value)
             self.end_headers()
             self.wfile.write(body)
 
@@ -6875,6 +6924,7 @@ def make_handler(
 
         def do_GET(self) -> None:
             route = urlsplit(self.path).path
+            self._prepare_evidence("GET", route)
             if route == "/":
                 self._send(200, "text/html; charset=utf-8", HTML.encode("utf-8"))
                 return
@@ -7180,6 +7230,7 @@ def make_handler(
 
         def do_POST(self) -> None:
             route = urlsplit(self.path).path
+            self._prepare_evidence("POST", route)
             config_routes = {
                 "/api/config/plan",
                 "/api/config/suggestions",
@@ -7250,6 +7301,7 @@ def make_handler(
                 CONFIG_API_MAX_BYTES if route in config_routes else WORKER_API_MAX_BYTES
             )
             if not 1 <= length <= body_limit:
+                self._evidence_context = None
                 self._send(
                     400,
                     "application/json; charset=utf-8",
@@ -7257,7 +7309,15 @@ def make_handler(
                 )
                 return
             try:
-                request = json.loads(self.rfile.read(length))
+                raw_request = self.rfile.read(length)
+                trace_context = getattr(self, "_evidence_context", None)
+                if (
+                    trace_context is not None
+                    and hashlib.sha256(raw_request).hexdigest()
+                    != trace_context.action_sha256
+                ):
+                    self._evidence_context = None
+                request = json.loads(raw_request)
                 if route == "/api/config/plan":
                     body = _json_bytes(seats.plan(request))
                 elif route == "/api/config/suggestions":
@@ -7783,6 +7843,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--worker-script", default=str(DEFAULT_WORKER_SCRIPT), help=argparse.SUPPRESS
     )
+    parser.add_argument(
+        "--evidence-trace-config",
+        help="Verifier-owned 0600 config for bounded Fleet evidence tracing",
+    )
     args = parser.parse_args(argv)
     if args.host != "127.0.0.1":
         parser.error("--host must be 127.0.0.1; non-loopback binding is refused")
@@ -7808,9 +7872,23 @@ def main(argv: list[str] | None = None) -> None:
     seat_manager = SeatConfigManager(
         seat_state_dir / "seats.json", state_dir=seat_state_dir
     )
+    try:
+        trace = (
+            EvidenceTrace.from_config(args.evidence_trace_config, Path(__file__))
+            if args.evidence_trace_config
+            else None
+        )
+    except EvidenceTraceConfigError as exc:
+        raise SystemExit(f"invalid evidence trace config: {exc}") from exc
     server = ThreadingHTTPServer(
         (args.host, args.port),
-        make_handler(cache, bridge_stats_path(), worker_manager, seat_manager),
+        make_handler(
+            cache,
+            bridge_stats_path(),
+            worker_manager,
+            seat_manager,
+            evidence_trace=trace,
+        ),
     )
     print(f"Fleet Dashboard: http://{args.host}:{args.port}", flush=True)
     try:
