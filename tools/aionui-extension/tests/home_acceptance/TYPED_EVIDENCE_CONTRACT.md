@@ -23,6 +23,8 @@ python3 /PATH/TO/CANDIDATE/typed_evidence.py install --dir /PATH/TO/VERIFIER
 /PATH/TO/VERIFIER/typed_evidence.py evaluate \
   --evidence /PATH/TO/evidence.json --expected /PATH/TO/expected.json \
   --trust /PATH/TO/trust.json --output /PATH/TO/result.json
+/PATH/TO/VERIFIER/typed_evidence.py evaluate-parent \
+  --trust /PATH/TO/trust.json < /PATH/TO/parent-request.json
 ```
 
 Callable integration uses:
@@ -522,6 +524,8 @@ runtime, entrypoint, correlation, and JSON-type variants cannot become PASS.
 The final positive must launch the real Fleet handler, execute its disposable
 `POST /api/attention` action, and consume the resulting product trace. No
 production mutation or browser claim is supplied by this delta. Reviewer-owned
-setup and final browser evidence remain separate gates. Opus owns wiring results
-into the shared runner, harness, canonical facts, and report-level graph
-validation.
+setup and final browser evidence remain separate gates. The shared runner invokes
+the installed module's `evaluate-parent` command for every nonvisual canonical
+conjunct. That command authenticates the evidence with verifier-owned trust,
+binds the full observation correlation, evaluates the canonical source/state
+meaning, and returns the exact result schema consumed by the parent harness.

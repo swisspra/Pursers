@@ -73,6 +73,9 @@ python3 tools/aionui-extension/tests/home_acceptance/runner.py install-observer 
   --ego-browser /PATH/TO/ego-browser \
   --task-space <authenticated-isolated-task-space-id>
 
+python3 tools/aionui-extension/tests/home_acceptance/typed_evidence.py install \
+  --dir /PATH/TO/verifier-typed
+
 # 2. report observed capability before claiming anything
 python3 tools/aionui-extension/tests/home_acceptance/runner.py doctor \
   --observer /PATH/TO/verifier-observer \
@@ -96,7 +99,7 @@ python3 tools/aionui-extension/tests/home_acceptance/runner.py assemble \
 PURSERS_HOME_ACCEPTANCE_MUTATE=I_UNDERSTAND_SANDBOX_ONLY \
 python3 tools/aionui-extension/tests/home_acceptance/runner.py validate \
   --observer /PATH/TO/verifier-observer \
-  --typed-evaluator /PATH/TO/verifier-typed/typed-evaluator \
+  --typed-evaluator /PATH/TO/verifier-typed/typed_evidence.py \
   --typed-trust /PATH/TO/verifier-typed/trust.json \
   --report /PATH/TO/evidence/report.json \
   --target http://127.0.0.1:25808 \

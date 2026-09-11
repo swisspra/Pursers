@@ -689,6 +689,7 @@ def _write_verifier_typed_evaluator(directory: Path) -> tuple[Path, Path]:
         """#!/usr/bin/env python3
 import argparse, hashlib, json, pathlib, sys
 parser = argparse.ArgumentParser()
+parser.add_argument("command", choices=["evaluate-parent"])
 parser.add_argument("--trust", required=True)
 args = parser.parse_args()
 trust = json.loads(pathlib.Path(args.trust).read_text())

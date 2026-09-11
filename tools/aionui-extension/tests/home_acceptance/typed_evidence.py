@@ -1599,6 +1599,125 @@ def evaluate_evidence(evidence: Any, expected: Any, trust_config: Any) -> dict[s
     }
 
 
+def _normalized_semantic_text(value: Any) -> str:
+    if isinstance(value, str):
+        text = value
+    else:
+        text = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return "".join(character.lower() for character in text if character.isalnum())
+
+
+def _semantic_contains(value: Any, expected: str) -> bool:
+    needle = _normalized_semantic_text(expected)
+    return bool(needle) and needle in _normalized_semantic_text(value)
+
+
+def evaluate_parent_request(request: Any, trust_config: Any) -> dict[str, Any]:
+    """Authenticate evidence and evaluate one canonical parent conjunct."""
+    trust = _trust(trust_config)
+    request = _closed(
+        request,
+        {
+            "observation_id", "run_id", "action_id", "entity", "causal_index",
+            "surface_id", "board_id", "candidate_commit", "conjunct",
+            "evidence_path",
+        },
+        "parent evaluation request",
+    )
+    evidence_path = Path(str(request["evidence_path"])).expanduser().resolve()
+    evidence_bytes = evidence_path.read_bytes()
+    if len(evidence_bytes) > MAX_CONFIG_BYTES:
+        raise TypedEvidenceError("parent evidence file is too large")
+    try:
+        evidence_value = json.loads(evidence_bytes)
+    except json.JSONDecodeError:
+        raise TypedEvidenceError("parent evidence is not valid JSON") from None
+    evidence = _verify_evidence(evidence_value, trust)
+    context = evidence["context"]
+    expected_context = {
+        "observation_id": request["observation_id"],
+        "run_id": request["run_id"],
+        "action_id": request["action_id"],
+        "entity": request["entity"],
+        "causal_index": request["causal_index"],
+        "surface": request["surface_id"],
+        "board_id": request["board_id"],
+        "candidate_commit": request["candidate_commit"],
+    }
+    if any(context.get(key) != value for key, value in expected_context.items()):
+        raise TypedEvidenceError("parent request correlation does not match evidence")
+    conjunct = request["conjunct"]
+    if not isinstance(conjunct, dict):
+        raise TypedEvidenceError("parent conjunct fields do not match schema")
+    kind = conjunct.get("kind")
+    if kind != evidence["kind"]:
+        raise TypedEvidenceError("parent conjunct kind does not match evidence")
+    record = evidence["record"]
+    source_id = evidence["source"]["source_id"]
+    if kind == "http_response":
+        conjunct = _closed(
+            conjunct, {"kind", "request", "status", "body_contains"},
+            "parent http_response conjunct",
+        )
+        passed = (
+            record["response"]["status"] == conjunct["status"]
+            and _semantic_contains(source_id, conjunct["request"])
+            and _semantic_contains(record["response"]["selected"], conjunct["body_contains"])
+        )
+    elif kind == "receipt_field":
+        conjunct = _closed(
+            conjunct, {"kind", "receipt", "field", "expected"},
+            "parent receipt_field conjunct",
+        )
+        field = str(conjunct["field"])
+        pointer = field if field.startswith("/") else "/" + field
+        passed = (
+            _semantic_contains(source_id, conjunct["receipt"])
+            and record["fields"].get(pointer, object()) == conjunct["expected"]
+        )
+    elif kind == "log_assertion":
+        conjunct = _closed(
+            conjunct, {"kind", "stream", "expected"},
+            "parent log_assertion conjunct",
+        )
+        passed = (
+            _semantic_contains(source_id, conjunct["stream"])
+            and _semantic_contains(record["entry"], conjunct["expected"])
+        )
+    elif kind == "state_transition":
+        conjunct = _closed(
+            conjunct, {"kind", "from", "to", "via"},
+            "parent state_transition conjunct",
+        )
+        passed = (
+            _semantic_contains(record["before"]["selected"], conjunct["from"])
+            and _semantic_contains(record["action"]["selected"], conjunct["via"])
+            and _semantic_contains(record["after"]["selected"], conjunct["to"])
+        )
+    else:
+        raise TypedEvidenceError("parent conjunct kind is unsupported")
+    if passed:
+        evidence_id = _digest({
+            "payload_sha256": evidence["payload_sha256"], "auth": evidence["auth"],
+        })
+        _consume_replay(evidence_id, trust["replay_guard"])
+    return {
+        "verifier_id": trust["verifier_id"],
+        "observation_id": request["observation_id"],
+        "run_id": request["run_id"],
+        "action_id": request["action_id"],
+        "entity": request["entity"],
+        "causal_index": request["causal_index"],
+        "surface_id": request["surface_id"],
+        "board_id": request["board_id"],
+        "candidate_commit": request["candidate_commit"],
+        "kind": kind,
+        "passed": passed,
+        "predicate_sha256": _digest(conjunct),
+        "evidence_sha256": hashlib.sha256(evidence_bytes).hexdigest(),
+    }
+
+
 def install_module(destination: Path) -> dict[str, Any]:
     """Install this recorder outside its source checkout with private mode."""
     destination = destination.expanduser().resolve()
@@ -1643,6 +1762,8 @@ def main(argv: list[str] | None = None) -> int:
     evaluate.add_argument("--expected", required=True)
     evaluate.add_argument("--trust", required=True)
     evaluate.add_argument("--output")
+    parent = commands.add_parser("evaluate-parent")
+    parent.add_argument("--trust", required=True)
     args = parser.parse_args(argv)
     try:
         if args.command == "install":
@@ -1653,13 +1774,19 @@ def main(argv: list[str] | None = None) -> int:
                 _read_json(Path(args.trust).expanduser().resolve(), "trust config"),
             )
             _write_result(value, args.output)
-        else:
+        elif args.command == "evaluate":
             value = evaluate_evidence(
                 _read_json(Path(args.evidence).expanduser().resolve(), "evidence"),
                 _read_json(Path(args.expected).expanduser().resolve(), "expected predicate"),
                 _read_json(Path(args.trust).expanduser().resolve(), "trust config"),
             )
             _write_result(value, args.output)
+        else:
+            value = evaluate_parent_request(
+                json.load(sys.stdin),
+                _read_json(Path(args.trust).expanduser().resolve(), "trust config"),
+            )
+            _write_result(value, None)
     except TypedEvidenceError as exc:
         sys.stderr.write(f"typed_evidence: {exc}\n")
         return 2

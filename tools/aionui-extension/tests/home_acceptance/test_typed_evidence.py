@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import tomllib
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -37,7 +38,10 @@ CANDIDATE = subprocess.check_output(
 BOARD = "sandbox-typed-evidence"
 EVIDENCE_KEY = "11" * 32
 SOURCE_KEY = "22" * 32
-PERSONAL_VERSION = "5.0.0a25"
+RELEASE_VERSIONS = tomllib.loads(
+    (REPOSITORY / "tools/release_versions.toml").read_text(encoding="utf-8")
+)
+PERSONAL_VERSION = RELEASE_VERSIONS["packages"]["personal"]
 
 
 def _json_bytes(value: Any) -> bytes:
@@ -618,6 +622,68 @@ def test_receipt_field_real_roundtrip_and_forgery(tmp_path: Path, http_server: s
         record_evidence(request, trust)
 
 
+def test_parent_cli_replays_authenticated_canonical_conjunct(
+    tmp_path: Path, http_server: str,
+) -> None:
+    receipt_path = tmp_path / "receipt.json"
+    _write_receipt(receipt_path)
+    context = _context(
+        observation_id="personal.role", action_id="read-role",
+        entity="seat-3", surface="personal",
+    )
+    trust = _trust(tmp_path, http_server)
+    trust["receipt_sources"] = {
+        "personal-receipt": _receipt_source(receipt_path)
+    }
+    evidence = record_evidence(
+        _request(
+            "receipt_field",
+            {
+                "source_id": "personal-receipt",
+                "fields": ["/role", "/transport", "/pid"],
+            },
+            context,
+        ),
+        trust,
+    )
+    evidence_path = tmp_path / "evidence.json"
+    evidence_path.write_text(json.dumps(evidence), encoding="utf-8")
+    trust_path = tmp_path / "trust.json"
+    trust_path.write_text(json.dumps(trust), encoding="utf-8")
+    trust_path.chmod(0o600)
+    conjunct = {
+        "kind": "receipt_field",
+        "receipt": "personal-receipt",
+        "field": "role",
+        "expected": "worker",
+    }
+    completed = subprocess.run(
+        [
+            str(Path(typed_evidence.__file__).resolve()),
+            "evaluate-parent", "--trust", str(trust_path),
+        ],
+        input=json.dumps({
+            "observation_id": context["observation_id"],
+            "run_id": context["run_id"],
+            "action_id": context["action_id"],
+            "entity": context["entity"],
+            "causal_index": context["causal_index"],
+            "surface_id": context["surface"],
+            "board_id": context["board_id"],
+            "candidate_commit": context["candidate_commit"],
+            "conjunct": conjunct,
+            "evidence_path": str(evidence_path),
+        }),
+        text=True, capture_output=True, check=True,
+    )
+    result = json.loads(completed.stdout)
+    assert result["passed"] is True
+    assert result["predicate_sha256"] == typed_evidence._digest(conjunct)
+    assert result["evidence_sha256"] == hashlib.sha256(
+        evidence_path.read_bytes()
+    ).hexdigest()
+
+
 def test_receipt_rejects_decoy_pid(tmp_path: Path, http_server: str) -> None:
     marker = tmp_path / "receipt_process.py"
     marker.write_text("import time; time.sleep(30)\n", encoding="utf-8")
@@ -700,19 +766,58 @@ def test_personal_receipt_real_producer_capture_adapter(
         / "packages/personal/src/pursers_personal/apps_server.py"
     )
     receipt = tmp_path / "personal-runtime.json"
-    runtime = tmp_path / "personal-venv"
+    build_sources = tmp_path / "build-sources"
+    wheel_dir = tmp_path / "wheels"
+    wheel_dir.mkdir()
+    for project_name in ("client", "central", "personal"):
+        shutil.copytree(
+            candidate_checkout / "packages" / project_name,
+            build_sources / project_name,
+            ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "build", "*.egg-info"),
+        )
+    build_runtime = tmp_path / "build-venv"
+    subprocess.run(
+        ["uv", "venv", "--python", sys.executable, str(build_runtime)],
+        check=True, capture_output=True, text=True,
+    )
+    build_python = build_runtime / "bin/python"
+    build_requirements = [
+        f"{name}=={version}"
+        for name, version in RELEASE_VERSIONS["build_toolchain"].items()
+    ]
     subprocess.run(
         [
-            "uv", "venv", "--python", sys.executable,
-            "--system-site-packages", str(runtime),
+            "uv", "pip", "install", "--offline", "--python",
+            str(build_python), *build_requirements,
         ],
+        check=True, capture_output=True, text=True,
+    )
+    build_environment = {
+        **os.environ,
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONHASHSEED": "0",
+        "SOURCE_DATE_EPOCH": RELEASE_VERSIONS["source_date_epoch"],
+    }
+    for project_name in ("client", "central", "personal"):
+        subprocess.run(
+            [
+                "uv", "build", "--offline", "--wheel", "--no-build-isolation",
+                "--python", str(build_python), "--out-dir", str(wheel_dir),
+                str(build_sources / project_name),
+            ],
+            check=True, capture_output=True, text=True, env=build_environment,
+        )
+    runtime = tmp_path / "personal-venv"
+    subprocess.run(
+        ["uv", "venv", "--python", sys.executable, str(runtime)],
         check=True, capture_output=True, text=True,
     )
     runtime_python = runtime / "bin/python"
     subprocess.run(
         [
-            "uv", "pip", "install", "--offline", "--no-deps", "--python",
-            str(runtime_python), str(candidate_checkout / "packages/personal"),
+            "uv", "pip", "install", "--offline", "--python",
+            str(runtime_python),
+            *[str(path) for path in sorted(wheel_dir.glob("*.whl"))],
         ],
         check=True, capture_output=True, text=True,
         env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
@@ -724,97 +829,6 @@ def test_personal_receipt_real_producer_capture_adapter(
         ],
         text=True,
     ).strip())
-    client_package = site_packages / "pursers_client"
-    shutil.copytree(
-        candidate_checkout / "packages/client/src/pursers_client",
-        client_package,
-        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
-    )
-    dist_info = site_packages / "pursers_client-0.1.0a22.dist-info"
-    (dist_info / "licenses").mkdir(parents=True)
-    metadata = (
-        "Metadata-Version: 2.4\n"
-        "Name: pursers-client\n"
-        "Version: 0.1.0a22\n"
-        "Summary: Async client for the On Board central service\n"
-        "License-Expression: Apache-2.0\n"
-        "Requires-Python: >=3.11\n"
-        "License-File: LICENSE\n"
-        "Requires-Dist: mcp==2.1.1\n"
-        "Requires-Dist: PyJWT[crypto]<3,>=2.10\n"
-        "Requires-Dist: cryptography<51,>=44\n"
-        "Dynamic: license-file\n"
-    )
-    wheel_metadata = (
-        "Wheel-Version: 1.0\n"
-        "Generator: setuptools (80.9.0)\n"
-        "Root-Is-Purelib: true\n"
-        "Tag: py3-none-any\n\n"
-    )
-    (dist_info / "METADATA").write_text(metadata, encoding="utf-8")
-    (dist_info / "WHEEL").write_text(wheel_metadata, encoding="utf-8")
-    (dist_info / "top_level.txt").write_text("pursers_client\n", encoding="utf-8")
-    shutil.copy2(
-        candidate_checkout / "packages/client/LICENSE",
-        dist_info / "licenses/LICENSE",
-    )
-    installed_members = [
-        *(f"pursers_client/{path.name}" for path in sorted(client_package.glob("*.py"))),
-        "pursers_client-0.1.0a22.dist-info/licenses/LICENSE",
-        "pursers_client-0.1.0a22.dist-info/METADATA",
-        "pursers_client-0.1.0a22.dist-info/WHEEL",
-        "pursers_client-0.1.0a22.dist-info/top_level.txt",
-        "pursers_client-0.1.0a22.dist-info/RECORD",
-    ]
-    (dist_info / "RECORD").write_text(
-        "".join(f"{relative},,\n" for relative in installed_members),
-        encoding="utf-8",
-    )
-    central_package = site_packages / "pursers_central"
-    shutil.copytree(
-        candidate_checkout / "packages/central/src/pursers_central",
-        central_package,
-        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
-    )
-    central_dist_info = site_packages / "pursers_central-0.1.0a29.dist-info"
-    (central_dist_info / "licenses").mkdir(parents=True)
-    central_metadata = (
-        "Metadata-Version: 2.4\n"
-        "Name: pursers-central\n"
-        "Version: 0.1.0a29\n"
-        "Summary: Central multi-board On Board MCP service\n"
-        "License-Expression: Apache-2.0\n"
-        "Requires-Python: >=3.11\n"
-        "License-File: LICENSE\n"
-        "Requires-Dist: mcp[cli]==2.1.1\n"
-        "Requires-Dist: pursers-client==0.1.0a22\n"
-        "Requires-Dist: PyJWT[crypto]<3,>=2.10\n"
-        "Requires-Dist: uvicorn<1,>=0.30\n"
-        "Dynamic: license-file\n"
-    )
-    (central_dist_info / "METADATA").write_text(
-        central_metadata, encoding="utf-8"
-    )
-    (central_dist_info / "WHEEL").write_text(wheel_metadata, encoding="utf-8")
-    (central_dist_info / "top_level.txt").write_text(
-        "pursers_central\n", encoding="utf-8"
-    )
-    shutil.copy2(
-        candidate_checkout / "packages/central/LICENSE",
-        central_dist_info / "licenses/LICENSE",
-    )
-    central_installed_members = [
-        *(f"pursers_central/{path.name}" for path in sorted(central_package.glob("*.py"))),
-        "pursers_central-0.1.0a29.dist-info/licenses/LICENSE",
-        "pursers_central-0.1.0a29.dist-info/METADATA",
-        "pursers_central-0.1.0a29.dist-info/WHEEL",
-        "pursers_central-0.1.0a29.dist-info/top_level.txt",
-        "pursers_central-0.1.0a29.dist-info/RECORD",
-    ]
-    (central_dist_info / "RECORD").write_text(
-        "".join(f"{relative},,\n" for relative in central_installed_members),
-        encoding="utf-8",
-    )
     personal_package = site_packages / "pursers_personal"
     shutil.rmtree(personal_package)
     personal_package.symlink_to(
@@ -841,11 +855,15 @@ def test_personal_receipt_real_producer_capture_adapter(
     profile_board = json.loads(Path(profile_path).read_text(encoding="utf-8"))[
         "board_id"
     ]
+    challenge_key = tmp_path / "acceptance-challenge.key"
+    challenge_key.write_bytes(b"\x11" * 32)
+    challenge_key.chmod(0o600)
     command = [
         str(runtime_python), "-I", "-m", "pursers_personal.cli", "mcp",
         "--profile", profile_path, "--host-id", "pytest",
         "--session", "typed-evidence", "--acceptance-runtime-receipt",
-        str(receipt), "--candidate-source", str(candidate_source),
+        str(receipt), "--acceptance-challenge-key", str(challenge_key),
+        "--candidate-source", str(candidate_source),
         "--candidate-commit", CANDIDATE, "--board-id", profile_board,
     ]
     process = subprocess.Popen(
@@ -887,6 +905,7 @@ def test_personal_receipt_real_producer_capture_adapter(
                 "--host-id": "pytest",
                 "--session": "typed-evidence",
                 "--acceptance-runtime-receipt": str(receipt),
+                "--acceptance-challenge-key": str(challenge_key),
                 "--candidate-source": str(candidate_source),
                 "--candidate-commit": CANDIDATE,
                 "--board-id": profile_board,

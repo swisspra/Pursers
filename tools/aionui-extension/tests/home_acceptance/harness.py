@@ -434,7 +434,10 @@ class VerifierTypedEvidenceEvaluator:
         }
         try:
             completed = subprocess.run(
-                [str(self.command), "--trust", str(self.trust)],
+                [
+                    str(self.command), "evaluate-parent",
+                    "--trust", str(self.trust),
+                ],
                 input=json.dumps(payload, sort_keys=True),
                 text=True,
                 capture_output=True,
