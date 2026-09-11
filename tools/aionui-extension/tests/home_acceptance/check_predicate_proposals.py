@@ -51,6 +51,20 @@ PRESET_FACTS = {
     "extension.reviewer-preset-codex": "pursers-reviewer-codex",
     "extension.reviewer-preset-claude": "pursers-reviewer-claude",
 }
+CAUSAL_BROWSER_IDS = frozenset({
+    "extension.join-progress",
+    "fleet.add-project-one-time-doors",
+    "fleet.board-detail-activity",
+    "fleet.board-detail-metadata",
+    "fleet.board-detail-truncation",
+    "fleet.config-tier-skill-role-capabilities",
+    "fleet.hub-boards",
+    "fleet.operations-job-result",
+    "fleet.unknown-route-recovery",
+    "personal.activity-bounded-feed",
+    "personal.activity-offline",
+    "personal.activity-stale",
+})
 OPS = {"eq", "ne", "contains", "in", "gt", "gte", "lt", "lte"}
 POINTER = re.compile(r"^/(?:[^/~]|~[01])+(?:/(?:[^/~]|~[01])+)*$")
 
@@ -567,41 +581,160 @@ const { createHandlers } = require('./tools/aionui-extension/webui/routes.js');
 
 def check_fact_specific_mutations(proposals: list[dict[str, Any]]) -> int:
     cases = (
-        ("extension.join-progress", ("before", "/connect_step"), "Wrong prior step"),
+        (
+            "extension.join-progress",
+            {("after", "/prepare_step"): "Connect"},
+        ),
+        (
+            "fleet.add-project-one-time-doors",
+            {
+                ("before", "/worker_door_present"): 0,
+                ("before", "/reviewer_door_present"): 0,
+                ("before", "/copy_control_count"): 0,
+            },
+        ),
+        (
+            "fleet.board-detail-activity",
+            {
+                ("after", "/timeline_day_count"): 0,
+                ("after", "/timeline_ticket_count"): 0,
+                ("after", "/timeline_event_row_count"): 0,
+            },
+        ),
+        (
+            "fleet.board-detail-metadata",
+            {("after", "/detail_board_id"): ""},
+        ),
+        (
+            "fleet.board-detail-truncation",
+            {("after", "/ticket_limit_notice"): "bounded view"},
+        ),
+        (
+            "fleet.config-tier-skill-role-capabilities",
+            {
+                ("after", "/tier_after"): "",
+                ("after", "/skills_after"): "",
+                ("after", "/review_after"): False,
+                ("after", "/work_after"): False,
+            },
+        ),
+        (
+            "fleet.hub-boards",
+            {
+                ("after", "/boards_nav_active"): 0,
+                ("after", "/boards_heading"): "Fleet overview",
+            },
+        ),
+        (
+            "fleet.operations-job-result",
+            {
+                ("after", "/terminal_output"):
+                    "Status: running\nEffect: pending refresh",
+            },
+        ),
+        (
+            "fleet.unknown-route-recovery",
+            {
+                ("after", "/overview_nav_active_after"): 0,
+                ("after", "/overview_heading"): "",
+            },
+        ),
+        (
+            "personal.activity-bounded-feed",
+            {
+                ("after", "/retained_total"): "201 retained",
+                ("after", "/retained_event_count"): 201,
+            },
+        ),
+        (
+            "personal.activity-offline",
+            {
+                ("after", "/offline_title"):
+                    "Showing the last known local state",
+                ("after", "/demo_tone_count"): 0,
+            },
+        ),
+        (
+            "personal.activity-stale",
+            {
+                ("after", "/stale_title"): "Connected to the local board",
+                ("after", "/stale_or_error_tone_count"): 0,
+            },
+        ),
         (
             "extension.worker-preset-codex",
-            ("action", "/assistant_binding"),
-            {"agent_id": "claude"},
+            {("action", "/assistant_binding"): {"agent_id": "claude"}},
         ),
         (
             "fleet.add-project-idempotent-rerun",
-            ("field", "/_evidence/changed"),
-            True,
+            {("field", "/_evidence/changed"): True},
         ),
         (
             "fleet.doors-disabled",
-            ("action", "/disabled_while_pending"),
-            False,
+            {("action", "/disabled_while_pending"): False},
         ),
         (
             "fleet.refresh-pause-resume",
-            ("before", "/paused_status"),
-            "Updated without pause",
+            {("before", "/paused_status"): "Updated without pause"},
         ),
         (
             "personal.work-priority",
-            ("before", "/personal_work_priority_target_hidden"),
-            False,
+            {("before", "/personal_work_priority_target_hidden"): False},
         ),
     )
-    for fact_id, key, wrong in cases:
+    require(
+        CAUSAL_BROWSER_IDS <= {fact_id for fact_id, _mutations in cases},
+        "every repaired causal browser proposal needs an executable mutation",
+    )
+    for fact_id, mutations in cases:
         item = next(proposal for proposal in proposals if proposal["id"] == fact_id)
         predicate = item["canonical_predicate"]
         observed = synthesized_observed(predicate)
         require(evaluate(predicate, observed), f"{fact_id}: representative positive failed")
-        observed[key] = wrong
+        observed.update(mutations)
         require(not evaluate(predicate, observed), f"{fact_id}: fact-specific mutation passed")
     return len(cases)
+
+
+def check_causal_browser_regressions(proposals: list[dict[str, Any]]) -> None:
+    for item in proposals:
+        if item["id"] not in CAUSAL_BROWSER_IDS:
+            continue
+        recorder = item["executable_request"]["recorder"]
+        require(
+            all(action["kind"] != "observe" for action in recorder["action"]),
+            f"{item['id']}: observe-only pseudo transition",
+        )
+        require(
+            recorder["before"] != recorder["after"],
+            f"{item['id']}: duplicated before/after observation",
+        )
+
+    require_assertion(
+        proposals, "fleet.add-project-one-time-doors", phase="before",
+        path="/copy_control_count", op="eq", value=2,
+    )
+    require_assertion(
+        proposals, "fleet.add-project-one-time-doors", phase="action",
+        path="/seat_refresh_count", op="gt", value=0,
+    )
+    require_assertion(
+        proposals, "fleet.add-project-one-time-doors", phase="after",
+        path="/door_input_count_after", op="eq", value=0,
+    )
+    require_assertion(
+        proposals, "fleet.operations-job-result", phase="action",
+        path="/job_poll_count", op="gt", value=0,
+    )
+    require_assertion(
+        proposals, "fleet.operations-job-result", phase="action",
+        path="/fleet_refresh_count", op="gt", value=0,
+    )
+    require_assertion(
+        proposals, "fleet.operations-job-result", phase="after",
+        path="/terminal_output", op="contains",
+        value="Outcome: succeeded",
+    )
 
 
 def check_assistant_binding_examples(proposals: list[dict[str, Any]]) -> int:
@@ -850,6 +983,7 @@ def check_request(item: dict[str, Any]) -> None:
                 "submit": {"kind", "selector", "path"},
                 "press_key": {"kind", "selector", "key", "path"},
                 "wait": {"kind", "milliseconds", "path"},
+                "resource_delta": {"kind", "endpoint", "milliseconds", "path"},
                 "fetch": {"kind", "method", "endpoint", "body", "path"},
                 "fetch_json": {
                     "kind", "method", "endpoint", "body", "pointer", "path",
@@ -899,6 +1033,18 @@ def check_request(item: dict[str, Any]) -> None:
                     )
             if kind_name in {"fetch_json", "click_response_json"}:
                 check_pointer(action["pointer"], item["id"])
+            if kind_name == "resource_delta":
+                require(
+                    isinstance(action["milliseconds"], int)
+                    and not isinstance(action["milliseconds"], bool)
+                    and 0 <= action["milliseconds"] <= 10_000
+                    and isinstance(action["endpoint"], str)
+                    and action["endpoint"].startswith("/")
+                    and not action["endpoint"].startswith("//")
+                    and "?" not in action["endpoint"]
+                    and "#" not in action["endpoint"],
+                    f"{item['id']}: resource-delta action",
+                )
             if kind_name == "assistant_binding":
                 require(
                     action["endpoint"] == "/api/extensions/assistants"
@@ -1093,6 +1239,7 @@ def validate(delta: dict[str, Any]) -> tuple[int, int, int]:
         semantic.add(normalized)
     require(len(semantic) == 121, "semantic predicates must be unique without source_id")
     check_regressions(proposals)
+    check_causal_browser_regressions(proposals)
     negative_cases += check_fact_specific_mutations(proposals)
     producer_examples = (
         check_parent_producer_examples(proposals)
