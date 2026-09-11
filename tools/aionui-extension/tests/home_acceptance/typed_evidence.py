@@ -75,6 +75,29 @@ FLEET_PROJECT_STEP_POINTERS = frozenset(
     for field in ("step", "status")
 )
 FLEET_PROJECT_CREDENTIAL_ABSENCE_POINTERS = frozenset({"/doors"})
+FLEET_PROJECT_STATE_DOMAINS = (
+    "registry", "board", "credentials", "keys", "clone",
+)
+FLEET_PROJECT_PREFLIGHT_POINTERS = frozenset({
+    "/error",
+    "/_project_preflight/schema_version",
+    "/_project_preflight/request/project",
+    "/_project_preflight/request/board_id",
+    "/_project_preflight/request/action_sha256",
+    "/_project_preflight/result/status",
+    "/_project_preflight/result/decision",
+    "/_evidence/action_sha256",
+    "/_evidence/entity",
+    "/_evidence/board_id",
+    "/_evidence/status",
+    "/_evidence/outcome",
+    "/_evidence/effect",
+    "/_evidence/changed",
+} | {
+    f"/_project_preflight/domains/{domain}/{phase}_sha256"
+    for domain in FLEET_PROJECT_STATE_DOMAINS
+    for phase in ("before", "after")
+})
 FLEET_ACTION_RESULT_POINTERS = {
     "/api/attention": frozenset({"/items"}),
     "/api/projects/add": (
@@ -1129,11 +1152,16 @@ def _validate_runtime_record(value: Any, label: str) -> dict[str, Any]:
 
 
 def _validate_fleet_project_projection(
-    path: str, selected: dict[str, Any], label: str,
+    path: str, status: int, selected: dict[str, Any], label: str,
 ) -> None:
     """Validate the only credential-safe projection of Add project output."""
+    preflight_unique = {
+        pointer for pointer in FLEET_PROJECT_PREFLIGHT_POINTERS
+        if pointer.startswith("/_project_preflight/")
+    }
     project_pointers = (
         FLEET_PROJECT_STEP_POINTERS | FLEET_PROJECT_CREDENTIAL_ABSENCE_POINTERS
+        | preflight_unique
     )
     if path != "/api/projects/add":
         if set(selected) & project_pointers:
@@ -1141,6 +1169,50 @@ def _validate_fleet_project_projection(
                 f"{label} uses project selectors on another route"
             )
         return
+    preflight = set(selected) & preflight_unique
+    if preflight:
+        if not FLEET_PROJECT_PREFLIGHT_POINTERS <= set(selected):
+            raise TypedEvidenceError(
+                f"{label} project preflight projection is incomplete"
+            )
+        if (
+            status != 403
+            or selected["/_project_preflight/schema_version"] != SCHEMA_VERSION
+            or selected["/_project_preflight/result/status"] != status
+            or selected["/_project_preflight/result/decision"] != "denied"
+            or selected["/_evidence/status"] != status
+            or selected["/_evidence/outcome"] != "failed"
+            or selected["/_evidence/effect"] != "project_state_unchanged"
+            or selected["/_evidence/changed"] is not False
+            or selected["/_project_preflight/request/project"]
+            != selected["/_evidence/entity"]
+            or selected["/_project_preflight/request/board_id"]
+            != selected["/_evidence/board_id"]
+            or selected["/_project_preflight/request/action_sha256"]
+            != selected["/_evidence/action_sha256"]
+            or not isinstance(selected["/error"], str)
+            or not selected["/error"].startswith(
+                "board access denied: admin membership required for "
+            )
+        ):
+            raise TypedEvidenceError(
+                f"{label} project preflight denial is inconsistent"
+            )
+        for domain in FLEET_PROJECT_STATE_DOMAINS:
+            before = selected[
+                f"/_project_preflight/domains/{domain}/before_sha256"
+            ]
+            after = selected[
+                f"/_project_preflight/domains/{domain}/after_sha256"
+            ]
+            if (
+                not SHA256.fullmatch(str(before))
+                or not SHA256.fullmatch(str(after))
+                or not hmac.compare_digest(before, after)
+            ):
+                raise TypedEvidenceError(
+                    f"{label} project {domain} state changed before denial"
+                )
     if "/doors" in selected and selected["/doors"] is not None:
         raise TypedEvidenceError(f"{label} retained door credential material")
     if (
@@ -1182,7 +1254,9 @@ def _validate_http_result(value: Any, source: dict[str, Any], label: str) -> dic
         or any(not isinstance(item, str) for item in correlation.values())
     ):
         raise TypedEvidenceError(f"{label} has invalid types or fields")
-    _validate_fleet_project_projection(value["path"], value["selected"], label)
+    _validate_fleet_project_projection(
+        value["path"], value["status"], value["selected"], label
+    )
     return value
 
 
@@ -1579,7 +1653,7 @@ def _http_source(source_id: Any, trust: dict[str, Any], context: dict[str, Any])
 
 
 def _select_http_projection(
-    document: Any, select: list[str], path: str, label: str,
+    document: Any, select: list[str], path: str, label: str, status: int = 200,
 ) -> dict[str, Any]:
     selected: dict[str, Any] = {}
     for pointer in select:
@@ -1596,7 +1670,7 @@ def _select_http_projection(
                 raise TypedEvidenceError(f"{label} doors result has an invalid shape")
             continue
         selected[pointer] = _safe_public(value, f"{label} selected value")
-    _validate_fleet_project_projection(path, selected, label)
+    _validate_fleet_project_projection(path, status, selected, label)
     return selected
 
 
@@ -1670,7 +1744,14 @@ def _http_call(
         raise TypedEvidenceError(f"{label} selectors are invalid")
     if not set(select) <= set(source["select_allowlist"]):
         raise TypedEvidenceError(f"{label} selector is not verifier-allowlisted")
-    selected = _select_http_projection(document, select, path, label)
+    selected = _select_http_projection(document, select, path, label, status)
+    if (
+        data is not None
+        and "/_evidence/action_sha256" in selected
+        and selected["/_evidence/action_sha256"]
+        != hashlib.sha256(data).hexdigest()
+    ):
+        raise TypedEvidenceError(f"{label} action digest does not match request")
     return {
         "method": method, "path": path, "status": status, "selected": selected,
         "response_sha256": hashlib.sha256(raw).hexdigest(), "correlation": correlation_headers,

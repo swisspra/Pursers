@@ -125,6 +125,9 @@ GIT_TIMEOUT_SECONDS = 120
 GIT_ERROR_TAIL_CHARS = 2_000
 CONFIG_STATE_DIR = runtime_environment.dashboard_state_dir()
 MAX_REVIEW_STATE_BYTES = 4_096
+PROJECT_EVIDENCE_MAX_BYTES = 65_536
+PROJECT_EVIDENCE_MAX_KEY_FILES = 512
+PROJECT_EVIDENCE_MAX_KEY_BYTES = 65_536
 REVIEW_STATE_SUFFIX = ".review-state.json"
 WORKER_NAME_RE = re.compile(r"^[a-z0-9-]{2,32}$")
 WORKER_KEYCHAIN_SERVICE = "pursers-worker"
@@ -1221,6 +1224,64 @@ def _time_sort_value(value: Any) -> float:
 
 def _json_bytes(value: Any) -> bytes:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+
+def _bounded_evidence_digest(value: Any, label: str) -> str:
+    """Digest one bounded state value without exposing its contents."""
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+    if len(encoded) > PROJECT_EVIDENCE_MAX_BYTES:
+        raise ValueError(f"{label} exceeds evidence byte cap")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _door_evidence_digests(config: Config, board_id: str) -> dict[str, str]:
+    """Digest board-scoped public credentials and the bounded key store."""
+    keys_dir = config.doors_keys_dir
+    jwks_path = config.jwks_path
+    if keys_dir is None or jwks_path is None:
+        raise ValueError("door credential storage is not configured")
+    resolved_keys = Path(keys_dir).expanduser().resolve()
+    resolved_jwks = Path(jwks_path).expanduser().resolve()
+    if resolved_jwks.exists():
+        info = resolved_jwks.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_size > PROJECT_EVIDENCE_MAX_BYTES:
+            raise ValueError("door credential JWKS is not a bounded regular file")
+        document = json.loads(resolved_jwks.read_text(encoding="utf-8"))
+    else:
+        document = {"keys": []}
+    if not isinstance(document, dict) or not isinstance(document.get("keys"), list):
+        raise ValueError("door credential JWKS is invalid")
+    scoped_credentials = [
+        item
+        for item in document["keys"]
+        if isinstance(item, dict)
+        and isinstance(item.get(door_admin.METADATA_KEY), dict)
+        and item[door_admin.METADATA_KEY].get("board") == board_id
+    ]
+
+    key_inventory: list[dict[str, Any]] = []
+    if resolved_keys.exists():
+        key_paths = sorted(resolved_keys.iterdir(), key=lambda item: item.name)
+        if len(key_paths) > PROJECT_EVIDENCE_MAX_KEY_FILES:
+            raise ValueError("door key inventory exceeds evidence file cap")
+        for path in key_paths:
+            info = path.lstat()
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or info.st_size > PROJECT_EVIDENCE_MAX_KEY_BYTES
+                or path.parent != resolved_keys
+            ):
+                raise ValueError("door key inventory contains an unsafe file")
+            key_inventory.append({
+                "name_sha256": hashlib.sha256(path.name.encode()).hexdigest(),
+                "content_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            })
+    return {
+        "credentials": _bounded_evidence_digest(
+            scoped_credentials, "door credential state"
+        ),
+        "keys": _bounded_evidence_digest(key_inventory, "door key state"),
+    }
 
 
 def _door_material_digest(config: Config, board_id: str) -> str:
@@ -3402,6 +3463,47 @@ class FleetFetcher:
             "expected_sha256": hashlib.sha256(raw.encode("utf-8")).hexdigest(),
         }
 
+    async def project_evidence_state(
+        self, project_name: str, board_id: str
+    ) -> dict[str, Any]:
+        """Read bounded project/board state for a traced Add project action."""
+        payload = await self.fetch_project_registry()
+        registry = payload["registry"]
+        projects = registry.get("projects") if isinstance(registry, dict) else None
+        if not isinstance(projects, dict):
+            raise ValueError("project registry has no projects mapping")
+        project_entry = copy.deepcopy(projects.get(project_name))
+
+        async with self._client(self.config.home_board) as home_client:
+            listed = await _client_call(home_client, "board_list", {})
+        boards = listed.get("boards") if isinstance(listed, dict) else None
+        if not isinstance(boards, list):
+            raise ValueError("board list has no boards array")
+        board_rows = [
+            copy.deepcopy(row)
+            for row in boards
+            if isinstance(row, dict)
+            and row.get("board_id") in {self.config.home_board, board_id}
+        ]
+        target_present = any(row.get("board_id") == board_id for row in board_rows)
+        target_state: dict[str, Any] | None = None
+        if target_present:
+            async with self._client(board_id) as target_client:
+                members = await _client_call(target_client, "board_members", {})
+                status = await _client_call(target_client, "board_status", {})
+            target_state = {"members": members, "status": status}
+
+        return {
+            "registry": _bounded_evidence_digest(
+                {"project": project_entry}, "project registry state"
+            ),
+            "board": _bounded_evidence_digest(
+                {"board_rows": board_rows, "target": target_state},
+                "project board state",
+            ),
+            "project_entry": project_entry,
+        }
+
     async def save_project_registry(
         self, value: Any, expected_sha256: Any
     ) -> dict[str, Any]:
@@ -5537,6 +5639,26 @@ class SeatConfigManager:
             "behind": behind,
         }
 
+    def project_clone_evidence_state(
+        self,
+        project_name: str,
+        project_entry: Any,
+        integration_ref: str,
+    ) -> str:
+        """Digest the intended fleet clone without exposing its local path."""
+        entry = project_entry if isinstance(project_entry, dict) else {}
+        target = Path(
+            entry.get("fleet_clone_dir") or self._fleet_clone_default(project_name)
+        ).expanduser().resolve()
+        state = self._clone_state(target, integration_ref)
+        state.pop("path", None)
+        if target.exists() and state.get("status") != "invalid":
+            head = self._git(target, "rev-parse", "HEAD")
+            state["head"] = head.stdout.strip() if head.returncode == 0 else None
+        else:
+            state["head"] = None
+        return _bounded_evidence_digest(state, "fleet clone state")
+
     def prepare_fleet_clone(
         self, registry_payload: Any, project_name: Any
     ) -> dict[str, Any]:
@@ -6032,6 +6154,17 @@ class DashboardCache:
         label = self.resolve_central(central)
         return self._labeled(
             asyncio.run(self.fetchers[label].fetch_project_registry()), label
+        )
+
+    def get_project_evidence_state(
+        self,
+        project_name: str,
+        board_id: str,
+        central: str | None = None,
+    ) -> dict[str, Any]:
+        label = self.resolve_central(central)
+        return asyncio.run(
+            self.fetchers[label].project_evidence_state(project_name, board_id)
         )
 
     def save_project_registry(
@@ -6950,6 +7083,8 @@ def make_handler(
             self._evidence_context = None
             self._evidence_before = None
             self._evidence_after = None
+            self._project_authorization_denied = False
+            self._project_evidence_request = None
             if evidence_trace is None:
                 return
             context = evidence_trace.context(self.headers, method, route)
@@ -6976,17 +7111,43 @@ def make_handler(
                 self._evidence_context = None
                 return None
             try:
-                payload = cache_call("get_project_registry", central=central)
-                registry = payload.get("registry")
-                projects = registry.get("projects") if isinstance(registry, dict) else None
-                if not isinstance(projects, dict):
-                    raise ValueError("project registry has no projects mapping")
+                state = cache_call(
+                    "get_project_evidence_state",
+                    request["name"],
+                    request["board_id"],
+                    central=central,
+                )
                 label = cache.resolve_central(central)
+                fetcher = cache.fetchers[label]
+                door_state = _door_evidence_digests(
+                    fetcher.config, request["board_id"]
+                )
+                clone_state = seats.project_clone_evidence_state(
+                    request["name"],
+                    state.pop("project_entry", None),
+                    request.get("integration_ref", "main"),
+                )
+                snapshot = {
+                    "registry": state["registry"],
+                    "board": state["board"],
+                    **door_state,
+                    "clone": clone_state,
+                }
+                if set(snapshot) != {
+                    "registry", "board", "credentials", "keys", "clone"
+                } or any(
+                    not isinstance(value, str)
+                    or not re.fullmatch(r"[0-9a-f]{64}", value)
+                    for value in snapshot.values()
+                ):
+                    raise ValueError("project evidence snapshot is invalid")
+                self._project_evidence_request = {
+                    "project": request["name"],
+                    "board_id": request["board_id"],
+                    "action_sha256": context.action_sha256,
+                }
                 return {
-                    "project": copy.deepcopy(projects.get(context.entity)),
-                    "door_material_sha256": _door_material_digest(
-                        cache.fetchers[label].config, request["board_id"]
-                    ),
+                    domain: digest for domain, digest in snapshot.items()
                 }
             except Exception:  # noqa: BLE001 - tracing must stay fail-passive.
                 self._evidence_context = None
@@ -7005,6 +7166,35 @@ def make_handler(
                 and content_type.startswith("application/json")
             ):
                 try:
+                    if (
+                        status == 403
+                        and getattr(self, "_project_authorization_denied", False)
+                        and isinstance(before, dict)
+                        and isinstance(after, dict)
+                        and set(before) == set(after)
+                        == {"registry", "board", "credentials", "keys", "clone"}
+                        and isinstance(
+                            getattr(self, "_project_evidence_request", None), dict
+                        )
+                    ):
+                        document = json.loads(body)
+                        if isinstance(document, dict):
+                            document["_project_preflight"] = {
+                                "schema_version": 1,
+                                "request": self._project_evidence_request,
+                                "result": {
+                                    "status": status,
+                                    "decision": "denied",
+                                },
+                                "domains": {
+                                    domain: {
+                                        "before_sha256": before[domain],
+                                        "after_sha256": after[domain],
+                                    }
+                                    for domain in sorted(before)
+                                },
+                            }
+                            body = _json_bytes(document)
                     metadata, _emitted = evidence_trace.observe(
                         context=context,
                         method=self.command,
@@ -7670,6 +7860,16 @@ def make_handler(
                                 seats,
                                 central=central,
                             )
+                        except PermissionError:
+                            if self._evidence_context is not None:
+                                self._evidence_after = self._prepare_project_evidence(
+                                    request, central
+                                )
+                                self._project_authorization_denied = (
+                                    self._evidence_context is not None
+                                    and self._evidence_after is not None
+                                )
+                            raise
                         except Exception:
                             if self._evidence_context is not None:
                                 self._evidence_after = self._prepare_project_evidence(

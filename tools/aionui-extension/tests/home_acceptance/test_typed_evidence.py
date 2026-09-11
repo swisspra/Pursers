@@ -159,6 +159,48 @@ class _Handler(BaseHTTPRequestHandler):
             }
             self._send(200, payload)
         elif self.path == "/api/projects/add":
+            if body.get("mode") in {"auth-denied", "auth-mutated", "bad-action-digest"}:
+                action_sha256 = self.headers.get("X-Pursers-Action-SHA256")
+                domains = {}
+                for domain in typed_evidence.FLEET_PROJECT_STATE_DOMAINS:
+                    digest = typed_evidence._digest({"domain": domain, "state": "before"})
+                    domains[domain] = {
+                        "before_sha256": digest,
+                        "after_sha256": (
+                            "0" * 64
+                            if body.get("mode") == "auth-mutated" and domain == "registry"
+                            else digest
+                        ),
+                    }
+                evidence_action = (
+                    "0" * 64
+                    if body.get("mode") == "bad-action-digest"
+                    else action_sha256
+                )
+                payload.update({
+                    "error": "board access denied: admin membership required for 'sandbox-board'",
+                    "_project_preflight": {
+                        "schema_version": 1,
+                        "request": {
+                            "project": body["name"],
+                            "board_id": body["board_id"],
+                            "action_sha256": evidence_action,
+                        },
+                        "result": {"status": 403, "decision": "denied"},
+                        "domains": domains,
+                    },
+                    "_evidence": {
+                        "action_sha256": evidence_action,
+                        "entity": body["name"],
+                        "board_id": body["board_id"],
+                        "status": 403,
+                        "outcome": "failed",
+                        "effect": "project_state_unchanged",
+                        "changed": False,
+                    },
+                })
+                self._send(403, payload)
+                return
             statuses = ["already present"] * 6
             if body.get("mode") == "bad-status":
                 statuses[5] = "invented"
@@ -2173,6 +2215,75 @@ def test_fleet_project_add_projection_retains_only_null_credential_absence(
     with pytest.raises(TypedEvidenceError, match="credential material"):
         typed_evidence._validate_http_result(
             forged, source, "Fleet project rerun"
+        )
+
+
+def test_fleet_project_preflight_denial_requires_exact_correlated_unchanged_state(
+    tmp_path: Path, http_server: str,
+) -> None:
+    trust = _trust(tmp_path, http_server)
+    source = trust["http_sources"]["fleet-api"]
+    source["select_allowlist"] = sorted(
+        set(source["select_allowlist"])
+        | typed_evidence.FLEET_PROJECT_PREFLIGHT_POINTERS
+    )
+    context = _context(
+        observation_id="fleet.add-project-authorization-error",
+        action_id="add-project-denied",
+        entity="denied-project",
+    )
+    select = sorted(typed_evidence.FLEET_PROJECT_PREFLIGHT_POINTERS)
+
+    def request(mode: str) -> dict[str, Any]:
+        return {
+            "method": "POST",
+            "path": "/api/projects/add",
+            "body": {
+                "mode": mode,
+                "name": context["entity"],
+                "board_id": context["board_id"],
+            },
+            "select": select,
+        }
+
+    result = typed_evidence._http_call(
+        source, context, request("auth-denied"), "Fleet denied project add"
+    )
+    assert result["status"] == 403
+    assert result["selected"]["/_project_preflight/result/decision"] == "denied"
+    assert result["selected"]["/_evidence/action_sha256"] == hashlib.sha256(
+        _json_bytes(request("auth-denied")["body"])
+    ).hexdigest()
+    for domain in typed_evidence.FLEET_PROJECT_STATE_DOMAINS:
+        assert (
+            result["selected"][
+                f"/_project_preflight/domains/{domain}/before_sha256"
+            ]
+            == result["selected"][
+                f"/_project_preflight/domains/{domain}/after_sha256"
+            ]
+        )
+
+    with pytest.raises(TypedEvidenceError, match="registry state changed"):
+        typed_evidence._http_call(
+            source, context, request("auth-mutated"), "Fleet mutated denial"
+        )
+    with pytest.raises(TypedEvidenceError, match="action digest does not match"):
+        typed_evidence._http_call(
+            source,
+            context,
+            request("bad-action-digest"),
+            "Fleet mismatched denial",
+        )
+    with pytest.raises(TypedEvidenceError, match="projection is incomplete"):
+        typed_evidence._http_call(
+            source,
+            context,
+            {
+                **request("auth-denied"),
+                "select": select[:-1],
+            },
+            "Fleet incomplete denial",
         )
 
 

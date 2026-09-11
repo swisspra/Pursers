@@ -122,7 +122,6 @@ class ProjectBoard:
         self.review_policy = "workflow"
 
     async def __aenter__(self) -> "ProjectBoard":
-        self.central.boards_present.add(self.board_id)
         return self
 
     async def __aexit__(self, *_args: object) -> None:
@@ -131,7 +130,14 @@ class ProjectBoard:
     async def board_list(self) -> dict[str, Any]:
         return {
             "boards": [
-                {"board_id": board_id, "membership_role": "admin"}
+                {
+                    "board_id": board_id,
+                    "membership_role": (
+                        self.central.home_membership_role
+                        if board_id == "pursers"
+                        else "admin"
+                    ),
+                }
                 for board_id in sorted(self.central.boards_present)
             ]
         }
@@ -192,6 +198,7 @@ class ProjectCentral:
         self.registry: dict[str, Any] = {"schema_version": 1, "projects": {}}
         self.boards_present = {"pursers"}
         self.boards: dict[str, ProjectBoard] = {}
+        self.home_membership_role = "admin"
 
     def client_factory(
         self, _url: str, _token: str, board_id: str, **_kwargs: object
@@ -205,6 +212,19 @@ class ProjectSeats:
 
     def _clone_state(self, _path: Path, _ref: str = "main") -> dict[str, Any]:
         return {"status": "ready", "dirty": False}
+
+    def project_clone_evidence_state(
+        self, _project_name: str, _project_entry: Any, _integration_ref: str
+    ) -> str:
+        files = {
+            path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in self.clone_dir.rglob("*")
+            if path.is_file()
+        } if self.clone_dir.exists() else {}
+        return dashboard._bounded_evidence_digest(
+            {"exists": self.clone_dir.exists(), "files": files},
+            "test fleet clone state",
+        )
 
     def prepare_fleet_clone(
         self, registry_payload: dict[str, Any], project_name: str
@@ -428,7 +448,19 @@ def test_real_add_project_handler_emits_steps_and_actual_registry_transition(
         action_id="add-project",
         entity="demo",
     )
-    door_digest_before = dashboard._door_material_digest(config, "sandbox-board")
+    def project_snapshot() -> dict[str, str]:
+        state = cache.get_project_evidence_state("demo", "sandbox-board")
+        project_entry = state.pop("project_entry", None)
+        return {
+            "registry": state["registry"],
+            "board": state["board"],
+            **dashboard._door_evidence_digests(config, "sandbox-board"),
+            "clone": seats.project_clone_evidence_state(
+                "demo", project_entry, "main"
+            ),
+        }
+
+    snapshot_before = project_snapshot()
     try:
         status, result, response_headers = _call(
             base_url,
@@ -437,6 +469,7 @@ def test_real_add_project_handler_emits_steps_and_actual_registry_transition(
             body=action,
             headers={**trace_headers, "Origin": base_url},
         )
+        snapshot_after = project_snapshot()
         door_state_after_create = {
             path.relative_to(tmp_path): path.read_bytes()
             for path in tmp_path.rglob("*")
@@ -590,25 +623,12 @@ def test_real_add_project_handler_emits_steps_and_actual_registry_transition(
     assert evidence["entity"] == "demo"
     assert evidence["outcome"] == "succeeded"
     assert evidence["effect"] == "project_state_changed"
-    assert evidence["before_sha256"] == hashlib.sha256(
-        json.dumps(
-            {"project": None, "door_material_sha256": door_digest_before},
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode()
-    ).hexdigest()
-    assert evidence["after_sha256"] == hashlib.sha256(
-        json.dumps(
-            {
-                "project": central.registry["projects"]["demo"],
-                "door_material_sha256": dashboard._door_material_digest(
-                    config, "sandbox-board"
-                ),
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode()
-    ).hexdigest()
+    assert evidence["before_sha256"] == dashboard._bounded_evidence_digest(
+        snapshot_before, "test before state"
+    )
+    assert evidence["after_sha256"] == dashboard._bounded_evidence_digest(
+        snapshot_after, "test after state"
+    )
     original_result = {key: value for key, value in result.items() if key != "_evidence"}
     assert evidence["result_sha256"] == hashlib.sha256(
         dashboard._json_bytes(original_result)
@@ -687,6 +707,226 @@ def test_real_add_project_handler_emits_steps_and_actual_registry_transition(
     serialized = output.read_text(encoding="utf-8")
     assert str(tmp_path) not in serialized
     assert "prs1." not in serialized
+
+
+def test_add_project_admin_denial_emits_correlated_unchanged_domain_evidence(
+    tmp_path: Path,
+) -> None:
+    trace, output = _trace(tmp_path)
+    central = ProjectCentral()
+    central.home_membership_role = "member"
+    config = dashboard.Config(
+        url="http://127.0.0.1:1/mcp",
+        token="test-token",
+        home_board="pursers",
+        agent_name="fleet-evidence-test",
+        stale_seconds=300,
+        cache_seconds=5,
+        doors_keys_dir=tmp_path / "keys",
+        jwks_path=tmp_path / "jwks.json",
+    )
+    fetcher = dashboard.FleetFetcher(config, client_factory=central.client_factory)
+    cache = dashboard.DashboardCache([fetcher], 60)
+    seats = ProjectSeats(tmp_path / "fleet-clone")
+    server = dashboard.ThreadingHTTPServer(
+        ("127.0.0.1", 0),
+        dashboard.make_handler(cache, seat_manager=seats, evidence_trace=trace),
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base_url = f"http://127.0.0.1:{server.server_port}"
+    action = dashboard._json_bytes({
+        "name": "denied-project",
+        "board_id": "sandbox-board",
+        "work_dir": str(tmp_path / "work"),
+    })
+    (tmp_path / "work").mkdir()
+    headers = _headers(
+        action,
+        observation_id="fleet.add-project-authorization-error",
+        action_id="add-project-denied",
+        entity="denied-project",
+    )
+    durable_before = {
+        "registry": copy.deepcopy(central.registry),
+        "boards": set(central.boards_present),
+        "jwks_exists": config.jwks_path.exists(),
+        "keys_exists": config.doors_keys_dir.exists(),
+        "clone_exists": seats.clone_dir.exists(),
+    }
+    try:
+        status, result, response_headers = _call(
+            base_url,
+            "POST",
+            path="/api/projects/add",
+            body=action,
+            headers={**headers, "Origin": base_url},
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+        fetcher.close()
+
+    assert status == 403
+    assert result["error"] == (
+        "board access denied: admin membership required for 'pursers'"
+    )
+    assert durable_before == {
+        "registry": central.registry,
+        "boards": central.boards_present,
+        "jwks_exists": config.jwks_path.exists(),
+        "keys_exists": config.doors_keys_dir.exists(),
+        "clone_exists": seats.clone_dir.exists(),
+    }
+    evidence = result["_evidence"]
+    assert evidence["status"] == 403
+    assert evidence["outcome"] == "failed"
+    assert evidence["effect"] == "project_state_unchanged"
+    assert evidence["changed"] is False
+    assert evidence["action_sha256"] == hashlib.sha256(action).hexdigest()
+    preflight = result["_project_preflight"]
+    assert preflight["request"] == {
+        "project": "denied-project",
+        "board_id": "sandbox-board",
+        "action_sha256": hashlib.sha256(action).hexdigest(),
+    }
+    assert preflight["result"] == {"status": 403, "decision": "denied"}
+    assert set(preflight["domains"]) == set(
+        typed_evidence.FLEET_PROJECT_STATE_DOMAINS
+    )
+    for pair in preflight["domains"].values():
+        assert pair["before_sha256"] == pair["after_sha256"]
+    for key, header in dashboard.CORRELATION_HEADERS.items():
+        assert response_headers[header] == getattr(
+            trace.context(headers, "POST", "/api/projects/add"), key
+        )
+
+    selected = typed_evidence._select_http_projection(
+        result,
+        sorted(typed_evidence.FLEET_PROJECT_PREFLIGHT_POINTERS),
+        "/api/projects/add",
+        "actual authorization denial",
+        status,
+    )
+    for domain in typed_evidence.FLEET_PROJECT_STATE_DOMAINS:
+        forged = copy.deepcopy(selected)
+        forged[
+            f"/_project_preflight/domains/{domain}/after_sha256"
+        ] = "0" * 64
+        with pytest.raises(
+            typed_evidence.TypedEvidenceError,
+            match=rf"project {domain} state changed before denial",
+        ):
+            typed_evidence._validate_fleet_project_projection(
+                "/api/projects/add", status, forged, "forged denial"
+            )
+    serialized = json.dumps(result, sort_keys=True)
+    assert str(tmp_path) not in serialized
+    assert "test-token" not in serialized
+    assert len(output.read_text(encoding="utf-8").splitlines()) == 1
+
+
+@pytest.mark.parametrize(
+    "changed_domain", ["registry", "board", "credentials", "keys", "clone"]
+)
+def test_project_preflight_rejects_mutation_disguised_as_admin_denial(
+    tmp_path: Path, changed_domain: str,
+) -> None:
+    trace, _output = _trace(tmp_path)
+    central = ProjectCentral()
+    config = dashboard.Config(
+        url="http://127.0.0.1:1/mcp",
+        token="test-token",
+        home_board="pursers",
+        agent_name="fleet-evidence-test",
+        stale_seconds=300,
+        cache_seconds=5,
+        doors_keys_dir=tmp_path / "keys",
+        jwks_path=tmp_path / "jwks.json",
+    )
+    seats = ProjectSeats(tmp_path / "fleet-clone")
+    fetcher = dashboard.FleetFetcher(config, client_factory=central.client_factory)
+
+    async def mutate_then_deny(_board_id: str) -> None:
+        if changed_domain == "registry":
+            central.registry["projects"]["denied-project"] = {
+                "board_id": "sandbox-board",
+                "work_dir": str(tmp_path / "work"),
+                "status": "active",
+            }
+        elif changed_domain == "board":
+            central.boards_present.add("sandbox-board")
+        elif changed_domain == "credentials":
+            config.jwks_path.write_text(
+                json.dumps({
+                    "keys": [{
+                        "kid": "unexpected",
+                        dashboard.door_admin.METADATA_KEY: {
+                            "board": "sandbox-board", "role": "worker"
+                        },
+                    }]
+                }),
+                encoding="utf-8",
+            )
+        elif changed_domain == "keys":
+            config.doors_keys_dir.mkdir()
+            (config.doors_keys_dir / "unexpected.pem").write_bytes(b"changed")
+        else:
+            seats.clone_dir.mkdir()
+        raise PermissionError(
+            "board access denied: admin membership required for 'pursers'"
+        )
+
+    fetcher._require_board_admin = mutate_then_deny  # type: ignore[method-assign]
+    cache = dashboard.DashboardCache([fetcher], 60)
+    server = dashboard.ThreadingHTTPServer(
+        ("127.0.0.1", 0),
+        dashboard.make_handler(cache, seat_manager=seats, evidence_trace=trace),
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base_url = f"http://127.0.0.1:{server.server_port}"
+    action = dashboard._json_bytes({
+        "name": "denied-project",
+        "board_id": "sandbox-board",
+        "work_dir": str(tmp_path / "work"),
+    })
+    (tmp_path / "work").mkdir()
+    try:
+        status, result, _headers_result = _call(
+            base_url,
+            "POST",
+            path="/api/projects/add",
+            body=action,
+            headers={
+                **_headers(
+                    action,
+                    observation_id="fleet.add-project-authorization-error",
+                    action_id=f"mutate-{changed_domain}",
+                    entity="denied-project",
+                ),
+                "Origin": base_url,
+            },
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+        fetcher.close()
+
+    assert status == 403
+    pair = result["_project_preflight"]["domains"][changed_domain]
+    assert pair["before_sha256"] != pair["after_sha256"]
+    assert result["_evidence"]["changed"] is True
+    with pytest.raises(typed_evidence.TypedEvidenceError):
+        typed_evidence._select_http_projection(
+            result,
+            sorted(typed_evidence.FLEET_PROJECT_PREFLIGHT_POINTERS),
+            "/api/projects/add",
+            f"mutated {changed_domain} denial",
+            status,
+        )
 
 
 def test_trace_route_allowlist_is_closed_for_project_evidence(tmp_path: Path) -> None:
