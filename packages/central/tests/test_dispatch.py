@@ -1516,6 +1516,90 @@ class DispatchTests(unittest.IsolatedAsyncioTestCase):
             resubmitted.structured_content["ticket"]["review_offer"]["agent_id"], first
         )
 
+    async def test_review_verdict_retires_stale_offer_and_frees_next_review(
+        self,
+    ) -> None:
+        worker = await self.add_seat(
+            self.worker_a, "worker-a", {"tier_max": 2}
+        )
+        reviewer = await self.add_seat(
+            self.reviewer_a,
+            "reviewer-a",
+            {"tier_max": 2, "can_work": False, "can_review": True},
+            role="reviewer",
+        )
+
+        first = await self.create(prefer_agents=[worker])
+        first_id = first.structured_content["ticket"]["ticket_id"]
+        self.principal = self.worker_a
+        await self.call("ticket_claim", agent_name="worker-a", ticket_id=first_id)
+        await self.call(
+            "ticket_submit", agent_name="worker-a", ticket_id=first_id,
+            summary="first review",
+        )
+        self.principal = self.reviewer_a
+        first_claim = await self.call(
+            "ticket_review_claim", agent_name="reviewer-a", ticket_id=first_id
+        )
+        first_lease = first_claim.structured_content["review_lease"]
+
+        second = await self.create(prefer_agents=[worker])
+        second_id = second.structured_content["ticket"]["ticket_id"]
+        self.principal = self.worker_a
+        await self.call("ticket_claim", agent_name="worker-a", ticket_id=second_id)
+        await self.call(
+            "ticket_submit", agent_name="worker-a", ticket_id=second_id,
+            summary="second review",
+        )
+        persisted = self.service.load("pursers")["tickets"]
+        self.assertEqual(persisted[first_id]["review_lease"], first_lease)
+        self.assertNotIn("review_offer", persisted[first_id])
+        self.assertNotIn("review_offer", persisted[second_id])
+
+        self.principal = self.reviewer_a
+        approved = await self.call(
+            "ticket_review", agent_name="reviewer-a", ticket_id=first_id,
+            verdict="approve", review_notes="approved",
+        )
+        self.assertEqual(approved.structured_content["ticket"]["status"], "closed")
+        self.assertNotIn("review_offer", approved.structured_content["ticket"])
+        persisted = self.service.load("pursers")["tickets"]
+        next_offer = copy.deepcopy(persisted[second_id]["review_offer"])
+        self.assertEqual(next_offer["agent_id"], reviewer)
+
+        def restore_post_verdict_offer(document: dict[str, Any]) -> None:
+            stale_offer = copy.deepcopy(next_offer)
+            stale_offer["ticket_id"] = first_id
+            document["tickets"][first_id]["review_offer"] = stale_offer
+
+        self.service.mutate(
+            "pursers", restore_post_verdict_offer, require_generation=False
+        )
+        claimed = await self.call(
+            "ticket_review_claim", agent_name="reviewer-a", ticket_id=second_id
+        )
+        self.assertTrue(claimed.structured_content["ok"])
+        self.assertNotIn("review_offer", claimed.structured_content["ticket"])
+        stale_revocations = [
+            event for event in claimed.structured_content["release_events"]
+            if event["kind"] == OFFER_REVOKED
+            and event.get("ticket_id") == first_id
+        ]
+        self.assertEqual(len(stale_revocations), 1)
+        self.assertEqual(
+            stale_revocations[0]["dispatch_reason"], "offer_status_mismatch"
+        )
+
+        second_lease = claimed.structured_content["review_lease"]
+        self.principal = self.admin
+        first_reap = await self.call("board_reap")
+        second_reap = await self.call("board_reap")
+        self.assertEqual(first_reap.structured_content["release_events"], [])
+        self.assertEqual(second_reap.structured_content["release_events"], [])
+        persisted = self.service.load("pursers")["tickets"]
+        self.assertEqual(persisted[second_id]["review_lease"], second_lease)
+        self.assertNotIn("review_offer", persisted[second_id])
+
     async def test_admin_bypasses_review_offer_gate(self) -> None:
         worker = await self.add_seat(
             self.worker_a, "worker-a", {"tier_max": 2}

@@ -3199,6 +3199,39 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 reserved_agents.add(agent_id_value)
         return False
 
+    def retire_nonreviewable_review_offers(
+        document: dict[str, Any], now: float,
+    ) -> list[dict[str, Any]]:
+        events: list[dict[str, Any]] = []
+        for ticket in document["tickets"].values():
+            if ticket.get("status") == "submitted":
+                continue
+            offer = ticket.pop("review_offer", None)
+            if not isinstance(offer, Mapping):
+                continue
+            state = ticket.get("dispatch_state")
+            if (
+                isinstance(state, Mapping)
+                and state.get("state") == "offered"
+                and state.get("kind") == "review"
+                and state.get("agent_id") == offer.get("agent_id")
+            ):
+                ticket.pop("dispatch_state", None)
+            ticket["updated_at"] = iso_at(now)
+            events.append(
+                {
+                    "kind": OFFER_REVOKED,
+                    "ticket_id": ticket["ticket_id"],
+                    "offer_kind": "review",
+                    "offered_agent_id": offer.get("agent_id"),
+                    "offered_agent_name": offer.get("agent_name"),
+                    "offer_expires_at": offer.get("expires_at"),
+                    "dispatch_reason": "offer_status_mismatch",
+                    "recipients": [offer.get("agent_id")],
+                }
+            )
+        return events
+
     def release_assignment_pin(
         ticket: dict[str, Any], now: float, reason: str,
     ) -> str | None:
@@ -3233,6 +3266,8 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         if ticket.get("status") != wanted_status:
             return None
         if ticket.get("parked") is True:
+            return None
+        if kind == "review" and review_lease_is_live(ticket, now):
             return None
         if not dispatch_enabled(document):
             return None
@@ -9269,6 +9304,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
 
         def claim(document: dict[str, Any]) -> dict[str, Any]:
             released = reap_expired(document, now, redispatch=False)
+            released.extend(retire_nonreviewable_review_offers(document, now))
             if coordinate_only:
                 actor = coordinator_actor(document, principal, agent_name)
                 renewed = []
