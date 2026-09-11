@@ -444,6 +444,43 @@ class HumanInputTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(HUMAN_INPUT_REQUESTED, KNOWN_EVENT_KINDS)
         self.assertIn(HUMAN_INPUT_RESOLVED, KNOWN_EVENT_KINDS)
 
+    async def test_request_recipients_excludes_non_active_members(self) -> None:
+        await self.claimed_ticket()
+        active_coordinator = central.Principal(
+            "PR-humanc-active", "coordinator",
+            frozenset({"board:read", "board:write", "board:coordinate"}),
+        )
+        inactive_coordinator = central.Principal(
+            "PR-humanc-inactive", "coordinator",
+            frozenset({"board:read", "board:write", "board:coordinate"}),
+        )
+        self.principal = self.admin
+        await self.call(
+            "board_member_add", agent_name="admin-agent",
+            principal_id=active_coordinator.principal_id, role="admin",
+        )
+        await self.call(
+            "board_member_add", agent_name="admin-agent",
+            principal_id=inactive_coordinator.principal_id, role="admin",
+        )
+        self.principal = active_coordinator
+        active_join = await self.call(
+            "board_join", agent_name=active_coordinator.canonical,
+        )
+        self.principal = inactive_coordinator
+        inactive_join = await self.call(
+            "board_join", agent_name=inactive_coordinator.canonical,
+        )
+        await self.call(
+            "memory_handoff", agent_name=inactive_coordinator.canonical,
+            summary="inactive coordinator should not receive human requests",
+            next_steps=["mark inactive"],
+        )
+        requested = (await self.request()).structured_content
+        recipients = set(requested["event"]["recipient_identities"])
+        self.assertIn(active_join.structured_content["agent_id"], recipients)
+        self.assertNotIn(inactive_join.structured_content["agent_id"], recipients)
+
 
 if __name__ == "__main__":
     unittest.main()

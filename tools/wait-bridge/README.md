@@ -642,6 +642,64 @@ Run the bridge tests with:
 python -m unittest discover -s tools/wait-bridge/tests -v
 ```
 
+Run the disposable private end-to-end probe with:
+
+```sh
+python tools/wait-bridge/tests/question_bridge_probe.py
+```
+
+## Coordinator questions
+
+The bridge exposes Central's durable, non-pausing coordinator question flow
+through the already configured credential and joined seat identity:
+
+- `ticket_question_ask(ticket_id, message, kind[, message_id, in_reply_to])`
+  is available only to a worker holding the work lease or a reviewer holding
+  the review lease. `message_id` makes a retry idempotent.
+- `board_question_inbox([state, ticket_id, limit])` is available only to the
+  registered project coordinator identity.
+- `ticket_question_answer(ticket_id, question_id[, action, message])` accepts
+  with `action="accept"` or replies with `action="answer"`. The bridge computes
+  `host_binding` inside `BoardClient`; it is never a tool argument or result.
+- `board_question_wait(since_seq[, timeout_s, ticket_id])` waits for a
+  coordinator question, and `ticket_question_wait(ticket_id, question_id,
+  since_seq[, timeout_s])` waits for the correlated answer. Both use the
+  existing journal/seat resource subscription, durable cursor and reconnecting
+  event stream. They do not poll. Preserve each returned `new_seq`.
+
+Question tools reject every undeclared argument, including credential,
+binding, identity, board and project overrides. Central remains authoritative
+for the ticket's project, lease holder, registered coordinator and projected
+question visibility. A successful wait reports `delivery=protocol_delivered`
+and `model_continuation=host_managed`: MCP delivery is proven, but whether a
+host schedules another model turn is a separate host behavior.
+
+Later host setup requires one stdio bridge process per explicit seat identity.
+Configure the existing MCP server entry with `/PATH/TO/PYTHON` and
+`/PATH/TO/REPOSITORY/tools/wait-bridge/pursers_wait_server.py`, then provide
+`PYTHONPATH=/PATH/TO/REPOSITORY/packages/client/src`,
+`ONBOARD_CENTRAL_URL`, `ONBOARD_BOARD_ID`, `ONBOARD_AGENT_NAME`, and
+`PURSERS_ROLE`. Supply `ONBOARD_CENTRAL_TOKEN` through the host's private
+environment or secret facility; never put it in a prompt or tool call. Also
+declare the existing seat capabilities exactly: workers use
+`PURSERS_CAN_WORK=true,PURSERS_CAN_REVIEW=false`, reviewers use the inverse,
+and coordinators use both false. Restart/reload that host connector only after
+the operator approves its profile change; this repository does not edit an
+installed profile.
+
+| Host surface | Protocol delivery | Model continuation |
+| --- | --- | --- |
+| Python MCP SDK / stdio disposable probe | Verified: ask, inbox, accept, rotated-credential reconnect, answer and correlated waits | Probe drives the next call explicitly |
+| Codex / Codex CLI stdio | Supported by the same stdio tool contract; host profile change still required | Host-managed; not claimed by the disposable probe |
+| Claude Code / Claude Desktop stdio | Supported by the same stdio tool contract; host profile change still required | Host-managed; not claimed by the disposable probe |
+| Goose / AionUi imported stdio | Supported by the same stdio tool contract; host profile change still required | Host-managed; not claimed by the disposable probe |
+
+The private probe uses four separate short-lived JWT credentials against a
+disposable loopback Central. It verifies worker and reviewer asks, coordinator
+accept/reply after credential rotation, exact answer correlation, role and
+capability preservation, and rejection of secret or routing overrides. It is
+not evidence of a run in any intended desktop host.
+
 ## Human requests (needs_human)
 
 A ticket blocked on a human calls Central's `ticket_request_human(message,

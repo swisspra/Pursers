@@ -149,7 +149,7 @@
   <header class="page">
     <p class="eyebrow">Team briefing · Pursers v5</p>
     <h1>จาก “ความจำร่วม” สู่<br><span>ระบบส่งต่องานที่ตรวจสอบได้</span></h1>
-    <p class="lead">ภาพรวม Pursers 5.0.0a25: subscription-first push-wait ทุก seat, host-aware re-arm, project registry, worker pool และ independent review</p>
+    <p class="lead">ภาพรวม Pursers 5.0.0a26: subscription-first push-wait ทุก seat, host-aware re-arm, project registry, worker pool และ independent review</p>
     <div class="meta">
       <span class="pill">Central + SQLite</span>
       <span class="pill">MCP v2</span>
@@ -183,13 +183,13 @@
   <main class="page">
     <section id="start">
       <h2>เริ่มใน 5 นาที: 6 คำสั่งสำหรับ operator</h2>
-      <pre><code>python -m pip install "pursers==5.0.0a25"
+      <pre><code>python -m pip install "pursers==5.0.0a26"
 pursers-personal setup --project /PATH/TO/project --session primary
 pursers-personal doctor --project /PATH/TO/project
 python tools/wait-bridge/registry_admin.py show
 python tools/fleet-dashboard/fleet_dashboard.py --token-file /PATH/TO/admin.jwt
 shasum -a 256 -c SHA256SUMS.txt</code></pre>
-      <div class="callout"><strong>ผลที่ควรเห็น:</strong> version 5.0.0a25 และ component set ที่ pin ตรงกัน, profile/identity ชัด, registry ผ่าน validation และ dashboard เปิดบน loopback</div>
+      <div class="callout"><strong>ผลที่ควรเห็น:</strong> version 5.0.0a26 และ component set ที่ pin ตรงกัน, profile/identity ชัด, registry ผ่าน validation และ dashboard เปิดบน loopback</div>
     </section>
 
     <section id="mental-model">
@@ -325,7 +325,7 @@ shasum -a 256 -c SHA256SUMS.txt</code></pre>
         </article>
         <article class="card">
           <h3>board_state ใช้ scrub profile ของ board</h3>
-          <p>Central 0.1.0a29 ใช้ scrub profile ของบอร์ดกับ <code>board_state_update</code> บอร์ด <code>internal</code> จึงเก็บ registry ที่มี absolute <code>work_dir</code> ได้ ขณะที่บอร์ด <code>strict</code> ยังปฏิเสธ path ลักษณะ home directory</p>
+          <p>Central 0.1.0a30 ใช้ scrub profile ของบอร์ดกับ <code>board_state_update</code> บอร์ด <code>internal</code> จึงเก็บ registry ที่มี absolute <code>work_dir</code> ได้ ขณะที่บอร์ด <code>strict</code> ยังปฏิเสธ path ลักษณะ home directory</p>
         </article>
         <article class="card">
           <h3>Board generation fencing</h3>
@@ -524,7 +524,7 @@ shasum -a 256 -c SHA256SUMS.txt</code></pre>
         <article class="card"><h3>Snapshot</h3><p><code>board_snapshot</code> จำกัด projected collections และ JSON UTF-8 รวม พร้อม total/returned/omitted/truncated และ watermark</p></article>
         <article class="card"><h3>Catchup</h3><p><code>board_catchup</code> จำกัด events/bytes และคืน <code>has_more</code>/<code>new_seq</code>; a21 batch, compact และ clamp cursor โดยยังรับประกัน monotonic progress ภายใน deadline</p></article>
         <article class="card"><h3>Status</h3><p><code>board_status</code> เป็นมุมมองสั้นสำหรับสถานะปัจจุบัน แทน <code>board_get_briefing</code> ที่ถูกถอดใน a21</p></article>
-        <article class="card"><h3>Submit</h3><p>Client 0.1.0a22 จำกัด notes ที่ใหญ่เกินพร้อม truncation metadata เพื่อไม่ให้หลักฐานถูกตัดแบบเงียบ</p></article>
+        <article class="card"><h3>Submit</h3><p>Client 0.1.0a23 จำกัด notes ที่ใหญ่เกินพร้อม truncation metadata เพื่อไม่ให้หลักฐานถูกตัดแบบเงียบ</p></article>
       </div>
       <div class="callout"><strong>หลัก:</strong> token budget ไม่ได้จำกัด structured envelope ต้องคุม item/event/byte limits และ paginate ตาม cursor ที่ server คืน</div>
     </section>
@@ -741,20 +741,20 @@ shasum -a 256 -c SHA256SUMS.txt</code></pre>
           <tr><td>a22</td><td>fleet-wide vs dedicated home-board semantics, model-liveness-gated keepalive, backlog re-surface/re-offer, form-safe Resume, clone repair, seat-kit upgrade/interpreter fixes, annotations, <code>needs_human</code>, claim gating และ elicitation</td></tr>
         </tbody>
       </table>
-      <p>รายการ a22 อยู่ใน release 5.0.0a25 แล้ว; ผู้ดูแลต้องตรวจ tag, manifest, component versions และ artifact ที่อนุมัติก่อน deploy</p>
+      <p>รายการ a22 อยู่ใน release 5.0.0a26 แล้ว; ผู้ดูแลต้องตรวจ tag, manifest, component versions และ artifact ที่อนุมัติก่อน deploy</p>
     </section>
 
     <section id="release">
       <h2>Build และ release: จาก source ถึง PyPI มี hash chain</h2>
-      <p class="section-intro">ชุด pre-release ที่เอกสารนี้อธิบายคือ <code>v5.0.0a25</code> ซึ่งรวม subscription-first push-wait ที่ release แล้ว ตรวจ manifest และ checksum ที่ operator อนุมัติก่อนติดตั้ง</p>
+      <p class="section-intro">ชุด pre-release ที่เอกสารนี้อธิบายคือ <code>v5.0.0a26</code> ซึ่งรวม subscription-first push-wait ที่ release แล้ว ตรวจ manifest และ checksum ที่ operator อนุมัติก่อนติดตั้ง</p>
 
       <div class="version-grid" aria-label="เวอร์ชัน distribution ปัจจุบัน">
-        <article class="card"><b>5.0.0a25</b><small>pursers · meta installer</small></article>
-        <article class="card"><b>5.0.0a25</b><small>pursers-personal</small></article>
-        <article class="card"><b>0.1.0a29</b><small>pursers-central</small></article>
-        <article class="card"><b>0.1.0a22</b><small>pursers-client</small></article>
+        <article class="card"><b>5.0.0a26</b><small>pursers · meta installer</small></article>
+        <article class="card"><b>5.0.0a26</b><small>pursers-personal</small></article>
+        <article class="card"><b>0.1.0a30</b><small>pursers-central</small></article>
+        <article class="card"><b>0.1.0a23</b><small>pursers-client</small></article>
         <article class="card"><b>5.0.0a3</b><small>pursers-personal-import</small></article>
-        <article class="card"><b>0.1.0a15</b><small>pursers-wait-bridge</small></article>
+        <article class="card"><b>0.1.0a16</b><small>pursers-wait-bridge</small></article>
       </div>
 
       <div class="detail-grid">
@@ -762,7 +762,7 @@ shasum -a 256 -c SHA256SUMS.txt</code></pre>
           <h3>ติดตั้งจาก PyPI</h3>
           <pre><code>pip install pursers
 uvx pursers-wait-bridge</code></pre>
-          <p>ชุด released นี้ pin Central <code>0.1.0a29</code>, Client <code>0.1.0a22</code> และ Personal <code>5.0.0a25</code> แบบ exact dependency; ตรวจ manifest ก่อนติดตั้ง</p>
+          <p>ชุด released นี้ pin Central <code>0.1.0a30</code>, Client <code>0.1.0a23</code> และ Personal <code>5.0.0a26</code> แบบ exact dependency; ตรวจ manifest ก่อนติดตั้ง</p>
         </article>
         <article class="card">
           <h3>Trusted Publishing</h3>
@@ -854,7 +854,7 @@ uvx pursers-wait-bridge</code></pre>
       <ul>
         <li><code>packages/central/src/pursers_central/central.py</code> — loopback binding, JWT verifier, journal notification, ticket/review tools</li>
         <li><code>packages/central/src/pursers_central/jwt_verifier.py</code> — RS256-only JWKS verification และ required claims แบบ fail-closed</li>
-        <li><code>packages/central/tests/test_board_state_scrub_profile.py</code> — <code>board_state_update</code> ใช้ scrub profile ของ board ใน Central 0.1.0a29</li>
+        <li><code>packages/central/tests/test_board_state_scrub_profile.py</code> — <code>board_state_update</code> ใช้ scrub profile ของ board ใน Central 0.1.0a30</li>
         <li><code>packages/central/src/pursers_central/transactional_sqlite.py</code> และ <code>sqlite_store.py</code> — SQLite transaction และ WAL-backed storage</li>
         <li><code>tools/wait-bridge/pursers_wait_server.py</code> และ <code>README.md</code> — subscription-first wait, host profiles, per-call identity, multi-board cursor, explicit poll fallback และ lease-only renewal</li>
         <li><code>tools/wait-bridge/registry_admin.py</code> — schema validation, safe mutation และ read-back verification ของ project registry</li>
@@ -869,7 +869,7 @@ uvx pursers-wait-bridge</code></pre>
   </main>
 
   <footer>
-    <div class="page">Pursers architecture briefing · v5.0.0a25 release · เอกสาร standalone ไม่มี external asset, CDN หรือ JavaScript · ใช้ placeholder แทน credential และ path ส่วนบุคคล</div>
+    <div class="page">Pursers architecture briefing · v5.0.0a26 release · เอกสาร standalone ไม่มี external asset, CDN หรือ JavaScript · ใช้ placeholder แทน credential และ path ส่วนบุคคล</div>
   </footer>
 </body>
 </html>

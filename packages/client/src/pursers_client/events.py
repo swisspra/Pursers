@@ -2,6 +2,17 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+
+
+def coordinator_host_binding(token: str, agent_id: str) -> str:
+    """Return the opaque proof Central can verify for this auth/session pair."""
+    if not token or not agent_id:
+        raise ValueError("token and agent_id are required")
+    material = json.dumps([token, agent_id], separators=(",", ":"))
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
 
 TICKET_REVIEW_CLAIMED = "ticket_review_claimed"
 TICKET_ANNOTATED = "ticket_annotated"
@@ -15,6 +26,9 @@ REVIEW_OFFERED = "review_offered"
 DISPATCH_UNASSIGNABLE = "dispatch_unassignable"
 HUMAN_INPUT_REQUESTED = "human_input_requested"
 HUMAN_INPUT_RESOLVED = "human_input_resolved"
+COORDINATOR_QUESTION_ASKED = "coordinator_question_asked"
+COORDINATOR_QUESTION_ACCEPTED = "coordinator_question_accepted"
+COORDINATOR_QUESTION_ANSWERED = "coordinator_question_answered"
 TICKET_CLAIM_REFUSED = "ticket_claim_refused"
 REVIEW_CLAIM_REFUSED = "review_claim_refused"
 TICKET_PARKED = "ticket_parked"
@@ -48,6 +62,7 @@ HELD_TICKET_KINDS = frozenset(
         TICKET_ANNOTATED,
         TICKET_STATUS_CHANGED,
         HUMAN_INPUT_RESOLVED,
+        COORDINATOR_QUESTION_ANSWERED,
         TICKET_PARKED,
         TICKET_UNPARKED,
         REVIEW_LEASE_EXPIRED,
@@ -77,6 +92,13 @@ CLAIM_TTL_EVENT_KINDS = frozenset({"board_claim_ttl_changed"})
 REVIEW_EVENT_KINDS = frozenset({"board_review_policy_changed"}) | REVIEW_LEASE_KINDS
 DEPRECATION_EVENT_KINDS = frozenset({"deprecated_tool_warning"})
 AGENT_LIFECYCLE_EVENT_KINDS = frozenset({"agent_lifecycle_changed"})
+COORDINATOR_MESSAGE_EVENT_KINDS = frozenset(
+    {
+        COORDINATOR_QUESTION_ASKED,
+        COORDINATOR_QUESTION_ACCEPTED,
+        COORDINATOR_QUESTION_ANSWERED,
+    }
+)
 
 # Central imports this vocabulary rather than maintaining an independent set.
 CENTRAL_EVENT_KINDS = (
@@ -87,6 +109,7 @@ CENTRAL_EVENT_KINDS = (
     | REVIEW_EVENT_KINDS
     | DEPRECATION_EVENT_KINDS
     | AGENT_LIFECYCLE_EVENT_KINDS
+    | COORDINATOR_MESSAGE_EVENT_KINDS
     | DISPATCH_EVENT_KINDS
     | CLAIM_GATE_EVENT_KINDS
     | PARK_EVENT_KINDS

@@ -68,7 +68,7 @@ from contextvars import ContextVar
 from datetime import date, datetime, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pursers_client import (
     CENTRAL_EVENT_KINDS,
@@ -76,6 +76,8 @@ from pursers_client import (
     HELD_TICKET_KINDS,
     HUMAN_INPUT_REQUESTED,
     HUMAN_INPUT_RESOLVED,
+    COORDINATOR_QUESTION_ASKED,
+    COORDINATOR_QUESTION_ANSWERED,
     OFFER_EXPIRED,
     OFFER_REVOKED,
     REVIEW_OFFERED,
@@ -118,7 +120,7 @@ from backlog import (
     ticket_is_relevant,
 )
 
-SOURCE_VERSION = "0.1.0a15"
+SOURCE_VERSION = "0.1.0a16"
 
 
 def _source_version() -> str:
@@ -230,6 +232,29 @@ _BACKLOG_SEEN: OrderedDict[
 CLAIMED_STATES = frozenset({"claimed", "in_progress", "creating_report"})
 HANDOFF_REJOIN_MESSAGE = "call board_onboard or board_join before more work"
 HUMAN_EVENT_KINDS = frozenset({HUMAN_INPUT_REQUESTED, HUMAN_INPUT_RESOLVED})
+QUESTION_EVENT_KINDS = frozenset(
+    {COORDINATOR_QUESTION_ASKED, COORDINATOR_QUESTION_ANSWERED}
+)
+SUBSCRIPTION_KINDS |= QUESTION_EVENT_KINDS
+QUESTION_TOOL_ARGUMENTS: dict[str, frozenset[str]] = {
+    "ticket_question_ask": frozenset(
+        {"ticket_id", "message", "kind", "message_id", "in_reply_to"}
+    ),
+    "board_question_inbox": frozenset({"state", "ticket_id", "limit"}),
+    "ticket_question_answer": frozenset(
+        {"ticket_id", "question_id", "action", "message"}
+    ),
+    "board_question_wait": frozenset({"since_seq", "timeout_s", "ticket_id"}),
+    "ticket_question_wait": frozenset(
+        {"ticket_id", "question_id", "since_seq", "timeout_s"}
+    ),
+}
+_QUESTION_ARGUMENT_REJECTION: ContextVar[str | None] = ContextVar(
+    "question_argument_rejection", default=None
+)
+BLOCKING_WAIT_TOOLS = frozenset(
+    {"a2a_wait", "board_question_wait", "ticket_question_wait"}
+)
 HUMAN_REQUEST_KINDS = ("decision", "deliverable", "approval", "information")
 HUMAN_ACTIONS = ("accept", "decline", "cancel")
 HUMAN_DISPOSITIONS = ("reopen", "park", "cancel")
@@ -1406,8 +1431,6 @@ class DeferredBoardConnection:
         stop: asyncio.Event,
     ) -> None:
         startup_caps = _seat_capabilities()
-        if _host_name() in {"codex", "codex-cli"}:
-            startup_caps = {"can_work": False, "can_review": False}
         client = MeteredBoardClient(
             CENTRAL_URL,
             CENTRAL_TOKEN,
@@ -1864,8 +1887,15 @@ class LeaseKeepalive:
         except Exception:
             boards = [BOARD_ID]
         capabilities = _seat_capabilities()
-        if _host_name() in {"codex", "codex-cli"}:
-            capabilities = {"can_work": False, "can_review": False}
+        if (
+            selected_source == "keepalive"
+            and _host_name() in {"codex", "codex-cli"}
+        ):
+            capabilities = {
+                **(capabilities or {}),
+                "can_work": False,
+                "can_review": False,
+            }
         for board_id in boards:
             try:
                 joined = await _BoardView(client, board_id).board_join(
@@ -2832,21 +2862,35 @@ class SessionCaptureMiddleware:
             engine = self.engine_getter()
             if engine is not None:
                 engine.sessions.add(session)
-        keepalive = self.keepalive_getter()
-        if keepalive is None or getattr(ctx, "method", None) != "tools/call":
-            return await call_next(ctx)
+        method = getattr(ctx, "method", None)
         raw: Any = getattr(ctx, "params", None)
         if hasattr(raw, "model_dump"):
             raw = raw.model_dump(by_alias=True, exclude_none=True)
         tool_name = raw.get("name") if isinstance(raw, dict) else None
-        if tool_name != "a2a_wait":
-            keepalive.observe_model_interaction()
-            return await call_next(ctx)
-        keepalive.begin_wait()
+        arguments = raw.get("arguments") if isinstance(raw, dict) else None
+        allowed = QUESTION_TOOL_ARGUMENTS.get(str(tool_name))
+        rejection_token = None
+        if (
+            allowed is not None
+            and isinstance(arguments, dict)
+            and set(arguments) - allowed
+        ):
+            rejection_token = _QUESTION_ARGUMENT_REJECTION.set(str(tool_name))
+        keepalive = self.keepalive_getter()
         try:
-            return await call_next(ctx)
+            if keepalive is None or method != "tools/call":
+                return await call_next(ctx)
+            if tool_name not in BLOCKING_WAIT_TOOLS:
+                keepalive.observe_model_interaction()
+                return await call_next(ctx)
+            keepalive.begin_wait()
+            try:
+                return await call_next(ctx)
+            finally:
+                keepalive.end_wait()
         finally:
-            keepalive.end_wait()
+            if rejection_token is not None:
+                _QUESTION_ARGUMENT_REJECTION.reset(rejection_token)
 
 
 @asynccontextmanager
@@ -2898,6 +2942,9 @@ async def _custom_bridge_list_tools(
         legacy = os.environ.get("PURSERS_LEGACY_TOOLS") == "1"
     if not legacy and BRIDGE_DEPRECATED_TOOLS:
         tools = [t for t in tools if t.name not in BRIDGE_DEPRECATED_TOOLS]
+    for tool in tools:
+        if tool.name in QUESTION_TOOL_ARGUMENTS:
+            tool.input_schema["additionalProperties"] = False
     return tools
 
 
@@ -3735,6 +3782,267 @@ async def board_human_requests(
         protocol_version=protocol_version,
         legacy_elicit_form=legacy_elicit_form,
         legacy_elicit_url=legacy_elicit_url,
+    )
+
+
+def _question_identity(
+    client: BoardClient, allowed_roles: frozenset[str], operation: str
+) -> JoinedIdentity:
+    identity = client.identity
+    if identity is None:
+        raise ToolError(f"{operation} requires an existing joined seat identity")
+    if identity.role not in allowed_roles:
+        expected = " or ".join(sorted(allowed_roles))
+        raise ToolError(f"{operation} requires role {expected}")
+    return identity
+
+
+def _reject_question_argument_overrides(tool_name: str) -> None:
+    if _QUESTION_ARGUMENT_REJECTION.get() == tool_name:
+        raise ToolError(
+            f"{tool_name} received unsupported arguments; private auth and "
+            "identity overrides are never accepted"
+        )
+
+
+def _public_question(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    projected = copy.deepcopy(value)
+    projected.pop("binding", None)
+    return projected
+
+
+def _question_from_ticket(
+    ticket: dict[str, Any], question_id: str
+) -> dict[str, Any] | None:
+    questions = ticket.get("coordinator_questions")
+    if not isinstance(questions, list):
+        return None
+    for question in questions:
+        if isinstance(question, dict) and question.get("question_id") == question_id:
+            return _public_question(question)
+    return None
+
+
+async def _question_wait_core(
+    client: BoardClient,
+    *,
+    since_seq: int,
+    timeout_s: float,
+    event_kind: str,
+    ticket_id: str | None = None,
+    question_id: str | None = None,
+) -> dict[str, Any]:
+    """Wait on the existing durable subscription, then return correlated state."""
+    if isinstance(since_seq, bool) or not isinstance(since_seq, int) or since_seq < 0:
+        raise ValueError("since_seq must be a non-negative integer")
+    if event_kind not in QUESTION_EVENT_KINDS:
+        raise ValueError("unsupported coordinator question event kind")
+    identity = client.identity
+    if identity is None:
+        raise ToolError("question wait requires an existing joined seat identity")
+    cursor = since_seq
+
+    def advance(value: int) -> None:
+        nonlocal cursor
+        cursor = max(cursor, int(value))
+
+    events = _event_stream(
+        client,
+        client.board_id,
+        identity,
+        client.generation_token,
+        since_seq,
+        advance,
+        pure_catchup=False,
+    )
+    try:
+        async with asyncio.timeout(max(0.001, float(timeout_s))):
+            async with aclosing(events):
+                async for event in events:
+                    event_seq = event.get("seq")
+                    if isinstance(event_seq, int) and not isinstance(event_seq, bool):
+                        cursor = max(cursor, event_seq)
+                    if event.get("kind") != event_kind:
+                        continue
+                    event_ticket_id = event.get("ticket_id")
+                    event_question_id = event.get("question_id")
+                    if ticket_id is not None and event_ticket_id != ticket_id:
+                        continue
+                    if question_id is not None and event_question_id != question_id:
+                        continue
+                    if event_kind == COORDINATOR_QUESTION_ASKED:
+                        inbox = await client.board_question_inbox(
+                            ticket_id=str(event_ticket_id)
+                        )
+                        question = next(
+                            (
+                                _public_question(item)
+                                for item in inbox.get("questions", [])
+                                if isinstance(item, dict)
+                                and item.get("question_id") == event_question_id
+                            ),
+                            None,
+                        )
+                    else:
+                        result = await client.ticket_get(str(event_ticket_id))
+                        question = _question_from_ticket(
+                            result.get("ticket", {}), str(event_question_id)
+                        )
+                        asked_by = (question or {}).get("asked_by") or {}
+                        if asked_by.get("agent_id") != identity.agent_id:
+                            question = None
+                    if question is None:
+                        continue
+                    return {
+                        "ok": True,
+                        "timed_out": False,
+                        "new_seq": cursor,
+                        "event": event,
+                        "question": question,
+                        "delivery": "protocol_delivered",
+                        "model_continuation": "host_managed",
+                    }
+    except TimeoutError:
+        pass
+    return {
+        "ok": True,
+        "timed_out": True,
+        "new_seq": cursor,
+        "event": None,
+        "question": None,
+        "delivery": "no_matching_event",
+        "model_continuation": "host_managed",
+    }
+
+
+@mcp.tool()
+async def ticket_question_ask(
+    ctx: Context,
+    ticket_id: str,
+    message: str,
+    kind: Literal["decision", "deliverable", "approval", "information"],
+    message_id: str | None = None,
+    in_reply_to: str | None = None,
+) -> dict[str, Any]:
+    """Ask this ticket's registered coordinator without pausing the ticket."""
+    _reject_question_argument_overrides("ticket_question_ask")
+    client = await _client_for_tool(ctx)
+    _question_identity(client, frozenset({"worker", "reviewer"}), "question ask")
+    try:
+        return await client.ticket_question_ask(
+            ticket_id,
+            message,
+            kind,
+            message_id=message_id,
+            in_reply_to=in_reply_to,
+        )
+    except BoardClientError as exc:
+        raise ToolError(f"ticket_question_ask Central error: {exc}") from exc
+
+
+@mcp.tool()
+async def board_question_inbox(
+    ctx: Context,
+    state: Literal["open", "accepted", "answered"] | None = None,
+    ticket_id: str | None = None,
+    limit: int = 20,
+) -> dict[str, Any]:
+    """List questions for this joined registered coordinator identity."""
+    _reject_question_argument_overrides("board_question_inbox")
+    client = await _client_for_tool(ctx)
+    _question_identity(client, frozenset({"coordinator"}), "question inbox")
+    try:
+        return await client.board_question_inbox(
+            state=state, ticket_id=ticket_id, limit=limit
+        )
+    except BoardClientError as exc:
+        raise ToolError(f"board_question_inbox Central error: {exc}") from exc
+
+
+@mcp.tool()
+async def ticket_question_answer(
+    ctx: Context,
+    ticket_id: str,
+    question_id: str,
+    action: Literal["accept", "answer"] = "answer",
+    message: str | None = None,
+) -> dict[str, Any]:
+    """Accept or answer as this joined coordinator; auth proof stays internal."""
+    _reject_question_argument_overrides("ticket_question_answer")
+    client = await _client_for_tool(ctx)
+    _question_identity(client, frozenset({"coordinator"}), "question answer")
+    try:
+        result = await client.ticket_question_answer(
+            ticket_id,
+            question_id,
+            action=action,
+            message=message,
+        )
+    except BoardClientError as exc:
+        raise ToolError(f"ticket_question_answer Central error: {exc}") from exc
+    question = _public_question(result.get("question"))
+    return {**result, "question": question}
+
+
+@mcp.tool()
+async def board_question_wait(
+    ctx: Context,
+    since_seq: int,
+    timeout_s: int = 180,
+    ticket_id: str | None = None,
+) -> dict[str, Any]:
+    """Wait without polling for a question sent to this coordinator."""
+    _reject_question_argument_overrides("board_question_wait")
+    client = await _client_for_tool(ctx)
+    identity = _question_identity(
+        client, frozenset({"coordinator"}), "question arrival wait"
+    )
+    try:
+        await client.board_question_inbox(limit=1)
+    except BoardClientError as exc:
+        raise ToolError(f"board_question_wait Central error: {exc}") from exc
+    return await _question_wait_core(
+        client,
+        since_seq=since_seq,
+        timeout_s=clamp_timeout(timeout_s, identity.role),
+        event_kind=COORDINATOR_QUESTION_ASKED,
+        ticket_id=ticket_id,
+    )
+
+
+@mcp.tool()
+async def ticket_question_wait(
+    ctx: Context,
+    ticket_id: str,
+    question_id: str,
+    since_seq: int,
+    timeout_s: int = 180,
+) -> dict[str, Any]:
+    """Wait without polling for the correlated coordinator answer."""
+    _reject_question_argument_overrides("ticket_question_wait")
+    client = await _client_for_tool(ctx)
+    identity = _question_identity(
+        client, frozenset({"worker", "reviewer"}), "question answer wait"
+    )
+    try:
+        ticket = (await client.ticket_get(ticket_id)).get("ticket", {})
+    except BoardClientError as exc:
+        raise ToolError(f"ticket_question_wait Central error: {exc}") from exc
+    question = _question_from_ticket(ticket, question_id)
+    asked_by = (question or {}).get("asked_by") or {}
+    if asked_by.get("agent_id") != identity.agent_id:
+        raise ToolError(
+            "ticket_question_wait requires the original asker identity and question"
+        )
+    return await _question_wait_core(
+        client,
+        since_seq=since_seq,
+        timeout_s=clamp_timeout(timeout_s, identity.role),
+        event_kind=COORDINATOR_QUESTION_ANSWERED,
+        ticket_id=ticket_id,
+        question_id=question_id,
     )
 
 
@@ -4841,8 +5149,9 @@ async def _event_stream(
         async def redeclare_capabilities() -> None:
             capabilities = _seat_capabilities()
             if capabilities is None:
-                return
+                capabilities = getattr(parent, "capabilities", None)
             view = _BoardView(parent, board_id)
+            view.role = identity.role
             joined = await view.board_join(
                 agent_name=identity.agent_name,
                 capabilities=capabilities,

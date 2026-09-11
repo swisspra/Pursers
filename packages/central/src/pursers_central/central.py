@@ -49,6 +49,11 @@ from pursers_client import (
     ARCHIVE_EVENT_KINDS,
     CLAIM_TTL_EVENT_KINDS,
     CLAIM_GATE_EVENT_KINDS,
+    COORDINATOR_QUESTION_ASKED,
+    COORDINATOR_QUESTION_ACCEPTED,
+    COORDINATOR_QUESTION_ANSWERED,
+    COORDINATOR_MESSAGE_EVENT_KINDS,
+    coordinator_host_binding,
     DEPRECATION_EVENT_KINDS,
     DISPATCH_EVENT_KINDS,
     HUMAN_INPUT_REQUESTED,
@@ -350,6 +355,7 @@ INTAKE_RATE_WINDOW_SECONDS = 3_600
 COORDINATOR_EVENT_FIELDS = frozenset(
     {
         "ticket_id",
+        "question_id",
         "origin",
         "target_agent_id",
         "coordinator_op_key",
@@ -390,6 +396,17 @@ HUMAN_REQUEST_SCHEMA_MAX_CHARS = 20_000
 HUMAN_REQUEST_MAX_PROPERTIES = 50
 HUMAN_REQUEST_SNAPSHOT_MESSAGE_CHARS = 500
 HUMAN_REQUEST_KINDS = frozenset({"decision", "deliverable", "approval", "information"})
+# Non-pausing coordinator question/reply sibling of the needs_human path.
+# The pausing semantics of ticket_request_human are deliberately NOT reused:
+# the asker keeps its work lease and the ticket status is never mutated.
+COORDINATOR_QUESTION_MESSAGE_MAX_CHARS = 2_000
+COORDINATOR_QUESTION_KINDS = HUMAN_REQUEST_KINDS
+COORDINATOR_QUESTION_STATES = frozenset({"open", "accepted", "answered"})
+COORDINATOR_QUESTIONS_PER_TICKET_MAX = 50
+# Board state key holding {project: [coordinator agent_id, ...]}. Membership in
+# this map, not merely admin or board:coordinate, establishes project ownership.
+PROJECT_COORDINATORS_STATE_KEY = "project_coordinators"
+COORDINATOR_BINDING_MAX_CHARS = 512
 
 
 @dataclass(frozen=True)
@@ -426,6 +443,14 @@ def require_board_authorization(principal: Principal, board_id: str) -> None:
         raise PermissionError(
             "board access denied: token is not authorized for this board"
         )
+
+
+def current_host_binding(agent_id_value: str) -> str:
+    """Derive a private, verifier-backed binding for one authenticated session."""
+    access = get_access_token()
+    if access is None or not isinstance(access.token, str) or not access.token:
+        raise RuntimeError("authenticated access token missing")
+    return coordinator_host_binding(access.token, agent_id_value)
 
 
 def require_scope(principal: Principal, scope: str) -> None:
@@ -575,6 +600,7 @@ class CentralJournal(Journal):
             | PARK_EVENT_KINDS
             | ARCHIVE_EVENT_KINDS
             | SEAT_IDENTITY_EVENT_KINDS
+            | COORDINATOR_MESSAGE_EVENT_KINDS
         ):
             raise ValueError(f"unsupported event kind: {kind}")
         board_id = _require_text("board_id", board_id)
@@ -651,6 +677,7 @@ class CentralJournal(Journal):
             | PARK_EVENT_KINDS
             | ARCHIVE_EVENT_KINDS
             | SEAT_IDENTITY_EVENT_KINDS
+            | COORDINATOR_MESSAGE_EVENT_KINDS
         ):
             raise ValueError(f"unsupported event kind: {kind}")
         if not unique_fields:
@@ -3226,6 +3253,39 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 reserved_agents.add(agent_id_value)
         return False
 
+    def retire_nonreviewable_review_offers(
+        document: dict[str, Any], now: float,
+    ) -> list[dict[str, Any]]:
+        events: list[dict[str, Any]] = []
+        for ticket in document["tickets"].values():
+            if ticket.get("status") == "submitted":
+                continue
+            offer = ticket.pop("review_offer", None)
+            if not isinstance(offer, Mapping):
+                continue
+            state = ticket.get("dispatch_state")
+            if (
+                isinstance(state, Mapping)
+                and state.get("state") == "offered"
+                and state.get("kind") == "review"
+                and state.get("agent_id") == offer.get("agent_id")
+            ):
+                ticket.pop("dispatch_state", None)
+            ticket["updated_at"] = iso_at(now)
+            events.append(
+                {
+                    "kind": OFFER_REVOKED,
+                    "ticket_id": ticket["ticket_id"],
+                    "offer_kind": "review",
+                    "offered_agent_id": offer.get("agent_id"),
+                    "offered_agent_name": offer.get("agent_name"),
+                    "offer_expires_at": offer.get("expires_at"),
+                    "dispatch_reason": "offer_status_mismatch",
+                    "recipients": [offer.get("agent_id")],
+                }
+            )
+        return events
+
     def release_assignment_pin(
         ticket: dict[str, Any], now: float, reason: str,
     ) -> str | None:
@@ -3260,6 +3320,8 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         if ticket.get("status") != wanted_status:
             return None
         if ticket.get("parked") is True:
+            return None
+        if kind == "review" and review_lease_is_live(ticket, now):
             return None
         if not dispatch_enabled(document):
             return None
@@ -3894,6 +3956,8 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         ticket: dict[str, Any],
         *,
         include_annotations: bool = True,
+        document: Mapping[str, Any] | None = None,
+        principal: Principal | None = None,
     ) -> dict[str, Any]:
         projected = copy.deepcopy(ticket)
         projected.setdefault("description", "")
@@ -3927,6 +3991,45 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             projected["annotations"] = annotations
         else:
             projected.pop("annotations", None)
+        questions = projected.get("coordinator_questions")
+        if isinstance(questions, list):
+            visible: list[dict[str, Any]] = []
+            if document is not None and principal is not None:
+                membership = service.resolve_board_context(
+                    document, principal.principal_id
+                )
+                is_admin = membership.get("role") == "admin"
+                principal_agent_ids = {
+                    item["agent_id"]
+                    for item in service.principal_members(
+                        document, principal.principal_id
+                    )
+                }
+                project = ticket_project(ticket, board_id)
+                is_project_coordinator = bool(
+                    principal_agent_ids
+                    & set(project_coordinator_ids(document, project))
+                ) and (
+                    COORDINATOR_SCOPE in principal.scopes or is_admin
+                )
+                for question in questions:
+                    if not isinstance(question, dict):
+                        continue
+                    asked_by = question.get("asked_by") or {}
+                    # Explicit projection policy: the asker, the current
+                    # registered project coordinator, and board admins only.
+                    if (
+                        asked_by.get("principal_id") == principal.principal_id
+                        or is_project_coordinator
+                        or is_admin
+                    ):
+                        item = copy.deepcopy(question)
+                        item.pop("binding", None)
+                        visible.append(item)
+            if visible:
+                projected["coordinator_questions"] = visible
+            else:
+                projected.pop("coordinator_questions", None)
         now = time.time()
 
         def elapsed_seconds(value: Any) -> int | None:
@@ -3962,8 +4065,16 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         projected["payload_ref"] = resource_uri(board_id, "ticket", ticket["ticket_id"])
         return projected
 
-    def snapshot_ticket_payload(board_id: str, ticket: dict[str, Any]) -> dict[str, Any]:
-        projected = project_ticket(board_id, ticket)
+    def snapshot_ticket_payload(
+        board_id: str,
+        ticket: dict[str, Any],
+        *,
+        document: Mapping[str, Any],
+        principal: Principal,
+    ) -> dict[str, Any]:
+        projected = project_ticket(
+            board_id, ticket, document=document, principal=principal
+        )
         request = projected.get("human_request")
         if not isinstance(request, dict):
             return projected
@@ -4498,6 +4609,8 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
     def human_request_recipients(document: dict[str, Any]) -> list[str]:
         recipients: list[str] = []
         for member in document.get("members", {}).values():
+            if member.get("lifecycle_status", "active") != "active":
+                continue
             membership = document.get("principal_memberships", {}).get(
                 member.get("principal_id"), {}
             )
@@ -5392,10 +5505,13 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         }
 
     def snapshot_payload(
-        document: dict[str, Any], *, include_retired: bool = False
+        document: dict[str, Any], principal: Principal, *, include_retired: bool = False
     ) -> dict[str, Any]:
         tickets = [
-            snapshot_ticket_payload(document["board_id"], ticket)
+            snapshot_ticket_payload(
+                document["board_id"], ticket,
+                document=document, principal=principal,
+            )
             for ticket in document["tickets"].values()
         ]
         archived_index = service.load_archive_index(document["board_id"])
@@ -5466,6 +5582,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
 
     def bounded_snapshot_payload(
         document: dict[str, Any],
+        principal: Principal,
         *,
         limit: int,
         max_bytes: int,
@@ -5474,7 +5591,9 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         include_retired: bool = False,
     ) -> dict[str, Any]:
         """Build a deterministic snapshot with explicit collection and byte bounds."""
-        snapshot = snapshot_payload(document, include_retired=include_retired)
+        snapshot = snapshot_payload(
+            document, principal, include_retired=include_retired
+        )
         scrub_items = sorted(snapshot["board"]["scrub_allow_counts"].items())
         collections: dict[str, Any] = {
             "agents": snapshot["agents"][:limit],
@@ -5585,7 +5704,10 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             reverse=True,
         )
         tickets = [
-            project_ticket(document["board_id"], item, include_annotations=False)
+            project_ticket(
+                document["board_id"], item, include_annotations=False,
+                document=document, principal=principal,
+            )
             for item in document["tickets"].values()
             if item.get("status") in ACTIVE_TICKET_STATES
         ]
@@ -6130,6 +6252,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         snapshot_at = datetime.now(timezone.utc).isoformat()
         snapshot = bounded_snapshot_payload(
             snapshot_document,
+            principal,
             limit=snapshot_limit,
             max_bytes=snapshot_max_bytes,
             watermark=watermark,
@@ -6181,6 +6304,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         watermark = latest_seq(board_id)
         return bounded_snapshot_payload(
             document,
+            principal,
             limit=limit,
             max_bytes=max_bytes,
             watermark=watermark,
@@ -6207,7 +6331,17 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                     "board_id": board_id,
                     "agent_ids": [item["agent_id"] for item in memberships],
                     "agent_names": [item["agent_name"] for item in memberships],
-                    "roles": sorted({item["role"] for item in memberships}),
+                    # Retired-member compaction intentionally removes the seat
+                    # role from tombstones.  Unknown legacy/corrupt roles are
+                    # also omitted instead of being promoted during discovery.
+                    "roles": sorted(
+                        {
+                            role
+                            for item in memberships
+                            if isinstance((role := item.get("role")), str)
+                            and role in SEAT_ROLES
+                        }
+                    ),
                     "membership_role": board_membership["role"],
                     "scrub_profile": board_scrub_profile(document),
                     "review_policy": board_review_policy(document),
@@ -7127,14 +7261,18 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             if archived is not None:
                 return {
                     "ok": True,
-                    "ticket": project_ticket(board_id, archived),
+                    "ticket": project_ticket(
+                        board_id, archived, document=document, principal=principal
+                    ),
                     "archived": True,
                     "latest_seq": latest_seq(board_id),
                 }
             raise ValueError("ticket not found")
         return {
             "ok": True,
-            "ticket": project_ticket(board_id, ticket),
+            "ticket": project_ticket(
+                board_id, ticket, document=document, principal=principal
+            ),
             "latest_seq": latest_seq(board_id),
         }
 
@@ -7153,6 +7291,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         tags: list[str] | None = None,
         related_files: list[str] | None = None,
         target_url: str | None = None,
+        project: str | None = None,
         assigned_to: str | None = None,
         unassigned: bool = False,
         coordinator_op_key: str | None = None,
@@ -7167,8 +7306,9 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         If ``ticket_id`` is omitted, ``description``, ``target_url``, ``scope``,
         and ``required_fields`` are all required. Supplying ``ticket_id``
         currently enforces none of those fields. The first path segment of
-        ``target_url`` is the project slug used to route work to
-        project-filtered workers.
+        ``target_url`` is resolved against the board's project registry. The
+        optional ``project`` value is only a compatibility assertion and may
+        not select a different route.
         """
         board_id = require_id("board_id", board_id)
         agent_name = require_id("agent_name", agent_name)
@@ -7221,6 +7361,10 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             )
             safe_assigned = clean_text(
                 "assigned_to", assigned_to, max_length=100,
+                scrub_profile=profile, allow_counts=allow_counts,
+            )
+            safe_project = clean_text(
+                "project", project, max_length=100,
                 scrub_profile=profile, allow_counts=allow_counts,
             )
             safe_required = clean_list(
@@ -7316,6 +7460,13 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                     or actual_id in service.load_archive_index(document["board_id"])
                 ):
                     raise ValueError("ticket already exists")
+            derived_project = derive_ticket_project(
+                document, board_id, safe_target or ""
+            )
+            if safe_project and safe_project != derived_project:
+                raise PermissionError(
+                    "project must match the server-derived project registry route"
+                )
             requested_assignment = safe_assigned
             if explicit_id and safe_assigned is None and not unassigned:
                 requested_assignment = actor["agent_name"]
@@ -7340,6 +7491,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 "tags": safe_tags,
                 "related_files": safe_files,
                 "target_url": safe_target or "",
+                "project": derived_project,
                 "status": "open",
                 "created_by_agent_id": actor["agent_id"],
                 "created_by_principal_id": principal.principal_id,
@@ -8500,6 +8652,499 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             "scrub_audit": changed["scrub_audit"],
         }
 
+    def derive_ticket_project(
+        document: Mapping[str, Any], board_id: str, target_url: str
+    ) -> str:
+        """Resolve routing from authenticated board membership and registry state."""
+        entry = (document.get("state") or {}).get("project_registry")
+        raw = entry.get("value") if isinstance(entry, Mapping) else None
+        if raw is None:
+            return board_id
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("project_registry is not valid JSON") from exc
+        projects = raw.get("projects") if isinstance(raw, Mapping) else None
+        if not isinstance(projects, Mapping):
+            raise ValueError("project_registry projects must be an object")
+        active = [
+            (name, config)
+            for name, config in projects.items()
+            if isinstance(name, str)
+            and isinstance(config, Mapping)
+            and config.get("board_id") == board_id
+            and config.get("status") == "active"
+            and config.get("fleet", True) is not False
+        ]
+        if not target_url:
+            return active[0][0] if len(active) == 1 else board_id
+        parsed = urlparse(target_url)
+        if parsed.scheme or parsed.netloc:
+            matches = [
+                name for name, config in active
+                if config.get("repository_url") == target_url
+            ]
+        else:
+            key = target_url.split("/", 1)[0].casefold()
+            matches = []
+            for name, config in active:
+                aliases = {name.casefold()}
+                work_dir = config.get("work_dir")
+                if isinstance(work_dir, str) and work_dir:
+                    aliases.add(Path(work_dir).name.casefold())
+                if key in aliases:
+                    matches.append(name)
+        if len(matches) != 1:
+            raise PermissionError(
+                "target_url must resolve to exactly one active project on this board"
+            )
+        return matches[0]
+
+    def ticket_project(ticket: Mapping[str, Any], board_id: str) -> str:
+        """Server-derived project. Never taken from caller input."""
+        value = ticket.get("project")
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        return board_id
+
+    def project_coordinator_ids(document: Mapping[str, Any], project: str) -> list[str]:
+        entry = (document.get("state") or {}).get(PROJECT_COORDINATORS_STATE_KEY)
+        raw = entry.get("value") if isinstance(entry, Mapping) else None
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except (TypeError, ValueError):
+                return []
+        if not isinstance(raw, Mapping):
+            return []
+        owners = raw.get(project)
+        if isinstance(owners, str):
+            owners = [owners]
+        if not isinstance(owners, list):
+            return []
+        return [item for item in owners if isinstance(item, str) and item]
+
+    def coordinator_question_authorized(
+        document: Mapping[str, Any], principal: Principal,
+        actor: Mapping[str, Any], project: str,
+    ) -> bool:
+        """Project ownership, not bare admin or board:coordinate."""
+        owners = project_coordinator_ids(document, project)
+        if not owners:
+            return False
+        if actor["agent_id"] not in owners:
+            return False
+        if COORDINATOR_SCOPE in principal.scopes:
+            return True
+        membership = service.resolve_board_context(document, principal.principal_id)
+        return membership.get("role") == "admin"
+
+    def authenticated_coordinator_binding(
+        principal: Principal,
+        actor: Mapping[str, Any],
+        value: str,
+    ) -> str:
+        """Verify the opaque session identity and persist only a server digest."""
+        text = clean_text(
+            "host_binding", value, required=True,
+            max_length=COORDINATOR_BINDING_MAX_CHARS,
+        )
+        assert text is not None
+        expected = current_host_binding(str(actor["agent_id"]))
+        if not hmac.compare_digest(text, expected):
+            raise PermissionError(
+                "host_binding must match the authenticated agent binding"
+            )
+        material = json.dumps(
+            [principal.principal_id, expected], separators=(",", ":")
+        )
+        return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+    def find_coordinator_question(
+        ticket: dict[str, Any], question_id: str
+    ) -> dict[str, Any] | None:
+        for entry in ticket.get("coordinator_questions", []):
+            if entry.get("question_id") == question_id:
+                return entry
+        return None
+
+    @tool()
+    async def ticket_question_ask(
+        board_id: str,
+        agent_name: str,
+        ticket_id: str,
+        message: str,
+        kind: str,
+        ctx: Context,
+        message_id: str | None = None,
+        in_reply_to: str | None = None,
+        expected_generation: str | None = None,
+    ) -> dict[str, Any]:
+        """Ask the project coordinator a durable question without pausing work."""
+        board_id = require_id("board_id", board_id)
+        ticket_id = require_id("ticket_id", ticket_id)
+        # Idempotency keys use the same public identifier grammar and explicit
+        # 80-character bound as every other durable ID. This rejects path- and
+        # secret-shaped runtime input before any duplicate lookup or write.
+        safe_message_id = (
+            require_id("message_id", message_id) if message_id is not None else None
+        )
+        principal = current_principal()
+        require_board_write_or_coordinate(principal)
+        if kind not in COORDINATOR_QUESTION_KINDS:
+            raise ValueError("kind must be decision, deliverable, approval, or information")
+        now = time.time()
+
+        def ask(document: dict[str, Any]) -> dict[str, Any]:
+            profile = board_scrub_profile(document)
+            allow_counts: dict[str, int] = {}
+            safe_message = clean_text(
+                "message", message, required=True,
+                max_length=COORDINATOR_QUESTION_MESSAGE_MAX_CHARS,
+                scrub_profile=profile, allow_counts=allow_counts,
+            )
+            actor, released, renewed = prepare_board_call(
+                document, principal, agent_name, now
+            )
+            ticket = document["tickets"].get(ticket_id)
+            if ticket is None:
+                raise ValueError("ticket not found")
+            membership = service.resolve_board_context(
+                document, principal.principal_id
+            )
+            is_holder = (
+                ticket.get("status") in PRE_SUBMISSION_STATES
+                and ticket.get("claimed_by_agent_id") == actor["agent_id"]
+                and ticket.get("claimed_by_principal_id") == principal.principal_id
+            )
+            is_admin = membership.get("role") == "admin"
+            review_lease = ticket.get("review_lease") or {}
+            # The independent reviewer asks through the same primitive, with no
+            # new write rights: holding the review lease is the only addition.
+            is_reviewer = (
+                review_lease.get("reviewer_agent_id") == actor["agent_id"]
+                and review_lease.get("reviewer_principal_id") == principal.principal_id
+            )
+            if not (is_holder or is_reviewer or is_admin):
+                raise PermissionError(
+                    "coordinator question requires the work lease, the review "
+                    "lease, or board admin"
+                )
+            if ticket.get("status") in TERMINAL_TICKET_STATES:
+                raise ValueError(f"ticket is already {ticket['status']}")
+            questions = ticket.setdefault("coordinator_questions", [])
+            # Retry idempotency: the same caller-supplied message_id never
+            # creates a second question and never re-notifies.
+            if safe_message_id is not None:
+                for entry in questions:
+                    if entry.get("message_id") != safe_message_id:
+                        continue
+                    asked_by = entry.get("asked_by")
+                    if not (
+                        isinstance(asked_by, Mapping)
+                        and asked_by.get("principal_id") == principal.principal_id
+                        and asked_by.get("agent_id") == actor["agent_id"]
+                    ):
+                        raise PermissionError(
+                            "message_id is already owned by another asker"
+                        )
+                    return {
+                        "actor": actor, "question": copy.deepcopy(entry),
+                        "duplicate": True, "recipients": [],
+                        "released": released,
+                        "renewed": [i for i in renewed if i != ticket_id],
+                        "scrub_audit": None,
+                    }
+            if in_reply_to is not None and find_coordinator_question(
+                ticket, in_reply_to
+            ) is None:
+                raise ValueError("in_reply_to does not match a question on this ticket")
+            if len(questions) >= COORDINATOR_QUESTIONS_PER_TICKET_MAX:
+                raise ValueError("ticket has too many coordinator questions")
+            project = ticket_project(ticket, board_id)
+            owners = project_coordinator_ids(document, project)
+            if not owners:
+                raise ValueError(
+                    "no project coordinator is registered for project "
+                    f"{project}; set board state {PROJECT_COORDINATORS_STATE_KEY}"
+                )
+            question_id = "CQ-" + secrets.token_hex(8)
+            entry = {
+                "question_id": question_id,
+                "project": project,
+                "asker_role": "reviewer" if is_reviewer and not is_holder else "worker",
+                "message_id": safe_message_id,
+                "in_reply_to": in_reply_to,
+                "message": safe_message,
+                "kind": kind,
+                "state": "open",
+                "asked_by": {
+                    "agent_id": actor["agent_id"],
+                    "agent_name": actor["agent_name"],
+                    "principal_id": principal.principal_id,
+                },
+                "asked_at": iso_at(now),
+                "accepted_by": None,
+                "accepted_at": None,
+                "binding": None,
+                "rebound_at": None,
+                "answer": None,
+                "answered_at": None,
+            }
+            questions.append(entry)
+            ticket["updated_at"] = iso_at(now)
+            scrub_audit = record_scrub_allows(document, actor, now, allow_counts)
+            return {
+                "actor": actor, "question": copy.deepcopy(entry),
+                "duplicate": False,
+                "recipients": owners,
+                "released": released,
+                "renewed": [item for item in renewed if item != ticket_id],
+                "scrub_audit": scrub_audit,
+            }
+
+        changed = service.mutate(board_id, ask)
+        release_events = await publish_releases(
+            board_id, changed["released"], principal, ctx
+        )
+        event = None
+        if not changed["duplicate"]:
+            # The cue rides the existing ticket resource so a coordinator whose
+            # subscription already watches tickets needs no new surface.
+            uri = resource_uri(board_id, "ticket", ticket_id)
+            event = await append_and_publish(
+                board_id, changed["actor"], COORDINATOR_QUESTION_ASKED, uri,
+                changed["recipients"], ctx, ticket_id=ticket_id,
+                question_id=changed["question"]["question_id"],
+            )
+        return {
+            "ok": True, "duplicate": changed["duplicate"],
+            "question_id": changed["question"]["question_id"],
+            "question": changed["question"], "event": event,
+            "release_events": release_events,
+            "implicitly_renewed": changed["renewed"],
+            "scrub_audit": changed["scrub_audit"],
+        }
+
+    @tool()
+    async def board_question_inbox(
+        board_id: str,
+        agent_name: str,
+        ctx: Context,
+        state: str | None = None,
+        ticket_id: str | None = None,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        """List coordinator questions this principal is authorized to answer."""
+        board_id = require_id("board_id", board_id)
+        principal = current_principal()
+        require_board_write_or_coordinate(principal)
+        if state is not None and state not in COORDINATOR_QUESTION_STATES:
+            raise ValueError("state must be open, accepted, or answered")
+        now = time.time()
+
+        def read(document: dict[str, Any]) -> dict[str, Any]:
+            actor, released, renewed = prepare_board_call(
+                document, principal, agent_name, now
+            )
+            items: list[dict[str, Any]] = []
+            projects: set[str] = set()
+            for tid, ticket in document["tickets"].items():
+                if ticket_id is not None and tid != ticket_id:
+                    continue
+                questions = ticket.get("coordinator_questions")
+                if not questions:
+                    continue
+                project = ticket_project(ticket, board_id)
+                if not coordinator_question_authorized(
+                    document, principal, actor, project
+                ):
+                    continue
+                projects.add(project)
+                for entry in questions:
+                    if state is not None and entry.get("state") != state:
+                        continue
+                    item = copy.deepcopy(entry)
+                    item.pop("binding", None)
+                    item["ticket_id"] = tid
+                    items.append(item)
+            if not projects and not items:
+                # Distinguish "nothing pending" from "not a project coordinator".
+                entry_state = (document.get("state") or {}).get(
+                    PROJECT_COORDINATORS_STATE_KEY
+                )
+                raw = entry_state.get("value") if isinstance(entry_state, Mapping) else None
+                if isinstance(raw, str):
+                    try:
+                        raw = json.loads(raw)
+                    except (TypeError, ValueError):
+                        raw = None
+                names = list(raw.keys()) if isinstance(raw, Mapping) else []
+                owned = any(
+                    actor["agent_id"] in project_coordinator_ids(document, name)
+                    for name in names
+                )
+                if not owned:
+                    raise PermissionError(
+                        "coordinator inbox requires registered project "
+                        "coordinator ownership on this board"
+                    )
+            items.sort(key=lambda item: item.get("asked_at") or "")
+            return {
+                "actor": actor, "items": items[: max(1, min(limit, 100))],
+                "total": len(items), "released": released, "renewed": renewed,
+            }
+
+        changed = service.mutate(board_id, read)
+        release_events = await publish_releases(
+            board_id, changed["released"], principal, ctx
+        )
+        return {
+            "ok": True, "questions": changed["items"],
+            "total": changed["total"], "release_events": release_events,
+            "implicitly_renewed": changed["renewed"],
+        }
+
+    @tool()
+    async def ticket_question_answer(
+        board_id: str,
+        agent_name: str,
+        ticket_id: str,
+        question_id: str,
+        host_binding: str,
+        ctx: Context,
+        action: str = "answer",
+        message: str | None = None,
+        expected_generation: str | None = None,
+    ) -> dict[str, Any]:
+        """Accept or answer a coordinator question without changing ticket state."""
+        board_id = require_id("board_id", board_id)
+        ticket_id = require_id("ticket_id", ticket_id)
+        question_id = require_id("question_id", question_id)
+        principal = current_principal()
+        require_board_write_or_coordinate(principal)
+        if action not in {"accept", "answer"}:
+            raise ValueError("action must be accept or answer")
+        if action == "answer" and not message:
+            raise ValueError("answer requires a message")
+        now = time.time()
+
+        def respond(document: dict[str, Any]) -> dict[str, Any]:
+            profile = board_scrub_profile(document)
+            allow_counts: dict[str, int] = {}
+            safe_message = None
+            if message is not None:
+                safe_message = clean_text(
+                    "message", message, required=True,
+                    max_length=COORDINATOR_QUESTION_MESSAGE_MAX_CHARS,
+                    scrub_profile=profile, allow_counts=allow_counts,
+                )
+            actor, released, renewed = prepare_board_call(
+                document, principal, agent_name, now
+            )
+            ticket = document["tickets"].get(ticket_id)
+            if ticket is None:
+                raise ValueError("ticket not found")
+            project = ticket_project(ticket, board_id)
+            if not coordinator_question_authorized(document, principal, actor, project):
+                raise PermissionError(
+                    "answering requires registered project coordinator "
+                    f"ownership of project {project}"
+                )
+            binding = authenticated_coordinator_binding(
+                principal, actor, host_binding
+            )
+            entry = find_coordinator_question(ticket, question_id)
+            if entry is None:
+                raise ValueError("question not found")
+            if entry.get("state") == "answered":
+                # Idempotent: a retried answer returns the stored one.
+                public = copy.deepcopy(entry)
+                public.pop("binding", None)
+                return {
+                    "actor": actor, "question": public,
+                    "duplicate": True, "recipients": [], "released": released,
+                    "renewed": renewed, "scrub_audit": None, "kind": None,
+                }
+            existing_binding = entry.get("binding")
+            accepted_by = entry.get("accepted_by") or {}
+            if accepted_by and accepted_by.get("agent_id") != actor["agent_id"]:
+                current_owners = set(project_coordinator_ids(document, project))
+                if accepted_by.get("agent_id") in current_owners:
+                    raise PermissionError(
+                        "question is already accepted by another current "
+                        "project coordinator"
+                    )
+                entry["transferred_from"] = copy.deepcopy(accepted_by)
+                entry["transferred_at"] = iso_at(now)
+                entry["accepted_by"] = {
+                    "agent_id": actor["agent_id"],
+                    "agent_name": actor["agent_name"],
+                    "principal_id": principal.principal_id,
+                }
+                entry["binding"] = binding
+                entry["rebound_at"] = iso_at(now)
+            elif existing_binding is not None and binding != existing_binding:
+                # A newly verified token under the same authenticated agent is
+                # an allowed reconnect. Caller-chosen values were rejected
+                # above, so only verifier-backed sessions can rebind.
+                entry["binding"] = binding
+                entry["rebound_at"] = iso_at(now)
+            elif existing_binding is None:
+                entry["binding"] = binding
+            if action == "accept":
+                entry["state"] = "accepted"
+                entry["accepted_by"] = {
+                    "agent_id": actor["agent_id"],
+                    "agent_name": actor["agent_name"],
+                    "principal_id": principal.principal_id,
+                }
+                entry["accepted_at"] = iso_at(now)
+                event_kind = COORDINATOR_QUESTION_ACCEPTED
+            else:
+                entry["state"] = "answered"
+                entry["answer"] = safe_message
+                entry["answered_at"] = iso_at(now)
+                entry["answered_by"] = {
+                    "agent_id": actor["agent_id"],
+                    "agent_name": actor["agent_name"],
+                    "principal_id": principal.principal_id,
+                }
+                event_kind = COORDINATOR_QUESTION_ANSWERED
+            ticket["updated_at"] = iso_at(now)
+            scrub_audit = record_scrub_allows(document, actor, now, allow_counts)
+            asked_by = entry.get("asked_by") or {}
+            recipients = [asked_by["agent_id"]] if asked_by.get("agent_id") else []
+            public = copy.deepcopy(entry)
+            public.pop("binding", None)
+            return {
+                "actor": actor, "question": public,
+                "duplicate": False, "recipients": recipients,
+                "released": released, "renewed": renewed,
+                "scrub_audit": scrub_audit, "kind": event_kind,
+            }
+
+        changed = service.mutate(board_id, respond)
+        release_events = await publish_releases(
+            board_id, changed["released"], principal, ctx
+        )
+        event = None
+        if not changed["duplicate"]:
+            uri = resource_uri(board_id, "ticket", ticket_id)
+            event = await append_and_publish(
+                board_id, changed["actor"], changed["kind"], uri,
+                changed["recipients"], ctx, ticket_id=ticket_id,
+                question_id=question_id,
+            )
+        return {
+            "ok": True, "duplicate": changed["duplicate"],
+            "question": changed["question"], "event": event,
+            "release_events": release_events,
+            "implicitly_renewed": changed["renewed"],
+            "scrub_audit": changed["scrub_audit"],
+        }
+
     @tool()
     async def lease_renew(
         board_id: str,
@@ -8791,6 +9436,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
 
         def claim(document: dict[str, Any]) -> dict[str, Any]:
             released = reap_expired(document, now, redispatch=False)
+            released.extend(retire_nonreviewable_review_offers(document, now))
             if coordinate_only:
                 actor = coordinator_actor(document, principal, agent_name)
                 renewed = []
@@ -9605,12 +10251,16 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                     projected.append(compact_row)
                     continue
                 archived_row = project_ticket(
-                    board_id, full, include_annotations=False
+                    board_id, full, include_annotations=False,
+                    document=document, principal=principal,
                 )
                 archived_row["archived"] = True
                 projected.append(archived_row)
                 continue
-            row = project_ticket(board_id, item, include_annotations=False)
+            row = project_ticket(
+                board_id, item, include_annotations=False,
+                document=document, principal=principal,
+            )
             lease = item.get("review_lease")
             if item.get("status") != "submitted":
                 projected.append(row)
