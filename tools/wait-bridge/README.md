@@ -733,7 +733,7 @@ installed profile.
 | Python MCP SDK / stdio disposable probe | Verified: ask, inbox, accept, rotated-credential reconnect, answer and correlated waits | Probe drives the next call explicitly |
 | Codex / Codex CLI stdio | Supported by the same stdio tool contract; host profile change still required | Host-managed; not claimed by the disposable probe |
 | Claude Code / Claude Desktop stdio | Supported by the same stdio tool contract; host profile change still required | Host-managed; not claimed by the disposable probe |
-| Goose / AionUi imported stdio | Supported by the same stdio tool contract; host profile change still required | Host-managed; not claimed by the disposable probe |
+| Goose / AionUi 2.2.1 (AionCore 0.2.1) imported stdio | Measured 2026-09-07: a bounded claimable wait returned `timed_out=true, mode=poll`, not push; native elicitation was not rendered | Host-managed; not claimed by the disposable probe |
 
 The private probe uses four separate short-lived JWT credentials against a
 disposable loopback Central. It verifies worker and reviewer asks, coordinator
@@ -792,6 +792,19 @@ MRTR result and retry. Direct calls to `ctx.elicit`, `ctx.elicit_url`,
 `ServerSession` request helper fail on 2026-07-28 with top-level JSON-RPC
 `-32600`, not `CallToolResult(is_error=True)`. The two bridge session calls are
 confined to the pre-2026 branch.
+
+AionUi 2.2.1 / AionCore 0.2.1 imported stdio was measured on 2026-09-07
+with `elicitation=no`. A pending form produced only a generic `Elicitation`
+confirmation with Allow / Allow Always / Reject, without the schema field or
+disposition selector. A bounded wait used `agent_name=aion-spike`,
+`only_mine=false`, `timeout_s=3`, and `wait_for=claimable`; it returned
+`timed_out=true, mode=poll`.
+
+For AionUi 2.2.1, register the bridge through
+`POST /api/mcp/servers/import`; an extension manifest
+`contributes.mcpServers` entry did not reach a session. Each
+`mcpServers[].transport` must contain its `command`, `args`, and `env`.
+The 2.2.1 loader silently discarded `presetAgentType`.
 
 ### Request-state keyring and manual continuation
 
