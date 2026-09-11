@@ -772,10 +772,10 @@ def _verify_evidence(evidence: Any, trust: dict[str, Any]) -> dict[str, Any]:
                 or action_response["path"] != "/api/attention"
                 or action_response["status"] != record["entry"]["status"]
                 or action_response["selected"] != expected_selected
-                or _digest(items) != record["entry"]["after_sha256"]
-                or hashlib.sha256(
-                    _json_bytes({"items": items})
-                ).hexdigest() != record["entry"]["result_sha256"]
+                or _digest({"items": items})
+                != record["entry"]["after_sha256"]
+                or _digest({"items": items})
+                != record["entry"]["result_sha256"]
             ):
                 raise TypedEvidenceError(
                     "Fleet trace action response does not match its log entry"
@@ -1390,10 +1390,8 @@ def _record_log(request: dict[str, Any], trust: dict[str, Any], context: dict[st
         if (
             action_response["status"] != entry["status"]
             or action_response["selected"] != expected_selected
-            or _digest(items) != entry["after_sha256"]
-            or hashlib.sha256(
-                _json_bytes({"items": items})
-            ).hexdigest() != entry["result_sha256"]
+            or _digest({"items": items}) != entry["after_sha256"]
+            or _digest({"items": items}) != entry["result_sha256"]
         ):
             raise TypedEvidenceError(
                 "Fleet trace action response does not match its log entry"

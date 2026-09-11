@@ -458,8 +458,8 @@ from `action_input_path` to the pinned Fleet process with `POST /api/attention`,
 and accepts only one correlated record appended by that call. The HTTP response
 must expose the complete matching record under `/_evidence`, report
 `log_emitted=true`, return the same status, and expose `/items`. The consumer
-independently recomputes `after_sha256` from `/items` and `result_sha256` from
-the original `{\"items\": ...}` product response. This rejects a concurrent
+independently recomputes both `after_sha256` and `result_sha256` from the exact
+original `{\"items\": ...}` product response. This rejects a concurrent
 request's after-state being attributed to the observed action. Pre-existing
 records, replaced file prefixes, non-canonical action files, and response/log
 disagreement fail closed. `select_allowlist` must therefore include `/items`,
