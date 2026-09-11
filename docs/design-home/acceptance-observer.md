@@ -96,6 +96,8 @@ python3 tools/aionui-extension/tests/home_acceptance/runner.py assemble \
 PURSERS_HOME_ACCEPTANCE_MUTATE=I_UNDERSTAND_SANDBOX_ONLY \
 python3 tools/aionui-extension/tests/home_acceptance/runner.py validate \
   --observer /PATH/TO/verifier-observer \
+  --typed-evaluator /PATH/TO/verifier-typed/typed-evaluator \
+  --typed-trust /PATH/TO/verifier-typed/trust.json \
   --report /PATH/TO/evidence/report.json \
   --target http://127.0.0.1:25808 \
   --board sandbox-home \
@@ -128,6 +130,13 @@ bound to the full correlation above and the exact canonical-conjunct digest.
 An absent evaluator is a blocked capability, not a pass or skip. The parent
 integration checkpoint deliberately keeps that gate closed until the separate
 typed collector has an independently reviewed immutable SHA.
+
+The evaluator executable and its trust file must both be absolute regular
+files outside the candidate checkout and evidence directory. The executable
+must not be group/world writable; the trust file must be mode `0600`. The
+harness sends one closed request on stdin and accepts only the exact correlated
+result schema, so neither the report nor a candidate-local executable can
+select the trust root.
 
 `harness.py verify-evidence --browser-observer /PATH/TO/verifier-observer/browser_observer.py`
 remains the equivalent single-source-of-truth entrypoint; `runner.py validate`

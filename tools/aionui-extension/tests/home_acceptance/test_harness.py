@@ -682,6 +682,46 @@ json.dump({
     )
 
 
+def _write_verifier_typed_evaluator(directory: Path) -> tuple[Path, Path]:
+    command = directory / "typed-evaluator"
+    command.parent.mkdir(parents=True, exist_ok=True)
+    command.write_text(
+        """#!/usr/bin/env python3
+import argparse, hashlib, json, pathlib, sys
+parser = argparse.ArgumentParser()
+parser.add_argument("--trust", required=True)
+args = parser.parse_args()
+trust = json.loads(pathlib.Path(args.trust).read_text())
+request = json.load(sys.stdin)
+evidence = pathlib.Path(request["evidence_path"]).read_bytes()
+canonical = json.dumps(request["conjunct"], sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+json.dump({
+    "verifier_id": trust["verifier_id"],
+    "observation_id": request["observation_id"],
+    "run_id": request["run_id"],
+    "action_id": request["action_id"],
+    "entity": request["entity"],
+    "causal_index": request["causal_index"],
+    "surface_id": request["surface_id"],
+    "board_id": request["board_id"],
+    "candidate_commit": request["candidate_commit"],
+    "kind": request["conjunct"]["kind"],
+    "passed": True,
+    "predicate_sha256": hashlib.sha256(canonical).hexdigest(),
+    "evidence_sha256": hashlib.sha256(evidence).hexdigest(),
+}, sys.stdout, sort_keys=True)
+""",
+        encoding="utf-8",
+    )
+    command.chmod(0o700)
+    trust = directory / "typed-trust.json"
+    trust.write_text(
+        json.dumps({"verifier_id": "verifier-session-typed-1"}), encoding="utf-8"
+    )
+    trust.chmod(0o600)
+    return command, trust
+
+
 @contextmanager
 def _minimal_status_server() -> Iterator[str]:
     class Handler(BaseHTTPRequestHandler):
@@ -945,7 +985,22 @@ def test_verifier_browser_observer_replays_bounded_independent_capture(
     assert capture.candidate_commit == CANDIDATE_SHA
 
 
-def test_public_validation_requires_typed_evaluator_after_browser_replay(
+def test_typed_evaluator_and_trust_must_be_external_and_private(
+    tmp_path: Path,
+) -> None:
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+    command, trust = _write_verifier_typed_evaluator(evidence)
+    with pytest.raises(AcceptanceError, match="verifier-owned outside"):
+        harness_module.VerifierTypedEvidenceEvaluator(command, trust, evidence)
+
+    command, trust = _write_verifier_typed_evaluator(tmp_path / "verifier")
+    trust.chmod(0o644)
+    with pytest.raises(AcceptanceError, match="verifier-owned outside"):
+        harness_module.VerifierTypedEvidenceEvaluator(command, trust, evidence)
+
+
+def test_public_validation_uses_verifier_owned_browser_and_typed_replay(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setenv("PURSERS_HOME_ACCEPTANCE_MUTATE", MUTATION_OPT_IN)
@@ -953,23 +1008,22 @@ def test_public_validation_requires_typed_evaluator_after_browser_replay(
     evidence.mkdir()
     verifier = tmp_path / "verifier" / "browser-observer"
     _write_verifier_observer(verifier)
+    typed_evaluator, typed_trust = _write_verifier_typed_evaluator(verifier.parent)
     with _minimal_status_server() as base_url:
         report = _retarget(_complete_report(), base_url)
         path = _write_report(evidence, report)
-        with (
-            patch.object(harness_module, "_execute_required_suite", return_value=None),
-            pytest.raises(
-                AcceptanceCapabilityUnavailable,
-                match="trusted typed evidence evaluator is unavailable",
-            ),
-        ):
-            validate_evidence_report(
+        with patch.object(harness_module, "_execute_required_suite", return_value=None):
+            result = validate_evidence_report(
                 path,
                 validate_live_target(base_url, "sandbox-home"),
                 RepositoryCapabilities((), (), (), (), ()),
                 CANDIDATE_SHA,
                 verifier,
+                typed_evaluator,
+                typed_trust,
             )
+    assert result["candidate_commit"] == CANDIDATE_SHA
+    assert result["steps_passed"] == len(SEQUENCE)
 
 
 def test_report_owned_observer_cannot_make_self_authored_artifacts_pass(

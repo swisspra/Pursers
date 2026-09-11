@@ -791,6 +791,14 @@ def validate(args: argparse.Namespace) -> int:
             capabilities,
             args.commit,
             browser_observer_command=command,
+            typed_evidence_evaluator_command=(
+                Path(args.typed_evaluator).expanduser().resolve()
+                if args.typed_evaluator else None
+            ),
+            typed_evidence_trust=(
+                Path(args.typed_trust).expanduser().resolve()
+                if args.typed_trust else None
+            ),
         )
     except harness.AcceptanceCapabilityUnavailable as error:
         json.dump(
@@ -874,6 +882,8 @@ def build_parser() -> argparse.ArgumentParser:
     check_report.add_argument("--target", required=True)
     check_report.add_argument("--board", required=True)
     check_report.add_argument("--commit", required=True)
+    check_report.add_argument("--typed-evaluator")
+    check_report.add_argument("--typed-trust")
     check_report.set_defaults(handler=validate)
     return parser
 

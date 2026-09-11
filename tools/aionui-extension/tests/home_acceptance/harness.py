@@ -382,6 +382,85 @@ class VerifierBrowserObserver:
         return {"key": key, "pid": pid, "candidate_source": str(candidate_source)}
 
 
+class VerifierTypedEvidenceEvaluator:
+    """Replay typed records through an external verifier-owned evaluator."""
+
+    def __init__(self, command: Path, trust: Path, evidence_root: Path) -> None:
+        repository = REPOSITORY_ROOT.resolve()
+        evidence = evidence_root.resolve()
+        self.command = self._private_external_file(
+            command, repository, evidence, executable=True, label="typed evaluator"
+        )
+        self.trust = self._private_external_file(
+            trust, repository, evidence, executable=False, label="typed evaluator trust"
+        )
+
+    @staticmethod
+    def _private_external_file(
+        value: Path,
+        repository: Path,
+        evidence: Path,
+        *,
+        executable: bool,
+        label: str,
+    ) -> Path:
+        if not value.is_absolute():
+            raise AcceptanceError(f"{label} path must be absolute")
+        try:
+            resolved = value.resolve(strict=True)
+        except (FileNotFoundError, RuntimeError):
+            raise AcceptanceCapabilityUnavailable(f"{label} is unavailable") from None
+        status = resolved.stat()
+        if (
+            not resolved.is_file()
+            or resolved.is_relative_to(repository)
+            or resolved.is_relative_to(evidence)
+            or status.st_uid != os.getuid()
+            or status.st_mode & 0o022
+            or (executable and not os.access(resolved, os.X_OK))
+            or (not executable and status.st_mode & 0o077)
+        ):
+            raise AcceptanceError(
+                f"{label} must be verifier-owned outside the checkout and evidence directory"
+            )
+        return resolved
+
+    def evaluate(
+        self, request: TypedEvidenceRequest
+    ) -> TrustedTypedEvidenceEvaluation:
+        payload = {
+            **asdict(request),
+            "evidence_path": str(request.evidence_path),
+        }
+        try:
+            completed = subprocess.run(
+                [str(self.command), "--trust", str(self.trust)],
+                input=json.dumps(payload, sort_keys=True),
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=60,
+                cwd=self.command.parent,
+                env={"PATH": os.defpath, "LANG": "C", "LC_ALL": "C"},
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise AcceptanceError("trusted typed evidence evaluator execution failed") from exc
+        if completed.returncode != 0 or len(completed.stdout.encode()) > MAX_EVIDENCE_FILE_BYTES:
+            raise AcceptanceError("trusted typed evidence evaluator returned no valid result")
+        try:
+            result = json.loads(completed.stdout)
+        except json.JSONDecodeError:
+            raise AcceptanceError("trusted typed evidence evaluator returned invalid JSON") from None
+        expected_keys = {
+            "verifier_id", "observation_id", "run_id", "action_id", "entity",
+            "causal_index", "surface_id", "board_id", "candidate_commit", "kind",
+            "passed", "predicate_sha256", "evidence_sha256",
+        }
+        if not isinstance(result, dict) or set(result) != expected_keys:
+            raise AcceptanceError("trusted typed evidence evaluator result fields do not match schema")
+        return TrustedTypedEvidenceEvaluation(**result)
+
+
 def _semantic_capabilities(routes: tuple[str, ...]) -> set[str]:
     lowered = {route.lower() for route in routes}
     capabilities = {"read_only_discovery"}
@@ -725,6 +804,8 @@ def validate_evidence_report(
     capabilities: RepositoryCapabilities,
     candidate_commit: str,
     browser_observer_command: Path | None = None,
+    typed_evidence_evaluator_command: Path | None = None,
+    typed_evidence_trust: Path | None = None,
 ) -> dict[str, Any]:
     configured = browser_observer_command or (
         Path(value) if (value := os.environ.get("PURSERS_HOME_BROWSER_OBSERVER")) else None
@@ -734,12 +815,25 @@ def validate_evidence_report(
         if configured is not None
         else None
     )
+    if (typed_evidence_evaluator_command is None) != (typed_evidence_trust is None):
+        raise AcceptanceError(
+            "typed evidence evaluator command and trust must be supplied together"
+        )
+    typed_evaluator = (
+        VerifierTypedEvidenceEvaluator(
+            typed_evidence_evaluator_command, typed_evidence_trust, report_path.parent
+        )
+        if typed_evidence_evaluator_command is not None
+        and typed_evidence_trust is not None
+        else None
+    )
     return _validate_evidence_report(
         report_path,
         target,
         capabilities,
         candidate_commit,
         trusted_browser_observer=observer,
+        trusted_typed_evidence_evaluator=typed_evaluator,
     )
 
 
@@ -2023,11 +2117,13 @@ def _probe_command(base_url: str) -> int:
 def _verify_command(
     base_url: str, board_id: str, report: Path, candidate_commit: str,
     browser_observer: Path | None,
+    typed_evaluator: Path | None,
+    typed_trust: Path | None,
 ) -> int:
     target = validate_live_target(base_url, board_id)
     result = validate_evidence_report(
         report, target, discover_repository_capabilities(), candidate_commit,
-        browser_observer,
+        browser_observer, typed_evaluator, typed_trust,
     )
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
@@ -2045,6 +2141,8 @@ def main(argv: list[str] | None = None) -> int:
     verify.add_argument("--report", required=True, type=Path)
     verify.add_argument("--candidate-commit", required=True)
     verify.add_argument("--browser-observer", type=Path)
+    verify.add_argument("--typed-evaluator", type=Path)
+    verify.add_argument("--typed-trust", type=Path)
     args = parser.parse_args(argv)
     if args.command == "discover":
         return _discover_command()
@@ -2052,7 +2150,7 @@ def main(argv: list[str] | None = None) -> int:
         return _probe_command(args.host_url)
     return _verify_command(
         args.host_url, args.board, args.report, args.candidate_commit,
-        args.browser_observer,
+        args.browser_observer, args.typed_evaluator, args.typed_trust,
     )
 
 
