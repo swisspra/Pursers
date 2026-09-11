@@ -5172,9 +5172,13 @@ def test_agents_hub_defaults_to_active_sorted_status_with_toggle_and_live_work()
             source("function agentVisibilityToggle("),
             source("function pageHead("),
             source("function workerByName("),
+            source("function agentIdentity("),
+            source("function agentIdentityLabel("),
+            source("function workerForAgent("),
             source("function renderRoleChips("),
             source("function liveAgentCard("),
             source("function renderGuide("),
+            source("function inactiveAgentDrawer("),
             source("function renderAgentsHub("),
             "Date.now=()=>new Date('2030-01-01T12:00:00Z').getTime();",
             f"let fleetData={{personal:{{agents:{json.dumps(agents)}}}}},hubWorkers={{}},hubGuide=null,showStaleAgents=false;",
@@ -7124,6 +7128,11 @@ def test_add_project_single_action_happy_path_and_idempotent_rerun(tmp_path: Pat
         ) == f"repository_url={repository_url}"
 
         # Second call: Idempotent re-run
+        door_state_before = {
+            path.relative_to(tmp_path): path.read_bytes()
+            for path in tmp_path.rglob("*")
+            if path.is_file() and (path == jwks_path or keys_dir in path.parents)
+        }
         req2 = urllib.request.Request(
             base + "/api/projects/add",
             data=json.dumps(payload).encode(),
@@ -7140,10 +7149,15 @@ def test_add_project_single_action_happy_path_and_idempotent_rerun(tmp_path: Pat
             assert statuses2["door_principals"] == "already present"
             assert statuses2["policies"] == "already present"
             assert statuses2["fleet_clone"] == "already present"
-            assert result2["doors"]["worker"].startswith("prs1.")
-            assert result2["doors"]["reviewer"].startswith("prs1.")
+            assert statuses2["door_credentials"] == "already present"
+            assert result2["doors"] is None
             # Verify clone preparation was not repeated
             assert seats.calls == 1
+            assert door_state_before == {
+                path.relative_to(tmp_path): path.read_bytes()
+                for path in tmp_path.rglob("*")
+                if path.is_file() and (path == jwks_path or keys_dir in path.parents)
+            }
     finally:
         server.shutdown()
         server.server_close()
@@ -7556,6 +7570,247 @@ def test_doors_ui_rendering() -> None:
     assert 'data-door-action="copy"' in html
     assert 'data-door-action="rotate"' in html
     assert 'name="integration_ref"' in html
+
+
+def test_add_project_denied_before_any_durable_mutation(tmp_path: Path) -> None:
+    central = FakeDoorCentral(is_admin=False)
+    config = dashboard.Config(
+        url="http://127.0.0.1:8766/mcp",
+        token="test-token",
+        home_board="pursers",
+        agent_name="viewer",
+        stale_seconds=300,
+        cache_seconds=5,
+        doors_keys_dir=tmp_path / "keys",
+        jwks_path=tmp_path / "jwks.json",
+    )
+    fetcher = dashboard.FleetFetcher(config, client_factory=central.client_factory)
+    registry_before = copy.deepcopy(central.registry_data)
+    boards_before = set(central.created_boards)
+
+    with pytest.raises(PermissionError, match="admin membership required"):
+        asyncio.run(
+            fetcher.add_project(
+                project_name="denied-project",
+                board_id="denied-board",
+                work_dir="/PATH/TO/DENIED",
+            )
+        )
+
+    assert central.registry_data == registry_before
+    assert central.created_boards == boards_before
+    assert "denied-board" not in central.boards
+    assert not (tmp_path / "jwks.json").exists()
+    assert not (tmp_path / "keys").exists()
+
+
+def test_add_project_direct_rerun_does_not_reissue_or_rewrite_doors(tmp_path: Path) -> None:
+    central = FakeDoorCentral()
+    config = dashboard.Config(
+        url="http://127.0.0.1:8766/mcp",
+        token="test-token",
+        home_board="pursers",
+        agent_name="viewer",
+        stale_seconds=300,
+        cache_seconds=5,
+        doors_keys_dir=tmp_path / "keys",
+        jwks_path=tmp_path / "jwks.json",
+    )
+    fetcher = dashboard.FleetFetcher(config, client_factory=central.client_factory)
+    kwargs = {
+        "project_name": "rerun-project",
+        "board_id": "rerun-board",
+        "work_dir": "/PATH/TO/RERUN",
+    }
+
+    first = asyncio.run(fetcher.add_project(**kwargs))
+    assert set(first["doors"]) == {"worker", "reviewer"}
+    assert all(value.startswith("prs1.") for value in first["doors"].values())
+    state_before = {
+        path.relative_to(tmp_path): path.read_bytes()
+        for path in tmp_path.rglob("*")
+        if path.is_file()
+    }
+
+    second = asyncio.run(fetcher.add_project(**kwargs))
+    state_after = {
+        path.relative_to(tmp_path): path.read_bytes()
+        for path in tmp_path.rglob("*")
+        if path.is_file()
+    }
+    statuses = {step["step"]: step["status"] for step in second["steps"]}
+    assert second["doors"] is None
+    assert statuses["door_credentials"] == "already present"
+    assert state_after == state_before
+
+
+def test_agents_hub_keeps_duplicate_names_distinct_and_exposes_inactive_drawer() -> None:
+    script = "\n".join(
+        re.findall(r"<script>(.*?)</script>", dashboard.HTML, re.DOTALL | re.IGNORECASE)
+    )
+    lines = script.splitlines()
+
+    def source(prefix: str) -> str:
+        return next(line for line in lines if line.startswith(prefix))
+
+    agents = [
+        {
+            "agent_name": "same-name",
+            "principal_id": "PR-111111111111",
+            "duplicate_name": True,
+            "pool_status": "available",
+            "boards": ["pursers"],
+            "seats": [],
+            "last_seen": "2030-01-01T11:59:00Z",
+        },
+        {
+            "agent_name": "same-name",
+            "principal_id": "PR-222222222222",
+            "duplicate_name": True,
+            "pool_status": "available",
+            "boards": ["pursers"],
+            "seats": [],
+            "last_seen": "2030-01-01T11:58:00Z",
+        },
+    ]
+    inactive = [
+        {
+            "agent_name": "old-seat",
+            "agent_id": "AI-retired-123456",
+            "lifecycle_status": "retired",
+            "board_id": "pursers",
+            "last_seen": "2029-12-01T00:00:00Z",
+        }
+    ]
+    program = "\n".join(
+        [
+            source("const esc="),
+            source("const agentStatusRank="),
+            source("function compareAgents("),
+            source("function relativeAge("),
+            source("function clippedAgentTitle("),
+            source("function agentLiveWork("),
+            source("function agentTicketLink("),
+            source("function agentVisibilityToggle("),
+            source("function pageHead("),
+            source("function workerByName("),
+            source("function agentIdentity("),
+            source("function agentIdentityLabel("),
+            source("function workerForAgent("),
+            source("function renderRoleChips("),
+            source("function liveAgentCard("),
+            source("function renderGuide("),
+            source("function inactiveAgentDrawer("),
+            source("function renderAgentsHub("),
+            "const managedControls=()=>'';",
+            "Date.now=()=>new Date('2030-01-01T12:00:00Z').getTime();",
+            f"let fleetData={{fleet:{{agents:{json.dumps(agents)},inactive_agents:{json.dumps(inactive)}}}}},hubWorkers={{}},hubGuide=null,showStaleAgents=false;",
+            "console.log(renderAgentsHub());",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "-e", program], check=True, capture_output=True, text=True
+    ).stdout
+
+    assert result.count("<h3>same-name</h3>") == 2
+    assert "PR-111111111111" in result
+    assert "PR-222222222222" in result
+    assert result.count("Duplicate name") == 2
+    assert 'id="inactive-agent-drawer"' in result
+    assert "old-seat" in result
+    assert "retired" in result
+
+
+def test_overview_renders_exact_online_count_separately_from_central_health() -> None:
+    script = "\n".join(
+        re.findall(r"<script>(.*?)</script>", dashboard.HTML, re.DOTALL | re.IGNORECASE)
+    )
+    lines = script.splitlines()
+
+    def source(prefix: str) -> str:
+        return next(line for line in lines if line.startswith(prefix))
+
+    program = "\n".join(
+        [
+            source("const esc="),
+            source("const fmt="),
+            source("function numberCount("),
+            source("function pageHead("),
+            source("function renderAttentionOverview("),
+            "const reconcileAttention=()=>[],renderWaitingForYou=()=>'',attentionRow=()=>'';",
+            "let centralLabels=['fleet'],fleetErrors={},fleetData={fleet:{pool_summary:{online:7,busy:2,available:5,stale:1},boards:[]}};",
+            "console.log(renderAttentionOverview());",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "-e", program], check=True, capture_output=True, text=True
+    ).stdout
+
+    assert "Online<b>7</b>" in result
+    assert "Busy<b>2</b>" in result
+    assert "Ready<b>5</b>" in result
+    assert "central up" in result
+
+
+def test_operation_terminal_result_reports_effect_for_success_and_failure() -> None:
+    script = "\n".join(
+        re.findall(r"<script>(.*?)</script>", dashboard.HTML, re.DOTALL | re.IGNORECASE)
+    )
+    line = next(
+        line for line in script.splitlines() if line.startswith("function terminalOpsText(")
+    )
+    program = "\n".join(
+        [
+            line,
+            "const job={job_id:'job-1',command:'safe command'};",
+            "console.log(JSON.stringify({ok:terminalOpsText({status:'succeeded',logs:['done']},job),bad:terminalOpsText({status:'failed',logs:['bounded failure']},job)}));",
+        ]
+    )
+    result = json.loads(
+        subprocess.run(
+            ["node", "-e", program], check=True, capture_output=True, text=True
+        ).stdout
+    )
+    assert "Outcome: succeeded" in result["ok"]
+    assert "operation completed; Fleet state refreshed" in result["ok"]
+    assert "Outcome: failed" in result["bad"]
+    assert "no success effect was applied" in result["bad"]
+    assert (
+        "opsTerminalResult=terminalOpsText(state,job);if(out)out.textContent=opsTerminalResult;await refreshSeats()"
+        in script
+    )
+
+
+def test_door_failure_is_bounded_inline_and_does_not_echo_exception() -> None:
+    script = "\n".join(
+        re.findall(r"<script>(.*?)</script>", dashboard.HTML, re.DOTALL | re.IGNORECASE)
+    )
+    helper = script.split("function showDoorActionFailure()", 1)[1].split(
+        "seatClick = async function", 1
+    )[0]
+    helper = "function showDoorActionFailure()" + helper
+    program = "\n".join(
+        [
+            "const node={textContent:'',style:{display:'none'}};",
+            "const document={querySelector:()=>node};",
+            helper,
+            "showDoorActionFailure(new Error('secret-token-value'));",
+            "console.log(JSON.stringify(node));",
+        ]
+    )
+    result = json.loads(
+        subprocess.run(
+            ["node", "-e", program], check=True, capture_output=True, text=True
+        ).stdout
+    )
+    assert result["style"]["display"] == "block"
+    assert "No credential was changed" in result["textContent"]
+    assert "secret-token-value" not in result["textContent"]
+    door_handler = script.split("const seatClickBeforeDoors", 1)[1].split(
+        "const addProjectFormBeforeDoors", 1
+    )[0]
+    assert "alert(`Door action failed" not in door_handler
+    assert "e.message" not in door_handler
 
 
 def test_clean_text_redaction_is_linear_time_and_behavior_preserved() -> None:
