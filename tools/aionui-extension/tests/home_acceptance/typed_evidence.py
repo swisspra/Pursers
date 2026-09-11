@@ -68,7 +68,10 @@ FLEET_RESPONSE_POINTERS = frozenset(
     {f"/_evidence/{field}" for field in FLEET_TRACE_KEYS}
     | {"/_evidence/log_emitted"}
 )
-FLEET_ACTION_RESPONSE_POINTERS = FLEET_RESPONSE_POINTERS | {"/items"}
+FLEET_ACTION_RESPONSE_POINTERS = {
+    "/api/attention": FLEET_RESPONSE_POINTERS | {"/items"},
+    "/api/projects/add": FLEET_RESPONSE_POINTERS | {"/steps"},
+}
 LOG_COMMON_KEYS = frozenset({
     "adapter", "provenance", "runtime_id", "path",
     "timestamp_pointer", "max_age_seconds", "required_bindings", "emitter",
@@ -79,6 +82,7 @@ FLEET_LOG_SOURCE_KEYS = LOG_COMMON_KEYS | {
     "http_source_id", "http_source_config_sha256", "schema_version_pointer",
     "pid_pointer", "entrypoint_digest_pointer", "status_pointer",
     "changed_pointer", "outcome_pointer", "effect_pointer", "sha256_pointers",
+    "action_path",
 }
 TRUST_KEYS = {
     "schema_version", "verifier_id", "trusted_module_path", "module_sha256",
@@ -1143,20 +1147,27 @@ def _verify_evidence(evidence: Any, trust: dict[str, Any]) -> dict[str, Any]:
                 for key, value in record["entry"].items()
             }
             expected_selected["/_evidence/log_emitted"] = True
-            items = action_response["selected"].get("/items")
-            expected_selected["/items"] = items
+            result_pointer = (
+                "/items" if trusted_source["action_path"] == "/api/attention"
+                else "/steps"
+            )
+            result_value = action_response["selected"].get(result_pointer)
+            expected_selected[result_pointer] = result_value
             if (
                 action_response["method"] != "POST"
-                or action_response["path"] != "/api/attention"
+                or action_response["path"] != trusted_source["action_path"]
                 or action_response["status"] != record["entry"]["status"]
                 or action_response["selected"] != expected_selected
-                or _digest({"items": items})
-                != record["entry"]["after_sha256"]
-                or _digest({"items": items})
-                != record["entry"]["result_sha256"]
             ):
                 raise TypedEvidenceError(
                     "Fleet trace action response does not match its log entry"
+                )
+            if trusted_source["action_path"] == "/api/attention" and (
+                _digest({"items": result_value}) != record["entry"]["after_sha256"]
+                or _digest({"items": result_value}) != record["entry"]["result_sha256"]
+            ):
+                raise TypedEvidenceError(
+                    "Fleet attention response does not match its state digests"
                 )
         else:
             if record["authenticity"] != "verifier_captured_process_bound":
@@ -1716,6 +1727,8 @@ def _fleet_source_contract(source: Any) -> list[str]:
         or len(source["document_keys"]) != len(FLEET_TRACE_KEYS)
     ):
         raise TypedEvidenceError("Fleet trace document schema is invalid")
+    if source["action_path"] not in FLEET_ACTION_RESPONSE_POINTERS:
+        raise TypedEvidenceError("Fleet trace action path is not allowlisted")
     fixed_pointers = {
         "timestamp_pointer": "/timestamp",
         "runtime_pointer": "/runtime_id",
@@ -1763,7 +1776,7 @@ def _validate_fleet_entry(
         or entry["entrypoint_sha256"] != runtime["artifact_sha256"]
         or entry["action_sha256"] != source["action_input_sha256"]
         or entry["method"] != "POST"
-        or entry["path"] != "/api/attention"
+        or entry["path"] != source["action_path"]
         or not isinstance(status, int) or isinstance(status, bool)
         or not 100 <= status <= 599
         or not isinstance(changed, bool)
@@ -1771,12 +1784,17 @@ def _validate_fleet_entry(
         raise TypedEvidenceError("Fleet trace entry provenance is invalid")
     _safe_id(outcome, "Fleet trace outcome")
     _safe_id(effect, "Fleet trace effect")
+    expected_effect = {
+        "/api/attention": (
+            "attention_state_changed" if changed else "attention_state_unchanged"
+        ),
+        "/api/projects/add": (
+            "project_state_changed" if changed else "project_state_unchanged"
+        ),
+    }[source["action_path"]]
     if (
         outcome != ("succeeded" if 200 <= status < 300 else "failed")
-        or effect != (
-            "attention_state_changed"
-            if changed else "attention_state_unchanged"
-        )
+        or effect != expected_effect
         or changed != (entry["before_sha256"] != entry["after_sha256"])
         or any(
             not SHA256.fullmatch(str(_pointer(entry, pointer)))
@@ -1891,7 +1909,8 @@ def _record_log(request: dict[str, Any], trust: dict[str, Any], context: dict[st
     ):
         raise TypedEvidenceError("Fleet trace directory is unavailable or not private")
     if adapter == "fleet_evidence_trace_v1":
-        if not FLEET_ACTION_RESPONSE_POINTERS <= set(
+        response_selectors = FLEET_ACTION_RESPONSE_POINTERS[source["action_path"]]
+        if not response_selectors <= set(
             http_source["select_allowlist"]
         ):
             raise TypedEvidenceError(
@@ -1901,9 +1920,9 @@ def _record_log(request: dict[str, Any], trust: dict[str, Any], context: dict[st
             http_source,
             context,
             {
-                "method": "POST", "path": "/api/attention",
+                "method": "POST", "path": source["action_path"],
                 "body": action_document,
-                "select": sorted(FLEET_ACTION_RESPONSE_POINTERS),
+                "select": sorted(response_selectors),
             },
             "Fleet trace action",
         )
@@ -1972,16 +1991,24 @@ def _record_log(request: dict[str, Any], trust: dict[str, Any], context: dict[st
             f"/_evidence/{key}": value for key, value in entry.items()
         }
         expected_selected["/_evidence/log_emitted"] = True
-        items = action_response["selected"].get("/items")
-        expected_selected["/items"] = items
+        result_pointer = (
+            "/items" if source["action_path"] == "/api/attention" else "/steps"
+        )
+        result_value = action_response["selected"].get(result_pointer)
+        expected_selected[result_pointer] = result_value
         if (
             action_response["status"] != entry["status"]
             or action_response["selected"] != expected_selected
-            or _digest({"items": items}) != entry["after_sha256"]
-            or _digest({"items": items}) != entry["result_sha256"]
         ):
             raise TypedEvidenceError(
                 "Fleet trace action response does not match its log entry"
+            )
+        if source["action_path"] == "/api/attention" and (
+            _digest({"items": result_value}) != entry["after_sha256"]
+            or _digest({"items": result_value}) != entry["result_sha256"]
+        ):
+            raise TypedEvidenceError(
+                "Fleet attention response does not match its state digests"
             )
     _safe_public(entry, "log entry")
     record = {

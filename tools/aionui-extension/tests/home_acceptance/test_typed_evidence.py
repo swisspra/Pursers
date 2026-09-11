@@ -281,7 +281,7 @@ def _trust(tmp_path: Path, http_server: str, **changes: Any) -> dict[str, Any]:
         "timeout_seconds": 2,
         "select_allowlist": [
             "/ok", "/count", "/state", "/accepted", "/action_sha256",
-            *sorted(typed_evidence.FLEET_ACTION_RESPONSE_POINTERS),
+            *sorted(typed_evidence.FLEET_ACTION_RESPONSE_POINTERS["/api/attention"]),
         ],
         "response_bindings": {
             "/board": "$board_id", "/candidate": "$candidate_commit",
@@ -1437,6 +1437,7 @@ def _fleet_trace_source(
     context: dict[str, Any],
     *,
     action: dict[str, Any] | None = None,
+    action_route: str = "/api/attention",
     entry_changes: dict[str, Any] | None = None,
 ) -> tuple[Path, Path, dict[str, Any]]:
     action_path = tmp_path / "fleet-action.json"
@@ -1460,10 +1461,14 @@ def _fleet_trace_source(
         "action_id": context["action_id"],
         "entity": context["entity"],
         "method": "POST",
-        "path": "/api/attention",
+        "path": action_route,
         "status": 200,
         "outcome": "succeeded",
-        "effect": "attention_state_changed",
+        "effect": (
+            "attention_state_changed"
+            if action_route == "/api/attention"
+            else "project_state_changed"
+        ),
         "changed": True,
         "before_sha256": typed_evidence._digest({}),
         "after_sha256": typed_evidence._digest(action_document),
@@ -1501,6 +1506,7 @@ def _fleet_trace_source(
         "action_input_path": str(action_path),
         "action_input_sha256": action_sha256,
         "action_digest_pointer": "/action_sha256",
+        "action_path": action_route,
         "http_source_id": "fleet-api",
         "http_source_config_sha256": typed_evidence._digest(
             trust["http_sources"]["fleet-api"]
@@ -1688,6 +1694,56 @@ def test_fleet_trace_rejects_weakened_schema_and_pointer_contract(
         )
 
 
+def test_fleet_project_add_route_has_closed_effect_and_result_contract(
+    tmp_path: Path, http_server: str,
+) -> None:
+    trust = _trust(tmp_path, http_server)
+    context = _context(
+        observation_id="fleet.project-add",
+        action_id="add-project",
+        entity="project:new-board",
+    )
+    project_selectors = typed_evidence.FLEET_ACTION_RESPONSE_POINTERS[
+        "/api/projects/add"
+    ]
+    assert "/steps" in project_selectors
+    assert "/items" not in project_selectors
+    assert "/doors" not in project_selectors
+    trust["http_sources"]["fleet-api"]["select_allowlist"] = sorted(
+        project_selectors
+    )
+    _action_path, _log_path, source = _fleet_trace_source(
+        tmp_path,
+        trust,
+        context,
+        action={
+            "name": "new-svc",
+            "board_id": "new-board",
+            "work_dir": "/PATH/TO/work",
+            "integration_ref": "main",
+        },
+        action_route="/api/projects/add",
+    )
+    entry = json.loads(_log_path.read_text(encoding="utf-8"))
+    runtime = typed_evidence._runtime_check(
+        trust["http_sources"]["fleet-api"]["runtime"],
+        trust,
+        trust["http_sources"]["fleet-api"]["base_url"],
+    )
+    assert typed_evidence._fleet_source_contract(source)
+    typed_evidence._validate_fleet_entry(entry, source, runtime, context)
+
+    wrong_effect = {**entry, "effect": "attention_state_changed"}
+    with pytest.raises(TypedEvidenceError, match="outcome is inconsistent"):
+        typed_evidence._validate_fleet_entry(
+            wrong_effect, source, runtime, context
+        )
+
+    decoy_source = {**source, "action_path": "/api/projects/decoy"}
+    with pytest.raises(TypedEvidenceError, match="action path is not allowlisted"):
+        typed_evidence._fleet_source_contract(decoy_source)
+
+
 def test_fleet_trace_real_product_roundtrip(tmp_path: Path) -> None:
     checkout_value = os.environ.get("PURSERS_FLEET_EVIDENCE_CHECKOUT")
     if not checkout_value:
@@ -1779,7 +1835,7 @@ def test_fleet_trace_real_product_roundtrip(tmp_path: Path) -> None:
             "headers": {},
             "timeout_seconds": 2,
             "select_allowlist": sorted(
-                typed_evidence.FLEET_ACTION_RESPONSE_POINTERS
+                typed_evidence.FLEET_ACTION_RESPONSE_POINTERS["/api/attention"]
             ),
             "response_bindings": response_bindings,
             "runtime": runtime,
@@ -1811,6 +1867,7 @@ def test_fleet_trace_real_product_roundtrip(tmp_path: Path) -> None:
             "action_input_path": str(action_path),
             "action_input_sha256": hashlib.sha256(action_path.read_bytes()).hexdigest(),
             "action_digest_pointer": "/action_sha256",
+            "action_path": "/api/attention",
             "http_source_id": "fleet-api",
             "http_source_config_sha256": typed_evidence._digest(http_source),
             "schema_version_pointer": "/schema_version",

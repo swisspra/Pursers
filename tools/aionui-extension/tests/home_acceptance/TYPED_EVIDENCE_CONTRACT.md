@@ -480,6 +480,7 @@ The exact verifier trust source for that producer is:
   "action_input_path": "/PATH/TO/VERIFIER/action.json",
   "action_input_sha256": "...",
   "action_digest_pointer": "/action_sha256",
+  "action_path": "/api/attention",
   "http_source_id": "fleet-api",
   "http_source_config_sha256": "...",
   "schema_version_pointer": "/schema_version",
@@ -497,21 +498,26 @@ The exact verifier trust source for that producer is:
 ```
 
 The adapter fixes those document keys and pointer values as part of version 1;
-changing the verifier list cannot define a weaker schema. It also requires
-`emitter=fleet-dashboard-runtime`, `method=POST`, `path=/api/attention`, derives
-`outcome` from the status class and `effect` from `changed`, and checks that
-`changed` agrees with the before/after digests.
+changing the verifier list cannot define a weaker schema. It allowlists only
+`POST /api/attention` and `POST /api/projects/add`, derives `outcome` from the
+status class and the route-specific `attention_state_*` or `project_state_*`
+effect from `changed`, and checks that `changed` agrees with the before/after
+digests.
 
 Collection snapshots the verifier-private JSONL file, sends the canonical bytes
-from `action_input_path` to the pinned Fleet process with `POST /api/attention`,
-and accepts only one correlated record appended by that call. The HTTP response
-must expose the complete matching record under `/_evidence`, report
-`log_emitted=true`, return the same status, and expose `/items`. The consumer
-independently recomputes both `after_sha256` and `result_sha256` from the exact
-original `{\"items\": ...}` product response. This rejects a concurrent
-request's after-state being attributed to the observed action. Pre-existing
-records, replaced file prefixes, non-canonical action files, and response/log
-disagreement fail closed. `select_allowlist` must therefore include `/items`,
+from `action_input_path` to the pinned Fleet process at the exact allowlisted
+`action_path`, and accepts only one correlated record appended by that call. The
+HTTP response must expose the complete matching record under `/_evidence`,
+report `log_emitted=true`, return the same status, and expose the route-specific
+result: `/items` for attention or `/steps` for project addition. For attention,
+the consumer independently recomputes both `after_sha256` and `result_sha256`
+from the exact original `{\"items\": ...}` product response. For project
+addition, the signed runtime trace binds the full state/result digests while the
+consumer exposes only `/steps`; it never selects the response's sensitive
+`/doors` member. This rejects a concurrent request's after-state being
+attributed to the observed action. Pre-existing records, replaced file
+prefixes, non-canonical action files, and response/log disagreement fail closed.
+`select_allowlist` must therefore include the route-specific result pointer,
 every `/_evidence/<document key>`, and `/_evidence/log_emitted`.
 
 The private action JSON must not contain any producer-owned trace field. In
