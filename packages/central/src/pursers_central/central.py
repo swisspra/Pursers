@@ -7050,6 +7050,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         tags: list[str] | None = None,
         related_files: list[str] | None = None,
         target_url: str | None = None,
+        project: str | None = None,
         assigned_to: str | None = None,
         unassigned: bool = False,
         coordinator_op_key: str | None = None,
@@ -7118,6 +7119,10 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             )
             safe_assigned = clean_text(
                 "assigned_to", assigned_to, max_length=100,
+                scrub_profile=profile, allow_counts=allow_counts,
+            )
+            safe_project = clean_text(
+                "project", project, max_length=100,
                 scrub_profile=profile, allow_counts=allow_counts,
             )
             safe_required = clean_list(
@@ -7237,6 +7242,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 "tags": safe_tags,
                 "related_files": safe_files,
                 "target_url": safe_target or "",
+                "project": safe_project or "",
                 "status": "open",
                 "created_by_agent_id": actor["agent_id"],
                 "created_by_principal_id": principal.principal_id,

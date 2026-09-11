@@ -314,5 +314,54 @@ class CoordinatorQuestionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(retry["question"]["answer"], "once")
 
 
+    async def test_two_projects_on_one_board_do_not_cross_access(self) -> None:
+        self.principal = self.admin
+        await self.call(
+            "board_state_update", agent_name="admin-agent",
+            key=central.PROJECT_COORDINATORS_STATE_KEY,
+            value=json.dumps(
+                {
+                    "alpha": [self.agent_ids["coord"]],
+                    "beta": [self.agent_ids["coord2"]],
+                }
+            ),
+        )
+        for ticket_id, project in (("TK-alpha", "alpha"), ("TK-beta", "beta")):
+            self.principal = self.admin
+            await self.call(
+                "ticket_create", ticket_id=ticket_id, agent_name="admin-agent",
+                title=f"Work for {project}", description="Two projects, one board",
+                scope="interactive-no-send", required_fields=["test_output"],
+                project=project, unassigned=True,
+            )
+            self.principal = self.worker
+            await self.call("ticket_claim", ticket_id=ticket_id, agent_name="worker")
+            await self.call(
+                "ticket_question_ask", ticket_id=ticket_id, agent_name="worker",
+                message=f"Routing question for {project}", kind="decision",
+            )
+        self.principal = self.coordinator
+        alpha_inbox = (
+            await self.call("board_question_inbox", agent_name="coord")
+        ).structured_content
+        self.assertEqual(alpha_inbox["total"], 1)
+        self.assertEqual(alpha_inbox["questions"][0]["ticket_id"], "TK-alpha")
+        self.assertEqual(alpha_inbox["questions"][0]["project"], "alpha")
+        self.principal = self.coordinator_two
+        beta_inbox = (
+            await self.call("board_question_inbox", agent_name="coord2")
+        ).structured_content
+        self.assertEqual(beta_inbox["total"], 1)
+        self.assertEqual(beta_inbox["questions"][0]["ticket_id"], "TK-beta")
+        beta_question = beta_inbox["questions"][0]["question_id"]
+        self.principal = self.coordinator
+        with self.assertRaisesRegex(ToolError, "ownership of project beta"):
+            await self.call(
+                "ticket_question_answer", ticket_id="TK-beta", agent_name="coord",
+                question_id=beta_question, action="answer",
+                message="cross-project answer",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()
