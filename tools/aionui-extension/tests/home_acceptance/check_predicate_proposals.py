@@ -22,9 +22,10 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[4]
 DEFAULT_DELTA = ROOT / "docs/design-home/context/typed-predicate-integration-delta.json"
 FACTS_PATH = "docs/design-home/context/acceptance-facts.json"
-BASE = "7f5ca61a556ed881567dadbc8c49f4b4a6a74c4a"
+BASE = "594ec7b0fab83ae7ed1c5a5fe80d216d17cd930c"
 ASSISTANT_BINDING_REF = "d09757f2e6187fd417ee1017814e92754047ea54"
 PENDING_STATE_REF = "0e5390b72407186ba842bdc93b84a2d502de13bd"
+CREDENTIAL_RERUN_REF = "7f5ca61a556ed881567dadbc8c49f4b4a6a74c4a"
 FLEET_DASHBOARD = ROOT / "tools/fleet-dashboard/fleet_dashboard.py"
 BROWSER_OBSERVER = ROOT / "tools/aionui-extension/tests/home_acceptance/browser_observer.py"
 WEBUI_APP = ROOT / "tools/aionui-extension/webui/app.js"
@@ -753,85 +754,108 @@ def check_operations_job_result_cases(proposals: list[dict[str, Any]]) -> int:
     )
     predicate = item["canonical_predicate"]
     actions = item["executable_request"]["recorder"]["action"]
-    capture, poll, refresh = actions
-    require(capture["kind"] == "click_response_json", "job result must capture operation response")
+    expected_action = {
+        "kind": "click_job_lifecycle",
+        "selector": '[data-ops-action="stage"]',
+        "start_endpoint": "/api/config/ops",
+        "job_path_prefix": "/api/config/jobs/",
+        "output_selector": "#ops-output",
+        "max_samples": 8,
+        "path": "/job_lifecycle",
+    }
+    require(actions == [expected_action], "job lifecycle action drift")
     require(
-        capture["method"] == "POST"
-        and capture["endpoint"] == "/api/config/ops"
-        and capture["pointer"] == "/body/job_id",
-        "job result operation response binding drift",
-    )
-    expected_job_id = next(
-        assertion["value"] for assertion in predicate["assertions"]
-        if assertion.get("path") == "/operation_job_id"
-    )
-    require(
-        isinstance(expected_job_id, str)
-        and re.fullmatch(r"[a-f0-9]{32}", expected_job_id) is not None
-        and expected_job_id != "0" * 32,
-        "job result requires a nonzero fixture job ID",
+        item["adapter"].get("parent_contract_ref") == BASE,
+        "job lifecycle is not pinned to the action-derived parent contract",
     )
     require(
-        poll == {
-            "kind": "resource_delta",
-            "endpoint": f"/api/config/jobs/{expected_job_id}",
-            "milliseconds": 1100,
-            "path": "/job_poll_count",
-        },
-        "job poll endpoint is not bound to the captured fixture job ID",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" not in json.dumps(item)
+        and "/api/config/jobs/00000000000000000000000000000000"
+        not in json.dumps(item),
+        "job lifecycle retains a static job ID",
     )
-    require(
-        refresh["kind"] == "resource_delta"
-        and refresh["endpoint"] == "/api/config/seats",
-        "job result must observe the ensuing Fleet refresh",
-    )
-    bindings = item["adapter"].get("fixture_bindings")
-    require(
-        isinstance(bindings, dict)
-        and bindings.get("job_id") == expected_job_id
-        and bindings.get("poll_sequence") == ["running", "succeeded"],
-        "job result fixture binding drift",
-    )
-    fleet_source = FLEET_DASHBOARD.read_text()
-    for fragment in (
-        "const job=await configPost('/api/config/ops'",
-        "`/api/config/jobs/${job.job_id}`",
-        "opsTerminalResult=terminalOpsText(state,job)",
-        "await refreshSeats()",
-    ):
-        require(fragment in fleet_source, f"job result source missing {fragment!r}")
 
-    positive = synthesized_observed(predicate)
-    positive[("before", "/job_output_before")] = (
-        f"Job {expected_job_id} queued\nStreaming output…"
-    )
-    positive[("action", "/operation_job_id")] = expected_job_id
-    positive[("action", "/job_poll_count")] = 1
-    positive[("action", "/fleet_refresh_count")] = 1
-    positive[("after", "/terminal_output")] = (
-        f"Job {expected_job_id}\nOutcome: succeeded\n"
-        "Effect: operation completed; Fleet state refreshed."
-    )
-    require(evaluate(predicate, positive), "correlated terminal job fixture did not pass")
+    job_id = "1" * 32
+    lifecycle = {
+        "start_matches": 1,
+        "start_status": 200,
+        "job_id": job_id,
+        "job_path": f"/api/config/jobs/{job_id}",
+        "statuses": ["running", "succeeded"],
+        "terminal_status": "succeeded",
+        "terminal_response_sha256": "2" * 64,
+        "terminal_logs_sha256": "3" * 64,
+        "terminal_log_count": 2,
+        "disabled_while_running": True,
+        "pre_refresh_output_sha256": "4" * 64,
+        "after_refresh_output_sha256": "4" * 64,
+        "refresh_count": 1,
+        "enabled_after_refresh": True,
+        "error": None,
+    }
+
+    def lifecycle_valid(value: dict[str, Any]) -> bool:
+        statuses = value["statuses"]
+        terminal = value["terminal_status"]
+        return (
+            value["start_matches"] == 1
+            and 200 <= value["start_status"] < 300
+            and re.fullmatch(r"[a-f0-9]{32}", value["job_id"]) is not None
+            and value["job_path"] == "/api/config/jobs/" + value["job_id"]
+            and 2 <= len(statuses) <= 8
+            and "running" in statuses
+            and terminal in {"succeeded", "failed"}
+            and statuses[-1] == terminal
+            and terminal not in statuses[:-1]
+            and re.fullmatch(r"[a-f0-9]{64}", value["terminal_response_sha256"])
+            is not None
+            and re.fullmatch(r"[a-f0-9]{64}", value["terminal_logs_sha256"])
+            is not None
+            and value["terminal_log_count"] >= 1
+            and value["disabled_while_running"] is True
+            and value["pre_refresh_output_sha256"]
+            == value["after_refresh_output_sha256"]
+            and value["refresh_count"] >= 1
+            and value["enabled_after_refresh"] is True
+            and value["error"] is None
+        )
+
+    positive = {
+        ("before", "/operation_control_disabled"): False,
+        ("action", "/job_lifecycle"): lifecycle,
+        ("after", "/terminal_output"): (
+            f"Job {job_id}\nOutcome: succeeded\n"
+            "Effect: operation completed; Fleet state refreshed."
+        ),
+    }
+    require(lifecycle_valid(lifecycle), "runtime-shaped job lifecycle fixture is invalid")
+    require(evaluate(predicate, positive), "runtime-shaped job lifecycle did not pass")
 
     cases = {
         "running": {
-            **positive,
-            ("action", "/fleet_refresh_count"): 0,
-            ("after", "/terminal_output"):
-                f"Job {expected_job_id}\nStatus: running\nStreaming output…",
+            **lifecycle,
+            "statuses": ["running"], "terminal_status": None,
+            "terminal_response_sha256": None, "terminal_logs_sha256": None,
+            "terminal_log_count": None, "pre_refresh_output_sha256": None,
+            "after_refresh_output_sha256": None, "refresh_count": 0,
+            "enabled_after_refresh": False,
         },
         "pre-refresh": {
-            **positive,
-            ("action", "/fleet_refresh_count"): 0,
+            **lifecycle,
+            "after_refresh_output_sha256": None, "refresh_count": 0,
+            "enabled_after_refresh": False,
         },
         "stale-terminal": {
-            **positive,
-            ("action", "/operation_job_id"): "b" * 32,
+            **lifecycle,
+            "after_refresh_output_sha256": "5" * 64,
+        },
+        "different-id": {
+            **lifecycle,
+            "job_path": "/api/config/jobs/" + "2" * 32,
         },
     }
-    for label, observed in cases.items():
-        require(not evaluate(predicate, observed), f"job result {label} case passed")
+    for label, value in cases.items():
+        require(not lifecycle_valid(value), f"job result {label} case passed")
     return len(cases)
 
 
@@ -863,11 +887,14 @@ def check_causal_browser_regressions(proposals: list[dict[str, Any]]) -> None:
     )
     require_assertion(
         proposals, "fleet.operations-job-result", phase="action",
-        path="/job_poll_count", op="gt", value=0,
-    )
-    require_assertion(
-        proposals, "fleet.operations-job-result", phase="action",
-        path="/fleet_refresh_count", op="gt", value=0,
+        path="/job_lifecycle", op="contains", value={
+            "start_matches": 1,
+            "start_status": 200,
+            "terminal_status": "succeeded",
+            "disabled_while_running": True,
+            "enabled_after_refresh": True,
+            "error": None,
+        },
     )
     require_assertion(
         proposals, "fleet.operations-job-result", phase="after",
@@ -975,7 +1002,7 @@ def check_new_parent_channel_examples(proposals: list[dict[str, Any]]) -> int:
         "/steps/5/step", "/steps/5/status",
     ]
     require(
-        credential["adapter"]["parent_contract_ref"] == BASE
+        credential["adapter"]["parent_contract_ref"] == CREDENTIAL_RERUN_REF
         and credential["executable_request"]["recorder"]["request"]["select"]
         == credential_select,
         "credential rerun parent projection drift",
@@ -1030,6 +1057,10 @@ def check_new_parent_channel_examples(proposals: list[dict[str, Any]]) -> int:
         "test_real_add_project_handler_emits_steps_and_actual_registry_transition",
         "tools/fleet-dashboard/tests/test_fleet_dashboard.py::"
         "test_add_project_denied_before_any_durable_mutation",
+        "tools/aionui-extension/tests/home_acceptance/test_typed_evidence.py::"
+        "test_browser_job_lifecycle_binds_returned_id_running_terminal_and_refresh",
+        "tools/aionui-extension/tests/home_acceptance/test_browser_observer.py::"
+        "test_ego_job_lifecycle_uses_action_returned_id_and_survives_refresh",
     ]
     completed = subprocess.run(
         [sys.executable, "-m", "pytest", "-q", *nodes],
@@ -1040,7 +1071,7 @@ def check_new_parent_channel_examples(proposals: list[dict[str, Any]]) -> int:
         "new parent channel regression failed: "
         + (completed.stdout + completed.stderr).strip()[-500:],
     )
-    return 2
+    return 3
 
 
 def check_predicate(item: dict[str, Any]) -> int:
@@ -1153,6 +1184,10 @@ def check_request(item: dict[str, Any]) -> None:
                 "click_response_json": {
                     "kind", "selector", "method", "endpoint", "pointer", "path",
                 },
+                "click_job_lifecycle": {
+                    "kind", "selector", "start_endpoint", "job_path_prefix",
+                    "output_selector", "max_samples", "path",
+                },
             }
             kind_name = action.get("kind")
             require(kind_name in action_keys, f"{item['id']}: action kind")
@@ -1160,7 +1195,8 @@ def check_request(item: dict[str, Any]) -> None:
             check_pointer(action.get("path"), item["id"])
             if kind_name in {
                 "click", "set_value", "select", "submit", "press_key",
-                "click_response_json", "click_pending_state",
+                "click_response_json", "click_job_lifecycle",
+                "click_pending_state",
             }:
                 require(
                     isinstance(action["selector"], str) and action["selector"],
@@ -1186,6 +1222,16 @@ def check_request(item: dict[str, Any]) -> None:
                     )
             if kind_name in {"fetch_json", "click_response_json"}:
                 check_pointer(action["pointer"], item["id"])
+            if kind_name == "click_job_lifecycle":
+                require(
+                    action["start_endpoint"] == "/api/config/ops"
+                    and action["job_path_prefix"] == "/api/config/jobs/"
+                    and action["output_selector"] == "#ops-output"
+                    and isinstance(action["max_samples"], int)
+                    and not isinstance(action["max_samples"], bool)
+                    and 2 <= action["max_samples"] <= 32,
+                    f"{item['id']}: job lifecycle action",
+                )
             if kind_name == "resource_delta":
                 require(
                     isinstance(action["milliseconds"], int)

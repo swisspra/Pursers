@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "ticket_id": "TK-fadd47fce924",
-  "base_commit": "7f5ca61a556ed881567dadbc8c49f4b4a6a74c4a",
+  "base_commit": "594ec7b0fab83ae7ed1c5a5fe80d216d17cd930c",
   "source_map": {
     "path": "docs/design-home/context/derivation-support/TK-63e391d86a18.json",
     "approved_commit": "f9b2d37ac687abcef510e7a854446a469588702a",
@@ -40,7 +40,7 @@
       "validation"
     ],
     "supported_adapters": {
-      "browser_action_state": "trusted_browser_state_v1 state transitions plus aionui_assistant_binding_v1 installed-manifest/runtime joins",
+      "browser_action_state": "trusted_browser_state_v1 state transitions including action-derived click_job_lifecycle capture, plus aionui_assistant_binding_v1 installed-manifest/runtime joins",
       "fleet_project_add": "trusted_http_v1 http_response against correlated POST /api/projects/add with exact /steps selection",
       "fleet_correlated_route": "trusted_http_v1 http_response against an allowlisted real Fleet route",
       "personal_stdio_mcp": "trusted_mcp_stdio_v1 mcp_tool_response against the exact Personal stdio tool and selector allowlist"
@@ -60,7 +60,7 @@
     ]
   },
   "prototype_contract": {
-    "commit": "7f5ca61a556ed881567dadbc8c49f4b4a6a74c4a",
+    "commit": "594ec7b0fab83ae7ed1c5a5fe80d216d17cd930c",
     "parent_branch": "codex/TK-a565b6635db1-parent-worker2",
     "canonical_fielded_conjunct_keys": [
       "kind",
@@ -110,7 +110,7 @@
       "browser": "trusted_browser_state_v1 and aionui_assistant_binding_v1",
       "http": "trusted_http_v1",
       "mcp": "trusted_mcp_stdio_v1",
-      "fleet_producer": "7f5ca61a556ed881567dadbc8c49f4b4a6a74c4a"
+      "fleet_producer": "594ec7b0fab83ae7ed1c5a5fe80d216d17cd930c"
     },
     "closed_operators": [
       "eq",
@@ -126,7 +126,7 @@
   "reconciliation": {
     "stale_product_gap_source": "the approved source map predates the approved seven-behavior Fleet repair",
     "approved_repair_ref": "7b7c66d1d330b978376bdfb07e480f901f87825f",
-    "current_parent_ref": "7f5ca61a556ed881567dadbc8c49f4b4a6a74c4a",
+    "current_parent_ref": "594ec7b0fab83ae7ed1c5a5fe80d216d17cd930c",
     "reconciled_ids": [
       "fleet.add-project-authorization-error",
       "fleet.add-project-idempotent-rerun",
@@ -136,20 +136,22 @@
       "fleet.operations-job-result",
       "fleet.pool-online"
     ],
-    "focused_validation": "137 passed, 1 skipped (typed evidence plus harness); 79 passed, 1 skipped (typed evidence plus Fleet evidence/release producer)",
+    "focused_validation": "proposal validator PASS with 121 executable, 0 gaps, 127 anchors, 1282 negatives, and 18 actual parent examples; full home acceptance 229 passed, 3 skipped; Fleet dashboard/evidence 237 passed",
     "approved_project_trace_producer_ref": "6c0c324bdfd3bc191ff2615fc878ca8790f9ebb4",
     "reconciled_result": "all seven stale BLOCKED source-map rows use repaired current-parent semantics",
-    "working_parent": "7f5ca61a556ed881567dadbc8c49f4b4a6a74c4a",
+    "working_parent": "594ec7b0fab83ae7ed1c5a5fe80d216d17cd930c",
     "parent_branch": "codex/TK-a565b6635db1-parent-worker2",
     "parent_corrections": {
       "safe_project_step_selectors": "ea3ee12ed2bd4063feb8487418c62df41051453a",
       "correlated_release_job_reads": "2d0f13f9a6bc1dbf4bf2211da2e7312b7606efd2",
       "structured_browser_action_results": "ad9d4bf59ca882c92c3899129e9c88c9072fa7d9",
-      "current_full_parent": "7f5ca61a556ed881567dadbc8c49f4b4a6a74c4a",
+      "current_full_parent": "594ec7b0fab83ae7ed1c5a5fe80d216d17cd930c",
       "credential_state_trace": "ad80007b0f0bc00a77d68333b69ed41df9fe08c0",
       "installed_assistant_binding": "d09757f2e6187fd417ee1017814e92754047ea54",
       "credential_safe_project_rerun": "7f5ca61a556ed881567dadbc8c49f4b4a6a74c4a",
-      "inflight_door_state": "0e5390b72407186ba842bdc93b84a2d502de13bd"
+      "inflight_door_state": "0e5390b72407186ba842bdc93b84a2d502de13bd",
+      "project_authorization_capture": "0cac13e291ae0ef1fd8d369fff41a9bc99177d57",
+      "action_derived_job_lifecycle": "594ec7b0fab83ae7ed1c5a5fe80d216d17cd930c"
     }
   },
   "partition": {
@@ -752,7 +754,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -985,7 +987,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -1177,7 +1179,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -1369,7 +1371,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -1561,7 +1563,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -1742,13 +1744,13 @@
           "paths": "verifier substitutes a private absolute path for /PATH/TO/...",
           "authority": "the correlated Fleet principal lacks admin membership on the home board"
         },
-        "parent_contract_ref": "7f5ca61a556ed881567dadbc8c49f4b4a6a74c4a"
+        "parent_contract_ref": "0cac13e291ae0ef1fd8d369fff41a9bc99177d57"
       },
       "required_evidence": [
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -1961,7 +1963,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -2136,7 +2138,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -2306,7 +2308,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -2543,7 +2545,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -2781,7 +2783,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -2935,7 +2937,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -3089,7 +3091,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -3243,7 +3245,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -3432,7 +3434,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -3671,7 +3673,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -3909,7 +3911,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -4106,7 +4108,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -4350,7 +4352,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -4550,7 +4552,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -4723,7 +4725,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -4918,7 +4920,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -5149,7 +5151,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -5360,7 +5362,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -5603,7 +5605,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -5829,7 +5831,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -6007,7 +6009,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -6190,7 +6192,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -6407,7 +6409,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -6701,7 +6703,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -7026,7 +7028,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -7231,7 +7233,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -7447,7 +7449,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -7635,7 +7637,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -7873,7 +7875,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -8067,7 +8069,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -8298,7 +8300,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -8530,7 +8532,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -8756,7 +8758,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -8950,7 +8952,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -9149,7 +9151,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -9348,7 +9350,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -9555,7 +9557,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -9799,7 +9801,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -10057,7 +10059,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -10272,7 +10274,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -10409,10 +10411,10 @@
         ]
       },
       "causal": {
-        "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; an operations job reaches terminal state.",
-        "action": "click the stage operation, capture its returned nonzero job ID, observe the matching job poll, then observe the ensuing seat refresh",
+        "precondition": "Exact candidate and sandbox board are bound; the stage operation control is enabled.",
+        "action": "click the real stage operation and let the parent-owned job lifecycle capture follow the exact returned job ID through running, terminal, and Fleet refresh",
         "expected_transition": "terminal operation output survives Fleet refresh and distinguishes success effect from failure with no success effect",
-        "exact_selection": "require the real POST /api/config/ops job ID to equal the nonzero fixture ID embedded in the exact job-poll endpoint, then require that poll, the ensuing Fleet seat refresh, and persisted succeeded output",
+        "exact_selection": "require the closed click_job_lifecycle result to bind POST /api/config/ops to GET /api/config/jobs/<returned job_id>, running then succeeded terminal state, stable output across refresh, and re-enabled control",
         "negative_counterexample": "terminal output visible only before the immediate refresh or a running job is accepted",
         "correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id."
       },
@@ -10425,31 +10427,20 @@
         "recipe": {
           "before": [
             {
-              "path": "/job_output_before",
-              "selector": "#ops-output",
-              "property": "text"
+              "path": "/operation_control_disabled",
+              "selector": "[data-ops-action=\"stage\"]",
+              "property": "disabled"
             }
           ],
           "actions": [
             {
-              "kind": "click_response_json",
-              "selector": "[data-ops-action='stage']",
-              "method": "POST",
-              "endpoint": "/api/config/ops",
-              "pointer": "/body/job_id",
-              "path": "/operation_job_id"
-            },
-            {
-              "kind": "resource_delta",
-              "endpoint": "/api/config/jobs/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-              "milliseconds": 1100,
-              "path": "/job_poll_count"
-            },
-            {
-              "kind": "resource_delta",
-              "endpoint": "/api/config/seats",
-              "milliseconds": 1500,
-              "path": "/fleet_refresh_count"
+              "kind": "click_job_lifecycle",
+              "selector": "[data-ops-action=\"stage\"]",
+              "start_endpoint": "/api/config/ops",
+              "job_path_prefix": "/api/config/jobs/",
+              "output_selector": "#ops-output",
+              "max_samples": 8,
+              "path": "/job_lifecycle"
             }
           ],
           "after": [
@@ -10459,34 +10450,25 @@
               "property": "text"
             }
           ],
-          "settle_milliseconds": 250
+          "settle_milliseconds": 10000
         },
         "select_allowlist": [
-          "/fleet_refresh_count",
-          "/job_output_before",
-          "/job_poll_count",
-          "/operation_job_id",
+          "/job_lifecycle",
+          "/operation_control_disabled",
           "/terminal_output"
         ],
-        "semantic_basis": "require the real POST /api/config/ops job ID to equal the nonzero fixture ID embedded in the exact job-poll endpoint, then require that poll, the ensuing Fleet seat refresh, and persisted succeeded output",
-        "fixture_bindings": {
-          "job_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-          "derivation": "the verifier patches the operation job allocator to return this nonzero ID; click_response_json captures it from the real POST /api/config/ops response and resource_delta observes the identical ID in the ensuing GET path",
-          "poll_sequence": [
-            "running",
-            "succeeded"
-          ]
-        }
+        "semantic_basis": "require the closed click_job_lifecycle result to bind POST /api/config/ops to GET /api/config/jobs/<returned job_id>, running then succeeded terminal state, stable output across refresh, and re-enabled control",
+        "parent_contract_ref": "594ec7b0fab83ae7ed1c5a5fe80d216d17cd930c"
       },
       "required_evidence": [
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
-        "shape_contract": "97a5ed712c7a7909642608211dea34601d12564b closed recorder and parent fielded-conjunct schemas",
+        "shape_contract": "594ec7b0fab83ae7ed1c5a5fe80d216d17cd930c closed action-derived click_job_lifecycle recorder and parent fielded-conjunct schemas",
         "executable_now": true,
         "adversarial_negatives": [
           {
@@ -10495,28 +10477,36 @@
             "observed_fixture": [
               {
                 "phase": "before",
-                "path": "/job_output_before",
-                "value": "Streaming output"
+                "path": "/operation_control_disabled",
+                "value": false
               },
               {
                 "phase": "action",
-                "path": "/operation_job_id",
-                "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-              },
-              {
-                "phase": "action",
-                "path": "/job_poll_count",
-                "value": 1
-              },
-              {
-                "phase": "action",
-                "path": "/fleet_refresh_count",
-                "value": 0
+                "path": "/job_lifecycle",
+                "value": {
+                  "start_matches": 1,
+                  "start_status": 200,
+                  "job_id": "11111111111111111111111111111111",
+                  "job_path": "/api/config/jobs/11111111111111111111111111111111",
+                  "statuses": [
+                    "running"
+                  ],
+                  "terminal_status": null,
+                  "terminal_response_sha256": null,
+                  "terminal_logs_sha256": null,
+                  "terminal_log_count": null,
+                  "disabled_while_running": true,
+                  "pre_refresh_output_sha256": null,
+                  "after_refresh_output_sha256": null,
+                  "refresh_count": 0,
+                  "enabled_after_refresh": false,
+                  "error": null
+                }
               },
               {
                 "phase": "after",
                 "path": "/terminal_output",
-                "value": "Command: safe operation\nStatus: running\nStreaming output\u2026"
+                "value": "Job 11111111111111111111111111111111\nStatus: running\nStreaming output\u2026"
               }
             ]
           },
@@ -10553,31 +10543,20 @@
           "source_id": "browser-state-fleet.operations-job-result",
           "before": [
             {
-              "path": "/job_output_before",
-              "selector": "#ops-output",
-              "property": "text"
+              "path": "/operation_control_disabled",
+              "selector": "[data-ops-action=\"stage\"]",
+              "property": "disabled"
             }
           ],
           "action": [
             {
-              "kind": "click_response_json",
-              "selector": "[data-ops-action='stage']",
-              "method": "POST",
-              "endpoint": "/api/config/ops",
-              "pointer": "/body/job_id",
-              "path": "/operation_job_id"
-            },
-            {
-              "kind": "resource_delta",
-              "endpoint": "/api/config/jobs/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-              "milliseconds": 1100,
-              "path": "/job_poll_count"
-            },
-            {
-              "kind": "resource_delta",
-              "endpoint": "/api/config/seats",
-              "milliseconds": 1500,
-              "path": "/fleet_refresh_count"
+              "kind": "click_job_lifecycle",
+              "selector": "[data-ops-action=\"stage\"]",
+              "start_endpoint": "/api/config/ops",
+              "job_path_prefix": "/api/config/jobs/",
+              "output_selector": "#ops-output",
+              "max_samples": 8,
+              "path": "/job_lifecycle"
             }
           ],
           "after": [
@@ -10595,27 +10574,22 @@
         "assertions": [
           {
             "phase": "before",
-            "path": "/job_output_before",
-            "op": "contains",
-            "value": "Streaming output"
-          },
-          {
-            "phase": "action",
-            "path": "/operation_job_id",
+            "path": "/operation_control_disabled",
             "op": "eq",
-            "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            "value": false
           },
           {
             "phase": "action",
-            "path": "/job_poll_count",
-            "op": "gt",
-            "value": 0
-          },
-          {
-            "phase": "action",
-            "path": "/fleet_refresh_count",
-            "op": "gt",
-            "value": 0
+            "path": "/job_lifecycle",
+            "op": "contains",
+            "value": {
+              "start_matches": 1,
+              "start_status": 200,
+              "terminal_status": "succeeded",
+              "disabled_while_running": true,
+              "enabled_after_refresh": true,
+              "error": null
+            }
           },
           {
             "phase": "after",
@@ -10685,7 +10659,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -10879,7 +10853,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -11096,7 +11070,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -11295,7 +11269,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -11517,7 +11491,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -11737,7 +11711,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -11937,7 +11911,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -12117,7 +12091,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -12280,7 +12254,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -12475,7 +12449,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -12648,7 +12622,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -12807,7 +12781,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -13044,7 +13018,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -13298,7 +13272,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -13477,7 +13451,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -13655,7 +13629,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -13833,7 +13807,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -14011,7 +13985,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -14189,7 +14163,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -14380,7 +14354,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -14577,7 +14551,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -14731,7 +14705,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -14916,7 +14890,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -15126,7 +15100,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -15325,7 +15299,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -15524,7 +15498,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -15712,7 +15686,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -15901,7 +15875,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -16123,7 +16097,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -16313,7 +16287,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -16507,7 +16481,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -16706,7 +16680,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -16911,7 +16885,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -17126,7 +17100,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -17325,7 +17299,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -17524,7 +17498,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -17723,7 +17697,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -17922,7 +17896,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -18121,7 +18095,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -18320,7 +18294,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -18519,7 +18493,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -18736,7 +18710,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -18983,7 +18957,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -19149,7 +19123,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -19321,7 +19295,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -19532,7 +19506,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -19775,7 +19749,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -19974,7 +19948,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -20202,7 +20176,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -20449,7 +20423,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -20648,7 +20622,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -20847,7 +20821,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -21052,7 +21026,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -21267,7 +21241,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -21462,7 +21436,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -21644,7 +21618,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -21825,7 +21799,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -21984,7 +21958,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -22144,7 +22118,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -22340,7 +22314,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -22595,7 +22569,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -22837,7 +22811,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -23036,7 +23010,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -23241,7 +23215,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -23468,7 +23442,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -23699,7 +23673,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -23898,7 +23872,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -24103,7 +24077,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -24318,7 +24292,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -24517,7 +24491,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -24716,7 +24690,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -24951,7 +24925,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
@@ -25246,7 +25220,7 @@
         "trusted exact-candidate/board/runtime evidence from the named adapter",
         "same observation/run/action/entity and strictly ordered causal_index",
         "real screenshot plus normalized accessibility-tree context for the same browser action",
-        "independent verifier evaluation including the declared adversarial mutations"
+        "independent verifier evaluation including the declared adversarial fixtures"
       ],
       "validation": {
         "source_anchor": "checked at the retained exact source commit and line range",
