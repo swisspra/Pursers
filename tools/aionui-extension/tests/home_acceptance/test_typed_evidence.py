@@ -105,10 +105,18 @@ class _Handler(BaseHTTPRequestHandler):
         payload = self._common()
         if self.path == "/state/action" and body.get("next") in {"busy", "idle"}:
             type(self).state = body["next"]
-            payload.update({"state": type(self).state, "accepted": True})
+            payload.update({
+                "state": type(self).state,
+                "accepted": True,
+                "action_sha256": self.headers.get("X-Pursers-Action-SHA256"),
+            })
             self._send(202, payload)
         elif self.path == "/state/action":
-            payload.update({"state": type(self).state, "accepted": False})
+            payload.update({
+                "state": type(self).state,
+                "accepted": False,
+                "action_sha256": self.headers.get("X-Pursers-Action-SHA256"),
+            })
             self._send(409, payload)
         else:
             self._send(404, payload)
@@ -231,7 +239,9 @@ def _trust(tmp_path: Path, http_server: str, **changes: Any) -> dict[str, Any]:
         "methods": ["GET", "POST"],
         "headers": {},
         "timeout_seconds": 2,
-        "select_allowlist": ["/ok", "/count", "/state", "/accepted"],
+        "select_allowlist": [
+            "/ok", "/count", "/state", "/accepted", "/action_sha256",
+        ],
         "response_bindings": {
             "/board": "$board_id", "/candidate": "$candidate_commit",
             "/surface": "$surface", "/entity": "$entity",
@@ -1084,16 +1094,15 @@ def _fleet_trace_source(
     entry_changes: dict[str, Any] | None = None,
 ) -> tuple[Path, Path, dict[str, Any]]:
     action_path = tmp_path / "fleet-action.json"
-    action_path.write_text(
-        json.dumps(action if action is not None else {"attention": []}),
-        encoding="utf-8",
+    action_path.write_bytes(
+        _json_bytes(action if action is not None else {"attention": []})
     )
     action_path.chmod(0o600)
     action_sha256 = hashlib.sha256(action_path.read_bytes()).hexdigest()
     runtime = trust["http_sources"]["fleet-api"]["runtime"]
     entry = {
         "schema_version": 1,
-        "emitter": "pursers-fleet",
+        "emitter": "fleet-dashboard-runtime",
         "timestamp": _now(),
         "runtime_id": "fleet-runtime-1",
         "candidate_commit": context["candidate_commit"],
@@ -1105,8 +1114,9 @@ def _fleet_trace_source(
         "entity": context["entity"],
         "method": "POST",
         "path": "/api/attention",
-        "http_status": 200,
-        "outcome": "saved",
+        "status": 200,
+        "outcome": "succeeded",
+        "effect": "attention_state_changed",
         "changed": True,
         "before_sha256": "33" * 32,
         "after_sha256": "44" * 32,
@@ -1136,7 +1146,7 @@ def _fleet_trace_source(
             "/run_id": "$run_id",
             "/action_id": "$action_id",
         },
-        "emitter": "pursers-fleet",
+        "emitter": "fleet-dashboard-runtime",
         "runtime_pointer": "/runtime_id",
         "max_bytes": 65_536,
         "action_input_path": str(action_path),
@@ -1149,9 +1159,10 @@ def _fleet_trace_source(
         "schema_version_pointer": "/schema_version",
         "pid_pointer": "/pid",
         "entrypoint_digest_pointer": "/entrypoint_sha256",
-        "status_pointer": "/http_status",
+        "status_pointer": "/status",
         "changed_pointer": "/changed",
         "outcome_pointer": "/outcome",
+        "effect_pointer": "/effect",
         "sha256_pointers": [
             "/before_sha256", "/after_sha256", "/result_sha256",
             "/action_sha256", "/entrypoint_sha256",
@@ -1180,7 +1191,7 @@ def test_fleet_trace_rejects_caller_owned_result_fields(
         record_evidence(
             _request(
                 "log_assertion",
-                {"source_id": "fleet-trace", "field_equals": {"/outcome": "saved"}},
+                {"source_id": "fleet-trace", "field_equals": {"/outcome": "succeeded"}},
                 context,
             ),
             trust,
@@ -1193,8 +1204,13 @@ def test_fleet_trace_rejects_caller_owned_result_fields(
         {"pid": 999_999},
         {"entrypoint_sha256": "66" * 32},
         {"observation_id": "fleet.decoy"},
-        {"http_status": True},
+        {"status": True},
         {"changed": 1},
+        {"outcome": "failed"},
+        {"effect": "attention_state_unchanged"},
+        {"after_sha256": "33" * 32},
+        {"method": "GET"},
+        {"path": "/api/decoy"},
     ],
 )
 def test_fleet_trace_rejects_forged_runtime_correlation_and_types(
@@ -1214,7 +1230,7 @@ def test_fleet_trace_rejects_forged_runtime_correlation_and_types(
         record_evidence(
             _request(
                 "log_assertion",
-                {"source_id": "fleet-trace", "field_equals": {"/outcome": "saved"}},
+                {"source_id": "fleet-trace", "field_equals": {"/outcome": "succeeded"}},
                 context,
             ),
             trust,
@@ -1239,7 +1255,53 @@ def test_fleet_trace_rejects_changed_http_runtime_source(
         record_evidence(
             _request(
                 "log_assertion",
-                {"source_id": "fleet-trace", "field_equals": {"/outcome": "saved"}},
+                {"source_id": "fleet-trace", "field_equals": {"/outcome": "succeeded"}},
+                context,
+            ),
+            trust,
+        )
+
+
+def test_fleet_trace_rejects_weakened_schema_and_pointer_contract(
+    tmp_path: Path, http_server: str,
+) -> None:
+    trust = _trust(tmp_path, http_server)
+    context = _context(
+        observation_id="fleet.attention",
+        action_id="save-attention",
+        entity="fleet-attention",
+    )
+    _action_path, _log_path, source = _fleet_trace_source(
+        tmp_path, trust, context
+    )
+    source["document_keys"].remove("effect")
+    trust["log_sources"] = {"fleet-trace": source}
+    with pytest.raises(TypedEvidenceError, match="document schema"):
+        record_evidence(
+            _request(
+                "log_assertion",
+                {
+                    "source_id": "fleet-trace",
+                    "field_equals": {"/outcome": "succeeded"},
+                },
+                context,
+            ),
+            trust,
+        )
+
+    _action_path, _log_path, source = _fleet_trace_source(
+        tmp_path, trust, context
+    )
+    source["status_pointer"] = "/changed"
+    trust["log_sources"] = {"fleet-trace": source}
+    with pytest.raises(TypedEvidenceError, match="pointer contract"):
+        record_evidence(
+            _request(
+                "log_assertion",
+                {
+                    "source_id": "fleet-trace",
+                    "field_equals": {"/outcome": "succeeded"},
+                },
                 context,
             ),
             trust,
@@ -1321,7 +1383,11 @@ def _state_recorder(next_state: str) -> dict[str, Any]:
     return {
         "source_id": "fleet-state",
         "before": {"method": "GET", "path": "/state", "body": None, "select": ["/state"]},
-        "action": {"method": "POST", "path": "/state/action", "body": {"next": next_state}, "select": ["/state", "/accepted"]},
+        "action": {
+            "method": "POST", "path": "/state/action",
+            "body": {"next": next_state},
+            "select": ["/state", "/accepted", "/action_sha256"],
+        },
         "after": {"method": "GET", "path": "/state", "body": None, "select": ["/state"]},
     }
 
@@ -1333,6 +1399,10 @@ def test_state_transition_real_roundtrip_and_negative_action(tmp_path: Path, htt
     result = evaluate_evidence(evidence, _expected(evidence, [
         {"phase": "before", "path": "/state", "op": "eq", "value": "idle"},
         {"phase": "action", "path": "/status", "op": "eq", "value": 202},
+        {
+            "phase": "action", "path": "/action_sha256", "op": "eq",
+            "value": hashlib.sha256(_json_bytes({"next": "busy"})).hexdigest(),
+        },
         {"phase": "after", "path": "/state", "op": "eq", "value": "busy"},
     ]), trust)
     assert result["passed"]

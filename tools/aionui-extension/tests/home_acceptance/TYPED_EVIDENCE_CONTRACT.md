@@ -351,8 +351,10 @@ matching-body echo
 service, including one serving identical bytes from another cwd, cannot
 substitute for the candidate runtime.
 The recorder injects observation/run/action/entity correlation headers and
-requires the real response to echo them. It records status, selected bounded
-JSON values, and a body digest. Redirects cannot escape the trusted origin.
+requires the real response to echo them. For a JSON request body it also sends
+`X-Pursers-Action-SHA256` over the exact bounded canonical bytes placed on the
+wire. It records status, selected bounded JSON values, and a body digest.
+Redirects cannot escape the trusted origin.
 Direct HTTP evidence is always `verifier_api`; it never claims a browser action.
 
 Conjuncts are exact
@@ -397,6 +399,60 @@ candidate/board/surface/observation/entity/run/action bindings and must come
 from the same live PID and entrypoint already proven by that HTTP source.
 Exactly one fresh matching record is accepted.
 
+The exact verifier trust source for that producer is:
+
+```json
+{
+  "adapter": "fleet_evidence_trace_v1",
+  "provenance": "fleet-runtime-evidence-trace",
+  "runtime_id": "fleet-runtime-1",
+  "path": "/PATH/TO/VERIFIER/fleet-evidence.jsonl",
+  "document_keys": [
+    "schema_version", "emitter", "timestamp", "runtime_id", "pid",
+    "candidate_commit", "entrypoint_sha256", "board_id", "surface",
+    "observation_id", "run_id", "action_id", "entity", "method", "path",
+    "status", "outcome", "effect", "changed", "before_sha256",
+    "after_sha256", "result_sha256", "action_sha256"
+  ],
+  "timestamp_pointer": "/timestamp",
+  "max_age_seconds": 300,
+  "required_bindings": {
+    "/candidate_commit": "$candidate_commit",
+    "/board_id": "$board_id",
+    "/surface": "$surface",
+    "/observation_id": "$observation_id",
+    "/entity": "$entity",
+    "/run_id": "$run_id",
+    "/action_id": "$action_id"
+  },
+  "emitter": "fleet-dashboard-runtime",
+  "runtime_pointer": "/runtime_id",
+  "max_bytes": 65536,
+  "action_input_path": "/PATH/TO/VERIFIER/action.json",
+  "action_input_sha256": "...",
+  "action_digest_pointer": "/action_sha256",
+  "http_source_id": "fleet-api",
+  "http_source_config_sha256": "...",
+  "schema_version_pointer": "/schema_version",
+  "pid_pointer": "/pid",
+  "entrypoint_digest_pointer": "/entrypoint_sha256",
+  "status_pointer": "/status",
+  "changed_pointer": "/changed",
+  "outcome_pointer": "/outcome",
+  "effect_pointer": "/effect",
+  "sha256_pointers": [
+    "/before_sha256", "/after_sha256", "/result_sha256",
+    "/action_sha256", "/entrypoint_sha256"
+  ]
+}
+```
+
+The adapter fixes those document keys and pointer values as part of version 1;
+changing the verifier list cannot define a weaker schema. It also requires
+`emitter=fleet-dashboard-runtime`, `method=POST`, `path=/api/attention`, derives
+`outcome` from the status class and `effect` from `changed`, and checks that
+`changed` agrees with the before/after digests.
+
 The private action JSON must not contain any producer-owned trace field. In
 particular, caller input cannot provide status, outcome, changed/effect values,
 state digests, runtime identity, candidate identity, PID, or entrypoint digest.
@@ -414,7 +470,7 @@ reviewed producer from `TK-3df615678068`; if that producer is unavailable, the
 caller reports `collector_gap` instead of manufacturing success evidence.
 
 Conjuncts are exact
-`{"path":"/outcome","op":"eq","value":"accepted"}`.
+`{"path":"/outcome","op":"eq","value":"succeeded"}`.
 
 ## `state_transition`
 

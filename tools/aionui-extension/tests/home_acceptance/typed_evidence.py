@@ -52,6 +52,13 @@ CONTEXT_KEYS = {
     "observation_id", "run_id", "action_id", "entity", "surface",
     "board_id", "candidate_commit", "issued_at", "causal_index",
 }
+FLEET_TRACE_KEYS = frozenset({
+    "schema_version", "emitter", "timestamp", "runtime_id", "pid",
+    "candidate_commit", "entrypoint_sha256", "board_id", "surface",
+    "observation_id", "run_id", "action_id", "entity", "method", "path",
+    "status", "outcome", "effect", "changed", "before_sha256",
+    "after_sha256", "result_sha256", "action_sha256",
+})
 TRUST_KEYS = {
     "schema_version", "verifier_id", "trusted_module_path", "module_sha256",
     "candidate_checkout_root", "candidate_commit", "board_id", "max_age_seconds", "active_evidence_key",
@@ -874,6 +881,7 @@ def _http_call(
         _safe_public(body, f"{label} request body")
         data = _json_bytes(body)
         headers["Content-Type"] = "application/json"
+        headers["X-Pursers-Action-SHA256"] = hashlib.sha256(data).hexdigest()
     request = Request(target, data=data, headers=headers, method=method)
     status: int
     response_headers: Any
@@ -1082,7 +1090,8 @@ def _record_log(request: dict[str, Any], trust: dict[str, Any], context: dict[st
             "http_source_id", "http_source_config_sha256",
             "schema_version_pointer", "pid_pointer",
             "entrypoint_digest_pointer", "status_pointer",
-            "changed_pointer", "outcome_pointer", "sha256_pointers",
+            "changed_pointer", "outcome_pointer", "effect_pointer",
+            "sha256_pointers",
         }
     else:
         raise TypedEvidenceError("log adapter is unsupported")
@@ -1131,11 +1140,13 @@ def _record_log(request: dict[str, Any], trust: dict[str, Any], context: dict[st
             raise TypedEvidenceError("Fleet trace action input is not JSON") from exc
         document_keys = source["document_keys"]
         if (
+            not isinstance(document_keys, list)
+            or set(document_keys) != FLEET_TRACE_KEYS
+            or len(document_keys) != len(FLEET_TRACE_KEYS)
+        ):
+            raise TypedEvidenceError("Fleet trace document schema is invalid")
+        if (
             not isinstance(action_document, dict)
-            or not isinstance(document_keys, list)
-            or not document_keys
-            or any(not isinstance(field, str) for field in document_keys)
-            or len(set(document_keys)) != len(document_keys)
             or set(action_document) & set(document_keys)
         ):
             raise TypedEvidenceError(
@@ -1154,6 +1165,41 @@ def _record_log(request: dict[str, Any], trust: dict[str, Any], context: dict[st
         runtime = _runtime_check(
             http_source["runtime"], trust, http_source["base_url"]
         )
+        sha256_pointers = source["sha256_pointers"]
+        pointer_fields = (
+            "schema_version_pointer", "pid_pointer",
+            "entrypoint_digest_pointer", "status_pointer",
+            "changed_pointer", "outcome_pointer", "effect_pointer",
+        )
+        if (
+            not isinstance(sha256_pointers, list)
+            or len(sha256_pointers) != 5
+            or len(set(sha256_pointers)) != len(sha256_pointers)
+            or any(
+                not isinstance(pointer, str) or not pointer.startswith("/")
+                for pointer in sha256_pointers
+            )
+            or any(
+                not isinstance(source[field], str)
+                or not source[field].startswith("/")
+                for field in pointer_fields
+            )
+            or {
+                "schema_version_pointer": "/schema_version",
+                "pid_pointer": "/pid",
+                "entrypoint_digest_pointer": "/entrypoint_sha256",
+                "status_pointer": "/status",
+                "changed_pointer": "/changed",
+                "outcome_pointer": "/outcome",
+                "effect_pointer": "/effect",
+            }
+            != {field: source[field] for field in pointer_fields}
+            or set(sha256_pointers) != {
+                "/before_sha256", "/after_sha256", "/result_sha256",
+                "/action_sha256", "/entrypoint_sha256",
+            }
+        ):
+            raise TypedEvidenceError("Fleet trace pointer contract is invalid")
     limit = source["max_bytes"]
     if not isinstance(limit, int) or not 1 <= limit <= MAX_LOG_BYTES:
         raise TypedEvidenceError("log max_bytes is invalid")
@@ -1193,30 +1239,6 @@ def _record_log(request: dict[str, Any], trust: dict[str, Any], context: dict[st
             ):
                 continue
             if adapter == "fleet_evidence_trace_v1":
-                sha256_pointers = source["sha256_pointers"]
-                pointer_fields = (
-                    "schema_version_pointer", "pid_pointer",
-                    "entrypoint_digest_pointer", "status_pointer",
-                    "changed_pointer", "outcome_pointer",
-                )
-                if (
-                    not isinstance(sha256_pointers, list)
-                    or not sha256_pointers
-                    or len(sha256_pointers) > 16
-                    or len(set(sha256_pointers)) != len(sha256_pointers)
-                    or source["action_digest_pointer"] not in sha256_pointers
-                    or source["entrypoint_digest_pointer"] not in sha256_pointers
-                    or any(
-                        not isinstance(pointer, str) or not pointer.startswith("/")
-                        for pointer in sha256_pointers
-                    )
-                    or any(
-                        not isinstance(source[field], str)
-                        or not source[field].startswith("/")
-                        for field in pointer_fields
-                    )
-                ):
-                    raise TypedEvidenceError("Fleet trace pointer contract is invalid")
                 if (
                     _pointer(entry, source["schema_version_pointer"])
                     != SCHEMA_VERSION
@@ -1229,13 +1251,28 @@ def _record_log(request: dict[str, Any], trust: dict[str, Any], context: dict[st
                 status = _pointer(entry, source["status_pointer"])
                 changed = _pointer(entry, source["changed_pointer"])
                 outcome = _pointer(entry, source["outcome_pointer"])
+                effect = _pointer(entry, source["effect_pointer"])
                 if (
                     not isinstance(status, int) or isinstance(status, bool)
                     or not 100 <= status <= 599
                     or not isinstance(changed, bool)
+                    or entry.get("emitter") != "fleet-dashboard-runtime"
+                    or entry.get("method") != "POST"
+                    or entry.get("path") != "/api/attention"
                 ):
                     continue
                 _safe_id(outcome, "Fleet trace outcome")
+                _safe_id(effect, "Fleet trace effect")
+                if (
+                    outcome != ("succeeded" if 200 <= status < 300 else "failed")
+                    or effect != (
+                        "attention_state_changed"
+                        if changed else "attention_state_unchanged"
+                    )
+                    or changed
+                    != (entry["before_sha256"] != entry["after_sha256"])
+                ):
+                    continue
                 if any(
                     not SHA256.fullmatch(str(_pointer(entry, pointer)))
                     for pointer in sha256_pointers
