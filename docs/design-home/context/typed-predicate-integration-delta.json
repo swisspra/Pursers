@@ -659,9 +659,9 @@
       },
       "causal": {
         "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; the settings page is at initial setup.",
-        "action": "inspect the Setup progress ordered list",
+        "action": "activate the setup call-to-action and inspect the resulting connection section",
         "expected_transition": "Connect, Prepare Team, and Ready appear in order with one current step",
-        "exact_selection": "read .stepper li labels and assert exact ordered states plus one .current",
+        "exact_selection": "click #next-step-action, then assert the ordered .stepper labels, one current step, and #connection",
         "negative_counterexample": "unordered navigation links or a generic Progress heading are accepted",
         "correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id."
       },
@@ -674,30 +674,16 @@
         "recipe": {
           "before": [
             {
-              "path": "/connect_step",
-              "selector": ".stepper li:nth-child(1)",
+              "path": "/next_step_control",
+              "selector": "#next-step-action",
               "property": "text"
-            },
-            {
-              "path": "/prepare_step",
-              "selector": ".stepper li:nth-child(2)",
-              "property": "text"
-            },
-            {
-              "path": "/ready_step",
-              "selector": ".stepper li:nth-child(3)",
-              "property": "text"
-            },
-            {
-              "path": "/current_step_count",
-              "selector": ".stepper li.current",
-              "property": "count"
             }
           ],
           "actions": [
             {
-              "kind": "observe",
-              "path": "/extension_join_progress_action"
+              "kind": "click",
+              "selector": "#next-step-action",
+              "path": "/open_connection"
             }
           ],
           "after": [
@@ -720,18 +706,25 @@
               "path": "/current_step_count",
               "selector": ".stepper li.current",
               "property": "count"
+            },
+            {
+              "path": "/connection_section",
+              "selector": "#connection",
+              "property": "count"
             }
           ],
           "settle_milliseconds": 250
         },
         "select_allowlist": [
           "/connect_step",
+          "/connection_section",
           "/current_step_count",
-          "/extension_join_progress_action",
+          "/next_step_control",
+          "/open_connection",
           "/prepare_step",
           "/ready_step"
         ],
-        "semantic_basis": "read .stepper li labels and assert exact ordered states plus one .current"
+        "semantic_basis": "click #next-step-action, then assert the ordered .stepper labels, one current step, and #connection"
       },
       "required_evidence": [
         "trusted exact-candidate/board/runtime evidence from the named adapter",
@@ -781,30 +774,16 @@
           "source_id": "browser-state-extension.join-progress",
           "before": [
             {
-              "path": "/connect_step",
-              "selector": ".stepper li:nth-child(1)",
+              "path": "/next_step_control",
+              "selector": "#next-step-action",
               "property": "text"
-            },
-            {
-              "path": "/prepare_step",
-              "selector": ".stepper li:nth-child(2)",
-              "property": "text"
-            },
-            {
-              "path": "/ready_step",
-              "selector": ".stepper li:nth-child(3)",
-              "property": "text"
-            },
-            {
-              "path": "/current_step_count",
-              "selector": ".stepper li.current",
-              "property": "count"
             }
           ],
           "action": [
             {
-              "kind": "observe",
-              "path": "/extension_join_progress_action"
+              "kind": "click",
+              "selector": "#next-step-action",
+              "path": "/open_connection"
             }
           ],
           "after": [
@@ -827,6 +806,11 @@
               "path": "/current_step_count",
               "selector": ".stepper li.current",
               "property": "count"
+            },
+            {
+              "path": "/connection_section",
+              "selector": "#connection",
+              "property": "count"
             }
           ]
         }
@@ -837,15 +821,15 @@
         "assertions": [
           {
             "phase": "before",
-            "path": "/connect_step",
-            "op": "contains",
-            "value": "Connect"
+            "path": "/next_step_control",
+            "op": "eq",
+            "value": "Connect project"
           },
           {
             "phase": "action",
-            "path": "/extension_join_progress_action",
+            "path": "/open_connection",
             "op": "eq",
-            "value": "observed"
+            "value": "clicked"
           },
           {
             "phase": "after",
@@ -868,6 +852,12 @@
           {
             "phase": "after",
             "path": "/current_step_count",
+            "op": "eq",
+            "value": 1
+          },
+          {
+            "phase": "after",
+            "path": "/connection_section",
             "op": "eq",
             "value": 1
           }
@@ -2206,9 +2196,9 @@
       },
       "causal": {
         "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; Add project succeeds with worker and reviewer doors.",
-        "action": "inspect the result panel",
+        "action": "wait for the Add project flow's actual Fleet seat refresh",
         "expected_transition": "both doors appear in password inputs with explicit copy controls only in the immediate response",
-        "exact_selection": "assert two password inputs and that refresh removes their values",
+        "exact_selection": "assert both one-time password inputs and copy controls before /api/config/seats refresh, then assert no door input survives it",
         "negative_counterexample": "persistent Doors table metadata is accepted as the secret",
         "correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id."
       },
@@ -2221,31 +2211,58 @@
         "recipe": {
           "before": [
             {
-              "path": "/fleet_add_project_one_time_doors_copy_worker_door",
-              "selector": "#add-project-result",
-              "property": "text"
+              "path": "/worker_door_present",
+              "selector": "#new-worker-door",
+              "property": "count"
+            },
+            {
+              "path": "/reviewer_door_present",
+              "selector": "#new-reviewer-door",
+              "property": "count"
+            },
+            {
+              "path": "/copy_control_count",
+              "selector": "#add-project-result [data-copy-input]",
+              "property": "count"
             }
           ],
           "actions": [
             {
-              "kind": "observe",
-              "path": "/fleet_add_project_one_time_doors_action"
+              "kind": "resource_delta",
+              "endpoint": "/api/config/seats",
+              "milliseconds": 2000,
+              "path": "/seat_refresh_count"
             }
           ],
           "after": [
             {
-              "path": "/fleet_add_project_one_time_doors_copy_worker_door",
-              "selector": "#add-project-result",
-              "property": "text"
+              "path": "/worker_door_retained",
+              "selector": "#new-worker-door",
+              "property": "count"
+            },
+            {
+              "path": "/reviewer_door_retained",
+              "selector": "#new-reviewer-door",
+              "property": "count"
+            },
+            {
+              "path": "/door_input_count_after",
+              "selector": "#add-project-result input[type=password]",
+              "property": "count"
             }
           ],
           "settle_milliseconds": 250
         },
         "select_allowlist": [
-          "/fleet_add_project_one_time_doors_action",
-          "/fleet_add_project_one_time_doors_copy_worker_door"
+          "/copy_control_count",
+          "/door_input_count_after",
+          "/reviewer_door_present",
+          "/reviewer_door_retained",
+          "/seat_refresh_count",
+          "/worker_door_present",
+          "/worker_door_retained"
         ],
-        "semantic_basis": "assert two password inputs and that refresh removes their values"
+        "semantic_basis": "assert both one-time password inputs and copy controls before /api/config/seats refresh, then assert no door input survives it"
       },
       "required_evidence": [
         "trusted exact-candidate/board/runtime evidence from the named adapter",
@@ -2295,22 +2312,44 @@
           "source_id": "browser-state-fleet.add-project-one-time-doors",
           "before": [
             {
-              "path": "/fleet_add_project_one_time_doors_copy_worker_door",
-              "selector": "#add-project-result",
-              "property": "text"
+              "path": "/worker_door_present",
+              "selector": "#new-worker-door",
+              "property": "count"
+            },
+            {
+              "path": "/reviewer_door_present",
+              "selector": "#new-reviewer-door",
+              "property": "count"
+            },
+            {
+              "path": "/copy_control_count",
+              "selector": "#add-project-result [data-copy-input]",
+              "property": "count"
             }
           ],
           "action": [
             {
-              "kind": "observe",
-              "path": "/fleet_add_project_one_time_doors_action"
+              "kind": "resource_delta",
+              "endpoint": "/api/config/seats",
+              "milliseconds": 2000,
+              "path": "/seat_refresh_count"
             }
           ],
           "after": [
             {
-              "path": "/fleet_add_project_one_time_doors_copy_worker_door",
-              "selector": "#add-project-result",
-              "property": "text"
+              "path": "/worker_door_retained",
+              "selector": "#new-worker-door",
+              "property": "count"
+            },
+            {
+              "path": "/reviewer_door_retained",
+              "selector": "#new-reviewer-door",
+              "property": "count"
+            },
+            {
+              "path": "/door_input_count_after",
+              "selector": "#add-project-result input[type=password]",
+              "property": "count"
             }
           ]
         }
@@ -2321,21 +2360,45 @@
         "assertions": [
           {
             "phase": "before",
-            "path": "/fleet_add_project_one_time_doors_copy_worker_door",
-            "op": "contains",
-            "value": "Copy worker door"
+            "path": "/worker_door_present",
+            "op": "eq",
+            "value": 1
+          },
+          {
+            "phase": "before",
+            "path": "/reviewer_door_present",
+            "op": "eq",
+            "value": 1
+          },
+          {
+            "phase": "before",
+            "path": "/copy_control_count",
+            "op": "eq",
+            "value": 2
           },
           {
             "phase": "action",
-            "path": "/fleet_add_project_one_time_doors_action",
-            "op": "eq",
-            "value": "observed"
+            "path": "/seat_refresh_count",
+            "op": "gt",
+            "value": 0
           },
           {
             "phase": "after",
-            "path": "/fleet_add_project_one_time_doors_copy_worker_door",
-            "op": "contains",
-            "value": "Copy worker door"
+            "path": "/worker_door_retained",
+            "op": "eq",
+            "value": 0
+          },
+          {
+            "phase": "after",
+            "path": "/reviewer_door_retained",
+            "op": "eq",
+            "value": 0
+          },
+          {
+            "phase": "after",
+            "path": "/door_input_count_after",
+            "op": "eq",
+            "value": 0
           }
         ]
       }
@@ -3503,7 +3566,7 @@
         "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; board detail has retained events.",
         "action": "open Timeline",
         "expected_transition": "events are grouped by day and ticket with seq/kind/transition/time",
-        "exact_selection": "assert grouped rows and bounded ack=false note",
+        "exact_selection": "click the Timeline tab and require active timeline, day/ticket/event rows, and the bounded ack=false disclosure",
         "negative_counterexample": "ticket updated timestamps are accepted as activity",
         "correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id."
       },
@@ -3516,31 +3579,57 @@
         "recipe": {
           "before": [
             {
-              "path": "/fleet_board_detail_activity_17",
-              "selector": "#detail-view",
-              "property": "text"
+              "path": "/tickets_tab_active",
+              "selector": ".tabs a[href*=\"/tickets\"].active",
+              "property": "count"
             }
           ],
           "actions": [
             {
-              "kind": "observe",
-              "path": "/fleet_board_detail_activity_action"
+              "kind": "click",
+              "selector": ".tabs a[href*=\"/timeline\"]",
+              "path": "/open_timeline"
             }
           ],
           "after": [
             {
-              "path": "/fleet_board_detail_activity_17",
-              "selector": "#detail-view",
+              "path": "/timeline_tab_active",
+              "selector": ".tabs a[href*=\"/timeline\"].active",
+              "property": "count"
+            },
+            {
+              "path": "/timeline_day_count",
+              "selector": ".timeline > details",
+              "property": "count"
+            },
+            {
+              "path": "/timeline_ticket_count",
+              "selector": ".timeline-ticket",
+              "property": "count"
+            },
+            {
+              "path": "/timeline_event_row_count",
+              "selector": ".timeline-ticket tbody tr",
+              "property": "count"
+            },
+            {
+              "path": "/bounded_activity_note",
+              "selector": ".bounded-note",
               "property": "text"
             }
           ],
           "settle_milliseconds": 250
         },
         "select_allowlist": [
-          "/fleet_board_detail_activity_17",
-          "/fleet_board_detail_activity_action"
+          "/bounded_activity_note",
+          "/open_timeline",
+          "/tickets_tab_active",
+          "/timeline_day_count",
+          "/timeline_event_row_count",
+          "/timeline_tab_active",
+          "/timeline_ticket_count"
         ],
-        "semantic_basis": "assert grouped rows and bounded ack=false note"
+        "semantic_basis": "click the Timeline tab and require active timeline, day/ticket/event rows, and the bounded ack=false disclosure"
       },
       "required_evidence": [
         "trusted exact-candidate/board/runtime evidence from the named adapter",
@@ -3590,21 +3679,42 @@
           "source_id": "browser-state-fleet.board-detail-activity",
           "before": [
             {
-              "path": "/fleet_board_detail_activity_17",
-              "selector": "#detail-view",
-              "property": "text"
+              "path": "/tickets_tab_active",
+              "selector": ".tabs a[href*=\"/tickets\"].active",
+              "property": "count"
             }
           ],
           "action": [
             {
-              "kind": "observe",
-              "path": "/fleet_board_detail_activity_action"
+              "kind": "click",
+              "selector": ".tabs a[href*=\"/timeline\"]",
+              "path": "/open_timeline"
             }
           ],
           "after": [
             {
-              "path": "/fleet_board_detail_activity_17",
-              "selector": "#detail-view",
+              "path": "/timeline_tab_active",
+              "selector": ".tabs a[href*=\"/timeline\"].active",
+              "property": "count"
+            },
+            {
+              "path": "/timeline_day_count",
+              "selector": ".timeline > details",
+              "property": "count"
+            },
+            {
+              "path": "/timeline_ticket_count",
+              "selector": ".timeline-ticket",
+              "property": "count"
+            },
+            {
+              "path": "/timeline_event_row_count",
+              "selector": ".timeline-ticket tbody tr",
+              "property": "count"
+            },
+            {
+              "path": "/bounded_activity_note",
+              "selector": ".bounded-note",
               "property": "text"
             }
           ]
@@ -3616,21 +3726,45 @@
         "assertions": [
           {
             "phase": "before",
-            "path": "/fleet_board_detail_activity_17",
-            "op": "contains",
-            "value": "#17"
+            "path": "/tickets_tab_active",
+            "op": "eq",
+            "value": 1
           },
           {
             "phase": "action",
-            "path": "/fleet_board_detail_activity_action",
+            "path": "/open_timeline",
             "op": "eq",
-            "value": "observed"
+            "value": "clicked"
           },
           {
             "phase": "after",
-            "path": "/fleet_board_detail_activity_17",
+            "path": "/timeline_tab_active",
+            "op": "eq",
+            "value": 1
+          },
+          {
+            "phase": "after",
+            "path": "/timeline_day_count",
+            "op": "gt",
+            "value": 0
+          },
+          {
+            "phase": "after",
+            "path": "/timeline_ticket_count",
+            "op": "gt",
+            "value": 0
+          },
+          {
+            "phase": "after",
+            "path": "/timeline_event_row_count",
+            "op": "gt",
+            "value": 0
+          },
+          {
+            "phase": "after",
+            "path": "/bounded_activity_note",
             "op": "contains",
-            "value": "#17"
+            "value": "ack=false"
           }
         ]
       }
@@ -3664,29 +3798,43 @@
         "recipe": {
           "before": [
             {
-              "path": "/board_detail",
-              "selector": "#detail-view",
-              "property": "text"
+              "path": "/workspace_card_count",
+              "selector": ".boards-list .board-card",
+              "property": "count"
             }
           ],
           "actions": [
             {
-              "kind": "observe",
-              "path": "/fleet_board_detail_metadata_action"
+              "kind": "click",
+              "selector": ".boards-list .board-card .card-actions a.primary-action",
+              "path": "/open_workspace"
             }
           ],
           "after": [
             {
-              "path": "/board_detail",
+              "path": "/detail_visible",
               "selector": "#detail-view",
+              "property": "hidden"
+            },
+            {
+              "path": "/detail_heading",
+              "selector": "#detail-view > .top h2",
+              "property": "text"
+            },
+            {
+              "path": "/detail_board_id",
+              "selector": "#detail-view > .top .meta",
               "property": "text"
             }
           ],
           "settle_milliseconds": 250
         },
         "select_allowlist": [
-          "/board_detail",
-          "/fleet_board_detail_metadata_action"
+          "/detail_board_id",
+          "/detail_heading",
+          "/detail_visible",
+          "/open_workspace",
+          "/workspace_card_count"
         ],
         "semantic_basis": "assert exact header and meta values"
       },
@@ -3738,21 +3886,32 @@
           "source_id": "browser-state-fleet.board-detail-metadata",
           "before": [
             {
-              "path": "/board_detail",
-              "selector": "#detail-view",
-              "property": "text"
+              "path": "/workspace_card_count",
+              "selector": ".boards-list .board-card",
+              "property": "count"
             }
           ],
           "action": [
             {
-              "kind": "observe",
-              "path": "/fleet_board_detail_metadata_action"
+              "kind": "click",
+              "selector": ".boards-list .board-card .card-actions a.primary-action",
+              "path": "/open_workspace"
             }
           ],
           "after": [
             {
-              "path": "/board_detail",
+              "path": "/detail_visible",
               "selector": "#detail-view",
+              "property": "hidden"
+            },
+            {
+              "path": "/detail_heading",
+              "selector": "#detail-view > .top h2",
+              "property": "text"
+            },
+            {
+              "path": "/detail_board_id",
+              "selector": "#detail-view > .top .meta",
               "property": "text"
             }
           ]
@@ -3764,44 +3923,32 @@
         "assertions": [
           {
             "phase": "before",
-            "path": "/board_detail",
-            "op": "contains",
-            "value": "Sandbox Project"
-          },
-          {
-            "phase": "before",
-            "path": "/board_detail",
-            "op": "contains",
-            "value": "local-central"
-          },
-          {
-            "phase": "before",
-            "path": "/board_detail",
-            "op": "contains",
-            "value": "sandbox-board"
+            "path": "/workspace_card_count",
+            "op": "gt",
+            "value": 0
           },
           {
             "phase": "action",
-            "path": "/fleet_board_detail_metadata_action",
+            "path": "/open_workspace",
             "op": "eq",
-            "value": "observed"
+            "value": "clicked"
           },
           {
             "phase": "after",
-            "path": "/board_detail",
-            "op": "contains",
-            "value": "Sandbox Project"
+            "path": "/detail_visible",
+            "op": "eq",
+            "value": false
           },
           {
             "phase": "after",
-            "path": "/board_detail",
-            "op": "contains",
-            "value": "local-central"
+            "path": "/detail_heading",
+            "op": "eq",
+            "value": "Sandbox Project \u00b7 local-central"
           },
           {
             "phase": "after",
-            "path": "/board_detail",
-            "op": "contains",
+            "path": "/detail_board_id",
+            "op": "eq",
             "value": "sandbox-board"
           }
         ]
@@ -3823,7 +3970,7 @@
         "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; detail payload is truncated.",
         "action": "open workspace",
         "expected_transition": "header discloses returned and total ticket counts",
-        "exact_selection": "assert exact status text and truncated=true precondition",
+        "exact_selection": "open the bounded workspace card and require the exact returned-versus-total ticket notice",
         "negative_counterexample": "bounded view badge without counts is accepted",
         "correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id."
       },
@@ -3836,31 +3983,33 @@
         "recipe": {
           "before": [
             {
-              "path": "/fleet_board_detail_truncation_snapshot_truncated_to_2_of_3_tickets",
-              "selector": "#detail-view",
-              "property": "text"
+              "path": "/bounded_workspace_card_count",
+              "selector": ".boards-list .board-card",
+              "property": "count"
             }
           ],
           "actions": [
             {
-              "kind": "observe",
-              "path": "/fleet_board_detail_truncation_action"
+              "kind": "click",
+              "selector": ".boards-list .board-card .card-actions a.primary-action",
+              "path": "/open_bounded_workspace"
             }
           ],
           "after": [
             {
-              "path": "/fleet_board_detail_truncation_snapshot_truncated_to_2_of_3_tickets",
-              "selector": "#detail-view",
+              "path": "/ticket_limit_notice",
+              "selector": "#detail-view > .top .status",
               "property": "text"
             }
           ],
           "settle_milliseconds": 250
         },
         "select_allowlist": [
-          "/fleet_board_detail_truncation_action",
-          "/fleet_board_detail_truncation_snapshot_truncated_to_2_of_3_tickets"
+          "/bounded_workspace_card_count",
+          "/open_bounded_workspace",
+          "/ticket_limit_notice"
         ],
-        "semantic_basis": "assert exact status text and truncated=true precondition"
+        "semantic_basis": "open the bounded workspace card and require the exact returned-versus-total ticket notice"
       },
       "required_evidence": [
         "trusted exact-candidate/board/runtime evidence from the named adapter",
@@ -3910,21 +4059,22 @@
           "source_id": "browser-state-fleet.board-detail-truncation",
           "before": [
             {
-              "path": "/fleet_board_detail_truncation_snapshot_truncated_to_2_of_3_tickets",
-              "selector": "#detail-view",
-              "property": "text"
+              "path": "/bounded_workspace_card_count",
+              "selector": ".boards-list .board-card",
+              "property": "count"
             }
           ],
           "action": [
             {
-              "kind": "observe",
-              "path": "/fleet_board_detail_truncation_action"
+              "kind": "click",
+              "selector": ".boards-list .board-card .card-actions a.primary-action",
+              "path": "/open_bounded_workspace"
             }
           ],
           "after": [
             {
-              "path": "/fleet_board_detail_truncation_snapshot_truncated_to_2_of_3_tickets",
-              "selector": "#detail-view",
+              "path": "/ticket_limit_notice",
+              "selector": "#detail-view > .top .status",
               "property": "text"
             }
           ]
@@ -3936,21 +4086,21 @@
         "assertions": [
           {
             "phase": "before",
-            "path": "/fleet_board_detail_truncation_snapshot_truncated_to_2_of_3_tickets",
-            "op": "contains",
-            "value": "snapshot truncated to 2 of 3 tickets"
+            "path": "/bounded_workspace_card_count",
+            "op": "gt",
+            "value": 0
           },
           {
             "phase": "action",
-            "path": "/fleet_board_detail_truncation_action",
+            "path": "/open_bounded_workspace",
             "op": "eq",
-            "value": "observed"
+            "value": "clicked"
           },
           {
             "phase": "after",
-            "path": "/fleet_board_detail_truncation_snapshot_truncated_to_2_of_3_tickets",
-            "op": "contains",
-            "value": "snapshot truncated to 2 of 3 tickets"
+            "path": "/ticket_limit_notice",
+            "op": "eq",
+            "value": "2 of 3 tickets shown"
           }
         ]
       }
@@ -5669,7 +5819,7 @@
         "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; seat wizard is open.",
         "action": "set role, tier, skills, review/work flags",
         "expected_transition": "preview payload preserves each capability dimension",
-        "exact_selection": "assert seatPayload exact fields and form values",
+        "exact_selection": "drive the role, tier, skills, review-derived, and explicit work controls and assert every resulting form dimension",
         "negative_counterexample": "role alone is accepted as all capabilities",
         "correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id."
       },
@@ -5682,31 +5832,90 @@
         "recipe": {
           "before": [
             {
-              "path": "/fleet_config_tier_skill_role_capabilities_tier_2",
-              "selector": "#config-view",
-              "property": "text"
+              "path": "/role_before",
+              "selector": "#seat-wizard [name=\"role\"]",
+              "property": "value"
+            },
+            {
+              "path": "/review_before",
+              "selector": "#seat-wizard [name=\"can_review\"]",
+              "property": "checked"
+            },
+            {
+              "path": "/work_before",
+              "selector": "#seat-wizard [name=\"can_work\"]",
+              "property": "checked"
             }
           ],
           "actions": [
             {
-              "kind": "observe",
-              "path": "/fleet_config_tier_skill_role_capabilities_action"
+              "kind": "select",
+              "selector": "#seat-wizard [name=\"role\"]",
+              "value": "reviewer",
+              "path": "/selected_role"
+            },
+            {
+              "kind": "select",
+              "selector": "#seat-wizard [name=\"tier_max\"]",
+              "value": "2",
+              "path": "/selected_tier"
+            },
+            {
+              "kind": "set_value",
+              "selector": "#seat-wizard [name=\"skills\"]",
+              "value": "git,browser",
+              "path": "/entered_skills"
+            },
+            {
+              "kind": "click",
+              "selector": "#seat-wizard [name=\"can_work\"]",
+              "path": "/work_flag_clicked"
             }
           ],
           "after": [
             {
-              "path": "/fleet_config_tier_skill_role_capabilities_tier_2",
-              "selector": "#config-view",
-              "property": "text"
+              "path": "/role_after",
+              "selector": "#seat-wizard [name=\"role\"]",
+              "property": "value"
+            },
+            {
+              "path": "/tier_after",
+              "selector": "#seat-wizard [name=\"tier_max\"]",
+              "property": "value"
+            },
+            {
+              "path": "/skills_after",
+              "selector": "#seat-wizard [name=\"skills\"]",
+              "property": "value"
+            },
+            {
+              "path": "/review_after",
+              "selector": "#seat-wizard [name=\"can_review\"]",
+              "property": "checked"
+            },
+            {
+              "path": "/work_after",
+              "selector": "#seat-wizard [name=\"can_work\"]",
+              "property": "checked"
             }
           ],
           "settle_milliseconds": 250
         },
         "select_allowlist": [
-          "/fleet_config_tier_skill_role_capabilities_action",
-          "/fleet_config_tier_skill_role_capabilities_tier_2"
+          "/entered_skills",
+          "/review_after",
+          "/review_before",
+          "/role_after",
+          "/role_before",
+          "/selected_role",
+          "/selected_tier",
+          "/skills_after",
+          "/tier_after",
+          "/work_after",
+          "/work_before",
+          "/work_flag_clicked"
         ],
-        "semantic_basis": "assert seatPayload exact fields and form values"
+        "semantic_basis": "drive the role, tier, skills, review-derived, and explicit work controls and assert every resulting form dimension"
       },
       "required_evidence": [
         "trusted exact-candidate/board/runtime evidence from the named adapter",
@@ -5756,22 +5965,71 @@
           "source_id": "browser-state-fleet.config-tier-skill-role-capabilities",
           "before": [
             {
-              "path": "/fleet_config_tier_skill_role_capabilities_tier_2",
-              "selector": "#config-view",
-              "property": "text"
+              "path": "/role_before",
+              "selector": "#seat-wizard [name=\"role\"]",
+              "property": "value"
+            },
+            {
+              "path": "/review_before",
+              "selector": "#seat-wizard [name=\"can_review\"]",
+              "property": "checked"
+            },
+            {
+              "path": "/work_before",
+              "selector": "#seat-wizard [name=\"can_work\"]",
+              "property": "checked"
             }
           ],
           "action": [
             {
-              "kind": "observe",
-              "path": "/fleet_config_tier_skill_role_capabilities_action"
+              "kind": "select",
+              "selector": "#seat-wizard [name=\"role\"]",
+              "value": "reviewer",
+              "path": "/selected_role"
+            },
+            {
+              "kind": "select",
+              "selector": "#seat-wizard [name=\"tier_max\"]",
+              "value": "2",
+              "path": "/selected_tier"
+            },
+            {
+              "kind": "set_value",
+              "selector": "#seat-wizard [name=\"skills\"]",
+              "value": "git,browser",
+              "path": "/entered_skills"
+            },
+            {
+              "kind": "click",
+              "selector": "#seat-wizard [name=\"can_work\"]",
+              "path": "/work_flag_clicked"
             }
           ],
           "after": [
             {
-              "path": "/fleet_config_tier_skill_role_capabilities_tier_2",
-              "selector": "#config-view",
-              "property": "text"
+              "path": "/role_after",
+              "selector": "#seat-wizard [name=\"role\"]",
+              "property": "value"
+            },
+            {
+              "path": "/tier_after",
+              "selector": "#seat-wizard [name=\"tier_max\"]",
+              "property": "value"
+            },
+            {
+              "path": "/skills_after",
+              "selector": "#seat-wizard [name=\"skills\"]",
+              "property": "value"
+            },
+            {
+              "path": "/review_after",
+              "selector": "#seat-wizard [name=\"can_review\"]",
+              "property": "checked"
+            },
+            {
+              "path": "/work_after",
+              "selector": "#seat-wizard [name=\"can_work\"]",
+              "property": "checked"
             }
           ]
         }
@@ -5782,21 +6040,75 @@
         "assertions": [
           {
             "phase": "before",
-            "path": "/fleet_config_tier_skill_role_capabilities_tier_2",
-            "op": "contains",
-            "value": "tier 2"
+            "path": "/role_before",
+            "op": "eq",
+            "value": "worker"
+          },
+          {
+            "phase": "before",
+            "path": "/review_before",
+            "op": "eq",
+            "value": false
+          },
+          {
+            "phase": "before",
+            "path": "/work_before",
+            "op": "eq",
+            "value": true
           },
           {
             "phase": "action",
-            "path": "/fleet_config_tier_skill_role_capabilities_action",
+            "path": "/selected_role",
             "op": "eq",
-            "value": "observed"
+            "value": "reviewer"
+          },
+          {
+            "phase": "action",
+            "path": "/selected_tier",
+            "op": "eq",
+            "value": "2"
+          },
+          {
+            "phase": "action",
+            "path": "/entered_skills",
+            "op": "eq",
+            "value": "git,browser"
+          },
+          {
+            "phase": "action",
+            "path": "/work_flag_clicked",
+            "op": "eq",
+            "value": "clicked"
           },
           {
             "phase": "after",
-            "path": "/fleet_config_tier_skill_role_capabilities_tier_2",
-            "op": "contains",
-            "value": "tier 2"
+            "path": "/role_after",
+            "op": "eq",
+            "value": "reviewer"
+          },
+          {
+            "phase": "after",
+            "path": "/tier_after",
+            "op": "eq",
+            "value": "2"
+          },
+          {
+            "phase": "after",
+            "path": "/skills_after",
+            "op": "eq",
+            "value": "git,browser"
+          },
+          {
+            "phase": "after",
+            "path": "/review_after",
+            "op": "eq",
+            "value": true
+          },
+          {
+            "phase": "after",
+            "path": "/work_after",
+            "op": "eq",
+            "value": true
           }
         ]
       }
@@ -6898,13 +7210,13 @@
             "phase": "after",
             "path": "/issued_expiry",
             "op": "ne",
-            "value": "—"
+            "value": "\u2014"
           },
           {
             "phase": "after",
             "path": "/absent_expiry",
             "op": "eq",
-            "value": "—"
+            "value": "\u2014"
           },
           {
             "phase": "after",
@@ -8062,29 +8374,49 @@
         "recipe": {
           "before": [
             {
-              "path": "/fleet_hub_boards_board_workspaces",
-              "selector": "#home-view",
-              "property": "text"
+              "path": "/overview_nav_active",
+              "selector": "[data-nav=\"overview\"].active",
+              "property": "count"
             }
           ],
           "actions": [
             {
-              "kind": "observe",
-              "path": "/fleet_hub_boards_action"
+              "kind": "click",
+              "selector": "[data-nav=\"boards\"]",
+              "path": "/open_boards"
             }
           ],
           "after": [
             {
-              "path": "/fleet_hub_boards_board_workspaces",
-              "selector": "#home-view",
+              "path": "/boards_nav_active",
+              "selector": "[data-nav=\"boards\"].active",
+              "property": "count"
+            },
+            {
+              "path": "/boards_heading",
+              "selector": ".page-head h2",
               "property": "text"
+            },
+            {
+              "path": "/board_card_count",
+              "selector": ".boards-list .board-card",
+              "property": "count"
+            },
+            {
+              "path": "/board_route_action_count",
+              "selector": ".boards-list .board-card .card-actions a",
+              "property": "count"
             }
           ],
           "settle_milliseconds": 250
         },
         "select_allowlist": [
-          "/fleet_hub_boards_action",
-          "/fleet_hub_boards_board_workspaces"
+          "/board_card_count",
+          "/board_route_action_count",
+          "/boards_heading",
+          "/boards_nav_active",
+          "/open_boards",
+          "/overview_nav_active"
         ],
         "semantic_basis": "assert heading plus board-card set"
       },
@@ -8136,22 +8468,38 @@
           "source_id": "browser-state-fleet.hub-boards",
           "before": [
             {
-              "path": "/fleet_hub_boards_board_workspaces",
-              "selector": "#home-view",
-              "property": "text"
+              "path": "/overview_nav_active",
+              "selector": "[data-nav=\"overview\"].active",
+              "property": "count"
             }
           ],
           "action": [
             {
-              "kind": "observe",
-              "path": "/fleet_hub_boards_action"
+              "kind": "click",
+              "selector": "[data-nav=\"boards\"]",
+              "path": "/open_boards"
             }
           ],
           "after": [
             {
-              "path": "/fleet_hub_boards_board_workspaces",
-              "selector": "#home-view",
+              "path": "/boards_nav_active",
+              "selector": "[data-nav=\"boards\"].active",
+              "property": "count"
+            },
+            {
+              "path": "/boards_heading",
+              "selector": ".page-head h2",
               "property": "text"
+            },
+            {
+              "path": "/board_card_count",
+              "selector": ".boards-list .board-card",
+              "property": "count"
+            },
+            {
+              "path": "/board_route_action_count",
+              "selector": ".boards-list .board-card .card-actions a",
+              "property": "count"
             }
           ]
         }
@@ -8162,21 +8510,39 @@
         "assertions": [
           {
             "phase": "before",
-            "path": "/fleet_hub_boards_board_workspaces",
-            "op": "contains",
-            "value": "Board workspaces"
+            "path": "/overview_nav_active",
+            "op": "eq",
+            "value": 1
           },
           {
             "phase": "action",
-            "path": "/fleet_hub_boards_action",
+            "path": "/open_boards",
             "op": "eq",
-            "value": "observed"
+            "value": "clicked"
           },
           {
             "phase": "after",
-            "path": "/fleet_hub_boards_board_workspaces",
-            "op": "contains",
+            "path": "/boards_nav_active",
+            "op": "eq",
+            "value": 1
+          },
+          {
+            "phase": "after",
+            "path": "/boards_heading",
+            "op": "eq",
             "value": "Board workspaces"
+          },
+          {
+            "phase": "after",
+            "path": "/board_card_count",
+            "op": "gt",
+            "value": 0
+          },
+          {
+            "phase": "after",
+            "path": "/board_route_action_count",
+            "op": "gte",
+            "value": 5
           }
         ]
       }
@@ -8802,7 +9168,7 @@
         "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; an operations job reaches terminal state.",
         "action": "allow job watcher to refresh",
         "expected_transition": "terminal operation output survives Fleet refresh and distinguishes success effect from failure with no success effect",
-        "exact_selection": "assert exact Outcome and Effect text after terminal refresh for both status branches",
+        "exact_selection": "require an actual job poll and ensuing Fleet seat refresh, then require the persisted succeeded outcome and its success-only effect",
         "negative_counterexample": "terminal output visible only before the immediate refresh or a running job is accepted",
         "correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id."
       },
@@ -8815,20 +9181,28 @@
         "recipe": {
           "before": [
             {
-              "path": "/fleet_operations_job_result_effect",
+              "path": "/job_output_before",
               "selector": "#ops-output",
               "property": "text"
             }
           ],
           "actions": [
             {
-              "kind": "observe",
-              "path": "/fleet_operations_job_result_action"
+              "kind": "resource_delta",
+              "endpoint": "/api/config/jobs/00000000000000000000000000000000",
+              "milliseconds": 1500,
+              "path": "/job_poll_count"
+            },
+            {
+              "kind": "resource_delta",
+              "endpoint": "/api/config/seats",
+              "milliseconds": 1500,
+              "path": "/fleet_refresh_count"
             }
           ],
           "after": [
             {
-              "path": "/fleet_operations_job_result_effect",
+              "path": "/terminal_output",
               "selector": "#ops-output",
               "property": "text"
             }
@@ -8836,10 +9210,12 @@
           "settle_milliseconds": 250
         },
         "select_allowlist": [
-          "/fleet_operations_job_result_action",
-          "/fleet_operations_job_result_effect"
+          "/fleet_refresh_count",
+          "/job_output_before",
+          "/job_poll_count",
+          "/terminal_output"
         ],
-        "semantic_basis": "assert exact Outcome and Effect text after terminal refresh for both status branches"
+        "semantic_basis": "require an actual job poll and ensuing Fleet seat refresh, then require the persisted succeeded outcome and its success-only effect"
       },
       "required_evidence": [
         "trusted exact-candidate/board/runtime evidence from the named adapter",
@@ -8889,20 +9265,28 @@
           "source_id": "browser-state-fleet.operations-job-result",
           "before": [
             {
-              "path": "/fleet_operations_job_result_effect",
+              "path": "/job_output_before",
               "selector": "#ops-output",
               "property": "text"
             }
           ],
           "action": [
             {
-              "kind": "observe",
-              "path": "/fleet_operations_job_result_action"
+              "kind": "resource_delta",
+              "endpoint": "/api/config/jobs/00000000000000000000000000000000",
+              "milliseconds": 1500,
+              "path": "/job_poll_count"
+            },
+            {
+              "kind": "resource_delta",
+              "endpoint": "/api/config/seats",
+              "milliseconds": 1500,
+              "path": "/fleet_refresh_count"
             }
           ],
           "after": [
             {
-              "path": "/fleet_operations_job_result_effect",
+              "path": "/terminal_output",
               "selector": "#ops-output",
               "property": "text"
             }
@@ -8915,21 +9299,33 @@
         "assertions": [
           {
             "phase": "before",
-            "path": "/fleet_operations_job_result_effect",
+            "path": "/job_output_before",
             "op": "contains",
-            "value": "Effect:"
+            "value": "Streaming output"
           },
           {
             "phase": "action",
-            "path": "/fleet_operations_job_result_action",
-            "op": "eq",
-            "value": "observed"
+            "path": "/job_poll_count",
+            "op": "gt",
+            "value": 0
+          },
+          {
+            "phase": "action",
+            "path": "/fleet_refresh_count",
+            "op": "gt",
+            "value": 0
           },
           {
             "phase": "after",
-            "path": "/fleet_operations_job_result_effect",
+            "path": "/terminal_output",
             "op": "contains",
-            "value": "Effect:"
+            "value": "Outcome: succeeded"
+          },
+          {
+            "phase": "after",
+            "path": "/terminal_output",
+            "op": "contains",
+            "value": "Effect: operation completed; Fleet state refreshed."
           }
         ]
       }
@@ -12123,9 +12519,9 @@
       },
       "causal": {
         "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; location hash is malformed or unknown.",
-        "action": "trigger hashchange",
+        "action": "allow the malformed-hash startup/hashchange handler to settle",
         "expected_transition": "route returns null and hub falls back to overview without unsafe decoding",
-        "exact_selection": "assert overview visible and no detail fetch",
+        "exact_selection": "from the connecting state, wait for route handling and require visible active Overview with no detail content",
         "negative_counterexample": "a JavaScript exception or blank page is accepted",
         "correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id."
       },
@@ -12138,31 +12534,51 @@
         "recipe": {
           "before": [
             {
-              "path": "/fleet_unknown_route_recovery_fleet_overview",
-              "selector": "#home-view",
+              "path": "/startup_state",
+              "selector": "#state",
               "property": "text"
             }
           ],
           "actions": [
             {
-              "kind": "observe",
-              "path": "/fleet_unknown_route_recovery_action"
+              "kind": "wait",
+              "milliseconds": 250,
+              "path": "/route_settle"
             }
           ],
           "after": [
             {
-              "path": "/fleet_unknown_route_recovery_fleet_overview",
+              "path": "/overview_visible",
               "selector": "#home-view",
+              "property": "hidden"
+            },
+            {
+              "path": "/overview_nav_active_after",
+              "selector": "[data-nav=\"overview\"].active",
+              "property": "count"
+            },
+            {
+              "path": "/overview_heading",
+              "selector": ".page-head h2",
               "property": "text"
+            },
+            {
+              "path": "/detail_content_count",
+              "selector": "#detail-view > *",
+              "property": "count"
             }
           ],
           "settle_milliseconds": 250
         },
         "select_allowlist": [
-          "/fleet_unknown_route_recovery_action",
-          "/fleet_unknown_route_recovery_fleet_overview"
+          "/detail_content_count",
+          "/overview_heading",
+          "/overview_nav_active_after",
+          "/overview_visible",
+          "/route_settle",
+          "/startup_state"
         ],
-        "semantic_basis": "assert overview visible and no detail fetch"
+        "semantic_basis": "from the connecting state, wait for route handling and require visible active Overview with no detail content"
       },
       "required_evidence": [
         "trusted exact-candidate/board/runtime evidence from the named adapter",
@@ -12212,22 +12628,38 @@
           "source_id": "browser-state-fleet.unknown-route-recovery",
           "before": [
             {
-              "path": "/fleet_unknown_route_recovery_fleet_overview",
-              "selector": "#home-view",
+              "path": "/startup_state",
+              "selector": "#state",
               "property": "text"
             }
           ],
           "action": [
             {
-              "kind": "observe",
-              "path": "/fleet_unknown_route_recovery_action"
+              "kind": "wait",
+              "milliseconds": 250,
+              "path": "/route_settle"
             }
           ],
           "after": [
             {
-              "path": "/fleet_unknown_route_recovery_fleet_overview",
+              "path": "/overview_visible",
               "selector": "#home-view",
+              "property": "hidden"
+            },
+            {
+              "path": "/overview_nav_active_after",
+              "selector": "[data-nav=\"overview\"].active",
+              "property": "count"
+            },
+            {
+              "path": "/overview_heading",
+              "selector": ".page-head h2",
               "property": "text"
+            },
+            {
+              "path": "/detail_content_count",
+              "selector": "#detail-view > *",
+              "property": "count"
             }
           ]
         }
@@ -12238,21 +12670,39 @@
         "assertions": [
           {
             "phase": "before",
-            "path": "/fleet_unknown_route_recovery_fleet_overview",
+            "path": "/startup_state",
             "op": "contains",
-            "value": "Fleet overview"
+            "value": "Connecting"
           },
           {
             "phase": "action",
-            "path": "/fleet_unknown_route_recovery_action",
+            "path": "/route_settle",
             "op": "eq",
-            "value": "observed"
+            "value": 250
           },
           {
             "phase": "after",
-            "path": "/fleet_unknown_route_recovery_fleet_overview",
-            "op": "contains",
+            "path": "/overview_visible",
+            "op": "eq",
+            "value": false
+          },
+          {
+            "phase": "after",
+            "path": "/overview_nav_active_after",
+            "op": "eq",
+            "value": 1
+          },
+          {
+            "phase": "after",
+            "path": "/overview_heading",
+            "op": "eq",
             "value": "Fleet overview"
+          },
+          {
+            "phase": "after",
+            "path": "/detail_content_count",
+            "op": "eq",
+            "value": 0
           }
         ]
       }
@@ -12550,29 +13000,43 @@
         "recipe": {
           "before": [
             {
-              "path": "/personal_activity_bounded_feed_200_retained",
-              "selector": "#activity-total",
-              "property": "text"
+              "path": "/activity_view_hidden_before",
+              "selector": "#view-activity",
+              "property": "hidden"
             }
           ],
           "actions": [
             {
-              "kind": "observe",
-              "path": "/personal_activity_bounded_feed_action"
+              "kind": "click",
+              "selector": "#tab-activity",
+              "path": "/open_activity"
             }
           ],
           "after": [
             {
-              "path": "/personal_activity_bounded_feed_200_retained",
+              "path": "/activity_view_hidden_after",
+              "selector": "#view-activity",
+              "property": "hidden"
+            },
+            {
+              "path": "/retained_total",
               "selector": "#activity-total",
               "property": "text"
+            },
+            {
+              "path": "/retained_event_count",
+              "selector": "#activity-list .timeline-item",
+              "property": "count"
             }
           ],
           "settle_milliseconds": 250
         },
         "select_allowlist": [
-          "/personal_activity_bounded_feed_200_retained",
-          "/personal_activity_bounded_feed_action"
+          "/activity_view_hidden_after",
+          "/activity_view_hidden_before",
+          "/open_activity",
+          "/retained_event_count",
+          "/retained_total"
         ],
         "semantic_basis": "inject 201 unique events and assert #activity-total is '200 retained'"
       },
@@ -12624,22 +13088,33 @@
           "source_id": "browser-state-personal.activity-bounded-feed",
           "before": [
             {
-              "path": "/personal_activity_bounded_feed_200_retained",
-              "selector": "#activity-total",
-              "property": "text"
+              "path": "/activity_view_hidden_before",
+              "selector": "#view-activity",
+              "property": "hidden"
             }
           ],
           "action": [
             {
-              "kind": "observe",
-              "path": "/personal_activity_bounded_feed_action"
+              "kind": "click",
+              "selector": "#tab-activity",
+              "path": "/open_activity"
             }
           ],
           "after": [
             {
-              "path": "/personal_activity_bounded_feed_200_retained",
+              "path": "/activity_view_hidden_after",
+              "selector": "#view-activity",
+              "property": "hidden"
+            },
+            {
+              "path": "/retained_total",
               "selector": "#activity-total",
               "property": "text"
+            },
+            {
+              "path": "/retained_event_count",
+              "selector": "#activity-list .timeline-item",
+              "property": "count"
             }
           ]
         }
@@ -12650,21 +13125,33 @@
         "assertions": [
           {
             "phase": "before",
-            "path": "/personal_activity_bounded_feed_200_retained",
-            "op": "contains",
-            "value": "200 retained"
+            "path": "/activity_view_hidden_before",
+            "op": "eq",
+            "value": true
           },
           {
             "phase": "action",
-            "path": "/personal_activity_bounded_feed_action",
+            "path": "/open_activity",
             "op": "eq",
-            "value": "observed"
+            "value": "clicked"
           },
           {
             "phase": "after",
-            "path": "/personal_activity_bounded_feed_200_retained",
-            "op": "contains",
+            "path": "/activity_view_hidden_after",
+            "op": "eq",
+            "value": false
+          },
+          {
+            "phase": "after",
+            "path": "/retained_total",
+            "op": "eq",
             "value": "200 retained"
+          },
+          {
+            "phase": "after",
+            "path": "/retained_event_count",
+            "op": "eq",
+            "value": 200
           }
         ]
       }
@@ -13574,9 +14061,9 @@
       },
       "causal": {
         "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; the Host bridge is not connected and fallback demo is rendered.",
-        "action": "inspect the connection banner",
+        "action": "wait for the disconnected bridge fallback snapshot to render",
         "expected_transition": "the banner identifies demo data and Central unavailable",
-        "exact_selection": "assert #connection-title equals 'Demo data — Central unavailable' and tone demo",
+        "exact_selection": "assert #connection-title equals 'Demo data \u2014 Central unavailable' and tone demo",
         "negative_counterexample": "a stale live snapshot is relabelled as offline",
         "correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id."
       },
@@ -13589,31 +14076,39 @@
         "recipe": {
           "before": [
             {
-              "path": "/personal_activity_offline_demo_data_u2014_central_unavailable",
+              "path": "/connection_title_before",
               "selector": "#connection-title",
               "property": "text"
             }
           ],
           "actions": [
             {
-              "kind": "observe",
-              "path": "/personal_activity_offline_action"
+              "kind": "wait",
+              "milliseconds": 250,
+              "path": "/offline_render_wait"
             }
           ],
           "after": [
             {
-              "path": "/personal_activity_offline_demo_data_u2014_central_unavailable",
+              "path": "/offline_title",
               "selector": "#connection-title",
               "property": "text"
+            },
+            {
+              "path": "/demo_tone_count",
+              "selector": "#connection-banner[data-tone=\"demo\"]",
+              "property": "count"
             }
           ],
           "settle_milliseconds": 250
         },
         "select_allowlist": [
-          "/personal_activity_offline_action",
-          "/personal_activity_offline_demo_data_u2014_central_unavailable"
+          "/connection_title_before",
+          "/demo_tone_count",
+          "/offline_render_wait",
+          "/offline_title"
         ],
-        "semantic_basis": "assert #connection-title equals 'Demo data — Central unavailable' and tone demo"
+        "semantic_basis": "assert #connection-title equals 'Demo data \u2014 Central unavailable' and tone demo"
       },
       "required_evidence": [
         "trusted exact-candidate/board/runtime evidence from the named adapter",
@@ -13663,22 +14158,28 @@
           "source_id": "browser-state-personal.activity-offline",
           "before": [
             {
-              "path": "/personal_activity_offline_demo_data_u2014_central_unavailable",
+              "path": "/connection_title_before",
               "selector": "#connection-title",
               "property": "text"
             }
           ],
           "action": [
             {
-              "kind": "observe",
-              "path": "/personal_activity_offline_action"
+              "kind": "wait",
+              "milliseconds": 250,
+              "path": "/offline_render_wait"
             }
           ],
           "after": [
             {
-              "path": "/personal_activity_offline_demo_data_u2014_central_unavailable",
+              "path": "/offline_title",
               "selector": "#connection-title",
               "property": "text"
+            },
+            {
+              "path": "/demo_tone_count",
+              "selector": "#connection-banner[data-tone=\"demo\"]",
+              "property": "count"
             }
           ]
         }
@@ -13689,21 +14190,27 @@
         "assertions": [
           {
             "phase": "before",
-            "path": "/personal_activity_offline_demo_data_u2014_central_unavailable",
-            "op": "contains",
-            "value": "Demo data — Central unavailable"
+            "path": "/connection_title_before",
+            "op": "eq",
+            "value": "Loading board"
           },
           {
             "phase": "action",
-            "path": "/personal_activity_offline_action",
+            "path": "/offline_render_wait",
             "op": "eq",
-            "value": "observed"
+            "value": 250
           },
           {
             "phase": "after",
-            "path": "/personal_activity_offline_demo_data_u2014_central_unavailable",
-            "op": "contains",
-            "value": "Demo data — Central unavailable"
+            "path": "/offline_title",
+            "op": "eq",
+            "value": "Demo data \u2014 Central unavailable"
+          },
+          {
+            "phase": "after",
+            "path": "/demo_tone_count",
+            "op": "eq",
+            "value": 1
           }
         ]
       }
@@ -13737,29 +14244,37 @@
         "recipe": {
           "before": [
             {
-              "path": "/personal_activity_stale_showing_the_last_known_local_state",
+              "path": "/stale_title_before",
               "selector": "#connection-title",
               "property": "text"
             }
           ],
           "actions": [
             {
-              "kind": "observe",
-              "path": "/personal_activity_stale_action"
+              "kind": "wait",
+              "milliseconds": 250,
+              "path": "/stale_render_wait"
             }
           ],
           "after": [
             {
-              "path": "/personal_activity_stale_showing_the_last_known_local_state",
+              "path": "/stale_title",
               "selector": "#connection-title",
               "property": "text"
+            },
+            {
+              "path": "/stale_or_error_tone_count",
+              "selector": "#connection-banner[data-tone=\"stale\"], #connection-banner[data-tone=\"error\"]",
+              "property": "count"
             }
           ],
           "settle_milliseconds": 250
         },
         "select_allowlist": [
-          "/personal_activity_stale_action",
-          "/personal_activity_stale_showing_the_last_known_local_state"
+          "/stale_or_error_tone_count",
+          "/stale_render_wait",
+          "/stale_title",
+          "/stale_title_before"
         ],
         "semantic_basis": "assert #connection-title exact text and tone stale or error"
       },
@@ -13811,22 +14326,28 @@
           "source_id": "browser-state-personal.activity-stale",
           "before": [
             {
-              "path": "/personal_activity_stale_showing_the_last_known_local_state",
+              "path": "/stale_title_before",
               "selector": "#connection-title",
               "property": "text"
             }
           ],
           "action": [
             {
-              "kind": "observe",
-              "path": "/personal_activity_stale_action"
+              "kind": "wait",
+              "milliseconds": 250,
+              "path": "/stale_render_wait"
             }
           ],
           "after": [
             {
-              "path": "/personal_activity_stale_showing_the_last_known_local_state",
+              "path": "/stale_title",
               "selector": "#connection-title",
               "property": "text"
+            },
+            {
+              "path": "/stale_or_error_tone_count",
+              "selector": "#connection-banner[data-tone=\"stale\"], #connection-banner[data-tone=\"error\"]",
+              "property": "count"
             }
           ]
         }
@@ -13837,21 +14358,27 @@
         "assertions": [
           {
             "phase": "before",
-            "path": "/personal_activity_stale_showing_the_last_known_local_state",
-            "op": "contains",
-            "value": "Showing the last known local state"
+            "path": "/stale_title_before",
+            "op": "eq",
+            "value": "Loading board"
           },
           {
             "phase": "action",
-            "path": "/personal_activity_stale_action",
+            "path": "/stale_render_wait",
             "op": "eq",
-            "value": "observed"
+            "value": 250
           },
           {
             "phase": "after",
-            "path": "/personal_activity_stale_showing_the_last_known_local_state",
-            "op": "contains",
+            "path": "/stale_title",
+            "op": "eq",
             "value": "Showing the last known local state"
+          },
+          {
+            "phase": "after",
+            "path": "/stale_or_error_tone_count",
+            "op": "eq",
+            "value": 1
           }
         ]
       }
@@ -14199,7 +14726,7 @@
             "phase": "after",
             "path": "/personal_agents_duplicate_identity_duplicate_active_name_u2014_pick_a_unique_agent_",
             "op": "contains",
-            "value": "Duplicate active name — pick a unique agent name."
+            "value": "Duplicate active name \u2014 pick a unique agent name."
           },
           {
             "phase": "after",
@@ -17528,7 +18055,7 @@
         "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; returned node and edge counts are distinct.",
         "action": "open Activity > Links",
         "expected_transition": "#links-total exposes both returned counts",
-        "exact_selection": "assert exact text such as '2 memories · 3 links'",
+        "exact_selection": "assert exact text such as '2 memories \u00b7 3 links'",
         "negative_counterexample": "source totals node_count/edge_count or only one count is accepted",
         "correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id."
       },
@@ -17577,7 +18104,7 @@
           "/personal_links_node_edge_totals_action",
           "/personal_links_node_edge_totals_target_hidden"
         ],
-        "semantic_basis": "assert exact text such as '2 memories · 3 links'"
+        "semantic_basis": "assert exact text such as '2 memories \u00b7 3 links'"
       },
       "required_evidence": [
         "trusted exact-candidate/board/runtime evidence from the named adapter",
@@ -17678,7 +18205,7 @@
             "phase": "after",
             "path": "/personal_links_node_edge_totals_2_memories_u00b7_3_links",
             "op": "contains",
-            "value": "2 memories · 3 links"
+            "value": "2 memories \u00b7 3 links"
           },
           {
             "phase": "after",
@@ -18043,7 +18570,7 @@
             "phase": "after",
             "path": "/personal_links_source_label_authoritative_u00b7_memory_graph",
             "op": "contains",
-            "value": "Authoritative · memory_graph"
+            "value": "Authoritative \u00b7 memory_graph"
           },
           {
             "phase": "after",
@@ -20171,7 +20698,7 @@
       "causal": {
         "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; a ticket has abandoned_count=2.",
         "action": "open Work",
-        "expected_transition": "its card exposes 'abandoned ×2' with attention tone",
+        "expected_transition": "its card exposes 'abandoned \u00d72' with attention tone",
         "exact_selection": "assert exact pill in the keyed ticket card",
         "negative_counterexample": "rejected status or rejection_count is accepted",
         "correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id."
@@ -20322,7 +20849,7 @@
             "phase": "after",
             "path": "/personal_work_abandonment_abandoned_u00d72",
             "op": "contains",
-            "value": "abandoned ×2"
+            "value": "abandoned \u00d72"
           },
           {
             "phase": "after",
