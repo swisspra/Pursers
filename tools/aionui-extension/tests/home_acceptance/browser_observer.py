@@ -91,6 +91,7 @@ TRANSITION_ACTION_KEYS = {
     "submit": {"kind", "selector", "path"},
     "press_key": {"kind", "selector", "key", "path"},
     "wait": {"kind", "milliseconds", "path"},
+    "resource_delta": {"kind", "endpoint", "milliseconds", "path"},
     "fetch": {"kind", "method", "endpoint", "body", "path"},
     "fetch_json": {
         "kind", "method", "endpoint", "body", "pointer", "path",
@@ -1123,6 +1124,16 @@ const transitionResult = await cdp('Runtime.evaluate', {
       else if (spec.kind === 'wait') {
         await new Promise(resolve => setTimeout(resolve, spec.milliseconds))
         action[spec.path] = spec.milliseconds
+      } else if (spec.kind === 'resource_delta') {
+        const startedAt = performance.now()
+        await new Promise(resolve => setTimeout(resolve, spec.milliseconds))
+        action[spec.path] = performance.getEntriesByType('resource').filter(entry => {
+          try {
+            const url = new URL(entry.name, window.location.href)
+            return entry.startTime >= startedAt && url.origin === window.location.origin
+              && url.pathname === spec.endpoint
+          } catch (_error) { return false }
+        }).length
       } else if (spec.kind === 'fetch' || spec.kind === 'fetch_json') {
         const init = { method: spec.method, credentials: 'same-origin', cache: 'no-store', headers: { accept: 'application/json' } }
         if (spec.body !== null) {
@@ -1408,12 +1419,20 @@ def _validate_transition_actions(value: Any) -> list[dict[str, Any]]:
             "Escape",
         }:
             raise _fail(EXIT_USAGE, "transition key action is invalid")
-        if kind == "wait" and (
+        if kind in {"wait", "resource_delta"} and (
             not isinstance(item["milliseconds"], int)
             or isinstance(item["milliseconds"], bool)
             or not 0 <= item["milliseconds"] <= 10_000
         ):
             raise _fail(EXIT_USAGE, "transition wait is invalid")
+        if kind == "resource_delta" and (
+            not isinstance(item["endpoint"], str)
+            or not item["endpoint"].startswith("/")
+            or item["endpoint"].startswith("//")
+            or "?" in item["endpoint"]
+            or "#" in item["endpoint"]
+        ):
+            raise _fail(EXIT_USAGE, "transition resource endpoint is invalid")
         if kind in {"fetch", "fetch_json"} and (
             item["method"] not in {"GET", "POST", "PUT", "PATCH", "DELETE"}
             or not isinstance(item["endpoint"], str)

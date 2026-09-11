@@ -417,6 +417,7 @@ def test_real_add_project_handler_emits_steps_and_actual_registry_transition(
         action_id="add-project",
         entity="demo",
     )
+    door_digest_before = dashboard._door_material_digest(config, "sandbox-board")
     try:
         status, result, response_headers = _call(
             base_url,
@@ -425,6 +426,37 @@ def test_real_add_project_handler_emits_steps_and_actual_registry_transition(
             body=action,
             headers={**trace_headers, "Origin": base_url},
         )
+        door_state_after_create = {
+            path.relative_to(tmp_path): path.read_bytes()
+            for path in tmp_path.rglob("*")
+            if path.is_file()
+            and (
+                path == config.jwks_path
+                or config.doors_keys_dir in path.parents
+            )
+        }
+        rerun_headers = _headers(
+            action,
+            observation_id="fleet.add-project-idempotent-rerun",
+            action_id="add-project-rerun",
+            entity="demo",
+        )
+        rerun_status, rerun_result, rerun_response_headers = _call(
+            base_url,
+            "POST",
+            path="/api/projects/add",
+            body=action,
+            headers={**rerun_headers, "Origin": base_url},
+        )
+        door_state_after_rerun = {
+            path.relative_to(tmp_path): path.read_bytes()
+            for path in tmp_path.rglob("*")
+            if path.is_file()
+            and (
+                path == config.jwks_path
+                or config.doors_keys_dir in path.parents
+            )
+        }
 
         failed_action = json.dumps(
             {
@@ -548,10 +580,23 @@ def test_real_add_project_handler_emits_steps_and_actual_registry_transition(
     assert evidence["outcome"] == "succeeded"
     assert evidence["effect"] == "project_state_changed"
     assert evidence["before_sha256"] == hashlib.sha256(
-        dashboard._json_bytes({"project": None})
+        json.dumps(
+            {"project": None, "door_material_sha256": door_digest_before},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
     ).hexdigest()
     assert evidence["after_sha256"] == hashlib.sha256(
-        dashboard._json_bytes({"project": central.registry["projects"]["demo"]})
+        json.dumps(
+            {
+                "project": central.registry["projects"]["demo"],
+                "door_material_sha256": dashboard._door_material_digest(
+                    config, "sandbox-board"
+                ),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
     ).hexdigest()
     original_result = {key: value for key, value in result.items() if key != "_evidence"}
     assert evidence["result_sha256"] == hashlib.sha256(
@@ -561,6 +606,25 @@ def test_real_add_project_handler_emits_steps_and_actual_registry_transition(
     assert context is not None
     for key, header in dashboard.CORRELATION_HEADERS.items():
         assert response_headers[header] == getattr(context, key)
+
+    assert rerun_status == 200
+    assert rerun_result["doors"] is None
+    assert rerun_result["steps"][5] == {
+        "step": "door_credentials",
+        "status": "already present",
+        "message": "Door credentials already present; no credentials changed.",
+    }
+    assert rerun_result["_evidence"]["changed"] is False
+    assert rerun_result["_evidence"]["effect"] == "project_state_unchanged"
+    assert (
+        rerun_result["_evidence"]["before_sha256"]
+        == rerun_result["_evidence"]["after_sha256"]
+    )
+    assert door_state_after_create == door_state_after_rerun
+    rerun_context = trace.context(rerun_headers, "POST", "/api/projects/add")
+    assert rerun_context is not None
+    for key, header in dashboard.CORRELATION_HEADERS.items():
+        assert rerun_response_headers[header] == getattr(rerun_context, key)
 
     assert failed_status == 400
     assert failed["error"] == "work_dir must be an absolute path"
@@ -580,6 +644,7 @@ def test_real_add_project_handler_emits_steps_and_actual_registry_transition(
     records = [json.loads(line) for line in output.read_text().splitlines()]
     assert [record["action_id"] for record in records] == [
         "add-project",
+        "add-project-rerun",
         "invalid-work-dir",
     ]
     serialized = output.read_text(encoding="utf-8")

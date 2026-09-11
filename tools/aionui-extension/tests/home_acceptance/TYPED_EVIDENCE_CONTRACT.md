@@ -78,12 +78,20 @@ trust pins the installed `browser_observer.py` plus `observer.json`, surface,
 origin, page, candidate, board, and a closed recipe. Recipes allow only bounded
 DOM reads (`text`, `value`, `checked`, `disabled`, `count`, `class`, `hidden`)
 and the explicit actions `observe`, `click`, `set_value`, `select`, `submit`,
-the closed navigation-key action `press_key`, `wait`, same-origin `fetch`, and
+the closed navigation-key action `press_key`, `wait`, bounded same-origin
+`resource_delta`, same-origin `fetch`, and
 same-origin `fetch_json`. The latter selects one required RFC 6901 JSON pointer
 from the real `{status, body}` response envelope and fails if it is absent;
 this permits exact structured action-result assertions without retaining a
 whole response or request credential. Arbitrary script expressions and
 arbitrary key strings are not accepted.
+
+`resource_delta` waits at most ten seconds and counts resource-timing entries
+started during that exact window whose origin is the loaded page origin and
+whose pathname exactly matches the configured endpoint. It records only the
+integer count, never URLs, headers, request bodies, or response bodies. This
+supports causal pause/resume evidence: a paused window must record zero matching
+refreshes, followed by a post-resume window with at least one matching refresh.
 
 For a page-owned cross-origin helper request, `click_response_json` clicks one
 real control, temporarily observes the single matching method/path response

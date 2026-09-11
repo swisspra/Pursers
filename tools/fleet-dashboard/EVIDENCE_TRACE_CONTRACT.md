@@ -96,8 +96,14 @@ trace stores hashes, never registry data, request data, door strings, or paths.
 
 The actual handler derives `status`, `outcome`, `changed`, `effect`,
 `before_sha256`, `after_sha256`, and `result_sha256` after invoking the existing
-operation. `result_sha256` covers the original product response before the
-`_evidence` member is added. Caller request fields never select those values.
+operation. For Add project, the opaque before/after state digest covers both the
+named registry entry and a nested digest of the exact persisted worker/reviewer
+public JWK plus private-key bytes for that board. Neither credential bytes,
+their direct hashes, nor filesystem paths leave the process. Credential-changing
+door operations share the traced project-operation lock, so an unrelated rotate
+cannot be attributed to an idempotent rerun. `result_sha256` covers the original
+product response before the `_evidence` member is added. Caller request fields
+never select those values.
 Effects are `attention_state_changed|attention_state_unchanged` for attention
 and `project_state_changed|project_state_unchanged` for add-project. The record
 field set is unchanged.

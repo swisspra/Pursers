@@ -1223,6 +1223,52 @@ def _json_bytes(value: Any) -> bytes:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
 
+def _door_material_digest(config: Config, board_id: str) -> str:
+    """Hash exact persisted door material without returning its bytes or paths."""
+    keys_dir = config.doors_keys_dir
+    jwks_path = config.jwks_path
+    if keys_dir is None or jwks_path is None:
+        raise ValueError("door credential storage is not configured")
+    resolved_keys = Path(keys_dir).expanduser().resolve()
+    resolved_jwks = Path(jwks_path).expanduser().resolve()
+    document = (
+        json.loads(resolved_jwks.read_text(encoding="utf-8"))
+        if resolved_jwks.exists()
+        else {"keys": []}
+    )
+    if not isinstance(document, dict) or not isinstance(document.get("keys"), list):
+        raise ValueError("door credential JWKS is invalid")
+    material: list[dict[str, Any]] = []
+    for item in document["keys"]:
+        metadata = item.get(door_admin.METADATA_KEY) if isinstance(item, dict) else None
+        kid = item.get("kid") if isinstance(item, dict) else None
+        if (
+            not isinstance(metadata, dict)
+            or metadata.get("board") != board_id
+            or metadata.get("role") not in door_admin.VALID_ROLES
+            or not isinstance(kid, str)
+            or not door_admin.KID_RE.fullmatch(kid)
+        ):
+            continue
+        key_path = resolved_keys / f"{kid}.pem"
+        info = key_path.lstat()
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or stat.S_IMODE(info.st_mode) != 0o600
+            or key_path.parent != resolved_keys
+        ):
+            raise ValueError("door credential key is not a private regular file")
+        material.append({
+            "kid": kid,
+            "role": metadata["role"],
+            "public_jwk": item,
+            "private_key_sha256": hashlib.sha256(key_path.read_bytes()).hexdigest(),
+        })
+    return hashlib.sha256(
+        json.dumps(material, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
 def bridge_stats_path() -> Path:
     configured = os.environ.get("PURSERS_BRIDGE_STATS", "").strip()
     return (
@@ -6935,7 +6981,13 @@ def make_handler(
                 projects = registry.get("projects") if isinstance(registry, dict) else None
                 if not isinstance(projects, dict):
                     raise ValueError("project registry has no projects mapping")
-                return {"project": copy.deepcopy(projects.get(context.entity))}
+                label = cache.resolve_central(central)
+                return {
+                    "project": copy.deepcopy(projects.get(context.entity)),
+                    "door_material_sha256": _door_material_digest(
+                        cache.fetchers[label].config, request["board_id"]
+                    ),
+                }
             except Exception:  # noqa: BLE001 - tracing must stay fail-passive.
                 self._evidence_context = None
                 return None
@@ -7558,25 +7610,37 @@ def make_handler(
                 elif route == "/api/doors/copy":
                     if not isinstance(request, dict) or set(request) != {"board", "role"}:
                         raise ValueError("request must contain only board and role")
-                    body = _json_bytes(
-                        cache_call(
-                            "copy_door",
-                            request["board"],
-                            request["role"],
-                            central=central,
-                        )
+                    lock = (
+                        project_operation_lock
+                        if evidence_trace is not None
+                        else nullcontext()
                     )
+                    with lock:
+                        body = _json_bytes(
+                            cache_call(
+                                "copy_door",
+                                request["board"],
+                                request["role"],
+                                central=central,
+                            )
+                        )
                 elif route == "/api/doors/rotate":
                     if not isinstance(request, dict) or set(request) != {"board", "role"}:
                         raise ValueError("request must contain only board and role")
-                    body = _json_bytes(
-                        cache_call(
-                            "rotate_door",
-                            request["board"],
-                            request["role"],
-                            central=central,
-                        )
+                    lock = (
+                        project_operation_lock
+                        if evidence_trace is not None
+                        else nullcontext()
                     )
+                    with lock:
+                        body = _json_bytes(
+                            cache_call(
+                                "rotate_door",
+                                request["board"],
+                                request["role"],
+                                central=central,
+                            )
+                        )
                 elif route == "/api/projects/add":
                     if not isinstance(request, dict):
                         raise ValueError("request must be an object")

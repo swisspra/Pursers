@@ -744,6 +744,22 @@ def test_typed_browser_transition_rejects_multiple_response_captures() -> None:
         observer_module._read_transition_spec(io.StringIO(json.dumps(spec)))
 
 
+def test_typed_browser_transition_accepts_bounded_resource_delta() -> None:
+    spec = _transition_spec()
+    spec["recipe"]["actions"] = [{
+        "kind": "resource_delta",
+        "endpoint": "/api/fleet",
+        "milliseconds": 5_100,
+        "path": "/paused_refresh_count",
+    }]
+    parsed = observer_module._read_transition_spec(io.StringIO(json.dumps(spec)))
+    assert parsed["recipe"]["actions"] == spec["recipe"]["actions"]
+
+    spec["recipe"]["actions"][0]["endpoint"] = "/api/fleet?central=work"
+    with pytest.raises(observer_module.ObserverError, match="resource endpoint is invalid"):
+        observer_module._read_transition_spec(io.StringIO(json.dumps(spec)))
+
+
 def test_ego_transition_uses_isolated_world_and_closed_operations() -> None:
     script = observer_module.EGO_TRANSITION_SCRIPT % (
         json.dumps("acceptance"),
@@ -755,6 +771,10 @@ def test_ego_transition_uses_isolated_world_and_closed_operations() -> None:
     assert "eval(" not in script
     assert "spec.kind === 'fetch'" in script
     assert "spec.kind === 'fetch_json'" in script
+    assert "spec.kind === 'resource_delta'" in script
+    assert "performance.getEntriesByType('resource')" in script
+    assert "entry.startTime >= startedAt" in script
+    assert "url.origin === window.location.origin" in script
     assert "selectJson(envelope, spec.pointer)" in script
     assert "spec.kind === 'click_response_json'" in script
     assert "new URL(state.helper.baseUrl)" in script

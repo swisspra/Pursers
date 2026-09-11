@@ -130,6 +130,7 @@ BROWSER_ACTION_KEYS = {
     "submit": {"kind", "selector", "path"},
     "press_key": {"kind", "selector", "key", "path"},
     "wait": {"kind", "milliseconds", "path"},
+    "resource_delta": {"kind", "endpoint", "milliseconds", "path"},
     "fetch": {"kind", "method", "endpoint", "body", "path"},
     "fetch_json": {
         "kind", "method", "endpoint", "body", "pointer", "path",
@@ -523,12 +524,20 @@ def _browser_actions(value: Any) -> list[dict[str, Any]]:
             "Escape",
         }:
             raise TypedEvidenceError("browser key action is invalid")
-        if kind == "wait" and (
+        if kind in {"wait", "resource_delta"} and (
             not isinstance(action["milliseconds"], int)
             or isinstance(action["milliseconds"], bool)
             or not 0 <= action["milliseconds"] <= 10_000
         ):
             raise TypedEvidenceError("browser wait is invalid")
+        if kind == "resource_delta" and (
+            not isinstance(action["endpoint"], str)
+            or not action["endpoint"].startswith("/")
+            or action["endpoint"].startswith("//")
+            or "?" in action["endpoint"]
+            or "#" in action["endpoint"]
+        ):
+            raise TypedEvidenceError("browser resource endpoint is invalid")
         if kind in {"fetch", "fetch_json"}:
             endpoint = action["endpoint"]
             if (

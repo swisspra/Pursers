@@ -608,6 +608,23 @@ def test_browser_fetch_json_action_has_closed_pointer_contract() -> None:
         typed_evidence._browser_actions([extra])
 
 
+def test_browser_resource_delta_has_closed_same_origin_path_contract() -> None:
+    action = {
+        "kind": "resource_delta",
+        "endpoint": "/api/fleet",
+        "milliseconds": 5_100,
+        "path": "/paused_refresh_count",
+    }
+    assert typed_evidence._browser_actions([action]) == [action]
+
+    for endpoint in ("//attacker.invalid/api/fleet", "/api/fleet?central=work"):
+        with pytest.raises(TypedEvidenceError, match="resource endpoint is invalid"):
+            typed_evidence._browser_actions([{**action, "endpoint": endpoint}])
+
+    with pytest.raises(TypedEvidenceError, match="browser wait is invalid"):
+        typed_evidence._browser_actions([{**action, "milliseconds": 10_001}])
+
+
 def test_browser_fetch_json_exact_structured_result_is_evaluable(
     tmp_path: Path, http_server: str,
 ) -> None:
