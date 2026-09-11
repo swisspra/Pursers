@@ -122,6 +122,7 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(409, payload)
         elif self.path == "/api/attention":
             action_sha256 = self.headers.get("X-Pursers-Action-SHA256")
+            payload["items"] = body
             payload["_evidence"] = {
                 "schema_version": 1,
                 "emitter": "fleet-dashboard-runtime",
@@ -144,9 +145,11 @@ class _Handler(BaseHTTPRequestHandler):
                 "outcome": "succeeded",
                 "effect": "attention_state_changed",
                 "changed": True,
-                "before_sha256": "33" * 32,
-                "after_sha256": "44" * 32,
-                "result_sha256": "55" * 32,
+                "before_sha256": typed_evidence._digest({}),
+                "after_sha256": typed_evidence._digest(body),
+                "result_sha256": hashlib.sha256(
+                    _json_bytes({"items": body})
+                ).hexdigest(),
                 "action_sha256": action_sha256,
                 "log_emitted": True,
             }
@@ -274,7 +277,7 @@ def _trust(tmp_path: Path, http_server: str, **changes: Any) -> dict[str, Any]:
         "timeout_seconds": 2,
         "select_allowlist": [
             "/ok", "/count", "/state", "/accepted", "/action_sha256",
-            *sorted(typed_evidence.FLEET_RESPONSE_POINTERS),
+            *sorted(typed_evidence.FLEET_ACTION_RESPONSE_POINTERS),
         ],
         "response_bindings": {
             "/board": "$board_id", "/candidate": "$candidate_commit",
@@ -1133,6 +1136,7 @@ def _fleet_trace_source(
     )
     action_path.chmod(0o600)
     action_sha256 = hashlib.sha256(action_path.read_bytes()).hexdigest()
+    action_document = json.loads(action_path.read_bytes())
     runtime = trust["http_sources"]["fleet-api"]["runtime"]
     entry = {
         "schema_version": 1,
@@ -1152,9 +1156,11 @@ def _fleet_trace_source(
         "outcome": "succeeded",
         "effect": "attention_state_changed",
         "changed": True,
-        "before_sha256": "33" * 32,
-        "after_sha256": "44" * 32,
-        "result_sha256": "55" * 32,
+        "before_sha256": typed_evidence._digest({}),
+        "after_sha256": typed_evidence._digest(action_document),
+        "result_sha256": hashlib.sha256(
+            _json_bytes({"items": action_document})
+        ).hexdigest(),
         "action_sha256": action_sha256,
         "pid": _HTTP_RUNTIMES[trust["http_sources"]["fleet-api"]["base_url"]].pid,
         "entrypoint_sha256": runtime["artifact_sha256"],
@@ -1273,6 +1279,7 @@ def test_fleet_trace_rejects_noncanonical_action_bytes(
         {"outcome": "failed"},
         {"effect": "attention_state_unchanged"},
         {"after_sha256": "33" * 32},
+        {"result_sha256": "55" * 32},
         {"method": "GET"},
         {"path": "/api/decoy"},
     ],
@@ -1462,7 +1469,9 @@ def test_fleet_trace_real_product_roundtrip(tmp_path: Path) -> None:
             "methods": ["POST"],
             "headers": {},
             "timeout_seconds": 2,
-            "select_allowlist": sorted(typed_evidence.FLEET_RESPONSE_POINTERS),
+            "select_allowlist": sorted(
+                typed_evidence.FLEET_ACTION_RESPONSE_POINTERS
+            ),
             "response_bindings": response_bindings,
             "runtime": runtime,
         }

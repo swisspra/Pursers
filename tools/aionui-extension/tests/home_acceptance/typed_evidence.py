@@ -63,6 +63,7 @@ FLEET_RESPONSE_POINTERS = frozenset(
     {f"/_evidence/{field}" for field in FLEET_TRACE_KEYS}
     | {"/_evidence/log_emitted"}
 )
+FLEET_ACTION_RESPONSE_POINTERS = FLEET_RESPONSE_POINTERS | {"/items"}
 LOG_COMMON_KEYS = frozenset({
     "adapter", "provenance", "runtime_id", "path",
     "timestamp_pointer", "max_age_seconds", "required_bindings", "emitter",
@@ -764,11 +765,17 @@ def _verify_evidence(evidence: Any, trust: dict[str, Any]) -> dict[str, Any]:
                 for key, value in record["entry"].items()
             }
             expected_selected["/_evidence/log_emitted"] = True
+            items = action_response["selected"].get("/items")
+            expected_selected["/items"] = items
             if (
                 action_response["method"] != "POST"
                 or action_response["path"] != "/api/attention"
                 or action_response["status"] != record["entry"]["status"]
                 or action_response["selected"] != expected_selected
+                or _digest(items) != record["entry"]["after_sha256"]
+                or hashlib.sha256(
+                    _json_bytes({"items": items})
+                ).hexdigest() != record["entry"]["result_sha256"]
             ):
                 raise TypedEvidenceError(
                     "Fleet trace action response does not match its log entry"
@@ -1297,7 +1304,9 @@ def _record_log(request: dict[str, Any], trust: dict[str, Any], context: dict[st
     ):
         raise TypedEvidenceError("Fleet trace directory is unavailable or not private")
     if adapter == "fleet_evidence_trace_v1":
-        if not FLEET_RESPONSE_POINTERS <= set(http_source["select_allowlist"]):
+        if not FLEET_ACTION_RESPONSE_POINTERS <= set(
+            http_source["select_allowlist"]
+        ):
             raise TypedEvidenceError(
                 "Fleet trace HTTP source lacks exact response selectors"
             )
@@ -1307,7 +1316,7 @@ def _record_log(request: dict[str, Any], trust: dict[str, Any], context: dict[st
             {
                 "method": "POST", "path": "/api/attention",
                 "body": action_document,
-                "select": sorted(FLEET_RESPONSE_POINTERS),
+                "select": sorted(FLEET_ACTION_RESPONSE_POINTERS),
             },
             "Fleet trace action",
         )
@@ -1376,9 +1385,15 @@ def _record_log(request: dict[str, Any], trust: dict[str, Any], context: dict[st
             f"/_evidence/{key}": value for key, value in entry.items()
         }
         expected_selected["/_evidence/log_emitted"] = True
+        items = action_response["selected"].get("/items")
+        expected_selected["/items"] = items
         if (
             action_response["status"] != entry["status"]
             or action_response["selected"] != expected_selected
+            or _digest(items) != entry["after_sha256"]
+            or hashlib.sha256(
+                _json_bytes({"items": items})
+            ).hexdigest() != entry["result_sha256"]
         ):
             raise TypedEvidenceError(
                 "Fleet trace action response does not match its log entry"

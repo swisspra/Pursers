@@ -457,10 +457,13 @@ Collection snapshots the verifier-private JSONL file, sends the canonical bytes
 from `action_input_path` to the pinned Fleet process with `POST /api/attention`,
 and accepts only one correlated record appended by that call. The HTTP response
 must expose the complete matching record under `/_evidence`, report
-`log_emitted=true`, and return the same status. Pre-existing records, replaced
-file prefixes, non-canonical action files, and response/log disagreement fail
-closed. `select_allowlist` must therefore include every
-`/_evidence/<document key>` plus `/_evidence/log_emitted`.
+`log_emitted=true`, return the same status, and expose `/items`. The consumer
+independently recomputes `after_sha256` from `/items` and `result_sha256` from
+the original `{\"items\": ...}` product response. This rejects a concurrent
+request's after-state being attributed to the observed action. Pre-existing
+records, replaced file prefixes, non-canonical action files, and response/log
+disagreement fail closed. `select_allowlist` must therefore include `/items`,
+every `/_evidence/<document key>`, and `/_evidence/log_emitted`.
 
 The private action JSON must not contain any producer-owned trace field. In
 particular, caller input cannot provide status, outcome, changed/effect values,
