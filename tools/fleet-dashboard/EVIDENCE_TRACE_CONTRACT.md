@@ -1,9 +1,11 @@
 # Fleet runtime evidence trace contract
 
 Version 1 is a narrow, opt-in observability channel for typed acceptance
-evidence. It observes the existing loopback Fleet handler and the existing
-`/api/attention` disposable-state API. It adds no endpoint, credential, or
-authority. With no `--evidence-trace-config`, Fleet behavior is unchanged.
+evidence. It observes the existing loopback Fleet handler. Its exact allowlist
+is `GET /api/attention`, `POST /api/attention`, and
+`POST /api/projects/add`; `/steps` is a member of the real add-project response,
+not another route. It adds no endpoint, credential, or authority. With no
+`--evidence-trace-config`, Fleet behavior is unchanged.
 
 The verifier owns a private directory and creates this exact 0600 config:
 
@@ -84,10 +86,21 @@ collector:
 }
 ```
 
+For `POST /api/projects/add`, the correlation entity must exactly equal the
+validated request `name`, and the request `board_id` must equal the private
+trace configuration. The normal loopback Host/same-origin guard still runs.
+Fleet serializes all add-project requests while a traced action captures the
+actual named registry entry immediately before and after the existing operation.
+The real response retains its ordered `steps`, including `fleet_clone`; the
+trace stores hashes, never registry data, request data, door strings, or paths.
+
 The actual handler derives `status`, `outcome`, `changed`, `effect`,
 `before_sha256`, `after_sha256`, and `result_sha256` after invoking the existing
 operation. `result_sha256` covers the original product response before the
 `_evidence` member is added. Caller request fields never select those values.
+Effects are `attention_state_changed|attention_state_unchanged` for attention
+and `project_state_changed|project_state_unchanged` for add-project. The record
+field set is unchanged.
 
 All attention-state reads and writes in the server share one reentrant state
 lock. A traced POST captures its immediate-before state and runs the actual save
@@ -147,6 +160,9 @@ argv data argument is not sufficient provenance.
 
 No raw request or response body, state value, arbitrary header, token, door,
 authorization material, or filesystem path is emitted. Invalid/missing
-correlation, wrong body digest, unrelated routes, replays, and trace I/O failure
-never produce a trusted log assertion. Failed product actions are recorded as
-failed; the channel never manufactures a passing result.
+correlation, request/entity or board mismatch, wrong body digest, unrelated
+routes, replays, and trace I/O failure never produce a trusted log assertion.
+Failed product actions are recorded as failed; the channel never manufactures a
+passing result. The parent consumer must explicitly allow the project route and
+effects and perform exact list-item selection; the producer has no wildcard
+evaluator.

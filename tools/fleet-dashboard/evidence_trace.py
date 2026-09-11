@@ -1,7 +1,7 @@
 """Opt-in, bounded evidence tracing for real Fleet Dashboard requests.
 
-The trace sink is intentionally passive: it observes the existing attention-state
-API and never grants authority or creates a mutation route.
+The trace sink is intentionally passive: it observes a closed allowlist of
+existing Fleet APIs and never grants authority or creates a mutation route.
 """
 
 from __future__ import annotations
@@ -35,7 +35,13 @@ COMMIT_RE = re.compile(r"[a-f0-9]{40}")
 MIN_TRACE_BYTES = 4_096
 MAX_TRACE_BYTES = 1_048_576
 MAX_CONFIG_BYTES = 8_192
-TRACE_ROUTE = "/api/attention"
+TRACE_ROUTES = frozenset(
+    {
+        ("GET", "/api/attention"),
+        ("POST", "/api/attention"),
+        ("POST", "/api/projects/add"),
+    }
+)
 
 
 class EvidenceTraceConfigError(ValueError):
@@ -209,7 +215,7 @@ class EvidenceTrace:
         return None
 
     def context(self, headers: Mapping[str, str], method: str, route: str) -> TraceContext | None:
-        if route != TRACE_ROUTE or method not in {"GET", "POST"}:
+        if (method, route) not in TRACE_ROUTES:
             return None
         values: dict[str, str] = {}
         for key, header in CORRELATION_HEADERS.items():
@@ -236,7 +242,10 @@ class EvidenceTrace:
         result_body: bytes,
     ) -> tuple[dict[str, Any] | None, bool]:
         """Return response metadata and append the real POST action once when possible."""
+        if (method, route) not in TRACE_ROUTES:
+            return None, False
         changed = _digest(before) != _digest(after)
+        effect_prefix = "attention_state" if route == "/api/attention" else "project_state"
         record: dict[str, Any] = {
             "schema_version": 1,
             "emitter": "fleet-dashboard-runtime",
@@ -252,7 +261,7 @@ class EvidenceTrace:
             "path": route,
             "status": status,
             "outcome": "succeeded" if 200 <= status < 300 else "failed",
-            "effect": "attention_state_changed" if changed else "attention_state_unchanged",
+            "effect": f"{effect_prefix}_{'changed' if changed else 'unchanged'}",
             "changed": changed,
             "before_sha256": _digest(before),
             "after_sha256": _digest(after),
