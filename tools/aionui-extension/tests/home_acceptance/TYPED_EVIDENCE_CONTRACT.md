@@ -453,6 +453,15 @@ changing the verifier list cannot define a weaker schema. It also requires
 `outcome` from the status class and `effect` from `changed`, and checks that
 `changed` agrees with the before/after digests.
 
+Collection snapshots the verifier-private JSONL file, sends the canonical bytes
+from `action_input_path` to the pinned Fleet process with `POST /api/attention`,
+and accepts only one correlated record appended by that call. The HTTP response
+must expose the complete matching record under `/_evidence`, report
+`log_emitted=true`, and return the same status. Pre-existing records, replaced
+file prefixes, non-canonical action files, and response/log disagreement fail
+closed. `select_allowlist` must therefore include every
+`/_evidence/<document key>` plus `/_evidence/log_emitted`.
+
 The private action JSON must not contain any producer-owned trace field. In
 particular, caller input cannot provide status, outcome, changed/effect values,
 state digests, runtime identity, candidate identity, PID, or entrypoint digest.
@@ -468,6 +477,10 @@ action occurred merely because a verifier fixture emitted a matching line.
 Final Fleet acceptance must use `fleet_evidence_trace_v1` with the independently
 reviewed producer from `TK-3df615678068`; if that producer is unavailable, the
 caller reports `collector_gap` instead of manufacturing success evidence.
+The focused suite's real-product test runs only when
+`PURSERS_FLEET_EVIDENCE_CHECKOUT` names a clean checkout of the independently
+reviewed producer commit; otherwise it is explicitly skipped rather than
+substituting a test emitter.
 
 Conjuncts are exact
 `{"path":"/outcome","op":"eq","value":"succeeded"}`.

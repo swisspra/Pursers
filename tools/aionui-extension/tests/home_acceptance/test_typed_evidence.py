@@ -1025,8 +1025,8 @@ def log_emitter(tmp_path: Path, request: pytest.FixtureRequest) -> Any:
         action = {
             "emitter": "central-runtime", "candidate_commit": CANDIDATE,
             "board_id": BOARD, "surface": "fleet", "entity": "TK-123",
-            "run_id": "run-1", "action_id": "submit-ticket",
-            "event": "ticket_submitted", "outcome": "accepted",
+            "run_id": "run-1", "action_id": "fixture-signal",
+            "event": "fixture_process_emitted", "outcome": "observed",
             "runtime_id": "central-runtime-1",
         }
         action.update(changes)
@@ -1340,20 +1340,214 @@ def test_fleet_trace_rejects_weakened_schema_and_pointer_contract(
         )
 
 
-def test_log_assertion_real_roundtrip_and_substitution(
+def test_fleet_trace_real_product_roundtrip(tmp_path: Path) -> None:
+    checkout_value = os.environ.get("PURSERS_FLEET_EVIDENCE_CHECKOUT")
+    if not checkout_value:
+        pytest.skip("set PURSERS_FLEET_EVIDENCE_CHECKOUT to a reviewed producer checkout")
+    checkout = Path(checkout_value).resolve()
+    candidate = subprocess.check_output(
+        ["git", "-C", str(checkout), "rev-parse", "HEAD"], text=True
+    ).strip()
+    assert not subprocess.check_output(
+        ["git", "-C", str(checkout), "status", "--porcelain"], text=True
+    )
+    artifact = checkout / "tools/fleet-dashboard/fleet_dashboard.py"
+    assert artifact.is_file()
+
+    token_path = tmp_path / "central.token"
+    token_path.write_text("test-token", encoding="utf-8")
+    token_path.chmod(0o600)
+    trace_path = tmp_path / "fleet-evidence.jsonl"
+    trace_config_path = tmp_path / "trace.json"
+    trace_config_path.write_text(
+        json.dumps({
+            "schema_version": 1,
+            "output_path": str(trace_path),
+            "max_bytes": 65_536,
+            "runtime_id": "fleet-runtime-1",
+            "board_id": BOARD,
+            "surface": "fleet",
+        }),
+        encoding="utf-8",
+    )
+    trace_config_path.chmod(0o600)
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    port = _free_port()
+    process = subprocess.Popen(
+        [
+            sys.executable, str(artifact), "--port", str(port),
+            "--url", "http://127.0.0.1:1", "--token-file", str(token_path),
+            "--seat-state-dir", str(state_dir),
+            "--evidence-trace-config", str(trace_config_path),
+        ],
+        cwd=checkout,
+        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        _wait_for_port(process, port)
+        base_url = f"http://127.0.0.1:{port}"
+        pid_path = tmp_path / "fleet.pid"
+        pid_path.write_text(str(process.pid), encoding="utf-8")
+        pid_path.chmod(0o600)
+        command = subprocess.check_output(
+            ["/bin/ps", "-p", str(process.pid), "-o", "command="], text=True
+        ).strip()
+        start_time = subprocess.check_output(
+            ["/bin/ps", "-p", str(process.pid), "-o", "lstart="], text=True
+        ).strip()
+        runtime = {
+            "pid_file": str(pid_path),
+            "command_sha256": hashlib.sha256(command.encode()).hexdigest(),
+            "start_time": start_time,
+            "executable": str(Path(command.split()[0]).resolve()),
+            "cwd": str(checkout),
+            "artifact_path": str(artifact),
+            "artifact_sha256": hashlib.sha256(artifact.read_bytes()).hexdigest(),
+            "listener_port": port,
+        }
+        response_bindings = {
+            "/_evidence/candidate_commit": "$candidate_commit",
+            "/_evidence/board_id": "$board_id",
+            "/_evidence/surface": "$surface",
+            "/_evidence/entity": "$entity",
+            "/_evidence/run_id": "$run_id",
+            "/_evidence/action_id": "$action_id",
+            "/_evidence/runtime_id": "fleet-runtime-1",
+        }
+        http_source = {
+            "adapter": "trusted_http_v1",
+            "provenance": "reviewed-fleet-disposable-service",
+            "runtime_id": "fleet-runtime-1",
+            "base_url": base_url,
+            "surface": "fleet",
+            "board_id": BOARD,
+            "candidate_commit": candidate,
+            "methods": ["POST"],
+            "headers": {},
+            "timeout_seconds": 2,
+            "select_allowlist": sorted(typed_evidence.FLEET_RESPONSE_POINTERS),
+            "response_bindings": response_bindings,
+            "runtime": runtime,
+        }
+        action_path = tmp_path / "action.json"
+        action = {"TK-123": {"state": "ack", "note": "real-product-roundtrip"}}
+        action_path.write_bytes(_json_bytes(action))
+        action_path.chmod(0o600)
+        log_source = {
+            "adapter": "fleet_evidence_trace_v1",
+            "provenance": "fleet-runtime-evidence-trace",
+            "runtime_id": "fleet-runtime-1",
+            "path": str(trace_path),
+            "document_keys": sorted(typed_evidence.FLEET_TRACE_KEYS),
+            "timestamp_pointer": "/timestamp",
+            "max_age_seconds": 300,
+            "required_bindings": {
+                "/candidate_commit": "$candidate_commit",
+                "/board_id": "$board_id",
+                "/surface": "$surface",
+                "/observation_id": "$observation_id",
+                "/entity": "$entity",
+                "/run_id": "$run_id",
+                "/action_id": "$action_id",
+            },
+            "emitter": "fleet-dashboard-runtime",
+            "runtime_pointer": "/runtime_id",
+            "max_bytes": 65_536,
+            "action_input_path": str(action_path),
+            "action_input_sha256": hashlib.sha256(action_path.read_bytes()).hexdigest(),
+            "action_digest_pointer": "/action_sha256",
+            "http_source_id": "fleet-api",
+            "http_source_config_sha256": typed_evidence._digest(http_source),
+            "schema_version_pointer": "/schema_version",
+            "pid_pointer": "/pid",
+            "entrypoint_digest_pointer": "/entrypoint_sha256",
+            "status_pointer": "/status",
+            "changed_pointer": "/changed",
+            "outcome_pointer": "/outcome",
+            "effect_pointer": "/effect",
+            "sha256_pointers": [
+                "/before_sha256", "/after_sha256", "/result_sha256",
+                "/action_sha256", "/entrypoint_sha256",
+            ],
+        }
+        trust = {
+            "schema_version": 1,
+            "verifier_id": "purser-reviewer-2",
+            "trusted_module_path": str(Path(typed_evidence.__file__).resolve()),
+            "module_sha256": typed_evidence._module_digest(),
+            "candidate_checkout_root": str(checkout),
+            "candidate_commit": candidate,
+            "board_id": BOARD,
+            "max_age_seconds": 300,
+            "active_evidence_key": "test-key",
+            "evidence_keys": {"test-key": EVIDENCE_KEY},
+            "http_sources": {"fleet-api": http_source},
+            "receipt_sources": {},
+            "log_sources": {"fleet-trace": log_source},
+            "state_sources": {},
+            "replay_guard": {"path": str(tmp_path / "replay.log"), "consume": False},
+        }
+        context = _context(
+            observation_id="fleet.attention-state", action_id="save-attention",
+            entity="TK-123", candidate_commit=candidate,
+        )
+        evidence = record_evidence(
+            _request(
+                "log_assertion",
+                {
+                    "source_id": "fleet-trace",
+                    "field_equals": {
+                        "/outcome": "succeeded",
+                        "/effect": "attention_state_changed",
+                    },
+                },
+                context,
+            ),
+            trust,
+        )
+        result = evaluate_evidence(
+            evidence,
+            _expected(evidence, [
+                {"path": "/outcome", "op": "eq", "value": "succeeded"},
+                {
+                    "path": "/effect", "op": "eq",
+                    "value": "attention_state_changed",
+                },
+            ]),
+            trust,
+        )
+        assert result["passed"]
+        assert evidence["record"]["runtime"]["pid"] == process.pid
+        assert evidence["record"]["action_response"]["status"] == 200
+        assert json.loads(
+            (state_dir / "attention-state.json").read_text(encoding="utf-8")
+        ) == action
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            process.wait(timeout=3)
+
+
+def test_log_process_binding_and_substitution_unit(
     tmp_path: Path, http_server: str, log_emitter: Any,
 ) -> None:
     trust = _trust(tmp_path, http_server)
     path, source = log_emitter(trust)
     trust["log_sources"] = {"central-log": source}
-    context = _context(action_id="submit-ticket")
+    context = _context(action_id="fixture-signal")
     request = _request("log_assertion", {
-        "source_id": "central-log", "field_equals": {"/event": "ticket_submitted"},
+        "source_id": "central-log",
+        "field_equals": {"/event": "fixture_process_emitted"},
     }, context)
     evidence = record_evidence(request, trust)
     result = evaluate_evidence(evidence, _expected(evidence, [
-        {"path": "/event", "op": "eq", "value": "ticket_submitted"},
-        {"path": "/outcome", "op": "eq", "value": "accepted"},
+        {"path": "/event", "op": "eq", "value": "fixture_process_emitted"},
+        {"path": "/outcome", "op": "eq", "value": "observed"},
     ]), trust)
     assert result["passed"]
     assert evidence["record"]["authenticity"] == "verifier_captured_process_bound"
@@ -1384,8 +1578,11 @@ def test_log_rejects_unsigned_empty_container(
     trust["log_sources"] = {"central-log": source}
     request = _request(
         "log_assertion",
-        {"source_id": "central-log", "field_equals": {"/event": "ticket_submitted"}},
-        _context(action_id="submit-ticket"),
+        {
+            "source_id": "central-log",
+            "field_equals": {"/event": "fixture_process_emitted"},
+        },
+        _context(action_id="fixture-signal"),
     )
     with pytest.raises(TypedEvidenceError, match="exactly one"):
         record_evidence(request, trust)
@@ -1404,9 +1601,9 @@ def test_hardcoded_signed_success_adapter_is_rejected(
                 "log_assertion",
                 {
                     "source_id": "central-log",
-                    "field_equals": {"/outcome": "accepted"},
+                    "field_equals": {"/outcome": "observed"},
                 },
-                _context(action_id="submit-ticket"),
+                _context(action_id="fixture-signal"),
             ),
             trust,
         )
@@ -1516,9 +1713,9 @@ def test_all_kinds_reject_resigned_unknown_missing_and_wrong_nested_fields(
                 "log_assertion",
                 {
                     "source_id": "central-log",
-                    "field_equals": {"/event": "ticket_submitted"},
+                    "field_equals": {"/event": "fixture_process_emitted"},
                 },
-                _context(action_id="submit-ticket"),
+                _context(action_id="fixture-signal"),
             ),
             trust,
         ),
@@ -1564,7 +1761,10 @@ def test_all_kinds_reject_resigned_unknown_missing_and_wrong_nested_fields(
                     if kind == "http_response"
                     else [{"path": "/role", "op": "eq", "value": "worker"}]
                     if kind == "receipt_field"
-                    else [{"path": "/event", "op": "eq", "value": "ticket_submitted"}]
+                    else [{
+                        "path": "/event", "op": "eq",
+                        "value": "fixture_process_emitted",
+                    }]
                     if kind == "log_assertion"
                     else [{"phase": "action", "path": "/status", "op": "eq", "value": 202}]
                 ),
