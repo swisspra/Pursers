@@ -52,6 +52,7 @@ from pursers_client import (
     COORDINATOR_QUESTION_ASKED,
     COORDINATOR_QUESTION_ACCEPTED,
     COORDINATOR_QUESTION_ANSWERED,
+    COORDINATOR_MESSAGE_EVENT_KINDS,
     DEPRECATION_EVENT_KINDS,
     DISPATCH_EVENT_KINDS,
     HUMAN_INPUT_REQUESTED,
@@ -400,6 +401,10 @@ COORDINATOR_QUESTION_MESSAGE_MAX_CHARS = 2_000
 COORDINATOR_QUESTION_KINDS = HUMAN_REQUEST_KINDS
 COORDINATOR_QUESTION_STATES = frozenset({"open", "accepted", "answered"})
 COORDINATOR_QUESTIONS_PER_TICKET_MAX = 50
+# Board state key holding {project: [coordinator agent_id, ...]}. Membership in
+# this map, not merely admin or board:coordinate, establishes project ownership.
+PROJECT_COORDINATORS_STATE_KEY = "project_coordinators"
+COORDINATOR_BINDING_MAX_CHARS = 512
 
 
 @dataclass(frozen=True)
@@ -566,6 +571,7 @@ class CentralJournal(Journal):
             | PARK_EVENT_KINDS
             | ARCHIVE_EVENT_KINDS
             | SEAT_IDENTITY_EVENT_KINDS
+            | COORDINATOR_MESSAGE_EVENT_KINDS
         ):
             raise ValueError(f"unsupported event kind: {kind}")
         board_id = _require_text("board_id", board_id)
@@ -642,6 +648,7 @@ class CentralJournal(Journal):
             | PARK_EVENT_KINDS
             | ARCHIVE_EVENT_KINDS
             | SEAT_IDENTITY_EVENT_KINDS
+            | COORDINATOR_MESSAGE_EVENT_KINDS
         ):
             raise ValueError(f"unsupported event kind: {kind}")
         if not unique_fields:
@@ -8390,14 +8397,54 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             "scrub_audit": changed["scrub_audit"],
         }
 
+    def ticket_project(ticket: Mapping[str, Any], board_id: str) -> str:
+        """Server-derived project. Never taken from caller input."""
+        value = ticket.get("project")
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        return board_id
+
+    def project_coordinator_ids(document: Mapping[str, Any], project: str) -> list[str]:
+        entry = (document.get("state") or {}).get(PROJECT_COORDINATORS_STATE_KEY)
+        raw = entry.get("value") if isinstance(entry, Mapping) else None
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except (TypeError, ValueError):
+                return []
+        if not isinstance(raw, Mapping):
+            return []
+        owners = raw.get(project)
+        if isinstance(owners, str):
+            owners = [owners]
+        if not isinstance(owners, list):
+            return []
+        return [item for item in owners if isinstance(item, str) and item]
+
     def coordinator_question_authorized(
-        document: dict[str, Any], principal: Principal
+        document: Mapping[str, Any], principal: Principal,
+        actor: Mapping[str, Any], project: str,
     ) -> bool:
-        """True when the principal may accept or answer coordinator questions."""
+        """Project ownership, not bare admin or board:coordinate."""
+        owners = project_coordinator_ids(document, project)
+        if not owners:
+            return False
+        if actor["agent_id"] not in owners:
+            return False
         if COORDINATOR_SCOPE in principal.scopes:
             return True
         membership = service.resolve_board_context(document, principal.principal_id)
         return membership.get("role") == "admin"
+
+    def coordinator_binding_digest(value: str | None) -> str | None:
+        """Opaque one-way digest; the raw host/profile/session never persists."""
+        if value is None:
+            return None
+        text = clean_text(
+            "host_binding", value, required=True,
+            max_length=COORDINATOR_BINDING_MAX_CHARS,
+        )
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
     def find_coordinator_question(
         ticket: dict[str, Any], question_id: str
@@ -8452,10 +8499,17 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 and ticket.get("claimed_by_principal_id") == principal.principal_id
             )
             is_admin = membership.get("role") == "admin"
-            if not (is_holder or is_admin or coordinate_authorized):
+            review_lease = ticket.get("review_lease") or {}
+            # The independent reviewer asks through the same primitive, with no
+            # new write rights: holding the review lease is the only addition.
+            is_reviewer = (
+                review_lease.get("reviewer_agent_id") == actor["agent_id"]
+                and review_lease.get("reviewer_principal_id") == principal.principal_id
+            )
+            if not (is_holder or is_reviewer or is_admin or coordinate_authorized):
                 raise PermissionError(
-                    "coordinator question requires the work lease, board admin, "
-                    "or board:coordinate"
+                    "coordinator question requires the work lease, the review "
+                    "lease, board admin, or board:coordinate"
                 )
             if ticket.get("status") in TERMINAL_TICKET_STATES:
                 raise ValueError(f"ticket is already {ticket['status']}")
@@ -8478,9 +8532,18 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 raise ValueError("in_reply_to does not match a question on this ticket")
             if len(questions) >= COORDINATOR_QUESTIONS_PER_TICKET_MAX:
                 raise ValueError("ticket has too many coordinator questions")
+            project = ticket_project(ticket, board_id)
+            owners = project_coordinator_ids(document, project)
+            if not owners:
+                raise ValueError(
+                    "no project coordinator is registered for project "
+                    f"{project}; set board state {PROJECT_COORDINATORS_STATE_KEY}"
+                )
             question_id = "CQ-" + secrets.token_hex(8)
             entry = {
                 "question_id": question_id,
+                "project": project,
+                "asker_role": "reviewer" if is_reviewer and not is_holder else "worker",
                 "message_id": message_id,
                 "in_reply_to": in_reply_to,
                 "message": safe_message,
@@ -8494,6 +8557,8 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 "asked_at": iso_at(now),
                 "accepted_by": None,
                 "accepted_at": None,
+                "binding": None,
+                "rebound_at": None,
                 "answer": None,
                 "answered_at": None,
             }
@@ -8503,7 +8568,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             return {
                 "actor": actor, "question": copy.deepcopy(entry),
                 "duplicate": False,
-                "recipients": human_request_recipients(document),
+                "recipients": owners,
                 "released": released,
                 "renewed": [item for item in renewed if item != ticket_id],
                 "scrub_audit": scrub_audit,
@@ -8553,20 +8618,48 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             actor, released, renewed = prepare_board_call(
                 document, principal, agent_name, now
             )
-            if not coordinator_question_authorized(document, principal):
-                raise PermissionError(
-                    "coordinator inbox requires board admin or board:coordinate"
-                )
             items: list[dict[str, Any]] = []
+            projects: set[str] = set()
             for tid, ticket in document["tickets"].items():
                 if ticket_id is not None and tid != ticket_id:
                     continue
-                for entry in ticket.get("coordinator_questions", []):
+                questions = ticket.get("coordinator_questions")
+                if not questions:
+                    continue
+                project = ticket_project(ticket, board_id)
+                if not coordinator_question_authorized(
+                    document, principal, actor, project
+                ):
+                    continue
+                projects.add(project)
+                for entry in questions:
                     if state is not None and entry.get("state") != state:
                         continue
                     item = copy.deepcopy(entry)
+                    item.pop("binding", None)
                     item["ticket_id"] = tid
                     items.append(item)
+            if not projects and not items:
+                # Distinguish "nothing pending" from "not a project coordinator".
+                entry_state = (document.get("state") or {}).get(
+                    PROJECT_COORDINATORS_STATE_KEY
+                )
+                raw = entry_state.get("value") if isinstance(entry_state, Mapping) else None
+                if isinstance(raw, str):
+                    try:
+                        raw = json.loads(raw)
+                    except (TypeError, ValueError):
+                        raw = None
+                names = list(raw.keys()) if isinstance(raw, Mapping) else []
+                owned = any(
+                    actor["agent_id"] in project_coordinator_ids(document, name)
+                    for name in names
+                )
+                if not owned:
+                    raise PermissionError(
+                        "coordinator inbox requires registered project "
+                        "coordinator ownership on this board"
+                    )
             items.sort(key=lambda item: item.get("asked_at") or "")
             return {
                 "actor": actor, "items": items[: max(1, min(limit, 100))],
@@ -8592,6 +8685,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         ctx: Context,
         action: str = "answer",
         message: str | None = None,
+        host_binding: str | None = None,
         expected_generation: str | None = None,
     ) -> dict[str, Any]:
         """Accept or answer a coordinator question without changing ticket state."""
@@ -8619,14 +8713,15 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             actor, released, renewed = prepare_board_call(
                 document, principal, agent_name, now
             )
-            if not coordinator_question_authorized(document, principal):
-                raise PermissionError(
-                    "answering a coordinator question requires board admin "
-                    "or board:coordinate"
-                )
             ticket = document["tickets"].get(ticket_id)
             if ticket is None:
                 raise ValueError("ticket not found")
+            project = ticket_project(ticket, board_id)
+            if not coordinator_question_authorized(document, principal, actor, project):
+                raise PermissionError(
+                    "answering requires registered project coordinator "
+                    f"ownership of project {project}"
+                )
             entry = find_coordinator_question(ticket, question_id)
             if entry is None:
                 raise ValueError("question not found")
@@ -8637,6 +8732,21 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                     "duplicate": True, "recipients": [], "released": released,
                     "renewed": renewed, "scrub_audit": None, "kind": None,
                 }
+            binding = coordinator_binding_digest(host_binding)
+            existing_binding = entry.get("binding")
+            accepted_by = entry.get("accepted_by") or {}
+            if accepted_by and accepted_by.get("agent_id") != actor["agent_id"]:
+                raise PermissionError(
+                    "question is already accepted by another project coordinator"
+                )
+            if existing_binding is not None and binding != existing_binding:
+                # Same coordinator identity, different host/profile/session:
+                # a reconnect rebind that preserves pending ownership. A
+                # different identity was already refused above.
+                entry["binding"] = binding
+                entry["rebound_at"] = iso_at(now)
+            elif existing_binding is None and binding is not None:
+                entry["binding"] = binding
             if action == "accept":
                 entry["state"] = "accepted"
                 entry["accepted_by"] = {
@@ -8660,8 +8770,10 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             scrub_audit = record_scrub_allows(document, actor, now, allow_counts)
             asked_by = entry.get("asked_by") or {}
             recipients = [asked_by["agent_id"]] if asked_by.get("agent_id") else []
+            public = copy.deepcopy(entry)
+            public.pop("binding", None)
             return {
-                "actor": actor, "question": copy.deepcopy(entry),
+                "actor": actor, "question": public,
                 "duplicate": False, "recipients": recipients,
                 "released": released, "renewed": renewed,
                 "scrub_audit": scrub_audit, "kind": event_kind,
