@@ -7,8 +7,9 @@
     "fleet": "fa62185980e69a5a4087ed31ab5fe501a9f44472"
   },
   "collector_contract": {
-    "candidate": "ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb",
-    "status": "rejected",
+    "candidate": "3318c1113cb8dd10f55bf1a2b9cc583e6a77d969",
+    "status": "rejected_pending_same_ticket_repair",
+    "rejected_ancestor": "ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb",
     "ticket_id": "TK-cd4077916134"
   },
   "partition": {
@@ -25,12 +26,12 @@
   "rows": [
     {
       "id": "extension.environment-free-mcp-registration",
-      "kind": "receipt_field",
-      "receipt": {
+      "kind": "state_transition",
+      "request": {
         "source_id": "aionui-semantic-source",
-        "fields": [
-          "result.mcp_definition.transport deep-equals {type:'stdio',command:'pursers-wait-bridge',args:[],env:{}}"
-        ]
+        "before": "read the registered MCP definition before connecting the saved seat",
+        "action": "connect the saved seat",
+        "after": "assert result.mcp_definition.transport deep-equals {type:'stdio',command:'pursers-wait-bridge',args:[],env:{}}"
       },
       "expected": {
         "outcome": "the definition uses stdio pursers-wait-bridge with an empty env object",
@@ -49,7 +50,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "registration requires inherited secrets or a populated env",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -80,19 +81,19 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "unordered navigation links or a generic Progress heading are accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
     },
     {
       "id": "extension.reviewer-preset-claude",
-      "kind": "receipt_field",
-      "receipt": {
+      "kind": "state_transition",
+      "request": {
         "source_id": "aionui-semantic-source",
-        "fields": [
-          "deep-match the manifest assistant by exact id and fields"
-        ]
+        "before": "capture the AionUi assistant roster before extension activation",
+        "action": "activate the exact candidate extension",
+        "after": "deep-match pursers-reviewer-claude in the live contributed assistant roster"
       },
       "expected": {
         "outcome": "pursers-reviewer-claude uses agentId and presetAgentType claude with contexts/reviewer.md",
@@ -111,19 +112,19 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "the Codex reviewer or worker context is substituted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
     },
     {
       "id": "extension.reviewer-preset-codex",
-      "kind": "receipt_field",
-      "receipt": {
+      "kind": "state_transition",
+      "request": {
         "source_id": "aionui-semantic-source",
-        "fields": [
-          "deep-match the manifest assistant by exact id and fields"
-        ]
+        "before": "capture the AionUi assistant roster before extension activation",
+        "action": "activate the exact candidate extension",
+        "after": "deep-match pursers-reviewer-codex in the live contributed assistant roster"
       },
       "expected": {
         "outcome": "pursers-reviewer-codex uses agentId and presetAgentType codex with contexts/reviewer.md",
@@ -142,19 +143,19 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "the Claude reviewer or worker context is substituted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
     },
     {
       "id": "extension.worker-preset-claude",
-      "kind": "receipt_field",
-      "receipt": {
+      "kind": "state_transition",
+      "request": {
         "source_id": "aionui-semantic-source",
-        "fields": [
-          "deep-match the manifest assistant by exact id and fields"
-        ]
+        "before": "capture the AionUi assistant roster before extension activation",
+        "action": "activate the exact candidate extension",
+        "after": "deep-match pursers-worker-claude in the live contributed assistant roster"
       },
       "expected": {
         "outcome": "pursers-worker-claude uses agentId and presetAgentType claude with contexts/worker.md",
@@ -173,19 +174,19 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "the Codex worker or reviewer context is substituted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
     },
     {
       "id": "extension.worker-preset-codex",
-      "kind": "receipt_field",
-      "receipt": {
+      "kind": "state_transition",
+      "request": {
         "source_id": "aionui-semantic-source",
-        "fields": [
-          "deep-match the manifest assistant by exact id and fields"
-        ]
+        "before": "capture the AionUi assistant roster before extension activation",
+        "action": "activate the exact candidate extension",
+        "after": "deep-match pursers-worker-codex in the live contributed assistant roster"
       },
       "expected": {
         "outcome": "pursers-worker-codex uses agentId and presetAgentType codex with contexts/worker.md",
@@ -204,18 +205,19 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "the Claude worker or reviewer context is substituted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
     },
     {
       "id": "fleet.add-project-authorization-error",
-      "kind": "http_response",
+      "kind": "state_transition",
       "request": {
         "source_id": "fleet-semantic-source",
-        "operation": "submit Add project",
-        "select": "BLOCKED: add_project proceeds to registry_admin without calling _require_board_admin; no pre-mutation authorization assertion can pass"
+        "before": "snapshot registry, board membership, and door-key state",
+        "action": "submit Add project as an operator without board-admin authority",
+        "after": "BLOCKED: baseline reaches registry_admin before any board-admin gate; assert no mutation plus authorization error once fixed"
       },
       "expected": {
         "outcome": "authorization is checked before the first registry or board mutation and denial is surfaced without issuing doors",
@@ -234,7 +236,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "a later board RPC denial after the registry write or a validation error is accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "baseline observed_gap; no approved product behavior resolves it"
       }
@@ -265,18 +267,23 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "Project name is treated as board ID",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
     },
     {
       "id": "fleet.add-project-clone-steps",
-      "kind": "log_assertion",
-      "stream": {
+      "kind": "http_response",
+      "request": {
         "source_id": "fleet-semantic-source",
-        "emitter": "tools/fleet-dashboard/fleet_dashboard.py",
-        "match": "run Add project"
+        "operation": "POST /api/projects/add for the correlated sandbox project",
+        "select": "select the exact fleet_clone item from /steps",
+        "response_fields": [
+          "/steps/*/step",
+          "/steps/*/status",
+          "/steps/*/message"
+        ]
       },
       "expected": {
         "outcome": "fleet_clone reports prepared or already present after clone-state checks",
@@ -286,7 +293,7 @@
       "source_path": "tools/fleet-dashboard/fleet_dashboard.py",
       "source_lines": [
         4489,
-        4526
+        4522
       ],
       "source_sha": "6368b72279f77e0132888c161e1bac001276dba1",
       "map_source_ref": "fa62185980e69a5a4087ed31ab5fe501a9f44472",
@@ -295,7 +302,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "a UI success message without clone state is accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -326,7 +333,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "already-present step labels are accepted while credentials are reissued",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "baseline observed_gap; no approved product behavior resolves it"
       }
@@ -348,7 +355,7 @@
       "source_path": "tools/fleet-dashboard/fleet_dashboard.py",
       "source_lines": [
         6633,
-        6633
+        6638
       ],
       "source_sha": "6368b72279f77e0132888c161e1bac001276dba1",
       "map_source_ref": "fa62185980e69a5a4087ed31ab5fe501a9f44472",
@@ -357,7 +364,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "persistent Doors table metadata is accepted as the secret",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -369,11 +376,11 @@
         "source_id": "fleet-semantic-source",
         "before": "read the same entity and operative surface",
         "action": "submit Add project",
-        "after": "BLOCKED: the exception response drops accumulated steps and UI renders only a generic failure"
+        "after": "assert #add-project-result shows failed_step and the bounded completed_steps retained by the approved candidate"
       },
       "expected": {
         "outcome": "completed steps and the exact failing step must remain visible",
-        "selection": "BLOCKED: the exception response drops accumulated steps and UI renders only a generic failure",
+        "selection": "assert exact failed step plus each completed step and status in #add-project-result",
         "operator": "exact semantic comparison on verifier-collected typed evidence"
       },
       "source_path": "tools/fleet-dashboard/fleet_dashboard.py",
@@ -383,12 +390,30 @@
       ],
       "source_sha": "6368b72279f77e0132888c161e1bac001276dba1",
       "map_source_ref": "fa62185980e69a5a4087ed31ab5fe501a9f44472",
+      "baseline_gap_source": {
+        "source_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+        "source_path": "tools/fleet-dashboard/fleet_dashboard.py",
+        "source_lines": [
+          6639,
+          6640
+        ],
+        "fact": "the baseline catch renders only generic error text"
+      },
+      "approved_delta_source": {
+        "source_sha": "d450536f69348a844b18341aa6c23c72da097370",
+        "source_path": "tools/fleet-dashboard/fleet_dashboard.py",
+        "source_lines": [
+          6703,
+          6712
+        ],
+        "fact": "the approved candidate renders failed_step and bounded completed_steps"
+      },
       "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; a backend step fails after an earlier durable step.",
       "action": "submit Add project",
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "generic error text is accepted as partial-step evidence",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "baseline observed_gap; approved product delta d450536f69348a844b18341aa6c23c72da097370 contains the proposed fix and executable UI regression"
       }
@@ -399,7 +424,12 @@
       "request": {
         "source_id": "fleet-semantic-source",
         "operation": "run Add project",
-        "select": "spy exact policy calls and assert configured step"
+        "select": "select the policies item from /steps and correlate it to the sandbox board",
+        "response_fields": [
+          "/steps/*/step",
+          "/steps/*/status",
+          "/steps/*/message"
+        ]
       },
       "expected": {
         "outcome": "dispatch defaults 600/180/second_opinion/fallback and strict review are applied",
@@ -418,7 +448,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "generic configured text without exact values is accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -429,7 +459,12 @@
       "request": {
         "source_id": "fleet-semantic-source",
         "operation": "run Add project",
-        "select": "assert two board_member_add calls keyed by derived principal"
+        "select": "select the principals item from /steps and correlate it to the sandbox board",
+        "response_fields": [
+          "/steps/*/step",
+          "/steps/*/status",
+          "/steps/*/message"
+        ]
       },
       "expected": {
         "outcome": "member and reviewer principals are added with distinct roles",
@@ -448,7 +483,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "two display rows without membership writes are accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -459,7 +494,12 @@
       "request": {
         "source_id": "fleet-semantic-source",
         "operation": "run Add project",
-        "select": "assert optimistic registry save and created step"
+        "select": "select the registry item from /steps and correlate it to the sandbox project",
+        "response_fields": [
+          "/steps/*/step",
+          "/steps/*/status",
+          "/steps/*/message"
+        ]
       },
       "expected": {
         "outcome": "an active registry entry with board/work_dir is saved under project name",
@@ -478,7 +518,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "board creation alone is accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -509,7 +549,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "pool busy status alone is accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -540,7 +580,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "two indistinguishable cards with the same name and no warning are accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "baseline observed_gap; no approved product behavior resolves it"
       }
@@ -571,7 +611,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "the Show stale filter without retired entries is accepted as the retired/stale drawer",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "baseline observed_gap; no approved product behavior resolves it"
       }
@@ -602,7 +642,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "ticket updated timestamps are accepted as activity",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -633,7 +673,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "board label alone is accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -664,7 +704,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "bounded view badge without counts is accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -695,7 +735,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "direct mutation on submit is accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -726,7 +766,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "installed version alone is accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -757,7 +797,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "open-ticket dispatch state is accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -788,7 +828,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "all discovered configs are shown as importable",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -819,7 +859,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "a generic dispatch status is accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -850,7 +890,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "bridge version alone is accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -881,7 +921,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "form submission itself is treated as confirmation",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -912,7 +952,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "seat config path is accepted as registry worktree",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -943,7 +983,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "discovered-only candidates are accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -974,7 +1014,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "role alone is accepted as all capabilities",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -1005,7 +1045,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "first visible central label is assumed without loadCentrals",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -1026,8 +1066,8 @@
       },
       "source_path": "tools/fleet-dashboard/fleet_dashboard.py",
       "source_lines": [
-        6484,
-        6484
+        6489,
+        6494
       ],
       "source_sha": "6368b72279f77e0132888c161e1bac001276dba1",
       "map_source_ref": "fa62185980e69a5a4087ed31ab5fe501a9f44472",
@@ -1036,7 +1076,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "agent pool membership is accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -1067,7 +1107,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "copying a key id is accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -1098,7 +1138,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "a release-operation button or an always-enabled second door row is accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -1129,7 +1169,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "raw exception text or an unrelated Add project error is accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "baseline observed_gap; no approved product behavior resolves it"
       }
@@ -1150,8 +1190,8 @@
       },
       "source_path": "tools/fleet-dashboard/fleet_dashboard.py",
       "source_lines": [
-        6483,
-        6483
+        6489,
+        6494
       ],
       "source_sha": "6368b72279f77e0132888c161e1bac001276dba1",
       "map_source_ref": "fa62185980e69a5a4087ed31ab5fe501a9f44472",
@@ -1160,7 +1200,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "key ID is accepted as expiry",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -1181,8 +1221,8 @@
       },
       "source_path": "tools/fleet-dashboard/fleet_dashboard.py",
       "source_lines": [
-        6482,
-        6482
+        6489,
+        6494
       ],
       "source_sha": "6368b72279f77e0132888c161e1bac001276dba1",
       "map_source_ref": "fa62185980e69a5a4087ed31ab5fe501a9f44472",
@@ -1191,7 +1231,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "door string or expiry is accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -1222,7 +1262,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "one row per project only is accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -1253,7 +1293,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "copy success text is accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -1274,8 +1314,19 @@
       },
       "source_path": "tools/fleet-dashboard/fleet_dashboard.py",
       "source_lines": [
-        6473,
-        6473
+        4213,
+        4222
+      ],
+      "supporting_sources": [
+        {
+          "source_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+          "source_path": "tools/fleet-dashboard/fleet_dashboard.py",
+          "source_lines": [
+            6489,
+            6494
+          ],
+          "fact": "persistent rows render only project, board, role, kid, expiry, and seat activity"
+        }
       ],
       "source_sha": "6368b72279f77e0132888c161e1bac001276dba1",
       "map_source_ref": "fa62185980e69a5a4087ed31ab5fe501a9f44472",
@@ -1284,7 +1335,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "the one-time Add project result is treated as the persistent list",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -1315,7 +1366,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "zero configured doors with no guidance is accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -1346,7 +1397,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "legacy Agent pool section is accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -1377,7 +1428,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "Fleet overview board cards are accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -1408,7 +1459,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "Release card alone is accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -1439,18 +1490,19 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "all actions disabled regardless of configuration",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
     },
     {
       "id": "fleet.operations-job-progress",
-      "kind": "log_assertion",
-      "stream": {
+      "kind": "state_transition",
+      "request": {
         "source_id": "fleet-semantic-source",
-        "emitter": "tools/fleet-dashboard/fleet_dashboard.py",
-        "match": "start the operation"
+        "before": "capture #ops-output and the enabled operation control",
+        "action": "confirm the plan and start the operation",
+        "after": "observe queued then running job status and progressively rendered /logs from GET /api/config/jobs/{job_id}"
       },
       "expected": {
         "outcome": "output shows queued job, command, streaming status and logs",
@@ -1469,18 +1521,19 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "final telemetry alone is accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
     },
     {
       "id": "fleet.operations-job-result",
-      "kind": "log_assertion",
-      "stream": {
+      "kind": "state_transition",
+      "request": {
         "source_id": "fleet-semantic-source",
-        "emitter": "tools/fleet-dashboard/fleet_dashboard.py",
-        "match": "allow job watcher to refresh"
+        "before": "capture the running #ops-output and disabled operation control",
+        "action": "allow the correlated job watcher to reach terminal state",
+        "after": "assert the final output remains after refresh and the control is re-enabled"
       },
       "expected": {
         "outcome": "polling stops, button re-enables, final status/logs remain visible after Config refresh",
@@ -1499,18 +1552,23 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "terminal output visible only before the immediate refresh or a running job is accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "baseline observed_gap; no approved product behavior resolves it"
       }
     },
     {
       "id": "fleet.operations-rollback-failure",
-      "kind": "log_assertion",
-      "stream": {
+      "kind": "http_response",
+      "request": {
         "source_id": "fleet-semantic-source",
-        "emitter": "tools/fleet-dashboard/release_ops.py",
-        "match": "execute the immutable plan"
+        "operation": "GET /api/config/jobs/{job_id} after executing the immutable plan",
+        "select": "select the correlated terminal failed job and its bounded /logs entry",
+        "response_fields": [
+          "/status",
+          "/error",
+          "/logs"
+        ]
       },
       "expected": {
         "outcome": "job emits ROLLBACK FAILED and raises with bounded failure detail",
@@ -1522,6 +1580,17 @@
         1321,
         1339
       ],
+      "supporting_sources": [
+        {
+          "source_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+          "source_path": "tools/fleet-dashboard/fleet_dashboard.py",
+          "source_lines": [
+            4649,
+            4689
+          ],
+          "fact": "the job response owns status, error, and bounded logs populated by the release emitter callback"
+        }
+      ],
       "source_sha": "6368b72279f77e0132888c161e1bac001276dba1",
       "map_source_ref": "fa62185980e69a5a4087ed31ab5fe501a9f44472",
       "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; stage Central mutates then both rollback targets include a failure.",
@@ -1529,7 +1598,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "primary failure without rollback outcome is accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -1560,7 +1629,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "one generic unavailable banner is accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -1591,7 +1660,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "Busy, Stale, or a count from another central is accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -1622,7 +1691,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "agent cards with busy status are accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -1653,7 +1722,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "central up or the number of visible non-stale cards is accepted as the online-agent count",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "baseline observed_gap; no approved product behavior resolves it"
       }
@@ -1684,7 +1753,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "Show stale toggle state is accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -1715,7 +1784,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "network failure or global pause is accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -1726,7 +1795,12 @@
       "request": {
         "source_id": "fleet-semantic-source",
         "operation": "open Release card",
-        "select": "assert exact versions and badge"
+        "select": "select live_version, staged_version, and status from /central_version",
+        "response_fields": [
+          "/central_version/live_version",
+          "/central_version/staged_version",
+          "/central_version/status"
+        ]
       },
       "expected": {
         "outcome": "live, staged and Matches/Drift/unknown are distinct",
@@ -1736,7 +1810,7 @@
       "source_path": "tools/fleet-dashboard/fleet_dashboard.py",
       "source_lines": [
         6418,
-        6418
+        6426
       ],
       "source_sha": "6368b72279f77e0132888c161e1bac001276dba1",
       "map_source_ref": "fa62185980e69a5a4087ed31ab5fe501a9f44472",
@@ -1745,7 +1819,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "package manifest version is accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -1756,7 +1830,11 @@
       "request": {
         "source_id": "fleet-semantic-source",
         "operation": "open Release card",
-        "select": "assert main and tag href/text/class"
+        "select": "select main and tag status/conclusion/url from /ci_status",
+        "response_fields": [
+          "/ci_status/main",
+          "/ci_status/tag"
+        ]
       },
       "expected": {
         "outcome": "separate linked badges show each conclusion/status",
@@ -1775,7 +1853,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "GitHub Release presence is accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -1786,7 +1864,11 @@
       "request": {
         "source_id": "fleet-semantic-source",
         "operation": "open Release card",
-        "select": "assert both branches and safe href"
+        "select": "select present and url from /github_release",
+        "response_fields": [
+          "/github_release/present",
+          "/github_release/url"
+        ]
       },
       "expected": {
         "outcome": "Published link and Not found warning are distinct",
@@ -1805,7 +1887,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "latest tag text is accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -1836,7 +1918,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "button click directly executes action",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -1847,7 +1929,13 @@
       "request": {
         "source_id": "fleet-semantic-source",
         "operation": "open Release card",
-        "select": "assert all three badge branches keyed by package"
+        "select": "select each package availability/present/status_code/error branch from /pypi",
+        "response_fields": [
+          "/pypi/*/availability",
+          "/pypi/*/present",
+          "/pypi/*/status_code",
+          "/pypi/*/error"
+        ]
       },
       "expected": {
         "outcome": "each package row shows PyPI 200, PyPI 404, or specific unavailable state",
@@ -1866,7 +1954,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "package version alone is accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -1877,7 +1965,13 @@
       "request": {
         "source_id": "fleet-semantic-source",
         "operation": "open Release card",
-        "select": "assert both status branches and metadata"
+        "select": "select host, needs_restart, reason, and running_pids from /restart_checklist",
+        "response_fields": [
+          "/restart_checklist/*/host",
+          "/restart_checklist/*/needs_restart",
+          "/restart_checklist/*/reason",
+          "/restart_checklist/*/running_pids"
+        ]
       },
       "expected": {
         "outcome": "each row shows host, RESTART NEEDED/OK, reason and PIDs",
@@ -1896,7 +1990,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "bridge Installed value is accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -1927,7 +2021,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "a board-local No matching tickets row is accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -1958,7 +2052,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "Timeline rows are accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -1989,7 +2083,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "raw status counts are accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -2020,7 +2114,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "Timeline actor data is accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -2051,7 +2145,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "overview active ticket rows are accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -2082,7 +2176,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "Changes summary is accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -2113,7 +2207,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "a JavaScript exception or blank page is accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -2124,26 +2218,34 @@
       "request": {
         "source_id": "personal-semantic-source",
         "operation": "call fleet_snapshot through the live Personal MCP process",
-        "select": "select /unavailable_boards and the healthy /projects rows from the same correlated response"
+        "select": "select /registry_warning and /projects from the same correlated response",
+        "response_fields": [
+          "/registry_warning",
+          "/projects"
+        ]
       },
       "expected": {
-        "outcome": "the bounded response names the failed board in unavailable_boards without failing healthy project rows",
-        "selection": "select /unavailable_boards and the healthy /projects rows from the same correlated response",
+        "outcome": "registry_warning names the failed active board while /projects still includes bounded rows for healthy and unavailable boards",
+        "selection": "select /registry_warning and /projects from the same correlated response",
         "operator": "exact semantic comparison on verifier-collected typed evidence"
       },
       "source_path": "packages/personal/src/pursers_personal/apps_server.py",
       "source_lines": [
         743,
-        849
+        958
       ],
       "source_sha": "6368b72279f77e0132888c161e1bac001276dba1",
-      "map_source_ref": "6368b72279f77e0132888c161e1bac001276dba1",
+      "derivation_provenance": {
+        "kind": "direct_inspection",
+        "source_ref": "6368b72279f77e0132888c161e1bac001276dba1",
+        "reason": "this D-autogen ID is absent from both approved source maps"
+      },
       "precondition": "An active registry board is unreachable through the real Personal fleet_snapshot tool.",
       "action": "call fleet_snapshot through the live Personal MCP process",
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "a generic UI label is accepted without an actual failed board read",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -2154,7 +2256,13 @@
       "request": {
         "source_id": "personal-semantic-source",
         "operation": "call board_snapshot before any explicit board_onboard operation",
-        "select": "select /data_mode, /connected, /stale, and /feed_error from the correlated board_snapshot response"
+        "select": "select /data_mode, /connected, /stale, and /feed_error from the correlated board_snapshot response",
+        "response_fields": [
+          "/data_mode",
+          "/connected",
+          "/stale",
+          "/feed_error"
+        ]
       },
       "expected": {
         "outcome": "the response remains non-joined fallback data with connected false and a bounded Central-unavailable error",
@@ -2163,17 +2271,32 @@
       },
       "source_path": "packages/personal/src/pursers_personal/apps_server.py",
       "source_lines": [
-        1360,
-        1402
+        1875,
+        1941
+      ],
+      "supporting_sources": [
+        {
+          "source_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+          "source_path": "packages/personal/src/pursers_personal/apps_server.py",
+          "source_lines": [
+            1981,
+            1982
+          ],
+          "fact": "the exposed board_snapshot tool returns state.snapshot()"
+        }
       ],
       "source_sha": "6368b72279f77e0132888c161e1bac001276dba1",
-      "map_source_ref": "6368b72279f77e0132888c161e1bac001276dba1",
+      "derivation_provenance": {
+        "kind": "direct_inspection",
+        "source_ref": "6368b72279f77e0132888c161e1bac001276dba1",
+        "reason": "this D-autogen ID is absent from both approved source maps"
+      },
       "precondition": "The real Personal MCP process has no successful projection and Central is unavailable.",
       "action": "call board_snapshot before any explicit board_onboard operation",
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "a Not onboarded label is accepted without proving no join was performed",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -2194,8 +2317,8 @@
       },
       "source_path": "tools/dashboard-ui/src/dashboard.ts",
       "source_lines": [
-        241,
-        249
+        392,
+        394
       ],
       "source_sha": "6368b72279f77e0132888c161e1bac001276dba1",
       "map_source_ref": "11885134bd53ec83821ea8c672f8c85358825be1",
@@ -2204,7 +2327,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "all 201 events or an arbitrary smaller count is accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -2235,7 +2358,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "snapshot_at or event count is treated as the cursor",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -2266,7 +2389,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "has_more or resync_notice alone is accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -2297,7 +2420,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "an empty container without the state or the Home timeline is accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -2328,7 +2451,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "the UI clears loaded data or reports a live connection",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -2359,7 +2482,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "only one of the two independent states is arranged",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -2390,7 +2513,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "a stale live snapshot is relabelled as offline",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -2421,7 +2544,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "demo or live connection copy is accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -2452,7 +2575,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "a linked-work count or current_ticket_id chip alone is accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -2483,7 +2606,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "the duplicate_name badge alone is accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -2514,7 +2637,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "duplicate=true identity conflict is accepted instead",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -2545,7 +2668,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "the Today 'No teammates yet' state is accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -2576,7 +2699,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "role, platform, or another agent's focus is accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -2588,26 +2711,44 @@
         "source_id": "personal-semantic-source",
         "before": "read the same entity and operative surface",
         "action": "open Team",
-        "after": "BLOCKED: source renders idle_minutes but no agent lease badge; no passing assertion exists"
+        "after": "assert the approved-candidate agent card contains both its idle-duration pill and lease badge"
       },
       "expected": {
         "outcome": "the same agent card must distinguish idle duration from lease expiry",
-        "selection": "BLOCKED: source renders idle_minutes but no agent lease badge; no passing assertion exists",
+        "selection": "assert idle duration and lease expiry in the same keyed agent card",
         "operator": "exact semantic comparison on verifier-collected typed evidence"
       },
       "source_path": "tools/dashboard-ui/src/dashboard.ts",
       "source_lines": [
-        21,
-        24
+        961,
+        967
       ],
       "source_sha": "6368b72279f77e0132888c161e1bac001276dba1",
       "map_source_ref": "11885134bd53ec83821ea8c672f8c85358825be1",
+      "baseline_gap_source": {
+        "source_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+        "source_path": "tools/dashboard-ui/src/dashboard.ts",
+        "source_lines": [
+          961,
+          967
+        ],
+        "fact": "the baseline card renders idle duration but no lease badge"
+      },
+      "approved_delta_source": {
+        "source_sha": "d450536f69348a844b18341aa6c23c72da097370",
+        "source_path": "tools/dashboard-ui/src/dashboard.ts",
+        "source_lines": [
+          977,
+          985
+        ],
+        "fact": "the approved candidate renders leaseBadge beside idle duration"
+      },
       "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; an agent has both idle_minutes and lease_expires_at.",
       "action": "open Team",
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "a ticket lease badge or idle-only card is treated as agent idle+lease proof",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "baseline observed_gap; approved product delta d450536f69348a844b18341aa6c23c72da097370 contains the proposed fix and executable UI regression"
       }
@@ -2638,7 +2779,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "role or agent name text containing codex is accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -2669,7 +2810,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "status or focus text containing reviewer is accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -2700,7 +2841,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "a fleet pool stale row is accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -2731,7 +2872,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "array length alone is accepted as both values",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -2762,7 +2903,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "Fleet data unavailable is accepted as an empty registry",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -2793,7 +2934,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "pool row statuses or four identical values are accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -2824,7 +2965,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "the pool status alone is accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -2835,7 +2976,13 @@
       "request": {
         "source_id": "personal-semantic-source",
         "operation": "open Projects",
-        "select": "assert column headers and cell values keyed by board id"
+        "select": "select project board_id and ticket counts from /projects",
+        "response_fields": [
+          "/projects/*/board_id",
+          "/projects/*/tickets_open",
+          "/projects/*/tickets_claimed",
+          "/projects/*/tickets_submitted"
+        ]
       },
       "expected": {
         "outcome": "the project table exposes all three counts in the correct row",
@@ -2854,7 +3001,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "fleet totals or project count is accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -2885,7 +3032,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "Fleet unavailable fallback is accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -2916,7 +3063,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "a per-project agent card is accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -2928,26 +3075,44 @@
         "source_id": "personal-semantic-source",
         "before": "read the same entity and operative surface",
         "action": "open Projects",
-        "after": "BLOCKED: FleetSnapshot decoding/rendering drops truncation_counts; no passing DOM assertion exists"
+        "after": "assert the approved candidate renders each non-zero truncation category in the Fleet data truncation notice"
       },
       "expected": {
         "outcome": "the UI must disclose fleet truncation without conflating it with registry warnings",
-        "selection": "BLOCKED: FleetSnapshot decoding/rendering drops truncation_counts; no passing DOM assertion exists",
+        "selection": "assert aria-label Fleet data truncation and exact omitted-count category text",
         "operator": "exact semantic comparison on verifier-collected typed evidence"
       },
-      "source_path": "packages/personal/src/pursers_personal/apps_server.py",
+      "source_path": "tools/dashboard-ui/src/dashboard.ts",
       "source_lines": [
-        939,
-        957
+        1035,
+        1045
       ],
       "source_sha": "6368b72279f77e0132888c161e1bac001276dba1",
       "map_source_ref": "11885134bd53ec83821ea8c672f8c85358825be1",
+      "baseline_gap_source": {
+        "source_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+        "source_path": "tools/dashboard-ui/src/dashboard.ts",
+        "source_lines": [
+          1035,
+          1045
+        ],
+        "fact": "the baseline renderer handles only unavailable and registry warnings"
+      },
+      "approved_delta_source": {
+        "source_sha": "d450536f69348a844b18341aa6c23c72da097370",
+        "source_path": "tools/dashboard-ui/src/dashboard.ts",
+        "source_lines": [
+          1064,
+          1080
+        ],
+        "fact": "the approved candidate renders non-zero truncation_counts by category"
+      },
       "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; fleet response has non-zero truncation_counts.",
       "action": "open Projects",
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "backend truncation_counts presence without UI disclosure is accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "baseline observed_gap; approved product delta d450536f69348a844b18341aa6c23c72da097370 contains the proposed fix and executable UI regression"
       }
@@ -2978,7 +3143,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "an available empty registry is accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -2990,26 +3155,44 @@
         "source_id": "personal-semantic-source",
         "before": "read the same entity and operative surface",
         "action": "open Activity > Links",
-        "after": "BLOCKED: backend accepts retracts but renderLinks only renders ticket/file/tag; no complete assertion exists"
+        "after": "assert the approved candidate distinguishes ticket grouping plus Files, Tags, and Retracts sections"
       },
       "expected": {
         "outcome": "all four authoritative edge kinds must have distinguishable UI evidence",
-        "selection": "BLOCKED: backend accepts retracts but renderLinks only renders ticket/file/tag; no complete assertion exists",
+        "selection": "assert ticket grouping and exact file, tag, and retracts targets with their copy controls",
         "operator": "exact semantic comparison on verifier-collected typed evidence"
       },
-      "source_path": "packages/personal/src/pursers_personal/apps_server.py",
+      "source_path": "tools/dashboard-ui/src/dashboard.ts",
       "source_lines": [
-        997,
-        1018
+        1216,
+        1241
       ],
       "source_sha": "6368b72279f77e0132888c161e1bac001276dba1",
       "map_source_ref": "11885134bd53ec83821ea8c672f8c85358825be1",
+      "baseline_gap_source": {
+        "source_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+        "source_path": "tools/dashboard-ui/src/dashboard.ts",
+        "source_lines": [
+          1216,
+          1241
+        ],
+        "fact": "the baseline renderer handles file and tag edges but omits retracts"
+      },
+      "approved_delta_source": {
+        "source_sha": "d450536f69348a844b18341aa6c23c72da097370",
+        "source_path": "tools/dashboard-ui/src/dashboard.ts",
+        "source_lines": [
+          1253,
+          1289
+        ],
+        "fact": "the approved candidate renders retracts edges and copy controls"
+      },
       "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; link_snapshot contains ticket, file, tag, and retracts edges.",
       "action": "open Activity > Links",
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "backend acceptance of retracts or three rendered kinds is treated as all four",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "baseline observed_gap; approved product delta d450536f69348a844b18341aa6c23c72da097370 contains the proposed fix and executable UI regression"
       }
@@ -3040,7 +3223,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "Links unavailable is accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -3071,7 +3254,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "source totals node_count/edge_count or only one count is accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -3102,7 +3285,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "an Important pinned Today card is accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -3133,7 +3316,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "a generic source or authority label without tool name is accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -3164,7 +3347,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "the compact #links-total returned counts alone are accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -3195,7 +3378,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "a zero counter with an empty list is accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -3206,17 +3389,53 @@
       "request": {
         "source_id": "personal-semantic-source",
         "operation": "allow scheduled feed refresh",
-        "select": "spy exact tool name/arguments and successful render"
+        "select": "select count, events, event_cursor, has_more, and error from board_event_feed",
+        "response_fields": [
+          "/count",
+          "/events",
+          "/event_cursor",
+          "/has_more",
+          "/error"
+        ]
       },
       "expected": {
         "outcome": "callServerTool invokes board_event_feed with empty arguments and decodes a Snapshot",
         "selection": "spy exact tool name/arguments and successful render",
         "operator": "exact semantic comparison on verifier-collected typed evidence"
       },
-      "source_path": "tools/dashboard-ui/src/dashboard.ts",
+      "source_path": "packages/personal/src/pursers_personal/apps_server.py",
       "source_lines": [
-        1597,
-        1604
+        1943,
+        1948
+      ],
+      "supporting_sources": [
+        {
+          "source_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+          "source_path": "packages/personal/src/pursers_personal/apps_server.py",
+          "source_lines": [
+            1912,
+            1924
+          ],
+          "fact": "snapshot payload supplies event_cursor and has_more before feed adds count and error"
+        },
+        {
+          "source_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+          "source_path": "tools/dashboard-ui/src/dashboard.ts",
+          "source_lines": [
+            1597,
+            1606
+          ],
+          "fact": "the UI calls board_event_feed and renders its decoded response"
+        },
+        {
+          "source_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+          "source_path": "packages/personal/src/pursers_personal/apps_server.py",
+          "source_lines": [
+            2014,
+            2015
+          ],
+          "fact": "the exposed board_event_feed tool returns state.feed()"
+        }
       ],
       "source_sha": "6368b72279f77e0132888c161e1bac001276dba1",
       "map_source_ref": "11885134bd53ec83821ea8c672f8c85358825be1",
@@ -3225,7 +3444,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "a board_snapshot call is accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -3236,17 +3455,43 @@
       "request": {
         "source_id": "personal-semantic-source",
         "operation": "activate snapshot refresh",
-        "select": "spy exact tool name/arguments and resulting board identity"
+        "select": "select board identity and projection state from board_snapshot",
+        "response_fields": [
+          "/board",
+          "/data_mode",
+          "/connected",
+          "/stale"
+        ]
       },
       "expected": {
         "outcome": "callServerTool invokes board_snapshot with empty arguments",
         "selection": "spy exact tool name/arguments and resulting board identity",
         "operator": "exact semantic comparison on verifier-collected typed evidence"
       },
-      "source_path": "tools/dashboard-ui/src/dashboard.ts",
+      "source_path": "packages/personal/src/pursers_personal/apps_server.py",
       "source_lines": [
-        1512,
-        1519
+        1875,
+        1941
+      ],
+      "supporting_sources": [
+        {
+          "source_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+          "source_path": "tools/dashboard-ui/src/dashboard.ts",
+          "source_lines": [
+            1512,
+            1519
+          ],
+          "fact": "the UI calls board_snapshot and renders its decoded response"
+        },
+        {
+          "source_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+          "source_path": "packages/personal/src/pursers_personal/apps_server.py",
+          "source_lines": [
+            1981,
+            1982
+          ],
+          "fact": "the exposed board_snapshot tool returns state.snapshot()"
+        }
       ],
       "source_sha": "6368b72279f77e0132888c161e1bac001276dba1",
       "map_source_ref": "11885134bd53ec83821ea8c672f8c85358825be1",
@@ -3255,7 +3500,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "board_event_feed or fixture data is accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -3266,17 +3511,43 @@
       "request": {
         "source_id": "personal-semantic-source",
         "operation": "open Projects or activate refresh",
-        "select": "spy exact tool name/arguments across success and invalid response"
+        "select": "select registry_warning, projects, pool, totals, and truncation_counts from fleet_snapshot",
+        "response_fields": [
+          "/registry_warning",
+          "/projects",
+          "/pool",
+          "/totals"
+        ]
       },
       "expected": {
         "outcome": "callServerTool invokes fleet_snapshot and invalid data enters unavailable state",
         "selection": "spy exact tool name/arguments across success and invalid response",
         "operator": "exact semantic comparison on verifier-collected typed evidence"
       },
-      "source_path": "tools/dashboard-ui/src/dashboard.ts",
+      "source_path": "packages/personal/src/pursers_personal/apps_server.py",
       "source_lines": [
-        1534,
-        1547
+        939,
+        958
+      ],
+      "supporting_sources": [
+        {
+          "source_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+          "source_path": "tools/dashboard-ui/src/dashboard.ts",
+          "source_lines": [
+            1534,
+            1551
+          ],
+          "fact": "the UI calls fleet_snapshot and accepts or rejects its decoded response"
+        },
+        {
+          "source_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+          "source_path": "packages/personal/src/pursers_personal/apps_server.py",
+          "source_lines": [
+            1992,
+            1993
+          ],
+          "fact": "the exposed fleet_snapshot tool returns state.fleet()"
+        }
       ],
       "source_sha": "6368b72279f77e0132888c161e1bac001276dba1",
       "map_source_ref": "11885134bd53ec83821ea8c672f8c85358825be1",
@@ -3285,7 +3556,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "board_snapshot or fallback fleet data is accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -3296,17 +3567,45 @@
       "request": {
         "source_id": "personal-semantic-source",
         "operation": "open Links or activate refresh",
-        "select": "spy exact tool name/arguments across success and invalid response"
+        "select": "select nodes, edges, counts, truncation, and source_tool from link_snapshot",
+        "response_fields": [
+          "/nodes",
+          "/edges",
+          "/returned_node_count",
+          "/returned_edge_count",
+          "/truncated",
+          "/source_tool"
+        ]
       },
       "expected": {
         "outcome": "callServerTool invokes link_snapshot and invalid data enters unavailable state",
         "selection": "spy exact tool name/arguments across success and invalid response",
         "operator": "exact semantic comparison on verifier-collected typed evidence"
       },
-      "source_path": "tools/dashboard-ui/src/dashboard.ts",
+      "source_path": "packages/personal/src/pursers_personal/apps_server.py",
       "source_lines": [
-        1562,
-        1575
+        1033,
+        1064
+      ],
+      "supporting_sources": [
+        {
+          "source_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+          "source_path": "tools/dashboard-ui/src/dashboard.ts",
+          "source_lines": [
+            1562,
+            1579
+          ],
+          "fact": "the UI calls link_snapshot and accepts or rejects its decoded response"
+        },
+        {
+          "source_sha": "6368b72279f77e0132888c161e1bac001276dba1",
+          "source_path": "packages/personal/src/pursers_personal/apps_server.py",
+          "source_lines": [
+            2003,
+            2004
+          ],
+          "fact": "the exposed link_snapshot tool returns state.links()"
+        }
       ],
       "source_sha": "6368b72279f77e0132888c161e1bac001276dba1",
       "map_source_ref": "11885134bd53ec83821ea8c672f8c85358825be1",
@@ -3315,7 +3614,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "memory_links backend name or fallback links are accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -3346,7 +3645,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "the Team grid or total agent count is accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -3377,7 +3676,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "all tickets or the Work view total is accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -3408,7 +3707,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "latest_handoff or any pinned link is accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -3439,7 +3738,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "important_pinned or an activity event is accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -3470,7 +3769,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "Activity view ordering without the five-row cap is accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -3501,7 +3800,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "raw ticket array length or rejected excluded from third metric is accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -3532,7 +3831,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "rejected status or rejection_count is accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -3563,7 +3862,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "Today's 'No current work' state is accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -3594,7 +3893,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "card-level unprefixed assignee or claimed_agent_id is accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -3625,7 +3924,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "a global priority string or status pill is accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -3656,7 +3955,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "abandoned_count without rejected status is accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -3687,7 +3986,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "the Today submitted metric alone is accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -3718,7 +4017,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "toneForStatus colors or partial grouping is accepted",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
@@ -3749,7 +4048,7 @@
       "causal_correlation": "Bind observation_id, run_id, action_id, entity, surface, board_id, candidate_commit, causal_index, and independently verified runtime_id.",
       "negative_counterexample": "loaded array length is accepted as total",
       "dependency": {
-        "collector": "collector_gap: ceca2a4c22a3788b6373d6b5e8c744ac6d961cbb was rejected; the six-gate same-ticket repair must be approved before executable use",
+        "collector": "collector_gap: candidate 3318c1113cb8dd10f55bf1a2b9cc583e6a77d969 was rejected on TK-cd4077916134 for three real-producer/runtime provenance defects",
         "setup": "verifier-owned source trust, candidate/runtime/board binding, and fresh causal context are required at capture time",
         "product": "supported on baseline source"
       }
