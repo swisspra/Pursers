@@ -227,6 +227,58 @@ def test_trace_rejects_bad_correlation_digest_replay_and_forged_success(
     ]
 
 
+@pytest.mark.parametrize(
+    ("guard_header", "guard_value", "expected_status"),
+    [
+        ("Host", "evil.example", 403),
+        ("Origin", "http://evil.example", 403),
+        ("Content-Type", "text/plain", 415),
+    ],
+)
+def test_post_guard_rejections_never_emit_trusted_evidence(
+    tmp_path: Path,
+    guard_header: str,
+    guard_value: str,
+    expected_status: int,
+) -> None:
+    trace, output = _trace(tmp_path)
+    state_dir = tmp_path / "state"
+    seats = dashboard.SeatConfigManager(
+        state_dir / "seats.json", state_dir=state_dir
+    )
+    server = dashboard.ThreadingHTTPServer(
+        ("127.0.0.1", 0),
+        dashboard.make_handler(
+            Cache(), worker_manager=SimpleNamespace(), seat_manager=seats, evidence_trace=trace
+        ),
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    action = b'{"TK-guard":{"state":"ack"}}'
+    headers = _headers(action)
+    headers["X-Pursers-Action-SHA256"] = "0" * 64
+    headers[guard_header] = guard_value
+    try:
+        status, result, response_headers = _call(
+            f"http://127.0.0.1:{server.server_port}",
+            "POST",
+            body=action,
+            headers=headers,
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+    assert status == expected_status
+    assert "_evidence" not in result
+    for header in dashboard.CORRELATION_HEADERS.values():
+        assert response_headers.get(header) is None
+    assert not output.exists()
+    assert seats.attention_state()["items"] == {}
+    assert not (state_dir / "attention-state.json").exists()
+
+
 def test_trace_requires_private_config_and_real_git_entrypoint(tmp_path: Path) -> None:
     config = tmp_path / "trace.json"
     config.write_text(

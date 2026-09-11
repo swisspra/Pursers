@@ -6833,13 +6833,20 @@ def make_handler(
         return str(resolver(central))
 
     class Handler(BaseHTTPRequestHandler):
-        def _prepare_evidence(self, method: str, route: str) -> None:
+        def _prepare_evidence(
+            self, method: str, route: str, raw_request: bytes | None = None
+        ) -> None:
             self._evidence_context = None
             self._evidence_before = None
             if evidence_trace is None:
                 return
             context = evidence_trace.context(self.headers, method, route)
             if context is None:
+                return
+            if method == "POST" and (
+                raw_request is None
+                or hashlib.sha256(raw_request).hexdigest() != context.action_sha256
+            ):
                 return
             try:
                 before = seats.attention_state()
@@ -7230,7 +7237,8 @@ def make_handler(
 
         def do_POST(self) -> None:
             route = urlsplit(self.path).path
-            self._prepare_evidence("POST", route)
+            self._evidence_context = None
+            self._evidence_before = None
             config_routes = {
                 "/api/config/plan",
                 "/api/config/suggestions",
@@ -7310,13 +7318,7 @@ def make_handler(
                 return
             try:
                 raw_request = self.rfile.read(length)
-                trace_context = getattr(self, "_evidence_context", None)
-                if (
-                    trace_context is not None
-                    and hashlib.sha256(raw_request).hexdigest()
-                    != trace_context.action_sha256
-                ):
-                    self._evidence_context = None
+                self._prepare_evidence("POST", route, raw_request)
                 request = json.loads(raw_request)
                 if route == "/api/config/plan":
                     body = _json_bytes(seats.plan(request))
