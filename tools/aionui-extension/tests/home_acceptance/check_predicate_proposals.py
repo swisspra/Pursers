@@ -696,6 +696,43 @@ def check_fact_specific_mutations(proposals: list[dict[str, Any]]) -> int:
     return len(cases)
 
 
+def check_declared_counterexample_mutations(
+    proposals: list[dict[str, Any]],
+) -> int:
+    """Execute the proposal-local mutation for every declared counterexample."""
+    checked = 0
+    for item in proposals:
+        predicate = item["canonical_predicate"]
+        negative = item["validation"]["adversarial_negatives"][0]
+        mutations = negative.get("observed_mutations")
+        require(
+            isinstance(mutations, list) and mutations,
+            f"{item['id']}: declared counterexample has no executable mutation",
+        )
+        observed = synthesized_observed(predicate)
+        require(
+            evaluate(predicate, observed),
+            f"{item['id']}: declared counterexample positive fixture failed",
+        )
+        scope_name = "phase" if predicate["kind"] == "state_transition" else "target"
+        expected_keys = {scope_name, "path", "value"}
+        for mutation in mutations:
+            exact_keys(mutation, expected_keys, f"{item['id']}.counterexample")
+            key = (mutation[scope_name], mutation["path"])
+            require(
+                key in observed,
+                f"{item['id']}: counterexample mutates an unasserted observation {key}",
+            )
+            observed[key] = copy.deepcopy(mutation["value"])
+        require(
+            not evaluate(predicate, observed),
+            f"{item['id']}: declared counterexample passed",
+        )
+        checked += 1
+    require(checked == 121, "declared counterexample coverage must be 121/121")
+    return checked
+
+
 def check_causal_browser_regressions(proposals: list[dict[str, Any]]) -> None:
     for item in proposals:
         if item["id"] not in CAUSAL_BROWSER_IDS:
@@ -734,6 +771,18 @@ def check_causal_browser_regressions(proposals: list[dict[str, Any]]) -> None:
         proposals, "fleet.operations-job-result", phase="after",
         path="/terminal_output", op="contains",
         value="Outcome: succeeded",
+    )
+    require_assertion(
+        proposals, "fleet.add-project-authorization-error", target="status",
+        path="", op="eq", value=403,
+    )
+    require_assertion(
+        proposals, "fleet.add-project-authorization-error", target="field",
+        path="/_evidence/changed", op="eq", value=False,
+    )
+    require_assertion(
+        proposals, "fleet.add-project-authorization-error", target="field",
+        path="/_evidence/effect", op="eq", value="project_state_unchanged",
     )
 
 
@@ -877,6 +926,8 @@ def check_new_parent_channel_examples(proposals: list[dict[str, Any]]) -> int:
         "test_fleet_project_add_projection_retains_only_null_credential_absence",
         "tools/fleet-dashboard/tests/test_evidence_trace.py::"
         "test_real_add_project_handler_emits_steps_and_actual_registry_transition",
+        "tools/fleet-dashboard/tests/test_fleet_dashboard.py::"
+        "test_add_project_denied_before_any_durable_mutation",
     ]
     completed = subprocess.run(
         [sys.executable, "-m", "pytest", "-q", *nodes],
@@ -1241,6 +1292,7 @@ def validate(delta: dict[str, Any]) -> tuple[int, int, int]:
     check_regressions(proposals)
     check_causal_browser_regressions(proposals)
     negative_cases += check_fact_specific_mutations(proposals)
+    negative_cases += check_declared_counterexample_mutations(proposals)
     producer_examples = (
         check_parent_producer_examples(proposals)
         + check_assistant_binding_examples(proposals)
