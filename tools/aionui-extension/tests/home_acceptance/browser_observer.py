@@ -41,6 +41,7 @@ HOST_PRODUCT = "AionUi"
 SEMVER = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?")
 BUILD_ID = re.compile(r"[0-9A-Za-z][0-9A-Za-z._+-]{5,127}")
 FULL_SHA = re.compile(r"[0-9a-f]{40}")
+SHA256 = re.compile(r"[0-9a-f]{64}")
 OBSERVER_ID = re.compile(r"[0-9A-Za-z][0-9A-Za-z._:-]{7,127}")
 OBSERVATION_ID = re.compile(r"[0-9A-Za-z][0-9A-Za-z._-]{0,127}")
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
@@ -104,6 +105,10 @@ TRANSITION_ACTION_KEYS = {
     },
     "click_response_json": {
         "kind", "selector", "method", "endpoint", "pointer", "path",
+    },
+    "click_job_lifecycle": {
+        "kind", "selector", "start_endpoint", "job_path_prefix",
+        "output_selector", "max_samples", "path",
     },
 }
 
@@ -1013,6 +1018,12 @@ if (pendingActions.length > 1 || (pendingActions.length && responseAction)) {
 }
 const pendingAction = pendingActions[0] || null
 const pendingCaptureKey = '__pursersVerifierPendingCapture'
+const jobActions = recipe.actions.filter(spec => spec.kind === 'click_job_lifecycle')
+if (jobActions.length > 1 || (jobActions.length && (responseAction || pendingAction))) {
+  throw new Error('job lifecycle capture must be unique')
+}
+const jobAction = jobActions[0] || null
+const jobCaptureKey = '__pursersVerifierJobCapture'
 if (responseAction) {
   const installed = await cdp('Runtime.evaluate', {
     expression: `(() => {
@@ -1162,6 +1173,123 @@ if (pendingAction) {
   if (!installed || installed.exceptionDetails || !installed.result ||
       installed.result.value !== true) throw new Error('pending-state capture unavailable')
 }
+if (jobAction) {
+  const installed = await cdp('Runtime.evaluate', {
+    expression: `(() => {
+      const key = ${JSON.stringify(jobCaptureKey)}
+      const selector = ${JSON.stringify(jobAction.selector)}
+      const startEndpoint = ${JSON.stringify(jobAction.start_endpoint)}
+      const jobPrefix = ${JSON.stringify(jobAction.job_path_prefix)}
+      const outputSelector = ${JSON.stringify(jobAction.output_selector)}
+      const maxSamples = ${JSON.stringify(jobAction.max_samples)}
+      const prior = window[key]
+      if (prior && prior.wrapper && window.fetch === prior.wrapper) {
+        window.fetch = prior.original
+        if (prior.observer) prior.observer.disconnect()
+      }
+      const original = window.fetch
+      const capture = {
+        original, wrapper: null, observer: null, timer: null,
+        startMatches: 0, startStatus: null, jobId: null, jobPath: null,
+        statuses: [], terminalStatus: null, terminalResponseSha256: null,
+        terminalLogsSha256: null, terminalLogCount: null,
+        disabledWhileRunning: false, preRefreshText: null,
+        preRefreshNode: null, afterRefreshText: null, refreshCount: 0,
+        error: null
+      }
+      const digestBytes = async bytes => {
+        const digest = await crypto.subtle.digest('SHA-256', bytes)
+        return Array.from(new Uint8Array(digest))
+          .map(byte => byte.toString(16).padStart(2, '0')).join('')
+      }
+      const digestJson = value => digestBytes(
+        new TextEncoder().encode(JSON.stringify(value))
+      )
+      const observeOutput = () => {
+        if (!capture.terminalStatus || !capture.jobId) return
+        const node = document.querySelector(outputSelector)
+        if (!node) return
+        const text = String(node.textContent || '')
+        const terminalMarker = 'Outcome: ' + capture.terminalStatus
+        if (!text.includes('Job ' + capture.jobId) || !text.includes(terminalMarker)) return
+        if (capture.preRefreshText === null) {
+          capture.preRefreshText = text
+          capture.preRefreshNode = node
+        } else if (node !== capture.preRefreshNode) {
+          capture.afterRefreshText = text
+          capture.refreshCount += 1
+        }
+      }
+      capture.observer = new MutationObserver(observeOutput)
+      capture.observer.observe(document.documentElement, {
+        subtree: true, childList: true, characterData: true
+      })
+      const wrapper = async function(input, init = {}) {
+        const requestUrl = typeof input === 'string' ? input : input.url
+        const requestMethod = String(init.method || input.method || 'GET').toUpperCase()
+        let parsed = null
+        try { parsed = new URL(requestUrl, window.location.href) } catch (_error) {}
+        const trusted = parsed && parsed.origin === window.location.origin
+          && !parsed.search && !parsed.hash
+        const response = await original.call(this, input, init)
+        if (!trusted) return response
+        try {
+          if (requestMethod === 'POST' && parsed.pathname === startEndpoint) {
+            capture.startMatches += 1
+            const body = await response.clone().json()
+            if (!body || typeof body.job_id !== 'string'
+                || !/^[a-f0-9]{32}$/.test(body.job_id)) {
+              throw new Error('operation response has no bounded job_id')
+            }
+            capture.startStatus = response.status
+            capture.jobId = body.job_id
+            capture.jobPath = jobPrefix + body.job_id
+          } else if (requestMethod === 'GET' && capture.jobPath
+              && parsed.pathname === capture.jobPath) {
+            if (capture.statuses.length >= maxSamples) {
+              throw new Error('job sample cap exceeded')
+            }
+            const bytes = await response.clone().arrayBuffer()
+            if (bytes.byteLength > 65536) throw new Error('job response exceeds byte cap')
+            const body = JSON.parse(new TextDecoder().decode(bytes))
+            if (!body || body.job_id !== capture.jobId
+                || !['queued', 'running', 'succeeded', 'failed'].includes(body.status)) {
+              throw new Error('job response does not match action-derived job_id')
+            }
+            capture.statuses.push(body.status)
+            if (body.status === 'running') {
+              const button = document.querySelector(selector)
+              capture.disabledWhileRunning = Boolean(button && button.disabled === true)
+            }
+            if (body.status === 'succeeded' || body.status === 'failed') {
+              capture.terminalStatus = body.status
+              capture.terminalResponseSha256 = await digestBytes(bytes)
+              const logs = Array.isArray(body.logs) ? body.logs : []
+              capture.terminalLogCount = logs.length
+              capture.terminalLogsSha256 = await digestJson(logs)
+            }
+          }
+        } catch (error) {
+          capture.error = String(error && error.message ? error.message : error)
+        }
+        return response
+      }
+      capture.wrapper = wrapper
+      window.fetch = wrapper
+      capture.timer = window.setTimeout(() => {
+        if (capture.observer) capture.observer.disconnect()
+        if (window.fetch === wrapper) window.fetch = original
+        if (window[key] === capture) delete window[key]
+      }, 30000)
+      window[key] = capture
+      return true
+    })()`,
+    awaitPromise: true,
+    returnByValue: true
+  })
+  if (!installed || installed.exceptionDetails || !installed.result ||
+      installed.result.value !== true) throw new Error('job lifecycle capture unavailable')
+}
 const transitionResult = await cdp('Runtime.evaluate', {
   expression: `(async () => {
     const recipe = ${JSON.stringify(recipe)}
@@ -1238,7 +1366,8 @@ const transitionResult = await cdp('Runtime.evaluate', {
       } else {
         const node = document.querySelector(spec.selector)
         if (!node) throw new Error('action selector absent: ' + spec.selector)
-        if (spec.kind === 'click' || spec.kind === 'click_response_json') {
+        if (spec.kind === 'click' || spec.kind === 'click_response_json'
+            || spec.kind === 'click_job_lifecycle') {
           node.click(); action[spec.path] = 'clicked'
         } else if (spec.kind === 'click_pending_state') {
           node.click()
@@ -1302,6 +1431,72 @@ if (pendingAction) {
   selected[pendingAction.status_path] = value.result.status
   selected[pendingAction.response_sha256_path] = value.result.response_sha256
   selected[pendingAction.error_path] = null
+}
+if (jobAction) {
+  const captured = await cdp('Runtime.evaluate', {
+    expression: `(async () => {
+      const key = ${JSON.stringify(jobCaptureKey)}
+      const state = window[key]
+      if (!state) return null
+      window.clearTimeout(state.timer)
+      if (state.observer) state.observer.disconnect()
+      if (window.fetch === state.wrapper) window.fetch = state.original
+      delete window[key]
+      const digestText = async text => {
+        const digest = await crypto.subtle.digest(
+          'SHA-256', new TextEncoder().encode(String(text))
+        )
+        return Array.from(new Uint8Array(digest))
+          .map(byte => byte.toString(16).padStart(2, '0')).join('')
+      }
+      const button = document.querySelector(${JSON.stringify(jobAction.selector)})
+      return {
+        start_matches: state.startMatches,
+        start_status: state.startStatus,
+        job_id: state.jobId,
+        job_path: state.jobPath,
+        statuses: state.statuses,
+        terminal_status: state.terminalStatus,
+        terminal_response_sha256: state.terminalResponseSha256,
+        terminal_logs_sha256: state.terminalLogsSha256,
+        terminal_log_count: state.terminalLogCount,
+        disabled_while_running: state.disabledWhileRunning,
+        pre_refresh_output_sha256: state.preRefreshText === null
+          ? null : await digestText(state.preRefreshText),
+        after_refresh_output_sha256: state.afterRefreshText === null
+          ? null : await digestText(state.afterRefreshText),
+        refresh_count: state.refreshCount,
+        enabled_after_refresh: Boolean(button && button.disabled === false),
+        error: state.error
+      }
+    })()`,
+    awaitPromise: true,
+    returnByValue: true
+  })
+  const value = captured && captured.result ? captured.result.value : null
+  const terminal = value && ['succeeded', 'failed'].includes(value.terminal_status)
+    ? value.terminal_status : null
+  if (!value || value.error !== null || value.start_matches !== 1
+      || typeof value.start_status !== 'number'
+      || value.start_status < 200 || value.start_status >= 300
+      || !/^[a-f0-9]{32}$/.test(value.job_id || '')
+      || value.job_path !== jobAction.job_path_prefix + value.job_id
+      || !Array.isArray(value.statuses) || value.statuses.length < 2
+      || value.statuses.length > jobAction.max_samples
+      || !value.statuses.includes('running') || terminal === null
+      || value.statuses.at(-1) !== terminal
+      || value.statuses.slice(0, -1).some(status => ['succeeded', 'failed'].includes(status))
+      || !/^[0-9a-f]{64}$/.test(value.terminal_response_sha256 || '')
+      || !/^[0-9a-f]{64}$/.test(value.terminal_logs_sha256 || '')
+      || !Number.isInteger(value.terminal_log_count) || value.terminal_log_count < 1
+      || value.disabled_while_running !== true
+      || !/^[0-9a-f]{64}$/.test(value.pre_refresh_output_sha256 || '')
+      || value.pre_refresh_output_sha256 !== value.after_refresh_output_sha256
+      || !Number.isInteger(value.refresh_count) || value.refresh_count < 1
+      || value.enabled_after_refresh !== true) {
+    throw new Error('job lifecycle did not bind action, running, terminal, and refresh')
+  }
+  transitionResult.result.value.action[jobAction.path] = value
 }
 const bindingResult = await cdp('Runtime.evaluate', {
   expression: `(async () => {
@@ -1540,7 +1735,7 @@ def _validate_transition_actions(value: Any) -> list[dict[str, Any]]:
         paths.update(result_paths)
         if kind in {
             "click", "set_value", "select", "submit", "press_key",
-            "click_response_json",
+            "click_response_json", "click_job_lifecycle",
             "click_pending_state",
         } and (
             not isinstance(item["selector"], str) or not item["selector"]
@@ -1600,6 +1795,15 @@ def _validate_transition_actions(value: Any) -> list[dict[str, Any]]:
             or "#" in item["endpoint"]
         ):
             raise _fail(EXIT_USAGE, "transition response capture is invalid")
+        if kind == "click_job_lifecycle" and (
+            item["start_endpoint"] != "/api/config/ops"
+            or item["job_path_prefix"] != "/api/config/jobs/"
+            or item["output_selector"] != "#ops-output"
+            or not isinstance(item["max_samples"], int)
+            or isinstance(item["max_samples"], bool)
+            or not 2 <= item["max_samples"] <= 32
+        ):
+            raise _fail(EXIT_USAGE, "transition job lifecycle action is invalid")
         if kind in {"fetch_json", "click_response_json"} and (
             not isinstance(item["pointer"], str)
             or len(item["pointer"]) > 512
@@ -1609,12 +1813,18 @@ def _validate_transition_actions(value: Any) -> list[dict[str, Any]]:
             raise _fail(EXIT_USAGE, "transition fetch JSON pointer is invalid")
     if sum(item["kind"] == "click_response_json" for item in value) > 1:
         raise _fail(EXIT_USAGE, "transition response capture must be unique")
-    if (
-        sum(item["kind"] == "click_pending_state" for item in value) > 1
-        or any(item["kind"] == "click_pending_state" for item in value)
-        and any(item["kind"] == "click_response_json" for item in value)
-    ):
+    if sum(item["kind"] == "click_job_lifecycle" for item in value) > 1:
+        raise _fail(EXIT_USAGE, "transition job lifecycle capture must be unique")
+    if sum(item["kind"] == "click_pending_state" for item in value) > 1:
         raise _fail(EXIT_USAGE, "transition pending-state capture must be unique")
+    capture_kinds = {
+        item["kind"] for item in value
+        if item["kind"] in {
+            "click_pending_state", "click_response_json", "click_job_lifecycle",
+        }
+    }
+    if len(capture_kinds) > 1:
+        raise _fail(EXIT_USAGE, "transition response capture kinds cannot be mixed")
     return value
 
 
@@ -2032,6 +2242,54 @@ def _transition_phase(
     }
 
 
+def _validate_job_lifecycle_result(action: dict[str, Any], value: Any) -> None:
+    keys = {
+        "start_matches", "start_status", "job_id", "job_path", "statuses",
+        "terminal_status", "terminal_response_sha256", "terminal_logs_sha256",
+        "terminal_log_count", "disabled_while_running",
+        "pre_refresh_output_sha256", "after_refresh_output_sha256",
+        "refresh_count", "enabled_after_refresh", "error",
+    }
+    if not isinstance(value, dict) or set(value) != keys:
+        raise _fail(EXIT_MISMATCH, "job lifecycle result fields do not match schema")
+    statuses = value["statuses"]
+    terminal = value["terminal_status"]
+    if (
+        value["start_matches"] != 1
+        or not isinstance(value["start_status"], int)
+        or isinstance(value["start_status"], bool)
+        or not 200 <= value["start_status"] < 300
+        or not isinstance(value["job_id"], str)
+        or not re.fullmatch(r"[a-f0-9]{32}", value["job_id"])
+        or value["job_path"] != action["job_path_prefix"] + value["job_id"]
+        or not isinstance(statuses, list)
+        or not 2 <= len(statuses) <= action["max_samples"]
+        or any(
+            status not in {"queued", "running", "succeeded", "failed"}
+            for status in statuses
+        )
+        or "running" not in statuses
+        or terminal not in {"succeeded", "failed"}
+        or statuses[-1] != terminal
+        or any(status in {"succeeded", "failed"} for status in statuses[:-1])
+        or not SHA256.fullmatch(str(value["terminal_response_sha256"]))
+        or not SHA256.fullmatch(str(value["terminal_logs_sha256"]))
+        or not isinstance(value["terminal_log_count"], int)
+        or isinstance(value["terminal_log_count"], bool)
+        or not 1 <= value["terminal_log_count"] <= 1_000
+        or value["disabled_while_running"] is not True
+        or not SHA256.fullmatch(str(value["pre_refresh_output_sha256"]))
+        or value["pre_refresh_output_sha256"]
+        != value["after_refresh_output_sha256"]
+        or not isinstance(value["refresh_count"], int)
+        or isinstance(value["refresh_count"], bool)
+        or not 1 <= value["refresh_count"] <= 32
+        or value["enabled_after_refresh"] is not True
+        or value["error"] is not None
+    ):
+        raise _fail(EXIT_MISMATCH, "job lifecycle result is invalid")
+
+
 def transition(stream: Any, out: Any) -> int:
     spec = _read_transition_spec(stream)
     config = _load_config()
@@ -2066,6 +2324,11 @@ def transition(stream: Any, out: Any) -> int:
             raise _fail(
                 EXIT_MISMATCH,
                 f"transition {phase} selectors differ from verifier recipe",
+            )
+    for action in recipe["actions"]:
+        if action["kind"] == "click_job_lifecycle":
+            _validate_job_lifecycle_result(
+                action, observation["action"][action["path"]]
             )
     result = {
         "schema_version": SCHEMA_VERSION,

@@ -173,6 +173,10 @@ BROWSER_ACTION_KEYS = {
     "click_response_json": {
         "kind", "selector", "method", "endpoint", "pointer", "path",
     },
+    "click_job_lifecycle": {
+        "kind", "selector", "start_endpoint", "job_path_prefix",
+        "output_selector", "max_samples", "path",
+    },
 }
 
 
@@ -550,7 +554,7 @@ def _browser_actions(value: Any) -> list[dict[str, Any]]:
         paths.update(result_paths)
         if kind in {
             "click", "set_value", "select", "submit", "press_key",
-            "click_response_json",
+            "click_response_json", "click_job_lifecycle",
             "click_pending_state",
         }:
             selector = action["selector"]
@@ -609,6 +613,15 @@ def _browser_actions(value: Any) -> list[dict[str, Any]]:
             or "#" in action["endpoint"]
         ):
             raise TypedEvidenceError("browser response capture is invalid")
+        if kind == "click_job_lifecycle" and (
+            action["start_endpoint"] != "/api/config/ops"
+            or action["job_path_prefix"] != "/api/config/jobs/"
+            or action["output_selector"] != "#ops-output"
+            or not isinstance(action["max_samples"], int)
+            or isinstance(action["max_samples"], bool)
+            or not 2 <= action["max_samples"] <= 32
+        ):
+            raise TypedEvidenceError("browser job lifecycle action is invalid")
         if kind in {"fetch_json", "click_response_json"} and (
             not isinstance(action["pointer"], str)
             or len(action["pointer"]) > 512
@@ -618,12 +631,18 @@ def _browser_actions(value: Any) -> list[dict[str, Any]]:
             raise TypedEvidenceError("browser fetch JSON pointer is invalid")
     if sum(action["kind"] == "click_response_json" for action in value) > 1:
         raise TypedEvidenceError("browser response capture must be unique")
-    if (
-        sum(action["kind"] == "click_pending_state" for action in value) > 1
-        or any(action["kind"] == "click_pending_state" for action in value)
-        and any(action["kind"] == "click_response_json" for action in value)
-    ):
+    if sum(action["kind"] == "click_job_lifecycle" for action in value) > 1:
+        raise TypedEvidenceError("browser job lifecycle capture must be unique")
+    if sum(action["kind"] == "click_pending_state" for action in value) > 1:
         raise TypedEvidenceError("browser pending-state capture must be unique")
+    capture_kinds = {
+        action["kind"] for action in value
+        if action["kind"] in {
+            "click_pending_state", "click_response_json", "click_job_lifecycle",
+        }
+    }
+    if len(capture_kinds) > 1:
+        raise TypedEvidenceError("browser response capture kinds cannot be mixed")
     return value
 
 
@@ -2467,6 +2486,70 @@ def _browser_phase(
                 or selected[item["error_path"]] is not None
             ):
                 raise TypedEvidenceError("browser pending-state result is invalid")
+        jobs = [
+            item for item in source["recipe"]["actions"]
+            if item["kind"] == "click_job_lifecycle"
+        ]
+        if jobs:
+            item = jobs[0]
+            lifecycle = _closed(
+                result["selected"][item["path"]],
+                {
+                    "start_matches", "start_status", "job_id", "job_path",
+                    "statuses", "terminal_status", "terminal_response_sha256",
+                    "terminal_logs_sha256", "terminal_log_count",
+                    "disabled_while_running", "pre_refresh_output_sha256",
+                    "after_refresh_output_sha256", "refresh_count",
+                    "enabled_after_refresh", "error",
+                },
+                "browser job lifecycle result",
+            )
+            statuses = lifecycle["statuses"]
+            terminal = lifecycle["terminal_status"]
+            if (
+                lifecycle["start_matches"] != 1
+                or not isinstance(lifecycle["start_status"], int)
+                or isinstance(lifecycle["start_status"], bool)
+                or not 200 <= lifecycle["start_status"] < 300
+                or not isinstance(lifecycle["job_id"], str)
+                or not re.fullmatch(r"[a-f0-9]{32}", lifecycle["job_id"])
+                or lifecycle["job_path"]
+                != item["job_path_prefix"] + lifecycle["job_id"]
+                or not isinstance(statuses, list)
+                or not 2 <= len(statuses) <= item["max_samples"]
+                or any(
+                    status not in {"queued", "running", "succeeded", "failed"}
+                    for status in statuses
+                )
+                or "running" not in statuses
+                or terminal not in {"succeeded", "failed"}
+                or statuses[-1] != terminal
+                or any(
+                    status in {"succeeded", "failed"}
+                    for status in statuses[:-1]
+                )
+                or not SHA256.fullmatch(
+                    str(lifecycle["terminal_response_sha256"])
+                )
+                or not SHA256.fullmatch(str(lifecycle["terminal_logs_sha256"]))
+                or not isinstance(lifecycle["terminal_log_count"], int)
+                or isinstance(lifecycle["terminal_log_count"], bool)
+                or not 1 <= lifecycle["terminal_log_count"] <= 1_000
+                or lifecycle["disabled_while_running"] is not True
+                or not SHA256.fullmatch(
+                    str(lifecycle["pre_refresh_output_sha256"])
+                )
+                or not hmac.compare_digest(
+                    lifecycle["pre_refresh_output_sha256"],
+                    str(lifecycle["after_refresh_output_sha256"]),
+                )
+                or not isinstance(lifecycle["refresh_count"], int)
+                or isinstance(lifecycle["refresh_count"], bool)
+                or not 1 <= lifecycle["refresh_count"] <= 32
+                or lifecycle["enabled_after_refresh"] is not True
+                or lifecycle["error"] is not None
+            ):
+                raise TypedEvidenceError("browser job lifecycle result is invalid")
     return result
 
 

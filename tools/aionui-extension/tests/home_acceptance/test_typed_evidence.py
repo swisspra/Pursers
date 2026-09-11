@@ -747,6 +747,61 @@ def test_browser_pending_state_is_request_and_settlement_bound(
         typed_evidence._browser_actions([invalid])
 
 
+def test_browser_job_lifecycle_binds_returned_id_running_terminal_and_refresh(
+    tmp_path: Path, http_server: str,
+) -> None:
+    action = {
+        "kind": "click_job_lifecycle",
+        "selector": '[data-ops-action="stage"]',
+        "start_endpoint": "/api/config/ops",
+        "job_path_prefix": "/api/config/jobs/",
+        "output_selector": "#ops-output",
+        "max_samples": 8,
+        "path": "/job_lifecycle",
+    }
+    job_id = "1" * 32
+    lifecycle = {
+        "start_matches": 1, "start_status": 200,
+        "job_id": job_id, "job_path": f"/api/config/jobs/{job_id}",
+        "statuses": ["running", "succeeded"],
+        "terminal_status": "succeeded",
+        "terminal_response_sha256": "2" * 64,
+        "terminal_logs_sha256": "3" * 64, "terminal_log_count": 2,
+        "disabled_while_running": True,
+        "pre_refresh_output_sha256": "4" * 64,
+        "after_refresh_output_sha256": "4" * 64,
+        "refresh_count": 1, "enabled_after_refresh": True, "error": None,
+    }
+    trust, context, recorder = _browser_state_trust(
+        tmp_path, http_server, action=action, action_result=lifecycle
+    )
+    evidence = record_evidence(
+        _request("state_transition", recorder, context), trust
+    )
+    assert evaluate_evidence(evidence, _expected(evidence, [{
+        "phase": "action", "path": "/job_lifecycle", "op": "eq",
+        "value": lifecycle,
+    }]), trust)["passed"] is True
+
+    for field, value in (
+        ("job_path", "/api/config/jobs/" + "0" * 32),
+        ("statuses", ["succeeded"]),
+        ("pre_refresh_output_sha256", "5" * 64),
+        ("enabled_after_refresh", False),
+    ):
+        changed = copy.deepcopy(evidence)
+        changed["record"]["action"]["selected"]["/job_lifecycle"][field] = value
+        changed["payload_sha256"] = typed_evidence._digest(changed["record"])
+        changed["auth"] = typed_evidence._sign_evidence(
+            {key: item for key, item in changed.items() if key != "auth"}, trust
+        )["auth"]
+        with pytest.raises(TypedEvidenceError, match="job lifecycle result is invalid"):
+            evaluate_evidence(changed, _expected(evidence, [{
+                "phase": "action", "path": "/job_lifecycle", "op": "eq",
+                "value": lifecycle,
+            }]), trust)
+
+
 def test_aionui_assistant_binding_joins_installed_manifest_and_runtime(
     tmp_path: Path, http_server: str,
 ) -> None:

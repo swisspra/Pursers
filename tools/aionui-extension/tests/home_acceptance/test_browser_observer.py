@@ -804,6 +804,65 @@ def test_typed_browser_transition_accepts_bounded_pending_state() -> None:
         observer_module._read_transition_spec(io.StringIO(json.dumps(spec)))
 
 
+def _job_lifecycle_action() -> dict[str, object]:
+    return {
+        "kind": "click_job_lifecycle",
+        "selector": '[data-ops-action="stage"]',
+        "start_endpoint": "/api/config/ops",
+        "job_path_prefix": "/api/config/jobs/",
+        "output_selector": "#ops-output",
+        "max_samples": 8,
+        "path": "/job_lifecycle",
+    }
+
+
+def _job_lifecycle_result() -> dict[str, object]:
+    job_id = "1" * 32
+    return {
+        "start_matches": 1,
+        "start_status": 200,
+        "job_id": job_id,
+        "job_path": f"/api/config/jobs/{job_id}",
+        "statuses": ["running", "succeeded"],
+        "terminal_status": "succeeded",
+        "terminal_response_sha256": "2" * 64,
+        "terminal_logs_sha256": "3" * 64,
+        "terminal_log_count": 2,
+        "disabled_while_running": True,
+        "pre_refresh_output_sha256": "4" * 64,
+        "after_refresh_output_sha256": "4" * 64,
+        "refresh_count": 1,
+        "enabled_after_refresh": True,
+        "error": None,
+    }
+
+
+def test_typed_browser_transition_accepts_action_bound_job_lifecycle() -> None:
+    spec = _transition_spec()
+    spec["recipe"]["actions"] = [_job_lifecycle_action()]
+    parsed = observer_module._read_transition_spec(io.StringIO(json.dumps(spec)))
+    assert parsed["recipe"]["actions"] == spec["recipe"]["actions"]
+    observer_module._validate_job_lifecycle_result(
+        parsed["recipe"]["actions"][0], _job_lifecycle_result()
+    )
+
+    for field, value in (
+        ("job_path", "/api/config/jobs/" + "0" * 32),
+        ("statuses", ["succeeded"]),
+        ("after_refresh_output_sha256", "5" * 64),
+        ("refresh_count", 0),
+    ):
+        changed = {**_job_lifecycle_result(), field: value}
+        with pytest.raises(observer_module.ObserverError, match="result is invalid"):
+            observer_module._validate_job_lifecycle_result(
+                parsed["recipe"]["actions"][0], changed
+            )
+
+    spec["recipe"]["actions"][0]["job_path_prefix"] = "/api/config/jobs/" + "0" * 32
+    with pytest.raises(observer_module.ObserverError, match="action is invalid"):
+        observer_module._read_transition_spec(io.StringIO(json.dumps(spec)))
+
+
 def test_ego_transition_uses_isolated_world_and_closed_operations() -> None:
     script = observer_module.EGO_TRANSITION_SCRIPT % (
         json.dumps("acceptance"),
@@ -1162,6 +1221,176 @@ console.log(JSON.stringify({ mode, restored, rejected: Boolean(observedError) })
     assert outcome == {
         "mode": mode, "restored": True,
         "rejected": mode not in {"success", "unchanged"},
+    }
+
+
+@pytest.mark.parametrize(
+    "mode", ["success", "static_path", "no_running", "no_terminal", "no_refresh"],
+)
+def test_ego_job_lifecycle_uses_action_returned_id_and_survives_refresh(
+    mode: str,
+) -> None:
+    recipe = _transition_spec()["recipe"]
+    action = _job_lifecycle_action()
+    recipe["actions"] = [action]
+    recipe["before"] = []
+    recipe["after"] = []
+    recipe["settle_milliseconds"] = 150
+    generated = observer_module.EGO_TRANSITION_SCRIPT % (
+        json.dumps("acceptance"),
+        json.dumps("http://127.0.0.1:18921/home"),
+        json.dumps(recipe),
+    )
+    prelude = r"""
+import vm from 'node:vm'
+const mode = __MODE__
+const pageUrl = 'http://127.0.0.1:18921/home'
+const pageOrigin = new URL(pageUrl).origin
+const jobId = '1'.repeat(32)
+const emitted = []
+const pending = []
+const observers = new Set()
+let currentOutput = { textContent: 'Ready.' }
+let currentButton = null
+const notify = () => { for (const observer of observers) observer.callback() }
+class TestMutationObserver {
+  constructor(callback) { this.callback = callback }
+  observe() { observers.add(this) }
+  disconnect() { observers.delete(this) }
+}
+let jobReads = 0
+const originalFetch = async function(input, init = {}) {
+  const url = new URL(typeof input === 'string' ? input : input.url, pageUrl)
+  const method = String(init.method || (typeof input === 'object' && input.method) || 'GET').toUpperCase()
+  if (method === 'POST' && url.pathname === '/api/config/ops') {
+    return new Response(JSON.stringify({ job_id: jobId, status: 'queued', command: 'safe' }), {
+      status: 200, headers: { 'content-type': 'application/json' }
+    })
+  }
+  const expectedPath = mode === 'static_path'
+    ? '/api/config/jobs/' + '0'.repeat(32) : '/api/config/jobs/' + jobId
+  if (method === 'GET' && url.pathname === expectedPath) {
+    jobReads += 1
+    const status = mode === 'no_running'
+      ? 'succeeded' : mode === 'no_terminal' || jobReads === 1 ? 'running' : 'succeeded'
+    return new Response(JSON.stringify({
+      job_id: jobId, status, command: 'safe', logs: ['started', status]
+    }), { status: 200, headers: { 'content-type': 'application/json' } })
+  }
+  return new Response(JSON.stringify({ error: 'not found' }), { status: 404 })
+}
+const runOperation = async () => {
+  currentButton.disabled = true
+  const start = await mainGlobal.window.fetch('/api/config/ops', { method: 'POST' })
+  const job = await start.json()
+  const path = mode === 'static_path'
+    ? '/api/config/jobs/' + '0'.repeat(32) : '/api/config/jobs/' + job.job_id
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const response = await mainGlobal.window.fetch(path, { method: 'GET' })
+    const state = await response.json()
+    currentOutput.textContent = `Job ${job.job_id}\nStatus: ${state.status}`
+    notify()
+    if (state.status === 'succeeded' || state.status === 'failed') {
+      currentOutput.textContent = `Job ${job.job_id}\nOutcome: ${state.status}\nEffect: done`
+      notify()
+      if (mode !== 'no_refresh') {
+        const retained = currentOutput.textContent
+        currentOutput = { textContent: retained }
+        currentButton = { disabled: false, click: () => {} }
+        notify()
+      }
+      return
+    }
+  }
+}
+currentButton = { disabled: false, click() { pending.push(runOperation()) } }
+const boardNode = {
+  textContent: 'sandbox-home-observer',
+  getAttribute(name) { return name === 'data-board-id' ? 'sandbox-home-observer' : null }
+}
+const documentObject = {
+  documentElement: {},
+  querySelector(selector) {
+    if (selector === '[data-ops-action="stage"]') return currentButton
+    if (selector === '#ops-output') return currentOutput
+    if (selector.includes('data-helper-field')) return boardNode
+    return null
+  },
+  querySelectorAll() { return [] }
+}
+const mainGlobal = {
+  URL, Headers, Response, TextEncoder, TextDecoder, setTimeout, clearTimeout,
+  crypto, fetch: originalFetch, MutationObserver: TestMutationObserver,
+  document: documentObject,
+  location: { href: pageUrl, origin: pageOrigin }
+}
+mainGlobal.window = mainGlobal
+const mainContext = vm.createContext(mainGlobal)
+const isolatedGlobal = {
+  URL, Headers, Response, TextEncoder, TextDecoder, setTimeout, clearTimeout,
+  crypto, MutationObserver: TestMutationObserver,
+  Event: class Event {}, KeyboardEvent: class KeyboardEvent {},
+  document: documentObject,
+  fetch: async function(input) {
+    const url = new URL(input, pageUrl)
+    if (url.pathname === '/pursers/status' || url.pathname.endsWith('/candidate.json')) {
+      return new Response(JSON.stringify({ ok: true }), { status: 200 })
+    }
+    return new Response('<html>candidate</html>', { status: 200 })
+  }
+}
+isolatedGlobal.window = { location: { href: pageUrl, origin: pageOrigin } }
+const isolatedContext = vm.createContext(isolatedGlobal)
+async function useOrCreateTaskSpace(value) { return value }
+async function openOrReuseTab() {}
+async function waitForLoad() {}
+async function pageInfo() { return { url: pageUrl, w: 1280, h: 800 } }
+function cliLog(value) { emitted.push(value) }
+async function cdp(method, params = {}) {
+  if (method === 'Page.getFrameTree') return { frameTree: { frame: { id: 'main' } } }
+  if (method === 'Page.createIsolatedWorld') return { executionContextId: 7 }
+  if (method !== 'Runtime.evaluate') throw new Error('unexpected CDP method: ' + method)
+  const context = params.contextId === 7 ? isolatedContext : mainContext
+  try { return { result: { value: await vm.runInContext(params.expression, context) } } }
+  catch (error) { return { exceptionDetails: { text: String(error) } } }
+}
+let observedError = null
+try {
+""".replace("__MODE__", json.dumps(mode))
+    epilogue = r"""
+} catch (error) {
+  observedError = String(error && error.message ? error.message : error)
+}
+await Promise.allSettled(pending)
+const restored = mainGlobal.window.fetch === originalFetch
+  && !Object.prototype.hasOwnProperty.call(mainGlobal.window, '__pursersVerifierJobCapture')
+if (!restored) throw new Error('job capture did not restore page fetch state')
+if (mode === 'success') {
+  if (observedError) throw new Error('successful lifecycle failed: ' + observedError)
+  const lifecycle = JSON.parse(emitted.at(-1)).action['/job_lifecycle']
+  if (lifecycle.job_id !== jobId
+      || lifecycle.job_path !== '/api/config/jobs/' + jobId
+      || JSON.stringify(lifecycle.statuses) !== JSON.stringify(['running', 'succeeded'])
+      || lifecycle.pre_refresh_output_sha256 !== lifecycle.after_refresh_output_sha256) {
+    throw new Error('successful lifecycle evidence differs')
+  }
+} else if (!observedError || !observedError.includes('job lifecycle did not bind')) {
+  throw new Error('negative lifecycle did not fail closed: ' + observedError)
+}
+console.log(JSON.stringify({ mode, restored, rejected: Boolean(observedError) }))
+"""
+    result = subprocess.run(
+        ["node", "--input-type=module"],
+        input=prelude + generated + epilogue,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    outcome = json.loads(result.stdout.strip().splitlines()[-1])
+    assert outcome == {
+        "mode": mode, "restored": True, "rejected": mode != "success",
     }
 
 
