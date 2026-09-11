@@ -59,25 +59,51 @@
       "surface": "aionui"
     },
     {
-      "action": "Navigate to or trigger Fleet 503 Recovery without relabelling another state.",
+      "action": "Restore the disposable Central dependency in the same run and observe the existing Fleet page recover on refresh.",
       "derivation": {
-        "action": "Implement the typed evidence recorder and evaluator for this fact in tools/aionui-extension/tests/home_acceptance/runner.py and harness.py, then re-derive this row against the recorded evidence as literal or identifier. purser-reviewer-2 confirmed on 2026-09-11 that http_response, receipt_field, log_assertion and state_transition are all collectable by hand but that no typed recorder exists, so this fact cannot be observed as written.",
-        "kind": "collector_gap",
-        "owner": "acceptance harness owner, through the typed evidence recorder work ticket"
+        "kind": "identifier",
+        "symbol": "renderFleet"
       },
       "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
-      "expected_fact": "The live Fleet surface visibly reports a 503 dependency failure and a subsequent recovered state.",
+      "expected_fact": "The same Fleet run progresses from an unavailable Central state to zero unavailable sections and an Updated state.",
       "id": "final.fleet-503-recovery",
-      "precondition": "Exact candidate and sandbox board are bound; arrange the final.fleet-503-recovery state on the real aionui surface.",
+      "precondition": "The earlier fleet-dashboard.state.offline observation passed with typed evidence for the same run and Fleet entity; the dependency is then restored.",
       "predicate": {
-        "expected": "Recovered",
+        "conjuncts": [
+          {
+            "expected": "An unavailable Central produces one unavailable Central section on the real Fleet surface.",
+            "kind": "prior_state",
+            "observation": "fleet-dashboard.state.offline"
+          },
+          {
+            "assertions": [
+              {
+                "op": "gte",
+                "path": "/unavailable_central_count",
+                "phase": "before",
+                "value": 1
+              },
+              {
+                "op": "eq",
+                "path": "/unavailable_central_count",
+                "phase": "after",
+                "value": 0
+              },
+              {
+                "op": "contains",
+                "path": "/state_text",
+                "phase": "after",
+                "value": "Updated"
+              }
+            ],
+            "kind": "state_transition",
+            "source_id": "browser-final-fleet-503-recovery"
+          }
+        ],
         "name": "required fact: final.fleet-503-recovery",
-        "operator": "ax_name_contains",
-        "path": [
-          "nodes"
-        ]
+        "operator": "all_of"
       },
-      "status": "measured-gap",
+      "status": "normative",
       "surface": "fleet"
     },
     {
@@ -106,12 +132,11 @@
     {
       "action": "Navigate to or trigger Logic without relabelling another state.",
       "derivation": {
-        "action": "Implement the typed evidence recorder and evaluator for this fact in tools/aionui-extension/tests/home_acceptance/runner.py and harness.py, then re-derive this row against the recorded evidence as literal or identifier. purser-reviewer-2 confirmed on 2026-09-11 that http_response, receipt_field, log_assertion and state_transition are all collectable by hand but that no typed recorder exists, so this fact cannot be observed as written.",
-        "kind": "collector_gap",
-        "owner": "acceptance harness owner, through the typed evidence recorder work ticket"
+        "kind": "literal",
+        "source_quote": "Today"
       },
       "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
-      "expected_fact": "The accessibility tree exposes 'Today' for dashboard-ui.logic.",
+      "expected_fact": "The real Personal surface exposes the Today view.",
       "id": "dashboard-ui.logic",
       "precondition": "Exact candidate and sandbox board are bound; arrange the dashboard-ui.logic state on the real personal surface.",
       "predicate": {
@@ -122,18 +147,17 @@
           "nodes"
         ]
       },
-      "status": "measured-gap",
+      "status": "normative",
       "surface": "personal"
     },
     {
       "action": "Navigate to or trigger Shell without relabelling another state.",
       "derivation": {
-        "action": "Implement the typed evidence recorder and evaluator for this fact in tools/aionui-extension/tests/home_acceptance/runner.py and harness.py, then re-derive this row against the recorded evidence as literal or identifier. purser-reviewer-2 confirmed on 2026-09-11 that http_response, receipt_field, log_assertion and state_transition are all collectable by hand but that no typed recorder exists, so this fact cannot be observed as written.",
-        "kind": "collector_gap",
-        "owner": "acceptance harness owner, through the typed evidence recorder work ticket"
+        "kind": "literal",
+        "source_quote": "On Board Personal Preview"
       },
       "evidence_source": "tools/dashboard-ui/dashboard-entry.html",
-      "expected_fact": "The accessibility tree exposes the exact 'On Board Personal Preview' shell title.",
+      "expected_fact": "The standalone shell exposes the exact On Board Personal Preview title.",
       "id": "dashboard-ui.shell",
       "precondition": "Exact candidate and sandbox board are bound; arrange the dashboard-ui.shell state on the real personal surface.",
       "predicate": {
@@ -144,7 +168,7 @@
           "nodes"
         ]
       },
-      "status": "measured-gap",
+      "status": "normative",
       "surface": "personal"
     },
     {
@@ -171,23 +195,22 @@
     {
       "action": "Navigate to or trigger Error without relabelling another state.",
       "derivation": {
-        "action": "Implement the typed evidence recorder and evaluator for this fact in tools/aionui-extension/tests/home_acceptance/runner.py and harness.py, then re-derive this row against the recorded evidence as literal or identifier. purser-reviewer-2 confirmed on 2026-09-11 that http_response, receipt_field, log_assertion and state_transition are all collectable by hand but that no typed recorder exists, so this fact cannot be observed as written.",
-        "kind": "collector_gap",
-        "owner": "acceptance harness owner, through the typed evidence recorder work ticket"
+        "kind": "literal",
+        "source_quote": "Connection interrupted"
       },
       "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
-      "expected_fact": "The accessibility tree exposes 'Disconnected' for dashboard-ui.state.error.",
+      "expected_fact": "The live Personal dashboard retains last-known data and exposes Connection interrupted after a feed failure.",
       "id": "dashboard-ui.state.error",
       "precondition": "Exact candidate and sandbox board are bound; arrange the dashboard-ui.state.error state on the real personal surface.",
       "predicate": {
-        "expected": "Disconnected",
+        "expected": "Connection interrupted",
         "name": "required fact: dashboard-ui.state.error",
         "operator": "ax_name_contains",
         "path": [
           "nodes"
         ]
       },
-      "status": "measured-gap",
+      "status": "normative",
       "surface": "personal"
     },
     {
@@ -214,45 +237,59 @@
     {
       "action": "Navigate to or trigger Permission Denied without relabelling another state.",
       "derivation": {
-        "action": "Implement the typed evidence recorder and evaluator for this fact in tools/aionui-extension/tests/home_acceptance/runner.py and harness.py, then re-derive this row against the recorded evidence as literal or identifier. purser-reviewer-2 confirmed on 2026-09-11 that http_response, receipt_field, log_assertion and state_transition are all collectable by hand but that no typed recorder exists, so this fact cannot be observed as written.",
-        "kind": "collector_gap",
-        "owner": "acceptance harness owner, through the typed evidence recorder work ticket"
+        "kind": "identifier",
+        "symbol": "failureSnapshot"
       },
       "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
-      "expected_fact": "The accessibility tree exposes 'Permission denied' for dashboard-ui.state.permission-denied.",
+      "expected_fact": "A permission failure places the Personal dashboard in its error render state and exposes the denial text.",
       "id": "dashboard-ui.state.permission-denied",
       "precondition": "Exact candidate and sandbox board are bound; arrange the dashboard-ui.state.permission-denied state on the real personal surface.",
       "predicate": {
-        "expected": "Permission denied",
+        "conjuncts": [
+          {
+            "assertions": [
+              {
+                "op": "eq",
+                "path": "/render_state",
+                "phase": "after",
+                "value": "error"
+              },
+              {
+                "op": "contains",
+                "path": "/connection_detail",
+                "phase": "after",
+                "value": "Permission denied"
+              }
+            ],
+            "kind": "state_transition",
+            "source_id": "browser-dashboard-ui-state-permission-denied"
+          }
+        ],
         "name": "required fact: dashboard-ui.state.permission-denied",
-        "operator": "ax_name_contains",
-        "path": [
-          "nodes"
-        ]
+        "operator": "all_of"
       },
-      "status": "measured-gap",
+      "status": "normative",
       "surface": "personal"
     },
     {
       "action": "Navigate to or trigger Search Empty without relabelling another state.",
       "derivation": {
-        "action": "Implement the typed evidence recorder and evaluator for this fact in tools/aionui-extension/tests/home_acceptance/runner.py and harness.py, then re-derive this row against the recorded evidence as literal or identifier. purser-reviewer-2 confirmed on 2026-09-11 that http_response, receipt_field, log_assertion and state_transition are all collectable by hand but that no typed recorder exists, so this fact cannot be observed as written.",
-        "kind": "collector_gap",
-        "owner": "acceptance harness owner, through the typed evidence recorder work ticket"
+        "kind": "literal",
+        "source_quote": "No matching loaded data"
       },
       "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
-      "expected_fact": "The accessibility tree exposes 'No results' for dashboard-ui.state.search-empty.",
+      "expected_fact": "A non-matching loaded-data query exposes No matching loaded data.",
       "id": "dashboard-ui.state.search-empty",
       "precondition": "Exact candidate and sandbox board are bound; arrange the dashboard-ui.state.search-empty state on the real personal surface.",
       "predicate": {
-        "expected": "No results",
+        "expected": "No matching loaded data",
         "name": "required fact: dashboard-ui.state.search-empty",
         "operator": "ax_name_contains",
         "path": [
           "nodes"
         ]
       },
-      "status": "measured-gap",
+      "status": "normative",
       "surface": "personal"
     },
     {
@@ -279,50 +316,65 @@
     {
       "action": "Apply the dark host theme to the dashboard while it is rendered in the light theme.",
       "derivation": {
-        "action": "Implement the typed evidence recorder and evaluator for this fact in tools/aionui-extension/tests/home_acceptance/runner.py and harness.py, then re-derive this row against the recorded evidence as literal or identifier. purser-reviewer-2 confirmed on 2026-09-11 that http_response, receipt_field, log_assertion and state_transition are all collectable by hand but that no typed recorder exists, so this fact cannot be observed as written.",
-        "kind": "collector_gap",
-        "owner": "acceptance harness owner, through the typed evidence recorder work ticket"
+        "kind": "identifier",
+        "symbol": ":root[data-theme=\"dark\"]"
       },
-      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
       "evidence_source": "tools/dashboard-ui/src/dashboard.css",
-      "expected_fact": "The dashboard style changes from the light theme to the dark theme through the data-theme state.",
+      "expected_fact": "Changing the dashboard theme control changes the root data-theme value from light to dark.",
       "id": "dashboard-ui.styles",
       "precondition": "Exact candidate and sandbox board are bound; the real Personal surface is rendered with data-theme light.",
       "predicate": {
         "conjuncts": [
           {
-            "from": "light",
+            "assertions": [
+              {
+                "op": "eq",
+                "path": "/theme",
+                "phase": "before",
+                "value": "light"
+              },
+              {
+                "op": "eq",
+                "path": "/theme",
+                "phase": "action",
+                "value": "dark"
+              },
+              {
+                "op": "eq",
+                "path": "/theme",
+                "phase": "after",
+                "value": "dark"
+              }
+            ],
             "kind": "state_transition",
-            "to": "dark",
-            "via": "data-theme"
+            "source_id": "browser-dashboard-ui-styles"
           }
         ],
         "name": "required fact: dashboard-ui.styles",
         "operator": "all_of"
       },
-      "status": "measured-gap",
+      "status": "normative",
       "surface": "personal"
     },
     {
       "action": "Navigate to or trigger Bridge Missing without relabelling another state.",
       "derivation": {
-        "action": "Implement the typed evidence recorder and evaluator for this fact in tools/aionui-extension/tests/home_acceptance/runner.py and harness.py, then re-derive this row against the recorded evidence as literal or identifier. purser-reviewer-2 confirmed on 2026-09-11 that http_response, receipt_field, log_assertion and state_transition are all collectable by hand but that no typed recorder exists, so this fact cannot be observed as written.",
-        "kind": "collector_gap",
-        "owner": "acceptance harness owner, through the typed evidence recorder work ticket"
+        "kind": "literal",
+        "source_quote": "Install it, then retry."
       },
       "evidence_source": "tools/aionui-extension/webui/app.js",
-      "expected_fact": "The accessibility tree exposes 'Install the Pursers bridge' for extension-join.state.bridge-missing.",
+      "expected_fact": "The missing-bridge state exposes the install-and-retry guidance.",
       "id": "extension-join.state.bridge-missing",
       "precondition": "Exact candidate and sandbox board are bound; arrange the extension-join.state.bridge-missing state on the real aionui surface.",
       "predicate": {
-        "expected": "Install the Pursers bridge",
+        "expected": "Install it, then retry.",
         "name": "required fact: extension-join.state.bridge-missing",
         "operator": "ax_name_contains",
         "path": [
           "nodes"
         ]
       },
-      "status": "measured-gap",
+      "status": "normative",
       "surface": "aionui"
     },
     {
@@ -370,30 +422,45 @@
     {
       "action": "Navigate to or trigger Joined without relabelling another state.",
       "derivation": {
-        "action": "Implement the typed evidence recorder and evaluator for this fact in tools/aionui-extension/tests/home_acceptance/runner.py and harness.py, then re-derive this row against the recorded evidence as literal or identifier. purser-reviewer-2 confirmed on 2026-09-11 that http_response, receipt_field, log_assertion and state_transition are all collectable by hand but that no typed recorder exists, so this fact cannot be observed as written.",
-        "kind": "collector_gap",
-        "owner": "acceptance harness owner, through the typed evidence recorder work ticket"
+        "kind": "identifier",
+        "symbol": "showConnection"
       },
       "evidence_source": "tools/aionui-extension/webui/app.js",
-      "expected_fact": "The accessibility tree exposes 'Joined and registered' for extension-join.state.joined.",
+      "expected_fact": "A successful join exposes Project connected in the real AionUi extension.",
       "id": "extension-join.state.joined",
       "precondition": "Exact candidate and sandbox board are bound; arrange the extension-join.state.joined state on the real aionui surface.",
       "predicate": {
-        "expected": "Joined and registered",
+        "conjuncts": [
+          {
+            "assertions": [
+              {
+                "op": "eq",
+                "path": "/connection_pill",
+                "phase": "after",
+                "value": "Connected"
+              },
+              {
+                "op": "eq",
+                "path": "/saved_state",
+                "phase": "after",
+                "value": "Connected"
+              }
+            ],
+            "kind": "state_transition",
+            "source_id": "browser-extension-join-state-joined"
+          }
+        ],
         "name": "required fact: extension-join.state.joined",
-        "operator": "ax_name_contains",
-        "path": [
-          "nodes"
-        ]
+        "operator": "all_of"
       },
-      "status": "measured-gap",
+      "status": "normative",
       "surface": "aionui"
     },
     {
       "action": "Navigate to or trigger Joining without relabelling another state.",
       "derivation": {
         "kind": "literal",
-        "source_quote": "setBusy(button, true, 'Joining\u2026');"
+        "source_quote": "setBusy(button, true, 'Joining…');"
       },
       "evidence_source": "tools/aionui-extension/webui/app.js",
       "expected_fact": "The accessibility tree exposes 'Joining' for extension-join.state.joining.",
@@ -434,23 +501,38 @@
     {
       "action": "Navigate to or trigger Status Loaded without relabelling another state.",
       "derivation": {
-        "action": "Implement the typed evidence recorder and evaluator for this fact in tools/aionui-extension/tests/home_acceptance/runner.py and harness.py, then re-derive this row against the recorded evidence as literal or identifier. purser-reviewer-2 confirmed on 2026-09-11 that http_response, receipt_field, log_assertion and state_transition are all collectable by hand but that no typed recorder exists, so this fact cannot be observed as written.",
-        "kind": "collector_gap",
-        "owner": "acceptance harness owner, through the typed evidence recorder work ticket"
+        "kind": "identifier",
+        "symbol": "showConnection"
       },
       "evidence_source": "tools/aionui-extension/webui/app.js",
-      "expected_fact": "The accessibility tree exposes 'Board' for extension-join.state.status-loaded.",
+      "expected_fact": "Loaded redacted status exposes the exact sandbox board and at least one saved-status field.",
       "id": "extension-join.state.status-loaded",
       "precondition": "Exact candidate and sandbox board are bound; arrange the extension-join.state.status-loaded state on the real aionui surface.",
       "predicate": {
-        "expected": "Board",
+        "conjuncts": [
+          {
+            "assertions": [
+              {
+                "op": "eq",
+                "path": "/board_text",
+                "phase": "after",
+                "value": "sandbox-home-acceptance"
+              },
+              {
+                "op": "gte",
+                "path": "/status_field_count",
+                "phase": "after",
+                "value": 1
+              }
+            ],
+            "kind": "state_transition",
+            "source_id": "browser-extension-join-state-status-loaded"
+          }
+        ],
         "name": "required fact: extension-join.state.status-loaded",
-        "operator": "ax_name_contains",
-        "path": [
-          "nodes"
-        ]
+        "operator": "all_of"
       },
-      "status": "measured-gap",
+      "status": "normative",
       "surface": "aionui"
     },
     {
@@ -477,23 +559,22 @@
     {
       "action": "Navigate to or trigger Bounded Errors without relabelling another state.",
       "derivation": {
-        "action": "Implement the typed evidence recorder and evaluator for this fact in tools/aionui-extension/tests/home_acceptance/runner.py and harness.py, then re-derive this row against the recorded evidence as literal or identifier. purser-reviewer-2 confirmed on 2026-09-11 that http_response, receipt_field, log_assertion and state_transition are all collectable by hand but that no typed recorder exists, so this fact cannot be observed as written.",
-        "kind": "collector_gap",
-        "owner": "acceptance harness owner, through the typed evidence recorder work ticket"
+        "kind": "literal",
+        "source_quote": "That ticket is not present in the bounded board response. Refresh and retry."
       },
       "evidence_source": "tools/aionui-extension/webui/app.js",
-      "expected_fact": "The accessibility tree exposes 'Bounded Errors' for extension.bounded-errors.",
+      "expected_fact": "A bounded missing-ticket failure exposes the shipped refresh-and-retry guidance.",
       "id": "extension.bounded-errors",
       "precondition": "Exact candidate and sandbox board are bound; arrange the extension.bounded-errors state on the real aionui surface.",
       "predicate": {
-        "expected": "Bounded Errors",
+        "expected": "That ticket is not present in the bounded board response. Refresh and retry.",
         "name": "required fact: extension.bounded-errors",
         "operator": "ax_name_contains",
         "path": [
           "nodes"
         ]
       },
-      "status": "measured-gap",
+      "status": "normative",
       "surface": "aionui"
     },
     {
@@ -521,45 +602,87 @@
     {
       "action": "Navigate to or trigger Idempotent Reconnect without relabelling another state.",
       "derivation": {
-        "action": "Implement the typed evidence recorder and evaluator for this fact in tools/aionui-extension/tests/home_acceptance/runner.py and harness.py, then re-derive this row against the recorded evidence as literal or identifier. purser-reviewer-2 confirmed on 2026-09-11 that http_response, receipt_field, log_assertion and state_transition are all collectable by hand but that no typed recorder exists, so this fact cannot be observed as written.",
-        "kind": "collector_gap",
-        "owner": "acceptance harness owner, through the typed evidence recorder work ticket"
+        "kind": "identifier",
+        "symbol": "recoverConnection"
       },
       "evidence_source": "tools/aionui-extension/webui/app.js",
-      "expected_fact": "The accessibility tree exposes 'Idempotent Reconnect' for extension.idempotent-reconnect.",
+      "expected_fact": "Recovering the same saved seat preserves one connection and clears registration-error state.",
       "id": "extension.idempotent-reconnect",
       "precondition": "Exact candidate and sandbox board are bound; arrange the extension.idempotent-reconnect state on the real aionui surface.",
       "predicate": {
-        "expected": "Idempotent Reconnect",
+        "conjuncts": [
+          {
+            "assertions": [
+              {
+                "op": "eq",
+                "path": "/connection_count",
+                "phase": "before",
+                "value": 1
+              },
+              {
+                "op": "eq",
+                "path": "/recover",
+                "phase": "action",
+                "value": "clicked"
+              },
+              {
+                "op": "eq",
+                "path": "/connection_count",
+                "phase": "after",
+                "value": 1
+              },
+              {
+                "op": "eq",
+                "path": "/registration_error_count",
+                "phase": "after",
+                "value": 0
+              }
+            ],
+            "kind": "state_transition",
+            "source_id": "browser-extension-idempotent-reconnect"
+          }
+        ],
         "name": "required fact: extension.idempotent-reconnect",
-        "operator": "ax_name_contains",
-        "path": [
-          "nodes"
-        ]
+        "operator": "all_of"
       },
-      "status": "measured-gap",
+      "status": "normative",
       "surface": "aionui"
     },
     {
       "action": "Navigate to or trigger Join Form without relabelling another state.",
       "derivation": {
-        "action": "Implement the typed evidence recorder and evaluator for this fact in tools/aionui-extension/tests/home_acceptance/runner.py and harness.py, then re-derive this row against the recorded evidence as literal or identifier. purser-reviewer-2 confirmed on 2026-09-11 that http_response, receipt_field, log_assertion and state_transition are all collectable by hand but that no typed recorder exists, so this fact cannot be observed as written.",
-        "kind": "collector_gap",
-        "owner": "acceptance harness owner, through the typed evidence recorder work ticket"
+        "kind": "identifier",
+        "symbol": "connectionPayload"
       },
       "evidence_source": "tools/aionui-extension/webui/app.js",
-      "expected_fact": "The accessibility tree exposes 'Join Form' for extension.join-form.",
+      "expected_fact": "The shipped connection form contains exactly one join form and one password input for the door.",
       "id": "extension.join-form",
       "precondition": "Exact candidate and sandbox board are bound; arrange the extension.join-form state on the real aionui surface.",
       "predicate": {
-        "expected": "Join Form",
+        "conjuncts": [
+          {
+            "assertions": [
+              {
+                "op": "eq",
+                "path": "/join_form_count",
+                "phase": "after",
+                "value": 1
+              },
+              {
+                "op": "eq",
+                "path": "/door_password_count",
+                "phase": "after",
+                "value": 1
+              }
+            ],
+            "kind": "state_transition",
+            "source_id": "browser-extension-join-form"
+          }
+        ],
         "name": "required fact: extension.join-form",
-        "operator": "ax_name_contains",
-        "path": [
-          "nodes"
-        ]
+        "operator": "all_of"
       },
-      "status": "measured-gap",
+      "status": "normative",
       "surface": "aionui"
     },
     {
@@ -587,23 +710,38 @@
     {
       "action": "Navigate to or trigger Redacted Status Card without relabelling another state.",
       "derivation": {
-        "action": "Implement the typed evidence recorder and evaluator for this fact in tools/aionui-extension/tests/home_acceptance/runner.py and harness.py, then re-derive this row against the recorded evidence as literal or identifier. purser-reviewer-2 confirmed on 2026-09-11 that http_response, receipt_field, log_assertion and state_transition are all collectable by hand but that no typed recorder exists, so this fact cannot be observed as written.",
-        "kind": "collector_gap",
-        "owner": "acceptance harness owner, through the typed evidence recorder work ticket"
+        "kind": "identifier",
+        "symbol": "showConnection"
       },
       "evidence_source": "tools/aionui-extension/webui/app.js",
-      "expected_fact": "The accessibility tree exposes 'Redacted Status Card' for extension.redacted-status-card.",
+      "expected_fact": "After connection the door input is empty while redacted status fields remain visible.",
       "id": "extension.redacted-status-card",
       "precondition": "Exact candidate and sandbox board are bound; arrange the extension.redacted-status-card state on the real aionui surface.",
       "predicate": {
-        "expected": "Redacted Status Card",
+        "conjuncts": [
+          {
+            "assertions": [
+              {
+                "op": "eq",
+                "path": "/door_value",
+                "phase": "after",
+                "value": ""
+              },
+              {
+                "op": "gte",
+                "path": "/status_field_count",
+                "phase": "after",
+                "value": 1
+              }
+            ],
+            "kind": "state_transition",
+            "source_id": "browser-extension-redacted-status-card"
+          }
+        ],
         "name": "required fact: extension.redacted-status-card",
-        "operator": "ax_name_contains",
-        "path": [
-          "nodes"
-        ]
+        "operator": "all_of"
       },
-      "status": "measured-gap",
+      "status": "normative",
       "surface": "aionui"
     },
     {
@@ -653,23 +791,44 @@
     {
       "action": "Navigate to or trigger Settings Navigation without relabelling another state.",
       "derivation": {
-        "action": "Implement the typed evidence recorder and evaluator for this fact in tools/aionui-extension/tests/home_acceptance/runner.py and harness.py, then re-derive this row against the recorded evidence as literal or identifier. purser-reviewer-2 confirmed on 2026-09-11 that http_response, receipt_field, log_assertion and state_transition are all collectable by hand but that no typed recorder exists, so this fact cannot be observed as written.",
-        "kind": "collector_gap",
-        "owner": "acceptance harness owner, through the typed evidence recorder work ticket"
+        "kind": "identifier",
+        "symbol": "settings page"
       },
       "evidence_source": "tools/aionui-extension/webui/app.js",
-      "expected_fact": "The accessibility tree exposes 'Settings Navigation' for extension.settings-navigation.",
+      "expected_fact": "Activating the extension settings navigation changes the settings region from hidden to visible.",
       "id": "extension.settings-navigation",
       "precondition": "Exact candidate and sandbox board are bound; arrange the extension.settings-navigation state on the real aionui surface.",
       "predicate": {
-        "expected": "Settings Navigation",
+        "conjuncts": [
+          {
+            "assertions": [
+              {
+                "op": "eq",
+                "path": "/settings_hidden",
+                "phase": "before",
+                "value": true
+              },
+              {
+                "op": "eq",
+                "path": "/settings_navigation",
+                "phase": "action",
+                "value": "clicked"
+              },
+              {
+                "op": "eq",
+                "path": "/settings_hidden",
+                "phase": "after",
+                "value": false
+              }
+            ],
+            "kind": "state_transition",
+            "source_id": "browser-extension-settings-navigation"
+          }
+        ],
         "name": "required fact: extension.settings-navigation",
-        "operator": "ax_name_contains",
-        "path": [
-          "nodes"
-        ]
+        "operator": "all_of"
       },
-      "status": "measured-gap",
+      "status": "normative",
       "surface": "aionui"
     },
     {
@@ -720,7 +879,7 @@
       "action": "Navigate to or trigger Bounded without relabelling another state.",
       "derivation": {
         "kind": "literal",
-        "source_quote": "function renderCentral(d){const central=d.central,s=d.pool_summary,boards=filterHomeBoards(d.boards,filterNeedle),agents=d.agents.filter(a=>matches([a.agent_name,a.pool_status,...a.boards],filterNeedle));return `<section class=\"central-group\" data-central=\"${esc(central)}\"><div class=\"top central-heading\"><div><h2>${esc(central)}</h2><p class=\"muted\">Independent central trust domain</p></div><nav class=\"tabs\"><a class=\"tab\" href=\"${centralHref(central,'overhead')}\">Overhead</a><a class=\"tab\" href=\"${centralHref(central,'config')}\">Config</a></nav></div><section class=\"strip\">${['online','busy','available','stale'].map(k=>`<div class=\"metric\"><span>${esc(k)}</span><b>${esc(s[k])}</b></div>`).join('')}</section><section class=\"grid\">${boards.map(b=>`<article class=\"card\"><a class=\"board-link\" href=\"${boardHref(central,b.board_id)}\"><div class=\"top\"><div><h2>${esc(b.label)}</h2><span class=\"meta\">${esc(b.board_id)}</span></div>${b.truncated?'<span class=\"status\">bounded view</span>':''}</div></a>${b.error?`<p class=\"error\">Unavailable: ${esc(b.error)}</p>`:`<div class=\"counts\">${Object.entries(b.counts).map(([k,v])=>`<span class=\"pill\">${esc(k.replace('_',' '))}: <b>${esc(v)}</b></span>`).join('')}</div><div class=\"table-scroll\"><table><thead><tr><th>Ticket</th><th>Title</th><th>Status</th><th class=\"hide-small\">Claimed by</th></tr></thead><tbody>${b.tickets.length?b.tickets.map(t=>`<tr><td><a class=\"id\" href=\"${ticketHref(central,b.board_id,t.id)}\">${esc(t.id)}</a></td><td>${esc(t.title)}</td><td><span class=\"status\">${esc(t.status_label||t.status)}</span></td><td class=\"hide-small\">${esc(t.claimed_by||'\u2014')}</td></tr>`).join(''):'<tr><td colspan=\"4\" class=\"empty\">No matching tickets</td></tr>'}</tbody></table></div>`}</article>`).join('')||'<p class=\"empty\">No boards match the filter.</p>'}</section><section class=\"card pool\"><h2>Agent pool \u00b7 ${esc(central)}</h2>${agents.length?agents.map(a=>`<details class=\"agent\" data-state-key=\"${esc(`agent:${central}:${a.agent_name}`)}\"><summary><b>${esc(a.agent_name)}${a.duplicate_name?' <span class=\"warning\">duplicate name</span>':''}</b><span>${esc(a.pool_status)}</span><span>${esc(a.boards.join(', '))}</span><span>${esc(fmt(a.last_seen))}</span></summary><div class=\"agent-body table-scroll\"><table><thead><tr><th>Project</th><th>Role</th><th>Current claim</th><th>Last seen</th></tr></thead><tbody>${a.seats.map(seat=>`<tr><td><a href=\"${boardHref(central,seat.board_id)}\">${esc(seat.project)}</a><div class=\"meta\">${esc(seat.board_id)}</div></td><td>${esc(seat.role||'\u2014')}</td><td>${seat.current_ticket_id?`<a class=\"id\" href=\"${ticketHref(central,seat.board_id,seat.current_ticket_id)}\">${esc(seat.current_ticket_id)}</a><div>${esc(seat.current_ticket_title)}</div>`:'\u2014'}</td><td>${esc(fmt(seat.last_seen))}</td></tr>`).join('')}</tbody></table></div></details>`).join(''):'<p class=\"empty\">No agents match the filter.</p>'}</section></section>`}"
+        "source_quote": "function renderCentral(d){const central=d.central,s=d.pool_summary,boards=filterHomeBoards(d.boards,filterNeedle),agents=d.agents.filter(a=>matches([a.agent_name,a.pool_status,...a.boards],filterNeedle));return `<section class=\"central-group\" data-central=\"${esc(central)}\"><div class=\"top central-heading\"><div><h2>${esc(central)}</h2><p class=\"muted\">Independent central trust domain</p></div><nav class=\"tabs\"><a class=\"tab\" href=\"${centralHref(central,'overhead')}\">Overhead</a><a class=\"tab\" href=\"${centralHref(central,'config')}\">Config</a></nav></div><section class=\"strip\">${['online','busy','available','stale'].map(k=>`<div class=\"metric\"><span>${esc(k)}</span><b>${esc(s[k])}</b></div>`).join('')}</section><section class=\"grid\">${boards.map(b=>`<article class=\"card\"><a class=\"board-link\" href=\"${boardHref(central,b.board_id)}\"><div class=\"top\"><div><h2>${esc(b.label)}</h2><span class=\"meta\">${esc(b.board_id)}</span></div>${b.truncated?'<span class=\"status\">bounded view</span>':''}</div></a>${b.error?`<p class=\"error\">Unavailable: ${esc(b.error)}</p>`:`<div class=\"counts\">${Object.entries(b.counts).map(([k,v])=>`<span class=\"pill\">${esc(k.replace('_',' '))}: <b>${esc(v)}</b></span>`).join('')}</div><div class=\"table-scroll\"><table><thead><tr><th>Ticket</th><th>Title</th><th>Status</th><th class=\"hide-small\">Claimed by</th></tr></thead><tbody>${b.tickets.length?b.tickets.map(t=>`<tr><td><a class=\"id\" href=\"${ticketHref(central,b.board_id,t.id)}\">${esc(t.id)}</a></td><td>${esc(t.title)}</td><td><span class=\"status\">${esc(t.status_label||t.status)}</span></td><td class=\"hide-small\">${esc(t.claimed_by||'—')}</td></tr>`).join(''):'<tr><td colspan=\"4\" class=\"empty\">No matching tickets</td></tr>'}</tbody></table></div>`}</article>`).join('')||'<p class=\"empty\">No boards match the filter.</p>'}</section><section class=\"card pool\"><h2>Agent pool · ${esc(central)}</h2>${agents.length?agents.map(a=>`<details class=\"agent\" data-state-key=\"${esc(`agent:${central}:${a.agent_name}`)}\"><summary><b>${esc(a.agent_name)}${a.duplicate_name?' <span class=\"warning\">duplicate name</span>':''}</b><span>${esc(a.pool_status)}</span><span>${esc(a.boards.join(', '))}</span><span>${esc(fmt(a.last_seen))}</span></summary><div class=\"agent-body table-scroll\"><table><thead><tr><th>Project</th><th>Role</th><th>Current claim</th><th>Last seen</th></tr></thead><tbody>${a.seats.map(seat=>`<tr><td><a href=\"${boardHref(central,seat.board_id)}\">${esc(seat.project)}</a><div class=\"meta\">${esc(seat.board_id)}</div></td><td>${esc(seat.role||'—')}</td><td>${seat.current_ticket_id?`<a class=\"id\" href=\"${ticketHref(central,seat.board_id,seat.current_ticket_id)}\">${esc(seat.current_ticket_id)}</a><div>${esc(seat.current_ticket_title)}</div>`:'—'}</td><td>${esc(fmt(seat.last_seen))}</td></tr>`).join('')}</tbody></table></div></details>`).join(''):'<p class=\"empty\">No agents match the filter.</p>'}</section></section>`}"
       },
       "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
       "expected_fact": "The accessibility tree exposes 'bounded view' for fleet-dashboard.state.bounded.",
@@ -741,7 +900,7 @@
       "action": "Navigate to or trigger Edit Paused without relabelling another state.",
       "derivation": {
         "kind": "literal",
-        "source_quote": "function refreshPaused(){const a=document.activeElement,state=document.querySelector('#state');const focused=!!a&&a!==document.body&&a.id!=='filter'&&a.matches('input,textarea,select,[contenteditable=\"true\"]');const dirty=!!document.querySelector('form[data-dirty]');const paused=focused||dirty;if(state){if(paused){if(!state.dataset.paused){state.dataset.paused='1';state.dataset.prev=state.textContent;state.textContent='Refresh paused while editing \u00b7 click to resume';state.title='Auto-refresh is paused while a form has focus or unsaved input. Click to resume.'}}else if(state.dataset.paused){delete state.dataset.paused;state.textContent=state.dataset.prev||'';state.title=''}}let pill=document.querySelector('#refresh-paused');if(paused){if(!pill&&document.body){pill=document.createElement('div');pill.id='refresh-paused';pill.setAttribute('role','status');pill.innerHTML='<span>Auto-refresh paused while you edit</span><button type=\"button\" id=\"refresh-resume\">Resume</button>';document.body.appendChild(pill)}}else pill?.remove();return paused}"
+        "source_quote": "function refreshPaused(){const a=document.activeElement,state=document.querySelector('#state');const focused=!!a&&a!==document.body&&a.id!=='filter'&&a.matches('input,textarea,select,[contenteditable=\"true\"]');const dirty=!!document.querySelector('form[data-dirty]');const paused=focused||dirty;if(state){if(paused){if(!state.dataset.paused){state.dataset.paused='1';state.dataset.prev=state.textContent;state.textContent='Refresh paused while editing · click to resume';state.title='Auto-refresh is paused while a form has focus or unsaved input. Click to resume.'}}else if(state.dataset.paused){delete state.dataset.paused;state.textContent=state.dataset.prev||'';state.title=''}}let pill=document.querySelector('#refresh-paused');if(paused){if(!pill&&document.body){pill=document.createElement('div');pill.id='refresh-paused';pill.setAttribute('role','status');pill.innerHTML='<span>Auto-refresh paused while you edit</span><button type=\"button\" id=\"refresh-resume\">Resume</button>';document.body.appendChild(pill)}}else pill?.remove();return paused}"
       },
       "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
       "expected_fact": "The accessibility tree exposes 'Refresh paused' for fleet-dashboard.state.edit-paused.",
@@ -782,30 +941,29 @@
     {
       "action": "Navigate to or trigger Empty Centrals without relabelling another state.",
       "derivation": {
-        "action": "Implement the typed evidence recorder and evaluator for this fact in tools/aionui-extension/tests/home_acceptance/runner.py and harness.py, then re-derive this row against the recorded evidence as literal or identifier. purser-reviewer-2 confirmed on 2026-09-11 that http_response, receipt_field, log_assertion and state_transition are all collectable by hand but that no typed recorder exists, so this fact cannot be observed as written.",
-        "kind": "collector_gap",
-        "owner": "acceptance harness owner, through the typed evidence recorder work ticket"
+        "kind": "literal",
+        "source_quote": "No central available"
       },
       "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
-      "expected_fact": "The accessibility tree exposes 'No centrals' for fleet-dashboard.state.empty-centrals.",
+      "expected_fact": "With no Central result the Fleet state line exposes No central available.",
       "id": "fleet-dashboard.state.empty-centrals",
       "precondition": "Exact candidate and sandbox board are bound; arrange the fleet-dashboard.state.empty-centrals state on the real fleet surface.",
       "predicate": {
-        "expected": "No centrals",
+        "expected": "No central available",
         "name": "required fact: fleet-dashboard.state.empty-centrals",
         "operator": "ax_name_contains",
         "path": [
           "nodes"
         ]
       },
-      "status": "measured-gap",
+      "status": "normative",
       "surface": "fleet"
     },
     {
       "action": "Navigate to or trigger Empty Workers without relabelling another state.",
       "derivation": {
         "kind": "literal",
-        "source_quote": "function renderWorkers(d){workerData=d;workerFormDirty=false;const rows=d.workers||[];document.querySelector('#workers-view').innerHTML=`<a class=\"back\" href=\"#/\">\u2190 All centrals</a><div class=\"top\"><div><h2>API workers \u00b7 ${esc(d.central)}</h2><p class=\"muted\">Keys go directly to macOS Keychain; local configs contain only a Keychain account reference.</p></div><span class=\"status\">${rows.length} configured</span></div><section class=\"card pool\"><h3>Configured workers</h3><div class=\"table-scroll\"><table><thead><tr><th>Name</th><th>Provider / host</th><th>Model</th><th>Process</th><th>Seat</th><th>Actions</th></tr></thead><tbody>${rows.length?rows.map(w=>`<tr><td><b class=\"id\">${esc(w.name)}</b></td><td>${esc(w.provider_label)}<div class=\"meta\">${esc(w.base_url_host)}</div></td><td>${esc(w.model)}</td><td><span class=\"status\">${w.running?`running \u00b7 PID ${esc(w.pid)}`:'stopped'}</span>${w.adopted?'<div class=\"meta\">adopted</div>':''}</td><td>${w.seat_exists?'<span class=\"status\">ready</span>':`<span class=\"warning\">missing</span><code class=\"worker-command\">${esc(w.seat_admin_command)}</code>`}</td><td><div class=\"worker-actions\"><button type=\"button\" data-worker-action=\"test\" data-name=\"${esc(w.name)}\">Test</button><button type=\"button\" data-worker-action=\"start\" data-name=\"${esc(w.name)}\" ${w.running?'disabled':''}>Start</button><button type=\"button\" data-worker-action=\"stop\" data-name=\"${esc(w.name)}\" ${w.running?'':'disabled'}>Stop</button>${w.seat_exists?'':`<button type=\"button\" data-copy-command=\"${esc(w.seat_admin_command)}\">Copy seat command</button>`}</div></td></tr>`).join(''):'<tr><td colspan=\"6\" class=\"empty\">No API workers configured.</td></tr>'}</tbody></table></div><p id=\"worker-action-status\" class=\"${workerActionError?'error':'muted'}\">${esc(workerActionMessage)}</p></section><section class=\"card pool\"><h3>Add or update worker</h3><form id=\"worker-form\" class=\"worker-form\"><label>Name<input name=\"name\" pattern=\"[a-z0-9-]{2,32}\" maxlength=\"32\" placeholder=\"api-worker-1\" required></label><label>Provider<select name=\"provider\">${workerPresetOptions(d.presets)}</select></label><label>Base URL<input name=\"base_url\" type=\"url\" required></label><label>Model<input name=\"model\" maxlength=\"200\" placeholder=\"model-id\" required></label><label>API key<input name=\"api_key\" type=\"password\" maxlength=\"8192\" autocomplete=\"new-password\" required></label><button class=\"worker-submit\" type=\"submit\">Save worker</button></form><p id=\"worker-save-status\" class=\"muted\">Saving an existing worker requires it to be stopped.</p></section>`;const form=document.querySelector('#worker-form'),provider=form.elements.provider,base=form.elements.base_url,key=form.elements.api_key;function syncPreset(){const option=provider.selectedOptions[0];base.value=option.dataset.url||'';base.readOnly=!['custom','azure'].includes(provider.value);key.required=option.dataset.key==='true';key.disabled=option.dataset.key!=='true';if(key.disabled)key.value=''}provider.addEventListener('change',syncPreset);syncPreset();form.addEventListener('input',()=>{workerFormDirty=true});form.addEventListener('change',()=>{workerFormDirty=true});form.addEventListener('submit',saveWorker);document.querySelector('#workers-view').onclick=workerClick;bindInteractive(document.querySelector('#workers-view'))}"
+        "source_quote": "function renderWorkers(d){workerData=d;workerFormDirty=false;const rows=d.workers||[];document.querySelector('#workers-view').innerHTML=`<a class=\"back\" href=\"#/\">← All centrals</a><div class=\"top\"><div><h2>API workers · ${esc(d.central)}</h2><p class=\"muted\">Keys go directly to macOS Keychain; local configs contain only a Keychain account reference.</p></div><span class=\"status\">${rows.length} configured</span></div><section class=\"card pool\"><h3>Configured workers</h3><div class=\"table-scroll\"><table><thead><tr><th>Name</th><th>Provider / host</th><th>Model</th><th>Process</th><th>Seat</th><th>Actions</th></tr></thead><tbody>${rows.length?rows.map(w=>`<tr><td><b class=\"id\">${esc(w.name)}</b></td><td>${esc(w.provider_label)}<div class=\"meta\">${esc(w.base_url_host)}</div></td><td>${esc(w.model)}</td><td><span class=\"status\">${w.running?`running · PID ${esc(w.pid)}`:'stopped'}</span>${w.adopted?'<div class=\"meta\">adopted</div>':''}</td><td>${w.seat_exists?'<span class=\"status\">ready</span>':`<span class=\"warning\">missing</span><code class=\"worker-command\">${esc(w.seat_admin_command)}</code>`}</td><td><div class=\"worker-actions\"><button type=\"button\" data-worker-action=\"test\" data-name=\"${esc(w.name)}\">Test</button><button type=\"button\" data-worker-action=\"start\" data-name=\"${esc(w.name)}\" ${w.running?'disabled':''}>Start</button><button type=\"button\" data-worker-action=\"stop\" data-name=\"${esc(w.name)}\" ${w.running?'':'disabled'}>Stop</button>${w.seat_exists?'':`<button type=\"button\" data-copy-command=\"${esc(w.seat_admin_command)}\">Copy seat command</button>`}</div></td></tr>`).join(''):'<tr><td colspan=\"6\" class=\"empty\">No API workers configured.</td></tr>'}</tbody></table></div><p id=\"worker-action-status\" class=\"${workerActionError?'error':'muted'}\">${esc(workerActionMessage)}</p></section><section class=\"card pool\"><h3>Add or update worker</h3><form id=\"worker-form\" class=\"worker-form\"><label>Name<input name=\"name\" pattern=\"[a-z0-9-]{2,32}\" maxlength=\"32\" placeholder=\"api-worker-1\" required></label><label>Provider<select name=\"provider\">${workerPresetOptions(d.presets)}</select></label><label>Base URL<input name=\"base_url\" type=\"url\" required></label><label>Model<input name=\"model\" maxlength=\"200\" placeholder=\"model-id\" required></label><label>API key<input name=\"api_key\" type=\"password\" maxlength=\"8192\" autocomplete=\"new-password\" required></label><button class=\"worker-submit\" type=\"submit\">Save worker</button></form><p id=\"worker-save-status\" class=\"muted\">Saving an existing worker requires it to be stopped.</p></section>`;const form=document.querySelector('#worker-form'),provider=form.elements.provider,base=form.elements.base_url,key=form.elements.api_key;function syncPreset(){const option=provider.selectedOptions[0];base.value=option.dataset.url||'';base.readOnly=!['custom','azure'].includes(provider.value);key.required=option.dataset.key==='true';key.disabled=option.dataset.key!=='true';if(key.disabled)key.value=''}provider.addEventListener('change',syncPreset);syncPreset();form.addEventListener('input',()=>{workerFormDirty=true});form.addEventListener('change',()=>{workerFormDirty=true});form.addEventListener('submit',saveWorker);document.querySelector('#workers-view').onclick=workerClick;bindInteractive(document.querySelector('#workers-view'))}"
       },
       "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
       "expected_fact": "The accessibility tree exposes 'No API workers configured' for fleet-dashboard.state.empty-workers.",
@@ -826,7 +984,7 @@
       "action": "Navigate to or trigger Error Board without relabelling another state.",
       "derivation": {
         "kind": "literal",
-        "source_quote": "async function refreshDetail(){const r=route();if(!r||r.kind!=='board'||refreshPaused())return;const key=`detail:${r.central}:${r.board}`;try{const data=await fetchJson(`/api/board/${encodeURIComponent(r.board)}?${apiCentral(r.central)}`);const current=route();if(current?.central!==r.central||current?.board!==r.board||refreshPaused())return;detailData=data;renderDetail(data);refreshIntake(current,true);markConnectionSuccess(key)}catch(e){markConnectionFailure(key);if(!detailData||detailData.central!==r.central||detailData.board?.board_id!==r.board)document.querySelector('#detail-view').innerHTML=`<a class=\"back\" href=\"#/\">\u2190 All centrals</a><p class=\"error\">Board detail unavailable for ${esc(r.central)}.</p>`}}"
+        "source_quote": "async function refreshDetail(){const r=route();if(!r||r.kind!=='board'||refreshPaused())return;const key=`detail:${r.central}:${r.board}`;try{const data=await fetchJson(`/api/board/${encodeURIComponent(r.board)}?${apiCentral(r.central)}`);const current=route();if(current?.central!==r.central||current?.board!==r.board||refreshPaused())return;detailData=data;renderDetail(data);refreshIntake(current,true);markConnectionSuccess(key)}catch(e){markConnectionFailure(key);if(!detailData||detailData.central!==r.central||detailData.board?.board_id!==r.board)document.querySelector('#detail-view').innerHTML=`<a class=\"back\" href=\"#/\">← All centrals</a><p class=\"error\">Board detail unavailable for ${esc(r.central)}.</p>`}}"
       },
       "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
       "expected_fact": "The accessibility tree exposes 'Board detail unavailable' for fleet-dashboard.state.error-board.",
@@ -847,7 +1005,7 @@
       "action": "Navigate to or trigger Loading Board without relabelling another state.",
       "derivation": {
         "kind": "literal",
-        "source_quote": "function syncRoute(){const r=route();document.querySelector('#home-view').hidden=!!r;document.querySelector('#detail-view').hidden=!r||r.kind==='config';if(detailTimer){clearInterval(detailTimer);detailTimer=null}for(const key of [...connectionFailures])if(key.startsWith('detail:')||key.startsWith('overhead:'))connectionFailures.delete(key);updateConnectionState();if(r?.kind==='board'){if(detailData?.central===r.central&&detailData?.board?.board_id===r.board)renderDetail(detailData);else document.querySelector('#detail-view').innerHTML='<p class=\"empty\">Loading board detail\u2026</p>';refreshDetail();detailTimer=setInterval(refreshDetail,5000)}else if(r?.kind==='overhead'){document.querySelector('#detail-view').innerHTML='<p class=\"empty\">Loading overhead\u2026</p>';refreshOverhead();detailTimer=setInterval(refreshOverhead,5000)}else if(!r)renderFleet()}"
+        "source_quote": "function syncRoute(){const r=route();document.querySelector('#home-view').hidden=!!r;document.querySelector('#detail-view').hidden=!r||r.kind==='config';if(detailTimer){clearInterval(detailTimer);detailTimer=null}for(const key of [...connectionFailures])if(key.startsWith('detail:')||key.startsWith('overhead:'))connectionFailures.delete(key);updateConnectionState();if(r?.kind==='board'){if(detailData?.central===r.central&&detailData?.board?.board_id===r.board)renderDetail(detailData);else document.querySelector('#detail-view').innerHTML='<p class=\"empty\">Loading board detail…</p>';refreshDetail();detailTimer=setInterval(refreshDetail,5000)}else if(r?.kind==='overhead'){document.querySelector('#detail-view').innerHTML='<p class=\"empty\">Loading overhead…</p>';refreshOverhead();detailTimer=setInterval(refreshOverhead,5000)}else if(!r)renderFleet()}"
       },
       "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
       "expected_fact": "The accessibility tree exposes 'Loading board detail' for fleet-dashboard.state.loading-board.",
@@ -867,23 +1025,38 @@
     {
       "action": "Navigate to or trigger Offline without relabelling another state.",
       "derivation": {
-        "action": "Implement the typed evidence recorder and evaluator for this fact in tools/aionui-extension/tests/home_acceptance/runner.py and harness.py, then re-derive this row against the recorded evidence as literal or identifier. purser-reviewer-2 confirmed on 2026-09-11 that http_response, receipt_field, log_assertion and state_transition are all collectable by hand but that no typed recorder exists, so this fact cannot be observed as written.",
-        "kind": "collector_gap",
-        "owner": "acceptance harness owner, through the typed evidence recorder work ticket"
+        "kind": "identifier",
+        "symbol": "renderFleet"
       },
       "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
-      "expected_fact": "The accessibility tree exposes 'Offline' for fleet-dashboard.state.offline.",
+      "expected_fact": "An unavailable Central produces one unavailable Central section on the real Fleet surface.",
       "id": "fleet-dashboard.state.offline",
       "precondition": "Exact candidate and sandbox board are bound; arrange the fleet-dashboard.state.offline state on the real fleet surface.",
       "predicate": {
-        "expected": "Offline",
+        "conjuncts": [
+          {
+            "assertions": [
+              {
+                "op": "gte",
+                "path": "/unavailable_central_count",
+                "phase": "after",
+                "value": 1
+              },
+              {
+                "op": "eq",
+                "path": "/available_central_count",
+                "phase": "after",
+                "value": 0
+              }
+            ],
+            "kind": "state_transition",
+            "source_id": "browser-fleet-dashboard-state-offline"
+          }
+        ],
         "name": "required fact: fleet-dashboard.state.offline",
-        "operator": "ax_name_contains",
-        "path": [
-          "nodes"
-        ]
+        "operator": "all_of"
       },
-      "status": "measured-gap",
+      "status": "normative",
       "surface": "fleet"
     },
     {
@@ -911,7 +1084,7 @@
       "action": "Navigate to or trigger Truncated Tickets without relabelling another state.",
       "derivation": {
         "kind": "literal",
-        "source_quote": "function renderDetail(d){const r=route();if(!r||r.kind!=='board'||r.central!==d.central||r.board!==d.board.board_id)return;const views={tickets:ticketView,timeline:timelineView,changes:changesView,flow:flowView,routes:routesView};document.querySelector('#detail-view').innerHTML=`<a class=\"back\" href=\"#/\">\u2190 All centrals</a><div class=\"top\"><div><h2>${esc(d.board.label)} \u00b7 ${esc(d.central)}</h2><span class=\"meta\">${esc(d.board.board_id)}</span></div>${d.truncated?`<span class=\"status\">${esc(d.ticket_returned)} of ${esc(d.ticket_total)} tickets shown</span>`:''}</div><div class=\"toolbar\">${tabs(d,r)}<span class=\"muted\">Two guarded writes only: config and intake \u00b7 ${esc(d.central)}</span></div>${intakePanel(d,r)}${r.view==='tickets'?findings(d):''}${views[r.view](d,r)}`;document.querySelector('#intake-form')?.addEventListener('submit',submitIntake);for(const button of document.querySelectorAll('[data-intake-action]'))button.addEventListener('click',decideIntake);document.querySelector('#ticket-sort')?.addEventListener('change',e=>{detailSort=e.target.value;renderDetail(d)});document.querySelector('#changes-form')?.addEventListener('submit',e=>{e.preventDefault();const value=document.querySelector('#since-seq').value.trim();location.hash=`/central/${encodeURIComponent(r.central)}/board/${encodeURIComponent(d.board.board_id)}/changes${value?`?since=${encodeURIComponent(value)}`:''}`});document.querySelector('#state').textContent=`Updated ${fmt(d.generated_at)} \u00b7 ${esc(d.central)}`;bindInteractive(document.querySelector('#detail-view'));renderSearchResults();if(r.ticket){const target=[...document.querySelectorAll('[data-ticket]')].find(x=>x.dataset.ticket===r.ticket);if(target){target.open=true;sectionStates.set(target.dataset.stateKey,true);target.scrollIntoView({block:'center'})}}}"
+        "source_quote": "function renderDetail(d){const r=route();if(!r||r.kind!=='board'||r.central!==d.central||r.board!==d.board.board_id)return;const views={tickets:ticketView,timeline:timelineView,changes:changesView,flow:flowView,routes:routesView};document.querySelector('#detail-view').innerHTML=`<a class=\"back\" href=\"#/\">← All centrals</a><div class=\"top\"><div><h2>${esc(d.board.label)} · ${esc(d.central)}</h2><span class=\"meta\">${esc(d.board.board_id)}</span></div>${d.truncated?`<span class=\"status\">${esc(d.ticket_returned)} of ${esc(d.ticket_total)} tickets shown</span>`:''}</div><div class=\"toolbar\">${tabs(d,r)}<span class=\"muted\">Two guarded writes only: config and intake · ${esc(d.central)}</span></div>${intakePanel(d,r)}${r.view==='tickets'?findings(d):''}${views[r.view](d,r)}`;document.querySelector('#intake-form')?.addEventListener('submit',submitIntake);for(const button of document.querySelectorAll('[data-intake-action]'))button.addEventListener('click',decideIntake);document.querySelector('#ticket-sort')?.addEventListener('change',e=>{detailSort=e.target.value;renderDetail(d)});document.querySelector('#changes-form')?.addEventListener('submit',e=>{e.preventDefault();const value=document.querySelector('#since-seq').value.trim();location.hash=`/central/${encodeURIComponent(r.central)}/board/${encodeURIComponent(d.board.board_id)}/changes${value?`?since=${encodeURIComponent(value)}`:''}`});document.querySelector('#state').textContent=`Updated ${fmt(d.generated_at)} · ${esc(d.central)}`;bindInteractive(document.querySelector('#detail-view'));renderSearchResults();if(r.ticket){const target=[...document.querySelectorAll('[data-ticket]')].find(x=>x.dataset.ticket===r.ticket);if(target){target.open=true;sectionStates.set(target.dataset.stateKey,true);target.scrollIntoView({block:'center'})}}}"
       },
       "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
       "expected_fact": "The accessibility tree exposes 'tickets shown' for fleet-dashboard.state.truncated-tickets.",
@@ -932,7 +1105,7 @@
       "action": "Navigate to or trigger Surface without relabelling another state.",
       "derivation": {
         "kind": "literal",
-        "source_quote": "r\"\"\"<body><div class=\"app-shell\"><aside class=\"sidebar\" aria-label=\"Primary navigation\"><a class=\"brand\" href=\"#/\"><span class=\"brand-mark\">P</span><span>Pursers Fleet</span></a><nav class=\"primary-nav\"><a data-nav=\"overview\" href=\"#/\"><span class=\"nav-icon\">\u2302</span>Overview</a><a data-nav=\"boards\" href=\"#/boards\"><span class=\"nav-icon\">\u25a6</span>Boards</a><a data-nav=\"agents\" href=\"#/agents\"><span class=\"nav-icon\">\u25ce</span>Agents</a><a data-nav=\"operations\" href=\"#/operations\"><span class=\"nav-icon\">\u2699</span>Operations</a></nav><div class=\"sidebar-foot\">Loopback control plane<br>bounded reads \u00b7 guarded writes</div></aside><main>\"\"\","
+        "source_quote": "r\"\"\"<body><div class=\"app-shell\"><aside class=\"sidebar\" aria-label=\"Primary navigation\"><a class=\"brand\" href=\"#/\"><span class=\"brand-mark\">P</span><span>Pursers Fleet</span></a><nav class=\"primary-nav\"><a data-nav=\"overview\" href=\"#/\"><span class=\"nav-icon\">⌂</span>Overview</a><a data-nav=\"boards\" href=\"#/boards\"><span class=\"nav-icon\">▦</span>Boards</a><a data-nav=\"agents\" href=\"#/agents\"><span class=\"nav-icon\">◎</span>Agents</a><a data-nav=\"operations\" href=\"#/operations\"><span class=\"nav-icon\">⚙</span>Operations</a></nav><div class=\"sidebar-foot\">Loopback control plane<br>bounded reads · guarded writes</div></aside><main>\"\"\","
       },
       "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
       "expected_fact": "The accessibility tree exposes 'Pursers Fleet' for fleet-dashboard.surface.",
@@ -952,23 +1125,32 @@
     {
       "action": "Navigate to or trigger Active Ticket Rows without relabelling another state.",
       "derivation": {
-        "action": "Implement the typed evidence recorder and evaluator for this fact in tools/aionui-extension/tests/home_acceptance/runner.py and harness.py, then re-derive this row against the recorded evidence as literal or identifier. purser-reviewer-2 confirmed on 2026-09-11 that http_response, receipt_field, log_assertion and state_transition are all collectable by hand but that no typed recorder exists, so this fact cannot be observed as written.",
-        "kind": "collector_gap",
-        "owner": "acceptance harness owner, through the typed evidence recorder work ticket"
+        "kind": "identifier",
+        "symbol": "_current_tickets_by_agent"
       },
       "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
-      "expected_fact": "The accessibility tree exposes 'Active Ticket Rows' for fleet.active-ticket-rows.",
+      "expected_fact": "A populated Fleet board exposes at least one bounded active ticket row.",
       "id": "fleet.active-ticket-rows",
       "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.active-ticket-rows state on the real fleet surface.",
       "predicate": {
-        "expected": "Active Ticket Rows",
+        "conjuncts": [
+          {
+            "assertions": [
+              {
+                "op": "gte",
+                "path": "/active_ticket_row_count",
+                "phase": "after",
+                "value": 1
+              }
+            ],
+            "kind": "state_transition",
+            "source_id": "browser-fleet-active-ticket-rows"
+          }
+        ],
         "name": "required fact: fleet.active-ticket-rows",
-        "operator": "ax_name_contains",
-        "path": [
-          "nodes"
-        ]
+        "operator": "all_of"
       },
-      "status": "measured-gap",
+      "status": "normative",
       "surface": "fleet"
     },
     {
@@ -1217,7 +1399,7 @@
       "action": "Navigate to or trigger Agent Pool without relabelling another state.",
       "derivation": {
         "kind": "literal",
-        "source_quote": "</style></head><body><main><div id=\"connection-banner\" class=\"connection-banner\" role=\"status\" hidden></div><div class=\"top\"><div><h1>Fleet Dashboard</h1><p class=\"muted\">Live boards and shared agent pool</p></div><div><div class=\"view-controls\"><button id=\"theme-toggle\" type=\"button\">Light theme</button><button id=\"density-toggle\" type=\"button\">Compact density</button><button id=\"help-toggle\" type=\"button\" aria-label=\"Keyboard help\">?</button></div><div class=\"search-wrap\"><input id=\"filter\" class=\"search\" type=\"search\" placeholder=\"Search boards, tickets, agents\u2026\" aria-label=\"Global dashboard search\" autocomplete=\"off\" aria-controls=\"search-results\" aria-expanded=\"false\"><div id=\"search-results\" class=\"search-results\" role=\"listbox\" hidden></div></div><div id=\"state\" class=\"muted\">Loading\u2026</div></div></div><section id=\"home-view\"><div id=\"central-sections\"></div></section><section id=\"detail-view\" hidden></section><section id=\"config-view\" hidden></section><dialog id=\"help-overlay\"><h2>Keyboard shortcuts</h2><dl class=\"shortcut-grid\"><dt>/</dt><dd>Focus global search</dd><dt>g then f</dt><dd>Fleet overview</dd><dt>g then o</dt><dd>Protocol overhead</dd><dt>g then c</dt><dd>Coordinator config</dd><dt>\u2191 / \u2193</dt><dd>Move within tables or search results</dd><dt>Enter</dt><dd>Open the selected search result</dd><dt>?</dt><dd>Toggle this help</dd><dt>Esc</dt><dd>Close search or help</dd></dl><button id=\"help-close\" type=\"button\">Close</button></dialog></main><script>"
+        "source_quote": "</style></head><body><main><div id=\"connection-banner\" class=\"connection-banner\" role=\"status\" hidden></div><div class=\"top\"><div><h1>Fleet Dashboard</h1><p class=\"muted\">Live boards and shared agent pool</p></div><div><div class=\"view-controls\"><button id=\"theme-toggle\" type=\"button\">Light theme</button><button id=\"density-toggle\" type=\"button\">Compact density</button><button id=\"help-toggle\" type=\"button\" aria-label=\"Keyboard help\">?</button></div><div class=\"search-wrap\"><input id=\"filter\" class=\"search\" type=\"search\" placeholder=\"Search boards, tickets, agents…\" aria-label=\"Global dashboard search\" autocomplete=\"off\" aria-controls=\"search-results\" aria-expanded=\"false\"><div id=\"search-results\" class=\"search-results\" role=\"listbox\" hidden></div></div><div id=\"state\" class=\"muted\">Loading…</div></div></div><section id=\"home-view\"><div id=\"central-sections\"></div></section><section id=\"detail-view\" hidden></section><section id=\"config-view\" hidden></section><dialog id=\"help-overlay\"><h2>Keyboard shortcuts</h2><dl class=\"shortcut-grid\"><dt>/</dt><dd>Focus global search</dd><dt>g then f</dt><dd>Fleet overview</dd><dt>g then o</dt><dd>Protocol overhead</dd><dt>g then c</dt><dd>Coordinator config</dd><dt>↑ / ↓</dt><dd>Move within tables or search results</dd><dt>Enter</dt><dd>Open the selected search result</dd><dt>?</dt><dd>Toggle this help</dd><dt>Esc</dt><dd>Close search or help</dd></dl><button id=\"help-close\" type=\"button\">Close</button></dialog></main><script>"
       },
       "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
       "expected_fact": "The accessibility tree exposes 'Agent Pool' for fleet.agent-pool.",
@@ -1259,23 +1441,32 @@
     {
       "action": "Navigate to or trigger Board Cards without relabelling another state.",
       "derivation": {
-        "action": "Implement the typed evidence recorder and evaluator for this fact in tools/aionui-extension/tests/home_acceptance/runner.py and harness.py, then re-derive this row against the recorded evidence as literal or identifier. purser-reviewer-2 confirmed on 2026-09-11 that http_response, receipt_field, log_assertion and state_transition are all collectable by hand but that no typed recorder exists, so this fact cannot be observed as written.",
-        "kind": "collector_gap",
-        "owner": "acceptance harness owner, through the typed evidence recorder work ticket"
+        "kind": "identifier",
+        "symbol": "renderBoardsHub"
       },
       "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
-      "expected_fact": "The accessibility tree exposes 'Board Cards' for fleet.board-cards.",
+      "expected_fact": "The Boards hub renders at least one real board card.",
       "id": "fleet.board-cards",
       "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.board-cards state on the real fleet surface.",
       "predicate": {
-        "expected": "Board Cards",
+        "conjuncts": [
+          {
+            "assertions": [
+              {
+                "op": "gte",
+                "path": "/board_card_count",
+                "phase": "after",
+                "value": 1
+              }
+            ],
+            "kind": "state_transition",
+            "source_id": "browser-fleet-board-cards"
+          }
+        ],
         "name": "required fact: fleet.board-cards",
-        "operator": "ax_name_contains",
-        "path": [
-          "nodes"
-        ]
+        "operator": "all_of"
       },
-      "status": "measured-gap",
+      "status": "normative",
       "surface": "fleet"
     },
     {
@@ -1347,23 +1538,38 @@
     {
       "action": "Navigate to or trigger Central Availability Isolation without relabelling another state.",
       "derivation": {
-        "action": "Implement the typed evidence recorder and evaluator for this fact in tools/aionui-extension/tests/home_acceptance/runner.py and harness.py, then re-derive this row against the recorded evidence as literal or identifier. purser-reviewer-2 confirmed on 2026-09-11 that http_response, receipt_field, log_assertion and state_transition are all collectable by hand but that no typed recorder exists, so this fact cannot be observed as written.",
-        "kind": "collector_gap",
-        "owner": "acceptance harness owner, through the typed evidence recorder work ticket"
+        "kind": "identifier",
+        "symbol": "renderFleet"
       },
       "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
-      "expected_fact": "The accessibility tree exposes 'Central Availability Isolation' for fleet.central-availability-isolation.",
+      "expected_fact": "One unavailable Central remains isolated while another Central section stays available.",
       "id": "fleet.central-availability-isolation",
       "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.central-availability-isolation state on the real fleet surface.",
       "predicate": {
-        "expected": "Central Availability Isolation",
+        "conjuncts": [
+          {
+            "assertions": [
+              {
+                "op": "eq",
+                "path": "/unavailable_central_count",
+                "phase": "after",
+                "value": 1
+              },
+              {
+                "op": "gte",
+                "path": "/available_central_count",
+                "phase": "after",
+                "value": 1
+              }
+            ],
+            "kind": "state_transition",
+            "source_id": "browser-fleet-central-availability-isolation"
+          }
+        ],
         "name": "required fact: fleet.central-availability-isolation",
-        "operator": "ax_name_contains",
-        "path": [
-          "nodes"
-        ]
+        "operator": "all_of"
       },
-      "status": "measured-gap",
+      "status": "normative",
       "surface": "fleet"
     },
     {
@@ -1589,23 +1795,38 @@
     {
       "action": "Navigate to or trigger Coordinator Configuration without relabelling another state.",
       "derivation": {
-        "action": "Implement the typed evidence recorder and evaluator for this fact in tools/aionui-extension/tests/home_acceptance/runner.py and harness.py, then re-derive this row against the recorded evidence as literal or identifier. purser-reviewer-2 confirmed on 2026-09-11 that http_response, receipt_field, log_assertion and state_transition are all collectable by hand but that no typed recorder exists, so this fact cannot be observed as written.",
-        "kind": "collector_gap",
-        "owner": "acceptance harness owner, through the typed evidence recorder work ticket"
+        "kind": "identifier",
+        "symbol": "validate_coordinator_config"
       },
       "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
-      "expected_fact": "The accessibility tree exposes 'Coordinator Configuration' for fleet.coordinator-configuration.",
+      "expected_fact": "The coordinator configuration view is visible and exposes its bounded form.",
       "id": "fleet.coordinator-configuration",
       "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.coordinator-configuration state on the real fleet surface.",
       "predicate": {
-        "expected": "Coordinator Configuration",
+        "conjuncts": [
+          {
+            "assertions": [
+              {
+                "op": "eq",
+                "path": "/config_view_hidden",
+                "phase": "after",
+                "value": false
+              },
+              {
+                "op": "gte",
+                "path": "/config_form_count",
+                "phase": "after",
+                "value": 1
+              }
+            ],
+            "kind": "state_transition",
+            "source_id": "browser-fleet-coordinator-configuration"
+          }
+        ],
         "name": "required fact: fleet.coordinator-configuration",
-        "operator": "ax_name_contains",
-        "path": [
-          "nodes"
-        ]
+        "operator": "all_of"
       },
-      "status": "measured-gap",
+      "status": "normative",
       "surface": "fleet"
     },
     {
@@ -1961,23 +2182,38 @@
     {
       "action": "Navigate to or trigger Hub Overview without relabelling another state.",
       "derivation": {
-        "action": "Implement the typed evidence recorder and evaluator for this fact in tools/aionui-extension/tests/home_acceptance/runner.py and harness.py, then re-derive this row against the recorded evidence as literal or identifier. purser-reviewer-2 confirmed on 2026-09-11 that http_response, receipt_field, log_assertion and state_transition are all collectable by hand but that no typed recorder exists, so this fact cannot be observed as written.",
-        "kind": "collector_gap",
-        "owner": "acceptance harness owner, through the typed evidence recorder work ticket"
+        "kind": "identifier",
+        "symbol": "renderOverview"
       },
       "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
-      "expected_fact": "The accessibility tree exposes 'Hub Overview' for fleet.hub-overview.",
+      "expected_fact": "The Overview navigation is active and at least one health card is rendered.",
       "id": "fleet.hub-overview",
       "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.hub-overview state on the real fleet surface.",
       "predicate": {
-        "expected": "Hub Overview",
+        "conjuncts": [
+          {
+            "assertions": [
+              {
+                "op": "eq",
+                "path": "/overview_active_count",
+                "phase": "after",
+                "value": 1
+              },
+              {
+                "op": "gte",
+                "path": "/health_card_count",
+                "phase": "after",
+                "value": 1
+              }
+            ],
+            "kind": "state_transition",
+            "source_id": "browser-fleet-hub-overview"
+          }
+        ],
         "name": "required fact: fleet.hub-overview",
-        "operator": "ax_name_contains",
-        "path": [
-          "nodes"
-        ]
+        "operator": "all_of"
       },
-      "status": "measured-gap",
+      "status": "normative",
       "surface": "fleet"
     },
     {
@@ -2005,7 +2241,7 @@
       "action": "Navigate to or trigger Keyboard Help without relabelling another state.",
       "derivation": {
         "kind": "literal",
-        "source_quote": "</style></head><body><main><div id=\"connection-banner\" class=\"connection-banner\" role=\"status\" hidden></div><div class=\"top\"><div><h1>Fleet Dashboard</h1><p class=\"muted\">Live boards and shared agent pool</p></div><div><div class=\"view-controls\"><button id=\"theme-toggle\" type=\"button\">Light theme</button><button id=\"density-toggle\" type=\"button\">Compact density</button><button id=\"help-toggle\" type=\"button\" aria-label=\"Keyboard help\">?</button></div><div class=\"search-wrap\"><input id=\"filter\" class=\"search\" type=\"search\" placeholder=\"Search boards, tickets, agents\u2026\" aria-label=\"Global dashboard search\" autocomplete=\"off\" aria-controls=\"search-results\" aria-expanded=\"false\"><div id=\"search-results\" class=\"search-results\" role=\"listbox\" hidden></div></div><div id=\"state\" class=\"muted\">Loading\u2026</div></div></div><section id=\"home-view\"><div id=\"central-sections\"></div></section><section id=\"detail-view\" hidden></section><section id=\"config-view\" hidden></section><dialog id=\"help-overlay\"><h2>Keyboard shortcuts</h2><dl class=\"shortcut-grid\"><dt>/</dt><dd>Focus global search</dd><dt>g then f</dt><dd>Fleet overview</dd><dt>g then o</dt><dd>Protocol overhead</dd><dt>g then c</dt><dd>Coordinator config</dd><dt>\u2191 / \u2193</dt><dd>Move within tables or search results</dd><dt>Enter</dt><dd>Open the selected search result</dd><dt>?</dt><dd>Toggle this help</dd><dt>Esc</dt><dd>Close search or help</dd></dl><button id=\"help-close\" type=\"button\">Close</button></dialog></main><script>"
+        "source_quote": "</style></head><body><main><div id=\"connection-banner\" class=\"connection-banner\" role=\"status\" hidden></div><div class=\"top\"><div><h1>Fleet Dashboard</h1><p class=\"muted\">Live boards and shared agent pool</p></div><div><div class=\"view-controls\"><button id=\"theme-toggle\" type=\"button\">Light theme</button><button id=\"density-toggle\" type=\"button\">Compact density</button><button id=\"help-toggle\" type=\"button\" aria-label=\"Keyboard help\">?</button></div><div class=\"search-wrap\"><input id=\"filter\" class=\"search\" type=\"search\" placeholder=\"Search boards, tickets, agents…\" aria-label=\"Global dashboard search\" autocomplete=\"off\" aria-controls=\"search-results\" aria-expanded=\"false\"><div id=\"search-results\" class=\"search-results\" role=\"listbox\" hidden></div></div><div id=\"state\" class=\"muted\">Loading…</div></div></div><section id=\"home-view\"><div id=\"central-sections\"></div></section><section id=\"detail-view\" hidden></section><section id=\"config-view\" hidden></section><dialog id=\"help-overlay\"><h2>Keyboard shortcuts</h2><dl class=\"shortcut-grid\"><dt>/</dt><dd>Focus global search</dd><dt>g then f</dt><dd>Fleet overview</dd><dt>g then o</dt><dd>Protocol overhead</dd><dt>g then c</dt><dd>Coordinator config</dd><dt>↑ / ↓</dt><dd>Move within tables or search results</dd><dt>Enter</dt><dd>Open the selected search result</dd><dt>?</dt><dd>Toggle this help</dd><dt>Esc</dt><dd>Close search or help</dd></dl><button id=\"help-close\" type=\"button\">Close</button></dialog></main><script>"
       },
       "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
       "expected_fact": "The accessibility tree exposes 'Keyboard Help' for fleet.keyboard-help.",
@@ -2354,23 +2590,38 @@
     {
       "action": "Navigate to or trigger Release Manifest without relabelling another state.",
       "derivation": {
-        "action": "Implement the typed evidence recorder and evaluator for this fact in tools/aionui-extension/tests/home_acceptance/runner.py and harness.py, then re-derive this row against the recorded evidence as literal or identifier. purser-reviewer-2 confirmed on 2026-09-11 that http_response, receipt_field, log_assertion and state_transition are all collectable by hand but that no typed recorder exists, so this fact cannot be observed as written.",
-        "kind": "collector_gap",
-        "owner": "acceptance harness owner, through the typed evidence recorder work ticket"
+        "kind": "identifier",
+        "symbol": "renderReleaseOps"
       },
       "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
-      "expected_fact": "The accessibility tree exposes 'Release Manifest' for fleet.release-manifest.",
+      "expected_fact": "The release card is visible and contains at least one package manifest row.",
       "id": "fleet.release-manifest",
       "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.release-manifest state on the real fleet surface.",
       "predicate": {
-        "expected": "Release Manifest",
+        "conjuncts": [
+          {
+            "assertions": [
+              {
+                "op": "eq",
+                "path": "/release_card_count",
+                "phase": "after",
+                "value": 1
+              },
+              {
+                "op": "gte",
+                "path": "/release_package_row_count",
+                "phase": "after",
+                "value": 1
+              }
+            ],
+            "kind": "state_transition",
+            "source_id": "browser-fleet-release-manifest"
+          }
+        ],
         "name": "required fact: fleet.release-manifest",
-        "operator": "ax_name_contains",
-        "path": [
-          "nodes"
-        ]
+        "operator": "all_of"
       },
-      "status": "measured-gap",
+      "status": "normative",
       "surface": "fleet"
     },
     {
@@ -2420,23 +2671,32 @@
     {
       "action": "Navigate to or trigger Release Tag without relabelling another state.",
       "derivation": {
-        "action": "Implement the typed evidence recorder and evaluator for this fact in tools/aionui-extension/tests/home_acceptance/runner.py and harness.py, then re-derive this row against the recorded evidence as literal or identifier. purser-reviewer-2 confirmed on 2026-09-11 that http_response, receipt_field, log_assertion and state_transition are all collectable by hand but that no typed recorder exists, so this fact cannot be observed as written.",
-        "kind": "collector_gap",
-        "owner": "acceptance harness owner, through the typed evidence recorder work ticket"
+        "kind": "identifier",
+        "symbol": "renderReleaseOps"
       },
       "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
-      "expected_fact": "The accessibility tree exposes 'Release Tag' for fleet.release-tag.",
+      "expected_fact": "The release card exposes its Latest tag value.",
       "id": "fleet.release-tag",
       "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.release-tag state on the real fleet surface.",
       "predicate": {
-        "expected": "Release Tag",
+        "conjuncts": [
+          {
+            "assertions": [
+              {
+                "op": "contains",
+                "path": "/latest_tag_text",
+                "phase": "after",
+                "value": "Latest tag:"
+              }
+            ],
+            "kind": "state_transition",
+            "source_id": "browser-fleet-release-tag"
+          }
+        ],
         "name": "required fact: fleet.release-tag",
-        "operator": "ax_name_contains",
-        "path": [
-          "nodes"
-        ]
+        "operator": "all_of"
       },
-      "status": "measured-gap",
+      "status": "normative",
       "surface": "fleet"
     },
     {
@@ -2476,7 +2736,7 @@
       "action": "Navigate to or trigger Search Results without relabelling another state.",
       "derivation": {
         "kind": "literal",
-        "source_quote": "</style></head><body><main><div id=\"connection-banner\" class=\"connection-banner\" role=\"status\" hidden></div><div class=\"top\"><div><h1>Fleet Dashboard</h1><p class=\"muted\">Live boards and shared agent pool</p></div><div><div class=\"view-controls\"><button id=\"theme-toggle\" type=\"button\">Light theme</button><button id=\"density-toggle\" type=\"button\">Compact density</button><button id=\"help-toggle\" type=\"button\" aria-label=\"Keyboard help\">?</button></div><div class=\"search-wrap\"><input id=\"filter\" class=\"search\" type=\"search\" placeholder=\"Search boards, tickets, agents\u2026\" aria-label=\"Global dashboard search\" autocomplete=\"off\" aria-controls=\"search-results\" aria-expanded=\"false\"><div id=\"search-results\" class=\"search-results\" role=\"listbox\" hidden></div></div><div id=\"state\" class=\"muted\">Loading\u2026</div></div></div><section id=\"home-view\"><div id=\"central-sections\"></div></section><section id=\"detail-view\" hidden></section><section id=\"config-view\" hidden></section><dialog id=\"help-overlay\"><h2>Keyboard shortcuts</h2><dl class=\"shortcut-grid\"><dt>/</dt><dd>Focus global search</dd><dt>g then f</dt><dd>Fleet overview</dd><dt>g then o</dt><dd>Protocol overhead</dd><dt>g then c</dt><dd>Coordinator config</dd><dt>\u2191 / \u2193</dt><dd>Move within tables or search results</dd><dt>Enter</dt><dd>Open the selected search result</dd><dt>?</dt><dd>Toggle this help</dd><dt>Esc</dt><dd>Close search or help</dd></dl><button id=\"help-close\" type=\"button\">Close</button></dialog></main><script>"
+        "source_quote": "</style></head><body><main><div id=\"connection-banner\" class=\"connection-banner\" role=\"status\" hidden></div><div class=\"top\"><div><h1>Fleet Dashboard</h1><p class=\"muted\">Live boards and shared agent pool</p></div><div><div class=\"view-controls\"><button id=\"theme-toggle\" type=\"button\">Light theme</button><button id=\"density-toggle\" type=\"button\">Compact density</button><button id=\"help-toggle\" type=\"button\" aria-label=\"Keyboard help\">?</button></div><div class=\"search-wrap\"><input id=\"filter\" class=\"search\" type=\"search\" placeholder=\"Search boards, tickets, agents…\" aria-label=\"Global dashboard search\" autocomplete=\"off\" aria-controls=\"search-results\" aria-expanded=\"false\"><div id=\"search-results\" class=\"search-results\" role=\"listbox\" hidden></div></div><div id=\"state\" class=\"muted\">Loading…</div></div></div><section id=\"home-view\"><div id=\"central-sections\"></div></section><section id=\"detail-view\" hidden></section><section id=\"config-view\" hidden></section><dialog id=\"help-overlay\"><h2>Keyboard shortcuts</h2><dl class=\"shortcut-grid\"><dt>/</dt><dd>Focus global search</dd><dt>g then f</dt><dd>Fleet overview</dd><dt>g then o</dt><dd>Protocol overhead</dd><dt>g then c</dt><dd>Coordinator config</dd><dt>↑ / ↓</dt><dd>Move within tables or search results</dd><dt>Enter</dt><dd>Open the selected search result</dd><dt>?</dt><dd>Toggle this help</dd><dt>Esc</dt><dd>Close search or help</dd></dl><button id=\"help-close\" type=\"button\">Close</button></dialog></main><script>"
       },
       "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
       "expected_fact": "The accessibility tree exposes 'Search Results' for fleet.search-results.",
@@ -2627,23 +2887,32 @@
     {
       "action": "Navigate to or trigger Ticket Counts without relabelling another state.",
       "derivation": {
-        "action": "Implement the typed evidence recorder and evaluator for this fact in tools/aionui-extension/tests/home_acceptance/runner.py and harness.py, then re-derive this row against the recorded evidence as literal or identifier. purser-reviewer-2 confirmed on 2026-09-11 that http_response, receipt_field, log_assertion and state_transition are all collectable by hand but that no typed recorder exists, so this fact cannot be observed as written.",
-        "kind": "collector_gap",
-        "owner": "acceptance harness owner, through the typed evidence recorder work ticket"
+        "kind": "identifier",
+        "symbol": "classify_ticket_flow"
       },
       "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
-      "expected_fact": "The accessibility tree exposes 'Ticket Counts' for fleet.ticket-counts.",
+      "expected_fact": "A populated board card exposes a non-empty ticket-count group.",
       "id": "fleet.ticket-counts",
       "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.ticket-counts state on the real fleet surface.",
       "predicate": {
-        "expected": "Ticket Counts",
+        "conjuncts": [
+          {
+            "assertions": [
+              {
+                "op": "gte",
+                "path": "/ticket_count_group_count",
+                "phase": "after",
+                "value": 1
+              }
+            ],
+            "kind": "state_transition",
+            "source_id": "browser-fleet-ticket-counts"
+          }
+        ],
         "name": "required fact: fleet.ticket-counts",
-        "operator": "ax_name_contains",
-        "path": [
-          "nodes"
-        ]
+        "operator": "all_of"
       },
-      "status": "measured-gap",
+      "status": "normative",
       "surface": "fleet"
     },
     {
@@ -2671,23 +2940,32 @@
     {
       "action": "Navigate to or trigger Updated State without relabelling another state.",
       "derivation": {
-        "action": "Implement the typed evidence recorder and evaluator for this fact in tools/aionui-extension/tests/home_acceptance/runner.py and harness.py, then re-derive this row against the recorded evidence as literal or identifier. purser-reviewer-2 confirmed on 2026-09-11 that http_response, receipt_field, log_assertion and state_transition are all collectable by hand but that no typed recorder exists, so this fact cannot be observed as written.",
-        "kind": "collector_gap",
-        "owner": "acceptance harness owner, through the typed evidence recorder work ticket"
+        "kind": "identifier",
+        "symbol": "renderFleet"
       },
       "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
-      "expected_fact": "The accessibility tree exposes 'Updated State' for fleet.updated-state.",
+      "expected_fact": "After a successful refresh the Fleet state line begins with Updated.",
       "id": "fleet.updated-state",
       "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.updated-state state on the real fleet surface.",
       "predicate": {
-        "expected": "Updated State",
+        "conjuncts": [
+          {
+            "assertions": [
+              {
+                "op": "contains",
+                "path": "/state_text",
+                "phase": "after",
+                "value": "Updated"
+              }
+            ],
+            "kind": "state_transition",
+            "source_id": "browser-fleet-updated-state"
+          }
+        ],
         "name": "required fact: fleet.updated-state",
-        "operator": "ax_name_contains",
-        "path": [
-          "nodes"
-        ]
+        "operator": "all_of"
       },
-      "status": "measured-gap",
+      "status": "normative",
       "surface": "fleet"
     },
     {
@@ -2714,27 +2992,36 @@
     {
       "action": "Navigate to or trigger Board Empty without relabelling another state.",
       "derivation": {
-        "action": "Implement the typed evidence recorder and evaluator for this fact in tools/aionui-extension/tests/home_acceptance/runner.py and harness.py, then re-derive this row against the recorded evidence as literal or identifier. purser-reviewer-2 confirmed on 2026-09-11 that http_response, receipt_field, log_assertion and state_transition are all collectable by hand but that no typed recorder exists, so this fact cannot be observed as written.",
-        "kind": "collector_gap",
-        "owner": "acceptance harness owner, through the typed evidence recorder work ticket"
+        "kind": "identifier",
+        "symbol": "board_snapshot"
       },
       "evidence_source": "packages/personal/src/pursers_personal/apps_server.py",
-      "expected_fact": "The live Personal MCP board_snapshot response reports zero tickets for the bound empty board.",
+      "expected_fact": "The live Personal MCP board_snapshot reports zero tickets and an empty ticket list for the bound board.",
       "id": "personal-mcp.state.board-empty",
       "precondition": "Exact candidate and sandbox board are bound; arrange the personal-mcp.state.board-empty state on the real personal surface.",
       "predicate": {
         "conjuncts": [
           {
-            "body_contains": "\"ticket_total\": 0",
-            "kind": "http_response",
-            "request": "board_snapshot",
-            "status": 200
+            "assertions": [
+              {
+                "op": "eq",
+                "path": "/ticket_total",
+                "value": 0
+              },
+              {
+                "op": "eq",
+                "path": "/tickets",
+                "value": []
+              }
+            ],
+            "kind": "mcp_tool_response",
+            "source_id": "personal-board-snapshot-empty"
           }
         ],
         "name": "required fact: personal-mcp.state.board-empty",
         "operator": "all_of"
       },
-      "status": "measured-gap",
+      "status": "normative",
       "surface": "personal"
     },
     {
@@ -2766,45 +3053,66 @@
     {
       "action": "Navigate to or trigger Links Empty without relabelling another state.",
       "derivation": {
-        "action": "Implement the typed evidence recorder and evaluator for this fact in tools/aionui-extension/tests/home_acceptance/runner.py and harness.py, then re-derive this row against the recorded evidence as literal or identifier. purser-reviewer-2 confirmed on 2026-09-11 that http_response, receipt_field, log_assertion and state_transition are all collectable by hand but that no typed recorder exists, so this fact cannot be observed as written.",
-        "kind": "collector_gap",
-        "owner": "acceptance harness owner, through the typed evidence recorder work ticket"
+        "kind": "identifier",
+        "symbol": "link_snapshot"
       },
       "evidence_source": "packages/personal/src/pursers_personal/apps_server.py",
-      "expected_fact": "The accessibility tree exposes 'No links' for personal-mcp.state.links-empty.",
+      "expected_fact": "The live Personal MCP link_snapshot reports zero returned nodes and edges for the bound board.",
       "id": "personal-mcp.state.links-empty",
       "precondition": "Exact candidate and sandbox board are bound; arrange the personal-mcp.state.links-empty state on the real personal surface.",
       "predicate": {
-        "expected": "No links",
+        "conjuncts": [
+          {
+            "assertions": [
+              {
+                "op": "eq",
+                "path": "/returned_node_count",
+                "value": 0
+              },
+              {
+                "op": "eq",
+                "path": "/returned_edge_count",
+                "value": 0
+              }
+            ],
+            "kind": "mcp_tool_response",
+            "source_id": "personal-link-snapshot-empty"
+          }
+        ],
         "name": "required fact: personal-mcp.state.links-empty",
-        "operator": "ax_name_contains",
-        "path": [
-          "nodes"
-        ]
+        "operator": "all_of"
       },
-      "status": "measured-gap",
+      "status": "normative",
       "surface": "personal"
     },
     {
       "action": "Navigate to or trigger Memory Empty without relabelling another state.",
       "derivation": {
-        "action": "Implement the typed evidence recorder and evaluator for this fact in tools/aionui-extension/tests/home_acceptance/runner.py and harness.py, then re-derive this row against the recorded evidence as literal or identifier. purser-reviewer-2 confirmed on 2026-09-11 that http_response, receipt_field, log_assertion and state_transition are all collectable by hand but that no typed recorder exists, so this fact cannot be observed as written.",
-        "kind": "collector_gap",
-        "owner": "acceptance harness owner, through the typed evidence recorder work ticket"
+        "kind": "identifier",
+        "symbol": "important_pinned"
       },
       "evidence_source": "packages/personal/src/pursers_personal/apps_server.py",
-      "expected_fact": "The accessibility tree exposes 'No pinned memory' for personal-mcp.state.memory-empty.",
+      "expected_fact": "The live Personal MCP board_snapshot reports no important pinned memory.",
       "id": "personal-mcp.state.memory-empty",
       "precondition": "Exact candidate and sandbox board are bound; arrange the personal-mcp.state.memory-empty state on the real personal surface.",
       "predicate": {
-        "expected": "No pinned memory",
+        "conjuncts": [
+          {
+            "assertions": [
+              {
+                "op": "eq",
+                "path": "/highlights/important_pinned",
+                "value": null
+              }
+            ],
+            "kind": "mcp_tool_response",
+            "source_id": "personal-board-snapshot-memory-empty"
+          }
+        ],
         "name": "required fact: personal-mcp.state.memory-empty",
-        "operator": "ax_name_contains",
-        "path": [
-          "nodes"
-        ]
+        "operator": "all_of"
       },
-      "status": "measured-gap",
+      "status": "normative",
       "surface": "personal"
     },
     {
@@ -2830,25 +3138,34 @@
       "surface": "personal"
     },
     {
-      "action": "Navigate to or trigger Ticket Not Found without relabelling another state.",
+      "action": "Call ticket_get for the verifier-owned absent ticket ID through the Personal MCP conversation and observe its rendered tool error.",
       "derivation": {
-        "action": "Implement the typed evidence recorder and evaluator for this fact in tools/aionui-extension/tests/home_acceptance/runner.py and harness.py, then re-derive this row against the recorded evidence as literal or identifier. purser-reviewer-2 confirmed on 2026-09-11 that http_response, receipt_field, log_assertion and state_transition are all collectable by hand but that no typed recorder exists, so this fact cannot be observed as written.",
-        "kind": "collector_gap",
-        "owner": "acceptance harness owner, through the typed evidence recorder work ticket"
+        "kind": "identifier",
+        "symbol": "ticket_get"
       },
       "evidence_source": "packages/personal/src/pursers_personal/apps_server.py",
-      "expected_fact": "The accessibility tree exposes 'Ticket not found' for personal-mcp.state.ticket-not-found.",
+      "expected_fact": "The Personal tool conversation exposes ticket not found for an absent bound-board ticket.",
       "id": "personal-mcp.state.ticket-not-found",
       "precondition": "Exact candidate and sandbox board are bound; arrange the personal-mcp.state.ticket-not-found state on the real personal surface.",
       "predicate": {
-        "expected": "Ticket not found",
+        "conjuncts": [
+          {
+            "assertions": [
+              {
+                "op": "contains",
+                "path": "/tool_error_text",
+                "phase": "after",
+                "value": "ticket not found"
+              }
+            ],
+            "kind": "state_transition",
+            "source_id": "browser-personal-mcp-state-ticket-not-found"
+          }
+        ],
         "name": "required fact: personal-mcp.state.ticket-not-found",
-        "operator": "ax_name_contains",
-        "path": [
-          "nodes"
-        ]
+        "operator": "all_of"
       },
-      "status": "measured-gap",
+      "status": "normative",
       "surface": "personal"
     },
     {
@@ -3033,23 +3350,22 @@
     {
       "action": "Navigate to or trigger Activity Scope without relabelling another state.",
       "derivation": {
-        "action": "Implement the typed evidence recorder and evaluator for this fact in tools/aionui-extension/tests/home_acceptance/runner.py and harness.py, then re-derive this row against the recorded evidence as literal or identifier. purser-reviewer-2 confirmed on 2026-09-11 that http_response, receipt_field, log_assertion and state_transition are all collectable by hand but that no typed recorder exists, so this fact cannot be observed as written.",
-        "kind": "collector_gap",
-        "owner": "acceptance harness owner, through the typed evidence recorder work ticket"
+        "kind": "literal",
+        "source_quote": "Observed by this MCP process"
       },
       "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
-      "expected_fact": "The accessibility tree exposes 'Activity Scope' for personal.activity-scope.",
+      "expected_fact": "The live activity disclosure exposes Observed by this MCP process.",
       "id": "personal.activity-scope",
       "precondition": "Exact candidate and sandbox board are bound; arrange the personal.activity-scope state on the real personal surface.",
       "predicate": {
-        "expected": "Activity Scope",
+        "expected": "Observed by this MCP process",
         "name": "required fact: personal.activity-scope",
         "operator": "ax_name_contains",
         "path": [
           "nodes"
         ]
       },
-      "status": "measured-gap",
+      "status": "normative",
       "surface": "personal"
     },
     {
@@ -3297,67 +3613,74 @@
     {
       "action": "Navigate to or trigger Board Identity without relabelling another state.",
       "derivation": {
-        "action": "Implement the typed evidence recorder and evaluator for this fact in tools/aionui-extension/tests/home_acceptance/runner.py and harness.py, then re-derive this row against the recorded evidence as literal or identifier. purser-reviewer-2 confirmed on 2026-09-11 that http_response, receipt_field, log_assertion and state_transition are all collectable by hand but that no typed recorder exists, so this fact cannot be observed as written.",
-        "kind": "collector_gap",
-        "owner": "acceptance harness owner, through the typed evidence recorder work ticket"
+        "kind": "identifier",
+        "symbol": "byId(\"board-id\")"
       },
       "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
-      "expected_fact": "The accessibility tree exposes 'Board Identity' for personal.board-identity.",
+      "expected_fact": "The Personal header exposes the exact bound sandbox board ID.",
       "id": "personal.board-identity",
       "precondition": "Exact candidate and sandbox board are bound; arrange the personal.board-identity state on the real personal surface.",
       "predicate": {
-        "expected": "Board Identity",
+        "conjuncts": [
+          {
+            "assertions": [
+              {
+                "op": "eq",
+                "path": "/board_text",
+                "phase": "after",
+                "value": "sandbox-home-acceptance"
+              }
+            ],
+            "kind": "state_transition",
+            "source_id": "browser-personal-board-identity"
+          }
+        ],
         "name": "required fact: personal.board-identity",
-        "operator": "ax_name_contains",
-        "path": [
-          "nodes"
-        ]
+        "operator": "all_of"
       },
-      "status": "measured-gap",
+      "status": "normative",
       "surface": "personal"
     },
     {
       "action": "Navigate to or trigger Connection Banner without relabelling another state.",
       "derivation": {
-        "action": "Implement the typed evidence recorder and evaluator for this fact in tools/aionui-extension/tests/home_acceptance/runner.py and harness.py, then re-derive this row against the recorded evidence as literal or identifier. purser-reviewer-2 confirmed on 2026-09-11 that http_response, receipt_field, log_assertion and state_transition are all collectable by hand but that no typed recorder exists, so this fact cannot be observed as written.",
-        "kind": "collector_gap",
-        "owner": "acceptance harness owner, through the typed evidence recorder work ticket"
+        "kind": "literal",
+        "source_quote": "Connected to the local board"
       },
       "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
-      "expected_fact": "The accessibility tree exposes 'Connection Banner' for personal.connection-banner.",
+      "expected_fact": "The healthy live Personal state exposes Connected to the local board.",
       "id": "personal.connection-banner",
       "precondition": "Exact candidate and sandbox board are bound; arrange the personal.connection-banner state on the real personal surface.",
       "predicate": {
-        "expected": "Connection Banner",
+        "expected": "Connected to the local board",
         "name": "required fact: personal.connection-banner",
         "operator": "ax_name_contains",
         "path": [
           "nodes"
         ]
       },
-      "status": "measured-gap",
+      "status": "normative",
       "surface": "personal"
     },
     {
       "action": "Navigate to or trigger Data Provenance without relabelling another state.",
       "derivation": {
-        "action": "Implement the typed evidence recorder and evaluator for this fact in tools/aionui-extension/tests/home_acceptance/runner.py and harness.py, then re-derive this row against the recorded evidence as literal or identifier. purser-reviewer-2 confirmed on 2026-09-11 that http_response, receipt_field, log_assertion and state_transition are all collectable by hand but that no typed recorder exists, so this fact cannot be observed as written.",
-        "kind": "collector_gap",
-        "owner": "acceptance harness owner, through the typed evidence recorder work ticket"
+        "kind": "literal",
+        "source_quote": "Live local Central · authorized projection"
       },
       "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
-      "expected_fact": "The accessibility tree exposes 'Data Provenance' for personal.data-provenance.",
+      "expected_fact": "The live Personal source label exposes Live local Central · authorized projection.",
       "id": "personal.data-provenance",
       "precondition": "Exact candidate and sandbox board are bound; arrange the personal.data-provenance state on the real personal surface.",
       "predicate": {
-        "expected": "Data Provenance",
+        "expected": "Live local Central · authorized projection",
         "name": "required fact: personal.data-provenance",
         "operator": "ax_name_contains",
         "path": [
           "nodes"
         ]
       },
-      "status": "measured-gap",
+      "status": "normative",
       "surface": "personal"
     },
     {
@@ -3451,23 +3774,38 @@
     {
       "action": "Navigate to or trigger Fleet Projects without relabelling another state.",
       "derivation": {
-        "action": "Implement the typed evidence recorder and evaluator for this fact in tools/aionui-extension/tests/home_acceptance/runner.py and harness.py, then re-derive this row against the recorded evidence as literal or identifier. purser-reviewer-2 confirmed on 2026-09-11 that http_response, receipt_field, log_assertion and state_transition are all collectable by hand but that no typed recorder exists, so this fact cannot be observed as written.",
-        "kind": "collector_gap",
-        "owner": "acceptance harness owner, through the typed evidence recorder work ticket"
+        "kind": "identifier",
+        "symbol": "renderFleet"
       },
       "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
-      "expected_fact": "The accessibility tree exposes 'Fleet Projects' for personal.fleet-projects.",
+      "expected_fact": "The Personal Projects view exposes at least one real project row and a non-empty total label.",
       "id": "personal.fleet-projects",
       "precondition": "Exact candidate and sandbox board are bound; arrange the personal.fleet-projects state on the real personal surface.",
       "predicate": {
-        "expected": "Fleet Projects",
+        "conjuncts": [
+          {
+            "assertions": [
+              {
+                "op": "gte",
+                "path": "/project_row_count",
+                "phase": "after",
+                "value": 1
+              },
+              {
+                "op": "contains",
+                "path": "/fleet_total_text",
+                "phase": "after",
+                "value": "project"
+              }
+            ],
+            "kind": "state_transition",
+            "source_id": "browser-personal-fleet-projects"
+          }
+        ],
         "name": "required fact: personal.fleet-projects",
-        "operator": "ax_name_contains",
-        "path": [
-          "nodes"
-        ]
+        "operator": "all_of"
       },
-      "status": "measured-gap",
+      "status": "normative",
       "surface": "personal"
     },
     {
@@ -3591,25 +3929,46 @@
       "surface": "personal"
     },
     {
-      "action": "Navigate to or trigger Keyboard Tabs without relabelling another state.",
+      "action": "Focus the selected Today tab, press ArrowRight through the verifier browser channel, and observe the Work panel.",
       "derivation": {
-        "action": "Implement the typed evidence recorder and evaluator for this fact in tools/aionui-extension/tests/home_acceptance/runner.py and harness.py, then re-derive this row against the recorded evidence as literal or identifier. purser-reviewer-2 confirmed on 2026-09-11 that http_response, receipt_field, log_assertion and state_transition are all collectable by hand but that no typed recorder exists, so this fact cannot be observed as written.",
-        "kind": "collector_gap",
-        "owner": "acceptance harness owner, through the typed evidence recorder work ticket"
+        "kind": "identifier",
+        "symbol": "keydown"
       },
       "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
-      "expected_fact": "The accessibility tree exposes 'Keyboard Tabs' for personal.keyboard-tabs.",
+      "expected_fact": "ArrowRight on the selected Personal tab moves visibility from Today to Work.",
       "id": "personal.keyboard-tabs",
       "precondition": "Exact candidate and sandbox board are bound; arrange the personal.keyboard-tabs state on the real personal surface.",
       "predicate": {
-        "expected": "Keyboard Tabs",
+        "conjuncts": [
+          {
+            "assertions": [
+              {
+                "op": "eq",
+                "path": "/work_hidden",
+                "phase": "before",
+                "value": true
+              },
+              {
+                "op": "eq",
+                "path": "/pressed_key",
+                "phase": "action",
+                "value": "ArrowRight"
+              },
+              {
+                "op": "eq",
+                "path": "/work_hidden",
+                "phase": "after",
+                "value": false
+              }
+            ],
+            "kind": "state_transition",
+            "source_id": "browser-personal-keyboard-tabs"
+          }
+        ],
         "name": "required fact: personal.keyboard-tabs",
-        "operator": "ax_name_contains",
-        "path": [
-          "nodes"
-        ]
+        "operator": "all_of"
       },
-      "status": "measured-gap",
+      "status": "normative",
       "surface": "personal"
     },
     {
@@ -3822,34 +4181,50 @@
     {
       "action": "Navigate to or trigger Search Results without relabelling another state.",
       "derivation": {
-        "action": "Implement the typed evidence recorder and evaluator for this fact in tools/aionui-extension/tests/home_acceptance/runner.py and harness.py, then re-derive this row against the recorded evidence as literal or identifier. purser-reviewer-2 confirmed on 2026-09-11 that http_response, receipt_field, log_assertion and state_transition are all collectable by hand but that no typed recorder exists, so this fact cannot be observed as written.",
-        "kind": "collector_gap",
-        "owner": "acceptance harness owner, through the typed evidence recorder work ticket"
+        "kind": "identifier",
+        "symbol": "renderSearch"
       },
       "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
-      "expected_fact": "A matching query changes the Personal search panel from hidden to visible and exposes 'Search results'.",
+      "expected_fact": "Typing a matching loaded-data query changes the search panel from hidden to visible and renders at least one result.",
       "id": "personal.search-results",
       "precondition": "Exact candidate and sandbox board are bound; arrange the personal.search-results state on the real personal surface.",
       "predicate": {
         "conjuncts": [
           {
-            "from": "search panel hidden",
+            "assertions": [
+              {
+                "op": "eq",
+                "path": "/panel_hidden",
+                "phase": "before",
+                "value": true
+              },
+              {
+                "op": "eq",
+                "path": "/query",
+                "phase": "action",
+                "value": "TK"
+              },
+              {
+                "op": "eq",
+                "path": "/panel_hidden",
+                "phase": "after",
+                "value": false
+              },
+              {
+                "op": "gte",
+                "path": "/result_count",
+                "phase": "after",
+                "value": 1
+              }
+            ],
             "kind": "state_transition",
-            "to": "search panel visible",
-            "via": "type matching query"
-          },
-          {
-            "expected": "Search results",
-            "kind": "ax_name_contains",
-            "path": [
-              "nodes"
-            ]
+            "source_id": "browser-personal-search-results"
           }
         ],
         "name": "required fact: personal.search-results",
         "operator": "all_of"
       },
-      "status": "measured-gap",
+      "status": "normative",
       "surface": "personal"
     },
     {
@@ -4118,23 +4493,38 @@
     {
       "action": "Navigate to or trigger Work Lease without relabelling another state.",
       "derivation": {
-        "action": "Implement the typed evidence recorder and evaluator for this fact in tools/aionui-extension/tests/home_acceptance/runner.py and harness.py, then re-derive this row against the recorded evidence as literal or identifier. purser-reviewer-2 confirmed on 2026-09-11 that http_response, receipt_field, log_assertion and state_transition are all collectable by hand but that no typed recorder exists, so this fact cannot be observed as written.",
-        "kind": "collector_gap",
-        "owner": "acceptance harness owner, through the typed evidence recorder work ticket"
+        "kind": "identifier",
+        "symbol": "leaseBadge"
       },
       "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
-      "expected_fact": "The accessibility tree exposes 'Work Lease' for personal.work-lease.",
+      "expected_fact": "A leased work item renders at least one lease countdown whose text includes lease.",
       "id": "personal.work-lease",
       "precondition": "Exact candidate and sandbox board are bound; arrange the personal.work-lease state on the real personal surface.",
       "predicate": {
-        "expected": "Work Lease",
+        "conjuncts": [
+          {
+            "assertions": [
+              {
+                "op": "gte",
+                "path": "/lease_count",
+                "phase": "after",
+                "value": 1
+              },
+              {
+                "op": "contains",
+                "path": "/lease_text",
+                "phase": "after",
+                "value": "lease"
+              }
+            ],
+            "kind": "state_transition",
+            "source_id": "browser-personal-work-lease"
+          }
+        ],
         "name": "required fact: personal.work-lease",
-        "operator": "ax_name_contains",
-        "path": [
-          "nodes"
-        ]
+        "operator": "all_of"
       },
-      "status": "measured-gap",
+      "status": "normative",
       "surface": "personal"
     },
     {
@@ -4297,12 +4687,11 @@
     {
       "action": "Navigate to or trigger Fresh_install without relabelling another state.",
       "derivation": {
-        "action": "Implement the typed evidence recorder and evaluator for this fact in tools/aionui-extension/tests/home_acceptance/runner.py and harness.py, then re-derive this row against the recorded evidence as literal or identifier. purser-reviewer-2 confirmed on 2026-09-11 that http_response, receipt_field, log_assertion and state_transition are all collectable by hand but that no typed recorder exists, so this fact cannot be observed as written.",
-        "kind": "collector_gap",
-        "owner": "acceptance harness owner, through the typed evidence recorder work ticket"
+        "kind": "literal",
+        "source_quote": "Pursers"
       },
       "evidence_source": "docs/design-home/acceptance.md",
-      "expected_fact": "The accessibility tree exposes 'Pursers' for fresh_install.",
+      "expected_fact": "The clean installed candidate exposes the Pursers entry in the real AionUi accessibility tree.",
       "id": "fresh_install",
       "precondition": "Exact candidate and sandbox board are bound; arrange the fresh_install state on the real aionui surface.",
       "predicate": {
@@ -4313,7 +4702,7 @@
           "nodes"
         ]
       },
-      "status": "measured-gap",
+      "status": "normative",
       "surface": "aionui"
     },
     {
@@ -4338,47 +4727,83 @@
       "surface": "aionui"
     },
     {
-      "action": "Navigate to or trigger Team_setup without relabelling another state.",
+      "action": "Create the disposable seat group, reopen the Team surface, and observe the same selected group.",
       "derivation": {
-        "action": "Implement the typed evidence recorder and evaluator for this fact in tools/aionui-extension/tests/home_acceptance/runner.py and harness.py, then re-derive this row against the recorded evidence as literal or identifier. purser-reviewer-2 confirmed on 2026-09-11 that http_response, receipt_field, log_assertion and state_transition are all collectable by hand but that no typed recorder exists, so this fact cannot be observed as written.",
-        "kind": "collector_gap",
-        "owner": "acceptance harness owner, through the typed evidence recorder work ticket"
+        "kind": "identifier",
+        "symbol": "team_setup"
       },
       "evidence_source": "docs/design-home/acceptance.md",
-      "expected_fact": "The accessibility tree exposes 'sandbox-home' for team_setup.",
+      "expected_fact": "Exactly one disposable board-scoped seat group exists and remains selected after reopen.",
       "id": "team_setup",
       "precondition": "Exact candidate and sandbox board are bound; arrange the team_setup state on the real aionui surface.",
       "predicate": {
-        "expected": "sandbox-home",
+        "conjuncts": [
+          {
+            "assertions": [
+              {
+                "op": "eq",
+                "path": "/group_count",
+                "phase": "after",
+                "value": 1
+              },
+              {
+                "op": "eq",
+                "path": "/selected_group_count",
+                "phase": "after",
+                "value": 1
+              }
+            ],
+            "kind": "state_transition",
+            "source_id": "browser-team-setup"
+          }
+        ],
         "name": "required fact: team_setup",
-        "operator": "ax_name_contains",
-        "path": [
-          "nodes"
-        ]
+        "operator": "all_of"
       },
-      "status": "measured-gap",
+      "status": "normative",
       "surface": "aionui"
     },
     {
-      "action": "Navigate to or trigger Five_workers_three_reviewers without relabelling another state.",
+      "action": "Open the populated disposable Team roster and count role rows and distinct stable identities.",
       "derivation": {
-        "action": "Implement the typed evidence recorder and evaluator for this fact in tools/aionui-extension/tests/home_acceptance/runner.py and harness.py, then re-derive this row against the recorded evidence as literal or identifier. purser-reviewer-2 confirmed on 2026-09-11 that http_response, receipt_field, log_assertion and state_transition are all collectable by hand but that no typed recorder exists, so this fact cannot be observed as written.",
-        "kind": "collector_gap",
-        "owner": "acceptance harness owner, through the typed evidence recorder work ticket"
+        "kind": "identifier",
+        "symbol": "five_workers_three_reviewers"
       },
       "evidence_source": "docs/design-home/acceptance.md",
-      "expected_fact": "The accessibility tree exposes '5 workers' for five_workers_three_reviewers.",
+      "expected_fact": "The real Team roster contains exactly five workers, three reviewers, and eight distinct identities.",
       "id": "five_workers_three_reviewers",
       "precondition": "Exact candidate and sandbox board are bound; arrange the five_workers_three_reviewers state on the real aionui surface.",
       "predicate": {
-        "expected": "5 workers",
+        "conjuncts": [
+          {
+            "assertions": [
+              {
+                "op": "eq",
+                "path": "/worker_count",
+                "phase": "after",
+                "value": 5
+              },
+              {
+                "op": "eq",
+                "path": "/reviewer_count",
+                "phase": "after",
+                "value": 3
+              },
+              {
+                "op": "eq",
+                "path": "/unique_identity_count",
+                "phase": "after",
+                "value": 8
+              }
+            ],
+            "kind": "state_transition",
+            "source_id": "browser-five-workers-three-reviewers"
+          }
+        ],
         "name": "required fact: five_workers_three_reviewers",
-        "operator": "ax_name_contains",
-        "path": [
-          "nodes"
-        ]
+        "operator": "all_of"
       },
-      "status": "measured-gap",
+      "status": "normative",
       "surface": "aionui"
     },
     {
@@ -4403,25 +4828,46 @@
       "surface": "aionui"
     },
     {
-      "action": "Navigate to or trigger Ticket_submit_independent_review without relabelling another state.",
+      "action": "Submit the disposable ticket, resolve its sandbox approval, complete review from another principal, and observe the result row.",
       "derivation": {
-        "action": "Implement the typed evidence recorder and evaluator for this fact in tools/aionui-extension/tests/home_acceptance/runner.py and harness.py, then re-derive this row against the recorded evidence as literal or identifier. purser-reviewer-2 confirmed on 2026-09-11 that http_response, receipt_field, log_assertion and state_transition are all collectable by hand but that no typed recorder exists, so this fact cannot be observed as written.",
-        "kind": "collector_gap",
-        "owner": "acceptance harness owner, through the typed evidence recorder work ticket"
+        "kind": "identifier",
+        "symbol": "ticket_submit_independent_review"
       },
       "evidence_source": "docs/design-home/acceptance.md",
-      "expected_fact": "The accessibility tree exposes 'approved' for ticket_submit_independent_review.",
+      "expected_fact": "One submitted disposable ticket reaches a closed result with an independent review and no unresolved approval.",
       "id": "ticket_submit_independent_review",
       "precondition": "Exact candidate and sandbox board are bound; arrange the ticket_submit_independent_review state on the real aionui surface.",
       "predicate": {
-        "expected": "approved",
+        "conjuncts": [
+          {
+            "assertions": [
+              {
+                "op": "eq",
+                "path": "/closed_result_count",
+                "phase": "after",
+                "value": 1
+              },
+              {
+                "op": "eq",
+                "path": "/independent_review_count",
+                "phase": "after",
+                "value": 1
+              },
+              {
+                "op": "eq",
+                "path": "/pending_approval_count",
+                "phase": "after",
+                "value": 0
+              }
+            ],
+            "kind": "state_transition",
+            "source_id": "browser-ticket-submit-independent-review"
+          }
+        ],
         "name": "required fact: ticket_submit_independent_review",
-        "operator": "ax_name_contains",
-        "path": [
-          "nodes"
-        ]
+        "operator": "all_of"
       },
-      "status": "measured-gap",
+      "status": "normative",
       "surface": "aionui"
     },
     {
@@ -4446,25 +4892,64 @@
       "surface": "aionui"
     },
     {
-      "action": "Navigate to or trigger Pause_resume_stop without relabelling another state.",
+      "action": "Use the shipped controls in order: pause, resume, then confirm cooperative stop for the same seat.",
       "derivation": {
-        "action": "Implement the typed evidence recorder and evaluator for this fact in tools/aionui-extension/tests/home_acceptance/runner.py and harness.py, then re-derive this row against the recorded evidence as literal or identifier. purser-reviewer-2 confirmed on 2026-09-11 that http_response, receipt_field, log_assertion and state_transition are all collectable by hand but that no typed recorder exists, so this fact cannot be observed as written.",
-        "kind": "collector_gap",
-        "owner": "acceptance harness owner, through the typed evidence recorder work ticket"
+        "kind": "identifier",
+        "symbol": "pause_resume_stop"
       },
       "evidence_source": "docs/design-home/acceptance.md",
-      "expected_fact": "The accessibility tree exposes 'Paused' for pause_resume_stop.",
+      "expected_fact": "The disposable seat is paused, resumed, then cooperatively stopped; no running row remains and stop is disabled.",
       "id": "pause_resume_stop",
       "precondition": "Exact candidate and sandbox board are bound; arrange the pause_resume_stop state on the real aionui surface.",
       "predicate": {
-        "expected": "Paused",
+        "conjuncts": [
+          {
+            "assertions": [
+              {
+                "op": "gte",
+                "path": "/running_count",
+                "phase": "before",
+                "value": 1
+              },
+              {
+                "op": "eq",
+                "path": "/pause",
+                "phase": "action",
+                "value": "clicked"
+              },
+              {
+                "op": "eq",
+                "path": "/resume",
+                "phase": "action",
+                "value": "clicked"
+              },
+              {
+                "op": "eq",
+                "path": "/stop",
+                "phase": "action",
+                "value": "clicked"
+              },
+              {
+                "op": "eq",
+                "path": "/running_count",
+                "phase": "after",
+                "value": 0
+              },
+              {
+                "op": "eq",
+                "path": "/stop_disabled",
+                "phase": "after",
+                "value": true
+              }
+            ],
+            "kind": "state_transition",
+            "source_id": "browser-pause-resume-stop"
+          }
+        ],
         "name": "required fact: pause_resume_stop",
-        "operator": "ax_name_contains",
-        "path": [
-          "nodes"
-        ]
+        "operator": "all_of"
       },
-      "status": "measured-gap",
+      "status": "normative",
       "surface": "aionui"
     },
     {

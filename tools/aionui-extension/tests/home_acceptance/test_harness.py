@@ -315,6 +315,7 @@ def _write_report(tmp_path: Path, report: dict[str, object]) -> Path:
         *report.get("inventory", []),
         *report.get("final_gates", []),
     ]
+    typed_correlations: dict[str, tuple[str, int]] = {}
     for item in observations:
         if not isinstance(item, dict):
             continue
@@ -378,6 +379,15 @@ def _write_report(tmp_path: Path, report: dict[str, object]) -> Path:
         _write_json(tmp_path / reference, receipt)
         typed_conjuncts = harness_module._canonical_typed_conjuncts(identifier)
         if typed_conjuncts:
+            prior_ids = [
+                conjunct["observation"]
+                for conjunct in harness_module._predicate_conjuncts(identifier)
+                if conjunct["kind"] == "prior_state"
+            ]
+            if prior_ids:
+                entity, prior_index = typed_correlations[prior_ids[0]]
+            else:
+                entity, prior_index = identifier, 0
             typed_references = []
             for index, conjunct in enumerate(typed_conjuncts, start=1):
                 typed_reference = (
@@ -393,10 +403,14 @@ def _write_report(tmp_path: Path, report: dict[str, object]) -> Path:
                     "evidence": typed_reference,
                     "run_id": "acceptance-run-1",
                     "action_id": identifier,
-                    "entity": identifier,
-                    "causal_index": index,
+                    "entity": entity,
+                    "causal_index": prior_index + index,
                 })
             item["typed_evidence"] = typed_references
+            typed_correlations[identifier] = (
+                entity,
+                prior_index + len(typed_conjuncts),
+            )
     for suite in report.get("suites", []):
         if not isinstance(suite, dict):
             continue

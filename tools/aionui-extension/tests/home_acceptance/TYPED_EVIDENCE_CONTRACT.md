@@ -78,7 +78,8 @@ trust pins the installed `browser_observer.py` plus `observer.json`, surface,
 origin, page, candidate, board, and a closed recipe. Recipes allow only bounded
 DOM reads (`text`, `value`, `checked`, `disabled`, `count`, `class`, `hidden`)
 and the explicit actions `observe`, `click`, `set_value`, `select`, `submit`,
-`wait`, and same-origin `fetch`. Arbitrary script expressions are not accepted.
+the closed navigation-key action `press_key`, `wait`, and same-origin `fetch`.
+Arbitrary script expressions and arbitrary key strings are not accepted.
 The observer executes the recipe in its isolated browser world and returns the
 actual correlated before/action/after selections.
 

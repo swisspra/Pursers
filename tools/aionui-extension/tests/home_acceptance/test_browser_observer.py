@@ -28,6 +28,7 @@ import pytest
 from . import browser_observer as observer_module
 from . import harness as harness_module
 from . import runner as runner_module
+from . import typed_evidence
 from .harness import (
     AcceptanceCapabilityUnavailable,
     AcceptanceError,
@@ -1145,6 +1146,25 @@ def test_install_surface_manifest_carries_private_challenge_into_binding(
     assert runtime["artifact_sha256"] == hashlib.sha256(
         runtime_source.read_bytes()
     ).hexdigest()
+
+
+def test_keyboard_transition_action_is_closed_and_shared_with_evaluator() -> None:
+    action = {
+        "kind": "press_key",
+        "selector": "[role=tab][aria-selected=true]",
+        "key": "ArrowRight",
+        "path": "/pressed_key",
+    }
+    assert observer_module._validate_transition_actions([action]) == [action]
+    assert typed_evidence._browser_actions([action]) == [action]
+    for changed in (
+        {**action, "key": "Tab"},
+        {**action, "script": "arbitrary()"},
+    ):
+        with pytest.raises(observer_module.ObserverError):
+            observer_module._validate_transition_actions([changed])
+        with pytest.raises(typed_evidence.TypedEvidenceError):
+            typed_evidence._browser_actions([changed])
 
 
 @pytest.mark.parametrize(

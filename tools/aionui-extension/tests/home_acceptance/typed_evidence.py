@@ -119,6 +119,7 @@ BROWSER_ACTION_KEYS = {
     "set_value": {"kind", "selector", "value", "path"},
     "select": {"kind", "selector", "value", "path"},
     "submit": {"kind", "selector", "path"},
+    "press_key": {"kind", "selector", "key", "path"},
     "wait": {"kind", "milliseconds", "path"},
     "fetch": {"kind", "method", "endpoint", "body", "path"},
 }
@@ -493,12 +494,17 @@ def _browser_actions(value: Any) -> list[dict[str, Any]]:
         if not isinstance(path, str) or not path.startswith("/") or path in paths:
             raise TypedEvidenceError("browser action result path is invalid")
         paths.add(path)
-        if kind in {"click", "set_value", "select", "submit"}:
+        if kind in {"click", "set_value", "select", "submit", "press_key"}:
             selector = action["selector"]
             if not isinstance(selector, str) or not selector or len(selector) > 512:
                 raise TypedEvidenceError("browser action selector is invalid")
         if kind in {"set_value", "select"} and not isinstance(action["value"], str):
             raise TypedEvidenceError("browser action value is invalid")
+        if kind == "press_key" and action["key"] not in {
+            "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Enter", " ",
+            "Escape",
+        }:
+            raise TypedEvidenceError("browser key action is invalid")
         if kind == "wait" and (
             not isinstance(action["milliseconds"], int)
             or isinstance(action["milliseconds"], bool)

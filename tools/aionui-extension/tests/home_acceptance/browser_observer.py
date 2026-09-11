@@ -89,6 +89,7 @@ TRANSITION_ACTION_KEYS = {
     "set_value": {"kind", "selector", "value", "path"},
     "select": {"kind", "selector", "value", "path"},
     "submit": {"kind", "selector", "path"},
+    "press_key": {"kind", "selector", "key", "path"},
     "wait": {"kind", "milliseconds", "path"},
     "fetch": {"kind", "method", "endpoint", "body", "path"},
 }
@@ -1042,6 +1043,12 @@ const transitionResult = await cdp('Runtime.evaluate', {
           if (typeof node.requestSubmit === 'function') node.requestSubmit()
           else node.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
           action[spec.path] = 'submitted'
+        } else if (spec.kind === 'press_key') {
+          if (typeof node.focus === 'function') node.focus()
+          node.dispatchEvent(new KeyboardEvent('keydown', {
+            key: spec.key, bubbles: true, cancelable: true
+          }))
+          action[spec.path] = spec.key
         } else throw new Error('unsupported browser action')
       }
     }
@@ -1262,13 +1269,18 @@ def _validate_transition_actions(value: Any) -> list[dict[str, Any]]:
         if not isinstance(path, str) or not path.startswith("/") or path in paths:
             raise _fail(EXIT_USAGE, "transition action path is invalid")
         paths.add(path)
-        if kind in {"click", "set_value", "select", "submit"} and (
+        if kind in {"click", "set_value", "select", "submit", "press_key"} and (
             not isinstance(item["selector"], str) or not item["selector"]
             or len(item["selector"]) > 512
         ):
             raise _fail(EXIT_USAGE, "transition action selector is invalid")
         if kind in {"set_value", "select"} and not isinstance(item["value"], str):
             raise _fail(EXIT_USAGE, "transition action value is invalid")
+        if kind == "press_key" and item["key"] not in {
+            "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Enter", " ",
+            "Escape",
+        }:
+            raise _fail(EXIT_USAGE, "transition key action is invalid")
         if kind == "wait" and (
             not isinstance(item["milliseconds"], int)
             or isinstance(item["milliseconds"], bool)
