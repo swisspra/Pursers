@@ -8617,9 +8617,14 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         """Ask the project coordinator a durable question without pausing work."""
         board_id = require_id("board_id", board_id)
         ticket_id = require_id("ticket_id", ticket_id)
+        # Idempotency keys use the same public identifier grammar and explicit
+        # 80-character bound as every other durable ID. This rejects path- and
+        # secret-shaped runtime input before any duplicate lookup or write.
+        safe_message_id = (
+            require_id("message_id", message_id) if message_id is not None else None
+        )
         principal = current_principal()
         require_board_write_or_coordinate(principal)
-        coordinate_authorized = COORDINATOR_SCOPE in principal.scopes
         if kind not in COORDINATOR_QUESTION_KINDS:
             raise ValueError("kind must be decision, deliverable, approval, or information")
         now = time.time()
@@ -8654,26 +8659,36 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 review_lease.get("reviewer_agent_id") == actor["agent_id"]
                 and review_lease.get("reviewer_principal_id") == principal.principal_id
             )
-            if not (is_holder or is_reviewer or is_admin or coordinate_authorized):
+            if not (is_holder or is_reviewer or is_admin):
                 raise PermissionError(
                     "coordinator question requires the work lease, the review "
-                    "lease, board admin, or board:coordinate"
+                    "lease, or board admin"
                 )
             if ticket.get("status") in TERMINAL_TICKET_STATES:
                 raise ValueError(f"ticket is already {ticket['status']}")
             questions = ticket.setdefault("coordinator_questions", [])
             # Retry idempotency: the same caller-supplied message_id never
             # creates a second question and never re-notifies.
-            if message_id is not None:
+            if safe_message_id is not None:
                 for entry in questions:
-                    if entry.get("message_id") == message_id:
-                        return {
-                            "actor": actor, "question": copy.deepcopy(entry),
-                            "duplicate": True, "recipients": [],
-                            "released": released,
-                            "renewed": [i for i in renewed if i != ticket_id],
-                            "scrub_audit": None,
-                        }
+                    if entry.get("message_id") != safe_message_id:
+                        continue
+                    asked_by = entry.get("asked_by")
+                    if not (
+                        isinstance(asked_by, Mapping)
+                        and asked_by.get("principal_id") == principal.principal_id
+                        and asked_by.get("agent_id") == actor["agent_id"]
+                    ):
+                        raise PermissionError(
+                            "message_id is already owned by another asker"
+                        )
+                    return {
+                        "actor": actor, "question": copy.deepcopy(entry),
+                        "duplicate": True, "recipients": [],
+                        "released": released,
+                        "renewed": [i for i in renewed if i != ticket_id],
+                        "scrub_audit": None,
+                    }
             if in_reply_to is not None and find_coordinator_question(
                 ticket, in_reply_to
             ) is None:
@@ -8692,7 +8707,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 "question_id": question_id,
                 "project": project,
                 "asker_role": "reviewer" if is_reviewer and not is_holder else "worker",
-                "message_id": message_id,
+                "message_id": safe_message_id,
                 "in_reply_to": in_reply_to,
                 "message": safe_message,
                 "kind": kind,

@@ -505,6 +505,36 @@ class CoordinatorQuestionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(retry["event"])
         self.assertEqual(retry["question"]["answer"], "once")
 
+    async def test_message_id_collision_does_not_disclose_another_asker(self) -> None:
+        await self.register_coordinators("coord")
+        await self.claimed_ticket()
+        first = (await self.ask(message_id="MSG-shared")).structured_content
+        self.principal = self.admin
+        with self.assertRaisesRegex(
+            ToolError, "message_id is already owned by another asker"
+        ) as denied:
+            await self.call(
+                "ticket_question_ask", ticket_id="TK-comm",
+                agent_name="admin-agent", message="Admin asks separately",
+                kind="information", message_id="MSG-shared",
+            )
+        self.assertNotIn(first["question"]["message"], str(denied.exception))
+        stored = self.service.load("pursers")["tickets"]["TK-comm"]
+        self.assertEqual(len(stored["coordinator_questions"]), 1)
+
+    async def test_message_id_rejects_scrub_sensitive_and_oversized_input(
+        self,
+    ) -> None:
+        await self.register_coordinators("coord")
+        await self.claimed_ticket()
+        posix_home_marker = "/" + "Us" + "ers/example/private-marker"
+        for message_id in (posix_home_marker, "x" * 81):
+            with self.subTest(message_id_length=len(message_id)):
+                with self.assertRaisesRegex(ToolError, "message_id must match"):
+                    await self.ask(message_id=message_id)
+        stored = self.service.load("pursers")["tickets"]["TK-comm"]
+        self.assertEqual(stored.get("coordinator_questions", []), [])
+
 
     async def test_two_projects_on_one_board_do_not_cross_access(self) -> None:
         self.principal = self.admin
@@ -548,6 +578,7 @@ class CoordinatorQuestionTests(unittest.IsolatedAsyncioTestCase):
             await self.call(
                 "ticket_question_ask", ticket_id=ticket_id, agent_name="worker",
                 message=f"Routing question for {project}", kind="decision",
+                message_id=f"MSG-{project}",
             )
         self.principal = self.coordinator
         alpha_inbox = (
@@ -563,6 +594,15 @@ class CoordinatorQuestionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(beta_inbox["total"], 1)
         self.assertEqual(beta_inbox["questions"][0]["ticket_id"], "TK-beta")
         beta_question = beta_inbox["questions"][0]["question_id"]
+        with self.assertRaisesRegex(
+            ToolError, "coordinator question requires"
+        ) as denied:
+            await self.call(
+                "ticket_question_ask", ticket_id="TK-alpha",
+                agent_name="coord2", message="Guess another asker's retry key",
+                kind="information", message_id="MSG-alpha",
+            )
+        self.assertNotIn("Routing question for alpha", str(denied.exception))
         self.principal = self.coordinator
         with self.assertRaisesRegex(ToolError, "ownership of project beta"):
             await self.call(
