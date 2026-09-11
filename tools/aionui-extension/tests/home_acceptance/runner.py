@@ -187,7 +187,7 @@ def _load_surface_manifest(path_value: str) -> dict[str, Any]:
         if surface_id == "personal":
             runtime = row["runtime"]
             if not isinstance(runtime, dict) or set(runtime) != {
-                "artifact", "pid_file", "receipt"
+                "artifact", "challenge_key", "pid_file", "receipt"
             }:
                 raise RunnerError(EXIT_USAGE, "Personal runtime fields are invalid")
             runtime_artifact = runtime["artifact"]
@@ -205,13 +205,38 @@ def _load_surface_manifest(path_value: str) -> dict[str, Any]:
             ):
                 raise RunnerError(EXIT_USAGE, "Personal runtime artifact is not exact tracked content")
             runtime_paths: dict[str, str] = {}
-            for field in ("pid_file", "receipt"):
+            for field in ("challenge_key", "pid_file", "receipt"):
                 value = runtime[field]
                 if not isinstance(value, str) or not Path(value).expanduser().is_absolute():
                     raise RunnerError(EXIT_USAGE, f"Personal runtime {field} must be absolute")
-                resolved = Path(value).expanduser().resolve()
+                configured = Path(value).expanduser()
+                if field == "challenge_key" and configured.is_symlink():
+                    raise RunnerError(
+                        EXIT_USAGE, "Personal runtime challenge_key must not be a symlink"
+                    )
+                resolved = configured.resolve()
                 if resolved.is_relative_to(REPOSITORY_ROOT.resolve()):
                     raise RunnerError(EXIT_USAGE, f"Personal runtime {field} must stay outside checkout")
+                if field == "challenge_key":
+                    try:
+                        status = resolved.stat()
+                        key = resolved.read_bytes()
+                    except OSError:
+                        raise RunnerError(
+                            EXIT_USAGE, "Personal runtime challenge_key is unavailable"
+                        ) from None
+                    if (
+                        not resolved.is_file()
+                        or status.st_uid != os.getuid()
+                        or status.st_mode & 0o077
+                    ):
+                        raise RunnerError(
+                            EXIT_USAGE, "Personal runtime challenge_key must be private"
+                        )
+                    if len(key) < 32:
+                        raise RunnerError(
+                            EXIT_USAGE, "Personal runtime challenge_key is too short"
+                        )
                 runtime_paths[field] = str(resolved)
             normalized_row["runtime"] = {
                 "artifact": runtime_artifact,

@@ -200,6 +200,61 @@ def _install(tmp_path: Path, backend: Path, *, max_age_s: int = 43_200) -> Path:
     return observer_dir
 
 
+def _write_surface_manifest(tmp_path: Path, challenge_key: str) -> Path:
+    runtime_dir = tmp_path / "personal-runtime"
+    runtime_dir.mkdir(exist_ok=True)
+    manifest = {
+        "schema_version": 1,
+        "candidate_commit": COMMIT,
+        "surfaces": {
+            "aionui": {
+                "adapter": "signed-aionui",
+                "target": {
+                    "base_url": "http://127.0.0.1:18822",
+                    "board_id": BOARD,
+                },
+            },
+            "fleet": {
+                "adapter": "pinned-process-artifact",
+                "target": {
+                    "base_url": "http://127.0.0.1:18821",
+                    "board_id": BOARD,
+                },
+                "artifact": "tools/fleet-dashboard/fleet_dashboard.py",
+            },
+            "personal": {
+                "adapter": "pinned-signed-aionui-personal-mcp",
+                "target": {
+                    "base_url": "http://127.0.0.1:18822",
+                    "board_id": BOARD,
+                },
+                "artifact": (
+                    "packages/personal/src/pursers_personal/resources/dashboard.html"
+                ),
+                "runtime": {
+                    "artifact": "packages/personal/src/pursers_personal/apps_server.py",
+                    "challenge_key": challenge_key,
+                    "pid_file": str(runtime_dir / "personal.pid"),
+                    "receipt": str(runtime_dir / "personal-runtime.json"),
+                },
+            },
+        },
+    }
+    path = tmp_path / "surface-manifest.json"
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+    return path
+
+
+def _clean_candidate_git(*arguments: str) -> str:
+    if arguments == ("rev-parse", "HEAD"):
+        return COMMIT
+    if arguments == ("status", "--porcelain"):
+        return ""
+    if arguments[:2] == ("ls-files", "--error-unmatch"):
+        return arguments[-1]
+    raise AssertionError(f"unexpected git invocation: {arguments}")
+
+
 def _assertions_file(tmp_path: Path) -> Path:
     path = tmp_path / "assertions.json"
     path.write_text(
@@ -1051,6 +1106,155 @@ def test_install_resolves_default_ego_browser_from_path(
     capsys.readouterr()
     config = json.loads((observer_dir / "observer.json").read_text(encoding="utf-8"))
     assert config["backend"]["command"] == str(ego.resolve())
+
+
+def test_install_surface_manifest_carries_private_challenge_into_binding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    backend = _write_backend(tmp_path, "door_connect")
+    challenge = tmp_path / "personal-runtime" / "acceptance-challenge.key"
+    challenge.parent.mkdir()
+    challenge.write_bytes(b"\x25" * 48)
+    challenge.chmod(0o600)
+    manifest = _write_surface_manifest(tmp_path, str(challenge))
+    monkeypatch.setattr(runner_module, "_git", _clean_candidate_git)
+    observer_dir = tmp_path / "verifier"
+
+    assert runner_module.main([
+        "runner.py", "install-observer",
+        "--dir", str(observer_dir),
+        "--backend-command", str(backend),
+        "--surface-manifest", str(manifest),
+    ]) == 0
+    capsys.readouterr()
+
+    config = json.loads(
+        (observer_dir / "observer.json").read_text(encoding="utf-8")
+    )
+    personal = observer_module._surface_config(config, "personal")
+    runtime = personal["runtime"]
+    assert set(runtime) == {
+        "artifact", "artifact_sha256", "challenge_key", "pid_file", "receipt"
+    }
+    assert runtime["challenge_key"] == str(challenge.resolve())
+    runtime_source = (
+        runner_module.REPOSITORY_ROOT / runtime["artifact"]
+    ).resolve()
+    assert runtime["artifact_sha256"] == hashlib.sha256(
+        runtime_source.read_bytes()
+    ).hexdigest()
+
+
+@pytest.mark.parametrize(
+    "unsafe_kind",
+    ["missing", "relative", "inside-checkout", "group-readable", "short", "symlink"],
+)
+def test_install_surface_manifest_rejects_unsafe_challenge_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    unsafe_kind: str,
+) -> None:
+    backend = _write_backend(tmp_path, "door_connect")
+    runtime_dir = tmp_path / "personal-runtime"
+    runtime_dir.mkdir()
+    challenge = runtime_dir / "acceptance-challenge.key"
+    challenge.write_bytes(b"\x26" * 48)
+    challenge.chmod(0o600)
+    challenge_value = str(challenge)
+    if unsafe_kind == "missing":
+        challenge_value = str(runtime_dir / "missing.key")
+    elif unsafe_kind == "relative":
+        challenge_value = "relative.key"
+    elif unsafe_kind == "inside-checkout":
+        challenge_value = str(
+            runner_module.REPOSITORY_ROOT
+            / "tools/aionui-extension/tests/home_acceptance/runner.py"
+        )
+    elif unsafe_kind == "group-readable":
+        challenge.chmod(0o640)
+    elif unsafe_kind == "short":
+        challenge.write_bytes(b"short")
+    elif unsafe_kind == "symlink":
+        link = runtime_dir / "challenge-link.key"
+        link.symlink_to(challenge)
+        challenge_value = str(link)
+    manifest = _write_surface_manifest(tmp_path, challenge_value)
+    monkeypatch.setattr(runner_module, "_git", _clean_candidate_git)
+    observer_dir = tmp_path / "verifier"
+
+    assert runner_module.main([
+        "runner.py", "install-observer",
+        "--dir", str(observer_dir),
+        "--backend-command", str(backend),
+        "--surface-manifest", str(manifest),
+    ]) == runner_module.EXIT_USAGE
+    assert not (observer_dir / "observer.json").exists()
+
+
+def test_reinstall_with_changed_challenge_rejects_old_runtime_process(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    backend = _write_backend(tmp_path, "door_connect")
+    runtime_dir = tmp_path / "personal-runtime"
+    runtime_dir.mkdir()
+    old_key = runtime_dir / "old.key"
+    new_key = runtime_dir / "new.key"
+    for key, byte in ((old_key, b"\x27"), (new_key, b"\x28")):
+        key.write_bytes(byte * 48)
+        key.chmod(0o600)
+    monkeypatch.setattr(runner_module, "_git", _clean_candidate_git)
+    observer_dir = tmp_path / "verifier"
+
+    for key in (old_key, new_key):
+        manifest = _write_surface_manifest(tmp_path, str(key))
+        assert runner_module.main([
+            "runner.py", "install-observer",
+            "--dir", str(observer_dir),
+            "--backend-command", str(backend),
+            "--surface-manifest", str(manifest),
+        ]) == 0
+        capsys.readouterr()
+
+    config = json.loads(
+        (observer_dir / "observer.json").read_text(encoding="utf-8")
+    )
+    personal = observer_module._surface_config(config, "personal")
+    runtime = personal["runtime"]
+    runtime_source = (
+        runner_module.REPOSITORY_ROOT / runtime["artifact"]
+    ).resolve()
+    Path(runtime["pid_file"]).write_text("12345", encoding="utf-8")
+    Path(runtime["pid_file"]).chmod(0o600)
+    Path(runtime["receipt"]).write_text("{}", encoding="utf-8")
+    Path(runtime["receipt"]).chmod(0o600)
+    command = (
+        f"/usr/bin/python3 -m pursers_personal.cli mcp "
+        f"--candidate-source {runtime_source} --candidate-commit {COMMIT} "
+        f"--board-id {BOARD} --acceptance-runtime-receipt {runtime['receipt']} "
+        f"--acceptance-challenge-key {old_key}"
+    )
+    monkeypatch.setattr(
+        observer_module, "_git_identity", lambda _repository: (COMMIT, "")
+    )
+    monkeypatch.setattr(
+        observer_module,
+        "_run_identity_command",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            [], 0, stdout=command, stderr=""
+        ),
+    )
+    page_digest = hashlib.sha256(
+        (runner_module.REPOSITORY_ROOT / personal["artifact"]).read_bytes()
+    ).hexdigest()
+    with pytest.raises(
+        observer_module.ObserverError,
+        match="acceptance-challenge-key changed",
+    ):
+        observer_module._probe_personal_mcp_runtime(config, personal, page_digest)
 
 
 @pytest.mark.parametrize(

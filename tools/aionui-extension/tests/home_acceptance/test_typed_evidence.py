@@ -1253,6 +1253,90 @@ def test_personal_receipt_real_producer_capture_adapter(
             evidence["record"]["authenticity"]
             == "verifier_bound_personal_runtime"
         )
+
+        mcp_receipt = tmp_path / "personal-tool-runtime.json"
+        mcp_args = list(command[1:])
+        receipt_index = mcp_args.index("--acceptance-runtime-receipt") + 1
+        mcp_args[receipt_index] = str(mcp_receipt)
+        executable = runtime_python.resolve()
+        mcp_source = {
+            "adapter": "trusted_mcp_stdio_v1",
+            "provenance": "personal-live-stdio",
+            "runtime_id": "personal-mcp-tool-runtime-1",
+            "surface": "personal",
+            "board_id": profile_board,
+            "candidate_commit": CANDIDATE,
+            "command": str(runtime_python),
+            "command_sha256": hashlib.sha256(executable.read_bytes()).hexdigest(),
+            "args": mcp_args,
+            "env": {
+                "PATH": os.defpath,
+                "PYTHONDONTWRITEBYTECODE": "1",
+            },
+            "cwd": str(candidate_checkout),
+            "candidate_source": str(candidate_source),
+            "candidate_source_sha256": hashlib.sha256(
+                candidate_source.read_bytes()
+            ).hexdigest(),
+            "challenge_key": str(challenge_key),
+            "tool": "board_snapshot",
+            "arguments": {},
+            "select_allowlist": ["/connected", "/tickets"],
+            "timeout_seconds": 8,
+        }
+        trust["mcp_sources"] = {"personal-board-snapshot": mcp_source}
+        mcp_context = _context(
+            observation_id="personal-mcp.state.board-empty",
+            action_id="board-snapshot",
+            entity="personal-board",
+            surface="personal",
+            board_id=profile_board,
+        )
+        mcp_recorder = {
+            "source_id": "personal-board-snapshot",
+            "tool": "board_snapshot",
+            "arguments": {},
+            "select": ["/connected", "/tickets"],
+        }
+        mcp_evidence = record_evidence(
+            _request("mcp_tool_response", mcp_recorder, mcp_context), trust
+        )
+        selected = mcp_evidence["record"]["result"]["selected"]
+        assert set(selected) == {"/connected", "/tickets"}
+        assert isinstance(selected["/connected"], bool)
+        assert isinstance(selected["/tickets"], list)
+        assert mcp_evidence["record"]["transport"] == "stdio"
+        assert evaluate_evidence(
+            mcp_evidence,
+            _expected(mcp_evidence, [
+                {"path": "/connected", "op": "eq", "value": selected["/connected"]},
+                {"path": "/tickets", "op": "eq", "value": selected["/tickets"]},
+            ]),
+            trust,
+        )["passed"] is True
+
+        wrong_target = {**mcp_context, "board_id": "sandbox-decoy"}
+        with pytest.raises(TypedEvidenceError, match="board does not match"):
+            record_evidence(
+                _request("mcp_tool_response", mcp_recorder, wrong_target), trust
+            )
+        wrong_tool = {**mcp_recorder, "tool": "fleet_snapshot"}
+        with pytest.raises(TypedEvidenceError, match="tool recipe"):
+            record_evidence(
+                _request("mcp_tool_response", wrong_tool, mcp_context), trust
+            )
+        wrong_process = copy.deepcopy(mcp_evidence)
+        wrong_process["record"]["process"]["pid"] += 1
+        _resign_evidence(wrong_process)
+        with pytest.raises(TypedEvidenceError, match="result binding changed"):
+            evaluate_evidence(
+                wrong_process,
+                _expected(wrong_process, [
+                    {"path": "/connected", "op": "eq", "value": selected["/connected"]},
+                ]),
+                trust,
+            )
+
         original = json.loads(receipt.read_text())
         for field, value in (("schema_version", 999), ("version", "forged-version")):
             forged = {**original, field: value}

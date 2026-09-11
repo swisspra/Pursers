@@ -53,6 +53,7 @@ SECRET_VALUE = re.compile(
     r"[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)",
     re.I,
 )
+PYTHON_EXECUTABLE_NAME = re.compile(r"^python(?:\d+(?:\.\d+)*)?$", re.I)
 CONTEXT_KEYS = {
     "observation_id", "run_id", "action_id", "entity", "surface",
     "board_id", "candidate_commit", "issued_at", "causal_index",
@@ -408,9 +409,10 @@ def _mcp_source(
         or source["candidate_commit"] != context["candidate_commit"]
     ):
         raise TypedEvidenceError("MCP source binding does not match request")
-    command = Path(str(source["command"])).resolve()
+    configured_command = Path(str(source["command"])).expanduser()
+    command = configured_command.resolve()
     if (
-        not command.is_absolute() or not command.is_file()
+        not configured_command.is_absolute() or not command.is_file()
         or not os.access(command, os.X_OK)
         or not SHA256.fullmatch(str(source["command_sha256"]))
         or hashlib.sha256(command.read_bytes()).hexdigest() != source["command_sha256"]
@@ -1456,13 +1458,33 @@ def _mcp_process_record(
     except ValueError:
         argv = []
     executable = Path(str(source["command"])).resolve()
-    if (
-        completed.returncode or not argv
-        or Path(argv[0]).resolve() != executable
-        or argv[1:] != source["args"]
-        or _process_cwd(pid, "MCP process") != Path(str(source["cwd"])).resolve()
-    ):
-        raise TypedEvidenceError("MCP attested process identity does not match source trust")
+    if completed.returncode or not argv:
+        raise TypedEvidenceError("MCP attested process command is unavailable")
+    actual_executable = Path(argv[0]).resolve()
+    allowed_executables = {executable}
+    # Framework Python on macOS re-execs its Python.app binary. Derive that
+    # launch target from the already digest-pinned interpreter instead of
+    # weakening identity to a basename such as ``Python``.
+    if PYTHON_EXECUTABLE_NAME.fullmatch(executable.name):
+        identity = subprocess.run(
+            [str(Path(str(source["command"])).absolute()), "-I", "-c", "import sys; print(sys.base_prefix)"],
+            text=True, capture_output=True, check=False, timeout=5,
+            env={"PATH": os.defpath, "LANG": "C", "LC_ALL": "C"},
+        )
+        lines = identity.stdout.splitlines()
+        if identity.returncode or len(lines) != 1 or not Path(lines[0]).is_absolute():
+            raise TypedEvidenceError("MCP pinned Python runtime identity is unavailable")
+        framework_executable = (
+            Path(lines[0]) / "Resources/Python.app/Contents/MacOS/Python"
+        ).resolve()
+        if framework_executable.is_file():
+            allowed_executables.add(framework_executable)
+    if actual_executable not in allowed_executables:
+        raise TypedEvidenceError("MCP attested process executable does not match source trust")
+    if argv[1:] != source["args"]:
+        raise TypedEvidenceError("MCP attested process argv does not match source trust")
+    if _process_cwd(pid, "MCP process") != Path(str(source["cwd"])).resolve():
+        raise TypedEvidenceError("MCP attested process cwd does not match source trust")
     return {
         "pid": pid,
         "argv_sha256": hashlib.sha256(command_text.encode()).hexdigest(),
@@ -1480,7 +1502,11 @@ async def _execute_mcp_tool(
     except ImportError as exc:
         raise TypedEvidenceError("MCP client runtime is unavailable") from exc
     params = StdioServerParameters(
-        command=str(Path(str(source["command"])).resolve()),
+        # Preserve a verifier-pinned virtual-environment launcher path. Resolving
+        # its interpreter symlink before exec drops Python's venv identity and
+        # can load an unrelated system environment; process verification below
+        # still binds argv[0] to the pinned resolved executable and digest.
+        command=str(Path(str(source["command"])).expanduser().absolute()),
         args=list(source["args"]),
         env=dict(source["env"]),
         cwd=str(Path(str(source["cwd"])).resolve()),
