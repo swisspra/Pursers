@@ -157,6 +157,96 @@ def test_real_attention_handler_emits_actual_sanitized_evidence(tmp_path: Path) 
     assert secret not in lines[0]
 
 
+def test_concurrent_untraced_save_cannot_change_traced_action_effect(
+    tmp_path: Path,
+) -> None:
+    trace, output = _trace(tmp_path)
+    state_dir = tmp_path / "state"
+    seats = dashboard.SeatConfigManager(
+        state_dir / "seats.json", state_dir=state_dir
+    )
+    action_inside_lock = threading.Event()
+    changing_action_entered = threading.Event()
+    release_action = threading.Event()
+    original_save = seats._save_attention_state_unlocked
+
+    def controlled_save(value: Any) -> dict[str, Any]:
+        if value == {}:
+            action_inside_lock.set()
+            assert release_action.wait(2)
+        else:
+            changing_action_entered.set()
+        return original_save(value)
+
+    seats._save_attention_state_unlocked = controlled_save
+    server = dashboard.ThreadingHTTPServer(
+        ("127.0.0.1", 0),
+        dashboard.make_handler(
+            Cache(), worker_manager=SimpleNamespace(), seat_manager=seats,
+            evidence_trace=trace,
+        ),
+    )
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    base_url = f"http://127.0.0.1:{server.server_port}"
+    no_op = b"{}"
+    changing = b'{"B":{"state":"ack"}}'
+    results: dict[str, tuple[int, dict[str, Any], Any]] = {}
+    failures: list[BaseException] = []
+
+    def call_a() -> None:
+        try:
+            results["a"] = _call(
+                base_url, "POST", body=no_op, headers=_headers(no_op)
+            )
+        except BaseException as exc:  # noqa: BLE001 - surfaced in test thread.
+            failures.append(exc)
+
+    def call_b() -> None:
+        try:
+            results["b"] = _call(
+                base_url, "POST", body=changing,
+                headers={"Content-Type": "application/json"},
+            )
+        except BaseException as exc:  # noqa: BLE001 - surfaced in test thread.
+            failures.append(exc)
+
+    request_a = threading.Thread(target=call_a)
+    request_b = threading.Thread(target=call_b)
+    try:
+        request_a.start()
+        assert action_inside_lock.wait(2)
+        request_b.start()
+        assert not changing_action_entered.wait(0.1)
+        release_action.set()
+        request_a.join(2)
+        request_b.join(2)
+        assert not request_a.is_alive()
+        assert not request_b.is_alive()
+    finally:
+        release_action.set()
+        server.shutdown()
+        server.server_close()
+        server_thread.join()
+
+    assert not failures
+    status_a, result_a, headers_a = results["a"]
+    status_b, result_b, headers_b = results["b"]
+    assert status_a == status_b == 200
+    assert result_a["items"] == {}
+    assert result_b == {"items": {"B": {"state": "ack"}}}
+    assert headers_a["X-Pursers-Action-Id"] == "save-attention"
+    assert headers_b.get("X-Pursers-Action-Id") is None
+    record = json.loads(output.read_text(encoding="utf-8"))
+    expected = hashlib.sha256(dashboard._json_bytes({"items": {}})).hexdigest()
+    assert record["before_sha256"] == expected
+    assert record["after_sha256"] == expected
+    assert record["result_sha256"] == expected
+    assert record["changed"] is False
+    assert record["effect"] == "attention_state_unchanged"
+    assert seats.attention_state() == {"items": {"B": {"state": "ack"}}}
+
+
 def test_trace_rejects_bad_correlation_digest_replay_and_forged_success(
     tmp_path: Path,
 ) -> None:

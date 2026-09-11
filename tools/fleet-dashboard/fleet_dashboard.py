@@ -4686,6 +4686,7 @@ class SeatConfigManager:
         self._active_ops: set[str] = set()
         self._jobs: dict[str, dict[str, Any]] = {}
         self._lock = threading.Lock()
+        self._attention_lock = threading.RLock()
 
     def release_status(self) -> dict[str, Any]:
         return self.release_ops.release_card_status()
@@ -4984,7 +4985,7 @@ class SeatConfigManager:
         with os.fdopen(descriptor, "a", encoding="utf-8") as stream:
             stream.write(json.dumps(record, sort_keys=True) + "\n")
 
-    def attention_state(self) -> dict[str, Any]:
+    def _attention_state_unlocked(self) -> dict[str, Any]:
         path = self.state_dir / "attention-state.json"
         try:
             value = json.loads(path.read_text(encoding="utf-8"))
@@ -4992,7 +4993,11 @@ class SeatConfigManager:
             value = {}
         return {"items": value if isinstance(value, dict) else {}}
 
-    def save_attention_state(self, value: Any) -> dict[str, Any]:
+    def attention_state(self) -> dict[str, Any]:
+        with self._attention_lock:
+            return self._attention_state_unlocked()
+
+    def _save_attention_state_unlocked(self, value: Any) -> dict[str, Any]:
         if not isinstance(value, dict) or len(value) > 500:
             raise ValueError("attention state must be an object with at most 500 items")
         encoded = json.dumps(value, sort_keys=True, separators=(",", ":"))
@@ -5014,6 +5019,24 @@ class SeatConfigManager:
             if os.path.exists(temporary):
                 os.unlink(temporary)
         return {"items": value}
+
+    def save_attention_state(self, value: Any) -> dict[str, Any]:
+        with self._attention_lock:
+            return self._save_attention_state_unlocked(value)
+
+    def observe_attention_action(
+        self, value: Any,
+    ) -> tuple[
+        dict[str, Any], dict[str, Any] | None, dict[str, Any], Exception | None,
+    ]:
+        """Run one attention save and snapshot its causal state under one lock."""
+        with self._attention_lock:
+            before = self._attention_state_unlocked()
+            try:
+                result = self._save_attention_state_unlocked(value)
+            except Exception as exc:  # noqa: BLE001 - handler preserves API mapping.
+                return before, None, self._attention_state_unlocked(), exc
+            return before, result, result, None
 
     def _bridge_inspection(self) -> dict[str, Any]:
         status = dict(self.bridge_installer.inspect())
@@ -6838,6 +6861,7 @@ def make_handler(
         ) -> None:
             self._evidence_context = None
             self._evidence_before = None
+            self._evidence_after = None
             if evidence_trace is None:
                 return
             context = evidence_trace.context(self.headers, method, route)
@@ -6848,25 +6872,21 @@ def make_handler(
                 or hashlib.sha256(raw_request).hexdigest() != context.action_sha256
             ):
                 return
-            try:
-                before = seats.attention_state()
-            except Exception:  # noqa: BLE001 - observability cannot break the API.
-                return
             self._evidence_context = context
-            self._evidence_before = before
 
         def _send(self, status: int, content_type: str, body: bytes) -> None:
             evidence_headers: dict[str, str] = {}
             context = getattr(self, "_evidence_context", None)
             before = getattr(self, "_evidence_before", None)
+            after = getattr(self, "_evidence_after", None)
             if (
                 evidence_trace is not None
                 and context is not None
                 and before is not None
+                and after is not None
                 and content_type.startswith("application/json")
             ):
                 try:
-                    after = seats.attention_state()
                     metadata, _emitted = evidence_trace.observe(
                         context=context,
                         method=self.command,
@@ -6961,6 +6981,9 @@ def make_handler(
                         payload = seats.release_status()
                     elif route == "/api/attention":
                         payload = seats.attention_state()
+                        if getattr(self, "_evidence_context", None) is not None:
+                            self._evidence_before = payload
+                            self._evidence_after = payload
                     else:
                         payload = seats.job(config_job.group(1))
                 except KeyError:
@@ -7423,7 +7446,17 @@ def make_handler(
                         )
                     )
                 elif route == "/api/attention":
-                    body = _json_bytes(seats.save_attention_state(request))
+                    if getattr(self, "_evidence_context", None) is None:
+                        body = _json_bytes(seats.save_attention_state(request))
+                    else:
+                        before, result, after, error = (
+                            seats.observe_attention_action(request)
+                        )
+                        self._evidence_before = before
+                        self._evidence_after = after
+                        if error is not None:
+                            raise error
+                        body = _json_bytes(result)
                 elif route == "/api/human/resolve":
                     if not isinstance(request, dict):
                         raise ValueError("request must be an object")

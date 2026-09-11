@@ -89,6 +89,15 @@ The actual handler derives `status`, `outcome`, `changed`, `effect`,
 operation. `result_sha256` covers the original product response before the
 `_evidence` member is added. Caller request fields never select those values.
 
+All attention-state reads and writes in the server share one reentrant state
+lock. A traced POST captures its immediate-before state and runs the actual save
+under that lock; its authoritative save result is also its after-state. The
+handler retains that tuple through response emission instead of reading state
+again, so a later traced or untraced request cannot be attributed to the first
+action. A traced GET likewise uses its single returned snapshot as both before
+and after. Trace-file append serialization is separate and does not substitute
+for this operation-level causal isolation.
+
 ## JSONL consumer schema
 
 Only a POST with all valid correlation headers and a matching body digest
