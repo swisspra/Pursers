@@ -28,6 +28,29 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   script-tag extraction regexes match upper-case tags
   (`py/bad-tag-filter`).
 
+## [5.0.0a26] - 2026-09-11
+
+This release includes `pursers-central==0.1.0a30`,
+`pursers-client==0.1.0a23`, `pursers-personal-import==5.0.0a3`,
+`pursers-personal==5.0.0a26`, `pursers==5.0.0a26`, and
+`pursers-wait-bridge==0.1.0a16`.
+
+### Changed
+
+- Central and Client: add durable, non-pausing worker/reviewer questions to the
+  project coordinator, authenticated coordinator inbox and answer routing,
+  caller-scoped retry correlation, and targeted answer events for an already
+  pending wait. Project ownership and the private host binding gate replies;
+  raw protocol persistence is not a claim of cold-host/model wake.
+- Wait Bridge: expose the question flow as strict, seat-scoped MCP tools while
+  preserving host discovery capabilities. Correlated waits use the existing
+  reconnecting subscription and durable cursor; protocol delivery remains
+  distinct from host-managed model continuation.
+- Central dispatcher: do not recreate review offers while a live review lease
+  exists, retire terminal stale review offers before the next review claim,
+  and tolerate compacted historical members in `board_list` without hiding
+  current authorized boards.
+
 ## [5.0.0a25] - 2026-09-08
 
 This release includes `pursers-central==0.1.0a29`,

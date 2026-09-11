@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <link rel="icon" href="data:,">
-  <title>Pursers 5.0.0a25 — Operator guide and release notes</title>
+  <title>Pursers 5.0.0a26 — Operator guide and release notes</title>
   <style>
     :root {
       color-scheme: light;
@@ -149,7 +149,7 @@
 <body>
   <header class="hero">
     <div class="hero-inner">
-      <p class="eyebrow">Pursers 5.0.0a25 · Operator guide · release notes</p>
+      <p class="eyebrow">Pursers 5.0.0a26 · Operator guide · release notes</p>
       <h1>Bring up the fleet, provision seats, and move work to done</h1>
       <p class="lead">Start with the six commands operators use most, then add seats, projects, tickets, review, and guarded releases. The a22 release boundary and exact component versions are documented below.</p>
       <div class="hero-meta" aria-label="Main characteristics">
@@ -157,7 +157,7 @@
         <span class="pill">JWT only</span>
         <span class="pill">Cross-project pool</span>
         <span class="pill">Independent review</span>
-        <span class="pill">Released · 5.0.0a25</span>
+        <span class="pill">Released · 5.0.0a26</span>
       </div>
     </div>
   </header>
@@ -180,7 +180,7 @@
         <li><a href="#release">Ship a release</a></li>
         <li><a href="#troubleshoot">Troubleshoot</a></li>
         <li><a href="#security">Handle JWTs and secrets</a></li>
-        <li><a href="#unreleased">5.0.0a25 release changes</a></li>
+        <li><a href="#unreleased">5.0.0a26 release changes</a></li>
         <li><a href="#operations-runbook">Resume fleet operations with a22</a></li>
       </ol>
     </nav>
@@ -193,7 +193,7 @@
 cd "/PATH/TO/Pursers-local"
 
 # 2 — install the released product set
-python3 -m pip install "pursers==5.0.0a25"
+python3 -m pip install "pursers==5.0.0a26"
 
 # 3 — create or inspect a Personal profile
 pursers-personal setup --project "$PWD"
@@ -208,7 +208,7 @@ ONBOARD_CENTRAL_TOKEN="$(cat /PATH/TO/admin.jwt)" \
 # 6 — open the loopback operations surface
 python3 tools/fleet-dashboard/fleet_dashboard.py \
   --token-file /PATH/TO/admin.jwt</code></pre>
-      <div class="success"><strong>Expected:</strong> product <code>5.0.0a25</code>, a clear profile and principal from Doctor, a valid registry read-back, and the Fleet Dashboard at <code>http://127.0.0.1:8899</code>.</div>
+      <div class="success"><strong>Expected:</strong> product <code>5.0.0a26</code>, a clear profile and principal from Doctor, a valid registry read-back, and the Fleet Dashboard at <code>http://127.0.0.1:8899</code>.</div>
       <div class="warning"><strong>Setup without apply is a plan.</strong> Preview the exact redacted change before applying it. Close and restart the target host after its managed configuration changes; an open process has not loaded the new connector or environment.</div>
     </section>
 
@@ -267,16 +267,16 @@ python3 tools/fleet-dashboard/fleet_dashboard.py \
       <div class="grid">
         <div class="mini">
           <h3>Persistent installation</h3>
-          <pre><code>python3 -m pip install "pursers==5.0.0a25"
+          <pre><code>python3 -m pip install "pursers==5.0.0a26"
 pursers-personal --version</code></pre>
           <p>The <code>pursers</code> meta-package installs Central, the Python client, Personal, and the Personal import utility at compatible versions.</p>
         </div>
         <div class="mini">
           <h3>Isolated commands with uvx</h3>
-          <pre><code>uvx --from "pursers-personal==5.0.0a25" pursers-personal --version
-uvx --from "pursers-personal==5.0.0a25" pursers-personal doctor \
+          <pre><code>uvx --from "pursers-personal==5.0.0a26" pursers-personal --version
+uvx --from "pursers-personal==5.0.0a26" pursers-personal doctor \
   --project &lt;work_dir&gt;</code></pre>
-          <p><code>uvx</code> creates an isolated environment for the command. A wait-bridge connector can also launch <code>pursers-wait-bridge==0.1.0a15</code> through <code>uvx</code>, as shown in the connector section.</p>
+          <p><code>uvx</code> creates an isolated environment for the command. A wait-bridge connector can also launch <code>pursers-wait-bridge==0.1.0a16</code> through <code>uvx</code>, as shown in the connector section.</p>
         </div>
       </div>
 
@@ -284,15 +284,15 @@ uvx --from "pursers-personal==5.0.0a25" pursers-personal doctor \
       <table>
         <thead><tr><th>Distribution</th><th>Current version</th><th>Purpose</th></tr></thead>
         <tbody>
-          <tr><td><code>pursers</code></td><td><code>5.0.0a25</code></td><td>Dependency-only installer for the compatible set.</td></tr>
-          <tr><td><code>pursers-personal</code></td><td><code>5.0.0a25</code></td><td>Profile lifecycle, chat tools, and the dashboard MCP App.</td></tr>
-          <tr><td><code>pursers-central</code></td><td><code>0.1.0a29</code></td><td>JWT-protected board, journal, ticket, state, and memory service.</td></tr>
-          <tr><td><code>pursers-client</code></td><td><code>0.1.0a22</code></td><td>Python client used by Personal and the wait bridge.</td></tr>
+          <tr><td><code>pursers</code></td><td><code>5.0.0a26</code></td><td>Dependency-only installer for the compatible set.</td></tr>
+          <tr><td><code>pursers-personal</code></td><td><code>5.0.0a26</code></td><td>Profile lifecycle, chat tools, and the dashboard MCP App.</td></tr>
+          <tr><td><code>pursers-central</code></td><td><code>0.1.0a30</code></td><td>JWT-protected board, journal, ticket, state, and memory service.</td></tr>
+          <tr><td><code>pursers-client</code></td><td><code>0.1.0a23</code></td><td>Python client used by Personal and the wait bridge.</td></tr>
           <tr><td><code>pursers-personal-import</code></td><td><code>5.0.0a3</code></td><td>Controlled Personal import utility.</td></tr>
-          <tr><td><code>pursers-wait-bridge</code></td><td><code>0.1.0a15</code></td><td>Subscription-first single-board and multi-board wait server.</td></tr>
+          <tr><td><code>pursers-wait-bridge</code></td><td><code>0.1.0a16</code></td><td>Subscription-first single-board and multi-board wait server.</td></tr>
         </tbody>
       </table>
-      <p>The released package set described here is <code>5.0.0a25</code>, including the push-wait changes below. Verify the operator-approved manifest and <code>SHA256SUMS.txt</code> before installing. PyPI versions are immutable.</p>
+      <p>The released package set described here is <code>5.0.0a26</code>, including the push-wait changes below. Verify the operator-approved manifest and <code>SHA256SUMS.txt</code> before installing. PyPI versions are immutable.</p>
       <p>The repository publishes to PyPI through GitHub Actions Trusted Publishing. The workflow requests an OIDC identity token and does not use a PyPI API token. Personal also verifies a component lock that records component versions, wheel hashes, member hashes, the dashboard hash, and a pinned build toolchain. The lock generator builds with fixed tool versions and a fixed source timestamp so two clean runs produce the same wheels.</p>
 
       <h3>Create a profile</h3>
@@ -343,7 +343,7 @@ args = [
 command = "uvx"
 tool_timeout_sec = 620
 args = [
-  "--from", "pursers-wait-bridge==0.1.0a15",
+  "--from", "pursers-wait-bridge==0.1.0a16",
   "pursers-wait-bridge"
 ]
 
@@ -723,7 +723,7 @@ memory_search(
       <h2>Use real JWTs and keep credentials out of shared config</h2>
       <p>Central starts only in JWT mode. It verifies RS256 signatures against the configured JWKS and checks the issuer and audience. The required settings are <code>CENTRAL_AUTH_MODE=jwt</code>, <code>CENTRAL_JWT_ISSUER</code>, <code>CENTRAL_JWT_AUDIENCE</code>, and <code>CENTRAL_JWKS_PATH</code>. There is no development-token fallback.</p>
       <p>A valid JWT identifies a principal but does not automatically admit it to every board. Add the principal with <code>board_member_add</code> or issue a <code>board_invite</code>, then grant only the scopes its seat needs. Different agent names under one token still belong to the same principal, so strict review needs a reviewer with credentials for an independent principal.</p>
-      <p>Central <code>0.1.0a29</code> applies each board's configured scrub profile when returning board state. Scrubbing remains defense in depth. Do not store a secret and rely on the scrubber to make it safe.</p>
+      <p>Central <code>0.1.0a30</code> applies each board's configured scrub profile when returning board state. Scrubbing remains defense in depth. Do not store a secret and rely on the scrubber to make it safe.</p>
       <ul class="checklist">
         <li>Use a real RS256 JWT issued by the team's identity system. Match its issuer and audience to Central.</li>
         <li>Keep tokens in a private profile or secret store. Documentation should contain only <code>&lt;JWT&gt;</code>.</li>
@@ -747,9 +747,9 @@ memory_search(
     </section>
 
     <section id="unreleased">
-      <p class="eyebrow" style="color:#2f6f9f">Released · 5.0.0a25</p>
-      <h2>Fleet operations added in 5.0.0a25</h2>
-      <div class="success"><strong>Release boundary:</strong> every item in this section belongs to 5.0.0a25. Confirm the installed component versions and approved artifact manifest before relying on it.</div>
+      <p class="eyebrow" style="color:#2f6f9f">Released · 5.0.0a26</p>
+      <h2>Fleet operations added in 5.0.0a26</h2>
+      <div class="success"><strong>Release boundary:</strong> every item in this section belongs to 5.0.0a26. Confirm the installed component versions and approved artifact manifest before relying on it.</div>
       <ul>
         <li><strong>Fleet-wide or dedicated seats.</strong> A blank home board serves every active registry board with <code>boards=registry</code>; the bridge binds to the registry board, <code>pursers</code> by default. A named home board is dedicated: use <code>boards=home</code>, and generated prompts pass <code>boards=["&lt;board&gt;"]</code>. Managed configs persist <code>PURSERS_BOARDS</code> and <code>PURSERS_HOME_BOARD</code>; seat-kit makes <code>--board</code> optional, adds <code>--registry-board</code>, and generated <code>bin/board.sh</code> exports <code>PURSERS_BOARDS</code>.</li>
         <li><strong>Protected dashboard input.</strong> Timer-driven Fleet Dashboard refresh pauses while a form has focus or unsaved input. A fixed <strong>Resume</strong> pill or the status line resumes it.</li>
@@ -1156,7 +1156,7 @@ python3 tools/worker-runtime/pursers_worker.py \
           <tr><td>Lease churn or lost claim</td><td>TTL is shorter than the renew schedule, the holder stopped renewing, Central restarted, or identity changed.</td><td>Stop edits, call <code>ticket_get</code>, verify holder/principal and <code>ttl_s</code>, reclaim only if current state permits, and renew about every five minutes during manual work. Check claim-TTL changes and the current Central service before resuming.</td></tr>
           <tr><td>Phantom or duplicate identities</td><td>A seat name/instance changed across restarts, or old config still launches another connector.</td><td>Restore one stable seat name, inspect inventory and Doctor, stop obsolete processes, then use <code>agent_retire</code> on the exact inert identity only after confirming it has no live work or review lease.</td></tr>
           <tr><td>Submission notes rejected or truncated</td><td>Notes exceeded the 5,000-character contract.</td><td>Keep the required fields and concise real test tails. The client truncates at a line boundary and returns metadata; move full logs to an approved artifact instead of claiming the omitted text was submitted.</td></tr>
-          <tr><td>Cursor ahead of journal</td><td>A cursor map came from another board, a restored state is newer than Central, or journal state was replaced.</td><td>Pursers Wait Bridge <code>0.1.0a15</code> in the a22 release clamps the affected entry and returns a recoverable <code>cursor_ahead_clamped</code> warning plus a usable cursor in <code>new_seq</code>. Preserve the other entries in the per-board cursor map, accept the returned entry for this board, refetch authoritative ticket state, and re-arm with the complete returned map.</td></tr>
+          <tr><td>Cursor ahead of journal</td><td>A cursor map came from another board, a restored state is newer than Central, or journal state was replaced.</td><td>Pursers Wait Bridge <code>0.1.0a16</code> in the a22 release clamps the affected entry and returns a recoverable <code>cursor_ahead_clamped</code> warning plus a usable cursor in <code>new_seq</code>. Preserve the other entries in the per-board cursor map, accept the returned entry for this board, refetch authoritative ticket state, and re-arm with the complete returned map.</td></tr>
           <tr><td>Codex bridge has no token</td><td>Codex did not forward a shell variable into its stdio subprocess.</td><td>Use the Config adapter so the private managed bridge env contains the token literal, keep the config mode 0600, verify literal/file principal equality with Doctor, and restart Codex.</td></tr>
         </tbody>
       </table>
@@ -1176,7 +1176,7 @@ python3 tools/worker-runtime/pursers_worker.py \
   </main>
 
   <footer>
-    <p>This guide reflects the released 5.0.0a25 package set, including subscription-first push-wait. Check the release manifest, hashes, admission policy, and host requirements again before installing in an ordinary environment.</p>
+    <p>This guide reflects the released 5.0.0a26 package set, including subscription-first push-wait. Check the release manifest, hashes, admission policy, and host requirements again before installing in an ordinary environment.</p>
   </footer>
 </body>
 </html>
