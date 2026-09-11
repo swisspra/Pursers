@@ -1111,6 +1111,65 @@ def test_all_of_nonvisual_fact_without_typed_evidence_is_rejected(
         )
 
 
+def test_prior_state_requires_same_entity_run_and_causal_precedence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prior_id = "door_connect"
+    current_id = "clean_reconnect_after_rotation"
+    current = dict(harness_module.REQUIRED_FACTS[current_id])
+    current["predicate"] = {
+        "name": f"required fact: {current_id}",
+        "operator": "all_of",
+        "conjuncts": [
+            {
+                "kind": "prior_state",
+                "observation": prior_id,
+                "expected": harness_module.REQUIRED_FACTS[prior_id]["expected_fact"],
+            },
+            {
+                "kind": "state_transition",
+                "source_id": "aionui-door-state",
+                "assertions": [
+                    {"phase": "before", "path": "/accepted", "op": "eq", "value": False},
+                    {"phase": "after", "path": "/accepted", "op": "eq", "value": True},
+                ],
+            },
+        ],
+    }
+    monkeypatch.setitem(harness_module.REQUIRED_FACTS, current_id, current)
+
+    def reference(index: int, *, entity: str = "seat-1") -> dict[str, Any]:
+        return {
+            "evidence": f"typed/{index}.json",
+            "run_id": "rotation-run",
+            "action_id": f"action-{index}",
+            "entity": entity,
+            "causal_index": index,
+        }
+
+    evidence = {
+        prior_id: harness_module._EvidenceReferences("prior.json", (reference(1),)),
+        current_id: harness_module._EvidenceReferences("current.json", (reference(2),)),
+    }
+    harness_module._validate_prior_state_graph(evidence)
+
+    wrong_entity = {
+        **evidence,
+        current_id: harness_module._EvidenceReferences(
+            "current.json", (reference(2, entity="seat-2"),)
+        ),
+    }
+    with pytest.raises(AcceptanceError, match="share one exact run and entity"):
+        harness_module._validate_prior_state_graph(wrong_entity)
+
+    out_of_order = {
+        **evidence,
+        current_id: harness_module._EvidenceReferences("current.json", (reference(1),)),
+    }
+    with pytest.raises(AcceptanceError, match="causally precede"):
+        harness_module._validate_prior_state_graph(out_of_order)
+
+
 def test_report_owned_passed_result_cannot_replace_typed_evaluation(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

@@ -127,6 +127,12 @@ fact must carry an explicit `browser context:` assertion so its screenshot and
 accessibility state remain substantive without pretending that visible copy
 proves the backend fact.
 
+`prior_state` is a report-graph edge, not a separately recordable evidence
+kind. It names an earlier canonical observation that passed independently. Both
+observations must carry typed evidence with one exact shared run and entity,
+and every referenced causal index must precede the dependent action. A missing,
+self/cyclic, unrelated-entity, cross-run, or out-of-order edge fails closed.
+
 The harness never accepts a report-authored typed result. A verifier-owned
 evaluator must authenticate the referenced record and return a passing result
 bound to the full correlation above and the exact canonical-conjunct digest.

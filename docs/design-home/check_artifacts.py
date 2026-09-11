@@ -71,6 +71,19 @@ CONJUNCT_KEYS: dict[str, set[str]] = {
     "log_assertion": {"kind", "stream", "expected"},
     "prior_state": {"kind", "observation", "expected"},
 }
+FIELDED_CONJUNCT_KEYS: dict[str, set[str]] = {
+    "http_response": {"kind", "source_id", "assertions"},
+    "state_transition": {"kind", "source_id", "assertions"},
+    "receipt_field": {"kind", "source_id", "assertions"},
+    "log_assertion": {"kind", "source_id", "assertions"},
+}
+FIELDED_ASSERTION_KEYS: dict[str, set[str]] = {
+    "http_response": {"target", "path", "op", "value"},
+    "state_transition": {"phase", "path", "op", "value"},
+    "receipt_field": {"path", "op", "value"},
+    "log_assertion": {"path", "op", "value"},
+}
+TYPED_OPERATORS = {"eq", "ne", "contains", "in", "gt", "gte", "lt", "lte"}
 DERIVATION_KEYS: dict[str, set[str]] = {
     "literal": {"kind", "source_quote"},
     "identifier": {"kind", "symbol"},
@@ -88,6 +101,42 @@ def conjunct_signature(identifier: str, conjunct: Any) -> tuple[str, ...]:
     if not isinstance(conjunct, dict) or conjunct.get("kind") not in CONJUNCT_KEYS:
         fail(f"acceptance fact {identifier} has an unknown predicate conjunct kind")
     kind = conjunct["kind"]
+    if kind in FIELDED_CONJUNCT_KEYS and set(conjunct) == FIELDED_CONJUNCT_KEYS[kind]:
+        source_id = conjunct["source_id"]
+        assertions = conjunct["assertions"]
+        if not isinstance(source_id, str) or not source_id.strip():
+            fail(f"acceptance fact {identifier} {kind} source_id is empty")
+        if not isinstance(assertions, list) or not 1 <= len(assertions) <= 64:
+            fail(f"acceptance fact {identifier} {kind} assertions are empty or unbounded")
+        signatures: list[str] = []
+        for assertion in assertions:
+            if not isinstance(assertion, dict) or set(assertion) != FIELDED_ASSERTION_KEYS[kind]:
+                fail(f"acceptance fact {identifier} {kind} assertion fields do not match schema")
+            path = assertion["path"]
+            op = assertion["op"]
+            if not isinstance(path, str) or not isinstance(op, str) or op not in TYPED_OPERATORS:
+                fail(f"acceptance fact {identifier} {kind} assertion path/operator is invalid")
+            if kind == "http_response":
+                target = assertion["target"]
+                if target not in {"status", "action_origin", "field"}:
+                    fail(f"acceptance fact {identifier} http_response target is invalid")
+                if (target == "field") != path.startswith("/") or (target != "field" and path):
+                    fail(f"acceptance fact {identifier} http_response assertion path is invalid")
+            elif kind == "state_transition":
+                if assertion["phase"] not in {"before", "action", "after"}:
+                    fail(f"acceptance fact {identifier} state_transition phase is invalid")
+                if path != "/status" and not path.startswith("/"):
+                    fail(f"acceptance fact {identifier} state_transition path is invalid")
+            elif not path.startswith("/"):
+                fail(f"acceptance fact {identifier} {kind} assertion path is invalid")
+            try:
+                encoded = json.dumps(assertion, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+            except (TypeError, ValueError):
+                fail(f"acceptance fact {identifier} {kind} assertion value is not JSON")
+            signatures.append(encoded)
+        if len(signatures) != len(set(signatures)):
+            fail(f"acceptance fact {identifier} repeats one {kind} assertion")
+        return (kind, normalized_fact(source_id), *sorted(signatures))
     if set(conjunct) != CONJUNCT_KEYS[kind]:
         fail(f"acceptance fact {identifier} {kind} conjunct fields do not match schema")
     for key, value in conjunct.items():
@@ -812,6 +861,13 @@ def predicate_expected_values(predicate: dict[str, Any]) -> list[str]:
         return [predicate["expected"]]
     values: list[str] = []
     for conjunct in predicate["conjuncts"]:
+        if "assertions" in conjunct:
+            values.extend(
+                assertion["value"]
+                for assertion in conjunct["assertions"]
+                if isinstance(assertion.get("value"), str)
+            )
+            continue
         if conjunct["kind"] in {"ax_name_contains", "receipt_field", "log_assertion"}:
             values.append(conjunct["expected"])
         elif conjunct["kind"] == "http_response":

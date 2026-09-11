@@ -684,6 +684,65 @@ def test_parent_cli_replays_authenticated_canonical_conjunct(
     ).hexdigest()
 
 
+def test_parent_fielded_state_conjunct_is_exact_and_source_bound(
+    tmp_path: Path, http_server: str,
+) -> None:
+    trust = _trust(tmp_path, http_server)
+    context = _context(action_id="set-busy", causal_index=9)
+    recorder = {
+        "source_id": "fleet-state",
+        "before": {"method": "GET", "path": "/state", "body": None, "select": ["/state"]},
+        "action": {
+            "method": "POST", "path": "/state/action", "body": {"next": "busy"},
+            "select": ["/state", "/accepted", "/action_sha256"],
+        },
+        "after": {"method": "GET", "path": "/state", "body": None, "select": ["/state"]},
+    }
+    evidence = record_evidence(
+        _request("state_transition", recorder, context), trust
+    )
+    evidence_path = tmp_path / "fielded-state.json"
+    evidence_path.write_text(json.dumps(evidence), encoding="utf-8")
+    conjunct = {
+        "kind": "state_transition",
+        "source_id": "fleet-state",
+        "assertions": [
+            {"phase": "before", "path": "/state", "op": "eq", "value": "idle"},
+            {"phase": "action", "path": "/status", "op": "eq", "value": 202},
+            {"phase": "after", "path": "/state", "op": "eq", "value": "busy"},
+        ],
+    }
+    request = {
+        "observation_id": context["observation_id"],
+        "run_id": context["run_id"],
+        "action_id": context["action_id"],
+        "entity": context["entity"],
+        "causal_index": context["causal_index"],
+        "surface_id": context["surface"],
+        "board_id": context["board_id"],
+        "candidate_commit": context["candidate_commit"],
+        "conjunct": conjunct,
+        "evidence_path": str(evidence_path),
+    }
+    result = typed_evidence.evaluate_parent_request(request, trust)
+    assert result["passed"] is True
+    assert result["predicate_sha256"] == typed_evidence._digest(conjunct)
+
+    wrong_value = json.loads(json.dumps(request))
+    wrong_value["conjunct"]["assertions"][2]["value"] = "idle"
+    assert typed_evidence.evaluate_parent_request(wrong_value, trust)["passed"] is False
+
+    wrong_source = json.loads(json.dumps(request))
+    wrong_source["conjunct"]["source_id"] = "decoy-state"
+    with pytest.raises(TypedEvidenceError, match="source does not match"):
+        typed_evidence.evaluate_parent_request(wrong_source, trust)
+
+    open_schema = json.loads(json.dumps(request))
+    open_schema["conjunct"]["assertions"][0]["unexpected"] = True
+    with pytest.raises(TypedEvidenceError, match="fields do not match schema"):
+        typed_evidence.evaluate_parent_request(open_schema, trust)
+
+
 def test_receipt_rejects_decoy_pid(tmp_path: Path, http_server: str) -> None:
     marker = tmp_path / "receipt_process.py"
     marker.write_text("import time; time.sleep(30)\n", encoding="utf-8")

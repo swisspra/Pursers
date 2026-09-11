@@ -1057,6 +1057,9 @@ def _validate_evidence_report(
                 references.typed, _canonical_typed_conjuncts(identifier)
             )
         )
+    _validate_prior_state_graph({
+        **passed_steps, **passed_inventory, **passed_final_gates
+    })
     browser_attachment_references = [
         reference
         for evidence in browser_evidence
@@ -1258,8 +1261,60 @@ def _canonical_typed_conjuncts(identifier: str) -> tuple[dict[str, Any], ...]:
     return tuple(
         conjunct
         for conjunct in _predicate_conjuncts(identifier)
-        if conjunct["kind"] != "ax_name_contains"
+        if conjunct["kind"] not in {"ax_name_contains", "prior_state"}
     )
+
+
+def _validate_prior_state_graph(
+    evidence: dict[str, _EvidenceReferences],
+) -> None:
+    """Bind prior_state to an earlier, separately proven observation correlation."""
+    order = {identifier: index for index, identifier in enumerate(REQUIRED_FACTS)}
+    for identifier, references in evidence.items():
+        prior_conjuncts = tuple(
+            conjunct
+            for conjunct in _predicate_conjuncts(identifier)
+            if conjunct["kind"] == "prior_state"
+        )
+        for conjunct in prior_conjuncts:
+            prior_id = conjunct["observation"]
+            prior = evidence.get(prior_id)
+            if prior is None or order[prior_id] >= order[identifier]:
+                raise AcceptanceError(
+                    f"prior state for {identifier} must be an earlier passed observation"
+                )
+            if conjunct["expected"] != REQUIRED_FACTS[prior_id]["expected_fact"]:
+                raise AcceptanceError(
+                    f"prior state for {identifier} does not match its canonical fact"
+                )
+            if not references.typed or not prior.typed:
+                raise AcceptanceError(
+                    f"prior state for {identifier} needs typed causal evidence on both observations"
+                )
+            current_correlations = {
+                (row["run_id"], row["entity"]) for row in references.typed
+            }
+            prior_correlations = {
+                (row["run_id"], row["entity"]) for row in prior.typed
+            }
+            shared = current_correlations & prior_correlations
+            if len(shared) != 1:
+                raise AcceptanceError(
+                    f"prior state for {identifier} must share one exact run and entity"
+                )
+            run_id, entity = next(iter(shared))
+            prior_indexes = [
+                row["causal_index"] for row in prior.typed
+                if row["run_id"] == run_id and row["entity"] == entity
+            ]
+            current_indexes = [
+                row["causal_index"] for row in references.typed
+                if row["run_id"] == run_id and row["entity"] == entity
+            ]
+            if not prior_indexes or not current_indexes or max(prior_indexes) >= min(current_indexes):
+                raise AcceptanceError(
+                    f"prior state for {identifier} must causally precede the current action"
+                )
 
 
 def _json_digest(value: Any) -> str:

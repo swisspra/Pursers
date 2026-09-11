@@ -269,6 +269,32 @@ Operators are closed to `eq`, `ne`, `contains`, `in`, `gt`, `gte`, `lt`, and
 `lte`. Comparisons are type-aware and case-sensitive. No expression or regular
 expression evaluation exists.
 
+The parent canonical fact uses the same exact assertions, adds the trusted
+`source_id`, and omits report-controlled context. The harness supplies the
+observation/run/action/entity/surface/board/candidate/causal context itself:
+
+```json
+{
+  "kind": "state_transition",
+  "source_id": "fleet-state",
+  "assertions": [
+    {"phase":"before","path":"/state","op":"eq","value":"idle"},
+    {"phase":"action","path":"/status","op":"eq","value":202},
+    {"phase":"after","path":"/state","op":"eq","value":"busy"}
+  ]
+}
+```
+
+For `http_response`, assertion fields are exactly `target`, `path`, `op`, and
+`value`; `target` is `status`, `action_origin`, or `field`. The first two use an
+empty path and `field` uses a JSON pointer. `receipt_field` and `log_assertion`
+assertions have exactly `path`, `op`, and `value`. `state_transition` assertions
+have exactly `phase`, `path`, `op`, and `value`. Unknown sources, fields,
+operators, phases, paths, or assertion members fail closed. The older bounded
+single-value parent forms remain readable for the already-authored facts, but
+bulk behavior conversion must use this fielded form instead of forcing a prose
+outcome through substring matching.
+
 Authenticated evidence has this exact envelope:
 
 ```json

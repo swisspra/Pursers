@@ -1612,6 +1612,77 @@ def _semantic_contains(value: Any, expected: str) -> bool:
     return bool(needle) and needle in _normalized_semantic_text(value)
 
 
+def _evaluate_parent_fielded_conjunct(
+    conjunct: dict[str, Any], evidence: dict[str, Any]
+) -> bool:
+    """Evaluate the canonical parent form with exact typed paths and operators."""
+    kind = evidence["kind"]
+    conjunct = _closed(
+        conjunct, {"kind", "source_id", "assertions"},
+        f"parent fielded {kind} conjunct",
+    )
+    if conjunct["kind"] != kind or conjunct["source_id"] != evidence["source"]["source_id"]:
+        raise TypedEvidenceError("parent conjunct source does not match evidence")
+    assertions = conjunct["assertions"]
+    if not isinstance(assertions, list) or not assertions or len(assertions) > 64:
+        raise TypedEvidenceError("parent conjunct assertions must contain 1-64 items")
+    record = evidence["record"]
+    checks: list[bool] = []
+    for assertion in assertions:
+        if kind == "http_response":
+            assertion = _closed(
+                assertion, {"target", "path", "op", "value"},
+                "parent http_response assertion",
+            )
+            target = assertion["target"]
+            path = assertion["path"]
+            if target == "status" and path == "":
+                actual = record["response"]["status"]
+            elif target == "action_origin" and path == "":
+                actual = record["action_origin"]
+            elif target == "field" and isinstance(path, str) and path.startswith("/"):
+                actual = record["response"]["selected"].get(path, object())
+            else:
+                raise TypedEvidenceError("parent http_response assertion target/path is invalid")
+        elif kind == "receipt_field":
+            assertion = _closed(
+                assertion, {"path", "op", "value"},
+                "parent receipt_field assertion",
+            )
+            path = assertion["path"]
+            if not isinstance(path, str) or not path.startswith("/"):
+                raise TypedEvidenceError("parent receipt_field assertion path is invalid")
+            actual = record["fields"].get(path, object())
+        elif kind == "log_assertion":
+            assertion = _closed(
+                assertion, {"path", "op", "value"},
+                "parent log_assertion assertion",
+            )
+            path = assertion["path"]
+            if not isinstance(path, str) or not path.startswith("/"):
+                raise TypedEvidenceError("parent log_assertion assertion path is invalid")
+            actual = _pointer(record["entry"], path)
+        elif kind == "state_transition":
+            assertion = _closed(
+                assertion, {"phase", "path", "op", "value"},
+                "parent state_transition assertion",
+            )
+            phase = assertion["phase"]
+            path = assertion["path"]
+            if phase not in {"before", "action", "after"}:
+                raise TypedEvidenceError("parent state_transition assertion phase is invalid")
+            if path == "/status":
+                actual = record[phase]["status"]
+            elif isinstance(path, str) and path.startswith("/"):
+                actual = record[phase]["selected"].get(path, object())
+            else:
+                raise TypedEvidenceError("parent state_transition assertion path is invalid")
+        else:
+            raise TypedEvidenceError("parent fielded conjunct kind is unsupported")
+        checks.append(_compare(actual, {"op": assertion["op"], "value": assertion["value"]}))
+    return all(checks)
+
+
 def evaluate_parent_request(request: Any, trust_config: Any) -> dict[str, Any]:
     """Authenticate evidence and evaluate one canonical parent conjunct."""
     trust = _trust(trust_config)
@@ -1654,7 +1725,9 @@ def evaluate_parent_request(request: Any, trust_config: Any) -> dict[str, Any]:
         raise TypedEvidenceError("parent conjunct kind does not match evidence")
     record = evidence["record"]
     source_id = evidence["source"]["source_id"]
-    if kind == "http_response":
+    if set(conjunct) == {"kind", "source_id", "assertions"}:
+        passed = _evaluate_parent_fielded_conjunct(conjunct, evidence)
+    elif kind == "http_response":
         conjunct = _closed(
             conjunct, {"kind", "request", "status", "body_contains"},
             "parent http_response conjunct",
