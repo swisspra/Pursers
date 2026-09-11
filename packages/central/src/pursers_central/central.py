@@ -313,7 +313,9 @@ CLAIM_GATE_EVENT_FIELDS = frozenset(
         "claim_kind",
         "refused_agent_id",
         "refused_agent_name",
+        "refused_principal_id",
         "refusal_reason",
+        "claim_diagnostics",
         "fixture_provenance",
         "recipient_identities",
     }
@@ -2923,6 +2925,60 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         }
         return bool(identities & wanted)
 
+    def agent_busy_conflicts(
+        document: Mapping[str, Any], agent_id_value: str, now: float,
+        *, excluding_ticket_id: str,
+    ) -> list[dict[str, Any]]:
+        conflicts: list[dict[str, Any]] = []
+        for candidate in document.get("tickets", {}).values():
+            if candidate.get("ticket_id") == excluding_ticket_id:
+                continue
+            if (
+                candidate.get("status") in PRE_SUBMISSION_STATES
+                and candidate.get("claimed_by_agent_id") == agent_id_value
+            ):
+                conflicts.append(
+                    {
+                        "ticket_id": candidate.get("ticket_id"),
+                        "kind": "work_lease",
+                        "status": candidate.get("status"),
+                        "expires_at_epoch": candidate.get("lease_expires_at_epoch"),
+                    }
+                )
+            lease = candidate.get("review_lease")
+            if (
+                isinstance(lease, Mapping)
+                and lease.get("reviewer_agent_id") == agent_id_value
+                and float(lease.get("expires_at_epoch", 0)) > now
+            ):
+                conflicts.append(
+                    {
+                        "ticket_id": candidate.get("ticket_id"),
+                        "kind": "review_lease",
+                        "status": candidate.get("status"),
+                        "expires_at_epoch": lease.get("expires_at_epoch"),
+                    }
+                )
+            for key in ("work_offer", "review_offer"):
+                offer = candidate.get(key)
+                if (
+                    isinstance(offer, Mapping)
+                    and offer.get("agent_id") == agent_id_value
+                    and float(offer.get("expires_at_epoch", 0)) > now
+                ):
+                    conflicts.append(
+                        {
+                            "ticket_id": candidate.get("ticket_id"),
+                            "kind": key,
+                            "status": candidate.get("status"),
+                            "expires_at_epoch": offer.get("expires_at_epoch"),
+                        }
+                    )
+        return sorted(
+            conflicts,
+            key=lambda item: (str(item.get("ticket_id", "")), str(item["kind"])),
+        )
+
     def agent_is_busy(
         document: Mapping[str, Any], agent_id_value: str, now: float,
         *, excluding_ticket_id: str,
@@ -3039,6 +3095,122 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             now,
             int(policy.get("offer_ttl_s", DEFAULT_OFFER_TTL_S)),
         )
+
+    def dispatch_claim_diagnostics(
+        document: Mapping[str, Any],
+        ticket: Mapping[str, Any],
+        member: Mapping[str, Any],
+        now: float,
+        kind: str,
+    ) -> dict[str, Any]:
+        """Capture non-secret inputs behind a generic dispatch claim refusal."""
+        principal_id_value = member.get("principal_id")
+        membership = document.get("principal_memberships", {}).get(
+            principal_id_value
+        )
+        assigned = ticket.get("assigned_to_agent_id") if kind == "work" else None
+        requested = ticket.get("assigned_to") if kind == "work" else None
+        assignment_match = assigned in {None, member.get("agent_id")}
+        if assigned is None and requested:
+            assignment_match = assignment_matches(member, str(requested))
+        excluded = agent_matches(ticket.get("exclude_agents", []), member)
+        caps = member_capabilities(member)
+        required_tier = int(ticket.get("tier", 2))
+        required_skills = set(ticket.get("skills_required", []))
+        missing_skills = sorted(required_skills - set(caps["skills"]))
+        membership_role = membership.get("role") if isinstance(membership, Mapping) else None
+        failures: list[str] = []
+        if membership is None:
+            failures.append("membership_missing")
+        if member.get("lifecycle_status", "active") != "active":
+            failures.append("lifecycle_inactive")
+        if not assignment_match:
+            failures.append("assignment_mismatch")
+        if excluded:
+            failures.append("excluded")
+        if not member.get("capabilities_explicit"):
+            failures.append("capabilities_not_explicit")
+        if kind == "work" and member.get("role") in {"coordinator", "orchestrator"}:
+            failures.append("role_cannot_work")
+        if int(caps["tier_max"]) < required_tier:
+            failures.append("tier_too_low")
+        if missing_skills:
+            failures.append("skills_missing")
+        if kind == "work" and not caps["can_work"]:
+            failures.append("can_work_false")
+        if kind == "review":
+            if not caps["can_review"]:
+                failures.append("can_review_false")
+            if membership_role not in {"admin", "reviewer"}:
+                failures.append("membership_role_cannot_review")
+            if member.get("agent_id") == ticket.get("submitted_by_agent_id"):
+                failures.append("self_review")
+        busy_conflicts = agent_busy_conflicts(
+            document,
+            str(member["agent_id"]),
+            now,
+            excluding_ticket_id=str(ticket["ticket_id"]),
+        )
+        if busy_conflicts:
+            failures.append("busy_elsewhere")
+        policy = dispatch_policy(document)
+        offer_ttl_s = int(policy.get("offer_ttl_s", DEFAULT_OFFER_TTL_S))
+        active_listener = str(member["agent_id"]) in service.active_listeners.get(
+            str(document["board_id"]), set()
+        )
+        last_seen = service.last_seen_activity.get(
+            (str(document["board_id"]), str(member["agent_id"]))
+        )
+        live = service.is_agent_live(
+            str(document["board_id"]),
+            str(member["agent_id"]),
+            member,
+            now,
+            offer_ttl_s,
+        )
+        if not live:
+            failures.append("not_live")
+        return {
+            "schema_version": 1,
+            "evaluated_at": iso_at(now),
+            "agent_id": member.get("agent_id"),
+            "principal_id": principal_id_value,
+            "agent_name": member.get("agent_name"),
+            "kind": kind,
+            "failures": failures,
+            "membership": {
+                "present": membership is not None,
+                "role": membership_role,
+            },
+            "member": {
+                "role": member.get("role"),
+                "lifecycle_status": member.get("lifecycle_status", "active"),
+                "capabilities_explicit": bool(member.get("capabilities_explicit")),
+            },
+            "capabilities": {
+                "can_work": bool(caps["can_work"]),
+                "can_review": bool(caps["can_review"]),
+                "tier_max": int(caps["tier_max"]),
+                "skills": sorted(caps["skills"]),
+            },
+            "ticket_requirements": {
+                "assigned_to_agent_id": assigned,
+                "assigned_to": requested,
+                "assignment_match": assignment_match,
+                "excluded": excluded,
+                "required_tier": required_tier,
+                "required_skills": sorted(required_skills),
+                "missing_skills": missing_skills,
+            },
+            "liveness": {
+                "live": live,
+                "active_listener": active_listener,
+                "last_seen_activity_at": iso_at(last_seen) if last_seen is not None else None,
+                "member_last_activity_at": member.get("last_activity_at"),
+                "window_s": DISPATCH_ACTIVITY_WINDOW_MULTIPLIER * offer_ttl_s,
+            },
+            "busy_conflicts": busy_conflicts,
+        }
 
     def agent_has_live_lease_elsewhere(
         document: Mapping[str, Any], agent_id_value: str, now: float,
@@ -7962,8 +8134,12 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             continuation = continuation_hint(ticket)
             operator_override = claim_gate_bypass(document, principal)
 
-            def refuse(message: str, claim_kind: str = "work") -> dict[str, Any]:
-                return {
+            def refuse(
+                message: str,
+                claim_kind: str = "work",
+                diagnostics: Mapping[str, Any] | None = None,
+            ) -> dict[str, Any]:
+                result = {
                     "error": message,
                     "claim_kind": claim_kind,
                     "actor": copy.deepcopy(actor),
@@ -7971,6 +8147,9 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                     "released": released,
                     "renewed": renewed,
                 }
+                if diagnostics is not None:
+                    result["claim_diagnostics"] = copy.deepcopy(diagnostics)
+                return result
 
             if ticket.get("status") == "claimed":
                 if (
@@ -8044,21 +8223,36 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 offer = ticket.get("work_offer")
                 state = ticket.get("dispatch_state")
                 broadcast = isinstance(state, Mapping) and state.get("state") == "broadcast"
+                eligible = dispatch_candidate_is_eligible(
+                    document, ticket, actor, now, "work"
+                )
+                offer_matches = (
+                    not isinstance(offer, Mapping)
+                    or offer.get("agent_id") == actor["agent_id"]
+                )
+                offer_present_or_broadcast = isinstance(offer, Mapping) or broadcast
                 if not operator_override and (
-                    not dispatch_candidate_is_eligible(
+                    not eligible or not offer_matches or not offer_present_or_broadcast
+                ):
+                    diagnostics = dispatch_claim_diagnostics(
                         document, ticket, actor, now, "work"
                     )
-                    or (
-                        isinstance(offer, Mapping)
-                        and offer.get("agent_id") != actor["agent_id"]
-                    )
-                    or (
-                        not isinstance(offer, Mapping)
-                        and not broadcast
-                    )
-                ):
+                    diagnostics["offer"] = {
+                        "present": isinstance(offer, Mapping),
+                        "offered_agent_id": (
+                            offer.get("agent_id") if isinstance(offer, Mapping) else None
+                        ),
+                        "matches_actor": offer_matches,
+                        "broadcast": broadcast,
+                        "state": state.get("state") if isinstance(state, Mapping) else None,
+                    }
+                    if not offer_matches:
+                        diagnostics["failures"].append("offer_recipient_mismatch")
+                    if not offer_present_or_broadcast:
+                        diagnostics["failures"].append("offer_missing")
                     return refuse(
-                        "ticket is not offered to this seat; wait for your offer"
+                        "ticket is not offered to this seat; wait for your offer",
+                        diagnostics=diagnostics,
                     )
                 if isinstance(offer, Mapping):
                     if offer.get("agent_id") != actor["agent_id"]:
@@ -8107,6 +8301,9 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         changed = service.mutate(board_id, claim)
         release_events = await publish_releases(board_id, changed["released"], principal, ctx)
         if "error" in changed:
+            refusal_fields: dict[str, Any] = {}
+            if "claim_diagnostics" in changed:
+                refusal_fields["claim_diagnostics"] = changed["claim_diagnostics"]
             await append_and_publish(
                 board_id,
                 changed["actor"],
@@ -8118,7 +8315,9 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 claim_kind=changed["claim_kind"],
                 refused_agent_id=changed["actor"]["agent_id"],
                 refused_agent_name=changed["actor"]["agent_name"],
+                refused_principal_id=principal.principal_id,
                 refusal_reason=changed["error"],
+                **refusal_fields,
             )
             raise ValueError(changed["error"])
         uri = resource_uri(board_id, "ticket", ticket_id)

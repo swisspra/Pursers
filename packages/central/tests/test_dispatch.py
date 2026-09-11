@@ -928,6 +928,93 @@ class DispatchTests(unittest.IsolatedAsyncioTestCase):
         )
         await assert_refusal("ticket is parked by the board owner")
 
+    async def test_matching_offer_refusal_records_dispatch_predicates(self) -> None:
+        worker = await self.add_seat(
+            self.worker_a, "diagnostic-worker", {"tier_max": 2}
+        )
+        first = await self.create(prefer_agents=[worker])
+        first_ticket = first.structured_content["ticket"]
+        second = await self.create(assigned_to=worker)
+        second_ticket_id = second.structured_content["ticket"]["ticket_id"]
+        now = central.time.time()
+
+        def install_matching_offer(document: dict[str, Any]) -> None:
+            ticket = document["tickets"][second_ticket_id]
+            offer = {
+                "ticket_id": second_ticket_id,
+                "kind": "work",
+                "agent_id": worker,
+                "agent_name": "diagnostic-worker",
+                "offered_at": central.iso_at(now),
+                "expires_at": central.iso_at(now + 600),
+                "expires_at_epoch": now + 600,
+            }
+            ticket["work_offer"] = offer
+            ticket["dispatch_state"] = {"state": "offered", **offer}
+
+        self.service.mutate(
+            "pursers", install_matching_offer, require_generation=False
+        )
+        self.service.record_agent_activity("pursers", worker, now)
+        self.principal = self.worker_a
+        with patch.object(central.time, "time", return_value=now):
+            with self.assertRaisesRegex(
+                ToolError,
+                "ticket is not offered to this seat; wait for your offer",
+            ):
+                await self.call(
+                    "ticket_claim",
+                    agent_name="diagnostic-worker",
+                    ticket_id=second_ticket_id,
+                )
+
+        event = self.service.journal.read_after("pursers", 0, 1000)["events"][-1]
+        self.assertEqual(event["kind"], TICKET_CLAIM_REFUSED)
+        self.assertEqual(event["refused_agent_id"], worker)
+        self.assertEqual(event["refused_principal_id"], self.worker_a.principal_id)
+        diagnostics = event["claim_diagnostics"]
+        self.assertEqual(diagnostics["agent_id"], worker)
+        self.assertEqual(diagnostics["principal_id"], self.worker_a.principal_id)
+        self.assertEqual(diagnostics["failures"], ["busy_elsewhere"])
+        self.assertEqual(
+            diagnostics["busy_conflicts"],
+            [
+                {
+                    "ticket_id": first_ticket["ticket_id"],
+                    "kind": "work_offer",
+                    "status": "open",
+                    "expires_at_epoch": first_ticket["work_offer"]["expires_at_epoch"],
+                }
+            ],
+        )
+        self.assertEqual(
+            diagnostics["membership"], {"present": True, "role": "member"}
+        )
+        self.assertEqual(
+            diagnostics["member"],
+            {
+                "role": "worker",
+                "lifecycle_status": "active",
+                "capabilities_explicit": True,
+            },
+        )
+        self.assertTrue(diagnostics["capabilities"]["can_work"])
+        self.assertEqual(diagnostics["capabilities"]["tier_max"], 2)
+        self.assertTrue(diagnostics["ticket_requirements"]["assignment_match"])
+        self.assertEqual(diagnostics["ticket_requirements"]["missing_skills"], [])
+        self.assertTrue(diagnostics["liveness"]["live"])
+        self.assertIsNotNone(diagnostics["liveness"]["last_seen_activity_at"])
+        self.assertEqual(
+            diagnostics["offer"],
+            {
+                "present": True,
+                "offered_agent_id": worker,
+                "matches_actor": True,
+                "broadcast": False,
+                "state": "offered",
+            },
+        )
+
     async def test_dead_assignment_pin_is_released_after_fallback_cycles(self) -> None:
         pinned = await self.add_seat(
             self.worker_a, "pinned-worker", {"tier_max": 2}

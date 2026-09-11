@@ -521,6 +521,92 @@ class CoordinatorWriteTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(claimed.is_error)
 
+    async def test_park_assign_unpark_rebuilds_consistent_offer(self) -> None:
+        other_worker_id = await self.join_other_worker()
+        await self.enable_work_dispatch(self.worker, "worker-agent")
+        await self.enable_work_dispatch(
+            self.other_worker, "other-worker-agent"
+        )
+        self.principal = self.admin
+        created = await self.call(
+            "ticket_create",
+            agent_name="admin-agent",
+            title="released recovery sequence",
+            description="withdraw, assign while parked, and reoffer once",
+            target_url="pursers/packages/central",
+            scope="interactive-no-send",
+            required_fields=["test_output"],
+            prefer_agents=[self.worker_id],
+        )
+        ticket_id = created.structured_content["ticket"]["ticket_id"]
+        self.assertEqual(
+            created.structured_content["ticket"]["work_offer"]["agent_id"],
+            self.worker_id,
+        )
+
+        parked = await self.call(
+            "ticket_update",
+            agent_name="admin-agent",
+            ticket_id=ticket_id,
+            parked=True,
+        )
+        self.assertTrue(parked.structured_content["ticket"]["parked"])
+        self.assertNotIn("work_offer", parked.structured_content["ticket"])
+        self.assertEqual(
+            parked.structured_content["dispatch_events"][0]["kind"],
+            central.OFFER_REVOKED,
+        )
+
+        self.principal = self.coordinator
+        assigned = await self.call(
+            "ticket_assign",
+            agent_name="coordinator-1",
+            ticket_id=ticket_id,
+            assigned_to_agent_id=other_worker_id,
+            expected_status="open",
+            expected_assigned_to_agent_id=None,
+            coordinator_op_key="released-park-assign-unpark",
+            reason="rebuild one offer for the exact eligible target",
+        )
+        self.assertEqual(
+            assigned.structured_content["ticket"]["assigned_to_agent_id"],
+            other_worker_id,
+        )
+        self.assertNotIn("work_offer", assigned.structured_content["ticket"])
+
+        unparked = await self.call(
+            "ticket_update",
+            agent_name="coordinator-1",
+            ticket_id=ticket_id,
+            parked=False,
+        )
+        recovered = unparked.structured_content["ticket"]
+        self.assertFalse(recovered["parked"])
+        self.assertEqual(recovered["work_offer"]["agent_id"], other_worker_id)
+        self.assertEqual(recovered["dispatch_state"]["agent_id"], other_worker_id)
+        self.assertEqual(
+            unparked.structured_content["dispatch_events"][0]["kind"],
+            central.TICKET_OFFERED,
+        )
+
+        self.principal = self.worker
+        with self.assertRaisesRegex(
+            ToolError, "ticket is not offered to this seat"
+        ):
+            await self.call(
+                "ticket_claim", agent_name="worker-agent", ticket_id=ticket_id
+            )
+        self.principal = self.other_worker
+        claimed = await self.call(
+            "ticket_claim",
+            agent_name="other-worker-agent",
+            ticket_id=ticket_id,
+        )
+        self.assertEqual(
+            claimed.structured_content["ticket"]["claimed_by_agent_id"],
+            other_worker_id,
+        )
+
     async def test_assignment_noop_preserves_offer_and_clear_redispatches(
         self,
     ) -> None:
