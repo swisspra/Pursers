@@ -21,8 +21,10 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[4]
 DEFAULT_DELTA = ROOT / "docs/design-home/context/typed-predicate-integration-delta.json"
 FACTS_PATH = "docs/design-home/context/acceptance-facts.json"
-BASE = "99a32afb4bf490ae05c126ca7966b3dda3580d87"
+BASE = "97a5ed712c7a7909642608211dea34601d12564b"
 FLEET_DASHBOARD = ROOT / "tools/fleet-dashboard/fleet_dashboard.py"
+BROWSER_OBSERVER = ROOT / "tools/aionui-extension/tests/home_acceptance/browser_observer.py"
+WEBUI_APP = ROOT / "tools/aionui-extension/webui/app.js"
 CONTEXT_BINDINGS = [
     "observation_id", "run_id", "action_id", "entity", "surface", "board_id",
     "candidate_commit", "issued_at", "causal_index",
@@ -127,7 +129,7 @@ def check_source_anchors(proposals: list[dict[str, Any]]) -> int:
         start, end = lines
         text = anchor_text(commit, path)
         require(1 <= start <= end <= len(text), f"{commit}:{path}:{start}-{end} out of range")
-    require(len(anchors) == 125, f"expected 125 unique source anchors, got {len(anchors)}")
+    require(len(anchors) == 127, f"expected 127 unique source anchors, got {len(anchors)}")
     return len(anchors)
 
 
@@ -302,7 +304,7 @@ def producer_call(
 
 
 def check_parent_producer_examples(proposals: list[dict[str, Any]]) -> int:
-    """Run proposal selections through the inherited real Fleet handler."""
+    """Run proposal selections through inherited Fleet and page/helper producers."""
     require(
         subprocess.run(
             ["git", "diff", "--quiet", BASE, "--", str(FLEET_DASHBOARD.relative_to(ROOT))],
@@ -382,8 +384,118 @@ def check_parent_producer_examples(proposals: list[dict[str, Any]]) -> int:
             f"{item['id']}: actual parent producer output did not pass",
         )
         checked += 1
-    require(checked == len(PARENT_PRODUCER_IDS), "parent producer example coverage")
-    return checked
+    require(checked == len(PARENT_PRODUCER_IDS), "parent Fleet producer example coverage")
+    registration = next(
+        item for item in proposals
+        if item["id"] == "extension.environment-free-mcp-registration"
+    )
+    check_page_helper_producer_example(registration)
+    return checked + 1
+
+
+def check_page_helper_producer_example(item: dict[str, Any]) -> None:
+    """Exercise the real recovery route and its closed page-owned capture contract."""
+    transport = {
+        "type": "stdio", "command": "pursers-wait-bridge", "args": [], "env": {},
+    }
+    expected_action = {
+        "kind": "click_response_json",
+        "selector": "#recover-seat",
+        "method": "POST",
+        "endpoint": "/pursers/onboarding/recover",
+        "pointer": "/body/mcp_definition/transport",
+        "path": "/mcp_transport",
+    }
+    recorder = item["executable_request"]["recorder"]
+    require(recorder["action"] == [expected_action], "registration must use the exact recovery click")
+    require(
+        recorder["before"] == [{
+            "path": "/recover_control", "selector": "#recover-seat", "property": "text",
+        }],
+        "registration before context drift",
+    )
+    require(
+        recorder["after"] == [{
+            "path": "/registration_status", "selector": "#connection-message",
+            "property": "text",
+        }],
+        "registration after context drift",
+    )
+
+    app = WEBUI_APP.read_text()
+    for source_fragment in (
+        "api('/pursers/onboarding/recover', { json: payload })",
+        "$('#recover-seat').addEventListener('click', recoverConnection)",
+        "Registration recovered without replaying the door.",
+    ):
+        require(source_fragment in app, f"actual page recovery source missing {source_fragment!r}")
+
+    script = r"""
+const { createHandlers } = require('./tools/aionui-extension/webui/routes.js');
+(async () => {
+  const runBridge = async (args) => {
+    if (args[0] !== 'status') throw new Error('unexpected bridge mutation');
+    return 'push_mode=push\nboard=sandbox-board role=worker kid=door-1 exp=2000000000 seat_names_used=worker-three\n';
+  };
+  const handlers = createHandlers({
+    expectedBoard: 'sandbox-board',
+    allowedOrigin: 'http://127.0.0.1:25808',
+    runBridge,
+    importMcp: async () => ({ success: true, imported: false }),
+  });
+  const response = await handlers.handle(new Request(
+    'http://127.0.0.1:43121/pursers/onboarding/recover', {
+      method: 'POST',
+      headers: { origin: 'http://127.0.0.1:25808' },
+      body: JSON.stringify({
+        board: 'sandbox-board', role: 'worker', seat_name: 'worker-three',
+        tier_max: 2, folder: 'worker-three',
+      }),
+    },
+  ));
+  process.stdout.write(JSON.stringify({ status: response.status, body: await response.json() }));
+})().catch((error) => { console.error(error); process.exitCode = 1; });
+"""
+    completed = subprocess.run(
+        ["node", "-e", script], cwd=ROOT, text=True, capture_output=True,
+    )
+    require(completed.returncode == 0, f"actual helper recovery failed: {completed.stderr.strip()}")
+    envelope = json.loads(completed.stdout)
+    selected = pointer_value(envelope, expected_action["pointer"])
+    require(selected == transport, "actual helper recovery transport drift")
+    observed = {
+        ("before", "/recover_control"): "Recover registration",
+        ("action", "/mcp_transport"): selected,
+        ("after", "/registration_status"):
+            "Registration recovered without replaying the door.",
+    }
+    require(evaluate(item["canonical_predicate"], observed), "actual page/helper output did not pass")
+
+    require(
+        [{**expected_action, "selector": "#decoy"}] != recorder["action"],
+        "wrong click target was accepted",
+    )
+    observer_spec = importlib.util.spec_from_file_location(
+        "predicate_proposal_browser_observer", BROWSER_OBSERVER
+    )
+    require(observer_spec is not None and observer_spec.loader is not None, "cannot load browser observer")
+    observer = importlib.util.module_from_spec(observer_spec)
+    observer_spec.loader.exec_module(observer)
+    try:
+        observer._validate_transition_actions([
+            expected_action, {**expected_action, "path": "/duplicate_transport"},
+        ])
+    except observer.ObserverError:
+        pass
+    else:
+        raise Invalid("duplicate response capture was accepted")
+    for cleanup_marker in (
+        "window.clearTimeout(state.timer)",
+        "window.fetch = state.original",
+        "delete window[key]",
+        "response capture did not match exactly once",
+    ):
+        require(cleanup_marker in observer.EGO_TRANSITION_SCRIPT, f"capture cleanup missing {cleanup_marker!r}")
 
 
 def check_predicate(item: dict[str, Any]) -> int:
@@ -485,9 +597,28 @@ def check_request(item: dict[str, Any]) -> None:
         available["action"] = set()
         require(isinstance(recorder["action"], list) and recorder["action"], f"{item['id']}: empty action")
         for action in recorder["action"]:
-            action_kinds = {"observe", "click", "set_value", "submit", "press_key", "wait"}
+            action_kinds = {
+                "observe", "click", "set_value", "submit", "press_key", "wait",
+                "click_response_json",
+            }
             require(action.get("kind") in action_kinds, f"{item['id']}: action kind")
             check_pointer(action.get("path"), item["id"])
+            if action["kind"] == "click_response_json":
+                exact_keys(
+                    action,
+                    {"kind", "selector", "method", "endpoint", "pointer", "path"},
+                    f"{item['id']}.action",
+                )
+                require(
+                    action["method"] in {"GET", "POST"}
+                    and isinstance(action["selector"], str) and action["selector"]
+                    and isinstance(action["endpoint"], str)
+                    and action["endpoint"].startswith("/")
+                    and not action["endpoint"].startswith("//")
+                    and "#" not in action["endpoint"],
+                    f"{item['id']}: response capture target",
+                )
+                check_pointer(action["pointer"], item["id"])
             available["action"].add(action["path"])
         for assertion in predicate["assertions"]:
             require(assertion["path"] in available[assertion["phase"]], f"{item['id']}: unrecorded assertion path")
@@ -540,11 +671,28 @@ def require_assertion(proposals: list[dict[str, Any]], ticket_id: str, **expecte
 
 
 def check_regressions(proposals: list[dict[str, Any]]) -> None:
+    registration = next(
+        item for item in proposals
+        if item["id"] == "extension.environment-free-mcp-registration"
+    )
     env = assertions_by_id(proposals, "extension.environment-free-mcp-registration")
-    require(len(env) == 7, "environment-free registration needs seven closed assertions")
+    require(len(env) == 3, "environment-free registration needs three closed browser assertions")
+    require(
+        registration["executable_request"]["kind"] == "state_transition"
+        and registration["adapter"]["adapter"] == "trusted_browser_state_v1",
+        "environment-free registration must be browser-observed",
+    )
     require_assertion(
-        proposals, "extension.environment-free-mcp-registration", target="field",
-        path="/mcp_definition/transport/env", op="eq", value={},
+        proposals, "extension.environment-free-mcp-registration", phase="action",
+        path="/mcp_transport", op="eq",
+        value={
+            "type": "stdio", "command": "pursers-wait-bridge", "args": [], "env": {},
+        },
+    )
+    require_assertion(
+        proposals, "extension.environment-free-mcp-registration", phase="after",
+        path="/registration_status", op="contains",
+        value="Registration recovered without replaying the door.",
     )
     require_assertion(proposals, "fleet.doors-expiry", phase="after", path="/issued_expiry", op="ne", value="—")
     require_assertion(proposals, "fleet.doors-key-id", phase="after", path="/issued_kid", op="contains", value="kid-")
