@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import importlib.util
 import json
@@ -54,12 +55,19 @@ def _trace(
     return dashboard.EvidenceTrace.from_config(config, MODULE_PATH), output
 
 
-def _headers(action: bytes | None = None) -> dict[str, str]:
+def _headers(
+    action: bytes | None = None,
+    *,
+    observation_id: str = "fleet.attention-state",
+    run_id: str = "run-1",
+    action_id: str = "save-attention",
+    entity: str = "TK-123",
+) -> dict[str, str]:
     result = {
-        "X-Pursers-Observation-Id": "fleet.attention-state",
-        "X-Pursers-Run-Id": "run-1",
-        "X-Pursers-Action-Id": "save-attention",
-        "X-Pursers-Entity-Id": "TK-123",
+        "X-Pursers-Observation-Id": observation_id,
+        "X-Pursers-Run-Id": run_id,
+        "X-Pursers-Action-Id": action_id,
+        "X-Pursers-Entity-Id": entity,
     }
     if action is not None:
         result["X-Pursers-Action-SHA256"] = hashlib.sha256(action).hexdigest()
@@ -71,11 +79,12 @@ def _call(
     base_url: str,
     method: str,
     *,
+    path: str = "/api/attention",
     body: bytes | None = None,
     headers: dict[str, str] | None = None,
 ) -> tuple[int, dict[str, Any], Any]:
     request = urllib.request.Request(
-        base_url + "/api/attention",
+        base_url + path,
         data=body,
         headers=headers or {},
         method=method,
@@ -86,6 +95,118 @@ def _call(
         response = exc
     with response:
         return response.status, json.loads(response.read()), response.headers
+
+
+class ProjectBoard:
+    def __init__(self, board_id: str, central: "ProjectCentral") -> None:
+        self.board_id = board_id
+        self.central = central
+        self.memberships: dict[str, str] = {}
+        self.dispatch_policy = {
+            "offer_ttl_s": 120,
+            "broadcast_reoffer_s": 600,
+            "second_opinion": False,
+            "fallback_broadcast": False,
+        }
+        self.review_policy = "workflow"
+
+    async def __aenter__(self) -> "ProjectBoard":
+        self.central.boards_present.add(self.board_id)
+        return self
+
+    async def __aexit__(self, *_args: object) -> None:
+        return None
+
+    async def board_list(self) -> dict[str, Any]:
+        return {
+            "boards": [
+                {"board_id": board_id, "membership_role": "admin"}
+                for board_id in sorted(self.central.boards_present)
+            ]
+        }
+
+    async def board_onboard(self, **_kwargs: object) -> dict[str, Any]:
+        self.central.boards_present.add(self.board_id)
+        return {"ok": True, "board_id": self.board_id}
+
+    async def board_members(self) -> dict[str, Any]:
+        return {
+            "members": [
+                {"principal_id": principal_id, "role": role}
+                for principal_id, role in self.memberships.items()
+            ]
+        }
+
+    async def board_member_add(
+        self, principal_id: str, role: str = "member", **_kwargs: object
+    ) -> dict[str, Any]:
+        self.memberships[principal_id] = role
+        return {"ok": True}
+
+    async def board_status(self) -> dict[str, Any]:
+        return {
+            "dispatch_policy": self.dispatch_policy,
+            "review_policy": self.review_policy,
+        }
+
+    async def board_dispatch_policy_set(self, **kwargs: object) -> dict[str, Any]:
+        self.dispatch_policy.update(kwargs)
+        return {"ok": True}
+
+    async def board_review_policy_set(
+        self, review_policy: str, **_kwargs: object
+    ) -> dict[str, Any]:
+        self.review_policy = review_policy
+        return {"ok": True}
+
+    async def board_state_get(self, key: str | None = None) -> dict[str, Any]:
+        assert key == "project_registry"
+        return {"state": {"value": json.dumps(self.central.registry)}}
+
+    async def _call(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        if name == "board_state_update":
+            self.central.registry = json.loads(arguments["value"])
+            return {"ok": True}
+        if name == "board_members":
+            return await self.board_members()
+        if name == "board_member_add":
+            return await self.board_member_add(
+                arguments["principal_id"], arguments.get("role", "member")
+            )
+        raise NotImplementedError(name)
+
+
+class ProjectCentral:
+    def __init__(self) -> None:
+        self.registry: dict[str, Any] = {"schema_version": 1, "projects": {}}
+        self.boards_present = {"pursers"}
+        self.boards: dict[str, ProjectBoard] = {}
+
+    def client_factory(
+        self, _url: str, _token: str, board_id: str, **_kwargs: object
+    ) -> ProjectBoard:
+        return self.boards.setdefault(board_id, ProjectBoard(board_id, self))
+
+
+class ProjectSeats:
+    def __init__(self, clone_dir: Path) -> None:
+        self.clone_dir = clone_dir
+
+    def _clone_state(self, _path: Path, _ref: str = "main") -> dict[str, Any]:
+        return {"status": "ready", "dirty": False}
+
+    def prepare_fleet_clone(
+        self, registry_payload: dict[str, Any], project_name: str
+    ) -> dict[str, Any]:
+        self.clone_dir.mkdir(parents=True, exist_ok=True)
+        registry = copy.deepcopy(registry_payload["registry"])
+        registry["projects"][project_name]["fleet_clone_dir"] = str(self.clone_dir)
+        return {
+            "project": project_name,
+            "clone": {"path": str(self.clone_dir), "status": "ready"},
+            "registry": registry,
+            "expected_sha256": registry_payload["expected_sha256"],
+        }
 
 
 def test_real_attention_handler_emits_actual_sanitized_evidence(tmp_path: Path) -> None:
@@ -155,6 +276,232 @@ def test_real_attention_handler_emits_actual_sanitized_evidence(tmp_path: Path) 
     assert len(record["candidate_commit"]) == 40
     assert stat.S_IMODE(output.stat().st_mode) == 0o600
     assert secret not in lines[0]
+
+
+def test_real_add_project_handler_emits_steps_and_actual_registry_transition(
+    tmp_path: Path,
+) -> None:
+    trace, output = _trace(tmp_path)
+    central = ProjectCentral()
+    config = dashboard.Config(
+        url="http://127.0.0.1:1/mcp",
+        token="test-token",
+        home_board="pursers",
+        agent_name="fleet-evidence-test",
+        stale_seconds=300,
+        cache_seconds=5,
+        doors_keys_dir=tmp_path / "keys",
+        jwks_path=tmp_path / "jwks.json",
+    )
+    fetcher = dashboard.FleetFetcher(config, client_factory=central.client_factory)
+    cache = dashboard.DashboardCache([fetcher], 60)
+    seats = ProjectSeats(tmp_path / "fleet-clone")
+    server = dashboard.ThreadingHTTPServer(
+        ("127.0.0.1", 0),
+        dashboard.make_handler(cache, seat_manager=seats, evidence_trace=trace),
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base_url = f"http://127.0.0.1:{server.server_port}"
+    action = json.dumps(
+        {
+            "name": "demo",
+            "board_id": "sandbox-board",
+            "work_dir": str(tmp_path / "work"),
+        },
+        separators=(",", ":"),
+    ).encode()
+    (tmp_path / "work").mkdir()
+    trace_headers = _headers(
+        action,
+        observation_id="fleet.add-project-clone-steps",
+        action_id="add-project",
+        entity="demo",
+    )
+    try:
+        status, result, response_headers = _call(
+            base_url,
+            "POST",
+            path="/api/projects/add",
+            body=action,
+            headers={**trace_headers, "Origin": base_url},
+        )
+
+        failed_action = json.dumps(
+            {
+                "name": "invalid-work-dir",
+                "board_id": "sandbox-board",
+                "work_dir": "relative",
+            },
+            separators=(",", ":"),
+        ).encode()
+        failed_status, failed, _failed_headers = _call(
+            base_url,
+            "POST",
+            path="/api/projects/add",
+            body=failed_action,
+            headers={
+                **_headers(
+                    failed_action,
+                    observation_id="fleet.add-project-negative",
+                    action_id="invalid-work-dir",
+                    entity="invalid-work-dir",
+                ),
+                "Origin": base_url,
+            },
+        )
+
+        mismatched = json.dumps(
+            {
+                "name": "mismatched",
+                "board_id": "sandbox-board",
+                "work_dir": str(tmp_path / "mismatched-work"),
+            },
+            separators=(",", ":"),
+        ).encode()
+        (tmp_path / "mismatched-work").mkdir()
+        mismatch_status, mismatch_result, mismatch_headers = _call(
+            base_url,
+            "POST",
+            path="/api/projects/add",
+            body=mismatched,
+            headers={
+                **_headers(
+                    mismatched,
+                    observation_id="fleet.add-project-mismatch",
+                    action_id="wrong-entity",
+                    entity="different-project",
+                ),
+                "Origin": base_url,
+            },
+        )
+
+        wrong_board = json.dumps(
+            {
+                "name": "wrong-board",
+                "board_id": "sandbox-other",
+                "work_dir": str(tmp_path / "wrong-board-work"),
+            },
+            separators=(",", ":"),
+        ).encode()
+        (tmp_path / "wrong-board-work").mkdir()
+        wrong_board_status, wrong_board_result, wrong_board_headers = _call(
+            base_url,
+            "POST",
+            path="/api/projects/add",
+            body=wrong_board,
+            headers={
+                **_headers(
+                    wrong_board,
+                    observation_id="fleet.add-project-wrong-board",
+                    action_id="wrong-board",
+                    entity="wrong-board",
+                ),
+                "Origin": base_url,
+            },
+        )
+
+        wrong_origin = json.dumps(
+            {
+                "name": "wrong-origin",
+                "board_id": "sandbox-board",
+                "work_dir": str(tmp_path / "wrong-origin-work"),
+            },
+            separators=(",", ":"),
+        ).encode()
+        wrong_origin_status, wrong_origin_result, wrong_origin_headers = _call(
+            base_url,
+            "POST",
+            path="/api/projects/add",
+            body=wrong_origin,
+            headers={
+                **_headers(
+                    wrong_origin,
+                    observation_id="fleet.add-project-wrong-origin",
+                    action_id="wrong-origin",
+                    entity="wrong-origin",
+                ),
+                "Origin": "https://attacker.invalid",
+            },
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+        fetcher.close()
+
+    assert status == 200
+    fleet_clone = next(step for step in result["steps"] if step["step"] == "fleet_clone")
+    assert fleet_clone["status"] == "prepared"
+    assert central.registry["projects"]["demo"]["board_id"] == "sandbox-board"
+    evidence = result["_evidence"]
+    assert evidence["path"] == "/api/projects/add"
+    assert evidence["entity"] == "demo"
+    assert evidence["outcome"] == "succeeded"
+    assert evidence["effect"] == "project_state_changed"
+    assert evidence["before_sha256"] == hashlib.sha256(
+        dashboard._json_bytes({"project": None})
+    ).hexdigest()
+    assert evidence["after_sha256"] == hashlib.sha256(
+        dashboard._json_bytes({"project": central.registry["projects"]["demo"]})
+    ).hexdigest()
+    original_result = {key: value for key, value in result.items() if key != "_evidence"}
+    assert evidence["result_sha256"] == hashlib.sha256(
+        dashboard._json_bytes(original_result)
+    ).hexdigest()
+    context = trace.context(trace_headers, "POST", "/api/projects/add")
+    assert context is not None
+    for key, header in dashboard.CORRELATION_HEADERS.items():
+        assert response_headers[header] == getattr(context, key)
+
+    assert failed_status == 400
+    assert failed["error"] == "work_dir must be an absolute path"
+    assert failed["_evidence"]["outcome"] == "failed"
+    assert failed["_evidence"]["effect"] == "project_state_unchanged"
+
+    assert mismatch_status == 200
+    assert "_evidence" not in mismatch_result
+    assert mismatch_headers.get("X-Pursers-Run-Id") is None
+    assert wrong_board_status == 200
+    assert "_evidence" not in wrong_board_result
+    assert wrong_board_headers.get("X-Pursers-Run-Id") is None
+    assert wrong_origin_status == 403
+    assert wrong_origin_result == {"error": "same-origin request required"}
+    assert wrong_origin_headers.get("X-Pursers-Run-Id") is None
+
+    records = [json.loads(line) for line in output.read_text().splitlines()]
+    assert [record["action_id"] for record in records] == [
+        "add-project",
+        "invalid-work-dir",
+    ]
+    serialized = output.read_text(encoding="utf-8")
+    assert str(tmp_path) not in serialized
+    assert "prs1." not in serialized
+
+
+def test_trace_route_allowlist_is_closed_for_project_evidence(tmp_path: Path) -> None:
+    trace, _output = _trace(tmp_path)
+    headers = _headers(
+        b"{}",
+        observation_id="fleet.add-project-clone-steps",
+        action_id="add-project",
+        entity="demo",
+    )
+    assert trace.context(headers, "POST", "/api/projects/add") is not None
+    assert trace.context(headers, "GET", "/api/projects/add") is None
+    assert trace.context(headers, "POST", "/api/projects/add/steps") is None
+    assert trace.context(headers, "POST", "/api/config/registry/clone") is None
+    context = trace.context(headers, "POST", "/api/projects/add")
+    assert context is not None
+    assert trace.observe(
+        context=context,
+        method="POST",
+        route="/api/projects/add/steps",
+        status=200,
+        before={},
+        after={"changed": True},
+        result_body=b'{}',
+    ) == (None, False)
 
 
 def test_concurrent_untraced_save_cannot_change_traced_action_effect(

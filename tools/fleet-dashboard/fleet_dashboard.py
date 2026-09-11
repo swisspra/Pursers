@@ -27,6 +27,7 @@ import urllib.error
 import urllib.request
 import uuid
 from collections.abc import Awaitable, Callable
+from contextlib import nullcontext
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -6799,6 +6800,7 @@ def make_handler(
     )
     workers = worker_manager or WorkerManager()
     seats = seat_manager or SeatConfigManager()
+    project_operation_lock = threading.RLock()
 
     def requested_central(path: str) -> str | None:
         values = parse_qs(urlsplit(path).query, keep_blank_values=True).get("central")
@@ -6913,6 +6915,30 @@ def make_handler(
             ):
                 return
             self._evidence_context = context
+
+        def _prepare_project_evidence(
+            self, request: Any, central: str | None
+        ) -> dict[str, Any] | None:
+            context = getattr(self, "_evidence_context", None)
+            if (
+                evidence_trace is None
+                or context is None
+                or not isinstance(request, dict)
+                or request.get("name") != context.entity
+                or request.get("board_id") != evidence_trace.board_id
+            ):
+                self._evidence_context = None
+                return None
+            try:
+                payload = cache_call("get_project_registry", central=central)
+                registry = payload.get("registry")
+                projects = registry.get("projects") if isinstance(registry, dict) else None
+                if not isinstance(projects, dict):
+                    raise ValueError("project registry has no projects mapping")
+                return {"project": copy.deepcopy(projects.get(context.entity))}
+            except Exception:  # noqa: BLE001 - tracing must stay fail-passive.
+                self._evidence_context = None
+                return None
 
         def _send(self, status: int, content_type: str, body: bytes) -> None:
             evidence_headers: dict[str, str] = {}
@@ -7554,17 +7580,35 @@ def make_handler(
                         raise ValueError(
                             f"request must contain {', '.join(sorted(req_fields))} and optionally integration_ref"
                         )
-                    body = _json_bytes(
-                        cache_call(
-                            "add_project",
-                            request["name"],
-                            request["board_id"],
-                            request["work_dir"],
-                            request.get("integration_ref", "main"),
-                            seats,
-                            central=central,
+                    with (
+                        project_operation_lock
+                        if evidence_trace is not None
+                        else nullcontext()
+                    ):
+                        self._evidence_before = self._prepare_project_evidence(
+                            request, central
                         )
-                    )
+                        try:
+                            result = cache_call(
+                                "add_project",
+                                request["name"],
+                                request["board_id"],
+                                request["work_dir"],
+                                request.get("integration_ref", "main"),
+                                seats,
+                                central=central,
+                            )
+                        except Exception:
+                            if self._evidence_context is not None:
+                                self._evidence_after = self._prepare_project_evidence(
+                                    request, central
+                                )
+                            raise
+                        if self._evidence_context is not None:
+                            self._evidence_after = self._prepare_project_evidence(
+                                request, central
+                            )
+                        body = _json_bytes(result)
                 elif route == "/api/workers":
                     body = _json_bytes(
                         {
