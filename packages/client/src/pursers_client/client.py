@@ -23,6 +23,7 @@ from .events import (
     KNOWN_EVENT_KINDS,
     PARK_EVENT_KINDS,
     REVIEW_LEASE_KINDS,
+    coordinator_host_binding,
 )
 
 
@@ -643,6 +644,73 @@ class BoardClient:
             arguments["note"] = note
         self._watched_uris.add(f"board://{self.board_id}/ticket/{ticket_id}")
         result = await self._call("ticket_human_resolve", arguments)
+        self._remember_event(result)
+        return result
+
+    async def ticket_question_ask(
+        self,
+        ticket_id: str,
+        message: str,
+        kind: str,
+        *,
+        message_id: str | None = None,
+        in_reply_to: str | None = None,
+    ) -> dict[str, Any]:
+        arguments: dict[str, Any] = {
+            "agent_name": self.agent_name,
+            "ticket_id": ticket_id,
+            "message": message,
+            "kind": kind,
+        }
+        if message_id is not None:
+            arguments["message_id"] = message_id
+        if in_reply_to is not None:
+            arguments["in_reply_to"] = in_reply_to
+        self._watched_uris.add(f"board://{self.board_id}/ticket/{ticket_id}")
+        result = await self._call("ticket_question_ask", arguments)
+        self._remember_event(result)
+        return result
+
+    async def board_question_inbox(
+        self,
+        *,
+        state: str | None = None,
+        ticket_id: str | None = None,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        arguments: dict[str, Any] = {
+            "agent_name": self.agent_name,
+            "limit": limit,
+        }
+        if state is not None:
+            arguments["state"] = state
+        if ticket_id is not None:
+            arguments["ticket_id"] = ticket_id
+        return await self._call("board_question_inbox", arguments)
+
+    async def ticket_question_answer(
+        self,
+        ticket_id: str,
+        question_id: str,
+        *,
+        action: str = "answer",
+        message: str | None = None,
+    ) -> dict[str, Any]:
+        if self.identity is None:
+            raise BoardClientError("client has not joined the board")
+        arguments: dict[str, Any] = {
+            "agent_name": self.agent_name,
+            "ticket_id": ticket_id,
+            "question_id": question_id,
+            "action": action,
+            "host_binding": coordinator_host_binding(
+                self.token, self.identity.agent_id
+            ),
+        }
+        if message is not None:
+            arguments["message"] = message
+        self._watched_uris.add(f"board://{self.board_id}/ticket/{ticket_id}")
+        result = await self._call("ticket_question_answer", arguments)
         self._remember_event(result)
         return result
 

@@ -53,6 +53,7 @@ from pursers_client import (
     COORDINATOR_QUESTION_ACCEPTED,
     COORDINATOR_QUESTION_ANSWERED,
     COORDINATOR_MESSAGE_EVENT_KINDS,
+    coordinator_host_binding,
     DEPRECATION_EVENT_KINDS,
     DISPATCH_EVENT_KINDS,
     HUMAN_INPUT_REQUESTED,
@@ -422,6 +423,14 @@ def current_principal() -> Principal:
     canonical = json.dumps([client_id, issuer or "-", subject or "-"], separators=(",", ":"))
     principal_id = "PR-" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
     return Principal(principal_id, canonical, frozenset(access.scopes))
+
+
+def current_host_binding(agent_id_value: str) -> str:
+    """Derive a private, verifier-backed binding for one authenticated session."""
+    access = get_access_token()
+    if access is None or not isinstance(access.token, str) or not access.token:
+        raise RuntimeError("authenticated access token missing")
+    return coordinator_host_binding(access.token, agent_id_value)
 
 
 def require_scope(principal: Principal, scope: str) -> None:
@@ -3857,6 +3866,8 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         ticket: dict[str, Any],
         *,
         include_annotations: bool = True,
+        document: Mapping[str, Any] | None = None,
+        principal: Principal | None = None,
     ) -> dict[str, Any]:
         projected = copy.deepcopy(ticket)
         projected.setdefault("description", "")
@@ -3890,6 +3901,45 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             projected["annotations"] = annotations
         else:
             projected.pop("annotations", None)
+        questions = projected.get("coordinator_questions")
+        if isinstance(questions, list):
+            visible: list[dict[str, Any]] = []
+            if document is not None and principal is not None:
+                membership = service.resolve_board_context(
+                    document, principal.principal_id
+                )
+                is_admin = membership.get("role") == "admin"
+                principal_agent_ids = {
+                    item["agent_id"]
+                    for item in service.principal_members(
+                        document, principal.principal_id
+                    )
+                }
+                project = ticket_project(ticket, board_id)
+                is_project_coordinator = bool(
+                    principal_agent_ids
+                    & set(project_coordinator_ids(document, project))
+                ) and (
+                    COORDINATOR_SCOPE in principal.scopes or is_admin
+                )
+                for question in questions:
+                    if not isinstance(question, dict):
+                        continue
+                    asked_by = question.get("asked_by") or {}
+                    # Explicit projection policy: the asker, the current
+                    # registered project coordinator, and board admins only.
+                    if (
+                        asked_by.get("principal_id") == principal.principal_id
+                        or is_project_coordinator
+                        or is_admin
+                    ):
+                        item = copy.deepcopy(question)
+                        item.pop("binding", None)
+                        visible.append(item)
+            if visible:
+                projected["coordinator_questions"] = visible
+            else:
+                projected.pop("coordinator_questions", None)
         now = time.time()
 
         def elapsed_seconds(value: Any) -> int | None:
@@ -3925,8 +3975,16 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         projected["payload_ref"] = resource_uri(board_id, "ticket", ticket["ticket_id"])
         return projected
 
-    def snapshot_ticket_payload(board_id: str, ticket: dict[str, Any]) -> dict[str, Any]:
-        projected = project_ticket(board_id, ticket)
+    def snapshot_ticket_payload(
+        board_id: str,
+        ticket: dict[str, Any],
+        *,
+        document: Mapping[str, Any],
+        principal: Principal,
+    ) -> dict[str, Any]:
+        projected = project_ticket(
+            board_id, ticket, document=document, principal=principal
+        )
         request = projected.get("human_request")
         if not isinstance(request, dict):
             return projected
@@ -5331,10 +5389,13 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         }
 
     def snapshot_payload(
-        document: dict[str, Any], *, include_retired: bool = False
+        document: dict[str, Any], principal: Principal, *, include_retired: bool = False
     ) -> dict[str, Any]:
         tickets = [
-            snapshot_ticket_payload(document["board_id"], ticket)
+            snapshot_ticket_payload(
+                document["board_id"], ticket,
+                document=document, principal=principal,
+            )
             for ticket in document["tickets"].values()
         ]
         archived_index = service.load_archive_index(document["board_id"])
@@ -5405,6 +5466,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
 
     def bounded_snapshot_payload(
         document: dict[str, Any],
+        principal: Principal,
         *,
         limit: int,
         max_bytes: int,
@@ -5413,7 +5475,9 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         include_retired: bool = False,
     ) -> dict[str, Any]:
         """Build a deterministic snapshot with explicit collection and byte bounds."""
-        snapshot = snapshot_payload(document, include_retired=include_retired)
+        snapshot = snapshot_payload(
+            document, principal, include_retired=include_retired
+        )
         scrub_items = sorted(snapshot["board"]["scrub_allow_counts"].items())
         collections: dict[str, Any] = {
             "agents": snapshot["agents"][:limit],
@@ -5524,7 +5588,10 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             reverse=True,
         )
         tickets = [
-            project_ticket(document["board_id"], item, include_annotations=False)
+            project_ticket(
+                document["board_id"], item, include_annotations=False,
+                document=document, principal=principal,
+            )
             for item in document["tickets"].values()
             if item.get("status") in ACTIVE_TICKET_STATES
         ]
@@ -6029,6 +6096,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         snapshot_at = datetime.now(timezone.utc).isoformat()
         snapshot = bounded_snapshot_payload(
             snapshot_document,
+            principal,
             limit=snapshot_limit,
             max_bytes=snapshot_max_bytes,
             watermark=watermark,
@@ -6080,6 +6148,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         watermark = latest_seq(board_id)
         return bounded_snapshot_payload(
             document,
+            principal,
             limit=limit,
             max_bytes=max_bytes,
             watermark=watermark,
@@ -7024,14 +7093,18 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             if archived is not None:
                 return {
                     "ok": True,
-                    "ticket": project_ticket(board_id, archived),
+                    "ticket": project_ticket(
+                        board_id, archived, document=document, principal=principal
+                    ),
                     "archived": True,
                     "latest_seq": latest_seq(board_id),
                 }
             raise ValueError("ticket not found")
         return {
             "ok": True,
-            "ticket": project_ticket(board_id, ticket),
+            "ticket": project_ticket(
+                board_id, ticket, document=document, principal=principal
+            ),
             "latest_seq": latest_seq(board_id),
         }
 
@@ -7065,8 +7138,9 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         If ``ticket_id`` is omitted, ``description``, ``target_url``, ``scope``,
         and ``required_fields`` are all required. Supplying ``ticket_id``
         currently enforces none of those fields. The first path segment of
-        ``target_url`` is the project slug used to route work to
-        project-filtered workers.
+        ``target_url`` is resolved against the board's project registry. The
+        optional ``project`` value is only a compatibility assertion and may
+        not select a different route.
         """
         board_id = require_id("board_id", board_id)
         agent_name = require_id("agent_name", agent_name)
@@ -7218,6 +7292,13 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                     or actual_id in service.load_archive_index(document["board_id"])
                 ):
                     raise ValueError("ticket already exists")
+            derived_project = derive_ticket_project(
+                document, board_id, safe_target or ""
+            )
+            if safe_project and safe_project != derived_project:
+                raise PermissionError(
+                    "project must match the server-derived project registry route"
+                )
             requested_assignment = safe_assigned
             if explicit_id and safe_assigned is None and not unassigned:
                 requested_assignment = actor["agent_name"]
@@ -7242,7 +7323,7 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                 "tags": safe_tags,
                 "related_files": safe_files,
                 "target_url": safe_target or "",
-                "project": safe_project or "",
+                "project": derived_project,
                 "status": "open",
                 "created_by_agent_id": actor["agent_id"],
                 "created_by_principal_id": principal.principal_id,
@@ -8403,6 +8484,55 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
             "scrub_audit": changed["scrub_audit"],
         }
 
+    def derive_ticket_project(
+        document: Mapping[str, Any], board_id: str, target_url: str
+    ) -> str:
+        """Resolve routing from authenticated board membership and registry state."""
+        entry = (document.get("state") or {}).get("project_registry")
+        raw = entry.get("value") if isinstance(entry, Mapping) else None
+        if raw is None:
+            return board_id
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("project_registry is not valid JSON") from exc
+        projects = raw.get("projects") if isinstance(raw, Mapping) else None
+        if not isinstance(projects, Mapping):
+            raise ValueError("project_registry projects must be an object")
+        active = [
+            (name, config)
+            for name, config in projects.items()
+            if isinstance(name, str)
+            and isinstance(config, Mapping)
+            and config.get("board_id") == board_id
+            and config.get("status") == "active"
+            and config.get("fleet", True) is not False
+        ]
+        if not target_url:
+            return active[0][0] if len(active) == 1 else board_id
+        parsed = urlparse(target_url)
+        if parsed.scheme or parsed.netloc:
+            matches = [
+                name for name, config in active
+                if config.get("repository_url") == target_url
+            ]
+        else:
+            key = target_url.split("/", 1)[0].casefold()
+            matches = []
+            for name, config in active:
+                aliases = {name.casefold()}
+                work_dir = config.get("work_dir")
+                if isinstance(work_dir, str) and work_dir:
+                    aliases.add(Path(work_dir).name.casefold())
+                if key in aliases:
+                    matches.append(name)
+        if len(matches) != 1:
+            raise PermissionError(
+                "target_url must resolve to exactly one active project on this board"
+            )
+        return matches[0]
+
     def ticket_project(ticket: Mapping[str, Any], board_id: str) -> str:
         """Server-derived project. Never taken from caller input."""
         value = ticket.get("project")
@@ -8442,15 +8572,26 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         membership = service.resolve_board_context(document, principal.principal_id)
         return membership.get("role") == "admin"
 
-    def coordinator_binding_digest(value: str | None) -> str | None:
-        """Opaque one-way digest; the raw host/profile/session never persists."""
-        if value is None:
-            return None
+    def authenticated_coordinator_binding(
+        principal: Principal,
+        actor: Mapping[str, Any],
+        value: str,
+    ) -> str:
+        """Verify the opaque session identity and persist only a server digest."""
         text = clean_text(
             "host_binding", value, required=True,
             max_length=COORDINATOR_BINDING_MAX_CHARS,
         )
-        return hashlib.sha256(text.encode("utf-8")).hexdigest()
+        assert text is not None
+        expected = current_host_binding(str(actor["agent_id"]))
+        if not hmac.compare_digest(text, expected):
+            raise PermissionError(
+                "host_binding must match the authenticated agent binding"
+            )
+        material = json.dumps(
+            [principal.principal_id, expected], separators=(",", ":")
+        )
+        return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
     def find_coordinator_question(
         ticket: dict[str, Any], question_id: str
@@ -8688,10 +8829,10 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
         agent_name: str,
         ticket_id: str,
         question_id: str,
+        host_binding: str,
         ctx: Context,
         action: str = "answer",
         message: str | None = None,
-        host_binding: str | None = None,
         expected_generation: str | None = None,
     ) -> dict[str, Any]:
         """Accept or answer a coordinator question without changing ticket state."""
@@ -8728,30 +8869,46 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                     "answering requires registered project coordinator "
                     f"ownership of project {project}"
                 )
+            binding = authenticated_coordinator_binding(
+                principal, actor, host_binding
+            )
             entry = find_coordinator_question(ticket, question_id)
             if entry is None:
                 raise ValueError("question not found")
             if entry.get("state") == "answered":
                 # Idempotent: a retried answer returns the stored one.
+                public = copy.deepcopy(entry)
+                public.pop("binding", None)
                 return {
-                    "actor": actor, "question": copy.deepcopy(entry),
+                    "actor": actor, "question": public,
                     "duplicate": True, "recipients": [], "released": released,
                     "renewed": renewed, "scrub_audit": None, "kind": None,
                 }
-            binding = coordinator_binding_digest(host_binding)
             existing_binding = entry.get("binding")
             accepted_by = entry.get("accepted_by") or {}
             if accepted_by and accepted_by.get("agent_id") != actor["agent_id"]:
-                raise PermissionError(
-                    "question is already accepted by another project coordinator"
-                )
-            if existing_binding is not None and binding != existing_binding:
-                # Same coordinator identity, different host/profile/session:
-                # a reconnect rebind that preserves pending ownership. A
-                # different identity was already refused above.
+                current_owners = set(project_coordinator_ids(document, project))
+                if accepted_by.get("agent_id") in current_owners:
+                    raise PermissionError(
+                        "question is already accepted by another current "
+                        "project coordinator"
+                    )
+                entry["transferred_from"] = copy.deepcopy(accepted_by)
+                entry["transferred_at"] = iso_at(now)
+                entry["accepted_by"] = {
+                    "agent_id": actor["agent_id"],
+                    "agent_name": actor["agent_name"],
+                    "principal_id": principal.principal_id,
+                }
                 entry["binding"] = binding
                 entry["rebound_at"] = iso_at(now)
-            elif existing_binding is None and binding is not None:
+            elif existing_binding is not None and binding != existing_binding:
+                # A newly verified token under the same authenticated agent is
+                # an allowed reconnect. Caller-chosen values were rejected
+                # above, so only verifier-backed sessions can rebind.
+                entry["binding"] = binding
+                entry["rebound_at"] = iso_at(now)
+            elif existing_binding is None:
                 entry["binding"] = binding
             if action == "accept":
                 entry["state"] = "accepted"
@@ -9910,12 +10067,16 @@ def build_server(host: str, port: int, data_root: Path) -> tuple[MCPServer[Any],
                     projected.append(compact_row)
                     continue
                 archived_row = project_ticket(
-                    board_id, full, include_annotations=False
+                    board_id, full, include_annotations=False,
+                    document=document, principal=principal,
                 )
                 archived_row["archived"] = True
                 projected.append(archived_row)
                 continue
-            row = project_ticket(board_id, item, include_annotations=False)
+            row = project_ticket(
+                board_id, item, include_annotations=False,
+                document=document, principal=principal,
+            )
             lease = item.get("review_lease")
             if item.get("status") != "submitted":
                 projected.append(row)

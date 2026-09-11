@@ -2,6 +2,17 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+
+
+def coordinator_host_binding(token: str, agent_id: str) -> str:
+    """Return the opaque proof Central can verify for this auth/session pair."""
+    if not token or not agent_id:
+        raise ValueError("token and agent_id are required")
+    material = json.dumps([token, agent_id], separators=(",", ":"))
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
 
 TICKET_REVIEW_CLAIMED = "ticket_review_claimed"
 TICKET_ANNOTATED = "ticket_annotated"
@@ -51,6 +62,7 @@ HELD_TICKET_KINDS = frozenset(
         TICKET_ANNOTATED,
         TICKET_STATUS_CHANGED,
         HUMAN_INPUT_RESOLVED,
+        COORDINATOR_QUESTION_ANSWERED,
         TICKET_PARKED,
         TICKET_UNPARKED,
         REVIEW_LEASE_EXPIRED,

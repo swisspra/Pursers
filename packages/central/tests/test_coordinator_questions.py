@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import sys
 import tempfile
@@ -21,7 +22,9 @@ from pursers_client import (  # noqa: E402
     COORDINATOR_QUESTION_ANSWERED,
     COORDINATOR_QUESTION_ASKED,
     KNOWN_EVENT_KINDS,
+    WORKER_WAIT_KINDS,
 )
+from pursers_client.project_registry import _held_ticket_update  # noqa: E402
 
 
 class CoordinatorQuestionTests(unittest.IsolatedAsyncioTestCase):
@@ -67,7 +70,13 @@ class CoordinatorQuestionTests(unittest.IsolatedAsyncioTestCase):
         )
         self.principal = self.admin
         self.original_current_principal = central.current_principal
+        self.original_current_host_binding = central.current_host_binding
         central.current_principal = lambda: self.principal
+        central.current_host_binding = lambda agent_id: hashlib.sha256(
+            json.dumps(
+                ["test-private-capability", agent_id], separators=(",", ":")
+            ).encode("utf-8")
+        ).hexdigest()
         await self.call("board_join", agent_name="admin-agent")
         self.agent_ids: dict[str, str] = {}
         for principal in (
@@ -86,6 +95,7 @@ class CoordinatorQuestionTests(unittest.IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self) -> None:
         central.current_principal = self.original_current_principal
+        central.current_host_binding = self.original_current_host_binding
         self.environment.stop()
         self.temp_dir.cleanup()
 
@@ -94,6 +104,22 @@ class CoordinatorQuestionTests(unittest.IsolatedAsyncioTestCase):
 
     async def register_coordinators(self, *canonicals: str) -> None:
         self.principal = self.admin
+        await self.call(
+            "board_state_update", agent_name="admin-agent",
+            key="project_registry",
+            value=json.dumps(
+                {
+                    "schema_version": 1,
+                    "projects": {
+                        "pursers": {
+                            "board_id": "pursers",
+                            "work_dir": "/srv/pursers",
+                            "status": "active",
+                        }
+                    },
+                }
+            ),
+        )
         await self.call(
             "board_state_update", agent_name="admin-agent",
             key=central.PROJECT_COORDINATORS_STATE_KEY,
@@ -119,6 +145,9 @@ class CoordinatorQuestionTests(unittest.IsolatedAsyncioTestCase):
             "ticket_question_ask", ticket_id="TK-comm", agent_name="worker",
             message="Which rollout order do you want", kind="decision", **extra,
         )
+
+    def binding(self, canonical: str) -> str:
+        return central.current_host_binding(self.agent_ids[canonical])
 
     async def test_ask_does_not_pause_work_or_touch_the_lease(self) -> None:
         await self.register_coordinators("coord")
@@ -196,6 +225,7 @@ class CoordinatorQuestionTests(unittest.IsolatedAsyncioTestCase):
             await self.call(
                 "ticket_question_answer", ticket_id="TK-comm", agent_name="other",
                 question_id=result["question_id"], action="answer", message="no",
+                host_binding=self.binding("other"),
             )
 
     async def test_worker_cannot_read_the_inbox_or_answer(self) -> None:
@@ -209,7 +239,55 @@ class CoordinatorQuestionTests(unittest.IsolatedAsyncioTestCase):
             await self.call(
                 "ticket_question_answer", ticket_id="TK-comm", agent_name="worker",
                 question_id=asked["question_id"], action="answer", message="mine",
+                host_binding=self.binding("worker"),
             )
+
+    async def test_generic_ticket_projections_redact_question_payloads(self) -> None:
+        await self.register_coordinators("coord")
+        await self.claimed_ticket()
+        asked = (await self.ask(message_id="MSG-private")).structured_content
+        marker = "Which rollout order do you want"
+
+        self.principal = self.worker
+        asker_get = (await self.call("ticket_get", ticket_id="TK-comm")).structured_content
+        self.assertEqual(
+            asker_get["ticket"]["coordinator_questions"][0]["question_id"],
+            asked["question_id"],
+        )
+
+        self.principal = self.coordinator
+        owner_get = (await self.call("ticket_get", ticket_id="TK-comm")).structured_content
+        self.assertIn(marker, json.dumps(owner_get))
+
+        for principal in (self.other, self.coordinator_two):
+            self.principal = principal
+            fetched = (await self.call("ticket_get", ticket_id="TK-comm")).structured_content
+            self.assertNotIn("coordinator_questions", fetched["ticket"])
+            self.assertNotIn(marker, json.dumps(fetched))
+
+        wrong_profile = central.Principal(
+            "PR-wrong-profile", "wrong-profile",
+            frozenset({"board:read", "board:write", "board:coordinate"}),
+        )
+        self.principal = self.admin
+        await self.call(
+            "board_member_add", agent_name="admin-agent",
+            principal_id=wrong_profile.principal_id, role="member",
+        )
+        self.principal = wrong_profile
+        await self.call("board_join", agent_name="coord-wrong-profile")
+        fetched = (await self.call("ticket_get", ticket_id="TK-comm")).structured_content
+        listed = (await self.call(
+            "ticket_list", ticket_ids=["TK-comm"]
+        )).structured_content
+        snapshot = (await self.call("board_snapshot")).structured_content
+        self.assertNotIn(marker, json.dumps(fetched))
+        self.assertNotIn(marker, json.dumps(listed))
+        self.assertNotIn(marker, json.dumps(snapshot))
+
+        self.principal = self.admin
+        admin_get = (await self.call("ticket_get", ticket_id="TK-comm")).structured_content
+        self.assertIn(marker, json.dumps(admin_get))
 
     async def test_accept_then_answer_reaches_the_original_asker(self) -> None:
         await self.register_coordinators("coord")
@@ -227,7 +305,7 @@ class CoordinatorQuestionTests(unittest.IsolatedAsyncioTestCase):
             await self.call(
                 "ticket_question_answer", ticket_id="TK-comm", agent_name="coord",
                 question_id=asked["question_id"], action="accept",
-                host_binding="codex-profile-a/session-1",
+                host_binding=self.binding("coord"),
             )
         ).structured_content
         self.assertEqual(accepted["question"]["state"], "accepted")
@@ -237,13 +315,23 @@ class CoordinatorQuestionTests(unittest.IsolatedAsyncioTestCase):
                 "ticket_question_answer", ticket_id="TK-comm", agent_name="coord",
                 question_id=asked["question_id"], action="answer",
                 message="Ship the ACL negatives first",
-                host_binding="codex-profile-a/session-1",
+                host_binding=self.binding("coord"),
             )
         ).structured_content
         self.assertEqual(answered["question"]["state"], "answered")
         self.assertEqual(answered["event"]["kind"], COORDINATOR_QUESTION_ANSWERED)
         self.assertEqual(
             answered["event"]["recipient_identities"], [self.agent_ids["worker"]]
+        )
+        self.assertIn(COORDINATOR_QUESTION_ANSWERED, WORKER_WAIT_KINDS)
+        ticket = self.service.load("pursers")["tickets"]["TK-comm"]
+        self.assertTrue(
+            _held_ticket_update(
+                ticket,
+                answered["event"],
+                self.agent_ids["worker"],
+                submitted=False,
+            )
         )
 
     async def test_second_coordinator_cannot_consume_an_accepted_question(self) -> None:
@@ -254,17 +342,54 @@ class CoordinatorQuestionTests(unittest.IsolatedAsyncioTestCase):
         await self.call(
             "ticket_question_answer", ticket_id="TK-comm", agent_name="coord",
             question_id=asked["question_id"], action="accept",
-            host_binding="codex-profile-a/session-1",
+            host_binding=self.binding("coord"),
         )
         self.principal = self.coordinator_two
         with self.assertRaisesRegex(ToolError, "already accepted by another"):
             await self.call(
                 "ticket_question_answer", ticket_id="TK-comm", agent_name="coord2",
                 question_id=asked["question_id"], action="answer",
-                message="wrong profile", host_binding="codex-profile-b/session-9",
+                message="wrong profile", host_binding=self.binding("coord2"),
             )
 
-    async def test_same_coordinator_rebinds_after_reconnect(self) -> None:
+    async def test_binding_is_required_and_must_match_authenticated_agent(self) -> None:
+        await self.register_coordinators("coord")
+        await self.claimed_ticket()
+        asked = (await self.ask()).structured_content
+        self.principal = self.coordinator
+        with self.assertRaisesRegex(ToolError, "host_binding"):
+            await self.call(
+                "ticket_question_answer", ticket_id="TK-comm", agent_name="coord",
+                question_id=asked["question_id"], action="accept",
+            )
+        with self.assertRaisesRegex(ToolError, "authenticated agent binding"):
+            await self.call(
+                "ticket_question_answer", ticket_id="TK-comm", agent_name="coord",
+                question_id=asked["question_id"], action="accept",
+                host_binding=self.binding("coord2"),
+            )
+        await self.call(
+            "ticket_question_answer", ticket_id="TK-comm", agent_name="coord",
+            question_id=asked["question_id"], action="accept",
+            host_binding=self.binding("coord"),
+        )
+        answered = (
+            await self.call(
+                "ticket_question_answer", ticket_id="TK-comm", agent_name="coord",
+                question_id=asked["question_id"], action="answer",
+                message="Authenticated binding retained",
+                host_binding=self.binding("coord"),
+            )
+        ).structured_content
+        self.assertEqual(answered["question"]["state"], "answered")
+        stored = self.service.load("pursers")["tickets"]["TK-comm"]
+        entry = stored["coordinator_questions"][0]
+        self.assertNotEqual(entry["binding"], self.binding("coord"))
+        self.assertRegex(entry["binding"], r"^[0-9a-f]{64}$")
+
+    async def test_authenticated_reconnect_rebinds_after_owner_session_transfer(
+        self,
+    ) -> None:
         await self.register_coordinators("coord")
         await self.claimed_ticket()
         asked = (await self.ask()).structured_content
@@ -272,21 +397,76 @@ class CoordinatorQuestionTests(unittest.IsolatedAsyncioTestCase):
         await self.call(
             "ticket_question_answer", ticket_id="TK-comm", agent_name="coord",
             question_id=asked["question_id"], action="accept",
-            host_binding="codex-profile-a/session-1",
+            host_binding=self.binding("coord"),
         )
+        rejoined = await self.call(
+            "board_join", agent_name="coord-reconnected"
+        )
+        reconnected_id = rejoined.structured_content["agent_id"]
+        self.principal = self.admin
+        await self.call(
+            "board_state_update", agent_name="admin-agent",
+            key=central.PROJECT_COORDINATORS_STATE_KEY,
+            value=json.dumps({"pursers": [reconnected_id]}),
+        )
+        self.principal = self.coordinator
         rebound = (
             await self.call(
-                "ticket_question_answer", ticket_id="TK-comm", agent_name="coord",
+                "ticket_question_answer", ticket_id="TK-comm",
+                agent_name="coord-reconnected",
                 question_id=asked["question_id"], action="answer",
-                message="Answered after reconnect",
-                host_binding="codex-profile-a/session-2",
+                message="Answered after authenticated reconnect",
+                host_binding=central.current_host_binding(reconnected_id),
             )
         ).structured_content
         self.assertEqual(rebound["question"]["state"], "answered")
+        self.assertEqual(
+            rebound["question"]["accepted_by"]["agent_id"], reconnected_id
+        )
+        self.assertEqual(
+            rebound["question"]["transferred_from"]["agent_id"],
+            self.agent_ids["coord"],
+        )
         self.assertIsNotNone(rebound["question"]["rebound_at"])
-        stored = self.service.load("pursers")["tickets"]["TK-comm"]
-        entry = stored["coordinator_questions"][0]
-        self.assertNotIn("codex-profile-a", json.dumps(entry))
+
+    async def test_current_project_owner_takes_over_from_removed_coordinator(
+        self,
+    ) -> None:
+        await self.register_coordinators("coord")
+        await self.claimed_ticket()
+        asked = (await self.ask()).structured_content
+        self.principal = self.coordinator
+        await self.call(
+            "ticket_question_answer", ticket_id="TK-comm", agent_name="coord",
+            question_id=asked["question_id"], action="accept",
+            host_binding=self.binding("coord"),
+        )
+        self.principal = self.admin
+        await self.call(
+            "board_state_update", agent_name="admin-agent",
+            key=central.PROJECT_COORDINATORS_STATE_KEY,
+            value=json.dumps({"pursers": [self.agent_ids["coord2"]]}),
+        )
+        self.principal = self.coordinator
+        with self.assertRaisesRegex(ToolError, "ownership of project pursers"):
+            await self.call(
+                "ticket_question_answer", ticket_id="TK-comm", agent_name="coord",
+                question_id=asked["question_id"], action="answer",
+                message="old owner", host_binding=self.binding("coord"),
+            )
+        self.principal = self.coordinator_two
+        transferred = (
+            await self.call(
+                "ticket_question_answer", ticket_id="TK-comm", agent_name="coord2",
+                question_id=asked["question_id"], action="answer",
+                message="new owner", host_binding=self.binding("coord2"),
+            )
+        ).structured_content
+        self.assertEqual(transferred["question"]["answer"], "new owner")
+        self.assertEqual(
+            transferred["question"]["transferred_from"]["agent_id"],
+            self.agent_ids["coord"],
+        )
 
     async def test_retry_is_idempotent_in_both_directions(self) -> None:
         await self.register_coordinators("coord")
@@ -302,11 +482,13 @@ class CoordinatorQuestionTests(unittest.IsolatedAsyncioTestCase):
         await self.call(
             "ticket_question_answer", ticket_id="TK-comm", agent_name="coord",
             question_id=first["question_id"], action="answer", message="once",
+            host_binding=self.binding("coord"),
         )
         retry = (
             await self.call(
                 "ticket_question_answer", ticket_id="TK-comm", agent_name="coord",
                 question_id=first["question_id"], action="answer", message="twice",
+                host_binding=self.binding("coord"),
             )
         ).structured_content
         self.assertTrue(retry["duplicate"])
@@ -316,6 +498,23 @@ class CoordinatorQuestionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_two_projects_on_one_board_do_not_cross_access(self) -> None:
         self.principal = self.admin
+        await self.call(
+            "board_state_update", agent_name="admin-agent",
+            key="project_registry",
+            value=json.dumps(
+                {
+                    "schema_version": 1,
+                    "projects": {
+                        project: {
+                            "board_id": "pursers",
+                            "work_dir": f"/srv/{project}",
+                            "status": "active",
+                        }
+                        for project in ("alpha", "beta")
+                    },
+                }
+            ),
+        )
         await self.call(
             "board_state_update", agent_name="admin-agent",
             key=central.PROJECT_COORDINATORS_STATE_KEY,
@@ -332,7 +531,7 @@ class CoordinatorQuestionTests(unittest.IsolatedAsyncioTestCase):
                 "ticket_create", ticket_id=ticket_id, agent_name="admin-agent",
                 title=f"Work for {project}", description="Two projects, one board",
                 scope="interactive-no-send", required_fields=["test_output"],
-                project=project, unassigned=True,
+                target_url=f"{project}/work", project=project, unassigned=True,
             )
             self.principal = self.worker
             await self.call("ticket_claim", ticket_id=ticket_id, agent_name="worker")
@@ -360,6 +559,37 @@ class CoordinatorQuestionTests(unittest.IsolatedAsyncioTestCase):
                 "ticket_question_answer", ticket_id="TK-beta", agent_name="coord",
                 question_id=beta_question, action="answer",
                 message="cross-project answer",
+                host_binding=self.binding("coord"),
+            )
+
+    async def test_ticket_project_cannot_override_registry_route(self) -> None:
+        self.principal = self.admin
+        await self.call(
+            "board_state_update", agent_name="admin-agent",
+            key="project_registry",
+            value=json.dumps(
+                {
+                    "schema_version": 1,
+                    "projects": {
+                        project: {
+                            "board_id": "pursers",
+                            "work_dir": f"/srv/{project}",
+                            "status": "active",
+                        }
+                        for project in ("alpha", "beta")
+                    },
+                }
+            ),
+        )
+        self.principal = self.worker
+        with self.assertRaisesRegex(ToolError, "server-derived project"):
+            await self.call(
+                "ticket_create", ticket_id="TK-project-injection",
+                agent_name="worker", title="Injected route",
+                description="Must not route to caller assertion",
+                target_url="beta/work", project="alpha",
+                scope="interactive-no-send", required_fields=["test_output"],
+                unassigned=True,
             )
 
 

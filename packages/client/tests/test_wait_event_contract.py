@@ -20,6 +20,7 @@ def test_holder_wait_contract_uses_only_central_emitted_kinds() -> None:
         "ticket_annotated",
         "ticket_status_changed",
         "human_input_resolved",
+        "coordinator_question_answered",
         "ticket_parked",
         "ticket_unparked",
         REVIEW_LEASE_EXPIRED,
