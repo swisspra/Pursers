@@ -689,35 +689,64 @@ def _verify_evidence(evidence: Any, trust: dict[str, Any]) -> dict[str, Any]:
             ):
                 raise TypedEvidenceError("receipt process record has invalid types")
     elif evidence["kind"] == "log_assertion":
+        adapter = trusted_source["adapter"]
         record = _closed(
             evidence["record"],
-            {"entry", "entry_sha256", "authenticity", "process"},
+            (
+                {"entry", "entry_sha256", "authenticity", "runtime"}
+                if adapter == "fleet_evidence_trace_v1"
+                else {"entry", "entry_sha256", "authenticity", "process"}
+            ),
             "log evidence record",
         )
         if (
             not isinstance(record["entry"], dict)
             or set(record["entry"]) != set(trusted_source["document_keys"])
             or not SHA256.fullmatch(str(record["entry_sha256"]))
-            or record["authenticity"] != "verifier_captured_process_bound"
         ):
             raise TypedEvidenceError("log evidence record has invalid fields")
-        process = _closed(
-            record["process"],
-            {
-                "pid", "argv_sha256", "cwd_sha256", "artifact_sha256",
-                "entrypoint_sha256", "executable_sha256",
-            },
-            "log process record",
-        )
-        if (
-            not isinstance(process["pid"], int) or isinstance(process["pid"], bool)
-            or not SHA256.fullmatch(str(process["argv_sha256"]))
-            or not SHA256.fullmatch(str(process["cwd_sha256"]))
-            or not SHA256.fullmatch(str(process["artifact_sha256"]))
-            or not SHA256.fullmatch(str(process["entrypoint_sha256"]))
-            or not SHA256.fullmatch(str(process["executable_sha256"]))
-        ):
-            raise TypedEvidenceError("log process record has invalid types")
+        if adapter == "fleet_evidence_trace_v1":
+            if record["authenticity"] != "fleet_runtime_trace_bound":
+                raise TypedEvidenceError("log evidence record has invalid fields")
+            _, http_source = _http_source(
+                trusted_source["http_source_id"], trust, context
+            )
+            if (
+                trusted_source["runtime_id"] != http_source["runtime_id"]
+                or trusted_source["http_source_config_sha256"]
+                != _digest(http_source)
+            ):
+                raise TypedEvidenceError(
+                    "Fleet trace source does not match its trusted HTTP runtime"
+                )
+            runtime = _validate_runtime_record(
+                record["runtime"], "log runtime record"
+            )
+            if runtime != _runtime_check(
+                http_source["runtime"], trust, http_source["base_url"]
+            ):
+                raise TypedEvidenceError("log runtime evidence changed")
+        else:
+            if record["authenticity"] != "verifier_captured_process_bound":
+                raise TypedEvidenceError("log evidence record has invalid fields")
+            process = _closed(
+                record["process"],
+                {
+                    "pid", "argv_sha256", "cwd_sha256", "artifact_sha256",
+                    "entrypoint_sha256", "executable_sha256",
+                },
+                "log process record",
+            )
+            if (
+                not isinstance(process["pid"], int)
+                or isinstance(process["pid"], bool)
+                or not SHA256.fullmatch(str(process["argv_sha256"]))
+                or not SHA256.fullmatch(str(process["cwd_sha256"]))
+                or not SHA256.fullmatch(str(process["artifact_sha256"]))
+                or not SHA256.fullmatch(str(process["entrypoint_sha256"]))
+                or not SHA256.fullmatch(str(process["executable_sha256"]))
+            ):
+                raise TypedEvidenceError("log process record has invalid types")
     else:
         record = evidence["record"]
         record = _closed(
@@ -1038,19 +1067,39 @@ def _record_receipt(request: dict[str, Any], trust: dict[str, Any], context: dic
 def _record_log(request: dict[str, Any], trust: dict[str, Any], context: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
     recorder = _closed(request["recorder"], {"source_id", "field_equals"}, "log_assertion recorder")
     source_id, source = _source(trust, "log_sources", recorder["source_id"])
-    keys = {
+    common_keys = {
         "adapter", "provenance", "runtime_id", "path",
         "timestamp_pointer", "max_age_seconds",
-        "required_bindings", "emitter", "runtime_pointer", "max_bytes", "process",
+        "required_bindings", "emitter", "runtime_pointer", "max_bytes",
         "document_keys", "action_input_path", "action_input_sha256",
         "action_digest_pointer",
     }
-    _closed(source, keys, "log source")
-    if source["adapter"] != "process_captured_jsonl_v1":
+    adapter = source.get("adapter")
+    if adapter == "process_captured_jsonl_v1":
+        keys = common_keys | {"process"}
+    elif adapter == "fleet_evidence_trace_v1":
+        keys = common_keys | {
+            "http_source_id", "http_source_config_sha256",
+            "schema_version_pointer", "pid_pointer",
+            "entrypoint_digest_pointer", "status_pointer",
+            "changed_pointer", "outcome_pointer", "sha256_pointers",
+        }
+    else:
         raise TypedEvidenceError("log adapter is unsupported")
+    _closed(source, keys, "log source")
     _require_context_bindings(
         source["required_bindings"],
-        {"candidate_commit", "board_id", "surface", "entity", "run_id", "action_id"},
+        (
+            {
+                "candidate_commit", "board_id", "surface", "observation_id",
+                "entity", "run_id", "action_id",
+            }
+            if adapter == "fleet_evidence_trace_v1"
+            else {
+                "candidate_commit", "board_id", "surface", "entity",
+                "run_id", "action_id",
+            }
+        ),
         "log source",
     )
     path = Path(str(source["path"])).resolve()
@@ -1069,9 +1118,42 @@ def _record_log(request: dict[str, Any], trust: dict[str, Any], context: dict[st
         != source["action_input_sha256"]
     ):
         raise TypedEvidenceError("log action input is not verifier-pinned")
-    process = _process_check(source["process"])
-    if process is None:
-        raise TypedEvidenceError("log capture requires a bound emitter process")
+    process = None
+    runtime = None
+    if adapter == "process_captured_jsonl_v1":
+        process = _process_check(source["process"])
+        if process is None:
+            raise TypedEvidenceError("log capture requires a bound emitter process")
+    else:
+        try:
+            action_document = json.loads(action_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise TypedEvidenceError("Fleet trace action input is not JSON") from exc
+        document_keys = source["document_keys"]
+        if (
+            not isinstance(action_document, dict)
+            or not isinstance(document_keys, list)
+            or not document_keys
+            or any(not isinstance(field, str) for field in document_keys)
+            or len(set(document_keys)) != len(document_keys)
+            or set(action_document) & set(document_keys)
+        ):
+            raise TypedEvidenceError(
+                "Fleet trace action input contains producer-owned fields"
+            )
+        _, http_source = _http_source(
+            source["http_source_id"], trust, context
+        )
+        if (
+            source["runtime_id"] != http_source["runtime_id"]
+            or source["http_source_config_sha256"] != _digest(http_source)
+        ):
+            raise TypedEvidenceError(
+                "Fleet trace source does not match its trusted HTTP runtime"
+            )
+        runtime = _runtime_check(
+            http_source["runtime"], trust, http_source["base_url"]
+        )
     limit = source["max_bytes"]
     if not isinstance(limit, int) or not 1 <= limit <= MAX_LOG_BYTES:
         raise TypedEvidenceError("log max_bytes is invalid")
@@ -1110,6 +1192,55 @@ def _record_log(request: dict[str, Any], trust: dict[str, Any], context: dict[st
                 != source["action_input_sha256"]
             ):
                 continue
+            if adapter == "fleet_evidence_trace_v1":
+                sha256_pointers = source["sha256_pointers"]
+                pointer_fields = (
+                    "schema_version_pointer", "pid_pointer",
+                    "entrypoint_digest_pointer", "status_pointer",
+                    "changed_pointer", "outcome_pointer",
+                )
+                if (
+                    not isinstance(sha256_pointers, list)
+                    or not sha256_pointers
+                    or len(sha256_pointers) > 16
+                    or len(set(sha256_pointers)) != len(sha256_pointers)
+                    or source["action_digest_pointer"] not in sha256_pointers
+                    or source["entrypoint_digest_pointer"] not in sha256_pointers
+                    or any(
+                        not isinstance(pointer, str) or not pointer.startswith("/")
+                        for pointer in sha256_pointers
+                    )
+                    or any(
+                        not isinstance(source[field], str)
+                        or not source[field].startswith("/")
+                        for field in pointer_fields
+                    )
+                ):
+                    raise TypedEvidenceError("Fleet trace pointer contract is invalid")
+                if (
+                    _pointer(entry, source["schema_version_pointer"])
+                    != SCHEMA_VERSION
+                    or _pointer(entry, source["pid_pointer"])
+                    != runtime["pid"]
+                    or _pointer(entry, source["entrypoint_digest_pointer"])
+                    != runtime["artifact_sha256"]
+                ):
+                    continue
+                status = _pointer(entry, source["status_pointer"])
+                changed = _pointer(entry, source["changed_pointer"])
+                outcome = _pointer(entry, source["outcome_pointer"])
+                if (
+                    not isinstance(status, int) or isinstance(status, bool)
+                    or not 100 <= status <= 599
+                    or not isinstance(changed, bool)
+                ):
+                    continue
+                _safe_id(outcome, "Fleet trace outcome")
+                if any(
+                    not SHA256.fullmatch(str(_pointer(entry, pointer)))
+                    for pointer in sha256_pointers
+                ):
+                    continue
             _fresh(_pointer(entry, source["timestamp_pointer"]), source["max_age_seconds"], "log timestamp")
             _check_bindings(entry, source["required_bindings"], context, "log entry")
             if all(_pointer(entry, pointer) == expected_value for pointer, expected_value in filters.items()):
@@ -1120,10 +1251,20 @@ def _record_log(request: dict[str, Any], trust: dict[str, Any], context: dict[st
         raise TypedEvidenceError("log capture needs exactly one authentic correlated entry")
     entry, raw = matches[0]
     _safe_public(entry, "log entry")
-    return _base_source(source_id, source, trust), {
-        "entry": entry, "entry_sha256": hashlib.sha256(raw).hexdigest(),
-        "authenticity": "verifier_captured_process_bound", "process": process,
+    record = {
+        "entry": entry,
+        "entry_sha256": hashlib.sha256(raw).hexdigest(),
+        "authenticity": (
+            "fleet_runtime_trace_bound"
+            if adapter == "fleet_evidence_trace_v1"
+            else "verifier_captured_process_bound"
+        ),
     }
+    if adapter == "fleet_evidence_trace_v1":
+        record["runtime"] = runtime
+    else:
+        record["process"] = process
+    return _base_source(source_id, source, trust), record
 
 
 def _record_transition(request: dict[str, Any], trust: dict[str, Any], context: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:

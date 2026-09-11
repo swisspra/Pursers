@@ -387,15 +387,31 @@ Recorder:
 {"source_id":"central-log","field_equals":{"/event":"ticket_submitted"}}
 ```
 
-The `process_captured_jsonl_v1` adapter reads only a bounded tail from a
-verifier-owned capture file. It requires an exact-schema entry produced by a
-live pinned emitter process from a private verifier-owned action input. The
-entry must repeat the action-input digest, runtime identity, freshness, and
-candidate/board/surface/entity/run/action bindings. Exactly one match is
-required. A substituted emitter, invented or hard-coded signed success, stale
-line, duplicate match, unrelated entry, changed action input, or unbound process
-fails. If the real pinned emitter/action cannot be captured, the caller must
-report `collector_gap`; it must not manufacture success evidence.
+`fleet_evidence_trace_v1` is the product-backed adapter for the opt-in Fleet
+trace contract. Its verifier-owned source configuration pins an exact
+`document_keys` set and JSON pointers for timestamp, schema version, runtime,
+live PID, executed-entrypoint digest, HTTP status, changed flag, outcome, and
+all SHA-256 fields. It also pins the private action bytes and their digest, plus
+the exact trusted Fleet HTTP source configuration. The trace must contain the
+candidate/board/surface/observation/entity/run/action bindings and must come
+from the same live PID and entrypoint already proven by that HTTP source.
+Exactly one fresh matching record is accepted.
+
+The private action JSON must not contain any producer-owned trace field. In
+particular, caller input cannot provide status, outcome, changed/effect values,
+state digests, runtime identity, candidate identity, PID, or entrypoint digest.
+Those values must be derived by the real Fleet handler after the actual action.
+A changed HTTP source, substituted process, wrong PID/entrypoint, caller-authored
+result, stale/duplicate record, wrong correlation, schema extension, invalid
+JSON type, or malformed digest fails closed.
+
+`process_captured_jsonl_v1` remains the generic pinned-emitter adapter. It reads
+only a bounded tail from a verifier-owned capture file and binds a live exact
+emitter process to private action bytes. It is not evidence that a product
+action occurred merely because a verifier fixture emitted a matching line.
+Final Fleet acceptance must use `fleet_evidence_trace_v1` with the independently
+reviewed producer from `TK-3df615678068`; if that producer is unavailable, the
+caller reports `collector_gap` instead of manufacturing success evidence.
 
 Conjuncts are exact
 `{"path":"/outcome","op":"eq","value":"accepted"}`.
@@ -427,8 +443,13 @@ cover positive and supported negative action results:
 ## Current integration boundary
 
 The disposable tests prove executable producer-to-recorder-to-evaluator paths
-for the actual Personal MCP receipt process, verifier action-to-pinned-emitter
-log capture, and clean-checkout HTTP/state runtimes. No production mutation or
-browser claim is supplied by this delta. Reviewer-owned setup and final browser
-evidence remain separate gates. Opus owns wiring results into the shared runner,
-harness, canonical facts, and report-level graph validation.
+for the actual Personal MCP receipt process and clean-checkout HTTP/state
+runtimes. Preparatory Fleet-trace tests are negative-only until the independently
+reviewed `TK-3df615678068` producer is available; they prove that forged result,
+runtime, entrypoint, correlation, and JSON-type variants cannot become PASS.
+The final positive must launch the real Fleet handler, execute its disposable
+`POST /api/attention` action, and consume the resulting product trace. No
+production mutation or browser claim is supplied by this delta. Reviewer-owned
+setup and final browser evidence remain separate gates. Opus owns wiring results
+into the shared runner, harness, canonical facts, and report-level graph
+validation.

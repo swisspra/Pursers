@@ -1075,6 +1075,177 @@ def log_emitter(tmp_path: Path, request: pytest.FixtureRequest) -> Any:
     return start
 
 
+def _fleet_trace_source(
+    tmp_path: Path,
+    trust: dict[str, Any],
+    context: dict[str, Any],
+    *,
+    action: dict[str, Any] | None = None,
+    entry_changes: dict[str, Any] | None = None,
+) -> tuple[Path, Path, dict[str, Any]]:
+    action_path = tmp_path / "fleet-action.json"
+    action_path.write_text(
+        json.dumps(action if action is not None else {"attention": []}),
+        encoding="utf-8",
+    )
+    action_path.chmod(0o600)
+    action_sha256 = hashlib.sha256(action_path.read_bytes()).hexdigest()
+    runtime = trust["http_sources"]["fleet-api"]["runtime"]
+    entry = {
+        "schema_version": 1,
+        "emitter": "pursers-fleet",
+        "timestamp": _now(),
+        "runtime_id": "fleet-runtime-1",
+        "candidate_commit": context["candidate_commit"],
+        "board_id": context["board_id"],
+        "surface": context["surface"],
+        "observation_id": context["observation_id"],
+        "run_id": context["run_id"],
+        "action_id": context["action_id"],
+        "entity": context["entity"],
+        "method": "POST",
+        "path": "/api/attention",
+        "http_status": 200,
+        "outcome": "saved",
+        "changed": True,
+        "before_sha256": "33" * 32,
+        "after_sha256": "44" * 32,
+        "result_sha256": "55" * 32,
+        "action_sha256": action_sha256,
+        "pid": _HTTP_RUNTIMES[trust["http_sources"]["fleet-api"]["base_url"]].pid,
+        "entrypoint_sha256": runtime["artifact_sha256"],
+    }
+    entry.update(entry_changes or {})
+    log_path = tmp_path / "fleet-evidence.jsonl"
+    log_path.write_text(json.dumps(entry) + "\n", encoding="utf-8")
+    log_path.chmod(0o600)
+    source = {
+        "adapter": "fleet_evidence_trace_v1",
+        "provenance": "fleet-runtime-evidence-trace",
+        "runtime_id": "fleet-runtime-1",
+        "path": str(log_path),
+        "document_keys": list(entry),
+        "timestamp_pointer": "/timestamp",
+        "max_age_seconds": 300,
+        "required_bindings": {
+            "/candidate_commit": "$candidate_commit",
+            "/board_id": "$board_id",
+            "/surface": "$surface",
+            "/observation_id": "$observation_id",
+            "/entity": "$entity",
+            "/run_id": "$run_id",
+            "/action_id": "$action_id",
+        },
+        "emitter": "pursers-fleet",
+        "runtime_pointer": "/runtime_id",
+        "max_bytes": 65_536,
+        "action_input_path": str(action_path),
+        "action_input_sha256": action_sha256,
+        "action_digest_pointer": "/action_sha256",
+        "http_source_id": "fleet-api",
+        "http_source_config_sha256": typed_evidence._digest(
+            trust["http_sources"]["fleet-api"]
+        ),
+        "schema_version_pointer": "/schema_version",
+        "pid_pointer": "/pid",
+        "entrypoint_digest_pointer": "/entrypoint_sha256",
+        "status_pointer": "/http_status",
+        "changed_pointer": "/changed",
+        "outcome_pointer": "/outcome",
+        "sha256_pointers": [
+            "/before_sha256", "/after_sha256", "/result_sha256",
+            "/action_sha256", "/entrypoint_sha256",
+        ],
+    }
+    return action_path, log_path, source
+
+
+def test_fleet_trace_rejects_caller_owned_result_fields(
+    tmp_path: Path, http_server: str,
+) -> None:
+    trust = _trust(tmp_path, http_server)
+    context = _context(
+        observation_id="fleet.attention",
+        action_id="save-attention",
+        entity="fleet-attention",
+    )
+    _action_path, _log_path, source = _fleet_trace_source(
+        tmp_path,
+        trust,
+        context,
+        action={"attention": [], "outcome": "accepted"},
+    )
+    trust["log_sources"] = {"fleet-trace": source}
+    with pytest.raises(TypedEvidenceError, match="producer-owned"):
+        record_evidence(
+            _request(
+                "log_assertion",
+                {"source_id": "fleet-trace", "field_equals": {"/outcome": "saved"}},
+                context,
+            ),
+            trust,
+        )
+
+
+@pytest.mark.parametrize(
+    "entry_changes",
+    [
+        {"pid": 999_999},
+        {"entrypoint_sha256": "66" * 32},
+        {"observation_id": "fleet.decoy"},
+        {"http_status": True},
+        {"changed": 1},
+    ],
+)
+def test_fleet_trace_rejects_forged_runtime_correlation_and_types(
+    tmp_path: Path, http_server: str, entry_changes: dict[str, Any],
+) -> None:
+    trust = _trust(tmp_path, http_server)
+    context = _context(
+        observation_id="fleet.attention",
+        action_id="save-attention",
+        entity="fleet-attention",
+    )
+    _action_path, _log_path, source = _fleet_trace_source(
+        tmp_path, trust, context, entry_changes=entry_changes
+    )
+    trust["log_sources"] = {"fleet-trace": source}
+    with pytest.raises(TypedEvidenceError, match="exactly one"):
+        record_evidence(
+            _request(
+                "log_assertion",
+                {"source_id": "fleet-trace", "field_equals": {"/outcome": "saved"}},
+                context,
+            ),
+            trust,
+        )
+
+
+def test_fleet_trace_rejects_changed_http_runtime_source(
+    tmp_path: Path, http_server: str,
+) -> None:
+    trust = _trust(tmp_path, http_server)
+    context = _context(
+        observation_id="fleet.attention",
+        action_id="save-attention",
+        entity="fleet-attention",
+    )
+    _action_path, _log_path, source = _fleet_trace_source(
+        tmp_path, trust, context
+    )
+    source["http_source_config_sha256"] = "77" * 32
+    trust["log_sources"] = {"fleet-trace": source}
+    with pytest.raises(TypedEvidenceError, match="trusted HTTP runtime"):
+        record_evidence(
+            _request(
+                "log_assertion",
+                {"source_id": "fleet-trace", "field_equals": {"/outcome": "saved"}},
+                context,
+            ),
+            trust,
+        )
+
+
 def test_log_assertion_real_roundtrip_and_substitution(
     tmp_path: Path, http_server: str, log_emitter: Any,
 ) -> None:
