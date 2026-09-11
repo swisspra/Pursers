@@ -77,6 +77,7 @@ from release_ops import ReleaseOpsManager
 import runtime_environment
 from warm_home import apply_warm_guided_home
 from result_visibility import project_ticket_result
+from evidence_trace import CORRELATION_HEADERS, EvidenceTrace, EvidenceTraceConfigError
 
 
 DEFAULT_URL = "http://127.0.0.1:8766/mcp"
@@ -4697,6 +4698,7 @@ class SeatConfigManager:
         self._active_ops: set[str] = set()
         self._jobs: dict[str, dict[str, Any]] = {}
         self._lock = threading.Lock()
+        self._attention_lock = threading.RLock()
 
     def release_status(self) -> dict[str, Any]:
         return self.release_ops.release_card_status()
@@ -4995,7 +4997,7 @@ class SeatConfigManager:
         with os.fdopen(descriptor, "a", encoding="utf-8") as stream:
             stream.write(json.dumps(record, sort_keys=True) + "\n")
 
-    def attention_state(self) -> dict[str, Any]:
+    def _attention_state_unlocked(self) -> dict[str, Any]:
         path = self.state_dir / "attention-state.json"
         try:
             value = json.loads(path.read_text(encoding="utf-8"))
@@ -5003,7 +5005,11 @@ class SeatConfigManager:
             value = {}
         return {"items": value if isinstance(value, dict) else {}}
 
-    def save_attention_state(self, value: Any) -> dict[str, Any]:
+    def attention_state(self) -> dict[str, Any]:
+        with self._attention_lock:
+            return self._attention_state_unlocked()
+
+    def _save_attention_state_unlocked(self, value: Any) -> dict[str, Any]:
         if not isinstance(value, dict) or len(value) > 500:
             raise ValueError("attention state must be an object with at most 500 items")
         encoded = json.dumps(value, sort_keys=True, separators=(",", ":"))
@@ -5025,6 +5031,24 @@ class SeatConfigManager:
             if os.path.exists(temporary):
                 os.unlink(temporary)
         return {"items": value}
+
+    def save_attention_state(self, value: Any) -> dict[str, Any]:
+        with self._attention_lock:
+            return self._save_attention_state_unlocked(value)
+
+    def observe_attention_action(
+        self, value: Any,
+    ) -> tuple[
+        dict[str, Any], dict[str, Any] | None, dict[str, Any], Exception | None,
+    ]:
+        """Run one attention save and snapshot its causal state under one lock."""
+        with self._attention_lock:
+            before = self._attention_state_unlocked()
+            try:
+                result = self._save_attention_state_unlocked(value)
+            except Exception as exc:  # noqa: BLE001 - handler preserves API mapping.
+                return before, None, self._attention_state_unlocked(), exc
+            return before, result, result, None
 
     def _bridge_inspection(self) -> dict[str, Any]:
         status = dict(self.bridge_installer.inspect())
@@ -6768,6 +6792,7 @@ def make_handler(
     stats_path: str | Path | None = None,
     worker_manager: WorkerManager | None = None,
     seat_manager: SeatConfigManager | None = None,
+    evidence_trace: EvidenceTrace | None = None,
 ) -> type[BaseHTTPRequestHandler]:
     selected_stats_path = (
         bridge_stats_path() if stats_path is None else Path(stats_path)
@@ -6871,7 +6896,56 @@ def make_handler(
         return str(resolver(central))
 
     class Handler(BaseHTTPRequestHandler):
+        def _prepare_evidence(
+            self, method: str, route: str, raw_request: bytes | None = None
+        ) -> None:
+            self._evidence_context = None
+            self._evidence_before = None
+            self._evidence_after = None
+            if evidence_trace is None:
+                return
+            context = evidence_trace.context(self.headers, method, route)
+            if context is None:
+                return
+            if method == "POST" and (
+                raw_request is None
+                or hashlib.sha256(raw_request).hexdigest() != context.action_sha256
+            ):
+                return
+            self._evidence_context = context
+
         def _send(self, status: int, content_type: str, body: bytes) -> None:
+            evidence_headers: dict[str, str] = {}
+            context = getattr(self, "_evidence_context", None)
+            before = getattr(self, "_evidence_before", None)
+            after = getattr(self, "_evidence_after", None)
+            if (
+                evidence_trace is not None
+                and context is not None
+                and before is not None
+                and after is not None
+                and content_type.startswith("application/json")
+            ):
+                try:
+                    metadata, _emitted = evidence_trace.observe(
+                        context=context,
+                        method=self.command,
+                        route=urlsplit(self.path).path,
+                        status=status,
+                        before=before,
+                        after=after,
+                        result_body=body,
+                    )
+                    document = json.loads(body)
+                    if metadata is not None and isinstance(document, dict):
+                        document["_evidence"] = metadata
+                        body = _json_bytes(document)
+                        evidence_headers = {
+                            header: getattr(context, key)
+                            for key, header in CORRELATION_HEADERS.items()
+                        }
+                except Exception:  # noqa: BLE001 - observability is fail-passive.
+                    pass
             self.send_response(status)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(body)))
@@ -6881,6 +6955,8 @@ def make_handler(
                 "Content-Security-Policy",
                 "default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'",
             )
+            for header, value in evidence_headers.items():
+                self.send_header(header, value)
             self.end_headers()
             self.wfile.write(body)
 
@@ -6915,6 +6991,7 @@ def make_handler(
 
         def do_GET(self) -> None:
             route = urlsplit(self.path).path
+            self._prepare_evidence("GET", route)
             if route == "/":
                 self._send(200, "text/html; charset=utf-8", HTML.encode("utf-8"))
                 return
@@ -6944,6 +7021,9 @@ def make_handler(
                         payload = seats.release_status()
                     elif route == "/api/attention":
                         payload = seats.attention_state()
+                        if getattr(self, "_evidence_context", None) is not None:
+                            self._evidence_before = payload
+                            self._evidence_after = payload
                     else:
                         payload = seats.job(config_job.group(1))
                 except KeyError:
@@ -7220,6 +7300,8 @@ def make_handler(
 
         def do_POST(self) -> None:
             route = urlsplit(self.path).path
+            self._evidence_context = None
+            self._evidence_before = None
             config_routes = {
                 "/api/config/plan",
                 "/api/config/suggestions",
@@ -7290,6 +7372,7 @@ def make_handler(
                 CONFIG_API_MAX_BYTES if route in config_routes else WORKER_API_MAX_BYTES
             )
             if not 1 <= length <= body_limit:
+                self._evidence_context = None
                 self._send(
                     400,
                     "application/json; charset=utf-8",
@@ -7297,7 +7380,9 @@ def make_handler(
                 )
                 return
             try:
-                request = json.loads(self.rfile.read(length))
+                raw_request = self.rfile.read(length)
+                self._prepare_evidence("POST", route, raw_request)
+                request = json.loads(raw_request)
                 if route == "/api/config/plan":
                     body = _json_bytes(seats.plan(request))
                 elif route == "/api/config/suggestions":
@@ -7401,7 +7486,17 @@ def make_handler(
                         )
                     )
                 elif route == "/api/attention":
-                    body = _json_bytes(seats.save_attention_state(request))
+                    if getattr(self, "_evidence_context", None) is None:
+                        body = _json_bytes(seats.save_attention_state(request))
+                    else:
+                        before, result, after, error = (
+                            seats.observe_attention_action(request)
+                        )
+                        self._evidence_before = before
+                        self._evidence_after = after
+                        if error is not None:
+                            raise error
+                        body = _json_bytes(result)
                 elif route == "/api/human/resolve":
                     if not isinstance(request, dict):
                         raise ValueError("request must be an object")
@@ -7823,6 +7918,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--worker-script", default=str(DEFAULT_WORKER_SCRIPT), help=argparse.SUPPRESS
     )
+    parser.add_argument(
+        "--evidence-trace-config",
+        help="Verifier-owned 0600 config for bounded Fleet evidence tracing",
+    )
     args = parser.parse_args(argv)
     if args.host != "127.0.0.1":
         parser.error("--host must be 127.0.0.1; non-loopback binding is refused")
@@ -7848,9 +7947,23 @@ def main(argv: list[str] | None = None) -> None:
     seat_manager = SeatConfigManager(
         seat_state_dir / "seats.json", state_dir=seat_state_dir
     )
+    try:
+        trace = (
+            EvidenceTrace.from_config(args.evidence_trace_config, Path(__file__))
+            if args.evidence_trace_config
+            else None
+        )
+    except EvidenceTraceConfigError as exc:
+        raise SystemExit(f"invalid evidence trace config: {exc}") from exc
     server = ThreadingHTTPServer(
         (args.host, args.port),
-        make_handler(cache, bridge_stats_path(), worker_manager, seat_manager),
+        make_handler(
+            cache,
+            bridge_stats_path(),
+            worker_manager,
+            seat_manager,
+            evidence_trace=trace,
+        ),
     )
     print(f"Fleet Dashboard: http://{args.host}:{args.port}", flush=True)
     try:
