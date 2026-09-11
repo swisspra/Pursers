@@ -22,7 +22,9 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[4]
 DEFAULT_DELTA = ROOT / "docs/design-home/context/typed-predicate-integration-delta.json"
 FACTS_PATH = "docs/design-home/context/acceptance-facts.json"
-BASE = "d09757f2e6187fd417ee1017814e92754047ea54"
+BASE = "7f5ca61a556ed881567dadbc8c49f4b4a6a74c4a"
+ASSISTANT_BINDING_REF = "d09757f2e6187fd417ee1017814e92754047ea54"
+PENDING_STATE_REF = "0e5390b72407186ba842bdc93b84a2d502de13bd"
 FLEET_DASHBOARD = ROOT / "tools/fleet-dashboard/fleet_dashboard.py"
 BROWSER_OBSERVER = ROOT / "tools/aionui-extension/tests/home_acceptance/browser_observer.py"
 WEBUI_APP = ROOT / "tools/aionui-extension/webui/app.js"
@@ -43,24 +45,12 @@ PARENT_PRODUCER_IDS = {
     "fleet.release-pypi",
     "fleet.release-restart-checklist",
 }
-EXPECTED_CONTRACT_GAPS = {
-    "fleet.add-project-idempotent-rerun",
-    "fleet.doors-disabled",
-}
 PRESET_FACTS = {
     "extension.worker-preset-codex": "pursers-worker-codex",
     "extension.worker-preset-claude": "pursers-worker-claude",
     "extension.reviewer-preset-codex": "pursers-reviewer-codex",
     "extension.reviewer-preset-claude": "pursers-reviewer-claude",
 }
-CREDENTIAL_GAP_FIELDS = [
-    "/_evidence/changed", "/_evidence/effect", "/doors",
-    "/steps/5/step", "/steps/5/status",
-]
-DOOR_DISABLED_GAP_FIELDS = [
-    "/before/disabled", "/action/outcome", "/action/during/disabled",
-    "/after/disabled",
-]
 OPS = {"eq", "ne", "contains", "in", "gt", "gte", "lt", "lte"}
 POINTER = re.compile(r"^/(?:[^/~]|~[01])+(?:/(?:[^/~]|~[01])+)*$")
 
@@ -584,6 +574,16 @@ def check_fact_specific_mutations(proposals: list[dict[str, Any]]) -> int:
             {"agent_id": "claude"},
         ),
         (
+            "fleet.add-project-idempotent-rerun",
+            ("field", "/_evidence/changed"),
+            True,
+        ),
+        (
+            "fleet.doors-disabled",
+            ("action", "/disabled_while_pending"),
+            False,
+        ),
+        (
             "fleet.refresh-pause-resume",
             ("before", "/paused_status"),
             "Updated without pause",
@@ -642,7 +642,7 @@ def check_assistant_binding_examples(proposals: list[dict[str, Any]]) -> int:
         require(recorder["action"] == [action], f"{fact_id}: assistant action drift")
         require(
             item["adapter"]["adapter"] == "aionui_assistant_binding_v1"
-            and item["adapter"]["parent_contract_ref"] == BASE,
+            and item["adapter"]["parent_contract_ref"] == ASSISTANT_BINDING_REF,
             f"{fact_id}: assistant adapter drift",
         )
         observed = {
@@ -680,45 +680,81 @@ def check_assistant_binding_examples(proposals: list[dict[str, Any]]) -> int:
     return checked
 
 
-def check_contract_gap(item: dict[str, Any], keys: set[str]) -> None:
-    exact_keys(item, keys, item["id"])
-    require(item["status"] == "contract_gap", f"{item['id']}: gap status")
-    require(item["executable_request"] is None, f"{item['id']}: gap request must be null")
-    require(item["canonical_predicate"] is None, f"{item['id']}: gap predicate must be null")
-    exact_keys(
-        item["adapter"],
-        {
-            "support_status", "channel", "missing_channel_or_operation",
-            "bounded_parent_correction",
-        },
-        f"{item['id']}.adapter",
+def check_new_parent_channel_examples(proposals: list[dict[str, Any]]) -> int:
+    """Consume the credential-safe rerun and in-flight control contracts."""
+    credential = next(
+        item for item in proposals
+        if item["id"] == "fleet.add-project-idempotent-rerun"
     )
-    require(item["adapter"]["support_status"] == "contract_gap", f"{item['id']}: gap adapter")
-    require(item["validation"]["executable_now"] is False, f"{item['id']}: gap executable marker")
-    requested = item["requested_semantics"]
-    exact_keys(
-        requested,
-        {"kind", "source_id", "operation", "selection", "response_fields"},
-        f"{item['id']}.requested_semantics",
-    )
-    if item["id"] == "fleet.add-project-idempotent-rerun":
-        require(
-            requested["kind"] == "http_response"
-            and requested["source_id"] == "fleet-api",
-            f"{item['id']}: gap kind/source",
-        )
-        expected_fields = CREDENTIAL_GAP_FIELDS
-    else:
-        require(
-            requested["kind"] == "state_transition"
-            and requested["source_id"] == f"browser-state-{item['id']}",
-            f"{item['id']}: gap kind/source",
-        )
-        expected_fields = DOOR_DISABLED_GAP_FIELDS
+    credential_select = [
+        "/_evidence/changed", "/_evidence/effect", "/doors",
+        "/steps/5/step", "/steps/5/status",
+    ]
     require(
-        requested["response_fields"] == expected_fields,
-        f"{item['id']}: gap response fields",
+        credential["adapter"]["parent_contract_ref"] == BASE
+        and credential["executable_request"]["recorder"]["request"]["select"]
+        == credential_select,
+        "credential rerun parent projection drift",
     )
+    for target, path, value in (
+        ("field", "/_evidence/changed", False),
+        ("field", "/_evidence/effect", "project_state_unchanged"),
+        ("field", "/doors", None),
+        ("field", "/steps/5/step", "door_credentials"),
+        ("field", "/steps/5/status", "already present"),
+    ):
+        require_assertion(
+            proposals, credential["id"], target=target, path=path,
+            op="eq", value=value,
+        )
+
+    pending = next(
+        item for item in proposals if item["id"] == "fleet.doors-disabled"
+    )
+    pending_action = pending["executable_request"]["recorder"]["action"]
+    require(
+        pending["adapter"]["parent_contract_ref"] == PENDING_STATE_REF
+        and len(pending_action) == 1
+        and pending_action[0]["kind"] == "click_pending_state"
+        and pending_action[0]["selector"]
+        == '[data-door-action="copy"][data-board="sandbox-board"][data-role="worker"]'
+        and pending_action[0]["endpoint"] == "/api/doors/copy"
+        and pending["adapter"]["recipe"]["settle_milliseconds"]
+        == pending_action[0]["hold_milliseconds"] == 400,
+        "in-flight door action recipe drift",
+    )
+    for phase, path, value in (
+        ("before", "/disabled_before", False),
+        ("action", "/clicked", "clicked"),
+        ("action", "/disabled_while_pending", True),
+        ("action", "/request_settled", True),
+        ("action", "/response_status", 200),
+        ("action", "/request_error", None),
+        ("after", "/disabled_after", False),
+    ):
+        require_assertion(
+            proposals, pending["id"], phase=phase, path=path,
+            op="eq", value=value,
+        )
+
+    nodes = [
+        "tools/aionui-extension/tests/home_acceptance/test_typed_evidence.py::"
+        "test_browser_pending_state_is_request_and_settlement_bound",
+        "tools/aionui-extension/tests/home_acceptance/test_typed_evidence.py::"
+        "test_fleet_project_add_projection_retains_only_null_credential_absence",
+        "tools/fleet-dashboard/tests/test_evidence_trace.py::"
+        "test_real_add_project_handler_emits_steps_and_actual_registry_transition",
+    ]
+    completed = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", *nodes],
+        cwd=ROOT, text=True, capture_output=True,
+    )
+    require(
+        completed.returncode == 0,
+        "new parent channel regression failed: "
+        + (completed.stdout + completed.stderr).strip()[-500:],
+    )
+    return 2
 
 
 def check_predicate(item: dict[str, Any]) -> int:
@@ -821,6 +857,12 @@ def check_request(item: dict[str, Any]) -> None:
                 "assistant_binding": {
                     "kind", "endpoint", "assistant_id", "path",
                 },
+                "click_pending_state": {
+                    "kind", "selector", "method", "endpoint", "property",
+                    "hold_milliseconds", "path", "pending_path",
+                    "settled_path", "status_path", "response_sha256_path",
+                    "error_path",
+                },
                 "click_response_json": {
                     "kind", "selector", "method", "endpoint", "pointer", "path",
                 },
@@ -831,7 +873,7 @@ def check_request(item: dict[str, Any]) -> None:
             check_pointer(action.get("path"), item["id"])
             if kind_name in {
                 "click", "set_value", "select", "submit", "press_key",
-                "click_response_json",
+                "click_response_json", "click_pending_state",
             }:
                 require(
                     isinstance(action["selector"], str) and action["selector"],
@@ -867,7 +909,33 @@ def check_request(item: dict[str, Any]) -> None:
                     ) is not None,
                     f"{item['id']}: assistant binding action",
                 )
-            available["action"].add(action["path"])
+            result_paths = {action["path"]}
+            if kind_name == "click_pending_state":
+                result_paths.update(
+                    action[field] for field in (
+                        "pending_path", "settled_path", "status_path",
+                        "response_sha256_path", "error_path",
+                    )
+                )
+                require(
+                    len(result_paths) == 6
+                    and action["method"] == "POST"
+                    and action["endpoint"] in {
+                        "/api/doors/copy", "/api/doors/rotate",
+                    }
+                    and action["property"] == "disabled"
+                    and isinstance(action["hold_milliseconds"], int)
+                    and not isinstance(action["hold_milliseconds"], bool)
+                    and 100 <= action["hold_milliseconds"] <= 2_000,
+                    f"{item['id']}: pending-state action",
+                )
+            for path in result_paths:
+                check_pointer(path, item["id"])
+            require(
+                not available["action"] & result_paths,
+                f"{item['id']}: duplicate action result path",
+            )
+            available["action"].update(result_paths)
         for assertion in predicate["assertions"]:
             require(assertion["path"] in available[assertion["phase"]], f"{item['id']}: unrecorded assertion path")
     elif kind == "http_response":
@@ -998,39 +1066,11 @@ def validate(delta: dict[str, Any]) -> tuple[int, int, int]:
     proposals = delta["proposals"]
     executable = [item for item in proposals if item["status"] == "executable_proposal"]
     gaps = [item for item in proposals if item["status"] == "contract_gap"]
-    gap_ids = {item["id"] for item in gaps}
     require(
-        len(executable) == 119 and gap_ids == EXPECTED_CONTRACT_GAPS,
-        "expected 119 executable and the two unresolved gaps",
-    )
-    gap_summaries = delta["contract_gaps"]
-    require(
-        len(gap_summaries) == 2
-        and {item["id"] for item in gap_summaries} == EXPECTED_CONTRACT_GAPS,
-        "top-level contract-gap summary drift",
+        len(executable) == 121 and not gaps and delta["contract_gaps"] == [],
+        "expected 121 executable and zero gaps",
     )
     normal_keys = set(delta["proposal_contract"]["executable_proposal_keys"])
-    gap_keys = set(delta["proposal_contract"]["contract_gap_keys"])
-    for item in gaps:
-        check_contract_gap(item, gap_keys)
-        summary = next(row for row in gap_summaries if row["id"] == item["id"])
-        exact_keys(
-            summary,
-            {
-                "id", "missing_channel_or_operation",
-                "bounded_parent_correction", "owner",
-            },
-            f"{item['id']}.gap_summary",
-        )
-        require(
-            summary["missing_channel_or_operation"]
-            == item["adapter"]["missing_channel_or_operation"]
-            and summary["bounded_parent_correction"]
-            == item["adapter"]["bounded_parent_correction"]
-            and summary["owner"]
-            == "TK-a565b6635db1 parent shared adapter/producer",
-            f"{item['id']}: gap summary mismatch",
-        )
     semantic: set[str] = set()
     negative_cases = 0
     first_negatives: set[str] = set()
@@ -1051,12 +1091,13 @@ def validate(delta: dict[str, Any]) -> tuple[int, int, int]:
         normalized = normalized_predicate(item["canonical_predicate"])
         require(normalized not in semantic, f"{item['id']}: duplicate semantic predicate")
         semantic.add(normalized)
-    require(len(semantic) == 119, "semantic predicates must be unique without source_id")
+    require(len(semantic) == 121, "semantic predicates must be unique without source_id")
     check_regressions(proposals)
     negative_cases += check_fact_specific_mutations(proposals)
     producer_examples = (
         check_parent_producer_examples(proposals)
         + check_assistant_binding_examples(proposals)
+        + check_new_parent_channel_examples(proposals)
     )
     return check_source_anchors(proposals), negative_cases, producer_examples
 
@@ -1072,10 +1113,10 @@ def main() -> int:
         print(f"predicate_proposals=FAIL: {error}", file=sys.stderr)
         return 1
     print(f"proposal_file={args.delta.relative_to(ROOT) if args.delta.is_relative_to(ROOT) else args.delta}")
-    print("owned=121 complement=43 executable=119 contract_gaps=2")
-    print("unique_semantic_predicates=119")
+    print("owned=121 complement=43 executable=121 contract_gaps=0")
+    print("unique_semantic_predicates=121")
     print(f"validated_source_anchors={anchors}")
-    print(f"schema_positive_cases=119 negative_cases={negatives}")
+    print(f"schema_positive_cases=121 negative_cases={negatives}")
     print(f"actual_parent_producer_examples={producer_examples}")
     print("predicate_proposals=PASS")
     return 0
