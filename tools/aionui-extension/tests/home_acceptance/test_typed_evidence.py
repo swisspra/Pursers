@@ -5,6 +5,8 @@ import hashlib
 import hmac
 import json
 import os
+import socket
+import shutil
 import subprocess
 import sys
 import threading
@@ -15,8 +17,15 @@ from typing import Any
 
 import pytest
 
-from . import typed_evidence
-from .typed_evidence import TypedEvidenceError, evaluate_evidence, record_evidence
+if __package__:
+    from . import typed_evidence
+    from .typed_evidence import TypedEvidenceError, evaluate_evidence, record_evidence
+else:  # pragma: no cover - disposable candidate subprocess entrypoints
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from home_acceptance import typed_evidence
+    from home_acceptance.typed_evidence import (
+        TypedEvidenceError, evaluate_evidence, record_evidence,
+    )
 
 
 REPOSITORY = Path(__file__).resolve().parents[4]
@@ -26,6 +35,7 @@ CANDIDATE = subprocess.check_output(
 BOARD = "sandbox-typed-evidence"
 EVIDENCE_KEY = "11" * 32
 SOURCE_KEY = "22" * 32
+PERSONAL_VERSION = "5.0.0a25"
 
 
 def _json_bytes(value: Any) -> bytes:
@@ -104,17 +114,68 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(404, payload)
 
 
+_HTTP_RUNTIMES: dict[str, subprocess.Popen[str]] = {}
+
+
+def _candidate_checkout(tmp_path: Path) -> Path:
+    checkout = tmp_path / "candidate-checkout"
+    if not checkout.exists():
+        subprocess.run(
+            [
+                "git", "clone", "--quiet", "--shared", "--no-checkout",
+                str(REPOSITORY), str(checkout),
+            ],
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(checkout), "checkout", "--quiet", CANDIDATE],
+            check=True,
+        )
+    return checkout
+
+
+def _free_port() -> int:
+    with socket.socket() as reservation:
+        reservation.bind(("127.0.0.1", 0))
+        return int(reservation.getsockname()[1])
+
+
+def _wait_for_port(process: subprocess.Popen[str], port: int) -> None:
+    for _ in range(200):
+        if process.poll() is not None:
+            _stdout, stderr = process.communicate()
+            raise AssertionError(f"candidate service exited: {stderr[-1000:]}")
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=0.05):
+                return
+        except OSError:
+            threading.Event().wait(0.01)
+    raise AssertionError("candidate service did not listen")
+
+
 @pytest.fixture
-def http_server() -> str:
-    _Handler.state = "idle"
-    server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
+def http_server(tmp_path: Path) -> str:
+    checkout = _candidate_checkout(tmp_path)
+    artifact = checkout / "tools/aionui-extension/tests/home_acceptance/test_typed_evidence.py"
+    port = _free_port()
+    process = subprocess.Popen(
+        [sys.executable, str(artifact), "--typed-evidence-http-server", str(port)],
+        cwd=checkout,
+        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    _wait_for_port(process, port)
+    url = f"http://127.0.0.1:{port}"
+    _HTTP_RUNTIMES[url] = process
     try:
-        yield f"http://127.0.0.1:{server.server_port}"
+        yield url
     finally:
-        server.shutdown()
-        thread.join(timeout=2)
+        _HTTP_RUNTIMES.pop(url, None)
+        process.terminate()
+        process.wait(timeout=3)
 
 
 def _context(**changes: Any) -> dict[str, Any]:
@@ -134,27 +195,16 @@ def _context(**changes: Any) -> dict[str, Any]:
 
 
 def _trust(tmp_path: Path, http_server: str, **changes: Any) -> dict[str, Any]:
-    candidate_checkout = tmp_path / "candidate-checkout"
-    if not candidate_checkout.exists():
-        subprocess.run(
-            [
-                "git", "clone", "--quiet", "--shared", "--no-checkout",
-                str(REPOSITORY), str(candidate_checkout),
-            ],
-            check=True,
-        )
-        subprocess.run(
-            ["git", "-C", str(candidate_checkout), "checkout", "--quiet", CANDIDATE],
-            check=True,
-        )
+    candidate_checkout = _candidate_checkout(tmp_path)
+    process = _HTTP_RUNTIMES[http_server]
     pid_file = tmp_path / "http-runtime.pid"
-    pid_file.write_text(str(os.getpid()), encoding="utf-8")
+    pid_file.write_text(str(process.pid), encoding="utf-8")
     pid_file.chmod(0o600)
     command = subprocess.check_output(
-        ["/bin/ps", "-p", str(os.getpid()), "-o", "command="], text=True
+        ["/bin/ps", "-p", str(process.pid), "-o", "command="], text=True
     ).strip()
     start_time = subprocess.check_output(
-        ["/bin/ps", "-p", str(os.getpid()), "-o", "lstart="], text=True
+        ["/bin/ps", "-p", str(process.pid), "-o", "lstart="], text=True
     ).strip()
     artifact = (
         candidate_checkout
@@ -165,6 +215,7 @@ def _trust(tmp_path: Path, http_server: str, **changes: Any) -> dict[str, Any]:
         "command_sha256": hashlib.sha256(command.encode()).hexdigest(),
         "start_time": start_time,
         "executable": str(Path(command.split()[0]).resolve()),
+        "cwd": str(candidate_checkout),
         "artifact_path": str(artifact),
         "artifact_sha256": hashlib.sha256(artifact.read_bytes()).hexdigest(),
         "listener_port": int(http_server.rsplit(":", 1)[1]),
@@ -297,19 +348,65 @@ def test_http_direct_api_cannot_spoof_browser_observation(
 def test_http_rejects_unrelated_echo_service_even_with_matching_body(
     tmp_path: Path, http_server: str,
 ) -> None:
-    decoy = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
-    thread = threading.Thread(target=decoy.serve_forever, daemon=True)
-    thread.start()
+    trust = _trust(tmp_path, http_server)
+    checkout = Path(trust["candidate_checkout_root"])
+    artifact = checkout / "tools/aionui-extension/tests/home_acceptance/test_typed_evidence.py"
+    port = _free_port()
+    decoy = subprocess.Popen(
+        [sys.executable, str(artifact), "--typed-evidence-http-server", str(port)],
+        cwd=tmp_path,
+        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, text=True,
+    )
+    _wait_for_port(decoy, port)
     try:
-        trust = _trust(tmp_path, http_server)
-        trust["http_sources"]["fleet-api"]["base_url"] = (
-            f"http://127.0.0.1:{decoy.server_port}"
-        )
-        with pytest.raises(TypedEvidenceError, match="listener port"):
+        command = subprocess.check_output(
+            ["/bin/ps", "-p", str(decoy.pid), "-o", "command="], text=True
+        ).strip()
+        started = subprocess.check_output(
+            ["/bin/ps", "-p", str(decoy.pid), "-o", "lstart="], text=True
+        ).strip()
+        runtime = trust["http_sources"]["fleet-api"]["runtime"]
+        runtime["pid_file"] = str(tmp_path / "decoy.pid")
+        Path(runtime["pid_file"]).write_text(str(decoy.pid), encoding="utf-8")
+        Path(runtime["pid_file"]).chmod(0o600)
+        runtime.update({
+            "command_sha256": hashlib.sha256(command.encode()).hexdigest(),
+            "start_time": started,
+            "executable": str(Path(command.split()[0]).resolve()),
+            "listener_port": port,
+        })
+        trust["http_sources"]["fleet-api"]["base_url"] = f"http://127.0.0.1:{port}"
+        with pytest.raises(TypedEvidenceError, match="working directory"):
             record_evidence(_request("http_response", _http_recorder()), trust)
     finally:
-        decoy.shutdown()
-        thread.join(timeout=2)
+        decoy.terminate()
+        decoy.wait(timeout=3)
+
+
+def test_http_rejects_dirty_checkout_and_unbound_artifact(
+    tmp_path: Path, http_server: str,
+) -> None:
+    trust = _trust(tmp_path, http_server)
+    checkout = Path(trust["candidate_checkout_root"])
+    unbound = checkout / "tools/aionui-extension/tests/home_acceptance/typed_evidence.py"
+    runtime = trust["http_sources"]["fleet-api"]["runtime"]
+    runtime.update({
+        "artifact_path": str(unbound),
+        "artifact_sha256": hashlib.sha256(unbound.read_bytes()).hexdigest(),
+    })
+    with pytest.raises(TypedEvidenceError, match="absent from the process command"):
+        record_evidence(_request("http_response", _http_recorder()), trust)
+
+    trust = _trust(tmp_path, http_server)
+    dirty = checkout / "untracked-runtime-input"
+    dirty.write_text("decoy", encoding="utf-8")
+    try:
+        with pytest.raises(TypedEvidenceError, match="not clean"):
+            record_evidence(_request("http_response", _http_recorder()), trust)
+    finally:
+        dirty.unlink()
 
 
 def test_http_rejects_plaintext_non_loopback_origin(
@@ -374,6 +471,7 @@ def _personal_receipt_source(
         ).hexdigest(),
         "product": "Pursers Personal",
         "server_name": "On Board Personal",
+        "version": PERSONAL_VERSION,
     }
 
 
@@ -422,7 +520,9 @@ def test_receipt_field_real_roundtrip_and_forgery(tmp_path: Path, http_server: s
 
 
 def test_receipt_rejects_decoy_pid(tmp_path: Path, http_server: str) -> None:
-    process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)", "typed-evidence-marker"])
+    marker = tmp_path / "receipt_process.py"
+    marker.write_text("import time; time.sleep(30)\n", encoding="utf-8")
+    process = subprocess.Popen([sys.executable, str(marker)], cwd=tmp_path)
     try:
         pid_file = tmp_path / "runtime.pid"
         pid_file.write_text(str(process.pid), encoding="utf-8")
@@ -435,8 +535,11 @@ def test_receipt_rejects_decoy_pid(tmp_path: Path, http_server: str) -> None:
         trust = _trust(tmp_path, http_server)
         process_trust = {
             "pid_file": str(pid_file),
-            "argv0_names": [Path(sys.executable).name, "Python"], "argv_prefix": ["-c"],
-            "argv_contains": ["typed-evidence-marker"],
+            "argv0_names": [Path(sys.executable).name, "Python"],
+            "argv_prefix": [str(marker)], "argv_contains": [],
+            "required_arguments": {}, "cwd": str(tmp_path),
+            "artifact_path": str(marker),
+            "artifact_sha256": hashlib.sha256(marker.read_bytes()).hexdigest(),
             "receipt_pid_pointer": "/pid",
         }
         trust["receipt_sources"] = {"personal-receipt": _receipt_source(path, process_trust)}
@@ -478,47 +581,199 @@ def test_personal_receipt_real_producer_capture_adapter(
     tmp_path: Path, http_server: str,
 ) -> None:
     trust = _trust(tmp_path, http_server)
+    candidate_checkout = Path(trust["candidate_checkout_root"])
     candidate_source = (
-        Path(trust["candidate_checkout_root"])
+        candidate_checkout
         / "packages/personal/src/pursers_personal/apps_server.py"
     )
     receipt = tmp_path / "personal-runtime.json"
-    producer = tmp_path / "personal_receipt_producer.py"
-    producer.write_text(
-        "import pathlib,sys,time\n"
-        "from types import SimpleNamespace\n"
-        "from pursers_personal.apps_server import _write_acceptance_runtime_receipt\n"
-        "board=sys.argv[4]; state=SimpleNamespace(config=SimpleNamespace(board_id=board))\n"
-        "_write_acceptance_runtime_receipt(pathlib.Path(sys.argv[1]),state=state,"
-        "candidate_source=pathlib.Path(sys.argv[2]),candidate_commit=sys.argv[3],"
-        "board_id=board)\n"
-        "time.sleep(30)\n",
+    runtime = tmp_path / "personal-venv"
+    subprocess.run(
+        [
+            "uv", "venv", "--python", sys.executable,
+            "--system-site-packages", str(runtime),
+        ],
+        check=True, capture_output=True, text=True,
+    )
+    runtime_python = runtime / "bin/python"
+    subprocess.run(
+        [
+            "uv", "pip", "install", "--offline", "--no-deps", "--python",
+            str(runtime_python), str(candidate_checkout / "packages/personal"),
+        ],
+        check=True, capture_output=True, text=True,
+        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+    )
+    site_packages = Path(subprocess.check_output(
+        [
+            str(runtime_python), "-c",
+            "import sysconfig; print(sysconfig.get_paths()['purelib'])",
+        ],
+        text=True,
+    ).strip())
+    client_package = site_packages / "pursers_client"
+    shutil.copytree(
+        candidate_checkout / "packages/client/src/pursers_client",
+        client_package,
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+    )
+    dist_info = site_packages / "pursers_client-0.1.0a22.dist-info"
+    (dist_info / "licenses").mkdir(parents=True)
+    metadata = (
+        "Metadata-Version: 2.4\n"
+        "Name: pursers-client\n"
+        "Version: 0.1.0a22\n"
+        "Summary: Async client for the On Board central service\n"
+        "License-Expression: Apache-2.0\n"
+        "Requires-Python: >=3.11\n"
+        "License-File: LICENSE\n"
+        "Requires-Dist: mcp==2.1.1\n"
+        "Requires-Dist: PyJWT[crypto]<3,>=2.10\n"
+        "Requires-Dist: cryptography<51,>=44\n"
+        "Dynamic: license-file\n"
+    )
+    wheel_metadata = (
+        "Wheel-Version: 1.0\n"
+        "Generator: setuptools (80.9.0)\n"
+        "Root-Is-Purelib: true\n"
+        "Tag: py3-none-any\n\n"
+    )
+    (dist_info / "METADATA").write_text(metadata, encoding="utf-8")
+    (dist_info / "WHEEL").write_text(wheel_metadata, encoding="utf-8")
+    (dist_info / "top_level.txt").write_text("pursers_client\n", encoding="utf-8")
+    shutil.copy2(
+        candidate_checkout / "packages/client/LICENSE",
+        dist_info / "licenses/LICENSE",
+    )
+    installed_members = [
+        *(f"pursers_client/{path.name}" for path in sorted(client_package.glob("*.py"))),
+        "pursers_client-0.1.0a22.dist-info/licenses/LICENSE",
+        "pursers_client-0.1.0a22.dist-info/METADATA",
+        "pursers_client-0.1.0a22.dist-info/WHEEL",
+        "pursers_client-0.1.0a22.dist-info/top_level.txt",
+        "pursers_client-0.1.0a22.dist-info/RECORD",
+    ]
+    (dist_info / "RECORD").write_text(
+        "".join(f"{relative},,\n" for relative in installed_members),
         encoding="utf-8",
     )
-    personal_src = Path(trust["candidate_checkout_root"]) / "packages/personal/src"
-    process = subprocess.Popen(
+    central_package = site_packages / "pursers_central"
+    shutil.copytree(
+        candidate_checkout / "packages/central/src/pursers_central",
+        central_package,
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+    )
+    central_dist_info = site_packages / "pursers_central-0.1.0a29.dist-info"
+    (central_dist_info / "licenses").mkdir(parents=True)
+    central_metadata = (
+        "Metadata-Version: 2.4\n"
+        "Name: pursers-central\n"
+        "Version: 0.1.0a29\n"
+        "Summary: Central multi-board On Board MCP service\n"
+        "License-Expression: Apache-2.0\n"
+        "Requires-Python: >=3.11\n"
+        "License-File: LICENSE\n"
+        "Requires-Dist: mcp[cli]==2.1.1\n"
+        "Requires-Dist: pursers-client==0.1.0a22\n"
+        "Requires-Dist: PyJWT[crypto]<3,>=2.10\n"
+        "Requires-Dist: uvicorn<1,>=0.30\n"
+        "Dynamic: license-file\n"
+    )
+    (central_dist_info / "METADATA").write_text(
+        central_metadata, encoding="utf-8"
+    )
+    (central_dist_info / "WHEEL").write_text(wheel_metadata, encoding="utf-8")
+    (central_dist_info / "top_level.txt").write_text(
+        "pursers_central\n", encoding="utf-8"
+    )
+    shutil.copy2(
+        candidate_checkout / "packages/central/LICENSE",
+        central_dist_info / "licenses/LICENSE",
+    )
+    central_installed_members = [
+        *(f"pursers_central/{path.name}" for path in sorted(central_package.glob("*.py"))),
+        "pursers_central-0.1.0a29.dist-info/licenses/LICENSE",
+        "pursers_central-0.1.0a29.dist-info/METADATA",
+        "pursers_central-0.1.0a29.dist-info/WHEEL",
+        "pursers_central-0.1.0a29.dist-info/top_level.txt",
+        "pursers_central-0.1.0a29.dist-info/RECORD",
+    ]
+    (central_dist_info / "RECORD").write_text(
+        "".join(f"{relative},,\n" for relative in central_installed_members),
+        encoding="utf-8",
+    )
+    project = tmp_path / "sandbox-personal"
+    project.mkdir()
+    profiles = tmp_path / "personal-profiles"
+    profile_path = subprocess.check_output(
         [
-            sys.executable, str(producer), str(receipt), str(candidate_source),
-            CANDIDATE, BOARD,
+            str(runtime_python), "-c",
+            (
+                "import pathlib,sys; from pursers_client import ensure_personal_profile; "
+                "p=ensure_personal_profile(pathlib.Path(sys.argv[1]), "
+                "profiles_root=pathlib.Path(sys.argv[2]), port=18767); "
+                "print(p.profile_path)"
+            ),
+            str(project), str(profiles),
         ],
-        env={**os.environ, "PYTHONPATH": str(personal_src)},
+        text=True,
+        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+    ).strip()
+    profile_board = json.loads(Path(profile_path).read_text(encoding="utf-8"))[
+        "board_id"
+    ]
+    command = [
+        str(runtime_python), "-m", "pursers_personal.cli", "mcp",
+        "--profile", profile_path, "--host-id", "pytest",
+        "--session", "typed-evidence", "--acceptance-runtime-receipt",
+        str(receipt), "--candidate-source", str(candidate_source),
+        "--candidate-commit", CANDIDATE, "--board-id", profile_board,
+    ]
+    process = subprocess.Popen(
+        command, cwd=candidate_checkout,
+        env={
+            **os.environ,
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "PYTHONPATH": str(candidate_checkout / "packages/personal/src"),
+        },
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True,
     )
     try:
-        for _ in range(100):
+        for _ in range(500):
             if receipt.exists():
                 break
             threading.Event().wait(0.01)
-        assert receipt.exists()
+        if not receipt.exists():
+            process.terminate()
+            _stdout, stderr = process.communicate(timeout=3)
+            raise AssertionError(f"Personal MCP did not write receipt: {stderr[-1000:]}")
         pid_file = tmp_path / "personal-runtime.pid"
         pid_file.write_text(str(process.pid), encoding="utf-8")
         pid_file.chmod(0o600)
         process_trust = {
             "pid_file": str(pid_file),
-            "argv0_names": [Path(sys.executable).name, "Python"],
-            "argv_prefix": [str(producer)],
-            "argv_contains": [BOARD],
+            "argv0_names": [
+                Path(sys.executable).name, runtime_python.name,
+                runtime_python.resolve().name, "Python",
+            ],
+            "argv_prefix": ["-m", "pursers_personal.cli", "mcp"],
+            "argv_contains": [],
+            "required_arguments": {
+                "--profile": profile_path,
+                "--host-id": "pytest",
+                "--session": "typed-evidence",
+                "--acceptance-runtime-receipt": str(receipt),
+                "--candidate-source": str(candidate_source),
+                "--candidate-commit": CANDIDATE,
+                "--board-id": profile_board,
+            },
+            "cwd": str(candidate_checkout),
+            "artifact_path": str(candidate_source),
+            "artifact_sha256": hashlib.sha256(candidate_source.read_bytes()).hexdigest(),
             "receipt_pid_pointer": "/pid",
         }
+        trust["board_id"] = profile_board
         trust["receipt_sources"] = {
             "personal-runtime": _personal_receipt_source(
                 receipt, candidate_source, process_trust
@@ -526,7 +781,7 @@ def test_personal_receipt_real_producer_capture_adapter(
         }
         context = _context(
             observation_id="personal.runtime", action_id="capture-runtime",
-            entity="personal-mcp", surface="personal",
+            entity="personal-mcp", surface="personal", board_id=profile_board,
         )
         evidence = record_evidence(
             _request(
@@ -555,54 +810,141 @@ def test_personal_receipt_real_producer_capture_adapter(
             evidence["record"]["authenticity"]
             == "verifier_bound_personal_runtime"
         )
+        original = json.loads(receipt.read_text())
+        for field, value in (("schema_version", 999), ("version", "forged-version")):
+            forged = {**original, field: value}
+            receipt.write_text(json.dumps(forged), encoding="utf-8")
+            receipt.chmod(0o600)
+            with pytest.raises(TypedEvidenceError, match="binding mismatch"):
+                record_evidence(
+                    _request(
+                        "receipt_field",
+                        {"source_id": "personal-runtime", "fields": ["/product"]},
+                        context,
+                    ),
+                    trust,
+                )
+        receipt.write_text(json.dumps(original), encoding="utf-8")
+        receipt.chmod(0o600)
+        arbitrary = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"], cwd=tmp_path,
+        )
+        try:
+            forged = {**original, "pid": arbitrary.pid}
+            receipt.write_text(json.dumps(forged), encoding="utf-8")
+            receipt.chmod(0o600)
+            pid_file.write_text(str(arbitrary.pid), encoding="utf-8")
+            with pytest.raises(TypedEvidenceError, match="process identity"):
+                record_evidence(
+                    _request(
+                        "receipt_field",
+                        {"source_id": "personal-runtime", "fields": ["/product"]},
+                        context,
+                    ),
+                    trust,
+                )
+        finally:
+            arbitrary.terminate()
+            arbitrary.wait(timeout=3)
     finally:
         process.terminate()
         process.wait(timeout=3)
 
 
-def _log_source(
-    path: Path, process: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    return {
-        "adapter": "hmac_jsonl_v1", "provenance": "central-authenticated-stderr",
-        "runtime_id": "central-runtime-1", "path": str(path), "hmac_key_hex": SOURCE_KEY,
-        "signature_field": "signature",
-        "document_keys": [
-            "emitter", "timestamp", "candidate_commit", "board_id", "surface",
-            "entity", "run_id", "action_id", "event", "outcome", "runtime_id",
-        ],
-        "timestamp_pointer": "/timestamp", "max_age_seconds": 300,
-        "required_bindings": {
-            "/candidate_commit": "$candidate_commit", "/board_id": "$board_id",
-            "/surface": "$surface", "/entity": "$entity", "/run_id": "$run_id",
-            "/action_id": "$action_id",
-        },
-        "emitter": "central-runtime", "runtime_pointer": "/runtime_id",
-        "max_bytes": 65_536, "process": process,
-    }
+@pytest.fixture
+def log_emitter(tmp_path: Path, request: pytest.FixtureRequest) -> Any:
+    processes: list[subprocess.Popen[str]] = []
+
+    def start(trust: dict[str, Any], **changes: Any) -> tuple[Path, dict[str, Any]]:
+        index = len(processes)
+        action = {
+            "emitter": "central-runtime", "candidate_commit": CANDIDATE,
+            "board_id": BOARD, "surface": "fleet", "entity": "TK-123",
+            "run_id": "run-1", "action_id": "submit-ticket",
+            "event": "ticket_submitted", "outcome": "accepted",
+            "runtime_id": "central-runtime-1",
+        }
+        action.update(changes)
+        action_path = tmp_path / f"action-{index}.json"
+        action_path.write_text(json.dumps(action), encoding="utf-8")
+        action_path.chmod(0o600)
+        log_path = tmp_path / f"emitter-{index}.jsonl"
+        checkout = Path(trust["candidate_checkout_root"])
+        artifact = checkout / "tools/aionui-extension/tests/home_acceptance/test_typed_evidence.py"
+        process = subprocess.Popen(
+            [
+                sys.executable, str(artifact), "--typed-evidence-log-emitter",
+                "--action-input", str(action_path), "--output", str(log_path),
+            ],
+            cwd=checkout,
+            env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True,
+        )
+        processes.append(process)
+        for _ in range(200):
+            if log_path.exists():
+                break
+            if process.poll() is not None:
+                _stdout, stderr = process.communicate()
+                raise AssertionError(f"emitter exited: {stderr[-1000:]}")
+            threading.Event().wait(0.01)
+        assert log_path.exists()
+        pid_file = tmp_path / f"emitter-{index}.pid"
+        pid_file.write_text(str(process.pid), encoding="utf-8")
+        pid_file.chmod(0o600)
+        process_trust = {
+            "pid_file": str(pid_file),
+            "argv0_names": [Path(sys.executable).name, "Python"],
+            "argv_prefix": [str(artifact), "--typed-evidence-log-emitter"],
+            "argv_contains": [],
+            "required_arguments": {
+                "--action-input": str(action_path), "--output": str(log_path),
+            },
+            "cwd": str(checkout), "artifact_path": str(artifact),
+            "artifact_sha256": hashlib.sha256(artifact.read_bytes()).hexdigest(),
+            "receipt_pid_pointer": "/pid",
+        }
+        source = {
+            "adapter": "process_captured_jsonl_v1",
+            "provenance": "verifier-captured-pinned-emitter",
+            "runtime_id": "central-runtime-1", "path": str(log_path),
+            "document_keys": [
+                "emitter", "timestamp", "candidate_commit", "board_id",
+                "surface", "entity", "run_id", "action_id", "event",
+                "outcome", "runtime_id", "action_sha256",
+            ],
+            "timestamp_pointer": "/timestamp", "max_age_seconds": 300,
+            "required_bindings": {
+                "/candidate_commit": "$candidate_commit",
+                "/board_id": "$board_id", "/surface": "$surface",
+                "/entity": "$entity", "/run_id": "$run_id",
+                "/action_id": "$action_id",
+            },
+            "emitter": "central-runtime", "runtime_pointer": "/runtime_id",
+            "max_bytes": 65_536, "process": process_trust,
+            "action_input_path": str(action_path),
+            "action_input_sha256": hashlib.sha256(action_path.read_bytes()).hexdigest(),
+            "action_digest_pointer": "/action_sha256",
+        }
+        return log_path, source
+
+    def cleanup() -> None:
+        for process in processes:
+            if process.poll() is None:
+                process.terminate()
+                process.wait(timeout=3)
+
+    request.addfinalizer(cleanup)
+    return start
 
 
-def _log_entry(**changes: Any) -> dict[str, Any]:
-    value = {
-        "emitter": "central-runtime", "timestamp": _now(), "candidate_commit": CANDIDATE,
-        "board_id": BOARD, "surface": "fleet", "entity": "TK-123", "run_id": "run-1",
-        "action_id": "submit-ticket", "event": "ticket_submitted", "outcome": "accepted",
-        "runtime_id": "central-runtime-1",
-    }
-    value.update(changes)
-    fields: list[str] = []
-    _sign(value, fields, SOURCE_KEY)
-    return value
-
-
-def test_log_assertion_real_roundtrip_and_substitution(tmp_path: Path, http_server: str) -> None:
-    path = tmp_path / "central.jsonl"
-    authentic = _log_entry()
-    fake = {**authentic, "outcome": "fake-success"}
-    path.write_text(json.dumps(fake) + "\n" + json.dumps(authentic) + "\n", encoding="utf-8")
-    path.chmod(0o600)
+def test_log_assertion_real_roundtrip_and_substitution(
+    tmp_path: Path, http_server: str, log_emitter: Any,
+) -> None:
     trust = _trust(tmp_path, http_server)
-    trust["log_sources"] = {"central-log": _log_source(path)}
+    path, source = log_emitter(trust)
+    trust["log_sources"] = {"central-log": source}
     context = _context(action_id="submit-ticket")
     request = _request("log_assertion", {
         "source_id": "central-log", "field_equals": {"/event": "ticket_submitted"},
@@ -613,29 +955,32 @@ def test_log_assertion_real_roundtrip_and_substitution(tmp_path: Path, http_serv
         {"path": "/outcome", "op": "eq", "value": "accepted"},
     ]), trust)
     assert result["passed"]
-    assert "signature" not in evidence["record"]["entry"]
+    assert evidence["record"]["authenticity"] == "verifier_captured_process_bound"
 
-    substituted = _log_entry(emitter="decoy")
+    substituted = {**evidence["record"]["entry"], "emitter": "decoy"}
     path.write_text(json.dumps(substituted) + "\n", encoding="utf-8")
     with pytest.raises(TypedEvidenceError, match="exactly one"):
         record_evidence(request, trust)
 
-    stale = _log_entry(timestamp=(datetime.now(timezone.utc) - timedelta(hours=1)).isoformat())
+    stale = {
+        **evidence["record"]["entry"],
+        "timestamp": (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(),
+    }
     path.write_text(json.dumps(stale) + "\n", encoding="utf-8")
     with pytest.raises(TypedEvidenceError, match="exactly one"):
         record_evidence(request, trust)
 
 
 def test_log_rejects_unsigned_empty_container(
-    tmp_path: Path, http_server: str,
+    tmp_path: Path, http_server: str, log_emitter: Any,
 ) -> None:
-    path = tmp_path / "central.jsonl"
-    entry = _log_entry()
+    trust = _trust(tmp_path, http_server)
+    path, source = log_emitter(trust)
+    entry = json.loads(path.read_text())
     entry["unsigned"] = []
     path.write_text(json.dumps(entry) + "\n", encoding="utf-8")
     path.chmod(0o600)
-    trust = _trust(tmp_path, http_server)
-    trust["log_sources"] = {"central-log": _log_source(path)}
+    trust["log_sources"] = {"central-log": source}
     request = _request(
         "log_assertion",
         {"source_id": "central-log", "field_equals": {"/event": "ticket_submitted"}},
@@ -645,81 +990,25 @@ def test_log_rejects_unsigned_empty_container(
         record_evidence(request, trust)
 
 
-def test_verified_emitter_producer_to_log_recorder(
-    tmp_path: Path, http_server: str,
+def test_hardcoded_signed_success_adapter_is_rejected(
+    tmp_path: Path, http_server: str, log_emitter: Any,
 ) -> None:
-    path = tmp_path / "emitter.jsonl"
-    key_file = tmp_path / "emitter.key"
-    key_file.write_text(SOURCE_KEY, encoding="utf-8")
-    key_file.chmod(0o600)
-    producer = tmp_path / "verified_emitter.py"
-    producer.write_text(
-        "import hashlib,hmac,json,os,pathlib,sys,time\n"
-        "out=pathlib.Path(sys.argv[1]); key=bytes.fromhex(pathlib.Path(sys.argv[2]).read_text())\n"
-        "value={'emitter':'central-runtime','timestamp':"
-        "time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()),"
-        "'candidate_commit':sys.argv[3],'board_id':sys.argv[4],"
-        "'surface':'fleet','entity':'TK-123','run_id':'run-1',"
-        "'action_id':'submit-ticket','event':'ticket_submitted',"
-        "'outcome':'accepted','runtime_id':'central-runtime-1'}\n"
-        "raw=json.dumps(value,sort_keys=True,separators=(',',':')).encode(); "
-        "value['signature']=hmac.new(key,raw,hashlib.sha256).hexdigest()\n"
-        "out.write_text(json.dumps(value)+'\\n'); out.chmod(0o600); time.sleep(30)\n",
-        encoding="utf-8",
-    )
-    process = subprocess.Popen(
-        [
-            sys.executable, str(producer), str(path), str(key_file),
-            CANDIDATE, BOARD,
-        ]
-    )
-    try:
-        for _ in range(100):
-            if path.exists():
-                break
-            threading.Event().wait(0.01)
-        assert path.exists()
-        pid_file = tmp_path / "emitter.pid"
-        pid_file.write_text(str(process.pid), encoding="utf-8")
-        pid_file.chmod(0o600)
-        process_trust = {
-            "pid_file": str(pid_file),
-            "argv0_names": [Path(sys.executable).name, "Python"],
-            "argv_prefix": [str(producer)],
-            "argv_contains": [BOARD],
-            "receipt_pid_pointer": "/pid",
-        }
-        trust = _trust(tmp_path, http_server)
-        trust["log_sources"] = {
-            "central-log": _log_source(path, process_trust)
-        }
-        evidence = record_evidence(
+    trust = _trust(tmp_path, http_server)
+    _path, source = log_emitter(trust)
+    source["adapter"] = "hmac_jsonl_v1"
+    trust["log_sources"] = {"central-log": source}
+    with pytest.raises(TypedEvidenceError, match="adapter"):
+        record_evidence(
             _request(
                 "log_assertion",
                 {
                     "source_id": "central-log",
-                    "field_equals": {"/event": "ticket_submitted"},
+                    "field_equals": {"/outcome": "accepted"},
                 },
                 _context(action_id="submit-ticket"),
             ),
             trust,
         )
-        result = evaluate_evidence(
-            evidence,
-            _expected(
-                evidence,
-                [
-                    {"path": "/event", "op": "eq", "value": "ticket_submitted"},
-                    {"path": "/outcome", "op": "eq", "value": "accepted"},
-                ],
-            ),
-            trust,
-        )
-        assert result["passed"] is True
-        assert evidence["record"]["process"]["pid"] == process.pid
-    finally:
-        process.terminate()
-        process.wait(timeout=3)
 
 def _state_recorder(next_state: str) -> dict[str, Any]:
     return {
@@ -787,7 +1076,7 @@ def test_state_transition_rejects_runtime_and_source_digest_mismatch(
 
 
 def test_all_kinds_reject_resigned_unknown_missing_and_wrong_nested_fields(
-    tmp_path: Path, http_server: str,
+    tmp_path: Path, http_server: str, log_emitter: Any,
 ) -> None:
     trust = _trust(tmp_path, http_server)
     receipt_path = tmp_path / "receipt.json"
@@ -795,10 +1084,8 @@ def test_all_kinds_reject_resigned_unknown_missing_and_wrong_nested_fields(
     trust["receipt_sources"] = {
         "personal-receipt": _receipt_source(receipt_path)
     }
-    log_path = tmp_path / "central.jsonl"
-    log_path.write_text(json.dumps(_log_entry()) + "\n", encoding="utf-8")
-    log_path.chmod(0o600)
-    trust["log_sources"] = {"central-log": _log_source(log_path)}
+    _log_path, log_source = log_emitter(trust)
+    trust["log_sources"] = {"central-log": log_source}
     receipt_context = _context(
         observation_id="personal.role", action_id="read-role",
         entity="seat-3", surface="personal",
@@ -968,3 +1255,37 @@ def test_installed_standalone_cli_roundtrip(tmp_path: Path, http_server: str) ->
     )
     assert checked.returncode == 0, checked.stderr
     assert json.loads(checked.stdout)["passed"] is True
+
+
+def _run_disposable_entrypoint() -> None:
+    if len(sys.argv) == 3 and sys.argv[1] == "--typed-evidence-http-server":
+        _Handler.state = "idle"
+        ThreadingHTTPServer(("127.0.0.1", int(sys.argv[2])), _Handler).serve_forever()
+        return
+    if len(sys.argv) == 6 and sys.argv[1] == "--typed-evidence-log-emitter":
+        if sys.argv[2] != "--action-input" or sys.argv[4] != "--output":
+            raise SystemExit(2)
+        action_path = Path(sys.argv[3]).resolve(strict=True)
+        output_path = Path(sys.argv[5]).resolve()
+        action_raw = action_path.read_bytes()
+        action = json.loads(action_raw)
+        required = {
+            "emitter", "candidate_commit", "board_id", "surface", "entity",
+            "run_id", "action_id", "event", "outcome", "runtime_id",
+        }
+        if not isinstance(action, dict) or set(action) != required:
+            raise SystemExit(2)
+        entry = {
+            **action,
+            "timestamp": _now(),
+            "action_sha256": hashlib.sha256(action_raw).hexdigest(),
+        }
+        output_path.write_text(json.dumps(entry) + "\n", encoding="utf-8")
+        output_path.chmod(0o600)
+        threading.Event().wait(60)
+        return
+    raise SystemExit(2)
+
+
+if __name__ == "__main__":  # pragma: no cover - exercised as bound subprocesses
+    _run_disposable_entrypoint()

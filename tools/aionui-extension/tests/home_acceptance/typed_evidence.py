@@ -288,12 +288,25 @@ def _require_context_bindings(bindings: dict[str, Any], fields: set[str], label:
         raise TypedEvidenceError(f"{label} lacks required context bindings")
 
 
+def _process_cwd(pid: int, label: str) -> Path:
+    completed = subprocess.run(
+        ["/usr/sbin/lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"],
+        text=True, capture_output=True, check=False, timeout=5,
+        env={"PATH": os.defpath, "LANG": "C", "LC_ALL": "C"},
+    )
+    paths = [line[1:] for line in completed.stdout.splitlines() if line.startswith("n")]
+    if completed.returncode or len(paths) != 1:
+        raise TypedEvidenceError(f"{label} working directory is unavailable")
+    return Path(paths[0]).resolve()
+
+
 def _process_check(process: Any, receipt: Any | None = None) -> dict[str, Any] | None:
     if process is None:
         return None
     process = _closed(
         process, {
             "pid_file", "argv0_names", "argv_prefix", "argv_contains",
+            "required_arguments", "cwd", "artifact_path", "artifact_sha256",
             "receipt_pid_pointer",
         },
         "process trust",
@@ -311,10 +324,16 @@ def _process_check(process: Any, receipt: Any | None = None) -> dict[str, Any] |
     if (
         pid <= 1 or not isinstance(process["argv_prefix"], list) or not process["argv_prefix"]
         or not isinstance(process["argv0_names"], list) or not process["argv0_names"]
-        or not isinstance(process["argv_contains"], list) or not process["argv_contains"]
+        or not isinstance(process["argv_contains"], list)
+        or not isinstance(process["required_arguments"], dict)
         or any(
             not isinstance(part, str)
             for part in process["argv0_names"] + process["argv_prefix"] + process["argv_contains"]
+        )
+        or any(
+            not isinstance(flag, str) or not flag.startswith("--")
+            or not isinstance(value, str)
+            for flag, value in process["required_arguments"].items()
         )
     ):
         raise TypedEvidenceError("trusted process contract is invalid")
@@ -329,6 +348,7 @@ def _process_check(process: Any, receipt: Any | None = None) -> dict[str, Any] |
     except ValueError:
         arguments = []
     prefix = process["argv_prefix"]
+    required_arguments = process["required_arguments"]
     if (
         completed.returncode or not arguments
         or Path(arguments[0]).name not in process["argv0_names"]
@@ -336,10 +356,32 @@ def _process_check(process: Any, receipt: Any | None = None) -> dict[str, Any] |
         or any(part not in arguments for part in process["argv_contains"])
     ):
         raise TypedEvidenceError("trusted process identity does not match")
+    for flag, expected in required_arguments.items():
+        positions = [index for index, value in enumerate(arguments) if value == flag]
+        if len(positions) != 1 or positions[0] + 1 >= len(arguments):
+            raise TypedEvidenceError(f"trusted process lacks exact {flag}")
+        if arguments[positions[0] + 1] != expected:
+            raise TypedEvidenceError(f"trusted process {flag} changed")
+    expected_cwd = Path(str(process["cwd"])).resolve()
+    if not expected_cwd.is_absolute() or _process_cwd(pid, "trusted process") != expected_cwd:
+        raise TypedEvidenceError("trusted process working directory changed")
+    artifact = Path(str(process["artifact_path"])).resolve()
+    if (
+        not artifact.is_file()
+        or not SHA256.fullmatch(str(process["artifact_sha256"]))
+        or hashlib.sha256(artifact.read_bytes()).hexdigest() != process["artifact_sha256"]
+        or str(artifact) not in arguments
+    ):
+        raise TypedEvidenceError("trusted process artifact is not bound to its command")
     pointer = process["receipt_pid_pointer"]
     if receipt is not None and _pointer(receipt, pointer) != pid:
         raise TypedEvidenceError("receipt PID does not match the trusted process")
-    return {"pid": pid, "argv_sha256": hashlib.sha256(command.encode()).hexdigest()}
+    return {
+        "pid": pid,
+        "argv_sha256": hashlib.sha256(command.encode()).hexdigest(),
+        "cwd_sha256": hashlib.sha256(str(expected_cwd).encode()).hexdigest(),
+        "artifact_sha256": process["artifact_sha256"],
+    }
 
 
 def _runtime_check(runtime: Any, trust: dict[str, Any], base_url: str) -> dict[str, Any]:
@@ -347,7 +389,7 @@ def _runtime_check(runtime: Any, trust: dict[str, Any], base_url: str) -> dict[s
         runtime,
         {
             "pid_file", "command_sha256", "start_time", "executable",
-            "artifact_path", "artifact_sha256", "listener_port",
+            "cwd", "artifact_path", "artifact_sha256", "listener_port",
         },
         "HTTP runtime trust",
     )
@@ -396,6 +438,11 @@ def _runtime_check(runtime: Any, trust: dict[str, Any], base_url: str) -> dict[s
         raise TypedEvidenceError("HTTP runtime artifact is not verifier-pinned")
     if not SHA256.fullmatch(str(runtime["artifact_sha256"])):
         raise TypedEvidenceError("HTTP runtime artifact digest is invalid")
+    expected_cwd = Path(str(runtime["cwd"])).resolve()
+    if expected_cwd != checkout or _process_cwd(pid, "HTTP runtime") != checkout:
+        raise TypedEvidenceError("HTTP runtime working directory is not the candidate checkout")
+    if str(artifact) not in arguments:
+        raise TypedEvidenceError("HTTP runtime artifact is absent from the process command")
     port = urlsplit(base_url).port
     if runtime["listener_port"] != port or not isinstance(port, int):
         raise TypedEvidenceError("HTTP runtime listener port changed")
@@ -417,10 +464,18 @@ def _runtime_check(runtime: Any, trust: dict[str, Any], base_url: str) -> dict[s
     )
     if head.returncode or head.stdout.strip() != trust["candidate_commit"]:
         raise TypedEvidenceError("HTTP runtime checkout HEAD is not the trusted candidate")
+    dirty = subprocess.run(
+        ["git", "-C", str(checkout), "status", "--porcelain"],
+        text=True, capture_output=True, check=False, timeout=5,
+        env={"PATH": os.defpath, "LANG": "C", "LC_ALL": "C"},
+    )
+    if dirty.returncode or dirty.stdout:
+        raise TypedEvidenceError("HTTP runtime candidate checkout is not clean")
     return {
         "pid": pid,
         "start_time": start_time,
         "command_sha256": runtime["command_sha256"],
+        "cwd_sha256": hashlib.sha256(str(checkout).encode()).hexdigest(),
         "artifact_sha256": runtime["artifact_sha256"],
         "listener_port": port,
     }
@@ -437,7 +492,7 @@ def _validate_runtime_record(value: Any, label: str) -> dict[str, Any]:
     value = _closed(
         value,
         {
-            "pid", "start_time", "command_sha256", "artifact_sha256",
+            "pid", "start_time", "command_sha256", "cwd_sha256", "artifact_sha256",
             "listener_port",
         },
         label,
@@ -447,6 +502,7 @@ def _validate_runtime_record(value: Any, label: str) -> dict[str, Any]:
         or value["pid"] <= 1
         or not isinstance(value["start_time"], str) or not value["start_time"]
         or not SHA256.fullmatch(str(value["command_sha256"]))
+        or not SHA256.fullmatch(str(value["cwd_sha256"]))
         or not SHA256.fullmatch(str(value["artifact_sha256"]))
         or not isinstance(value["listener_port"], int)
         or isinstance(value["listener_port"], bool)
@@ -555,10 +611,16 @@ def _verify_evidence(evidence: Any, trust: dict[str, Any]) -> dict[str, Any]:
         ):
             raise TypedEvidenceError("receipt evidence record has invalid types")
         if record["process"] is not None:
-            process = _closed(record["process"], {"pid", "argv_sha256"}, "receipt process record")
+            process = _closed(
+                record["process"],
+                {"pid", "argv_sha256", "cwd_sha256", "artifact_sha256"},
+                "receipt process record",
+            )
             if (
                 not isinstance(process["pid"], int) or isinstance(process["pid"], bool)
                 or not SHA256.fullmatch(str(process["argv_sha256"]))
+                or not SHA256.fullmatch(str(process["cwd_sha256"]))
+                or not SHA256.fullmatch(str(process["artifact_sha256"]))
             ):
                 raise TypedEvidenceError("receipt process record has invalid types")
     elif evidence["kind"] == "log_assertion":
@@ -571,16 +633,21 @@ def _verify_evidence(evidence: Any, trust: dict[str, Any]) -> dict[str, Any]:
             not isinstance(record["entry"], dict)
             or set(record["entry"]) != set(trusted_source["document_keys"])
             or not SHA256.fullmatch(str(record["entry_sha256"]))
-            or record["authenticity"] != "hmac_sha256"
+            or record["authenticity"] != "verifier_captured_process_bound"
         ):
             raise TypedEvidenceError("log evidence record has invalid fields")
-        if record["process"] is not None:
-            process = _closed(record["process"], {"pid", "argv_sha256"}, "log process record")
-            if (
-                not isinstance(process["pid"], int) or isinstance(process["pid"], bool)
-                or not SHA256.fullmatch(str(process["argv_sha256"]))
-            ):
-                raise TypedEvidenceError("log process record has invalid types")
+        process = _closed(
+            record["process"],
+            {"pid", "argv_sha256", "cwd_sha256", "artifact_sha256"},
+            "log process record",
+        )
+        if (
+            not isinstance(process["pid"], int) or isinstance(process["pid"], bool)
+            or not SHA256.fullmatch(str(process["argv_sha256"]))
+            or not SHA256.fullmatch(str(process["cwd_sha256"]))
+            or not SHA256.fullmatch(str(process["artifact_sha256"]))
+        ):
+            raise TypedEvidenceError("log process record has invalid types")
     else:
         record = evidence["record"]
         record = _closed(
@@ -789,7 +856,7 @@ def _record_receipt(request: dict[str, Any], trust: dict[str, Any], context: dic
             common_keys
             | {
                 "candidate_source", "candidate_source_sha256",
-                "product", "server_name",
+                "product", "server_name", "version",
             },
             "receipt source",
         )
@@ -847,19 +914,27 @@ def _record_receipt(request: dict[str, Any], trust: dict[str, Any], context: dic
             text=True, capture_output=True, check=False, timeout=5,
             env={"PATH": os.defpath, "LANG": "C", "LC_ALL": "C"},
         )
+        expected_receipt = {
+            "schema_version": SCHEMA_VERSION,
+            "product": source["product"],
+            "server_name": source["server_name"],
+            "version": source["version"],
+            "build": source["candidate_source_sha256"],
+            "candidate_commit": context["candidate_commit"],
+            "candidate_source": str(candidate_source),
+            "board_id": context["board_id"],
+            "pid": receipt.get("pid"),
+            "transport": source["transport"],
+        }
         if (
             head.returncode or head.stdout.strip() != trust["candidate_commit"]
             or not candidate_source.is_file()
             or not candidate_source.is_relative_to(checkout)
             or hashlib.sha256(candidate_source.read_bytes()).hexdigest()
             != source["candidate_source_sha256"]
-            or receipt.get("candidate_source") != str(candidate_source)
-            or receipt.get("build") != source["candidate_source_sha256"]
-            or receipt.get("product") != source["product"]
-            or receipt.get("server_name") != source["server_name"]
-            or receipt.get("candidate_commit") != context["candidate_commit"]
-            or receipt.get("board_id") != context["board_id"]
-            or receipt.get("transport") != source["transport"]
+            or not isinstance(receipt.get("pid"), int)
+            or isinstance(receipt.get("pid"), bool)
+            or receipt != expected_receipt
         ):
             raise TypedEvidenceError("Personal runtime receipt binding mismatch")
         age = datetime.now(timezone.utc).timestamp() - path.stat().st_mtime
@@ -894,13 +969,14 @@ def _record_log(request: dict[str, Any], trust: dict[str, Any], context: dict[st
     recorder = _closed(request["recorder"], {"source_id", "field_equals"}, "log_assertion recorder")
     source_id, source = _source(trust, "log_sources", recorder["source_id"])
     keys = {
-        "adapter", "provenance", "runtime_id", "path", "hmac_key_hex",
-        "signature_field", "timestamp_pointer", "max_age_seconds",
+        "adapter", "provenance", "runtime_id", "path",
+        "timestamp_pointer", "max_age_seconds",
         "required_bindings", "emitter", "runtime_pointer", "max_bytes", "process",
-        "document_keys",
+        "document_keys", "action_input_path", "action_input_sha256",
+        "action_digest_pointer",
     }
     _closed(source, keys, "log source")
-    if source["adapter"] != "hmac_jsonl_v1":
+    if source["adapter"] != "process_captured_jsonl_v1":
         raise TypedEvidenceError("log adapter is unsupported")
     _require_context_bindings(
         source["required_bindings"],
@@ -913,6 +989,19 @@ def _record_log(request: dict[str, Any], trust: dict[str, Any], context: dict[st
         or path.stat().st_mode & 0o077 or path.stat().st_uid != os.getuid()
     ):
         raise TypedEvidenceError("log source is unavailable or not private")
+    action_path = Path(str(source["action_input_path"])).resolve()
+    if (
+        not action_path.is_absolute() or not action_path.is_file()
+        or action_path.stat().st_mode & 0o077
+        or action_path.stat().st_uid != os.getuid()
+        or not SHA256.fullmatch(str(source["action_input_sha256"]))
+        or hashlib.sha256(action_path.read_bytes()).hexdigest()
+        != source["action_input_sha256"]
+    ):
+        raise TypedEvidenceError("log action input is not verifier-pinned")
+    process = _process_check(source["process"])
+    if process is None:
+        raise TypedEvidenceError("log capture requires a bound emitter process")
     limit = source["max_bytes"]
     if not isinstance(limit, int) or not 1 <= limit <= MAX_LOG_BYTES:
         raise TypedEvidenceError("log max_bytes is invalid")
@@ -935,24 +1024,21 @@ def _record_log(request: dict[str, Any], trust: dict[str, Any], context: dict[st
             continue
         if not isinstance(entry, dict) or entry.get("emitter") != source["emitter"]:
             continue
-        signature_field = source["signature_field"]
         document_keys = source["document_keys"]
         if (
-            signature_field not in entry or not isinstance(document_keys, list)
+            not isinstance(document_keys, list)
             or not document_keys or len(set(document_keys)) != len(document_keys)
             or any(not isinstance(field, str) for field in document_keys)
-            or set(entry) != set(document_keys) | {signature_field}
+            or set(entry) != set(document_keys)
         ):
             continue
         try:
-            expected = hmac.new(
-                _key_bytes(source["hmac_key_hex"], "log HMAC key"),
-                _json_bytes(_without_member(entry, signature_field)),
-                hashlib.sha256,
-            ).hexdigest()
-            if not isinstance(entry[signature_field], str) or not hmac.compare_digest(expected, entry[signature_field]):
-                continue
             if _pointer(entry, source["runtime_pointer"]) != source["runtime_id"]:
+                continue
+            if (
+                _pointer(entry, source["action_digest_pointer"])
+                != source["action_input_sha256"]
+            ):
                 continue
             _fresh(_pointer(entry, source["timestamp_pointer"]), source["max_age_seconds"], "log timestamp")
             _check_bindings(entry, source["required_bindings"], context, "log entry")
@@ -963,12 +1049,10 @@ def _record_log(request: dict[str, Any], trust: dict[str, Any], context: dict[st
     if len(matches) != 1:
         raise TypedEvidenceError("log capture needs exactly one authentic correlated entry")
     entry, raw = matches[0]
-    process = _process_check(source["process"])
-    public_entry = {key: value for key, value in entry.items() if key != source["signature_field"]}
-    _safe_public(public_entry, "log entry")
+    _safe_public(entry, "log entry")
     return _base_source(source_id, source, trust), {
-        "entry": public_entry, "entry_sha256": hashlib.sha256(raw).hexdigest(),
-        "authenticity": "hmac_sha256", "process": process,
+        "entry": entry, "entry_sha256": hashlib.sha256(raw).hexdigest(),
+        "authenticity": "verifier_captured_process_bound", "process": process,
     }
 
 
