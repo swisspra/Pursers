@@ -1046,7 +1046,7 @@ if (responseAction) {
       state.timer = window.setTimeout(() => {
         if (window.fetch === wrapper) window.fetch = original
         if (window[key] === state) delete window[key]
-      }, 15000)
+      }, 30000)
       window[key] = state
       return true
     })()`,
