@@ -1791,11 +1791,16 @@ def test_fleet_project_add_route_has_closed_effect_and_result_contract(
         "/api/projects/add"
     ]
     assert typed_evidence.FLEET_PROJECT_STEP_POINTERS <= project_selectors
+    assert "/steps/0/step" in project_selectors
+    assert "/steps/2/step" in project_selectors
+    assert "/steps/3/step" in project_selectors
     assert "/steps/4/step" in project_selectors
     assert "/steps/4/status" in project_selectors
+    assert not any(pointer.endswith("/message") for pointer in project_selectors)
     assert "/steps" not in project_selectors
     assert "/items" not in project_selectors
     assert "/doors" not in project_selectors
+    assert len(project_selectors) == 32
     trust["http_sources"]["fleet-api"]["select_allowlist"] = sorted(
         project_selectors
     )

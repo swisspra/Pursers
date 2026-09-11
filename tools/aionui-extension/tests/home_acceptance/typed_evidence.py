@@ -70,7 +70,9 @@ FLEET_RESPONSE_POINTERS = frozenset(
     | {"/_evidence/log_emitted"}
 )
 FLEET_PROJECT_STEP_POINTERS = frozenset(
-    {"/steps/4/step", "/steps/4/status"}
+    f"/steps/{index}/{field}"
+    for index in (0, 2, 3, 4)
+    for field in ("step", "status")
 )
 FLEET_ACTION_RESULT_POINTERS = {
     "/api/attention": frozenset({"/items"}),

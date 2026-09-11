@@ -530,7 +530,16 @@ def test_real_add_project_handler_emits_steps_and_actual_registry_transition(
         fetcher.close()
 
     assert status == 200
+    assert [step["step"] for step in result["steps"]] == [
+        "registry_admin",
+        "board_create",
+        "door_principals",
+        "policies",
+        "fleet_clone",
+        "door_credentials",
+    ]
     fleet_clone = next(step for step in result["steps"] if step["step"] == "fleet_clone")
+    assert result["steps"][4] is fleet_clone
     assert fleet_clone["status"] == "prepared"
     assert central.registry["projects"]["demo"]["board_id"] == "sandbox-board"
     evidence = result["_evidence"]
