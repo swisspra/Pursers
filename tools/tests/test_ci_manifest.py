@@ -37,8 +37,10 @@ def test_central_suite_covers_board_move_regression() -> None:
 def test_manifest_rejects_an_unlisted_test_directory(tmp_path: Path) -> None:
     listed = tmp_path / "packages" / "known" / "tests"
     listed.mkdir(parents=True)
+    (listed / "test_known.py").write_text("def test_known(): pass\n")
     unlisted = tmp_path / "tools" / "new-tool" / "tests"
     unlisted.mkdir(parents=True)
+    (unlisted / "test_new.py").write_text("def test_new(): pass\n")
 
     with pytest.raises(ValueError, match="tools/new-tool/tests"):
         validate_manifest(
@@ -47,9 +49,24 @@ def test_manifest_rejects_an_unlisted_test_directory(tmp_path: Path) -> None:
         )
 
 
+def test_manifest_ignores_non_pytest_test_directories(tmp_path: Path) -> None:
+    listed = tmp_path / "packages" / "known" / "tests"
+    listed.mkdir(parents=True)
+    (listed / "test_known.py").write_text("def test_known(): pass\n")
+    node_tests = tmp_path / "tools" / "dashboard-ui" / "tests"
+    node_tests.mkdir(parents=True)
+    (node_tests / "render.test.mjs").write_text("// covered by the Node runner\n")
+
+    validate_manifest(
+        tmp_path,
+        suites=(Suite("known", "packages/known/tests"),),
+    )
+
+
 def test_manifest_rejects_duplicate_paths(tmp_path: Path) -> None:
     path = tmp_path / "tools" / "same" / "tests"
     path.mkdir(parents=True)
+    (path / "test_same.py").write_text("def test_same(): pass\n")
 
     with pytest.raises(ValueError, match="duplicate manifest entries"):
         validate_manifest(
