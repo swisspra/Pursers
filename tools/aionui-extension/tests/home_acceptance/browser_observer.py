@@ -1007,6 +1007,25 @@ if (responseAction) {
       const method = ${JSON.stringify(responseAction.method)}
       const endpoint = ${JSON.stringify(responseAction.endpoint)}
       const pointer = ${JSON.stringify(responseAction.pointer)}
+      if (typeof state !== 'object' || !state || typeof state.helper !== 'object' ||
+          !state.helper || typeof state.helper.baseUrl !== 'string' ||
+          typeof state.helper.token !== 'string' || !state.helper.token) {
+        throw new Error('connected helper state unavailable')
+      }
+      const helperUrl = new URL(state.helper.baseUrl)
+      const helperToken = state.helper.token
+      const helperHost = helperUrl.hostname.replace(/^\\[|\\]$/g, '').toLowerCase()
+      const helperIpv4 = helperHost.split('.').map(Number)
+      const helperIsLoopback = helperHost === 'localhost'
+        || helperHost.endsWith('.localhost')
+        || helperHost === '::1'
+        || (helperIpv4.length === 4 && helperIpv4[0] === 127 &&
+            helperIpv4.every(part => Number.isInteger(part) && part >= 0 && part <= 255))
+      if (helperUrl.protocol !== 'http:' || !helperIsLoopback || helperUrl.username ||
+          helperUrl.password || helperUrl.pathname !== '/' || helperUrl.search || helperUrl.hash) {
+        throw new Error('configured helper origin is invalid')
+      }
+      const helperOrigin = helperUrl.origin
       const prior = window[key]
       if (prior && prior.wrapper && window.fetch === prior.wrapper) {
         window.fetch = prior.original
@@ -1024,30 +1043,37 @@ if (responseAction) {
         }
         return current
       }
-      const state = { original, values: [], error: null, wrapper: null, timer: null }
+      const capture = { original, values: [], error: null, wrapper: null, timer: null }
       const wrapper = async function(input, init = {}) {
         const response = await original.call(this, input, init)
         const requestUrl = typeof input === 'string' ? input : input.url
         const requestMethod = String(init.method || input.method || 'GET').toUpperCase()
-        let pathname = ''
-        try { pathname = new URL(requestUrl, window.location.href).pathname } catch (_error) {}
-        if (requestMethod === method && pathname === endpoint) {
+        let parsed = null
+        try { parsed = new URL(requestUrl, window.location.href) } catch (_error) {}
+        let requestToken = ''
+        try { requestToken = new Headers(init.headers).get('x-pursers-home-token') || '' }
+        catch (_error) {}
+        const trustedHelperRequest = parsed && parsed.origin === helperOrigin
+          && parsed.pathname === endpoint && !parsed.search && !parsed.hash
+          && init.credentials === 'omit' && init.cache === 'no-store'
+          && init.referrerPolicy === 'no-referrer' && requestToken === helperToken
+        if (requestMethod === method && trustedHelperRequest) {
           try {
             const body = await response.clone().json()
-            state.values.push(selectJson({ status: response.status, body }))
+            capture.values.push(selectJson({ status: response.status, body }))
           } catch (error) {
-            state.error = String(error && error.message ? error.message : error)
+            capture.error = String(error && error.message ? error.message : error)
           }
         }
         return response
       }
-      state.wrapper = wrapper
+      capture.wrapper = wrapper
       window.fetch = wrapper
-      state.timer = window.setTimeout(() => {
+      capture.timer = window.setTimeout(() => {
         if (window.fetch === wrapper) window.fetch = original
-        if (window[key] === state) delete window[key]
+        if (window[key] === capture) delete window[key]
       }, 30000)
-      window[key] = state
+      window[key] = capture
       return true
     })()`,
     awaitPromise: true,

@@ -729,6 +729,21 @@ def test_typed_browser_transition_rejects_invalid_fetch_json_pointer() -> None:
         observer_module._read_transition_spec(io.StringIO(json.dumps(spec)))
 
 
+def test_typed_browser_transition_rejects_multiple_response_captures() -> None:
+    spec = _transition_spec()
+    action = {
+        "kind": "click_response_json",
+        "selector": "#recover-seat",
+        "method": "POST",
+        "endpoint": "/pursers/onboarding/recover",
+        "pointer": "/body/mcp_definition/transport",
+        "path": "/first",
+    }
+    spec["recipe"]["actions"] = [action, {**action, "path": "/second"}]
+    with pytest.raises(observer_module.ObserverError, match="capture must be unique"):
+        observer_module._read_transition_spec(io.StringIO(json.dumps(spec)))
+
+
 def test_ego_transition_uses_isolated_world_and_closed_operations() -> None:
     script = observer_module.EGO_TRANSITION_SCRIPT % (
         json.dumps("acceptance"),
@@ -742,8 +757,15 @@ def test_ego_transition_uses_isolated_world_and_closed_operations() -> None:
     assert "spec.kind === 'fetch_json'" in script
     assert "selectJson(envelope, spec.pointer)" in script
     assert "spec.kind === 'click_response_json'" in script
+    assert "new URL(state.helper.baseUrl)" in script
+    assert "parsed.origin === helperOrigin" in script
+    assert "init.credentials === 'omit'" in script
+    assert "new Headers(init.headers).get('x-pursers-home-token')" in script
+    assert "requestToken === helperToken" in script
     assert "response capture did not match exactly once" in script
     assert "window.fetch = state.original" in script
+    assert "window.clearTimeout(state.timer)" in script
+    assert "}, 30000)" in script
     assert "spec.kind === 'click'" in script
 
 
