@@ -199,6 +199,7 @@ def test_release_handoff_uses_supported_run_and_latest_queries() -> None:
         ("run-id", "gh run watch"),
         ("run-watch", "gh release view"),
         ("prerelease", "gh api"),
+        ("latest-api", "gh release download"),
         ("latest", "gh release download"),
         ("checksum", None),
     ],
@@ -243,6 +244,8 @@ elif name == "gh":
         else:
             print("{}")
     elif args[0] == "api":
+        if failure == "latest-api":
+            raise SystemExit(1)
         print("v5.0.0b1" if failure == "latest" else "v5.0.0a26")
     elif args[:2] == ["release", "download"]:
         output = Path("dist-release")

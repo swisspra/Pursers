@@ -80,7 +80,7 @@ gh release view "$TAG" --repo swisspra/Pursers \
 test "$(gh release view "$TAG" --repo swisspra/Pursers \
   --json isPrerelease --jq '.isPrerelease')" = true
 LATEST_STABLE="$(gh api repos/swisspra/Pursers/releases/latest \
-  --jq '.tag_name' 2>/dev/null || true)"
+  --jq '.tag_name')"
 test "$LATEST_STABLE" != "$TAG"
 gh release download "$TAG" --repo swisspra/Pursers --dir dist-release
 (cd dist-release && shasum -a 256 -c SHA256SUMS.txt)
