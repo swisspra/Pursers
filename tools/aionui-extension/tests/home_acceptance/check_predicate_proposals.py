@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import http.client
 import importlib.util
 import json
@@ -21,10 +22,11 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[4]
 DEFAULT_DELTA = ROOT / "docs/design-home/context/typed-predicate-integration-delta.json"
 FACTS_PATH = "docs/design-home/context/acceptance-facts.json"
-BASE = "97a5ed712c7a7909642608211dea34601d12564b"
+BASE = "d09757f2e6187fd417ee1017814e92754047ea54"
 FLEET_DASHBOARD = ROOT / "tools/fleet-dashboard/fleet_dashboard.py"
 BROWSER_OBSERVER = ROOT / "tools/aionui-extension/tests/home_acceptance/browser_observer.py"
 WEBUI_APP = ROOT / "tools/aionui-extension/webui/app.js"
+EXTENSION_MANIFEST = ROOT / "tools/aionui-extension/aion-extension.json"
 CONTEXT_BINDINGS = [
     "observation_id", "run_id", "action_id", "entity", "surface", "board_id",
     "candidate_commit", "issued_at", "causal_index",
@@ -42,27 +44,18 @@ PARENT_PRODUCER_IDS = {
     "fleet.release-restart-checklist",
 }
 EXPECTED_CONTRACT_GAPS = {
-    "extension.reviewer-preset-claude",
-    "extension.reviewer-preset-codex",
-    "extension.worker-preset-claude",
-    "extension.worker-preset-codex",
     "fleet.add-project-idempotent-rerun",
     "fleet.doors-disabled",
 }
-PRESET_GAPS = EXPECTED_CONTRACT_GAPS - {
-    "fleet.add-project-idempotent-rerun", "fleet.doors-disabled",
+PRESET_FACTS = {
+    "extension.worker-preset-codex": "pursers-worker-codex",
+    "extension.worker-preset-claude": "pursers-worker-claude",
+    "extension.reviewer-preset-codex": "pursers-reviewer-codex",
+    "extension.reviewer-preset-claude": "pursers-reviewer-claude",
 }
-PRESET_GAP_FIELDS = [
-    "/id", "/agentId", "/presetAgentType", "/contextFile",
-    "/resolvedRuntimeContext",
-]
 CREDENTIAL_GAP_FIELDS = [
-    "/before/worker_credential_digest",
-    "/before/reviewer_credential_digest",
-    "/action/id",
-    "/after/worker_credential_digest",
-    "/after/reviewer_credential_digest",
-    "/after/doors",
+    "/_evidence/changed", "/_evidence/effect", "/doors",
+    "/steps/5/step", "/steps/5/status",
 ]
 DOOR_DISABLED_GAP_FIELDS = [
     "/before/disabled", "/action/outcome", "/action/during/disabled",
@@ -586,6 +579,11 @@ def check_fact_specific_mutations(proposals: list[dict[str, Any]]) -> int:
     cases = (
         ("extension.join-progress", ("before", "/connect_step"), "Wrong prior step"),
         (
+            "extension.worker-preset-codex",
+            ("action", "/assistant_binding"),
+            {"agent_id": "claude"},
+        ),
+        (
             "fleet.refresh-pause-resume",
             ("before", "/paused_status"),
             "Updated without pause",
@@ -604,6 +602,82 @@ def check_fact_specific_mutations(proposals: list[dict[str, Any]]) -> int:
         observed[key] = wrong
         require(not evaluate(predicate, observed), f"{fact_id}: fact-specific mutation passed")
     return len(cases)
+
+
+def check_assistant_binding_examples(proposals: list[dict[str, Any]]) -> int:
+    """Bind each proposal to the approved installed/runtime assistant adapter."""
+    manifest_bytes = EXTENSION_MANIFEST.read_bytes()
+    manifest = json.loads(manifest_bytes)
+    assistants = {
+        item["id"]: item for item in manifest["contributes"]["assistants"]
+    }
+    manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
+    checked = 0
+    for fact_id, assistant_id in PRESET_FACTS.items():
+        assistant = assistants[assistant_id]
+        context_file = assistant["contextFile"]
+        context_sha256 = hashlib.sha256(
+            (EXTENSION_MANIFEST.parent / context_file).read_bytes()
+        ).hexdigest()
+        action = {
+            "kind": "assistant_binding",
+            "endpoint": "/api/extensions/assistants",
+            "assistant_id": assistant_id,
+            "path": "/assistant_binding",
+        }
+        binding = {
+            "manifest_id": assistant_id,
+            "runtime_id": f"ext-{assistant_id}",
+            "agent_id": assistant["agentId"],
+            "preset_agent_type": assistant["presetAgentType"],
+            "context_file": context_file,
+            "context_sha256": context_sha256,
+            "manifest_sha256": manifest_sha256,
+            "extension_name": manifest["name"],
+            "endpoint": "/api/extensions/assistants",
+            "transport": "same-origin-http",
+        }
+        item = next(proposal for proposal in proposals if proposal["id"] == fact_id)
+        recorder = item["executable_request"]["recorder"]
+        require(recorder["action"] == [action], f"{fact_id}: assistant action drift")
+        require(
+            item["adapter"]["adapter"] == "aionui_assistant_binding_v1"
+            and item["adapter"]["parent_contract_ref"] == BASE,
+            f"{fact_id}: assistant adapter drift",
+        )
+        observed = {
+            ("before", "/selected_board"): "sandbox-board",
+            ("action", "/assistant_binding"): binding,
+            ("after", "/selected_board"): "sandbox-board",
+        }
+        require(
+            evaluate(item["canonical_predicate"], observed),
+            f"{fact_id}: exact assistant binding did not pass",
+        )
+        mutated = copy.deepcopy(observed)
+        mutated[("action", "/assistant_binding")]["preset_agent_type"] = "wrong"
+        require(
+            not evaluate(item["canonical_predicate"], mutated),
+            f"{fact_id}: preset substitution passed",
+        )
+        checked += 1
+    require(checked == 4, "assistant binding proposal coverage")
+    nodes = [
+        "tools/aionui-extension/tests/home_acceptance/test_typed_evidence.py::"
+        "test_aionui_assistant_binding_joins_installed_manifest_and_runtime",
+        "tools/aionui-extension/tests/home_acceptance/test_typed_evidence.py::"
+        "test_aionui_assistant_binding_rejects_runtime_substitution",
+    ]
+    completed = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", *nodes],
+        cwd=ROOT, text=True, capture_output=True,
+    )
+    require(
+        completed.returncode == 0,
+        "approved assistant binding regression failed: "
+        + (completed.stdout + completed.stderr).strip()[-500:],
+    )
+    return checked
 
 
 def check_contract_gap(item: dict[str, Any], keys: set[str]) -> None:
@@ -627,16 +701,19 @@ def check_contract_gap(item: dict[str, Any], keys: set[str]) -> None:
         {"kind", "source_id", "operation", "selection", "response_fields"},
         f"{item['id']}.requested_semantics",
     )
-    require(requested["kind"] == "state_transition", f"{item['id']}: gap kind")
-    require(
-        requested["source_id"] == f"browser-state-{item['id']}",
-        f"{item['id']}: gap source",
-    )
-    if item["id"] in PRESET_GAPS:
-        expected_fields = PRESET_GAP_FIELDS
-    elif item["id"] == "fleet.add-project-idempotent-rerun":
+    if item["id"] == "fleet.add-project-idempotent-rerun":
+        require(
+            requested["kind"] == "http_response"
+            and requested["source_id"] == "fleet-api",
+            f"{item['id']}: gap kind/source",
+        )
         expected_fields = CREDENTIAL_GAP_FIELDS
     else:
+        require(
+            requested["kind"] == "state_transition"
+            and requested["source_id"] == f"browser-state-{item['id']}",
+            f"{item['id']}: gap kind/source",
+        )
         expected_fields = DOOR_DISABLED_GAP_FIELDS
     require(
         requested["response_fields"] == expected_fields,
@@ -741,6 +818,9 @@ def check_request(item: dict[str, Any]) -> None:
                 "fetch_json": {
                     "kind", "method", "endpoint", "body", "pointer", "path",
                 },
+                "assistant_binding": {
+                    "kind", "endpoint", "assistant_id", "path",
+                },
                 "click_response_json": {
                     "kind", "selector", "method", "endpoint", "pointer", "path",
                 },
@@ -777,6 +857,16 @@ def check_request(item: dict[str, Any]) -> None:
                     )
             if kind_name in {"fetch_json", "click_response_json"}:
                 check_pointer(action["pointer"], item["id"])
+            if kind_name == "assistant_binding":
+                require(
+                    action["endpoint"] == "/api/extensions/assistants"
+                    and isinstance(action["assistant_id"], str)
+                    and re.fullmatch(
+                        r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}",
+                        action["assistant_id"],
+                    ) is not None,
+                    f"{item['id']}: assistant binding action",
+                )
             available["action"].add(action["path"])
         for assertion in predicate["assertions"]:
             require(assertion["path"] in available[assertion["phase"]], f"{item['id']}: unrecorded assertion path")
@@ -910,12 +1000,12 @@ def validate(delta: dict[str, Any]) -> tuple[int, int, int]:
     gaps = [item for item in proposals if item["status"] == "contract_gap"]
     gap_ids = {item["id"] for item in gaps}
     require(
-        len(executable) == 115 and gap_ids == EXPECTED_CONTRACT_GAPS,
-        "expected 115 executable and the six coordinator-confirmed gaps",
+        len(executable) == 119 and gap_ids == EXPECTED_CONTRACT_GAPS,
+        "expected 119 executable and the two unresolved gaps",
     )
     gap_summaries = delta["contract_gaps"]
     require(
-        len(gap_summaries) == 6
+        len(gap_summaries) == 2
         and {item["id"] for item in gap_summaries} == EXPECTED_CONTRACT_GAPS,
         "top-level contract-gap summary drift",
     )
@@ -961,10 +1051,13 @@ def validate(delta: dict[str, Any]) -> tuple[int, int, int]:
         normalized = normalized_predicate(item["canonical_predicate"])
         require(normalized not in semantic, f"{item['id']}: duplicate semantic predicate")
         semantic.add(normalized)
-    require(len(semantic) == 115, "semantic predicates must be unique without source_id")
+    require(len(semantic) == 119, "semantic predicates must be unique without source_id")
     check_regressions(proposals)
     negative_cases += check_fact_specific_mutations(proposals)
-    producer_examples = check_parent_producer_examples(proposals)
+    producer_examples = (
+        check_parent_producer_examples(proposals)
+        + check_assistant_binding_examples(proposals)
+    )
     return check_source_anchors(proposals), negative_cases, producer_examples
 
 
@@ -979,10 +1072,10 @@ def main() -> int:
         print(f"predicate_proposals=FAIL: {error}", file=sys.stderr)
         return 1
     print(f"proposal_file={args.delta.relative_to(ROOT) if args.delta.is_relative_to(ROOT) else args.delta}")
-    print("owned=121 complement=43 executable=115 contract_gaps=6")
-    print("unique_semantic_predicates=115")
+    print("owned=121 complement=43 executable=119 contract_gaps=2")
+    print("unique_semantic_predicates=119")
     print(f"validated_source_anchors={anchors}")
-    print(f"schema_positive_cases=115 negative_cases={negatives}")
+    print(f"schema_positive_cases=119 negative_cases={negatives}")
     print(f"actual_parent_producer_examples={producer_examples}")
     print("predicate_proposals=PASS")
     return 0
