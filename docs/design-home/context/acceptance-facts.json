@@ -38,22 +38,55 @@
   ],
   "final_gates": [
     {
-      "action": "Navigate to or trigger Quickstart Candidate Flow without relabelling another state.",
+      "action": "Reload the installed candidate after the complete disposable run, follow the Quickstart entry action, and observe the real Home helper setup.",
       "derivation": {
-        "kind": "literal",
-        "source_quote": "3. Choose **Connect helper**."
+        "kind": "identifier",
+        "symbol": "final.quickstart-candidate-flow"
       },
-      "evidence_source": "docs/design-home/quickstart.md",
+      "evidence_source": "docs/design-home/acceptance-observer.md",
       "expected_fact": "The final Quickstart flow visibly reaches the exact installed candidate Home.",
       "id": "final.quickstart-candidate-flow",
-      "precondition": "Exact candidate and sandbox board are bound; arrange the final.quickstart-candidate-flow state on the real aionui surface.",
+      "precondition": "The clean reconnect observation passed for this exact installed candidate, run, and sandbox entity.",
       "predicate": {
-        "expected": "Connect helper",
+        "conjuncts": [
+          {
+            "expected": "The rotated disposable door rejects the old credential and reconnects the same board with the new credential without stale state.",
+            "kind": "prior_state",
+            "observation": "clean_reconnect_after_rotation"
+          },
+          {
+            "assertions": [
+              {
+                "op": "eq",
+                "path": "/open_quickstart",
+                "phase": "action",
+                "value": "clicked"
+              },
+              {
+                "op": "eq",
+                "path": "/helper_action",
+                "phase": "after",
+                "value": "Connect helper"
+              },
+              {
+                "op": "contains",
+                "path": "/helper_heading",
+                "phase": "after",
+                "value": "Connect the Home helper"
+              },
+              {
+                "op": "eq",
+                "path": "/raw_json_count",
+                "phase": "after",
+                "value": 0
+              }
+            ],
+            "kind": "state_transition",
+            "source_id": "browser-final-quickstart-candidate-flow"
+          }
+        ],
         "name": "required fact: final.quickstart-candidate-flow",
-        "operator": "ax_name_contains",
-        "path": [
-          "nodes"
-        ]
+        "operator": "all_of"
       },
       "status": "normative",
       "surface": "aionui"
@@ -107,22 +140,56 @@
       "surface": "fleet"
     },
     {
-      "action": "Navigate to or trigger O1 Readiness Rollback without relabelling another state.",
+      "action": "Open the guarded Fleet operations card, run the verifier-arranged failing disposable operation, and observe its readiness and rollback result.",
       "derivation": {
-        "kind": "literal",
-        "source_quote": "checklist, immutable confirmation plan, job progress/result, rollback failure,"
+        "kind": "identifier",
+        "symbol": "terminalOpsText"
       },
-      "evidence_source": "docs/design-home/acceptance.md",
+      "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
       "expected_fact": "The O1 readiness check and rollback outcome are both visible on the real operations surface.",
       "id": "final.o1-readiness-rollback",
-      "precondition": "Exact candidate and sandbox board are bound; arrange the final.o1-readiness-rollback state on the real aionui surface.",
+      "precondition": "The exact candidate Fleet runtime is bound to a disposable operations configuration whose failed mutation has a safe rollback path.",
       "predicate": {
-        "expected": "Rollback",
+        "conjuncts": [
+          {
+            "assertions": [
+              {
+                "op": "eq",
+                "path": "/run_guarded_operation",
+                "phase": "action",
+                "value": "clicked"
+              },
+              {
+                "op": "contains",
+                "path": "/readiness",
+                "phase": "after",
+                "value": "CI: main"
+              },
+              {
+                "op": "contains",
+                "path": "/job_result",
+                "phase": "after",
+                "value": "Outcome: failed"
+              },
+              {
+                "op": "contains",
+                "path": "/rollback_result",
+                "phase": "after",
+                "value": "Rollback"
+              },
+              {
+                "op": "eq",
+                "path": "/success_effect_count",
+                "phase": "after",
+                "value": 0
+              }
+            ],
+            "kind": "state_transition",
+            "source_id": "browser-final-o1-readiness-rollback"
+          }
+        ],
         "name": "required fact: final.o1-readiness-rollback",
-        "operator": "ax_name_contains",
-        "path": [
-          "nodes"
-        ]
+        "operator": "all_of"
       },
       "status": "normative",
       "surface": "fleet"
@@ -4706,22 +4773,122 @@
       "surface": "aionui"
     },
     {
-      "action": "Navigate to or trigger Door_connect without relabelling another state.",
+      "action": "Connect the verifier-filled disposable worker door and reviewer door through the shipped join form, never selecting either secret as evidence.",
       "derivation": {
-        "kind": "literal",
-        "source_quote": "$('#sidebar-state').textContent = 'Project connected';"
+        "kind": "identifier",
+        "symbol": "showConnection"
       },
       "evidence_source": "tools/aionui-extension/webui/app.js",
-      "expected_fact": "The accessibility tree exposes 'Project connected' for door_connect.",
+      "expected_fact": "The worker and reviewer doors connect the exact sandbox board through real UI actions and expose only redacted seat metadata with ready MCP registration.",
       "id": "door_connect",
-      "precondition": "Exact candidate and sandbox board are bound; arrange the door_connect state on the real aionui surface.",
+      "precondition": "The verifier owns valid disposable worker and reviewer doors, pre-fills each password field outside evidence selection, and binds the exact candidate and sandbox board.",
       "predicate": {
-        "expected": "Project connected",
+        "conjuncts": [
+          {
+            "assertions": [
+              {
+                "op": "eq",
+                "path": "/connect",
+                "phase": "action",
+                "value": "clicked"
+              },
+              {
+                "op": "eq",
+                "path": "/connection_pill",
+                "phase": "after",
+                "value": "Connected"
+              },
+              {
+                "op": "eq",
+                "path": "/role",
+                "phase": "after",
+                "value": "worker"
+              },
+              {
+                "op": "eq",
+                "path": "/push_mode",
+                "phase": "after",
+                "value": "push"
+              },
+              {
+                "op": "ne",
+                "path": "/key_id",
+                "phase": "after",
+                "value": "—"
+              },
+              {
+                "op": "ne",
+                "path": "/expires",
+                "phase": "after",
+                "value": "—"
+              },
+              {
+                "op": "eq",
+                "path": "/door_value",
+                "phase": "after",
+                "value": ""
+              },
+              {
+                "op": "contains",
+                "path": "/registration_message",
+                "phase": "after",
+                "value": "AionUi registration is ready"
+              }
+            ],
+            "kind": "state_transition",
+            "source_id": "browser-door-connect-worker"
+          },
+          {
+            "assertions": [
+              {
+                "op": "eq",
+                "path": "/connect",
+                "phase": "action",
+                "value": "clicked"
+              },
+              {
+                "op": "eq",
+                "path": "/connection_pill",
+                "phase": "after",
+                "value": "Connected"
+              },
+              {
+                "op": "eq",
+                "path": "/role",
+                "phase": "after",
+                "value": "reviewer"
+              },
+              {
+                "op": "eq",
+                "path": "/push_mode",
+                "phase": "after",
+                "value": "push"
+              },
+              {
+                "op": "ne",
+                "path": "/seat",
+                "phase": "after",
+                "value": "—"
+              },
+              {
+                "op": "eq",
+                "path": "/door_value",
+                "phase": "after",
+                "value": ""
+              },
+              {
+                "op": "contains",
+                "path": "/registration_message",
+                "phase": "after",
+                "value": "AionUi registration is ready"
+              }
+            ],
+            "kind": "state_transition",
+            "source_id": "browser-door-connect-reviewer"
+          }
+        ],
         "name": "required fact: door_connect",
-        "operator": "ax_name_contains",
-        "path": [
-          "nodes"
-        ]
+        "operator": "all_of"
       },
       "status": "normative",
       "surface": "aionui"
@@ -4807,22 +4974,73 @@
       "surface": "aionui"
     },
     {
-      "action": "Navigate to or trigger Ticket_offer_claim without relabelling another state.",
+      "action": "Open the live targeted offer, claim it through the real host action, then attempt the separately expired offer and observe its refusal.",
       "derivation": {
-        "kind": "literal",
-        "source_quote": "claim only that live offer, and prove a stale/expired offer cannot be claimed."
+        "kind": "identifier",
+        "symbol": "ticket_offer_claim"
       },
       "evidence_source": "docs/design-home/acceptance.md",
-      "expected_fact": "The accessibility tree exposes 'claimed' for ticket_offer_claim.",
+      "expected_fact": "Only the live targeted offer becomes claimed by the intended disposable identity, while the expired offer remains unclaimed and exposes a refusal.",
       "id": "ticket_offer_claim",
-      "precondition": "Exact candidate and sandbox board are bound; arrange the ticket_offer_claim state on the real aionui surface.",
+      "precondition": "The populated disposable roster observation passed for the same run; one offer is live and targeted to the intended worker while a second offer is expired.",
       "predicate": {
-        "expected": "claimed",
+        "conjuncts": [
+          {
+            "expected": "The real Team roster contains exactly five workers, three reviewers, and eight distinct identities.",
+            "kind": "prior_state",
+            "observation": "five_workers_three_reviewers"
+          },
+          {
+            "assertions": [
+              {
+                "op": "eq",
+                "path": "/claim_live_offer",
+                "phase": "action",
+                "value": "clicked"
+              },
+              {
+                "op": "eq",
+                "path": "/live_offer_status",
+                "phase": "after",
+                "value": "claimed"
+              },
+              {
+                "op": "ne",
+                "path": "/claimed_identity",
+                "phase": "after",
+                "value": "—"
+              }
+            ],
+            "kind": "state_transition",
+            "source_id": "browser-ticket-offer-claim-live"
+          },
+          {
+            "assertions": [
+              {
+                "op": "eq",
+                "path": "/claim_expired_offer",
+                "phase": "action",
+                "value": "clicked"
+              },
+              {
+                "op": "ne",
+                "path": "/expired_offer_status",
+                "phase": "after",
+                "value": "claimed"
+              },
+              {
+                "op": "contains",
+                "path": "/claim_error",
+                "phase": "after",
+                "value": "expired"
+              }
+            ],
+            "kind": "state_transition",
+            "source_id": "browser-ticket-offer-claim-expired"
+          }
+        ],
         "name": "required fact: ticket_offer_claim",
-        "operator": "ax_name_contains",
-        "path": [
-          "nodes"
-        ]
+        "operator": "all_of"
       },
       "status": "normative",
       "surface": "aionui"
@@ -4871,22 +5089,67 @@
       "surface": "aionui"
     },
     {
-      "action": "Navigate to or trigger Result_visible without relabelling another state.",
+      "action": "Refresh the real result view after independent review and observe the exact closed result row and current activity cursor.",
       "derivation": {
-        "kind": "literal",
-        "source_quote": "routes, and the assembled group, ticket, and result route families. Source"
+        "kind": "identifier",
+        "symbol": "makeResultRow"
       },
-      "evidence_source": "docs/design-home/acceptance.md",
-      "expected_fact": "The accessibility tree exposes 'Result' for result_visible.",
+      "evidence_source": "tools/aionui-extension/webui/app.js",
+      "expected_fact": "The reviewed closed result shows its independent reviewer, actor, status transition, and a nonzero current cursor on the real Home result view.",
       "id": "result_visible",
-      "precondition": "Exact candidate and sandbox board are bound; arrange the result_visible state on the real aionui surface.",
+      "precondition": "The independent-review sequence observation passed for the same run and disposable ticket entity.",
       "predicate": {
-        "expected": "Result",
+        "conjuncts": [
+          {
+            "expected": "One submitted disposable ticket reaches a closed result with an independent review and no unresolved approval.",
+            "kind": "prior_state",
+            "observation": "ticket_submit_independent_review"
+          },
+          {
+            "assertions": [
+              {
+                "op": "eq",
+                "path": "/refresh_results",
+                "phase": "action",
+                "value": "clicked"
+              },
+              {
+                "op": "eq",
+                "path": "/closed_result_count",
+                "phase": "after",
+                "value": 1
+              },
+              {
+                "op": "contains",
+                "path": "/review",
+                "phase": "after",
+                "value": "independent review"
+              },
+              {
+                "op": "ne",
+                "path": "/actor",
+                "phase": "after",
+                "value": "—"
+              },
+              {
+                "op": "contains",
+                "path": "/status_transition",
+                "phase": "after",
+                "value": "closed"
+              },
+              {
+                "op": "gt",
+                "path": "/cursor",
+                "phase": "after",
+                "value": 0
+              }
+            ],
+            "kind": "state_transition",
+            "source_id": "browser-result-visible"
+          }
+        ],
         "name": "required fact: result_visible",
-        "operator": "ax_name_contains",
-        "path": [
-          "nodes"
-        ]
+        "operator": "all_of"
       },
       "status": "normative",
       "surface": "aionui"
@@ -4953,22 +5216,103 @@
       "surface": "aionui"
     },
     {
-      "action": "Navigate to or trigger Clean_reconnect_after_rotation without relabelling another state.",
+      "action": "Attempt the rotated-out credential, then submit the verifier-filled replacement through Replace door and refresh the same board state.",
       "derivation": {
-        "kind": "literal",
-        "source_quote": "const outcome = result.outcome === 'rotated' ? 'Connection replaced' : 'Project connected';"
+        "kind": "identifier",
+        "symbol": "submitDoor"
       },
       "evidence_source": "tools/aionui-extension/webui/app.js",
-      "expected_fact": "The accessibility tree exposes 'Connection replaced' for clean_reconnect_after_rotation.",
+      "expected_fact": "The rotated disposable door rejects the old credential and reconnects the same board with the new credential without stale state.",
       "id": "clean_reconnect_after_rotation",
-      "precondition": "Exact candidate and sandbox board are bound; arrange the clean_reconnect_after_rotation state on the real aionui surface.",
+      "precondition": "The pause/resume/stop observation passed for the same run, and the operator rotated only this disposable board-role door.",
       "predicate": {
-        "expected": "Connection replaced",
+        "conjuncts": [
+          {
+            "expected": "The disposable seat is paused, resumed, then cooperatively stopped; no running row remains and stop is disabled.",
+            "kind": "prior_state",
+            "observation": "pause_resume_stop"
+          },
+          {
+            "assertions": [
+              {
+                "op": "eq",
+                "path": "/check_old_door",
+                "phase": "action",
+                "value": "clicked"
+              },
+              {
+                "op": "eq",
+                "path": "/connection_pill",
+                "phase": "after",
+                "value": "Needs attention"
+              },
+              {
+                "op": "ne",
+                "path": "/old_door_error",
+                "phase": "after",
+                "value": ""
+              },
+              {
+                "op": "eq",
+                "path": "/door_value",
+                "phase": "after",
+                "value": ""
+              }
+            ],
+            "kind": "state_transition",
+            "source_id": "browser-clean-reconnect-old-door"
+          },
+          {
+            "assertions": [
+              {
+                "op": "eq",
+                "path": "/replace_door",
+                "phase": "action",
+                "value": "clicked"
+              },
+              {
+                "op": "eq",
+                "path": "/connection_pill",
+                "phase": "after",
+                "value": "Connected"
+              },
+              {
+                "op": "contains",
+                "path": "/connection_message",
+                "phase": "after",
+                "value": "Connection replaced"
+              },
+              {
+                "op": "eq",
+                "path": "/stale_offer_count",
+                "phase": "after",
+                "value": 0
+              },
+              {
+                "op": "eq",
+                "path": "/duplicate_identity_count",
+                "phase": "after",
+                "value": 0
+              },
+              {
+                "op": "eq",
+                "path": "/orphan_registration_count",
+                "phase": "after",
+                "value": 0
+              },
+              {
+                "op": "eq",
+                "path": "/door_value",
+                "phase": "after",
+                "value": ""
+              }
+            ],
+            "kind": "state_transition",
+            "source_id": "browser-clean-reconnect-new-door"
+          }
+        ],
         "name": "required fact: clean_reconnect_after_rotation",
-        "operator": "ax_name_contains",
-        "path": [
-          "nodes"
-        ]
+        "operator": "all_of"
       },
       "status": "normative",
       "surface": "aionui"
