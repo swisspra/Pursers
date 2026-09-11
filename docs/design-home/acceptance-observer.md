@@ -112,6 +112,23 @@ core observations remain mandatory. The runner additionally requires
 `final.quickstart-candidate-flow`, `final.fleet-503-recovery`, and
 `final.o1-readiness-rollback`, producing 201 concrete captures.
 
+An observation whose canonical predicate contains nonvisual `all_of`
+conjuncts also carries one `typed_evidence` row per conjunct. Each row binds a
+bounded evidence path plus exact `run_id`, `action_id`, `entity`, and
+`causal_index`; the surface, sandbox board, candidate SHA, and observation ID
+come from the canonical report graph. Browser capture is still mandatory.
+Visual conjuncts remain exact accessibility assertions, while a typed-only
+fact must carry an explicit `browser context:` assertion so its screenshot and
+accessibility state remain substantive without pretending that visible copy
+proves the backend fact.
+
+The harness never accepts a report-authored typed result. A verifier-owned
+evaluator must authenticate the referenced record and return a passing result
+bound to the full correlation above and the exact canonical-conjunct digest.
+An absent evaluator is a blocked capability, not a pass or skip. The parent
+integration checkpoint deliberately keeps that gate closed until the separate
+typed collector has an independently reviewed immutable SHA.
+
 `harness.py verify-evidence --browser-observer /PATH/TO/verifier-observer/browser_observer.py`
 remains the equivalent single-source-of-truth entrypoint; `runner.py validate`
 is a thin wrapper that adds a structured `passed` / `failed` / `blocked` outcome.
@@ -251,6 +268,7 @@ handoff already carries them.
   assertions/<id>.json            verifier-authored assertions
   specs/<id>.json                 caller request that was sent to the observer
   observations/<id>.json          browser_observation receipt
+  typed/<id>-<n>.json              authenticated nonvisual recorder output
   artifacts/<id>.png              observed screenshot bytes
   artifacts/<id>.ax.json          observed accessibility snapshot
 ```

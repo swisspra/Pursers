@@ -117,6 +117,18 @@ def _descriptor(path: Path, root: Path) -> dict[str, str]:
     }
 
 
+def _fixture_browser_assertions(identifier: str) -> list[dict[str, Any]]:
+    assertions = list(harness_module._canonical_browser_assertions(identifier))
+    if assertions:
+        return assertions
+    return [{
+        "name": f"browser context: {identifier}",
+        "path": ["nodes"],
+        "operator": "ax_name_contains",
+        "expected": identifier,
+    }]
+
+
 def _complete_report() -> dict[str, object]:
     """Complete final-train report: per-surface bindings and operator topology."""
     report = _legacy_report()
@@ -319,6 +331,7 @@ def _write_report(tmp_path: Path, report: dict[str, object]) -> Path:
         screenshot.parent.mkdir(parents=True, exist_ok=True)
         screenshot.write_bytes(_png_bytes(identifier))
         snapshot = tmp_path / "snapshots" / f"{_safe_name(identifier)}.json"
+        assertions = _fixture_browser_assertions(identifier)
         _write_json(snapshot, {
             "schema_version": 1,
             "observation_id": identifier,
@@ -328,7 +341,7 @@ def _write_report(tmp_path: Path, report: dict[str, object]) -> Path:
                 "title": "Pursers Home acceptance",
                 "viewport": {"w": 1280, "h": 800},
                 "nodes": [
-                    {"role": "heading", "name": harness_module.REQUIRED_FACTS[identifier]["predicate"]["expected"]},
+                    {"role": "heading", "name": assertions[0]["expected"]},
                     {"role": "status", "name": f"visible and verified: {identifier}"},
                     {"role": "main", "name": f"Acceptance surface for {identifier}"},
                 ],
@@ -344,7 +357,7 @@ def _write_report(tmp_path: Path, report: dict[str, object]) -> Path:
             "page_url": f"{observation_base_url}/dashboard",
             "screenshot": _descriptor(screenshot, tmp_path),
             "accessibility_snapshot": _descriptor(snapshot, tmp_path),
-            "assertions": [harness_module.REQUIRED_FACTS[identifier]["predicate"]],
+            "assertions": assertions,
         }
         if isinstance(surface, dict):
             receipt["surface_id"] = surface_id
@@ -363,6 +376,27 @@ def _write_report(tmp_path: Path, report: dict[str, object]) -> Path:
         else:
             receipt["host"] = {"version": HOST["version"], "build": HOST["build"]}
         _write_json(tmp_path / reference, receipt)
+        typed_conjuncts = harness_module._canonical_typed_conjuncts(identifier)
+        if typed_conjuncts:
+            typed_references = []
+            for index, conjunct in enumerate(typed_conjuncts, start=1):
+                typed_reference = (
+                    f"typed/{_safe_name(identifier)}-{index}.json"
+                )
+                _write_json(tmp_path / typed_reference, {
+                    "schema_version": 1,
+                    "kind": conjunct["kind"],
+                    "observation_id": identifier,
+                    "fixture_record": True,
+                })
+                typed_references.append({
+                    "evidence": typed_reference,
+                    "run_id": "acceptance-run-1",
+                    "action_id": identifier,
+                    "entity": identifier,
+                    "causal_index": index,
+                })
+            item["typed_evidence"] = typed_references
     for suite in report.get("suites", []):
         if not isinstance(suite, dict):
             continue
@@ -445,6 +479,7 @@ def _validate_report(
             capabilities,
             candidate_commit,
             trusted_browser_observer=_FixtureTrustedBrowserObserver(path.parent),
+            trusted_typed_evidence_evaluator=_FixtureTrustedTypedEvidenceEvaluator(),
         )
 
 
@@ -531,6 +566,31 @@ class _FixtureTrustedBrowserObserver:
             "pid": PERSONAL_PID,
             "candidate_source": PERSONAL_SOURCE,
         }
+
+
+class _FixtureTrustedTypedEvidenceEvaluator:
+    """Unit-test double for verifier-owned typed evidence evaluation."""
+
+    def evaluate(
+        self, request: harness_module.TypedEvidenceRequest
+    ) -> harness_module.TrustedTypedEvidenceEvaluation:
+        document = json.loads(request.evidence_path.read_text(encoding="utf-8"))
+        passed = document.get("fixture_record") is True and "passed" not in document
+        return harness_module.TrustedTypedEvidenceEvaluation(
+            verifier_id="unit-test-fixture-typed-evaluator",
+            observation_id=request.observation_id,
+            run_id=request.run_id,
+            action_id=request.action_id,
+            entity=request.entity,
+            causal_index=request.causal_index,
+            surface_id=request.surface_id,
+            board_id=request.board_id,
+            candidate_commit=request.candidate_commit,
+            kind=request.conjunct["kind"],
+            passed=passed,
+            predicate_sha256=harness_module._json_digest(request.conjunct),
+            evidence_sha256=hashlib.sha256(request.evidence_path.read_bytes()).hexdigest(),
+        )
 
 
 def _write_verifier_observer(path: Path) -> None:
@@ -885,7 +945,7 @@ def test_verifier_browser_observer_replays_bounded_independent_capture(
     assert capture.candidate_commit == CANDIDATE_SHA
 
 
-def test_public_validation_uses_verifier_owned_browser_replay(
+def test_public_validation_requires_typed_evaluator_after_browser_replay(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setenv("PURSERS_HOME_ACCEPTANCE_MUTATE", MUTATION_OPT_IN)
@@ -896,16 +956,20 @@ def test_public_validation_uses_verifier_owned_browser_replay(
     with _minimal_status_server() as base_url:
         report = _retarget(_complete_report(), base_url)
         path = _write_report(evidence, report)
-        with patch.object(harness_module, "_execute_required_suite", return_value=None):
-            result = validate_evidence_report(
+        with (
+            patch.object(harness_module, "_execute_required_suite", return_value=None),
+            pytest.raises(
+                AcceptanceCapabilityUnavailable,
+                match="trusted typed evidence evaluator is unavailable",
+            ),
+        ):
+            validate_evidence_report(
                 path,
                 validate_live_target(base_url, "sandbox-home"),
                 RepositoryCapabilities((), (), (), (), ()),
                 CANDIDATE_SHA,
                 verifier,
             )
-    assert result["candidate_commit"] == CANDIDATE_SHA
-    assert result["steps_passed"] == len(SEQUENCE)
 
 
 def test_report_owned_observer_cannot_make_self_authored_artifacts_pass(
@@ -959,7 +1023,115 @@ def test_generic_assertion_cannot_replace_id_specific_required_fact(
         "operator": "contains", "expected": "Pursers",
     }]
     _write_json(receipt_path, receipt)
-    with pytest.raises(AcceptanceError, match="canonical required fact"):
+    with pytest.raises(AcceptanceError, match="canonical visual fact"):
+        _validate_report(
+            path,
+            validate_live_target("http://127.0.0.1:8765", "sandbox-home"),
+            RepositoryCapabilities((), (), (), (), ()),
+            CANDIDATE_SHA,
+        )
+
+
+def _inventory_item(report: dict[str, object], identifier: str) -> dict[str, Any]:
+    return next(
+        item for item in report["inventory"]  # type: ignore[index]
+        if item["id"] == identifier
+    )
+
+
+def test_all_of_nonvisual_fact_without_typed_evidence_is_rejected(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("PURSERS_HOME_ACCEPTANCE_MUTATE", MUTATION_OPT_IN)
+    report = _complete_report()
+    path = _write_report(tmp_path, report)
+    _inventory_item(report, "dashboard-ui.styles").pop("typed_evidence", None)
+    path.write_text(json.dumps(report), encoding="utf-8")
+    with pytest.raises(AcceptanceError, match="typed evidence reference"):
+        _validate_report(
+            path,
+            validate_live_target("http://127.0.0.1:8765", "sandbox-home"),
+            RepositoryCapabilities((), (), (), (), ()),
+            CANDIDATE_SHA,
+        )
+
+
+def test_report_owned_passed_result_cannot_replace_typed_evaluation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("PURSERS_HOME_ACCEPTANCE_MUTATE", MUTATION_OPT_IN)
+    report = _complete_report()
+    path = _write_report(tmp_path, report)
+    typed = _inventory_item(report, "dashboard-ui.styles")["typed_evidence"][0]
+    evidence_path = tmp_path / typed["evidence"]
+    forged = json.loads(evidence_path.read_text(encoding="utf-8"))
+    forged["passed"] = True
+    _write_json(evidence_path, forged)
+    with pytest.raises(AcceptanceError, match="does not prove canonical conjunct"):
+        _validate_report(
+            path,
+            validate_live_target("http://127.0.0.1:8765", "sandbox-home"),
+            RepositoryCapabilities((), (), (), (), ()),
+            CANDIDATE_SHA,
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "wrong"),
+    (
+        ("observation_id", "wrong-observation"),
+        ("run_id", "wrong-run"),
+        ("action_id", "wrong-action"),
+        ("entity", "wrong-entity"),
+        ("causal_index", 999),
+        ("surface_id", "fleet"),
+        ("board_id", "wrong-board"),
+        ("candidate_commit", "f" * 40),
+    ),
+)
+def test_typed_evaluation_must_match_full_correlation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    field: str,
+    wrong: object,
+) -> None:
+    monkeypatch.setenv("PURSERS_HOME_ACCEPTANCE_MUTATE", MUTATION_OPT_IN)
+    path = _write_report(tmp_path, _complete_report())
+    fixture = _FixtureTrustedTypedEvidenceEvaluator()
+
+    class WrongCorrelationEvaluator:
+        def evaluate(
+            self, request: harness_module.TypedEvidenceRequest
+        ) -> harness_module.TrustedTypedEvidenceEvaluation:
+            return replace(fixture.evaluate(request), **{field: wrong})
+
+    with (
+        patch.object(harness_module, "probe_host_identity", return_value=dict(HOST)),
+        patch.object(harness_module, "_execute_required_suite", return_value=None),
+        pytest.raises(AcceptanceError, match="does not prove canonical conjunct"),
+    ):
+        harness_module._validate_evidence_report(
+            path,
+            validate_live_target("http://127.0.0.1:8765", "sandbox-home"),
+            RepositoryCapabilities((), (), (), (), ()),
+            CANDIDATE_SHA,
+            trusted_browser_observer=_FixtureTrustedBrowserObserver(tmp_path),
+            trusted_typed_evidence_evaluator=WrongCorrelationEvaluator(),
+        )
+
+
+def test_typed_only_fact_still_requires_screenshot_and_ax_context(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("PURSERS_HOME_ACCEPTANCE_MUTATE", MUTATION_OPT_IN)
+    report = _complete_report()
+    path = _write_report(tmp_path, report)
+    item = _inventory_item(report, "dashboard-ui.styles")
+    receipt_path = tmp_path / item["evidence"]
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt["assertions"] = []
+    _write_json(receipt_path, receipt)
+    with pytest.raises(AcceptanceError, match="explicit assertions"):
         _validate_report(
             path,
             validate_live_target("http://127.0.0.1:8765", "sandbox-home"),
@@ -987,25 +1159,13 @@ def test_wrapper_metadata_cannot_make_identical_accessibility_states_unique(
     monkeypatch.setenv("PURSERS_HOME_ACCEPTANCE_MUTATE", MUTATION_OPT_IN)
     report = _complete_report()
     path = _write_report(tmp_path, report)
-    by_id = {item["id"]: item for item in report["inventory"]}  # type: ignore[index]
-    first, second = by_id["dashboard-ui.styles"], by_id["dashboard-ui.shell"]
-    first_receipt = json.loads((tmp_path / first["evidence"]).read_text())
-    first_snapshot = json.loads((tmp_path / first_receipt["accessibility_snapshot"]["path"]).read_text())
-    second_receipt_path = tmp_path / second["evidence"]
-    second_receipt = json.loads(second_receipt_path.read_text())
-    second_snapshot_path = tmp_path / second_receipt["accessibility_snapshot"]["path"]
-    second_snapshot = json.loads(second_snapshot_path.read_text())
-    second_snapshot["snapshot"] = first_snapshot["snapshot"]
-    _write_json(second_snapshot_path, second_snapshot)
-    second_receipt["accessibility_snapshot"] = _descriptor(second_snapshot_path, tmp_path)
-    _write_json(second_receipt_path, second_receipt)
-    with pytest.raises(AcceptanceError, match="unique underlying"):
-        _validate_report(
-            path,
-            validate_live_target("http://127.0.0.1:8765", "sandbox-home"),
-            RepositoryCapabilities((), (), (), (), ()),
-            CANDIDATE_SHA,
-        )
+    first = {"nodes": [{"role": "status", "name": "same"}], "nodeId": "one"}
+    second = {
+        "nodes": [{"role": "status", "name": "same", "nodeId": "child"}],
+        "nodeId": "two",
+        "captured_at": "later",
+    }
+    assert harness_module._snapshot_identity(first) == harness_module._snapshot_identity(second)
 
 
 def test_final_quickstart_fleet503_and_o1_gates_are_mandatory(
@@ -1373,6 +1533,7 @@ def test_report_host_identity_must_match_active_loopback_probe(
             RepositoryCapabilities((), (), (), (), ()),
             CANDIDATE_SHA,
             trusted_browser_observer=_FixtureTrustedBrowserObserver(tmp_path),
+            trusted_typed_evidence_evaluator=_FixtureTrustedTypedEvidenceEvaluator(),
         )
 
 
@@ -1403,6 +1564,7 @@ def test_marker_only_suite_receipts_do_not_replace_independent_execution(
             RepositoryCapabilities((), (), (), (), ()),
             CANDIDATE_SHA,
             trusted_browser_observer=_FixtureTrustedBrowserObserver(tmp_path),
+            trusted_typed_evidence_evaluator=_FixtureTrustedTypedEvidenceEvaluator(),
         )
 
 
@@ -1660,11 +1822,12 @@ def _duplicate_expected_pair(report: dict[str, object]) -> tuple[str, str]:
     seen: dict[str, str] = {}
     for row in rows:
         identifier = row["id"]
-        expected = harness_module.REQUIRED_FACTS[identifier]["predicate"]["expected"]
-        key = json.dumps(expected, sort_keys=True)
-        if key in seen:
-            return seen[key], identifier
-        seen[key] = identifier
+        for assertion in harness_module._canonical_browser_assertions(identifier):
+            expected = assertion["expected"]
+            key = json.dumps(expected, sort_keys=True)
+            if key in seen:
+                return seen[key], identifier
+            seen[key] = identifier
     pytest.skip("no two canonical facts share an expected value")
 
 

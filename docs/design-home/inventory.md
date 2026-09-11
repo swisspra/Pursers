@@ -104,14 +104,14 @@ Each row is normative until a verifier records measured evidence. The machine pr
 | ID | Surface | Required observable fact | Predicate | Evidence source |
 | --- | --- | --- | --- | --- |
 | `dashboard-ui.logic` | personal | The accessibility tree exposes 'Today' for dashboard-ui.logic. | `ax_name_contains(Today)` | `tools/dashboard-ui/src/dashboard.ts` |
-| `dashboard-ui.shell` | personal | The accessibility tree exposes 'On Board Personal' for dashboard-ui.shell. | `ax_name_contains(On Board Personal)` | `tools/dashboard-ui/src/dashboard.ts` |
+| `dashboard-ui.shell` | personal | The accessibility tree exposes the exact 'On Board Personal Preview' shell title. | `ax_name_contains(On Board Personal Preview)` | `tools/dashboard-ui/dashboard-entry.html` |
 | `dashboard-ui.state.empty-tickets` | personal | The accessibility tree exposes 'No current work' for dashboard-ui.state.empty-tickets. | `ax_name_contains(No current work)` | `tools/dashboard-ui/src/dashboard.ts` |
 | `dashboard-ui.state.error` | personal | The accessibility tree exposes 'Disconnected' for dashboard-ui.state.error. | `ax_name_contains(Disconnected)` | `tools/dashboard-ui/src/dashboard.ts` |
 | `dashboard-ui.state.loading` | personal | The accessibility tree exposes 'Loading' for dashboard-ui.state.loading. | `ax_name_contains(Loading)` | `tools/dashboard-ui/src/dashboard.ts` |
 | `dashboard-ui.state.permission-denied` | personal | The accessibility tree exposes 'Permission denied' for dashboard-ui.state.permission-denied. | `ax_name_contains(Permission denied)` | `tools/dashboard-ui/src/dashboard.ts` |
 | `dashboard-ui.state.search-empty` | personal | The accessibility tree exposes 'No results' for dashboard-ui.state.search-empty. | `ax_name_contains(No results)` | `tools/dashboard-ui/src/dashboard.ts` |
 | `dashboard-ui.state.stale` | personal | The accessibility tree exposes 'Stale' for dashboard-ui.state.stale. | `ax_name_contains(Stale)` | `tools/dashboard-ui/src/dashboard.ts` |
-| `dashboard-ui.styles` | personal | The accessibility tree exposes 'On Board Personal' for dashboard-ui.styles. | `ax_name_contains(On Board Personal)` | `tools/dashboard-ui/src/dashboard.ts` |
+| `dashboard-ui.styles` | personal | The dashboard style changes from light to dark through the data-theme state. | `state_transition(light → dark via data-theme)` | `tools/dashboard-ui/src/dashboard.css` |
 | `extension-join.state.bridge-missing` | aionui | The accessibility tree exposes 'Install the Pursers bridge' for extension-join.state.bridge-missing. | `ax_name_contains(Install the Pursers bridge)` | `tools/aionui-extension/webui/app.js` |
 | `extension-join.state.error` | aionui | The accessibility tree exposes 'Join failed' for extension-join.state.error. | `ax_name_contains(Join failed)` | `tools/aionui-extension/webui/app.js` |
 | `extension-join.state.initial` | aionui | The accessibility tree exposes 'Join Pursers' for extension-join.state.initial. | `ax_name_contains(Join Pursers)` | `tools/aionui-extension/webui/app.js` |
@@ -210,7 +210,7 @@ Each row is normative until a verifier records measured evidence. The machine pr
 | `fleet.release-pypi` | fleet | The accessibility tree exposes 'Release PyPI' for fleet.release-pypi. | `ax_name_contains(Release PyPI)` | `tools/fleet-dashboard/fleet_dashboard.py` |
 | `fleet.release-restart-checklist` | fleet | The accessibility tree exposes 'Release Restart Checklist' for fleet.release-restart-checklist. | `ax_name_contains(Release Restart Checklist)` | `tools/fleet-dashboard/fleet_dashboard.py` |
 | `fleet.release-tag` | fleet | The accessibility tree exposes 'Release Tag' for fleet.release-tag. | `ax_name_contains(Release Tag)` | `tools/fleet-dashboard/fleet_dashboard.py` |
-| `fleet.search-no-results` | fleet | The accessibility tree exposes 'Search No Results' for fleet.search-no-results. | `ax_name_contains(Search No Results)` | `tools/fleet-dashboard/fleet_dashboard.py` |
+| `fleet.search-no-results` | fleet | An unmatched query changes matching results to the visible exact 'No results' state. | `state_transition + ax_name_contains(No results)` | `tools/fleet-dashboard/fleet_dashboard.py` |
 | `fleet.search-results` | fleet | The accessibility tree exposes 'Search Results' for fleet.search-results. | `ax_name_contains(Search Results)` | `tools/fleet-dashboard/fleet_dashboard.py` |
 | `fleet.tab-changes` | fleet | The accessibility tree exposes 'Tab Changes' for fleet.tab-changes. | `ax_name_contains(Tab Changes)` | `tools/fleet-dashboard/fleet_dashboard.py` |
 | `fleet.tab-flow` | fleet | The accessibility tree exposes 'Tab Flow' for fleet.tab-flow. | `ax_name_contains(Tab Flow)` | `tools/fleet-dashboard/fleet_dashboard.py` |
@@ -222,13 +222,13 @@ Each row is normative until a verifier records measured evidence. The machine pr
 | `fleet.unknown-route-recovery` | fleet | The accessibility tree exposes 'Unknown Route Recovery' for fleet.unknown-route-recovery. | `ax_name_contains(Unknown Route Recovery)` | `tools/fleet-dashboard/fleet_dashboard.py` |
 | `fleet.updated-state` | fleet | The accessibility tree exposes 'Updated State' for fleet.updated-state. | `ax_name_contains(Updated State)` | `tools/fleet-dashboard/fleet_dashboard.py` |
 | `fleet.worker-management` | fleet | The accessibility tree exposes 'Worker Management' for fleet.worker-management. | `ax_name_contains(Worker Management)` | `tools/fleet-dashboard/fleet_dashboard.py` |
-| `personal-mcp.state.board-empty` | personal | The accessibility tree exposes 'No current work' for personal-mcp.state.board-empty. | `ax_name_contains(No current work)` | `packages/personal/src/pursers_personal/apps_server.py` |
-| `personal-mcp.state.fleet-unavailable` | personal | The accessibility tree exposes 'Fleet unavailable' for personal-mcp.state.fleet-unavailable. | `ax_name_contains(Fleet unavailable)` | `packages/personal/src/pursers_personal/apps_server.py` |
+| `personal-mcp.state.board-empty` | personal | The live Personal MCP board_snapshot response reports zero tickets for the bound empty board. | `http_response(board_snapshot, ticket_total=0)` | `packages/personal/src/pursers_personal/apps_server.py` |
+| `personal-mcp.state.fleet-unavailable` | personal | The live Personal MCP fleet_snapshot response preserves a registry_warning for an unavailable active board. | `http_response(fleet_snapshot, registry_warning)` | `packages/personal/src/pursers_personal/apps_server.py` |
 | `personal-mcp.state.links-empty` | personal | The accessibility tree exposes 'No links' for personal-mcp.state.links-empty. | `ax_name_contains(No links)` | `packages/personal/src/pursers_personal/apps_server.py` |
 | `personal-mcp.state.memory-empty` | personal | The accessibility tree exposes 'No pinned memory' for personal-mcp.state.memory-empty. | `ax_name_contains(No pinned memory)` | `packages/personal/src/pursers_personal/apps_server.py` |
 | `personal-mcp.state.not-onboarded` | personal | The accessibility tree exposes 'Not onboarded' for personal-mcp.state.not-onboarded. | `ax_name_contains(Not onboarded)` | `packages/personal/src/pursers_personal/apps_server.py` |
 | `personal-mcp.state.ticket-not-found` | personal | The accessibility tree exposes 'Ticket not found' for personal-mcp.state.ticket-not-found. | `ax_name_contains(Ticket not found)` | `packages/personal/src/pursers_personal/apps_server.py` |
-| `personal-mcp.surface` | personal | The accessibility tree exposes 'On Board Personal' for personal-mcp.surface. | `ax_name_contains(On Board Personal)` | `packages/personal/src/pursers_personal/apps_server.py` |
+| `personal-mcp.surface` | personal | The live Personal runtime receipt identifies the server as 'On Board Personal'. | `receipt_field(server_name=On Board Personal)` | `packages/personal/src/pursers_personal/apps_server.py` |
 | `personal.activity-bounded-feed` | personal | The accessibility tree exposes 'Activity Bounded Feed' for personal.activity-bounded-feed. | `ax_name_contains(Activity Bounded Feed)` | `tools/dashboard-ui/src/dashboard.ts` |
 | `personal.activity-cursor` | personal | The accessibility tree exposes 'Activity Cursor' for personal.activity-cursor. | `ax_name_contains(Activity Cursor)` | `tools/dashboard-ui/src/dashboard.ts` |
 | `personal.activity-dropped-events` | personal | The accessibility tree exposes 'Activity Dropped Events' for personal.activity-dropped-events. | `ax_name_contains(Activity Dropped Events)` | `tools/dashboard-ui/src/dashboard.ts` |
@@ -259,7 +259,7 @@ Each row is normative until a verifier records measured evidence. The machine pr
 | `personal.fleet-registry-warning` | personal | The accessibility tree exposes 'Fleet Registry Warning' for personal.fleet-registry-warning. | `ax_name_contains(Fleet Registry Warning)` | `tools/dashboard-ui/src/dashboard.ts` |
 | `personal.fleet-shared-pool` | personal | The accessibility tree exposes 'Fleet Shared Pool' for personal.fleet-shared-pool. | `ax_name_contains(Fleet Shared Pool)` | `tools/dashboard-ui/src/dashboard.ts` |
 | `personal.fleet-truncation` | personal | The accessibility tree exposes 'Fleet Truncation' for personal.fleet-truncation. | `ax_name_contains(Fleet Truncation)` | `tools/dashboard-ui/src/dashboard.ts` |
-| `personal.fleet-unavailable` | personal | The accessibility tree exposes 'Fleet Unavailable' for personal.fleet-unavailable. | `ax_name_contains(Fleet Unavailable)` | `tools/dashboard-ui/src/dashboard.ts` |
+| `personal.fleet-unavailable` | personal | Opening Projects after fleet_snapshot failure changes the surface to 'Fleet data unavailable'. | `state_transition + ax_name_contains(Fleet data unavailable)` | `tools/dashboard-ui/src/dashboard.ts` |
 | `personal.health` | personal | The accessibility tree exposes 'Health' for personal.health. | `ax_name_contains(Health)` | `tools/dashboard-ui/src/dashboard.ts` |
 | `personal.keyboard-tabs` | personal | The accessibility tree exposes 'Keyboard Tabs' for personal.keyboard-tabs. | `ax_name_contains(Keyboard Tabs)` | `tools/dashboard-ui/src/dashboard.ts` |
 | `personal.links-edge-types` | personal | The accessibility tree exposes 'Links Edge Types' for personal.links-edge-types. | `ax_name_contains(Links Edge Types)` | `tools/dashboard-ui/src/dashboard.ts` |
@@ -270,13 +270,13 @@ Each row is normative until a verifier records measured evidence. The machine pr
 | `personal.links-truncation` | personal | The accessibility tree exposes 'Links Truncation' for personal.links-truncation. | `ax_name_contains(Links Truncation)` | `tools/dashboard-ui/src/dashboard.ts` |
 | `personal.links-unavailable` | personal | The accessibility tree exposes 'Links Unavailable' for personal.links-unavailable. | `ax_name_contains(Links Unavailable)` | `tools/dashboard-ui/src/dashboard.ts` |
 | `personal.refresh` | personal | The accessibility tree exposes 'Refresh' for personal.refresh. | `ax_name_contains(Refresh)` | `tools/dashboard-ui/src/dashboard.ts` |
-| `personal.search-no-results` | personal | The accessibility tree exposes 'Search No Results' for personal.search-no-results. | `ax_name_contains(Search No Results)` | `tools/dashboard-ui/src/dashboard.ts` |
-| `personal.search-results` | personal | The accessibility tree exposes 'Search Results' for personal.search-results. | `ax_name_contains(Search Results)` | `tools/dashboard-ui/src/dashboard.ts` |
+| `personal.search-no-results` | personal | An unmatched query changes matching data to 'No matching loaded data'. | `state_transition + ax_name_contains(No matching loaded data)` | `tools/dashboard-ui/src/dashboard.ts` |
+| `personal.search-results` | personal | A matching query changes the search panel from hidden to visible and exposes 'Search results'. | `state_transition + ax_name_contains(Search results)` | `tools/dashboard-ui/src/dashboard.ts` |
 | `personal.source-board-event-feed` | personal | The accessibility tree exposes 'Source Board Event Feed' for personal.source-board-event-feed. | `ax_name_contains(Source Board Event Feed)` | `tools/dashboard-ui/src/dashboard.ts` |
 | `personal.source-board-snapshot` | personal | The accessibility tree exposes 'Source Board Snapshot' for personal.source-board-snapshot. | `ax_name_contains(Source Board Snapshot)` | `tools/dashboard-ui/src/dashboard.ts` |
 | `personal.source-fleet-snapshot` | personal | The accessibility tree exposes 'Source Fleet Snapshot' for personal.source-fleet-snapshot. | `ax_name_contains(Source Fleet Snapshot)` | `tools/dashboard-ui/src/dashboard.ts` |
 | `personal.source-link-snapshot` | personal | The accessibility tree exposes 'Source Link Snapshot' for personal.source-link-snapshot. | `ax_name_contains(Source Link Snapshot)` | `tools/dashboard-ui/src/dashboard.ts` |
-| `personal.theme` | personal | The accessibility tree exposes 'Theme' for personal.theme. | `ax_name_contains(Theme)` | `tools/dashboard-ui/src/dashboard.ts` |
+| `personal.theme` | personal | Settings exposes 'Host-managed appearance' for host-controlled theme behavior. | `ax_name_contains(Host-managed appearance)` | `tools/dashboard-ui/src/dashboard.ts` |
 | `personal.today-active-agents` | personal | The accessibility tree exposes 'Today Active Agents' for personal.today-active-agents. | `ax_name_contains(Today Active Agents)` | `tools/dashboard-ui/src/dashboard.ts` |
 | `personal.today-current-work` | personal | The accessibility tree exposes 'Today Current Work' for personal.today-current-work. | `ax_name_contains(Today Current Work)` | `tools/dashboard-ui/src/dashboard.ts` |
 | `personal.today-important-pinned-note` | personal | The accessibility tree exposes 'Today Important Pinned Note' for personal.today-important-pinned-note. | `ax_name_contains(Today Important Pinned Note)` | `tools/dashboard-ui/src/dashboard.ts` |
@@ -299,7 +299,7 @@ These are mandatory in addition to the nine sequence steps and 189 inventory obs
 
 | ID | Surface | Required observable fact | Predicate | Evidence source |
 | --- | --- | --- | --- | --- |
-| `final.quickstart-candidate-flow` | aionui | The final Quickstart flow visibly reaches the exact installed candidate Home. | `ax_name_contains(Pursers)` | `docs/design-home/quickstart.md` |
+| `final.quickstart-candidate-flow` | aionui | The final Quickstart flow visibly reaches the exact installed candidate and exposes 'Connect helper'. | `ax_name_contains(Connect helper)` | `docs/design-home/quickstart.md` |
 | `final.fleet-503-recovery` | fleet | The live Fleet surface visibly reports a 503 dependency failure and a subsequent recovered state. | `ax_name_contains(Recovered)` | `tools/fleet-dashboard/fleet_dashboard.py` |
 | `final.o1-readiness-rollback` | fleet | The O1 readiness check and rollback outcome are both visible on the real operations surface. | `ax_name_contains(Rollback)` | `docs/design-home/acceptance.md` |
 <!-- acceptance-facts:end -->

@@ -113,6 +113,7 @@ SECRET_VALUE = re.compile(
 )
 PRIVATE_PATH = re.compile(r"(?:/Users/|/home/|[A-Za-z]:\\Users\\)")
 EVIDENCE_REFERENCE = re.compile(r"[A-Za-z0-9._/-]{1,240}")
+CORRELATION_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
 SUITE_LOG_MARKERS = {
     "repository-python": (
         "central:", "client:", "personal:", "wait-bridge:", "seat-kit:"
@@ -194,12 +195,56 @@ class _BrowserEvidence:
     attestation_nonce: str = ""
 
 
+@dataclass(frozen=True)
+class TypedEvidenceRequest:
+    observation_id: str
+    run_id: str
+    action_id: str
+    entity: str
+    causal_index: int
+    surface_id: str
+    board_id: str
+    candidate_commit: str
+    conjunct: dict[str, Any]
+    evidence_path: Path
+
+
+@dataclass(frozen=True)
+class TrustedTypedEvidenceEvaluation:
+    verifier_id: str
+    observation_id: str
+    run_id: str
+    action_id: str
+    entity: str
+    causal_index: int
+    surface_id: str
+    board_id: str
+    candidate_commit: str
+    kind: str
+    passed: bool
+    predicate_sha256: str
+    evidence_sha256: str
+
+
+@dataclass(frozen=True)
+class _EvidenceReferences:
+    browser: str
+    typed: tuple[dict[str, Any], ...] = ()
+
+
 class _TrustedBrowserObserver(Protocol):
     def capture(self, request: BrowserObservationRequest) -> TrustedBrowserCapture:
         """Capture the observation through a verifier-owned browser channel."""
 
     def personal_challenge(self) -> dict[str, Any]:
         """Return verifier-owned material for the Personal transport challenge."""
+
+
+class _TrustedTypedEvidenceEvaluator(Protocol):
+    def evaluate(
+        self, request: TypedEvidenceRequest
+    ) -> TrustedTypedEvidenceEvaluation:
+        """Evaluate one nonvisual conjunct through verifier-owned code."""
 
 
 class VerifierBrowserObserver:
@@ -737,6 +782,7 @@ def _validate_evidence_report(
     candidate_commit: str,
     *,
     trusted_browser_observer: _TrustedBrowserObserver | None,
+    trusted_typed_evidence_evaluator: _TrustedTypedEvidenceEvaluator | None = None,
     legacy_compat: bool = False,
 ) -> dict[str, Any]:
     require_mutation_opt_in(os.environ.get("PURSERS_HOME_ACCEPTANCE_MUTATE"))
@@ -872,9 +918,9 @@ def _validate_evidence_report(
         )
     primary_references = [
         host_reference,
-        *passed_steps.values(),
-        *passed_inventory.values(),
-        *passed_final_gates.values(),
+        *(value.browser for value in passed_steps.values()),
+        *(value.browser for value in passed_inventory.values()),
+        *(value.browser for value in passed_final_gates.values()),
         *suite_references,
     ]
     if len(primary_references) != len(set(primary_references)):
@@ -889,14 +935,17 @@ def _validate_evidence_report(
     )
     browser_evidence: list[_BrowserEvidence] = []
     browser_identifiers: list[str] = []
-    for identifier, reference in {
+    typed_evidence_rows: list[
+        tuple[str, str, dict[str, Any], dict[str, Any]]
+    ] = []
+    for identifier, references in {
         **passed_steps, **passed_inventory, **passed_final_gates
     }.items():
         surface_id = _surface_for_identifier(identifier)
         browser_identifiers.append(identifier)
         browser_evidence.append(_validate_browser_receipt(
             evidence_root,
-            reference,
+            references.browser,
             identifier,
             target,
             host_version,
@@ -905,6 +954,12 @@ def _validate_evidence_report(
             None if surface_bindings is None else surface_bindings[surface_id],
             surface_id,
         ))
+        typed_evidence_rows.extend(
+            (identifier, surface_id, reference, conjunct)
+            for reference, conjunct in zip(
+                references.typed, _canonical_typed_conjuncts(identifier)
+            )
+        )
     browser_attachment_references = [
         reference
         for evidence in browser_evidence
@@ -928,17 +983,28 @@ def _validate_evidence_report(
         suite_output_references.append(_validate_suite_receipt(
             evidence_root, suite, target, candidate_commit
         ))
+    all_artifact_references = [
+        *primary_references,
+        *browser_attachment_references,
+        *(row[2]["evidence"] for row in typed_evidence_rows),
+        *suite_output_references,
+    ]
+    if len(all_artifact_references) != len(set(all_artifact_references)):
+        raise AcceptanceError(
+            "each receipt, attachment, typed record, and suite output must be distinct"
+        )
     _validate_evidence_artifacts(
-        evidence_root,
-        [
-            *primary_references,
-            *browser_attachment_references,
-            *suite_output_references,
-        ],
-        excluded=resolved_report,
+        evidence_root, all_artifact_references, excluded=resolved_report
     )
     _validate_trusted_browser_observations(
         browser_evidence, trusted_browser_observer
+    )
+    _validate_trusted_typed_evidence(
+        evidence_root,
+        typed_evidence_rows,
+        trusted_typed_evidence_evaluator,
+        target.board_id,
+        candidate_commit,
     )
     for suite in suite_rows:
         _execute_required_suite(suite["name"], suite["command"], candidate_commit)
@@ -1066,6 +1132,44 @@ EPHEMERAL_SNAPSHOT_KEYS = frozenset({
     "sessionid", "observation_id", "captured_at", "recorded_at", "observer_id",
     "schema_version", "timestamp",
 })
+
+
+def _predicate_conjuncts(identifier: str) -> tuple[dict[str, Any], ...]:
+    predicate = REQUIRED_FACTS[identifier]["predicate"]
+    if predicate.get("operator") != "all_of":
+        return ()
+    return tuple(predicate["conjuncts"])
+
+
+def _canonical_browser_assertions(identifier: str) -> tuple[dict[str, Any], ...]:
+    predicate = REQUIRED_FACTS[identifier]["predicate"]
+    if predicate.get("operator") != "all_of":
+        return (predicate,)
+    return tuple(
+        {
+            "name": f"required fact: {identifier} visual conjunct {index}",
+            "path": conjunct["path"],
+            "operator": "ax_name_contains",
+            "expected": conjunct["expected"],
+        }
+        for index, conjunct in enumerate(predicate["conjuncts"], start=1)
+        if conjunct["kind"] == "ax_name_contains"
+    )
+
+
+def _canonical_typed_conjuncts(identifier: str) -> tuple[dict[str, Any], ...]:
+    return tuple(
+        conjunct
+        for conjunct in _predicate_conjuncts(identifier)
+        if conjunct["kind"] != "ax_name_contains"
+    )
+
+
+def _json_digest(value: Any) -> str:
+    encoded = json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _behavioural_signature(identifier: str) -> frozenset[tuple[str, ...]]:
@@ -1308,10 +1412,21 @@ def _validate_browser_receipt(
             or len(json.dumps(assertion["expected"])) > 1_000
         ):
             raise AcceptanceError("browser observation assertion is not verifiable")
-    required_assertion = REQUIRED_FACTS.get(identifier, {}).get("predicate")
-    if assertions != [required_assertion]:
+    required_assertions = list(_canonical_browser_assertions(identifier))
+    if required_assertions:
+        if assertions != required_assertions:
+            raise AcceptanceError(
+                f"browser observation {identifier} does not prove its canonical visual fact"
+            )
+    elif (
+        not _canonical_typed_conjuncts(identifier)
+        or any(
+            not assertion["name"].startswith("browser context: ")
+            for assertion in assertions
+        )
+    ):
         raise AcceptanceError(
-            f"browser observation {identifier} does not prove its canonical required fact"
+            f"browser observation {identifier} needs explicit visual context"
         )
     _evaluate_browser_assertions(snapshot["snapshot"], assertions)
     return _BrowserEvidence(
@@ -1507,6 +1622,72 @@ def _validate_trusted_browser_observations(
     if len(observer_ids) != 1:
         raise AcceptanceError(
             "all browser observations must come from one trusted observer session"
+        )
+
+
+def _validate_trusted_typed_evidence(
+    evidence_root: Path,
+    rows: list[tuple[str, str, dict[str, Any], dict[str, Any]]],
+    evaluator: _TrustedTypedEvidenceEvaluator | None,
+    board_id: str,
+    candidate_commit: str,
+) -> None:
+    if not rows:
+        return
+    if evaluator is None:
+        raise AcceptanceCapabilityUnavailable(
+            "trusted typed evidence evaluator is unavailable; nonvisual facts cannot pass"
+        )
+    verifier_ids: set[str] = set()
+    correlations: set[tuple[str, str, str, int]] = set()
+    for identifier, surface_id, reference, conjunct in rows:
+        correlation = (
+            reference["run_id"], reference["action_id"],
+            reference["entity"], reference["causal_index"],
+        )
+        if correlation in correlations:
+            raise AcceptanceError("typed evidence correlation must be unique")
+        correlations.add(correlation)
+        evidence_path = _resolve_evidence_file(
+            evidence_root, reference["evidence"], "typed evidence"
+        )
+        evidence_bytes = evidence_path.read_bytes()
+        request = TypedEvidenceRequest(
+            observation_id=identifier,
+            run_id=reference["run_id"],
+            action_id=reference["action_id"],
+            entity=reference["entity"],
+            causal_index=reference["causal_index"],
+            surface_id=surface_id,
+            board_id=board_id,
+            candidate_commit=candidate_commit,
+            conjunct=conjunct,
+            evidence_path=evidence_path,
+        )
+        result = evaluator.evaluate(request)
+        if not isinstance(result, TrustedTypedEvidenceEvaluation):
+            raise AcceptanceError("trusted typed evidence evaluator returned an invalid result")
+        verifier_ids.add(_require_exact_text(result.verifier_id, "typed evidence verifier id"))
+        if (
+            result.observation_id != identifier
+            or result.run_id != reference["run_id"]
+            or result.action_id != reference["action_id"]
+            or result.entity != reference["entity"]
+            or result.causal_index != reference["causal_index"]
+            or result.surface_id != surface_id
+            or result.board_id != board_id
+            or result.candidate_commit != candidate_commit
+            or result.kind != conjunct["kind"]
+            or result.passed is not True
+            or result.predicate_sha256 != _json_digest(conjunct)
+            or result.evidence_sha256 != hashlib.sha256(evidence_bytes).hexdigest()
+        ):
+            raise AcceptanceError(
+                f"trusted typed evidence does not prove canonical conjunct for {identifier}"
+            )
+    if len(verifier_ids) != 1:
+        raise AcceptanceError(
+            "all typed evidence must come from one trusted evaluator session"
         )
 
 
@@ -1753,8 +1934,10 @@ def _validate_evidence_artifacts(
             raise AcceptanceError("evidence artifact contains a secret or private path")
 
 
-def _passed_evidence_items(items: list[Any], label: str) -> dict[str, str]:
-    evidence: dict[str, str] = {}
+def _passed_evidence_items(
+    items: list[Any], label: str
+) -> dict[str, _EvidenceReferences]:
+    evidence: dict[str, _EvidenceReferences] = {}
     for item in items:
         if not isinstance(item, dict) or item.get("status") != "passed":
             raise AcceptanceError(f"every {label} must pass")
@@ -1762,13 +1945,60 @@ def _passed_evidence_items(items: list[Any], label: str) -> dict[str, str]:
         reference = item.get("evidence")
         if not isinstance(identifier, str):
             raise AcceptanceError(f"every {label} needs an id")
+        if identifier not in REQUIRED_FACTS:
+            raise AcceptanceError(f"{label} id is not authoritative")
         if not isinstance(reference, str) or not EVIDENCE_REFERENCE.fullmatch(reference):
             raise AcceptanceError(f"every {label} needs a bounded relative evidence reference")
         if reference.startswith("/") or ".." in Path(reference).parts:
             raise AcceptanceError(f"every {label} evidence reference must stay relative")
         if identifier in evidence:
             raise AcceptanceError(f"duplicate {label} id")
-        evidence[identifier] = reference
+        typed_conjuncts = _canonical_typed_conjuncts(identifier)
+        expected_keys = {"id", "status", "evidence"}
+        typed_references: tuple[dict[str, Any], ...] = ()
+        if typed_conjuncts:
+            expected_keys.add("typed_evidence")
+            raw_typed = item.get("typed_evidence")
+            if (
+                not isinstance(raw_typed, list)
+                or len(raw_typed) != len(typed_conjuncts)
+                or any(not isinstance(value, dict) for value in raw_typed)
+            ):
+                raise AcceptanceError(
+                    f"{label} {identifier} needs one bounded typed evidence reference per nonvisual conjunct"
+                )
+            seen_typed_paths: set[str] = set()
+            for value in raw_typed:
+                if set(value) != {
+                    "evidence", "run_id", "action_id", "entity", "causal_index"
+                }:
+                    raise AcceptanceError(
+                        f"{label} {identifier} typed evidence fields do not match schema"
+                    )
+                typed_path = value["evidence"]
+                if (
+                    not isinstance(typed_path, str)
+                    or not EVIDENCE_REFERENCE.fullmatch(typed_path)
+                    or typed_path.startswith("/")
+                    or ".." in Path(typed_path).parts
+                    or typed_path in seen_typed_paths
+                    or any(
+                        not isinstance(value[field], str)
+                        or not CORRELATION_ID.fullmatch(value[field])
+                        for field in ("run_id", "action_id", "entity")
+                    )
+                    or not isinstance(value["causal_index"], int)
+                    or isinstance(value["causal_index"], bool)
+                    or value["causal_index"] < 0
+                ):
+                    raise AcceptanceError(
+                        f"{label} {identifier} typed evidence correlation is invalid"
+                    )
+                seen_typed_paths.add(typed_path)
+            typed_references = tuple(raw_typed)
+        if set(item) != expected_keys:
+            raise AcceptanceError(f"{label} {identifier} fields do not match schema")
+        evidence[identifier] = _EvidenceReferences(reference, typed_references)
     return evidence
 
 

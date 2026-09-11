@@ -376,19 +376,45 @@ def prepare(args: argparse.Namespace) -> int:
         raise RunnerError(EXIT_USAGE, f"observation manifest must contain exactly {len(required)} rows")
     by_id: dict[str, dict[str, Any]] = {}
     for row in rows:
-        if not isinstance(row, dict) or set(row) != {"id", "page_url", "assertions"}:
+        if not isinstance(row, dict) or not {"id", "page_url", "assertions"}.issubset(row):
             raise RunnerError(EXIT_USAGE, "observation manifest row fields do not match schema")
         identifier = row["id"]
         if not isinstance(identifier, str) or identifier in by_id:
             raise RunnerError(EXIT_USAGE, "observation manifest IDs must be unique strings")
         if not isinstance(row["assertions"], list) or not row["assertions"]:
             raise RunnerError(EXIT_USAGE, f"observation {identifier} needs assertions")
-        required_assertion = harness.REQUIRED_FACTS.get(identifier, {}).get("predicate")
-        if row["assertions"] != [required_assertion]:
+        typed_conjuncts = harness._canonical_typed_conjuncts(identifier)
+        expected_keys = {"id", "page_url", "assertions"}
+        if typed_conjuncts:
+            expected_keys.add("typed_evidence")
+        if set(row) != expected_keys:
+            raise RunnerError(EXIT_USAGE, "observation manifest row fields do not match schema")
+        required_assertions = list(harness._canonical_browser_assertions(identifier))
+        if required_assertions:
+            if row["assertions"] != required_assertions:
+                raise RunnerError(
+                    EXIT_USAGE,
+                    f"observation {identifier} assertions do not match its canonical visual fact",
+                )
+        elif any(
+            not isinstance(assertion, dict)
+            or not str(assertion.get("name", "")).startswith("browser context: ")
+            for assertion in row["assertions"]
+        ):
             raise RunnerError(
                 EXIT_USAGE,
-                f"observation {identifier} assertions do not match its canonical required fact",
+                f"observation {identifier} needs explicit browser context assertions",
             )
+        if typed_conjuncts:
+            try:
+                harness._passed_evidence_items([{
+                    "id": identifier,
+                    "status": "passed",
+                    "evidence": f"observations/{identifier}.json",
+                    "typed_evidence": row["typed_evidence"],
+                }], "observation")
+            except harness.AcceptanceError as error:
+                raise RunnerError(EXIT_USAGE, str(error)) from None
         by_id[identifier] = row
     if set(by_id) != required:
         raise RunnerError(EXIT_USAGE, "observation manifest IDs do not match the authoritative set")
@@ -423,6 +449,11 @@ def prepare(args: argparse.Namespace) -> int:
         "sequence": list(sequence),
         "inventory": list(inventory),
         "final_gates": list(final_gates),
+        "typed_evidence": {
+            identifier: by_id[identifier]["typed_evidence"]
+            for identifier in (*sequence, *inventory, *final_gates)
+            if harness._canonical_typed_conjuncts(identifier)
+        },
         "commands": commands,
     }
     plan_path = evidence / "capture-plan.json"
@@ -449,7 +480,7 @@ def assemble(args: argparse.Namespace) -> int:
         raise RunnerError(EXIT_BLOCKED, "capture plan is missing or invalid") from None
     if not isinstance(plan, dict) or set(plan) != {
         "schema_version", "candidate_commit", "operator_topology",
-        "sequence", "inventory", "final_gates", "commands",
+        "sequence", "inventory", "final_gates", "typed_evidence", "commands",
     } or plan["schema_version"] != SCHEMA_VERSION:
         raise RunnerError(EXIT_FAILED, "capture plan fields do not match schema")
     candidate = config["surfaces"]["aionui"]["candidate_commit"]
@@ -469,6 +500,14 @@ def assemble(args: argparse.Namespace) -> int:
         raise RunnerError(EXIT_USAGE, "suite manifest does not match the required suite set")
     sequence, inventory, final_gates = _acceptance_ids()
     observations: dict[str, dict[str, Any]] = {}
+    typed_by_id = plan["typed_evidence"]
+    expected_typed_ids = {
+        identifier
+        for identifier in (*sequence, *inventory, *final_gates)
+        if harness._canonical_typed_conjuncts(identifier)
+    }
+    if not isinstance(typed_by_id, dict) or set(typed_by_id) != expected_typed_ids:
+        raise RunnerError(EXIT_FAILED, "capture plan typed evidence is invalid")
     surface_runtime: dict[str, dict[str, Any]] = {}
     for identifier in (*sequence, *inventory, *final_gates):
         path = evidence / "observations" / f"{identifier}.json"
@@ -484,6 +523,29 @@ def assemble(args: argparse.Namespace) -> int:
             raise RunnerError(EXIT_FAILED, f"surface runtime changed across captures: {surface_id}")
         surface_runtime[surface_id] = runtime
         observations[identifier] = receipt
+        typed_conjuncts = harness._canonical_typed_conjuncts(identifier)
+        if typed_conjuncts:
+            typed_rows = typed_by_id.get(identifier)
+            try:
+                validated = harness._passed_evidence_items([{
+                    "id": identifier,
+                    "status": "passed",
+                    "evidence": f"observations/{identifier}.json",
+                    "typed_evidence": typed_rows,
+                }], "observation")[identifier]
+            except harness.AcceptanceError as error:
+                raise RunnerError(EXIT_FAILED, str(error)) from None
+            for typed in validated.typed:
+                try:
+                    typed_path = (evidence / typed["evidence"]).resolve(strict=True)
+                    typed_path.relative_to(evidence)
+                    if not typed_path.is_file():
+                        raise FileNotFoundError(typed_path)
+                except (FileNotFoundError, ValueError, RuntimeError):
+                    raise RunnerError(
+                        EXIT_BLOCKED,
+                        f"typed evidence missing or invalid: {identifier}",
+                    ) from None
     suites: list[dict[str, Any]] = []
     for name, command in harness.REQUIRED_SUITES.items():
         reference = suite_refs[name]
@@ -514,15 +576,30 @@ def assemble(args: argparse.Namespace) -> int:
         "surfaces": surfaces,
         "operator_topology": operator_topology,
         "steps": [
-            {"id": identifier, "status": "passed", "evidence": f"observations/{identifier}.json"}
+            {
+                "id": identifier,
+                "status": "passed",
+                "evidence": f"observations/{identifier}.json",
+                **({"typed_evidence": typed_by_id[identifier]} if identifier in typed_by_id else {}),
+            }
             for identifier in sequence
         ],
         "inventory": [
-            {"id": identifier, "status": "passed", "evidence": f"observations/{identifier}.json"}
+            {
+                "id": identifier,
+                "status": "passed",
+                "evidence": f"observations/{identifier}.json",
+                **({"typed_evidence": typed_by_id[identifier]} if identifier in typed_by_id else {}),
+            }
             for identifier in inventory
         ],
         "final_gates": [
-            {"id": identifier, "status": "passed", "evidence": f"observations/{identifier}.json"}
+            {
+                "id": identifier,
+                "status": "passed",
+                "evidence": f"observations/{identifier}.json",
+                **({"typed_evidence": typed_by_id[identifier]} if identifier in typed_by_id else {}),
+            }
             for identifier in final_gates
         ],
         "suites": suites,

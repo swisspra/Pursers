@@ -347,11 +347,32 @@ def _write_complete_observation_manifest(
     for identifier in identifiers:
         surface_id = harness_module._surface_for_identifier(identifier)
         target = surfaces[surface_id]["target"]
-        rows.append({
+        assertions = list(harness_module._canonical_browser_assertions(identifier))
+        if not assertions:
+            assertions = [{
+                "name": f"browser context: {identifier}",
+                "path": ["nodes"],
+                "operator": "ax_name_contains",
+                "expected": identifier,
+            }]
+        row = {
             "id": identifier,
             "page_url": f"{target['base_url']}/acceptance/{identifier}",
-            "assertions": [harness_module.REQUIRED_FACTS[identifier]["predicate"]],
-        })
+            "assertions": assertions,
+        }
+        typed_conjuncts = harness_module._canonical_typed_conjuncts(identifier)
+        if typed_conjuncts:
+            row["typed_evidence"] = [
+                {
+                    "evidence": f"typed/{identifier}-{index}.json",
+                    "run_id": "acceptance-run-1",
+                    "action_id": identifier,
+                    "entity": identifier,
+                    "causal_index": index,
+                }
+                for index, _conjunct in enumerate(typed_conjuncts, start=1)
+            ]
+        rows.append(row)
     path = tmp_path / "observations.json"
     path.write_text(json.dumps({
         "schema_version": 1,
@@ -609,6 +630,15 @@ def test_prepare_expands_every_authoritative_observation_once(
     assert result["observations"] == expected == 201
     assert len(plan["commands"]) == expected
     assert len({command[command.index("--observation") + 1] for command in plan["commands"]}) == expected
+    assert set(plan["typed_evidence"]) == {
+        identifier
+        for identifier in (
+            *harness_module.SEQUENCE,
+            *harness_module.REQUIRED_INVENTORY,
+            *harness_module.REQUIRED_FINAL_GATES,
+        )
+        if harness_module._canonical_typed_conjuncts(identifier)
+    }
 
 
 def test_personal_surface_refuses_served_page_digest_mismatch(

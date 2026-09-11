@@ -41,14 +41,14 @@
       "action": "Navigate to or trigger Quickstart Candidate Flow without relabelling another state.",
       "derivation": {
         "kind": "literal",
-        "source_quote": "# Pursers Home quickstart and recovery guide"
+        "source_quote": "3. Choose **Connect helper**."
       },
       "evidence_source": "docs/design-home/quickstart.md",
       "expected_fact": "The final Quickstart flow visibly reaches the exact installed candidate Home.",
       "id": "final.quickstart-candidate-flow",
       "precondition": "Exact candidate and sandbox board are bound; arrange the final.quickstart-candidate-flow state on the real aionui surface.",
       "predicate": {
-        "expected": "Pursers",
+        "expected": "Connect helper",
         "name": "required fact: final.quickstart-candidate-flow",
         "operator": "ax_name_contains",
         "path": [
@@ -132,12 +132,12 @@
         "kind": "collector_gap",
         "owner": "acceptance harness owner, through the typed evidence recorder work ticket"
       },
-      "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
-      "expected_fact": "The accessibility tree exposes 'On Board Personal' for dashboard-ui.shell.",
+      "evidence_source": "tools/dashboard-ui/dashboard-entry.html",
+      "expected_fact": "The accessibility tree exposes the exact 'On Board Personal Preview' shell title.",
       "id": "dashboard-ui.shell",
       "precondition": "Exact candidate and sandbox board are bound; arrange the dashboard-ui.shell state on the real personal surface.",
       "predicate": {
-        "expected": "On Board Personal",
+        "expected": "On Board Personal Preview",
         "name": "required fact: dashboard-ui.shell",
         "operator": "ax_name_contains",
         "path": [
@@ -277,23 +277,28 @@
       "surface": "personal"
     },
     {
-      "action": "Navigate to or trigger Styles without relabelling another state.",
+      "action": "Apply the dark host theme to the dashboard while it is rendered in the light theme.",
       "derivation": {
         "action": "Implement the typed evidence recorder and evaluator for this fact in tools/aionui-extension/tests/home_acceptance/runner.py and harness.py, then re-derive this row against the recorded evidence as literal or identifier. purser-reviewer-2 confirmed on 2026-09-11 that http_response, receipt_field, log_assertion and state_transition are all collectable by hand but that no typed recorder exists, so this fact cannot be observed as written.",
         "kind": "collector_gap",
         "owner": "acceptance harness owner, through the typed evidence recorder work ticket"
       },
       "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
-      "expected_fact": "The accessibility tree exposes 'On Board Personal' for dashboard-ui.styles.",
+      "evidence_source": "tools/dashboard-ui/src/dashboard.css",
+      "expected_fact": "The dashboard style changes from the light theme to the dark theme through the data-theme state.",
       "id": "dashboard-ui.styles",
-      "precondition": "Exact candidate and sandbox board are bound; arrange the dashboard-ui.styles state on the real personal surface.",
+      "precondition": "Exact candidate and sandbox board are bound; the real Personal surface is rendered with data-theme light.",
       "predicate": {
-        "expected": "On Board Personal",
+        "conjuncts": [
+          {
+            "from": "light",
+            "kind": "state_transition",
+            "to": "dark",
+            "via": "data-theme"
+          }
+        ],
         "name": "required fact: dashboard-ui.styles",
-        "operator": "ax_name_contains",
-        "path": [
-          "nodes"
-        ]
+        "operator": "all_of"
       },
       "status": "measured-gap",
       "surface": "personal"
@@ -757,7 +762,7 @@
       "action": "Navigate to or trigger Empty Agents without relabelling another state.",
       "derivation": {
         "kind": "literal",
-        "source_quote": "function renderAgentsHub(){const records=[],seen=new Set();for(const [central,d] of Object.entries(fleetData)){for(const a of d.agents||[]){records.push({central,agent:a});seen.add(`${central}/${a.agent_name}`)}for(const w of hubWorkers[central]?.workers||[])if(!seen.has(`${central}/${w.name}`)){const work=w.current_work||[];records.push({central,agent:{agent_name:w.name,pool_status:work.length?'busy':w.running?'available':'stale',boards:[...new Set(work.map(x=>x.board_id).filter(Boolean))],seats:[],last_seen:w.last_seen||null}})}}const cards=records.filter(x=>showStaleAgents||x.agent.pool_status==='busy'||x.agent.pool_status==='available').sort((a,b)=>compareAgents(a.agent,b.agent)||a.central.localeCompare(b.central)).map(x=>liveAgentCard(x.central,x.agent)),action=`<div class=\"agent-actions\">${agentVisibilityToggle()}<button id=\"new-agent\" class=\"primary-action\" type=\"button\">+ New agent</button></div>`;return `${pageHead('Agents','Unified agent pool','Live workers, reviewers, local API agents, claims, pressure, controls, and bounded logs.',action)}${renderGuide()}<p id=\"hub-agent-status\" class=\"muted\"></p><section class=\"agent-grid\">${cards.join('')||`<p class=\"empty\">${showStaleAgents?'No agents available.':'No active agents available.'}</p>`}</section>`}"
+        "source_quote": "showStaleAgents?'No agents available.':'No active agents available.'"
       },
       "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
       "expected_fact": "The accessibility tree exposes 'No active agents available' for fleet-dashboard.state.empty-agents.",
@@ -2442,16 +2447,27 @@
         "owner": "acceptance harness owner, through the typed evidence recorder work ticket"
       },
       "evidence_source": "tools/fleet-dashboard/fleet_dashboard.py",
-      "expected_fact": "The accessibility tree exposes 'Search No Results' for fleet.search-no-results.",
+      "expected_fact": "The Fleet search listbox becomes visible with 'No results' and zero options for an unmatched query.",
       "id": "fleet.search-no-results",
       "precondition": "Exact candidate and sandbox board are bound; arrange the fleet.search-no-results state on the real fleet surface.",
       "predicate": {
-        "expected": "Search No Results",
+        "conjuncts": [
+          {
+            "from": "matching results",
+            "kind": "state_transition",
+            "to": "No results",
+            "via": "type unmatched query"
+          },
+          {
+            "expected": "No results",
+            "kind": "ax_name_contains",
+            "path": [
+              "nodes"
+            ]
+          }
+        ],
         "name": "required fact: fleet.search-no-results",
-        "operator": "ax_name_contains",
-        "path": [
-          "nodes"
-        ]
+        "operator": "all_of"
       },
       "status": "measured-gap",
       "surface": "fleet"
@@ -2703,16 +2719,20 @@
         "owner": "acceptance harness owner, through the typed evidence recorder work ticket"
       },
       "evidence_source": "packages/personal/src/pursers_personal/apps_server.py",
-      "expected_fact": "The accessibility tree exposes 'No current work' for personal-mcp.state.board-empty.",
+      "expected_fact": "The live Personal MCP board_snapshot response reports zero tickets for the bound empty board.",
       "id": "personal-mcp.state.board-empty",
       "precondition": "Exact candidate and sandbox board are bound; arrange the personal-mcp.state.board-empty state on the real personal surface.",
       "predicate": {
-        "expected": "No current work",
+        "conjuncts": [
+          {
+            "body_contains": "\"ticket_total\": 0",
+            "kind": "http_response",
+            "request": "board_snapshot",
+            "status": 200
+          }
+        ],
         "name": "required fact: personal-mcp.state.board-empty",
-        "operator": "ax_name_contains",
-        "path": [
-          "nodes"
-        ]
+        "operator": "all_of"
       },
       "status": "measured-gap",
       "surface": "personal"
@@ -2725,16 +2745,20 @@
         "owner": "acceptance harness owner, through the typed evidence recorder work ticket"
       },
       "evidence_source": "packages/personal/src/pursers_personal/apps_server.py",
-      "expected_fact": "The accessibility tree exposes 'Fleet unavailable' for personal-mcp.state.fleet-unavailable.",
+      "expected_fact": "The live Personal MCP fleet_snapshot response preserves a registry_warning for an unavailable active board.",
       "id": "personal-mcp.state.fleet-unavailable",
       "precondition": "Exact candidate and sandbox board are bound; arrange the personal-mcp.state.fleet-unavailable state on the real personal surface.",
       "predicate": {
-        "expected": "Fleet unavailable",
+        "conjuncts": [
+          {
+            "body_contains": "registry_warning",
+            "kind": "http_response",
+            "request": "fleet_snapshot",
+            "status": 200
+          }
+        ],
         "name": "required fact: personal-mcp.state.fleet-unavailable",
-        "operator": "ax_name_contains",
-        "path": [
-          "nodes"
-        ]
+        "operator": "all_of"
       },
       "status": "measured-gap",
       "surface": "personal"
@@ -2834,16 +2858,20 @@
         "source_quote": "\"server_name\": \"On Board Personal\","
       },
       "evidence_source": "packages/personal/src/pursers_personal/apps_server.py",
-      "expected_fact": "The accessibility tree exposes 'On Board Personal' for personal-mcp.surface.",
+      "expected_fact": "The live Personal runtime receipt identifies the server as 'On Board Personal'.",
       "id": "personal-mcp.surface",
       "precondition": "Exact candidate and sandbox board are bound; arrange the personal-mcp.surface state on the real personal surface.",
       "predicate": {
-        "expected": "On Board Personal",
+        "conjuncts": [
+          {
+            "expected": "On Board Personal",
+            "field": "server_name",
+            "kind": "receipt_field",
+            "receipt": "personal-runtime-receipt"
+          }
+        ],
         "name": "required fact: personal-mcp.surface",
-        "operator": "ax_name_contains",
-        "path": [
-          "nodes"
-        ]
+        "operator": "all_of"
       },
       "status": "normative",
       "surface": "personal"
@@ -3516,16 +3544,27 @@
         "owner": "acceptance harness owner, through the typed evidence recorder work ticket"
       },
       "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
-      "expected_fact": "The accessibility tree exposes 'Fleet Unavailable' for personal.fleet-unavailable.",
+      "expected_fact": "Opening Projects after fleet_snapshot failure changes the Personal surface to the 'Fleet data unavailable' state.",
       "id": "personal.fleet-unavailable",
       "precondition": "Exact candidate and sandbox board are bound; arrange the personal.fleet-unavailable state on the real personal surface.",
       "predicate": {
-        "expected": "Fleet Unavailable",
+        "conjuncts": [
+          {
+            "from": "fleet snapshot available",
+            "kind": "state_transition",
+            "to": "fleet snapshot unavailable",
+            "via": "open Projects"
+          },
+          {
+            "expected": "Fleet data unavailable",
+            "kind": "ax_name_contains",
+            "path": [
+              "nodes"
+            ]
+          }
+        ],
         "name": "required fact: personal.fleet-unavailable",
-        "operator": "ax_name_contains",
-        "path": [
-          "nodes"
-        ]
+        "operator": "all_of"
       },
       "status": "measured-gap",
       "surface": "personal"
@@ -3755,16 +3794,27 @@
         "owner": "acceptance harness owner, through the typed evidence recorder work ticket"
       },
       "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
-      "expected_fact": "The accessibility tree exposes 'Search No Results' for personal.search-no-results.",
+      "expected_fact": "The Personal search panel becomes visible with 'No matching loaded data' for an unmatched query.",
       "id": "personal.search-no-results",
       "precondition": "Exact candidate and sandbox board are bound; arrange the personal.search-no-results state on the real personal surface.",
       "predicate": {
-        "expected": "Search No Results",
+        "conjuncts": [
+          {
+            "from": "matching loaded data",
+            "kind": "state_transition",
+            "to": "No matching loaded data",
+            "via": "type the unmatched query"
+          },
+          {
+            "expected": "No matching loaded data",
+            "kind": "ax_name_contains",
+            "path": [
+              "nodes"
+            ]
+          }
+        ],
         "name": "required fact: personal.search-no-results",
-        "operator": "ax_name_contains",
-        "path": [
-          "nodes"
-        ]
+        "operator": "all_of"
       },
       "status": "measured-gap",
       "surface": "personal"
@@ -3777,16 +3827,27 @@
         "owner": "acceptance harness owner, through the typed evidence recorder work ticket"
       },
       "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
-      "expected_fact": "The accessibility tree exposes 'Search Results' for personal.search-results.",
+      "expected_fact": "A matching query changes the Personal search panel from hidden to visible and exposes 'Search results'.",
       "id": "personal.search-results",
       "precondition": "Exact candidate and sandbox board are bound; arrange the personal.search-results state on the real personal surface.",
       "predicate": {
-        "expected": "Search Results",
+        "conjuncts": [
+          {
+            "from": "search panel hidden",
+            "kind": "state_transition",
+            "to": "search panel visible",
+            "via": "type matching query"
+          },
+          {
+            "expected": "Search results",
+            "kind": "ax_name_contains",
+            "path": [
+              "nodes"
+            ]
+          }
+        ],
         "name": "required fact: personal.search-results",
-        "operator": "ax_name_contains",
-        "path": [
-          "nodes"
-        ]
+        "operator": "all_of"
       },
       "status": "measured-gap",
       "surface": "personal"
@@ -3883,14 +3944,14 @@
       "action": "Navigate to or trigger Theme without relabelling another state.",
       "derivation": {
         "kind": "literal",
-        "source_quote": "applyDocumentTheme,"
+        "source_quote": "byId(\"settings-appearance\").replaceChildren(settingsRow(\"Host-managed appearance\", \"Theme, fonts, safe areas, reduced motion, and forced colors follow Host or system settings.\"));"
       },
       "evidence_source": "tools/dashboard-ui/src/dashboard.ts",
-      "expected_fact": "The accessibility tree exposes 'Theme' for personal.theme.",
+      "expected_fact": "The Personal Settings view exposes 'Host-managed appearance' for host-controlled theme behavior.",
       "id": "personal.theme",
       "precondition": "Exact candidate and sandbox board are bound; arrange the personal.theme state on the real personal surface.",
       "predicate": {
-        "expected": "Theme",
+        "expected": "Host-managed appearance",
         "name": "required fact: personal.theme",
         "operator": "ax_name_contains",
         "path": [
