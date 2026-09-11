@@ -680,7 +680,7 @@ installed profile.
 | Python MCP SDK / stdio disposable probe | Verified: ask, inbox, accept, rotated-credential reconnect, answer and correlated waits | Probe drives the next call explicitly |
 | Codex / Codex CLI stdio | Supported by the same stdio tool contract; host profile change still required | Host-managed; not claimed by the disposable probe |
 | Claude Code / Claude Desktop stdio | Supported by the same stdio tool contract; host profile change still required | Host-managed; not claimed by the disposable probe |
-| Goose / AionUi imported stdio | Supported by the same stdio tool contract; host profile change still required | Host-managed; not claimed by the disposable probe |
+| Goose / AionUi 2.2.1 (AionCore 0.2.1) imported stdio | Measured 2026-09-07: a bounded claimable wait returned `timed_out=true, mode=poll`, not push; native elicitation was not rendered | Host-managed; not claimed by the disposable probe |
 
 The private probe uses four separate short-lived JWT credentials against a
 disposable loopback Central. It verifies worker and reviewer asks, coordinator
@@ -743,8 +743,14 @@ Elicitation host declarations (probed 2026-09-06):
 | Claude Desktop / stdio | not captured by the pre-raw-value probe build | Live MCPB calls returned `elicitation_declared: false`; no form was rendered. An earlier fallback `answer` call accepted `choice=green`, `disposition=reopen`, and Central recorded the matching resolution. The corrected bridge will distinguish raw `null` from `{}` on the next host call. |
 | Claude Desktop / HTTP custom connector | not measured | This is a separate per-request `_meta` path; no declaration is inferred from the stdio probe. |
 | Codex app | not measured | The sandbox probe connector was not available to this Codex task, so no declaration is inferred. |
-| AionUi 2.2.1 / imported stdio bridge | no usable native form renderer | Push is available through the stored-door wait bridge; AionUi did not render the requested elicitation schema, so use the dashboard or coordinator fallback. |
+| AionUi 2.2.1 / AionCore 0.2.1 imported stdio bridge (measured 2026-09-07) | elicitation=no | A pending form produced only a generic `Elicitation` confirmation with Allow / Allow Always / Reject, without the schema field or disposition selector. The bounded wait used `agent_name=aion-spike`, `only_mine=false`, `timeout_s=3`, and `wait_for=claimable`; it returned `timed_out=true, mode=poll`. |
 | Goose / stdio | not captured by the pre-raw-value probe build | Live stdio probe verified the fallback list + instructions path; no raw declaration was retained by that build. |
+
+For AionUi 2.2.1, register the bridge through
+`POST /api/mcp/servers/import`; an extension manifest
+`contributes.mcpServers` entry did not reach a session. Each
+`mcpServers[].transport` must contain its `command`, `args`, and `env`.
+The 2.2.1 loader silently discarded `presetAgentType`.
 
 The fleet dashboard is the independent browser fallback, not an MCP App UI
 resource associated with `board_human_requests`. Keeping it open does not alter

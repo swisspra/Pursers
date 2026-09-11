@@ -9,6 +9,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Changed
 
+- Wait Bridge documentation records the measured AionUi 2.2.1 / AionCore
+  0.2.1 imported-stdio behavior: bounded waits used poll mode, native
+  elicitation was not rendered, and session delivery required the authenticated
+  MCP import API with transport fields nested under `mcpServers[].transport`.
+
 - Client and seat kit: project-registry entries may declare an exact,
   board-scoped HTTPS `repository_url` for ticket routing. Generated seats fail
   before claim or verification when URL, checkout, board, or operator-ownership
