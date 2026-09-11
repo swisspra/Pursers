@@ -20,15 +20,15 @@
       "surface": "fleet",
       "source": {
         "path": "tools/fleet-dashboard/fleet_dashboard.py",
-        "line_start": 6082,
-        "line_end": 6082,
-        "evidence": "b.tickets.length?b.tickets.map"
+        "line_start": 6093,
+        "line_end": 6093,
+        "evidence": "function ticketView(d,r)"
       },
       "derivation_kind": "identifier",
       "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; a board has active and ended tickets.",
-      "action": "open Fleet overview",
-      "expected_state": "its board card lists bounded ticket rows with ID, title, status label, and claimant",
-      "proposed_executable_assertion": "assert the keyed board card row cells",
+      "action": "open the board Workspace Tickets view",
+      "expected_state": "the operative ticketView lists bounded rows with ID, title/details, status, claimant, and update time",
+      "proposed_executable_assertion": "assert the keyed board detail row cells after navigating to its Workspace",
       "negative_counterexample": "a ticket count pill alone is accepted"
     },
     {
@@ -37,16 +37,20 @@
       "surface": "fleet",
       "source": {
         "path": "tools/fleet-dashboard/fleet_dashboard.py",
-        "line_start": 4224,
-        "line_end": 4253,
-        "evidence": "async def _require_board_admin"
+        "line_start": 4299,
+        "line_end": 4327,
+        "evidence": "async def add_project("
       },
-      "derivation_kind": "identifier",
+      "derivation_kind": "observed_gap",
       "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; the operator lacks board-admin authority.",
       "action": "submit Add project",
-      "expected_state": "the request fails before door actions and UI shows Add project failed",
-      "proposed_executable_assertion": "stub authorization failure and assert no issue_credential plus #add-project-result error",
-      "negative_counterexample": "a validation error or partial success is accepted"
+      "expected_state": "authorization is checked before the first registry or board mutation and denial is surfaced without issuing doors",
+      "proposed_executable_assertion": "BLOCKED: add_project proceeds to registry_admin without calling _require_board_admin; no pre-mutation authorization assertion can pass",
+      "negative_counterexample": "a later board RPC denial after the registry write or a validation error is accepted",
+      "gap": {
+        "owner": "Fleet dashboard owner",
+        "exact_action": "Call an Add-project board-admin authorization gate before registry_admin mutation, then test denial leaves registry, board, credentials, and clone untouched."
+      }
     },
     {
       "id": "fleet.add-project-board",
@@ -88,16 +92,20 @@
       "surface": "fleet",
       "source": {
         "path": "tools/fleet-dashboard/fleet_dashboard.py",
-        "line_start": 4332,
-        "line_end": 4525,
-        "evidence": "\"status\": \"already present\""
+        "line_start": 4528,
+        "line_end": 4544,
+        "evidence": "door_admin.issue_credential("
       },
-      "derivation_kind": "identifier",
+      "derivation_kind": "observed_gap",
       "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; project, board, principals, policies, and clone already match.",
       "action": "rerun Add project",
-      "expected_state": "each existing component is reported already present without duplicate mutation",
-      "proposed_executable_assertion": "spy mutation calls and assert ordered already-present steps",
-      "negative_counterexample": "a second credential issue is treated as proof of all-step idempotency"
+      "expected_state": "each existing component is reported already present without duplicate registry, board, clone, or credential mutation",
+      "proposed_executable_assertion": "BLOCKED: worker and reviewer issue_credential calls run unconditionally and rewrite credential state on a matching rerun",
+      "negative_counterexample": "already-present step labels are accepted while credentials are reissued",
+      "gap": {
+        "owner": "Fleet dashboard owner",
+        "exact_action": "Make the credential step detect and reuse existing active door credentials without rewriting JWKS, then assert a matching rerun performs no durable writes."
+      }
     },
     {
       "id": "fleet.add-project-one-time-doors",
@@ -211,16 +219,20 @@
       "surface": "fleet",
       "source": {
         "path": "tools/fleet-dashboard/fleet_dashboard.py",
-        "line_start": 6082,
-        "line_end": 6082,
-        "evidence": "duplicate name"
+        "line_start": 6332,
+        "line_end": 6335,
+        "evidence": "function liveAgentCard(central,a)"
       },
-      "derivation_kind": "literal",
+      "derivation_kind": "observed_gap",
       "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; two active identities share an agent name.",
       "action": "open Fleet overview",
-      "expected_state": "the pool summary marks the duplicate name",
-      "proposed_executable_assertion": "assert warning marker on the named details summary",
-      "negative_counterexample": "two cards with the same text but no warning are accepted"
+      "expected_state": "the operative unified pool marks each duplicate display name without merging distinct identities",
+      "proposed_executable_assertion": "BLOCKED: liveAgentCard does not render duplicate_name and renderAgentsHub keys local merging by central/name",
+      "negative_counterexample": "two indistinguishable cards with the same name and no warning are accepted",
+      "gap": {
+        "owner": "Fleet dashboard owner",
+        "exact_action": "Carry stable agent identity into renderAgentsHub deduplication and render an explicit duplicate-name warning in liveAgentCard; test two same-name distinct IDs."
+      }
     },
     {
       "id": "fleet.agent-pool",
@@ -245,16 +257,20 @@
       "surface": "fleet",
       "source": {
         "path": "tools/fleet-dashboard/fleet_dashboard.py",
-        "line_start": 6071,
-        "line_end": 6071,
-        "evidence": "Show stale"
+        "line_start": 6335,
+        "line_end": 6335,
+        "evidence": "function renderAgentsHub()"
       },
-      "derivation_kind": "literal",
+      "derivation_kind": "observed_gap",
       "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; busy, available, and stale agents exist.",
       "action": "toggle stale visibility",
-      "expected_state": "stale agents are hidden by default and shown only after the toggle",
-      "proposed_executable_assertion": "assert card set before/after aria-pressed toggle",
-      "negative_counterexample": "retired/stale rows always visible are accepted"
+      "expected_state": "stale agents are hidden by default and the explicit drawer reveals distinct stale and retired lifecycle rows on demand",
+      "proposed_executable_assertion": "BLOCKED: operative renderAgentsHub can toggle stale agent cards but never consumes inactive_agents or renders retired lifecycle rows",
+      "negative_counterexample": "the Show stale filter without retired entries is accepted as the retired/stale drawer",
+      "gap": {
+        "owner": "Fleet dashboard owner",
+        "exact_action": "Integrate inactive_agents into the operative Agents hub as an explicit retired/stale drawer, retaining the default-hidden stale filter and distinct lifecycle labels."
+      }
     },
     {
       "id": "fleet.board-cards",
@@ -330,15 +346,15 @@
       "surface": "fleet",
       "source": {
         "path": "tools/fleet-dashboard/fleet_dashboard.py",
-        "line_start": 6085,
-        "line_end": 6085,
-        "evidence": "central-group unavailable"
+        "line_start": 6248,
+        "line_end": 6248,
+        "evidence": "function renderAttentionOverview()"
       },
       "derivation_kind": "identifier",
       "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; one central fails while another succeeds.",
       "action": "refresh Fleet",
-      "expected_state": "failed central gets its own unavailable section while successful data remains",
-      "proposed_executable_assertion": "assert both independent central sections and aggregate Updated state",
+      "expected_state": "failed central gets its own error health card while successful central health remains",
+      "proposed_executable_assertion": "assert independent per-central health cards contain the failed error and successful central up state",
       "negative_counterexample": "all centrals are replaced by one global failure"
     },
     {
@@ -558,9 +574,9 @@
       "derivation_kind": "identifier",
       "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; density starts comfortable.",
       "action": "activate Compact density twice",
-      "expected_state": "root preference toggles compact then comfortable",
-      "proposed_executable_assertion": "assert data-density and persisted control label",
-      "negative_counterexample": "theme toggle is accepted"
+      "expected_state": "within the current page session, root data-density and the control label toggle compact then comfortable",
+      "proposed_executable_assertion": "assert data-density and current control label after each activation without claiming reload persistence",
+      "negative_counterexample": "theme state or a persisted-across-reload claim is accepted"
     },
     {
       "id": "fleet.doors-connected-seats",
@@ -623,12 +639,16 @@
         "line_end": 6584,
         "evidence": "Door action failed: ${e.message}"
       },
-      "derivation_kind": "literal",
+      "derivation_kind": "observed_gap",
       "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; copy or rotate API rejects.",
       "action": "activate the door action",
-      "expected_state": "the control re-enables and an escaped bounded failure is surfaced",
-      "proposed_executable_assertion": "assert alert text and disabled=false",
-      "negative_counterexample": "silent failure or Add project error is accepted"
+      "expected_state": "the control re-enables and a bounded sanitized failure is surfaced without raw server details",
+      "proposed_executable_assertion": "BLOCKED: the handler interpolates unbounded e.message directly into alert and has no bounded error field",
+      "negative_counterexample": "raw exception text or an unrelated Add project error is accepted",
+      "gap": {
+        "owner": "Fleet dashboard owner",
+        "exact_action": "Bind door action failures to a bounded sanitized API error code/message, render it in the door status region, and test re-enable plus absence of raw details."
+      }
     },
     {
       "id": "fleet.doors-expiry",
@@ -895,12 +915,16 @@
         "line_end": 6445,
         "evidence": "state.status==='succeeded'||state.status==='failed'"
       },
-      "derivation_kind": "identifier",
+      "derivation_kind": "observed_gap",
       "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; an operations job reaches terminal state.",
       "action": "allow job watcher to refresh",
-      "expected_state": "polling stops, button re-enables, final status/logs remain, Config refreshes",
-      "proposed_executable_assertion": "assert clearInterval, enabled button and terminal output",
-      "negative_counterexample": "a running job is accepted as result"
+      "expected_state": "polling stops, button re-enables, final status/logs remain visible after Config refresh",
+      "proposed_executable_assertion": "BLOCKED: terminal logs are written to #ops-output and then refreshSeats rerenders the Config surface, erasing that output",
+      "negative_counterexample": "terminal output visible only before the immediate refresh or a running job is accepted",
+      "gap": {
+        "owner": "Fleet dashboard owner",
+        "exact_action": "Persist bounded terminal job status/logs in render state across refreshSeats and test the final output remains after rerender."
+      }
     },
     {
       "id": "fleet.operations-rollback-failure",
@@ -942,16 +966,16 @@
       "surface": "fleet",
       "source": {
         "path": "tools/fleet-dashboard/fleet_dashboard.py",
-        "line_start": 6082,
-        "line_end": 6082,
-        "evidence": "s[k]"
+        "line_start": 6248,
+        "line_end": 6248,
+        "evidence": "<span>Ready<b>${esc(s.available||0)}</b></span>"
       },
       "derivation_kind": "identifier",
       "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; pool_summary.available has a distinct value.",
       "action": "open Fleet overview",
-      "expected_state": "available metric reproduces that value",
-      "proposed_executable_assertion": "assert metric label available and exact count",
-      "negative_counterexample": "busy or Ready health metric is accepted"
+      "expected_state": "the operative Ready metric reproduces pool_summary.available",
+      "proposed_executable_assertion": "assert the Ready metric contains the exact available count for its central",
+      "negative_counterexample": "Busy, Stale, or a count from another central is accepted"
     },
     {
       "id": "fleet.pool-busy",
@@ -959,9 +983,9 @@
       "surface": "fleet",
       "source": {
         "path": "tools/fleet-dashboard/fleet_dashboard.py",
-        "line_start": 6082,
-        "line_end": 6082,
-        "evidence": "['online','busy','available','stale']"
+        "line_start": 6248,
+        "line_end": 6248,
+        "evidence": "<span>Busy<b>${esc(s.busy||0)}</b></span>"
       },
       "derivation_kind": "literal",
       "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; pool_summary.busy has a distinct value.",
@@ -976,16 +1000,20 @@
       "surface": "fleet",
       "source": {
         "path": "tools/fleet-dashboard/fleet_dashboard.py",
-        "line_start": 6082,
-        "line_end": 6082,
-        "evidence": "['online','busy','available','stale']"
+        "line_start": 6248,
+        "line_end": 6248,
+        "evidence": "<span class=\"status\">central up</span>"
       },
-      "derivation_kind": "literal",
+      "derivation_kind": "observed_gap",
       "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; pool_summary.online has a distinct value.",
       "action": "open Fleet overview",
-      "expected_state": "online metric reproduces that value",
-      "proposed_executable_assertion": "assert metric label online and exact count",
-      "negative_counterexample": "number of non-stale cards is accepted"
+      "expected_state": "a distinct online-agent metric reproduces pool_summary.online rather than only central connectivity",
+      "proposed_executable_assertion": "BLOCKED: operative overview renders central up plus Busy, Ready, and Stale, but no pool_summary.online count",
+      "negative_counterexample": "central up or the number of visible non-stale cards is accepted as the online-agent count",
+      "gap": {
+        "owner": "Fleet dashboard owner",
+        "exact_action": "Render pool_summary.online as a distinct per-central health metric and test it independently from central up, Busy, Ready, and Stale."
+      }
     },
     {
       "id": "fleet.pool-stale",
@@ -993,9 +1021,9 @@
       "surface": "fleet",
       "source": {
         "path": "tools/fleet-dashboard/fleet_dashboard.py",
-        "line_start": 6082,
-        "line_end": 6082,
-        "evidence": "['online','busy','available','stale']"
+        "line_start": 6248,
+        "line_end": 6248,
+        "evidence": "<span>Stale<b>${esc(s.stale||0)}</b></span>"
       },
       "derivation_kind": "literal",
       "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; pool_summary.stale has a distinct value.",
@@ -1306,9 +1334,9 @@
       "derivation_kind": "identifier",
       "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; theme starts dark.",
       "action": "activate Light theme twice",
-      "expected_state": "root preference and button state toggle light then dark",
-      "proposed_executable_assertion": "assert data-theme and persisted label",
-      "negative_counterexample": "density state is accepted"
+      "expected_state": "within the current page session, root data-theme and button label toggle light then dark",
+      "proposed_executable_assertion": "assert data-theme and current button label after each activation without claiming reload persistence",
+      "negative_counterexample": "density state or a persisted-across-reload claim is accepted"
     },
     {
       "id": "fleet.ticket-counts",
@@ -1350,14 +1378,14 @@
       "surface": "fleet",
       "source": {
         "path": "tools/fleet-dashboard/fleet_dashboard.py",
-        "line_start": 6085,
-        "line_end": 6085,
-        "evidence": "`Updated ${fmt(newest)}`:'No central available'"
+        "line_start": 6337,
+        "line_end": 6337,
+        "evidence": "`Updated ${fmt(newest)}`:'Connecting to centrals…'"
       },
       "derivation_kind": "literal",
-      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; at least one central succeeds, then none do.",
-      "action": "render Fleet",
-      "expected_state": "state shows newest update or No central available",
+      "precondition": "Exact candidate 6368b72279f77e0132888c161e1bac001276dba1 and sandbox board are bound; the hub first has no successful central payload, then receives one.",
+      "action": "render the active Fleet hub",
+      "expected_state": "state shows Connecting to centrals… before data and Updated plus the newest successful timestamp afterward",
       "proposed_executable_assertion": "assert both exact branches",
       "negative_counterexample": "connection banner timestamp is accepted"
     },
@@ -1381,9 +1409,44 @@
   ],
   "observed_gaps": [
     {
+      "id": "fleet.add-project-authorization-error",
+      "owner": "Fleet dashboard owner",
+      "exact_action": "Call an Add-project board-admin authorization gate before registry_admin mutation, then test denial leaves registry, board, credentials, and clone untouched."
+    },
+    {
+      "id": "fleet.add-project-idempotent-rerun",
+      "owner": "Fleet dashboard owner",
+      "exact_action": "Make the credential step detect and reuse existing active door credentials without rewriting JWKS, then assert a matching rerun performs no durable writes."
+    },
+    {
       "id": "fleet.add-project-partial-failure",
       "owner": "Fleet dashboard owner",
       "exact_action": "Return bounded completed_steps and failed_step on add_project failure, render both in #add-project-result, and assert no later step ran."
+    },
+    {
+      "id": "fleet.agent-duplicate-names",
+      "owner": "Fleet dashboard owner",
+      "exact_action": "Carry stable agent identity into renderAgentsHub deduplication and render an explicit duplicate-name warning in liveAgentCard; test two same-name distinct IDs."
+    },
+    {
+      "id": "fleet.agent-retired-stale-drawer",
+      "owner": "Fleet dashboard owner",
+      "exact_action": "Integrate inactive_agents into the operative Agents hub as an explicit retired/stale drawer, retaining the default-hidden stale filter and distinct lifecycle labels."
+    },
+    {
+      "id": "fleet.doors-error",
+      "owner": "Fleet dashboard owner",
+      "exact_action": "Bind door action failures to a bounded sanitized API error code/message, render it in the door status region, and test re-enable plus absence of raw details."
+    },
+    {
+      "id": "fleet.operations-job-result",
+      "owner": "Fleet dashboard owner",
+      "exact_action": "Persist bounded terminal job status/logs in render state across refreshSeats and test the final output remains after rerender."
+    },
+    {
+      "id": "fleet.pool-online",
+      "owner": "Fleet dashboard owner",
+      "exact_action": "Render pool_summary.online as a distinct per-central health metric and test it independently from central up, Busy, Ready, and Stale."
     }
   ]
 }
